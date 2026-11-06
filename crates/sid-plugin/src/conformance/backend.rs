@@ -461,6 +461,34 @@ pub async fn test_role_roundtrip(backend: &dyn StorageBackend) {
     assert_eq!(updated.permissions, ["content:read"]);
 }
 
+/// Roles are read by any number of ids at once, more than one statement can
+/// bind (SQLite allows 32766 values): the stored ones among them, the rest
+/// absent rather than an error.
+pub async fn test_many_roles_read_at_once(backend: &dyn StorageBackend) {
+    let mut stored = Vec::new();
+    for n in 0..2 {
+        let key = format!("bulk_{n}_{}", Uuid::now_v7().simple());
+        let role = sid_core::models::Role::new(ProjectId::SYSTEM, &key, &key);
+        backend.create_role(&role, test_audit()).await.unwrap();
+        stored.push(role.id);
+    }
+    let mut ids: Vec<sid_core::models::RoleId> = (0..40_000)
+        .map(|_| sid_core::models::RoleId::generate())
+        .collect();
+    ids.insert(20_000, stored[1]);
+    ids.push(stored[0]);
+    let mut read: Vec<_> = backend
+        .get_roles(&ids)
+        .await
+        .expect("a long id list is read, not refused")
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    read.sort();
+    stored.sort();
+    assert_eq!(read, stored);
+}
+
 /// A Cedar policy is created once and updated only over the revision it was
 /// read at: a second create never replaces it, a stale copy never re-enables
 /// a policy disabled since, and an update never recreates a deleted policy.
@@ -2595,7 +2623,7 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
         ],
         client_id_issued_at: at(3),
         client_secret_expires_at: Some(at(-30)),
-        registration_iat: Some(InitialAccessTokenId(Uuid::now_v7())),
+        registration_iat: Some(InitialAccessTokenId::generate()),
         registration_access_token_hash: Some(vec![9, 8, 7]),
         required_acr: Some(AuthLevel::Elevated),
         required_amr: vec!["hwk".into(), "pin".into()],
@@ -2689,7 +2717,7 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
 pub fn create_test_iat(max_clients: u32) -> sid_core::models::InitialAccessToken {
     let now = Utc::now();
     sid_core::models::InitialAccessToken {
-        id: sid_core::models::InitialAccessTokenId(Uuid::now_v7()),
+        id: sid_core::models::InitialAccessTokenId::generate(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
         project_id: ProjectId::SYSTEM,
         max_clients,
@@ -2699,7 +2727,7 @@ pub fn create_test_iat(max_clients: u32) -> sid_core::models::InitialAccessToken
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
         expires_at: now + Duration::hours(1),
         created_at: now,
-        created_by: "admin".to_string(),
+        created_by: ProfileId::generate(),
         revoked: false,
     }
 }
@@ -2728,7 +2756,7 @@ pub async fn test_iat_save_get_list_revoke(backend: &dyn StorageBackend) {
         by_id.allowed_redirect_patterns,
         iat.allowed_redirect_patterns
     );
-    assert_eq!(by_id.created_by, "admin");
+    assert_eq!(by_id.created_by, iat.created_by);
     let by_hash = backend
         .get_initial_access_token_by_hash(&iat.token_hash)
         .await
@@ -2769,7 +2797,7 @@ pub async fn test_iat_save_get_list_revoke(backend: &dyn StorageBackend) {
         "a revoked token was reactivated"
     );
     let unknown = backend
-        .revoke_initial_access_token(InitialAccessTokenId(Uuid::now_v7()), test_audit())
+        .revoke_initial_access_token(InitialAccessTokenId::generate(), test_audit())
         .await
         .unwrap_err();
     assert!(
@@ -3448,7 +3476,7 @@ pub async fn test_pat_crud(backend: &dyn StorageBackend) {
         .unwrap();
 
     let pat = PersonalAccessToken {
-        id: PatId(Uuid::now_v7()),
+        id: PatId::generate(),
         profile_id: profile.id,
         name: "Test PAT".to_string(),
         description: Some("A test token".to_string()),
@@ -3509,11 +3537,7 @@ pub async fn test_pat_crud(backend: &dyn StorageBackend) {
     assert_eq!(again.revoked_at, revoked.revoked_at);
     assert!(
         !backend
-            .revoke_pat(
-                sid_core::models::PatId(Uuid::now_v7()),
-                "admin",
-                test_audit()
-            )
+            .revoke_pat(sid_core::models::PatId::generate(), "admin", test_audit())
             .await
             .unwrap()
     );
@@ -3630,7 +3654,7 @@ pub async fn test_record_pat_use_only_when_usable(backend: &dyn StorageBackend) 
             .await
             .unwrap()
     );
-    for id in [revoked.id, expired.id, PatId(Uuid::now_v7())] {
+    for id in [revoked.id, expired.id, PatId::generate()] {
         assert!(
             !backend
                 .record_pat_use(id, Some("192.0.2.1"), test_audit())
@@ -3679,9 +3703,9 @@ pub async fn test_pat_listing_and_profile_revocation(backend: &dyn StorageBacken
         .into_iter()
         .map(|p| p.id)
         .collect();
-    of_owner.sort_by_key(|id| id.0);
+    of_owner.sort();
     let mut expected = vec![a.id, b.id, earlier.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     assert_eq!(of_owner, expected);
     let all: Vec<_> = backend
         .list_all_pats()

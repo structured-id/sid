@@ -38,7 +38,6 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
     let elevation = elevation_col(row)?;
     let browser_secret_hash: Option<Vec<u8>> = col(row, "browser_secret_hash")?;
     let browser_csrf: Option<Vec<u8>> = col(row, "browser_csrf")?;
-    let device_id: Option<String> = col(row, "device_id")?;
     let scopes: String = col(row, "scopes")?;
     let amr: String = col(row, "amr")?;
 
@@ -46,12 +45,7 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
         id: col(row, "id")?,
         profile_id: col(row, "profile_id")?,
         client_id: col(row, "client_id")?,
-        device_id: device_id
-            .map(|s| {
-                uuid::Uuid::parse_str(&s)
-                    .map_err(|e| SidError::Storage(format!("column device_id: {e}")))
-            })
-            .transpose()?,
+        device_id: col(row, "device_id")?,
         ip_address: super::ip_col(row, "ip_address")?,
         user_agent: col(row, "user_agent")?,
         scopes: Session::parse_scopes(&scopes),
@@ -94,7 +88,7 @@ where
     .bind(session.id)
     .bind(session.profile_id)
     .bind(&session.client_id)
-    .bind(session.device_id.map(|d| d.to_string()))
+    .bind(session.device_id)
     .bind(session.ip_address.map(super::ip_to_bytes))
     .bind(&session.user_agent)
     .bind(session.scopes_string())
@@ -226,7 +220,7 @@ impl SqliteBackend {
                     "SELECT 1 FROM credentials
                      WHERE id = ? AND profile_id = ? AND status = 'active' AND data = ?",
                 )
-                .bind(fence.id.to_string())
+                .bind(fence.id.0)
                 .bind(session.profile_id)
                 .bind(fence.data.expose())
                 .fetch_optional(&mut *tx)
@@ -243,7 +237,7 @@ impl SqliteBackend {
                     "SELECT 1 FROM principals
                      WHERE id = ? AND assigned_profile_id = ? AND assignment_revision = ?",
                 )
-                .bind(fence.principal.to_string())
+                .bind(fence.principal.0)
                 .bind(session.profile_id)
                 .bind(fence.revision)
                 .fetch_optional(&mut *tx)

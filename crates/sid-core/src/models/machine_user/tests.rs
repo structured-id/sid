@@ -5,9 +5,33 @@ fn make_machine_user() -> MachineUser {
         ProjectId::generate(),
         "mu_ci_deploy",
         "CI Deploy Bot",
-        OwnerType::Profile,
-        "owner-profile-id",
+        MachineOwner::Profile(ProfileId::generate()),
     )
+}
+
+/// A stored owner reads back as the owner that wrote it, and a kind without
+/// the id it needs (or the installation with one) is refused: a profile's
+/// machine user never reads back as the installation's.
+#[test]
+fn test_owner_round_trips_through_its_stored_form() {
+    for owner in [
+        MachineOwner::Profile(ProfileId::generate()),
+        MachineOwner::Organization(OrgId::generate()),
+        MachineOwner::System,
+    ] {
+        assert_eq!(
+            MachineOwner::from_stored(owner.kind(), owner.id()),
+            Ok(owner)
+        );
+    }
+    let id = *ProfileId::generate().as_uuid();
+    assert!(MachineOwner::from_stored(OwnerType::Profile, None).is_err());
+    assert!(MachineOwner::from_stored(OwnerType::Organization, None).is_err());
+    assert!(MachineOwner::from_stored(OwnerType::System, Some(id)).is_err());
+    assert!(
+        MachineOwner::from_stored(OwnerType::Profile, Some(uuid::Uuid::new_v4())).is_err(),
+        "a stored profile owner that is no profile id"
+    );
 }
 
 #[test]

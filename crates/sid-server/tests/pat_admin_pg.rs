@@ -157,9 +157,15 @@ async fn test_concurrent_attempts_at_the_limit_answer_with_one_token() {
     };
 
     let attempts = futures::future::join_all((0..8).map(|_| svc.create_pat(create()))).await;
-    let ids: std::collections::BTreeSet<String> = attempts
+    let ids: std::collections::BTreeSet<Vec<u8>> = attempts
         .into_iter()
-        .map(|a| a.expect("every attempt answers").into_inner().pat_id)
+        .map(|a| {
+            a.expect("every attempt answers")
+                .into_inner()
+                .pat_id
+                .expect("a token id")
+                .value
+        })
         .collect();
     assert_eq!(ids.len(), 1, "the attempts answered with different tokens");
     assert_eq!(
@@ -190,7 +196,7 @@ async fn test_pat_admin_rpcs_require_a_token() {
     let revoked = svc
         .admin_revoke_pat(req(
             AdminRevokePatRequest {
-                pat_id: victim.id.0.to_string(),
+                pat_id: Some(victim.id.into()),
             },
             None,
         ))
@@ -217,7 +223,7 @@ async fn test_pat_admin_rpcs_refuse_a_non_admin() {
     let revoked = svc
         .admin_revoke_pat(req(
             AdminRevokePatRequest {
-                pat_id: victim.id.0.to_string(),
+                pat_id: Some(victim.id.into()),
             },
             Some(&token),
         ))
@@ -249,7 +255,7 @@ async fn test_admin_revocation_records_the_administrator() {
 
     svc.admin_revoke_pat(req(
         AdminRevokePatRequest {
-            pat_id: victim.id.0.to_string(),
+            pat_id: Some(victim.id.into()),
         },
         Some(&token),
     ))
@@ -340,7 +346,7 @@ async fn test_exchange_of_an_unbound_token_issues_nothing() {
         .await
         .expect_err("an unbound PAT");
     assert_eq!(refused.code(), Code::FailedPrecondition);
-    let pat_id = sid_core::models::PatId(Uuid::parse_str(&created.pat_id).unwrap());
+    let pat_id: sid_core::models::PatId = sid_ids_proto::required(created.pat_id.as_ref()).unwrap();
     let stored = storage.get_pat(pat_id).await.unwrap().unwrap();
     assert_eq!(stored.use_count, 0, "no use recorded");
 }
@@ -356,7 +362,7 @@ async fn test_admin_revocation_of_an_unknown_token_is_not_found() {
     let revoked = svc
         .admin_revoke_pat(req(
             AdminRevokePatRequest {
-                pat_id: Uuid::now_v7().to_string(),
+                pat_id: Some(sid_core::models::PatId::generate().into()),
             },
             Some(&token),
         ))

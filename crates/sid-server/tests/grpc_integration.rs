@@ -460,14 +460,15 @@ async fn test_introspect_valid_token() {
 /// resource, it sees nothing.
 #[tokio::test]
 async fn test_introspect_by_a_machine_user() {
-    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+    use sid_core::models::machine_user::{
+        MachineCredentialType, MachineOwner, MachineUserCredential,
+    };
     let profile = test_profile();
     let pdp = sid_core::models::MachineUser::new(
         sid_core::models::ProjectId::SYSTEM,
         "orders-pdp",
         "Orders PDP",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let secret = "pdp-secret";
     let credential = MachineUserCredential::new(
@@ -2674,7 +2675,7 @@ async fn test_admin_create_project() {
         CreateProjectRequest {
             name: "New Project".to_string(),
             description: "Test description".to_string(),
-            owner_profile_id: Uuid::now_v7().to_string(),
+            owner_profile_id: Some(sid_core::models::ProfileId::generate().into()),
         },
     ));
 
@@ -2682,7 +2683,7 @@ async fn test_admin_create_project() {
     let project = resp.into_inner();
     assert_eq!(project.name, "New Project");
     assert_eq!(project.description, "Test description");
-    assert!(!project.id.is_empty());
+    assert!(project.id.is_some());
     assert!(!project.is_system);
 }
 
@@ -2695,7 +2696,7 @@ async fn test_admin_get_project() {
     let req = admin_request(
         &svc,
         GetProjectRequest {
-            id: system_id.to_string(),
+            id: Some(system_id.into()),
         },
     );
 
@@ -2711,7 +2712,7 @@ async fn test_admin_get_nonexistent_project() {
     let req = admin_request(
         &svc,
         GetProjectRequest {
-            id: Uuid::now_v7().to_string(),
+            id: Some(sid_core::models::ProjectId::generate().into()),
         },
     );
 
@@ -2730,7 +2731,7 @@ async fn test_admin_update_project() {
     let req = new_command(admin_request(
         &svc,
         UpdateProjectRequest {
-            id: project_id.to_string(),
+            id: Some(project_id.into()),
             name: Some("Updated Name".to_string()),
             description: Some("new desc".to_string()),
         },
@@ -2752,7 +2753,7 @@ async fn test_admin_delete_project() {
     let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
-            id: project_id.to_string(),
+            id: Some(project_id.into()),
         },
     ));
 
@@ -2763,7 +2764,7 @@ async fn test_admin_delete_project() {
     let req = admin_request(
         &svc,
         GetProjectRequest {
-            id: project_id.to_string(),
+            id: Some(project_id.into()),
         },
     );
     let err = svc.project.get_project(req).await.unwrap_err();
@@ -2799,7 +2800,7 @@ async fn test_admin_delete_project_in_use_is_refused() {
         .delete_project(new_command(admin_request(
             &svc,
             DeleteProjectRequest {
-                id: project_id.to_string(),
+                id: Some(project_id.into()),
             },
         )))
         .await
@@ -2820,7 +2821,7 @@ async fn test_admin_delete_system_project_forbidden() {
     let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
-            id: system_id.to_string(),
+            id: Some(system_id.into()),
         },
     ));
 
@@ -2931,7 +2932,7 @@ fn create_app(
     admin_request(
         svc,
         CreateApplicationRequest {
-            project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+            project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
             name: name.to_string(),
             client,
             resource,
@@ -2964,7 +2965,7 @@ async fn test_admin_create_application() {
     assert!(!client.client_id.is_empty());
     assert_eq!(client.application_id, app.id);
     // The installation's organization keys the application's pairwise subjects.
-    assert_eq!(client.org_id, Some(common::test_org().to_string()));
+    assert_eq!(client.org_id, Some(common::test_org().into()));
     // Registration metadata is issuer-relative `public`; it does not decide
     // which identifier a user gets (authentication-flow.md, registration A).
     assert_eq!(client.subject_type, SubjectType::Public as i32);
@@ -3003,7 +3004,7 @@ async fn test_resource_only_application_has_no_client_or_secret() {
     assert_eq!(resource.issuer, svc.issuer.canonical_url);
     assert_eq!(resource.scopes, settings.scopes);
     assert_eq!(resource.state, ResourceState::Active as i32);
-    assert_eq!(resource.application_id, Some(app.id));
+    assert_eq!(resource.application_id, app.id);
     assert!(
         svc.storage
             .list_oauth2_clients(0, 100)
@@ -3062,7 +3063,7 @@ async fn test_resource_indicator_is_validated() {
         .list_applications(admin_request(
             &svc,
             ListApplicationsRequest {
-                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+                project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
                 page_size: 100,
                 page_token: String::new(),
             },
@@ -3174,7 +3175,7 @@ async fn test_roles_are_added_once() {
     let missing = admin_request(
         &svc,
         AddResourceRoleRequest {
-            application_id: sid_core::models::ApplicationId::generate().to_string(),
+            application_id: Some(sid_core::models::ApplicationId::generate().into()),
             settings: Some(resource_settings()),
         },
     );
@@ -3220,7 +3221,9 @@ async fn test_resource_access_is_explicit() {
             svc,
             UpdateClientRoleRequest {
                 client_id: web.client_id.clone(),
-                default_resource_id: Some(api.id.clone()),
+                default_resource: Some(DefaultResource {
+                    resource_id: api.id.clone(),
+                }),
                 ..Default::default()
             },
         )
@@ -3266,7 +3269,7 @@ async fn test_resource_access_is_explicit() {
         },
         ListResourceAccessRequest {
             subject: Some(list_resource_access_request::Subject::ResourceId(
-                api.id.clone(),
+                api.id.clone().expect("a resource id"),
             )),
         },
     ] {
@@ -3287,10 +3290,7 @@ async fn test_resource_access_is_explicit() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        app.client.unwrap().default_resource_id,
-        Some(api.id.clone())
-    );
+    assert_eq!(app.client.unwrap().default_resource_id, api.id);
 
     svc.project
         .remove_resource_access(admin_request(
@@ -3324,7 +3324,7 @@ async fn test_resource_access_is_explicit() {
 #[tokio::test]
 async fn test_machine_user_is_given_resource_access() {
     use sid_core::models::MachineUser;
-    use sid_core::models::machine_user::OwnerType;
+    use sid_core::models::machine_user::MachineOwner;
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let api = svc
         .project
@@ -3340,8 +3340,7 @@ async fn test_machine_user_is_given_resource_access() {
         sid_core::models::ProjectId::SYSTEM,
         "ci-deploy".to_string(),
         "CI",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     svc.storage
         .create_machine_user(&ci, AuditEntry::system("test", "setup").into())
@@ -3372,7 +3371,7 @@ async fn test_machine_user_is_given_resource_access() {
             &svc,
             ListResourceAccessRequest {
                 subject: Some(list_resource_access_request::Subject::ResourceId(
-                    api.id.clone(),
+                    api.id.clone().expect("a resource id"),
                 )),
             },
         ))
@@ -3506,7 +3505,7 @@ async fn test_resource_management_requires_an_administrator() {
     let svc = TestServices::new(storage);
     let token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
     let mut request = tonic::Request::new(CreateApplicationRequest {
-        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+        project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
         name: "API".to_string(),
         client: None,
         resource: Some(resource_settings()),
@@ -3672,11 +3671,11 @@ async fn test_application_in_a_foreign_organization_is_refused() {
     let req = admin_request(
         &svc,
         CreateApplicationRequest {
-            project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+            project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
             name: "Foreign".to_string(),
             client: Some(client_settings(ApplicationType::Web)),
             resource: None,
-            org_id: Some(sid_core::models::OrgId::generate().to_string()),
+            org_id: Some(sid_core::models::OrgId::generate().into()),
         },
     );
     let err = svc.project.create_application(req).await.unwrap_err();
@@ -3690,7 +3689,7 @@ async fn test_admin_create_application_nonexistent_project() {
     let req = admin_request(
         &svc,
         CreateApplicationRequest {
-            project_id: Uuid::now_v7().to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
             name: "Orphan App".to_string(),
             client: Some(client_settings(ApplicationType::Spa)),
             resource: None,
@@ -3713,7 +3712,7 @@ async fn test_admin_get_application() {
     let req = admin_request(
         &svc,
         GetApplicationRequest {
-            id: client.application_id.to_string(),
+            id: Some(client.application_id.into()),
         },
     );
 
@@ -3730,7 +3729,7 @@ async fn test_admin_get_nonexistent_application() {
     let req = admin_request(
         &svc,
         GetApplicationRequest {
-            id: sid_core::models::ApplicationId::generate().to_string(),
+            id: Some(sid_core::models::ApplicationId::generate().into()),
         },
     );
     let err = svc.project.get_application(req).await.unwrap_err();
@@ -3739,7 +3738,9 @@ async fn test_admin_get_nonexistent_application() {
     let req = admin_request(
         &svc,
         GetApplicationRequest {
-            id: "nonexistent".to_string(),
+            id: Some(sid_ids_proto::ApplicationId {
+                value: b"nonexistent".to_vec(),
+            }),
         },
     );
     let err = svc.project.get_application(req).await.unwrap_err();
@@ -3756,7 +3757,7 @@ async fn test_admin_list_applications() {
     let req = admin_request(
         &svc,
         ListApplicationsRequest {
-            project_id: system_id.to_string(),
+            project_id: Some(system_id.into()),
             page_size: 100,
             page_token: String::new(),
         },
@@ -3784,7 +3785,7 @@ async fn test_admin_update_application() {
     let req = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
-            id: client.application_id.to_string(),
+            id: Some(client.application_id.into()),
             name: Some("Updated App Name".to_string()),
         },
     ));
@@ -3802,7 +3803,7 @@ async fn test_admin_update_application() {
     let empty = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
-            id: client.application_id.to_string(),
+            id: Some(client.application_id.into()),
             name: Some(String::new()),
         },
     ));
@@ -3830,7 +3831,7 @@ async fn test_admin_update_client_role() {
             grant_types: vec!["authorization_code".to_string()],
             active: Some(false),
             subject_type: None,
-            default_resource_id: None,
+            default_resource: None,
             post_logout_redirect_uris: Some(sid_proto::sid::v1::UriList {
                 uris: vec!["https://new.sid.example.com/signed-out".to_string()],
             }),
@@ -4016,7 +4017,7 @@ async fn test_admin_delete_application() {
         .with_system_project()
         .with_client(client.clone());
     let svc = TestServices::new(storage);
-    let id = client.application_id.to_string();
+    let id: Option<sid_ids_proto::ApplicationId> = Some(client.application_id.into());
 
     let req = admin_request(&svc, DeleteApplicationRequest { id: id.clone() });
     svc.project.delete_application(req).await.unwrap();
@@ -4453,7 +4454,7 @@ async fn test_e2e_admin_project_and_application_flow() {
             CreateProjectRequest {
                 name: "E2E Project".to_string(),
                 description: "End-to-end test".to_string(),
-                owner_profile_id: Uuid::now_v7().to_string(),
+                owner_profile_id: Some(sid_core::models::ProfileId::generate().into()),
             },
         )))
         .await
@@ -5016,7 +5017,7 @@ async fn test_maintenance_mode_blocks_project_service() {
             CreateProjectRequest {
                 name: "Test".to_string(),
                 description: "desc".to_string(),
-                owner_profile_id: profile.id.to_string(),
+                owner_profile_id: Some(profile.id.into()),
             },
             &token,
         ))
@@ -10552,7 +10553,7 @@ fn setup_iat_for_dcr(storage: MockStorage) -> (MockStorage, String) {
     let token_hash = Sha256::digest(raw_token.as_bytes()).to_vec();
 
     let iat = InitialAccessToken {
-        id: InitialAccessTokenId::new(),
+        id: InitialAccessTokenId::generate(),
         token_hash,
         project_id: ProjectId::SYSTEM,
         max_clients: 10,
@@ -10562,7 +10563,7 @@ fn setup_iat_for_dcr(storage: MockStorage) -> (MockStorage, String) {
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
         expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
         created_at: chrono::Utc::now(),
-        created_by: "admin".into(),
+        created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     };
 
@@ -10614,7 +10615,7 @@ async fn test_dcr_register_client_happy_path() {
     // no resource role and no access to any resource.
     let application = svc
         .storage
-        .get_application(app.application_id.parse().unwrap())
+        .get_application(sid_ids_proto::required(app.application_id.as_ref()).unwrap())
         .await
         .unwrap()
         .expect("the registration created its application");
@@ -10861,7 +10862,7 @@ async fn test_confidential_application_uses_client_secret_basic() {
         .create_application(admin_request(
             &svc,
             CreateApplicationRequest {
-                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+                project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
                 name: "Web".to_string(),
                 client: Some(client_settings(ApplicationType::Web)),
                 resource: None,

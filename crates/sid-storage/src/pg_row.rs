@@ -24,7 +24,7 @@ use sid_core::models::{
     ClosureRequest, Credential, CredentialData, CredentialId, Device as CoreDevice,
     DeviceAuthCodeId, DeviceAuthorizationCode as CoreDeviceAuth, DeviceId as CoreDeviceId,
     EmailLabel, ExportJob, ExportStatus, Group, GroupId, GroupMember, ImpersonationGrant,
-    InitialAccessToken, InitialAccessTokenId, MachineRestrictions, MachineUser,
+    InitialAccessToken, InitialAccessTokenId, MachineOwner, MachineRestrictions, MachineUser,
     MachineUserCredential, MachineUserId, MachineUserStatus, MagicLinkSession, OAuth2Client,
     OutboundDlqEntry, PatId, PatStatus, PersonalAccessToken, PhoneLabel, Principal,
     PrincipalBinding, PrincipalBindingId, PrincipalEntity, PrincipalId, PrincipalType, Profile,
@@ -535,7 +535,7 @@ pub struct OAuth2ClientRow {
     pub token_endpoint_auth_method: String,
     pub response_types: String,
     pub contacts: Vec<String>,
-    pub registration_iat: Option<Uuid>,
+    pub registration_iat: Option<InitialAccessTokenId>,
     pub registration_access_token_hash: Option<Vec<u8>>,
     pub org_id: Option<sid_core::models::OrgId>,
     pub client_id_issued_at: DateTime<Utc>,
@@ -584,9 +584,7 @@ impl OAuth2ClientRow {
             contacts: self.contacts,
             client_id_issued_at: self.client_id_issued_at,
             client_secret_expires_at: self.client_secret_expires_at,
-            registration_iat: self
-                .registration_iat
-                .map(sid_core::models::InitialAccessTokenId),
+            registration_iat: self.registration_iat,
             registration_access_token_hash: self.registration_access_token_hash,
             required_acr: self
                 .required_acr
@@ -1301,7 +1299,7 @@ impl UpstreamIdentityRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct PatRow {
-    pub id: Uuid,
+    pub id: PatId,
     pub profile_id: ProfileId,
     pub name: String,
     pub description: Option<String>,
@@ -1322,7 +1320,7 @@ pub struct PatRow {
 impl PatRow {
     pub fn into_domain(self) -> SidResult<PersonalAccessToken> {
         Ok(PersonalAccessToken {
-            id: PatId(self.id),
+            id: self.id,
             profile_id: self.profile_id,
             name: self.name,
             description: self.description,
@@ -1352,7 +1350,7 @@ pub struct MachineUserRow {
     pub project_id: ProjectId,
     pub machine_type: String,
     pub owner_type: String,
-    pub owner_id: String,
+    pub owner_id: Option<Uuid>,
     pub client_id: String,
     pub display_name: String,
     pub description: Option<String>,
@@ -1375,8 +1373,11 @@ impl MachineUserRow {
             id: self.id,
             project_id: self.project_id,
             machine_type: self.machine_type.parse().map_err(SidError::Storage)?,
-            owner_type: self.owner_type.parse().map_err(SidError::Storage)?,
-            owner_id: self.owner_id,
+            owner: MachineOwner::from_stored(
+                self.owner_type.parse().map_err(SidError::Storage)?,
+                self.owner_id,
+            )
+            .map_err(SidError::Storage)?,
             client_id: self.client_id,
             display_name: self.display_name,
             description: self.description,
@@ -1458,7 +1459,7 @@ impl ImpersonationGrantRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct InitialAccessTokenRow {
-    pub id: Uuid,
+    pub id: InitialAccessTokenId,
     pub project_id: ProjectId,
     pub token_hash: Vec<u8>,
     pub max_clients: i32,
@@ -1466,7 +1467,7 @@ pub struct InitialAccessTokenRow {
     pub allowed_scopes: String,
     pub allowed_grant_types: String,
     pub allowed_redirect_patterns: String,
-    pub created_by: String,
+    pub created_by: ProfileId,
     pub revoked: bool,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -1475,7 +1476,7 @@ pub struct InitialAccessTokenRow {
 impl InitialAccessTokenRow {
     pub fn into_domain(self) -> InitialAccessToken {
         InitialAccessToken {
-            id: InitialAccessTokenId(self.id),
+            id: self.id,
             project_id: self.project_id,
             token_hash: self.token_hash,
             max_clients: self.max_clients as u32,

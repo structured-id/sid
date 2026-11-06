@@ -94,11 +94,11 @@ async fn insert_dlq_entry(tx: &mut super::WriteTx, entry: &OutboundDlqEntry) -> 
             entity_type, error, attempts, first_attempt, last_attempt) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(entry.id.to_string())
-    .bind(entry.target_id.to_string())
+    .bind(entry.id)
+    .bind(entry.target_id.0)
     .bind(&entry.event_type)
     .bind(to_json(&entry.payload, "payload")?)
-    .bind(entry.sid_entity_id.to_string())
+    .bind(entry.sid_entity_id)
     .bind(entry.entity_type.as_str())
     .bind(&entry.error)
     .bind(i64::from(entry.attempts))
@@ -122,9 +122,9 @@ impl SqliteBackend {
                 auth_config, attribute_mapping, group_push, sync_config, enabled, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(target.id.to_string())
+        .bind(target.id.0)
         .bind(&target.client_id)
-        .bind(target.project_id.to_string())
+        .bind(target.project_id)
         .bind(&target.display_name)
         .bind(&target.endpoint_url)
         .bind(to_json(&target.auth, "auth")?)
@@ -145,7 +145,7 @@ impl SqliteBackend {
         id: ScimOutboundTargetId,
     ) -> SidResult<Option<ScimOutboundTarget>> {
         let row = sqlx::query("SELECT * FROM scim_outbound_targets WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -158,7 +158,7 @@ impl SqliteBackend {
     ) -> SidResult<Vec<ScimOutboundTarget>> {
         let rows =
             sqlx::query("SELECT * FROM scim_outbound_targets WHERE project_id = ? AND enabled = 1")
-                .bind(project_id.to_string())
+                .bind(project_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -173,7 +173,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         // Its sync records and dead letters go with it (ON DELETE CASCADE).
         sqlx::query("DELETE FROM scim_outbound_targets WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {e}")))?;
@@ -191,8 +191,8 @@ impl SqliteBackend {
                 downstream_id, last_synced_at, last_error, failure_count, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(record.target_id.to_string())
-        .bind(record.sid_entity_id.to_string())
+        .bind(record.target_id.0)
+        .bind(record.sid_entity_id)
         .bind(record.entity_type.as_str())
         .bind(&record.downstream_id)
         .bind(fmt_dt(&record.last_synced_at))
@@ -228,8 +228,8 @@ impl SqliteBackend {
                 downstream_id = excluded.downstream_id, last_synced_at = excluded.last_synced_at, \
                 last_error = NULL, failure_count = 0, updated_at = excluded.updated_at",
         )
-        .bind(record.target_id.to_string())
-        .bind(record.sid_entity_id.to_string())
+        .bind(record.target_id.0)
+        .bind(record.sid_entity_id)
         .bind(record.entity_type.as_str())
         .bind(&record.downstream_id)
         .bind(&synced)
@@ -260,8 +260,8 @@ impl SqliteBackend {
         )
         .bind(&entry.error)
         .bind(fmt_dt(&entry.last_attempt))
-        .bind(entry.target_id.to_string())
-        .bind(entry.sid_entity_id.to_string())
+        .bind(entry.target_id.0)
+        .bind(entry.sid_entity_id)
         .bind(entry.entity_type.as_str())
         .execute(&mut *tx)
         .await
@@ -279,8 +279,8 @@ impl SqliteBackend {
             "SELECT * FROM scim_outbound_records \
              WHERE target_id = ? AND sid_entity_id = ? AND entity_type = ?",
         )
-        .bind(target_id.to_string())
-        .bind(sid_entity_id.to_string())
+        .bind(target_id.0)
+        .bind(sid_entity_id)
         .bind(entity_type.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -303,7 +303,7 @@ impl SqliteBackend {
         target_id: ScimOutboundTargetId,
     ) -> SidResult<Vec<OutboundDlqEntry>> {
         let rows = sqlx::query("SELECT * FROM scim_outbound_dlq WHERE target_id = ?")
-            .bind(target_id.to_string())
+            .bind(target_id.0)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -317,7 +317,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM scim_outbound_dlq WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {e}")))?;

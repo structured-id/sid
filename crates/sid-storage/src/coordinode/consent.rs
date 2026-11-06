@@ -23,8 +23,8 @@ use sid_keys::EncryptedField;
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time,
-    get_uuid, key, opt_text, opt_time, texts, time, uuid,
+    get_bytes, get_id, get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts,
+    get_time, get_uuid, key, opt_text, opt_time, texts, time, uuid,
 };
 
 const CONSENT: &str = "c.id AS id, c.profile_id AS profile_id, c.client_id AS client_id,
@@ -55,11 +55,6 @@ const IDENTITY: &str = "i.id AS id, i.profile_id AS profile_id, i.provider_id AS
 
 fn bin(bytes: &[u8; 16]) -> Value {
     Value::Binary(bytes.to_vec())
-}
-
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_slice(&get_bytes(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
 }
 
 /// Claim the node of `label` whose `id` is `value` for a record created
@@ -101,7 +96,7 @@ fn consent(tx: &Statements<'_>, row: &Row) -> SidResult<ConsentRecord> {
     let grants = rows.iter().map(claim).collect::<SidResult<Vec<_>>>()?;
     Ok(ConsentRecord {
         id: ConsentId(id),
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         client_id: get_text(row, "client_id")?,
         status: get_parsed(row, "status")?,
         // Oldest grant first.
@@ -152,7 +147,7 @@ fn grant(row: &Row) -> SidResult<ProfileGrant> {
         id: ProfileGrantId(get_uuid(row, "id")?),
         project_id: ProjectId::from_slice(&get_bytes(row, "project_id")?)
             .map_err(|e| SidError::Storage(format!("project_id: {e}")))?,
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         role_keys: get_texts(row, "role_keys")?,
         granted_by: get_opt_text(row, "granted_by")?,
         expires_at: get_opt_time(row, "expires_at")?,
@@ -239,7 +234,7 @@ fn provider_params(p: &UpstreamProvider) -> SidResult<Params> {
 fn identity(row: &Row) -> SidResult<UpstreamIdentity> {
     Ok(UpstreamIdentity {
         id: UpstreamIdentityId(get_uuid(row, "id")?),
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         provider_id: UpstreamProviderId(get_uuid(row, "provider_id")?),
         upstream_subject: get_text(row, "upstream_subject")?,
         upstream_issuer: get_opt_text(row, "upstream_issuer")?,

@@ -73,7 +73,7 @@ impl SqliteBackend {
              AND NOT (is_provisional AND scopes = ?))",
         )
         .bind(profile_id)
-        .bind(device_id.to_string())
+        .bind(device_id)
         .bind(since(window)?)
         .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)

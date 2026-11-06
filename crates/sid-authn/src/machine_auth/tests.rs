@@ -6,8 +6,8 @@ use super::*;
 use crate::issuer::IssuerRegistry;
 use crate::jwt::{ClientGrant, JwtService};
 use sid_core::models::{
-    AuditEntry, MachineCredentialType, MachineUserCredential, MachineUserStatus, MutationContext,
-    OidcIssuer, OwnerType, ProjectId, ResourceIndicator,
+    AuditEntry, MachineCredentialType, MachineOwner, MachineUserCredential, MachineUserStatus,
+    MutationContext, OidcIssuer, ProjectId, ResourceIndicator,
 };
 use sid_storage::sqlite::SqliteBackend;
 use tonic::Code;
@@ -60,8 +60,7 @@ async fn fixture() -> Fixture {
         ProjectId::SYSTEM,
         "mu_orchestrator",
         "Tenant orchestrator",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     storage
         .create_machine_user(&machine, audit())
@@ -175,8 +174,7 @@ async fn a_token_for_something_else_is_refused() {
         ProjectId::SYSTEM,
         "mu_reader",
         "EDS reader",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     f.storage
         .create_machine_user(&other, audit())

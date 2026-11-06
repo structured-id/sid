@@ -11,8 +11,8 @@
 use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::machine_user::{
-    CredentialStatus, ImpersonationGrant, MachineRestrictions, MachineUser, MachineUserCredential,
-    MachineUserStatus,
+    CredentialStatus, ImpersonationGrant, MachineOwner, MachineRestrictions, MachineUser,
+    MachineUserCredential, MachineUserStatus,
 };
 use sid_core::models::provisioning_connector::MAX_USABLE_CONNECTOR_CREDENTIALS;
 use sid_core::models::{
@@ -23,8 +23,8 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bytes,
-    get_int, get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time,
-    hold_first, key, opt_text, opt_time, sorted_page, texts, time,
+    get_int, get_opt_int, get_opt_text, get_opt_time, get_opt_uuid, get_parsed, get_text,
+    get_texts, get_time, hold_first, key, opt_text, opt_time, opt_uuid, sorted_page, texts, time,
 };
 
 const MACHINE: &str = "m.id AS id, m.project_id AS project_id, m.machine_type AS machine_type,
@@ -83,8 +83,11 @@ fn machine_user(row: &Row) -> SidResult<MachineUser> {
         id: id(row, "id", MachineUserId::from_slice)?,
         project_id: id(row, "project_id", ProjectId::from_slice)?,
         machine_type: get_parsed(row, "machine_type")?,
-        owner_type: get_parsed(row, "owner_type")?,
-        owner_id: get_text(row, "owner_id")?,
+        owner: MachineOwner::from_stored(
+            get_parsed(row, "owner_type")?,
+            get_opt_uuid(row, "owner_id")?,
+        )
+        .map_err(SidError::Storage)?,
         client_id: get_text(row, "client_id")?,
         display_name: get_text(row, "display_name")?,
         description: get_opt_text(row, "description")?,
@@ -375,8 +378,8 @@ impl CoordinodeBackend {
                         "machine_type",
                         Value::String(m.machine_type.as_str().into()),
                     )
-                    .with("owner_type", Value::String(m.owner_type.as_str().into()))
-                    .with("owner_id", Value::String(m.owner_id.clone()))
+                    .with("owner_type", Value::String(m.owner.kind().as_str().into()))
+                    .with("owner_id", opt_uuid(m.owner.id().as_ref()))
                     .with("client_id", Value::String(m.client_id.clone()))
                     .with("display_name", Value::String(m.display_name.clone()))
                     .with("description", opt_text(m.description.as_deref()))

@@ -55,13 +55,13 @@ fn test_client_to_proto() {
     let c = client(ApplicationType::Web);
     let proto = client_to_proto(&c, ISSUER);
     assert_eq!(proto.client_id, "sid_test123");
-    assert_eq!(proto.application_id, c.application_id.to_string());
+    assert_eq!(proto.application_id, Some(c.application_id.into()));
     assert_eq!(proto.issuer, ISSUER);
     assert_eq!(proto.name, "Test App");
     assert_eq!(proto.r#type, i32::from(proto::ApplicationType::Web));
     assert_eq!(
         proto.default_resource_id,
-        c.default_resource.map(|r| r.to_string())
+        c.default_resource.map(Into::into)
     );
     assert_eq!(proto.revision, 3);
     assert!(proto.active);
@@ -100,7 +100,7 @@ fn test_resource_to_proto() {
         updated_at: Utc::now(),
     };
     let proto = resource_to_proto(&resource, ISSUER);
-    assert_eq!(proto.id, resource.id.to_string());
+    assert_eq!(proto.id, Some(resource.id.into()));
     assert_eq!(proto.application_id, None);
     assert_eq!(proto.indicator, "https://resources.example/orders");
     assert_eq!(proto.issuer, ISSUER);
@@ -132,7 +132,7 @@ fn test_application_to_proto_carries_its_roles() {
         updated_at: Utc::now(),
     };
     let proto = application_to_proto(&app, Some(client_to_proto(&c, ISSUER)), None);
-    assert_eq!(proto.id, app.id.to_string());
+    assert_eq!(proto.id, Some(app.id.into()));
     assert_eq!(proto.name, "Orders");
     assert_eq!(proto.client.unwrap().client_id, c.client_id);
     assert!(proto.resource.is_none());

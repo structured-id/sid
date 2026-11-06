@@ -445,7 +445,7 @@ async fn test_address_columns_hold_one_host() {
                  risk_score, reaction, timestamp)
              VALUES (?, 'r', '', ?, '', 0, '', '2026-01-01T00:00:00Z')",
         )
-        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(uuid::Uuid::now_v7())
         .bind(ip)
         .execute(backend.pool())
     };
@@ -646,7 +646,7 @@ async fn seed_profiles(backend: &SqliteBackend, n: u64) {
                 migration_pending, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(uuid::Uuid::now_v7())
         .bind(like.profile_type.as_str())
         .bind(like.roles.join(" "))
         .bind(like.status.as_str())
@@ -2050,17 +2050,17 @@ async fn test_stale_email_keys_are_quarantined_and_reconciled() {
             Some(address) => Some(stale_contact(&backend, profile.id, address).await),
             None => None,
         };
-        let principal_id = uuid::Uuid::now_v7().to_string();
+        let principal_id = uuid::Uuid::now_v7();
         sqlx::query(
             "INSERT INTO principals (id, principal_type, value, verified, verified_at,
                  assigned_profile_id, assignment_revision, email_policy_revision)
              VALUES (?, 'email', ?, ?, CASE WHEN ? THEN '2026-01-01T00:00:00Z' END, ?, 1, ?)",
         )
-        .bind(&principal_id)
+        .bind(principal_id)
         .bind(&row.key)
         .bind(row.verified)
         .bind(row.verified)
-        .bind(profile.id.to_string())
+        .bind(profile.id)
         .bind(STALE_REVISION)
         .execute(backend.pool())
         .await
@@ -2070,9 +2070,9 @@ async fn test_stale_email_keys_are_quarantined_and_reconciled() {
                  source_field, source_email_id)
              VALUES (?, ?, ?, 1, 'email', ?)",
         )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(&principal_id)
-        .bind(profile.id.to_string())
+        .bind(uuid::Uuid::now_v7())
+        .bind(principal_id)
+        .bind(profile.id)
         .bind(contact_id)
         .execute(backend.pool())
         .await
@@ -2082,7 +2082,7 @@ async fn test_stale_email_keys_are_quarantined_and_reconciled() {
                  (principal_id, from_revision, to_revision, disposition, reason)
              VALUES (?, ?, ?, 'quarantined', 'no_source_evidence')",
         )
-        .bind(&principal_id)
+        .bind(principal_id)
         .bind(STALE_REVISION)
         .bind(INSTALLATION_EMAIL_POLICY_REVISION)
         .execute(backend.pool())
@@ -2111,7 +2111,7 @@ async fn stale_contact(
     backend: &SqliteBackend,
     profile: sid_core::models::ProfileId,
     address: &str,
-) -> String {
+) -> uuid::Uuid {
     use sid_plugin::storage::StorageBackend;
 
     let now = chrono::Utc::now();
@@ -2131,5 +2131,5 @@ async fn stale_contact(
         .create_profile_email(&contact, common::test_audit())
         .await
         .unwrap();
-    contact.id.0.to_string()
+    contact.id.0
 }

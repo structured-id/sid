@@ -8,7 +8,7 @@ mod common;
 use common::{issue_admin_token, test_jwt};
 use sid_core::models::machine_user::MAX_ACTIVE_CREDENTIALS;
 use sid_core::models::{
-    AuditEntry, MachineUser, MachineUserCredential, OwnerType, ProfileId, ProjectId,
+    AuditEntry, MachineOwner, MachineUser, MachineUserCredential, ProfileId, ProjectId,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
@@ -45,8 +45,7 @@ async fn test_concurrent_attempts_at_the_limit_add_one_credential() {
         ProjectId::SYSTEM,
         format!("mu_{}", &suffix[..12]),
         "racing",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     storage
         .create_machine_user(&mu, AuditEntry::system("test.setup", "mu").into())
@@ -74,7 +73,7 @@ async fn test_concurrent_attempts_at_the_limit_add_one_credential() {
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let add = || {
         let mut req = Request::new(AddMachineCredentialRequest {
-            machine_user_id: mu.id.to_string(),
+            machine_user_id: Some(mu.id.into()),
             credential_type: MachineCredentialType::ClientSecret as i32,
             ..Default::default()
         });

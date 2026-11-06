@@ -1,4 +1,5 @@
 use super::*;
+use uuid::Uuid;
 
 #[test]
 fn test_generate_pat_token_format() {
@@ -109,26 +110,34 @@ fn test_pat_to_proto_with_optional_fields() {
     assert_eq!(proto.use_count, 1);
 }
 
+/// A token's identifier crosses the wire as its 16 bytes, both ways.
 #[test]
-fn test_parse_pat_id_valid() {
-    let uuid = Uuid::now_v7();
-    let result = parse_pat_id(&uuid.to_string());
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().0, uuid);
+fn test_pat_id_is_carried_as_bytes() {
+    let id = PatId::generate();
+    let wire: sid_ids_proto::PatId = id.into();
+    assert_eq!(wire.value, id.as_bytes());
+    assert_eq!(
+        convert::wire_id(Some(&wire), "pat_id").unwrap(),
+        id,
+        "the identifier read back is the one sent"
+    );
 }
 
+/// A malformed or absent identifier is refused on its field before any
+/// lookup.
 #[test]
-fn test_parse_pat_id_invalid() {
-    let result = parse_pat_id("not-a-uuid");
-    assert!(result.is_err());
-    let status = result.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
-#[test]
-fn test_parse_pat_id_empty() {
-    let result = parse_pat_id("");
-    assert!(result.is_err());
+fn test_pat_id_refused_on_its_field() {
+    for wire in [
+        Some(sid_ids_proto::PatId { value: vec![7; 15] }),
+        Some(sid_ids_proto::PatId {
+            value: Uuid::new_v4().as_bytes().to_vec(),
+        }),
+        None,
+    ] {
+        let status = convert::wire_id(wire.as_ref(), "pat_id").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("pat_id"), "{}", status.message());
+    }
 }
 
 #[test]

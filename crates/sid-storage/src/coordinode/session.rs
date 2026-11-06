@@ -19,7 +19,7 @@ use sid_core::models::session::{Elevation, SECOND_FACTOR_SCOPE};
 use sid_core::models::{
     AuthCodeRedemption, AuthLevel, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
     GrantAuthentication, MutationContext, NativeExchange, NativeGeneration, NativeGenerationState,
-    NativePresented, NativeRotation, NativeRotationOutcome, ProfileId, RefreshToken, ResourceId,
+    NativePresented, NativeRotation, NativeRotationOutcome, ProfileId, RefreshToken,
     RevocationReason, Session, SessionAuthentication, SessionEnd, SessionId, SignInProof,
 };
 use sid_core::{Error as SidError, Result as SidResult};
@@ -28,9 +28,9 @@ use uuid::Uuid;
 use super::audit::{ip_of, ip_value};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_count, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid,
-    get_text, get_texts, get_time, get_uuid, opt_text, opt_time, opt_uuid, profile::profile_value,
-    texts, time, uuid,
+    get_bytes, get_count, get_id, get_int, get_opt_bytes, get_opt_id, get_opt_text, get_opt_time,
+    get_opt_uuid, get_text, get_texts, get_time, get_uuid, opt_text, opt_time, opt_uuid,
+    profile::profile_value, texts, time, uuid,
 };
 
 const SESSION: &str = "s.id AS id, s.profile_id AS profile_id, s.client_id AS client_id,
@@ -63,28 +63,6 @@ const GENERATION: &str = "g.id AS id, g.session_id AS session_id, g.key_jkt AS k
 
 fn session_value(id: SessionId) -> Value {
     uuid(id.as_uuid())
-}
-
-fn session_id_of(row: &Row, name: &str) -> SidResult<SessionId> {
-    SessionId::from_uuid(get_uuid(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
-}
-
-fn opt_session_id_of(row: &Row, name: &str) -> SidResult<Option<SessionId>> {
-    get_opt_uuid(row, name)?
-        .map(SessionId::from_uuid)
-        .transpose()
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
-}
-
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_uuid(get_uuid(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
-}
-
-fn resource_of(row: &Row, name: &str) -> SidResult<ResourceId> {
-    ResourceId::from_uuid(get_uuid(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
 }
 
 /// A stored assurance level; an unknown one is an error, never `Basic`.
@@ -140,8 +118,8 @@ fn elevation_params(params: Params, elevation: Option<Elevation>) -> Params {
 
 pub(super) fn session(row: &Row) -> SidResult<Session> {
     Ok(Session {
-        id: session_id_of(row, "id")?,
-        profile_id: profile_of(row, "profile_id")?,
+        id: get_id(row, "id")?,
+        profile_id: get_id(row, "profile_id")?,
         client_id: get_opt_text(row, "client_id")?,
         device_id: get_opt_uuid(row, "device_id")?,
         ip_address: get_opt_bytes(row, "ip")?
@@ -169,7 +147,7 @@ pub(super) fn session(row: &Row) -> SidResult<Session> {
             .as_deref()
             .map(BrowserCsrfToken::try_from)
             .transpose()?,
-        authenticated_by: opt_session_id_of(row, "authenticated_by")?,
+        authenticated_by: get_opt_id(row, "authenticated_by")?,
     })
 }
 
@@ -453,11 +431,11 @@ fn token(row: &Row) -> SidResult<RefreshToken> {
     Ok(RefreshToken {
         id: get_uuid(row, "id")?,
         token_hash: get_bytes(row, "token_hash")?,
-        session_id: session_id_of(row, "session_id")?,
-        profile_id: profile_of(row, "profile_id")?,
+        session_id: get_id(row, "session_id")?,
+        profile_id: get_id(row, "profile_id")?,
         client_id: get_text(row, "client_id")?,
         scopes: get_texts(row, "scopes")?,
-        resource: resource_of(row, "resource_id")?,
+        resource: get_id(row, "resource_id")?,
         expires_at: get_time(row, "expires_at")?,
         created_at: get_time(row, "created_at")?,
         revoked: get_bool(row, "revoked")?,
@@ -521,15 +499,15 @@ fn revoke_tokens(tx: &Statements<'_>, property: &str, value: Value) -> SidResult
 fn code(row: &Row) -> SidResult<AuthorizationCode> {
     Ok(AuthorizationCode {
         code_hash: get_bytes(row, "code_hash")?,
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         client_id: get_text(row, "client_id")?,
         redirect_uri: get_text(row, "redirect_uri")?,
         scopes: get_texts(row, "scopes")?,
-        resource: resource_of(row, "resource_id")?,
+        resource: get_id(row, "resource_id")?,
         code_challenge: get_opt_text(row, "code_challenge")?,
         nonce: get_opt_text(row, "nonce")?,
         authentication: GrantAuthentication {
-            session: session_id_of(row, "authorizing_session_id")?,
+            session: get_id(row, "authorizing_session_id")?,
             authenticated_at: get_time(row, "authenticated_at")?,
             amr: get_texts(row, "amr")?,
             assurance_level: level(row, "assurance_level")?,
@@ -538,7 +516,7 @@ fn code(row: &Row) -> SidResult<AuthorizationCode> {
         expires_at: get_time(row, "expires_at")?,
         created_at: get_time(row, "created_at")?,
         used: get_bool(row, "used")?,
-        session_id: opt_session_id_of(row, "session_id")?,
+        session_id: get_opt_id(row, "session_id")?,
     })
 }
 
@@ -555,7 +533,7 @@ fn presented(row: &Row) -> SidResult<NativePresented> {
     };
     Ok(NativePresented {
         generation: get_uuid(row, "id")?,
-        session_id: session_id_of(row, "session_id")?,
+        session_id: get_id(row, "session_id")?,
         key_jkt: get_text(row, "key_jkt")?,
         expires_at: get_time(row, "expires_at")?,
         state,

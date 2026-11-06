@@ -44,8 +44,8 @@ pub(super) fn resource_state_to_proto(state: ResourceState) -> proto::ResourceSt
 pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthClient {
     proto::OAuthClient {
         client_id: c.client_id.clone(),
-        application_id: c.application_id.to_string(),
-        project_id: c.project_id.to_string(),
+        application_id: Some(c.application_id.into()),
+        project_id: Some(c.project_id.into()),
         name: c.client_name.clone(),
         r#type: application_type_to_proto(c.application_type).into(),
         redirect_uris: c.redirect_uris.clone(),
@@ -65,9 +65,9 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
         client_id_issued_at: Some(convert::to_timestamp(c.client_id_issued_at)),
         client_secret_expires_at: c.client_secret_expires_at.map(convert::to_timestamp),
         dynamically_registered: c.registration_iat.is_some(),
-        org_id: c.org_id.map(|org| org.to_string()),
+        org_id: c.org_id.map(Into::into),
         issuer: issuer.to_owned(),
-        default_resource_id: c.default_resource.map(|r| r.to_string()),
+        default_resource_id: c.default_resource.map(Into::into),
         revision: c.revision,
         jwks: c.jwks.as_ref().map(sid_core::models::ClientKeySet::to_json),
         post_logout_redirect_uris: c.post_logout_redirect_uris.clone(),
@@ -77,8 +77,8 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
 /// The resource role `r`, whose tokens come from `issuer`.
 pub(super) fn resource_to_proto(r: &ProtectedResource, issuer: &str) -> proto::ProtectedResource {
     proto::ProtectedResource {
-        id: r.id.to_string(),
-        application_id: r.application_id.map(|a| a.to_string()),
+        id: Some(r.id.into()),
+        application_id: r.application_id.map(Into::into),
         indicator: r.indicator.to_string(),
         issuer: issuer.to_owned(),
         scopes: r.scopes.clone(),
@@ -92,7 +92,7 @@ pub(super) fn resource_to_proto(r: &ProtectedResource, issuer: &str) -> proto::P
 pub(super) fn access_to_proto(a: &ResourceAccess) -> proto::ResourceAccess {
     proto::ResourceAccess {
         client_id: a.client_id.clone(),
-        resource_id: a.resource_id.to_string(),
+        resource_id: Some(a.resource_id.into()),
         scopes: a.scopes.clone(),
         created_at: Some(convert::to_timestamp(a.created_at)),
     }
@@ -104,8 +104,8 @@ pub(super) fn application_to_proto(
     resource: Option<proto::ProtectedResource>,
 ) -> proto::Application {
     proto::Application {
-        id: app.id.to_string(),
-        project_id: app.project_id.to_string(),
+        id: Some(app.id.into()),
+        project_id: Some(app.project_id.into()),
         name: app.name.clone(),
         client,
         resource,

@@ -7,13 +7,12 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::claim_mapping::ClaimMapping;
 use super::device::DeviceAssurance;
 use super::security_policy::EnforcementMode;
 use super::session::AuthLevel;
-use super::{ApplicationId, ProjectId, ResourceId};
+use super::{ApplicationId, ProfileId, ProjectId, ResourceId};
 
 mod keys;
 pub use keys::ClientKeySet;
@@ -165,27 +164,8 @@ impl RegistrationPolicy {
     }
 }
 
-/// Unique identifier for an Initial Access Token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct InitialAccessTokenId(pub Uuid);
-
-impl core::fmt::Display for InitialAccessTokenId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl Default for InitialAccessTokenId {
-    fn default() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl InitialAccessTokenId {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+/// Validated UUIDv7 identifier of an Initial Access Token.
+pub use sid_ids::InitialAccessTokenId;
 
 /// Initial Access Token (IAT) for Dynamic Client Registration.
 ///
@@ -213,8 +193,8 @@ pub struct InitialAccessToken {
     pub expires_at: DateTime<Utc>,
     /// When the token was created.
     pub created_at: DateTime<Utc>,
-    /// Who created this token.
-    pub created_by: String,
+    /// Administrator Profile that created this token.
+    pub created_by: ProfileId,
     /// Whether this token has been revoked.
     pub revoked: bool,
 }

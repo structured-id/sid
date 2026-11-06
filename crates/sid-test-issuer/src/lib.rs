@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+use sid_core::models::machine_user::{MachineCredentialType, MachineOwner, MachineUserCredential};
 use sid_core::models::{
     AUTHZ_CHECK, AuditEntry, MachineUser, OidcIssuer, Profile, ProjectId, ProtectedResource,
     ResourceAccess, ResourceId, ResourceIndicator, Role, RoleAssignment, RoleAssignmentPrincipal,
@@ -206,8 +206,7 @@ impl TestIssuer {
                 ProjectId::SYSTEM,
                 &checker.client_id,
                 &checker.client_id,
-                OwnerType::System,
-                "system",
+                MachineOwner::System,
             );
             storage
                 .create_machine_user(&machine, audit("machine_user.create"))
@@ -426,8 +425,7 @@ impl TestIssuer {
             ProjectId::SYSTEM,
             client_id,
             client_id,
-            OwnerType::System,
-            "system",
+            MachineOwner::System,
         );
         self.storage
             .create_machine_user(&machine, audit("machine_user.create"))

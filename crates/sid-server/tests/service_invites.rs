@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, issue_token, test_client, test_profile};
-use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+use sid_core::models::machine_user::{MachineCredentialType, MachineOwner, MachineUserCredential};
 use sid_core::models::{
     AuditEntry, INVITE_ACTIONS, INVITE_ISSUER_ROLE, MachineUser, ProjectId, ResourceAccess,
     RoleAssignment, RoleAssignmentPrincipal,
@@ -41,8 +41,7 @@ async fn invites() -> Invites {
         ProjectId::SYSTEM,
         ISSUER,
         "Onboarding service",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let svc = TestServices::new(
         MockStorage::new()

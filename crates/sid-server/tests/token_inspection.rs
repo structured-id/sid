@@ -287,13 +287,14 @@ async fn a_retired_resource_takes_no_inspector() {
 /// outside its allowlist it is refused as at the token endpoint.
 #[tokio::test]
 async fn a_machine_inspector_keeps_its_restrictions() {
-    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+    use sid_core::models::machine_user::{
+        MachineCredentialType, MachineOwner, MachineUserCredential,
+    };
     let mut pdp = sid_core::models::MachineUser::new(
         ProjectId::SYSTEM,
         "fenced-pdp",
         "Fenced PDP",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     pdp.restrictions.ip_allowlist = vec!["10.0.0.0/8".into()];
     let secret = "fenced-secret";

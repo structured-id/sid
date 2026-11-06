@@ -22,9 +22,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_parsed,
-    get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text, opt_time, sorted_page,
-    texts, time, uuid,
+    get_bytes, get_id, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid,
+    get_parsed, get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text, opt_time,
+    sorted_page, texts, time, uuid,
 };
 
 /// The scope both installation policies are recorded under.
@@ -47,11 +47,6 @@ fn scope() -> Value {
 
 fn bin(bytes: &[u8; 16]) -> Value {
     Value::Binary(bytes.to_vec())
-}
-
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_slice(&get_bytes(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
 }
 
 fn count(value: i64, name: &str) -> SidResult<u32> {
@@ -771,7 +766,7 @@ impl CoordinodeBackend {
                     _ => None,
                 };
                 redemptions.push(InviteRedemption {
-                    profile_id: profile_of(row, "profile_id")?,
+                    profile_id: get_id(row, "profile_id")?,
                     credential_id,
                     redeemed_at: get_time(row, "redeemed_at")?,
                 });

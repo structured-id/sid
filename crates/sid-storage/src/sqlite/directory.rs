@@ -105,7 +105,7 @@ pub(super) async fn update_profile(tx: &mut WriteTx, profile: &Profile) -> SidRe
 }
 
 /// Upsert the binding of `p` to entity `entity_id`.
-async fn upsert_binding(tx: &mut WriteTx, entity_id: &str, p: &Principal) -> SidResult<()> {
+async fn upsert_binding(tx: &mut WriteTx, entity_id: uuid::Uuid, p: &Principal) -> SidResult<()> {
     sqlx::query(
         "INSERT INTO principal_bindings (id, principal_id, profile_id, is_primary, source_field, source_email_id, source_phone_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -113,13 +113,13 @@ async fn upsert_binding(tx: &mut WriteTx, entity_id: &str, p: &Principal) -> Sid
             is_primary=excluded.is_primary, source_field=excluded.source_field,
             source_email_id=excluded.source_email_id, source_phone_id=excluded.source_phone_id",
     )
-    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(uuid::Uuid::now_v7())
     .bind(entity_id)
-    .bind(p.profile_id.to_string())
+    .bind(p.profile_id)
     .bind(p.is_primary)
     .bind(&p.source_field)
-    .bind(p.source_email_id.map(|id| id.to_string()))
-    .bind(p.source_phone_id.map(|id| id.to_string()))
+    .bind(p.source_email_id.map(|id| id.0))
+    .bind(p.source_phone_id.map(|id| id.0))
     .bind(fmt_dt(&p.created_at))
     .execute(&mut **tx)
     .await
@@ -137,7 +137,7 @@ async fn insert_new_principal(tx: &mut WriteTx, p: &Principal) -> SidResult<()> 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(principal_type, value) DO NOTHING",
     )
-    .bind(p.id.to_string())
+    .bind(p.id.0)
     .bind(p.principal_type.as_str())
     .bind(&p.value)
     .bind(p.verified)
@@ -154,7 +154,7 @@ async fn insert_new_principal(tx: &mut WriteTx, p: &Principal) -> SidResult<()> 
     Ok(())
 }
 
-async fn entity_id(tx: &mut WriteTx, p: &Principal) -> SidResult<String> {
+async fn entity_id(tx: &mut WriteTx, p: &Principal) -> SidResult<uuid::Uuid> {
     sqlx::query_scalar("SELECT id FROM principals WHERE principal_type = ? AND value = ?")
         .bind(p.principal_type.as_str())
         .bind(&p.value)
@@ -180,7 +180,7 @@ pub(super) async fn bind_principal(tx: &mut WriteTx, p: &Principal) -> SidResult
     }
     insert_new_principal(tx, p).await?;
     let id = entity_id(tx, p).await?;
-    upsert_binding(tx, &id, p).await
+    upsert_binding(tx, id, p).await
 }
 
 /// Bind a login handle, which is never shared: held by another Profile it
@@ -191,15 +191,15 @@ async fn bind_login_principal(tx: &mut WriteTx, p: &Principal) -> SidResult<()> 
     let other_holder: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM principal_bindings WHERE principal_id = ? AND profile_id <> ?)",
     )
-    .bind(&id)
-    .bind(p.profile_id.to_string())
+    .bind(id)
+    .bind(p.profile_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(storage("login principal"))?;
     if other_holder {
         return Err(SidError::Conflict("login handle already exists".into()));
     }
-    upsert_binding(tx, &id, p).await
+    upsert_binding(tx, id, p).await
 }
 
 /// Remove `profile_id`'s claim; the entity goes with its last claim. The
@@ -212,8 +212,8 @@ pub(super) async fn unbind_principal(
 ) -> SidResult<bool> {
     let removed =
         sqlx::query("DELETE FROM principal_bindings WHERE principal_id = ? AND profile_id = ?")
-            .bind(principal_id.to_string())
-            .bind(profile_id.to_string())
+            .bind(principal_id.0)
+            .bind(profile_id)
             .execute(&mut **tx)
             .await
             .map_err(storage("delete binding"))?
@@ -225,7 +225,7 @@ pub(super) async fn unbind_principal(
         "DELETE FROM principals WHERE id = ?1 \
          AND NOT EXISTS (SELECT 1 FROM principal_bindings WHERE principal_id = ?1)",
     )
-    .bind(principal_id.to_string())
+    .bind(principal_id.0)
     .execute(&mut **tx)
     .await
     .map_err(storage("delete principal"))?;
@@ -236,8 +236,8 @@ pub(super) async fn unbind_principal(
              updated_at = ?3
          WHERE id = ?1 AND assigned_profile_id = ?2",
     )
-    .bind(principal_id.to_string())
-    .bind(profile_id.to_string())
+    .bind(principal_id.0)
+    .bind(profile_id)
     .bind(fmt_dt(&chrono::Utc::now()))
     .execute(&mut **tx)
     .await
@@ -255,7 +255,7 @@ pub(super) async fn upsert_email(tx: &mut WriteTx, email: &ProfileEmail) -> SidR
             is_primary=excluded.is_primary, verified=excluded.verified,
             verified_at=excluded.verified_at, updated_at=excluded.updated_at",
     )
-    .bind(email.id.to_string())
+    .bind(email.id.0)
     .bind(email.profile_id)
     .bind(&email.email)
     .bind(email.label.as_str())
@@ -278,7 +278,7 @@ pub(super) async fn delete_email(
     owner: Option<ProfileId>,
 ) -> SidResult<()> {
     sqlx::query("DELETE FROM profile_emails WHERE id = ? AND (? IS NULL OR profile_id = ?)")
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(owner)
         .bind(owner)
         .execute(&mut **tx)
@@ -300,7 +300,7 @@ pub(super) async fn upsert_phone(tx: &mut WriteTx, phone: &ProfilePhone) -> SidR
             verified=excluded.verified, verified_at=excluded.verified_at,
             updated_at=excluded.updated_at",
     )
-    .bind(phone.id.to_string())
+    .bind(phone.id.0)
     .bind(phone.profile_id)
     .bind(phone.e164 as i64)
     .bind(phone.extension.map(|e| e as i32))
@@ -327,7 +327,7 @@ pub(super) async fn delete_phone(
     owner: Option<ProfileId>,
 ) -> SidResult<()> {
     sqlx::query("DELETE FROM profile_phones WHERE id = ? AND (? IS NULL OR profile_id = ?)")
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(owner)
         .bind(owner)
         .execute(&mut **tx)
@@ -433,11 +433,11 @@ async fn write_group(
     sql: &'static str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(sql)
-        .bind(group.id.to_string())
-        .bind(group.project_id.to_string())
+        .bind(group.id)
+        .bind(group.project_id)
         .bind(&group.name)
         .bind(&group.description)
-        .bind(group.parent_group_id.map(|g| g.to_string()))
+        .bind(group.parent_group_id)
         .bind(fmt_dt(&group.created_at))
         .bind(fmt_dt(&group.updated_at))
         .execute(&mut **tx)
@@ -459,7 +459,7 @@ async fn update_group(tx: &mut WriteTx, group: &Group) -> SidResult<bool> {
         .bind(&group.name)
         .bind(&group.description)
         .bind(fmt_dt(&group.updated_at))
-        .bind(group.id.to_string())
+        .bind(group.id)
         .execute(&mut **tx)
         .await
         .map(|r| r.rows_affected() == 1)
@@ -476,7 +476,7 @@ pub(super) async fn add_member(tx: &mut WriteTx, member: &GroupMember) -> SidRes
          WHERE group_id = ? AND basis_assignment_id IS NOT NULL AND granted_by = ?
          LIMIT 1",
     )
-    .bind(member.group_id.to_string())
+    .bind(member.group_id)
     .bind(format!("user:{}", member.profile_id))
     .fetch_optional(&mut **tx)
     .await
@@ -491,7 +491,7 @@ pub(super) async fn add_member(tx: &mut WriteTx, member: &GroupMember) -> SidRes
         "INSERT INTO group_members (group_id, profile_id, added_at) VALUES (?, ?, ?)
          ON CONFLICT(group_id, profile_id) DO NOTHING",
     )
-    .bind(member.group_id.to_string())
+    .bind(member.group_id)
     .bind(member.profile_id)
     .bind(fmt_dt(&member.added_at))
     .execute(&mut **tx)
@@ -517,7 +517,7 @@ pub(super) async fn remove_member(
     profile_id: ProfileId,
 ) -> SidResult<()> {
     sqlx::query("DELETE FROM group_members WHERE group_id = ? AND profile_id = ?")
-        .bind(group_id.to_string())
+        .bind(group_id)
         .bind(profile_id)
         .execute(&mut **tx)
         .await
@@ -539,7 +539,7 @@ impl SqliteBackend {
                 // A missing account or one changed since it was read refuses
                 // the whole write.
                 if !update_profile(&mut tx, &write.profile).await? {
-                    let exists: Option<String> =
+                    let exists: Option<ProfileId> =
                         sqlx::query_scalar("SELECT id FROM profiles WHERE id = ?")
                             .bind(profile_id)
                             .fetch_optional(&mut *tx)

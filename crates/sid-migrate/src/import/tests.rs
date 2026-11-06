@@ -1694,10 +1694,12 @@ async fn applications_resources_and_access_survive_migration() {
 
     // A machine user calling the API, with a credential, and the token
     // inspector role held by the machine and by the web client.
-    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
-    use sid_core::models::{MachineUser, Role, RoleAssignment, RoleAssignmentPrincipal};
+    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential};
+    use sid_core::models::{
+        MachineOwner, MachineUser, Role, RoleAssignment, RoleAssignmentPrincipal,
+    };
     source.ensure_system_project(ctx()).await.unwrap();
-    let ci = MachineUser::new(ProjectId::SYSTEM, "ci", "CI", OwnerType::System, "system");
+    let ci = MachineUser::new(ProjectId::SYSTEM, "ci", "CI", MachineOwner::System);
     source.create_machine_user(&ci, ctx()).await.unwrap();
     source
         .add_machine_credential(

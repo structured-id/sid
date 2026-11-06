@@ -19,9 +19,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bytes, get_int,
-    get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, key, opt_text,
-    opt_time, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_id, get_int, get_opt_text,
+    get_opt_time, get_parsed, get_text, get_texts, get_time, key, opt_text, opt_time, texts, time,
+    uuid,
 };
 
 const METADATA: &str = "m.profile_id AS profile_id, m.meta_key AS meta_key, m.value AS value,
@@ -38,16 +38,11 @@ fn bin(bytes: &[u8; 16]) -> Value {
     Value::Binary(bytes.to_vec())
 }
 
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_slice(&get_bytes(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
-}
-
 // === Profile metadata ===
 
 fn metadata(row: &Row) -> SidResult<ProfileMetadata> {
     Ok(ProfileMetadata {
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         key: get_text(row, "meta_key")?,
         value: super::get_document(row, "value")?,
         created_at: get_time(row, "created_at")?,
@@ -110,8 +105,8 @@ fn delete_metadata(tx: &Statements<'_>, profile: ProfileId, meta_key: &str) -> S
 fn pat(row: &Row) -> SidResult<PersonalAccessToken> {
     let use_count = get_int(row, "use_count")?;
     Ok(PersonalAccessToken {
-        id: PatId(get_uuid(row, "id")?),
-        profile_id: profile_of(row, "profile_id")?,
+        id: get_id(row, "id")?,
+        profile_id: get_id(row, "profile_id")?,
         name: get_text(row, "name")?,
         description: get_opt_text(row, "description")?,
         token_hash: get_text(row, "token_hash")?,
@@ -150,7 +145,7 @@ fn revoke(tx: &Statements<'_>, ids: &[PatId], revoked_by: Option<&str>) -> SidRe
             "MATCH (t:SidPat) WHERE t.id = $id
              SET t.status = 'revoked', t.revoked_at = $now, t.revoked_by = $by",
             Params::default()
-                .with("id", uuid(&id.0))
+                .with("id", uuid(id.as_uuid()))
                 .with("now", now.clone())
                 .with("by", opt_text(revoked_by)),
         )?;
@@ -574,7 +569,7 @@ impl CoordinodeBackend {
     // === Personal access tokens ===
 
     pub(super) async fn get_pat(&self, id: PatId) -> SidResult<Option<PersonalAccessToken>> {
-        self.read(move |tx| Ok(pats_where(tx, "t.id = $value", uuid(&id.0))?.pop()))
+        self.read(move |tx| Ok(pats_where(tx, "t.id = $value", uuid(id.as_uuid()))?.pop()))
             .await
     }
 
@@ -601,7 +596,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let t = t.clone();
-        self.mutate(format!("pat:{}", t.id.0), ctx, move |tx| {
+        self.mutate(format!("pat:{}", t.id), ctx, move |tx| {
             // The owner's turn makes the count and the insert one step.
             let owner = tx.run(
                 "MATCH (p:SidProfile) WHERE p.id = $id
@@ -634,7 +629,7 @@ impl CoordinodeBackend {
                     last_used_ip: $last_used_ip, use_count: $use_count, revoked_at: $revoked_at,
                     revoked_by: $revoked_by, created_at: $created_at})",
                 Params::default()
-                    .with("id", uuid(&t.id.0))
+                    .with("id", uuid(t.id.as_uuid()))
                     .with("profile_id", bin(t.profile_id.as_bytes()))
                     .with("name", Value::String(t.name.clone()))
                     .with("description", opt_text(t.description.as_deref()))
@@ -671,7 +666,7 @@ impl CoordinodeBackend {
         let ip = ip.map(str::to_owned);
         self.transaction(move |tx| {
             let now = Utc::now();
-            let usable = pats_where(tx, "t.id = $value", uuid(&id.0))?
+            let usable = pats_where(tx, "t.id = $value", uuid(id.as_uuid()))?
                 .pop()
                 .is_some_and(|t| {
                     t.status == PatStatus::Active && t.expires_at.is_none_or(|end| end > now)
@@ -683,11 +678,11 @@ impl CoordinodeBackend {
                 "MATCH (t:SidPat) WHERE t.id = $id AND t.status = 'active'
                  SET t.last_used_at = $now, t.last_used_ip = $ip, t.use_count = t.use_count + 1",
                 Params::default()
-                    .with("id", uuid(&id.0))
+                    .with("id", uuid(id.as_uuid()))
                     .with("now", time(now))
                     .with("ip", opt_text(ip.as_deref())),
             )?;
-            finalize(tx, &format!("pat:{}", id.0), ctx.clone())?;
+            finalize(tx, &format!("pat:{id}"), ctx.clone())?;
             Ok(Decision::Commit(true))
         })
         .await
@@ -701,14 +696,14 @@ impl CoordinodeBackend {
     ) -> SidResult<bool> {
         let revoked_by = revoked_by.to_owned();
         self.transaction(move |tx| {
-            let open = pats_where(tx, "t.id = $value", uuid(&id.0))?
+            let open = pats_where(tx, "t.id = $value", uuid(id.as_uuid()))?
                 .pop()
                 .is_some_and(|t| t.status != PatStatus::Revoked);
             if !open {
                 return Ok(Decision::Abandon(false));
             }
             revoke(tx, &[id], Some(&revoked_by))?;
-            finalize(tx, &format!("pat:{}", id.0), ctx.clone())?;
+            finalize(tx, &format!("pat:{id}"), ctx.clone())?;
             Ok(Decision::Commit(true))
         })
         .await

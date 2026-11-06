@@ -9,18 +9,14 @@ use sid_core::{
     },
 };
 use sqlx::Row;
-use uuid::Uuid;
 
 use super::profile::insert_credential;
 use super::session::row_to_session;
-use super::{SqliteBackend, col, fmt_dt, fmt_dt_opt, parse_dt, parse_dt_opt};
+use super::{SqliteBackend, col, fmt_dt, fmt_dt_opt, parse_dt, parse_dt_opt, uuid_col};
 
 fn row_to_reset_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<PasswordResetSession> {
-    let id: String = col(row, "id")?;
     Ok(PasswordResetSession {
-        id: ResetSessionId(
-            Uuid::parse_str(&id).map_err(|e| SidError::Storage(format!("column id: {e}")))?,
-        ),
+        id: ResetSessionId(uuid_col(row, "id")?),
         profile_id: col(row, "profile_id")?,
         email: col(row, "email")?,
         destination: col(row, "destination")?,
@@ -49,7 +45,7 @@ impl SqliteBackend {
                  created_at, expires_at, verified_at, completed_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(session.id.to_string())
+        .bind(session.id.0)
         .bind(session.profile_id)
         .bind(&session.email)
         .bind(&session.destination)
@@ -75,7 +71,7 @@ impl SqliteBackend {
                     created_at, expires_at, verified_at, completed_at \
              FROM password_reset_sessions WHERE id = ?",
         )
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -95,7 +91,7 @@ impl SqliteBackend {
              WHERE id = ?2 AND status = 'pending' AND expires_at > ?1",
         )
         .bind(&now)
-        .bind(id.to_string())
+        .bind(id.0)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Verify reset_session failed: {e}")))?
@@ -135,7 +131,7 @@ impl SqliteBackend {
              RETURNING profile_id",
         )
         .bind(&now)
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Complete reset_session failed: {e}")))?;

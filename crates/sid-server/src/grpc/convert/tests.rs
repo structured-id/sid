@@ -1,6 +1,7 @@
 use super::*;
 use sid_authn::webauthn::soft_authenticator::SoftAuthenticator;
 use sid_authn::webauthn::{RegistrationResponse, WebAuthnServer};
+use sid_core::models::ProfileId;
 use sid_proto::sid::v1::{AuthenticatorAttachment, AuthenticatorTransport, credential};
 
 /// A password credential names the OPAQUE configuration recorded with it,

@@ -23,7 +23,6 @@ use sid_proto::sid::v1::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
-use uuid::Uuid;
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
 
@@ -111,8 +110,12 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// CREDENTIAL_NOT_FOUND for a token that does not exist or is not the
 /// caller's: both answer alike, so another user's token is not revealed.
-fn pat_not_found(id: &str) -> Status {
-    not_found(ErrorReason::CredentialNotFound, "PersonalAccessToken", id)
+fn pat_not_found(id: PatId) -> Status {
+    not_found(
+        ErrorReason::CredentialNotFound,
+        "PersonalAccessToken",
+        id.to_string(),
+    )
 }
 
 /// TOKEN_INVALID for a token that cannot be exchanged: unknown, revoked or
@@ -132,8 +135,8 @@ fn pat_to_proto(pat: &PersonalAccessToken) -> Pat {
     };
 
     Pat {
-        id: pat.id.0.to_string(),
-        profile_id: pat.profile_id.to_string(),
+        id: Some(pat.id.into()),
+        profile_id: Some(pat.profile_id.into()),
         name: pat.name.clone(),
         description: pat.description.clone().unwrap_or_default(),
         token_prefix: pat.token_prefix.clone(),
@@ -147,13 +150,6 @@ fn pat_to_proto(pat: &PersonalAccessToken) -> Pat {
         revoked_at: pat.revoked_at.map(convert::to_timestamp),
         revoked_by: pat.revoked_by.clone().unwrap_or_default(),
     }
-}
-
-/// Parse a PAT ID string into the domain type.
-fn parse_pat_id(s: &str) -> Result<PatId, Status> {
-    Uuid::parse_str(s)
-        .map(PatId)
-        .map_err(|_| invalid_field("pat_id", "not a token identifier"))
 }
 
 #[tonic::async_trait]
@@ -224,7 +220,7 @@ impl PatService for PatServiceImpl {
             }
 
             let mut response = CreatePatResponse {
-                pat_id: pat.id.0.to_string(),
+                pat_id: Some(pat.id.into()),
                 token: String::new(),
                 token_prefix: prefix,
                 metadata: Some(pat_to_proto(&pat)),
@@ -232,7 +228,7 @@ impl PatService for PatServiceImpl {
             let audit = MutationContext::from(AuditEntry::user(
                 profile_id.to_string(),
                 "pat.create",
-                pat.id.0.to_string(),
+                pat.id.to_string(),
             ))
             .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
 
@@ -267,7 +263,7 @@ impl PatService for PatServiceImpl {
 
             info!(
                 "Created PAT {} ({}) for profile {}",
-                pat.id.0, pat.name, pat.profile_id
+                pat.id, pat.name, pat.profile_id
             );
 
             // The value is shown in this answer only.
@@ -301,18 +297,18 @@ impl PatService for PatServiceImpl {
     ) -> Result<Response<PatResponse>, Status> {
         let caller_id = self.token_owner(&request).await?;
         let req = request.into_inner();
-        let pat_id = parse_pat_id(&req.pat_id)?;
+        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
 
         let pat = self
             .storage
             .get_pat(pat_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| pat_not_found(&req.pat_id))?;
+            .ok_or_else(|| pat_not_found(pat_id))?;
 
         // Ownership check: users can only see their own PATs.
         if pat.profile_id != caller_id {
-            return Err(pat_not_found(&req.pat_id));
+            return Err(pat_not_found(pat_id));
         }
 
         Ok(Response::new(PatResponse {
@@ -326,7 +322,7 @@ impl PatService for PatServiceImpl {
     ) -> Result<Response<RevokePatResponse>, Status> {
         let caller_id = self.token_owner(&request).await?;
         let req = request.into_inner();
-        let pat_id = parse_pat_id(&req.pat_id)?;
+        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
 
         // Ownership check: users can only revoke their own PATs.
         let pat = self
@@ -334,21 +330,21 @@ impl PatService for PatServiceImpl {
             .get_pat(pat_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| pat_not_found(&req.pat_id))?;
+            .ok_or_else(|| pat_not_found(pat_id))?;
 
         if pat.profile_id != caller_id {
-            return Err(pat_not_found(&req.pat_id));
+            return Err(pat_not_found(pat_id));
         }
 
         let audit: MutationContext =
-            AuditEntry::user(caller_id.to_string(), "pat.revoke", pat_id.0.to_string()).into();
+            AuditEntry::user(caller_id.to_string(), "pat.revoke", pat_id.to_string()).into();
 
         self.storage
             .revoke_pat(pat_id, &caller_id.to_string(), audit)
             .await
             .map_err(storage_failure)?;
 
-        info!("Revoked PAT {} by profile {}", pat_id.0, caller_id);
+        info!("Revoked PAT {} by profile {}", pat_id, caller_id);
 
         Ok(Response::new(RevokePatResponse {}))
     }
@@ -389,7 +385,7 @@ impl PatService for PatServiceImpl {
         )
         .with_precondition(
             "PAT_RESOURCE_BINDING",
-            pat.id.0.to_string(),
+            pat.id.to_string(),
             "the token names no registered resource",
         )
         .into())
@@ -419,14 +415,10 @@ impl PatService for PatServiceImpl {
     ) -> Result<Response<RevokePatResponse>, Status> {
         let admin_id = self.admin(&request).await?;
         let req = request.into_inner();
-        let pat_id = parse_pat_id(&req.pat_id)?;
+        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
 
-        let audit: MutationContext = AuditEntry::admin(
-            admin_id.to_string(),
-            "pat.admin_revoke",
-            pat_id.0.to_string(),
-        )
-        .into();
+        let audit: MutationContext =
+            AuditEntry::admin(admin_id.to_string(), "pat.admin_revoke", pat_id.to_string()).into();
 
         let revoked = self
             .storage
@@ -443,11 +435,11 @@ impl PatService for PatServiceImpl {
                 .map_err(storage_failure)?
                 .is_some();
             if !exists {
-                return Err(pat_not_found(&req.pat_id));
+                return Err(pat_not_found(pat_id));
             }
         }
 
-        info!("Admin {} revoked PAT {}", admin_id, pat_id.0);
+        info!("Admin {} revoked PAT {}", admin_id, pat_id);
 
         Ok(Response::new(RevokePatResponse {}))
     }

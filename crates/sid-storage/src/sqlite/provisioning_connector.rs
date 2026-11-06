@@ -99,7 +99,7 @@ pub(super) async fn check_connector_fence(
          WHERE c.id = ? AND k.id = ? AND c.revision = ? AND c.state = 'active'",
     )
     .bind(connector)
-    .bind(credential.to_string())
+    .bind(credential)
     .bind(revision)
     .fetch_optional(&mut **tx)
     .await
@@ -321,7 +321,7 @@ impl SqliteBackend {
              WHERE id = ? AND connector_id = ? AND status = 'active'",
         )
         .bind(fmt_dt(&grace_until))
-        .bind(old.to_string())
+        .bind(old)
         .bind(connector_id)
         .execute(&mut *tx)
         .await
@@ -347,7 +347,7 @@ impl SqliteBackend {
             "UPDATE provisioning_credentials SET status = 'revoked'
              WHERE id = ? AND connector_id = ? AND status IN ('active', 'grace_period')",
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(connector_id)
         .execute(&mut *tx)
         .await

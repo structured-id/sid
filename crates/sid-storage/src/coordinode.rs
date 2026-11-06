@@ -399,6 +399,25 @@ pub(super) fn get_opt_uuid(row: &Row, name: &str) -> SidResult<Option<uuid::Uuid
         .transpose()
 }
 
+/// A typed identifier stored in `name`; bytes that are not that kind are an
+/// error, never a default.
+pub(super) fn get_id<T>(row: &Row, name: &str) -> SidResult<T>
+where
+    T: TryFrom<uuid::Uuid, Error = sid_ids::IdError>,
+{
+    T::try_from(get_uuid(row, name)?).map_err(|e| SidError::Storage(format!("{name}: {e}")))
+}
+
+/// A typed identifier stored in `name`, or none.
+pub(super) fn get_opt_id<T>(row: &Row, name: &str) -> SidResult<Option<T>>
+where
+    T: TryFrom<uuid::Uuid, Error = sid_ids::IdError>,
+{
+    get_opt_uuid(row, name)?
+        .map(|u| T::try_from(u).map_err(|e| SidError::Storage(format!("{name}: {e}"))))
+        .transpose()
+}
+
 pub(super) fn get_texts(row: &Row, name: &str) -> SidResult<Vec<String>> {
     match field(row, name)? {
         Value::Array(items) => items

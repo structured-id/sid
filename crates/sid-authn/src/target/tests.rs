@@ -384,15 +384,13 @@ async fn revoked_access_stops_further_issuance() {
 
 #[tokio::test]
 async fn a_machine_user_names_its_target() {
-    use sid_core::models::MachineUser;
-    use sid_core::models::machine_user::OwnerType;
+    use sid_core::models::{MachineOwner, MachineUser};
     let f = fixture().await;
     let ci = MachineUser::new(
         ProjectId::SYSTEM,
         "ci".to_string(),
         "CI",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     f.storage.create_machine_user(&ci, ctx()).await.unwrap();
 

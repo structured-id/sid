@@ -8,7 +8,7 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, issue_token};
-use sid_core::models::{MachineUser, OwnerType, Profile, ProfileId, ProjectId};
+use sid_core::models::{MachineOwner, MachineUser, MachineUserId, Profile, ProfileId, ProjectId};
 use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request};
@@ -32,17 +32,16 @@ fn existing() -> MachineUser {
         ProjectId::SYSTEM,
         "mu_existing",
         "existing",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     )
 }
 
 /// The status code each of the 14 RPCs answers for `token`, in declaration
 /// order; `None` when the call succeeds.
-async fn codes(svc: &TestServices, id: &str, token: Option<&str>) -> Vec<Option<Code>> {
+async fn codes(svc: &TestServices, id: MachineUserId, token: Option<&str>) -> Vec<Option<Code>> {
     let m = &svc.machine_user;
-    let project = ProjectId::SYSTEM.to_string();
-    let id = id.to_string();
+    let project = Some(ProjectId::SYSTEM.into());
+    let id = Some(id.into());
     vec![
         m.create_machine_user(req(
             CreateMachineUserRequest {
@@ -193,7 +192,7 @@ async fn codes(svc: &TestServices, id: &str, token: Option<&str>) -> Vec<Option<
 async fn test_machine_user_rpcs_require_a_token() {
     let mu = existing();
     let svc = TestServices::new(MockStorage::new().with_machine_user(mu.clone()));
-    let got = codes(&svc, &mu.id.to_string(), None).await;
+    let got = codes(&svc, mu.id, None).await;
     assert_eq!(got.len(), 14);
     for (i, code) in got.into_iter().enumerate() {
         assert_eq!(code, Some(Code::Unauthenticated), "rpc #{i}");
@@ -220,7 +219,7 @@ async fn test_machine_user_rpcs_refuse_a_non_admin() {
             .with_machine_user(mu.clone()),
     );
     let token = issue_token(&svc.jwt, &user, &["openid".to_string()]);
-    let got = codes(&svc, &mu.id.to_string(), Some(&token)).await;
+    let got = codes(&svc, mu.id, Some(&token)).await;
     for (i, code) in got.into_iter().enumerate() {
         assert_eq!(code, Some(Code::PermissionDenied), "rpc #{i}");
     }
@@ -237,7 +236,7 @@ async fn test_machine_user_creation_records_the_administrator() {
     svc.machine_user
         .create_machine_user(req(
             CreateMachineUserRequest {
-                project_id: ProjectId::SYSTEM.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 display_name: "billing".to_string(),
                 ..Default::default()
             },
@@ -261,7 +260,7 @@ async fn test_an_administrators_machine_user_belongs_to_the_organization() {
         .machine_user
         .create_machine_user(req(
             CreateMachineUserRequest {
-                project_id: ProjectId::SYSTEM.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 display_name: "billing".to_string(),
                 ..Default::default()
             },
@@ -272,8 +271,12 @@ async fn test_an_administrators_machine_user_belongs_to_the_organization() {
         .into_inner()
         .machine_user
         .unwrap();
-    assert_eq!(created.owner_type, "organization");
-    assert_eq!(created.owner_id, common::test_org().to_string());
+    assert_eq!(
+        created.owner.and_then(|o| o.owner),
+        Some(machine_user_owner::Owner::Organization(
+            common::test_org().into()
+        ))
+    );
 }
 
 /// An unknown machine user is MACHINE_USER_NOT_FOUND naming it in
@@ -283,12 +286,12 @@ async fn test_unknown_machine_user_is_machine_user_not_found() {
     use tonic_types::StatusExt;
     let svc = TestServices::new(MockStorage::new());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
-    let id = existing().id.to_string();
+    let id = existing().id;
     let err = svc
         .machine_user
         .get_machine_user(req(
             GetMachineUserRequest {
-                machine_user_id: id.clone(),
+                machine_user_id: Some(id.into()),
             },
             Some(&token),
         ))
@@ -300,7 +303,10 @@ async fn test_unknown_machine_user_is_machine_user_not_found() {
         details.error_info().unwrap().reason,
         "MACHINE_USER_NOT_FOUND"
     );
-    assert_eq!(details.resource_info().unwrap().resource_name, id);
+    assert_eq!(
+        details.resource_info().unwrap().resource_name,
+        id.to_string()
+    );
 }
 
 /// A deleted machine user cannot be suspended: INVALID_STATE whose
@@ -317,7 +323,7 @@ async fn test_suspending_a_deleted_machine_user_is_invalid_state() {
         .machine_user
         .suspend_machine_user(req(
             SuspendMachineUserRequest {
-                machine_user_id: mu.id.to_string(),
+                machine_user_id: Some(mu.id.into()),
             },
             Some(&token),
         ))
@@ -344,7 +350,7 @@ async fn test_a_state_change_already_in_effect_is_recorded_for_its_retry() {
     let svc = TestServices::new(MockStorage::new().with_machine_user(mu.clone()));
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let keyed = |key: &str| {
-        let mut r = Request::new(mu.id.to_string());
+        let mut r = Request::new(Some(mu.id.into()));
         r.metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
         common::name_command(r.metadata_mut(), key);
@@ -418,7 +424,7 @@ async fn test_a_rotated_credential_has_a_grace_end() {
         .machine_user
         .add_machine_credential(req(
             AddMachineCredentialRequest {
-                machine_user_id: mu.id.to_string(),
+                machine_user_id: Some(mu.id.into()),
                 credential_type: MachineCredentialType::ClientSecret as i32,
                 ..Default::default()
             },
@@ -433,7 +439,7 @@ async fn test_a_rotated_credential_has_a_grace_end() {
         .machine_user
         .rotate_machine_credential(req(
             RotateMachineCredentialRequest {
-                machine_user_id: mu.id.to_string(),
+                machine_user_id: Some(mu.id.into()),
                 kid: kid.clone(),
                 ..Default::default()
             },
@@ -473,7 +479,7 @@ async fn test_revocation_reaches_issued_tokens() {
                 .machine_user
                 .add_machine_credential(req(
                     AddMachineCredentialRequest {
-                        machine_user_id: mu.id.to_string(),
+                        machine_user_id: Some(mu.id.into()),
                         credential_type: MachineCredentialType::ClientSecret as i32,
                         ..Default::default()
                     },
@@ -484,7 +490,7 @@ async fn test_revocation_reaches_issued_tokens() {
                 .into_inner();
             kids.push(added.credential.unwrap().kid);
         }
-        let id = mu.id.to_string();
+        let id = Some(mu.id.into());
         match action {
             "revoke" => {
                 svc.machine_user
@@ -543,7 +549,7 @@ async fn test_rotating_an_unknown_kid_is_credential_not_found() {
         .machine_user
         .rotate_machine_credential(req(
             RotateMachineCredentialRequest {
-                machine_user_id: mu.id.to_string(),
+                machine_user_id: Some(mu.id.into()),
                 kid: "kid_missing".to_string(),
                 ..Default::default()
             },
