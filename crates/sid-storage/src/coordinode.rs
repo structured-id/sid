@@ -23,6 +23,7 @@ mod instance_secret;
 mod operation;
 mod principal;
 mod profile;
+mod project;
 mod work;
 
 /// How often one change is run again after a conflicting commit before it is
@@ -72,6 +73,8 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_email_policy FOR (a:SidEmailPolicy) REQUIRE a.scope IS UNIQUE",
     "CREATE CONSTRAINT sid_email_disposition FOR (d:SidEmailDisposition) REQUIRE d.principal_id IS UNIQUE",
     "CREATE CONSTRAINT sid_principal_quarantine FOR (q:SidPrincipalQuarantine) REQUIRE q.hash IS UNIQUE",
+    "CREATE CONSTRAINT sid_project_id FOR (j:SidProject) REQUIRE j.id IS UNIQUE",
+    "CREATE INDEX sid_project_owner ON :SidProject(owner_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

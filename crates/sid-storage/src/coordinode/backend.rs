@@ -753,33 +753,33 @@ impl StorageBackend for CoordinodeBackend {
 
     // === PROJECTS ===
 
-    async fn get_project(&self, _id: ProjectId) -> Result<Option<Project>> {
-        refused("projects")
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
+        CoordinodeBackend::get_project(self, id).await
     }
 
-    async fn create_project(&self, _project: &Project, _ctx: MutationContext) -> Result<()> {
-        refused("projects")
+    async fn create_project(&self, project: &Project, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_project(self, project, ctx).await
     }
 
     async fn update_project(
         &self,
-        _id: ProjectId,
-        _change: &ProjectChange,
-        _ctx: MutationContext,
+        id: ProjectId,
+        change: &ProjectChange,
+        ctx: MutationContext,
     ) -> Result<Option<Project>> {
-        refused("projects")
+        CoordinodeBackend::update_project(self, id, change, ctx).await
     }
 
-    async fn delete_project(&self, _id: ProjectId, _ctx: MutationContext) -> Result<()> {
-        refused("projects")
+    async fn delete_project(&self, id: ProjectId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_project(self, id, ctx).await
     }
 
-    async fn list_projects(&self, _offset: u64, _limit: u64) -> Result<Vec<Project>> {
-        refused("projects")
+    async fn list_projects(&self, offset: u64, limit: u64) -> Result<Vec<Project>> {
+        CoordinodeBackend::list_projects(self, offset, limit).await
     }
 
     async fn count_projects(&self) -> Result<u64> {
-        refused("projects")
+        CoordinodeBackend::count_projects(self).await
     }
 
     async fn list_oauth2_clients_by_project(
@@ -791,8 +791,8 @@ impl StorageBackend for CoordinodeBackend {
         refused("OAuth clients")
     }
 
-    async fn ensure_system_project(&self, _ctx: MutationContext) -> Result<()> {
-        refused("projects")
+    async fn ensure_system_project(&self, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::ensure_system_project(self, ctx).await
     }
 
     // === CLIENTS AND APPLICATIONS ===
