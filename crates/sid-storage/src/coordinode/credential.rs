@@ -25,7 +25,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
     get_int, get_opt_bytes, get_opt_int, get_opt_text, get_opt_time, get_text, get_time, get_uuid,
-    hold_first, key, opt_text, opt_time, sorted_page, time, uuid,
+    hold_first, key, opt_text, opt_time, profile::profile_value, sorted_page, time, uuid,
 };
 
 const CREDENTIAL: &str = "c.id AS id, c.profile_id AS profile_id,
@@ -45,10 +45,6 @@ const EPOCH: &str = "e.id AS id, e.owner_id AS owner_id, e.suite AS suite,
 const ENTRY: &str = "h.epoch_id AS epoch_id, h.seq AS seq, h.entry AS entry,
     h.operation_id AS operation_id, h.policy_version AS policy_version,
     h.created_at AS created_at";
-
-fn profile_value(id: ProfileId) -> Value {
-    uuid(id.as_uuid())
-}
 
 fn fixed32(row: &Row, name: &str) -> SidResult<[u8; 32]> {
     get_bytes(row, name)?

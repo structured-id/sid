@@ -1131,34 +1131,34 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn service_binding(
         &self,
-        _profile_id: ProfileId,
-        _scope: &sid_core::models::BindingScope,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        scope: &sid_core::models::BindingScope,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::ServiceBinding> {
-        refused("service bindings")
+        CoordinodeBackend::service_binding(self, profile_id, scope, ctx).await
     }
 
     async fn list_service_bindings(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<sid_core::models::ServiceBinding>> {
-        refused("service bindings")
+        CoordinodeBackend::list_service_bindings(self, profile_id).await
     }
 
     async fn import_service_binding(
         &self,
-        _binding: &sid_core::models::ServiceBinding,
-        _ctx: MutationContext,
+        binding: &sid_core::models::ServiceBinding,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("service bindings")
+        CoordinodeBackend::import_service_binding(self, binding, ctx).await
     }
 
     async fn find_service_binding(
         &self,
-        _profile_id: ProfileId,
-        _scope: &sid_core::models::BindingScope,
+        profile_id: ProfileId,
+        scope: &sid_core::models::BindingScope,
     ) -> Result<Option<sid_core::models::ServiceBinding>> {
-        refused("service bindings")
+        CoordinodeBackend::find_service_binding(self, profile_id, scope).await
     }
 
     async fn list_credentials_by_type(

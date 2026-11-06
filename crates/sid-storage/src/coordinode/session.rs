@@ -29,7 +29,7 @@ use super::audit::{ip_of, ip_value};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
     get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_texts,
-    get_time, get_uuid, opt_text, opt_time, opt_uuid, texts, time, uuid,
+    get_time, get_uuid, opt_text, opt_time, opt_uuid, profile::profile_value, texts, time, uuid,
 };
 
 const SESSION: &str = "s.id AS id, s.profile_id AS profile_id, s.client_id AS client_id,
@@ -61,10 +61,6 @@ const GENERATION: &str = "g.id AS id, g.session_id AS session_id, g.key_jkt AS k
     g.successor_id AS successor_id, g.redeliver_until AS redeliver_until, g.sealed AS sealed";
 
 fn session_value(id: SessionId) -> Value {
-    uuid(id.as_uuid())
-}
-
-fn profile_value(id: ProfileId) -> Value {
     uuid(id.as_uuid())
 }
 

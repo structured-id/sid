@@ -44,7 +44,8 @@ const EMAIL: &str = "c.id AS id, c.profile_id AS profile_id, c.email AS email,
 /// Labels of the nodes a profile owns, deleted with it.
 const OWNED: &[&str] = &["SidPhone", "SidEmail"];
 
-fn profile_id(id: ProfileId) -> Value {
+/// The stored form of profile `id`, as every node referring to it keeps it.
+pub(super) fn profile_value(id: ProfileId) -> Value {
     Value::Binary(id.as_bytes().to_vec())
 }
 
@@ -95,7 +96,7 @@ pub(super) fn profile(row: &Row) -> SidResult<Profile> {
 /// The properties `profile` stores, its revision as given.
 fn profile_params(profile: &Profile) -> SidResult<Params> {
     Ok(Params::default()
-        .with("id", profile_id(profile.id))
+        .with("id", profile_value(profile.id))
         .with(
             "profile_type",
             Value::String(profile.profile_type.as_str().into()),
@@ -144,7 +145,7 @@ fn profile_params(profile: &Profile) -> SidResult<Params> {
 pub(super) fn insert(tx: &Statements<'_>, profile: &Profile) -> SidResult<()> {
     let found = tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id RETURN p.id AS id",
-        Params::default().with("id", profile_id(profile.id)),
+        Params::default().with("id", profile_value(profile.id)),
     )?;
     if !found.is_empty() {
         return Err(SidError::Conflict("profile already exists".into()));
@@ -192,7 +193,7 @@ pub(super) fn update(tx: &Statements<'_>, profile: &Profile) -> SidResult<bool> 
 pub(super) fn get(tx: &Statements<'_>, id: ProfileId) -> SidResult<Option<Profile>> {
     let rows = tx.run(
         &format!("MATCH (p:SidProfile) WHERE p.id = $id RETURN {PROFILE}"),
-        Params::default().with("id", profile_id(id)),
+        Params::default().with("id", profile_value(id)),
     )?;
     rows.first().map(profile).transpose()
 }
@@ -221,7 +222,7 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     for label in OWNED {
         tx.run(
             &format!("MATCH (o:{label}) WHERE o.profile_id = $id DETACH DELETE o"),
-            Params::default().with("id", profile_id(id)),
+            Params::default().with("id", profile_value(id)),
         )?;
     }
     super::project::disown(tx, id)?;
@@ -236,9 +237,10 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     super::reset::delete_profile_records(tx, id)?;
     super::signals::delete_profile_records(tx, id)?;
     super::history::delete_profile_records(tx, id)?;
+    super::binding::delete_profile_records(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
-        Params::default().with("id", profile_id(id)),
+        Params::default().with("id", profile_value(id)),
     )?;
     Ok(())
 }
@@ -285,7 +287,7 @@ fn email(row: &Row) -> SidResult<ProfileEmail> {
 /// `primary_of` of a contact: its profile while it is the primary one.
 fn primary_of(profile: ProfileId, is_primary: bool) -> Value {
     if is_primary {
-        profile_id(profile)
+        profile_value(profile)
     } else {
         Value::Null
     }
@@ -304,7 +306,7 @@ fn clear_primary(
              SET c.is_primary = false, c.primary_of = null, c.updated_at = $at"
         ),
         Params::default()
-            .with("profile", profile_id(profile))
+            .with("profile", profile_value(profile))
             .with("at", time(at)),
     )?;
     Ok(())
@@ -336,7 +338,7 @@ pub(super) fn insert_phone(tx: &Statements<'_>, phone: &ProfilePhone) -> SidResu
             verified_at: $verified_at, created_at: $created_at, updated_at: $updated_at})",
         Params::default()
             .with("id", uuid(&phone.id.0))
-            .with("profile_id", profile_id(phone.profile_id))
+            .with("profile_id", profile_value(phone.profile_id))
             .with(
                 "number_key",
                 key(&[phone.profile_id.as_bytes(), &e164.to_be_bytes()])?,
@@ -385,7 +387,7 @@ pub(super) fn insert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResu
             verified_at: $verified_at, created_at: $created_at, updated_at: $updated_at})",
         Params::default()
             .with("id", uuid(&email.id.0))
-            .with("profile_id", profile_id(email.profile_id))
+            .with("profile_id", profile_value(email.profile_id))
             .with(
                 "address_key",
                 key(&[email.profile_id.as_bytes(), email.email.as_bytes()])?,
@@ -491,7 +493,7 @@ fn delete_contact(
             &format!(
                 "MATCH (c:{label}) WHERE c.id = $id AND c.profile_id = $owner DETACH DELETE c"
             ),
-            params.with("owner", profile_id(owner)),
+            params.with("owner", profile_value(owner)),
         )?,
         None => tx.run(
             &format!("MATCH (c:{label}) WHERE c.id = $id DETACH DELETE c"),
@@ -535,7 +537,7 @@ fn contacts<T>(
             "MATCH (c:{label}) WHERE c.profile_id = $profile RETURN {fields}
              ORDER BY c.is_primary DESC, c.created_at"
         ),
-        Params::default().with("profile", profile_id(profile)),
+        Params::default().with("profile", profile_value(profile)),
     )?;
     rows.iter().map(decode).collect()
 }
@@ -563,7 +565,7 @@ fn primary<T>(
 ) -> SidResult<Option<T>> {
     let rows = tx.run(
         &format!("MATCH (c:{label}) WHERE c.primary_of = $profile RETURN {fields}"),
-        Params::default().with("profile", profile_id(profile)),
+        Params::default().with("profile", profile_value(profile)),
     )?;
     rows.first().map(decode).transpose()
 }
@@ -583,7 +585,7 @@ fn set_primary(
         ),
         Params::default()
             .with("id", uuid(id))
-            .with("profile", profile_id(profile)),
+            .with("profile", profile_value(profile)),
     )?;
     if owned.is_empty() {
         return Ok(false);
@@ -596,7 +598,7 @@ fn set_primary(
         ),
         Params::default()
             .with("id", uuid(id))
-            .with("profile", profile_id(profile))
+            .with("profile", profile_value(profile))
             .with("at", time(at)),
     )?;
     Ok(true)

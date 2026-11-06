@@ -18,6 +18,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
 mod backend;
+mod binding;
 mod branding;
 mod ceremony;
 mod consent;
@@ -271,6 +272,10 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_branding FOR (b:SidBranding) REQUIRE b.id IS UNIQUE",
     "CREATE INDEX sid_branding_project ON :SidBranding(project_id)",
     "CREATE CONSTRAINT sid_key_version FOR (k:SidKeyVersion) REQUIRE k.version IS UNIQUE",
+    "CREATE CONSTRAINT sid_binding FOR (b:SidBinding) REQUIRE b.binding_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_binding_pair FOR (b:SidBinding) REQUIRE b.pair IS UNIQUE",
+    "CREATE CONSTRAINT sid_binding_slot FOR (b:SidBinding) REQUIRE b.slot IS UNIQUE",
+    "CREATE INDEX sid_binding_profile ON :SidBinding(profile_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

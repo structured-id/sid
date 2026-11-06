@@ -20,7 +20,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_count, get_int,
     get_opt_int, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_time, get_uuid, key,
-    opt_text, opt_time, opt_uuid, profile, time, uuid,
+    opt_text, opt_time, opt_uuid, profile, profile::profile_value, time, uuid,
 };
 
 const ENTITY: &str = "p.id AS id, p.principal_type AS principal_type, p.value AS value,
@@ -37,10 +37,6 @@ const BINDING: &str = "b.id AS b_id, b.principal_id AS b_principal_id,
 
 /// The scope the installation's email policy revision is recorded under.
 const EMAIL_POLICY_SCOPE: &str = "installation";
-
-fn profile_value(id: ProfileId) -> Value {
-    Value::Binary(id.as_bytes().to_vec())
-}
 
 fn type_value_key(principal_type: PrincipalType, value: &str) -> SidResult<Value> {
     key(&[principal_type.as_str().as_bytes(), value.as_bytes()])
