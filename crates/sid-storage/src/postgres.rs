@@ -2090,7 +2090,13 @@ impl GrantStore for PostgresBackend {
         .bind(code.authentication.session)
         .execute(&mut *tx)
         .await
-        .map_err(|e| insert_error("authorization code", e))?;
+        .map_err(|e| match &e {
+            // The authorizing session ended before the code was stored.
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                SidError::NotFound(format!("session {}", code.authentication.session))
+            }
+            _ => insert_error("authorization code", e),
+        })?;
         Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
         tx.commit()
             .await
@@ -3250,7 +3256,13 @@ impl StorageBackend for PostgresBackend {
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
+            .map_err(|e| match &e {
+                // An application or SCIM target still belongs to the project.
+                sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                    SidError::InvalidState(format!("project {id} is in use"))
+                }
+                _ => SidError::Storage(format!("Delete failed: {}", e)),
+            })?;
         Self::audit_in_tx(&mut tx, &format!("project:{id}"), audit).await?;
         tx.commit()
             .await

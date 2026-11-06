@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The user directory filter as SQL: the condition both engines apply to
+//! The user directory filter as SQL: the condition both SQL engines apply to
 //! `profiles p` before pagination. Every value is a bound parameter; only
 //! fixed column names, metadata keys and status literals are written into the
-//! statement.
+//! statement. The page's assembly is every backend's.
 
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter, DirectoryOperator as Op, DirectoryQuery,
     directory_query::metadata_keys,
 };
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 use sid_core::{Error as SidError, Result as SidResult};
 
 /// The SQL dialect a condition is written for.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Dialect {
     #[cfg(feature = "storage-pg")]
@@ -21,6 +24,7 @@ pub(crate) enum Dialect {
 
 /// A compiled condition and the text values bound to its placeholders, in
 /// order.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 #[derive(Debug)]
 pub(crate) struct Condition {
     pub sql: String,
@@ -29,6 +33,7 @@ pub(crate) struct Condition {
 
 /// The condition selecting the directory's users matching `query.filter`:
 /// retired profiles (closed, purged) are never part of the directory.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<Condition> {
     let mut out = Writer {
         dialect,
@@ -83,6 +88,7 @@ pub(crate) fn assemble(
 }
 
 /// Placeholder `n` (from 1) of a text value.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub(crate) fn placeholder(dialect: Dialect, n: usize) -> String {
     match dialect {
         // Typed, so functions overloaded on several types resolve.
@@ -93,6 +99,7 @@ pub(crate) fn placeholder(dialect: Dialect, n: usize) -> String {
     }
 }
 
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 struct Writer {
     dialect: Dialect,
     sql: String,
@@ -101,6 +108,7 @@ struct Writer {
     suffix: String,
 }
 
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 impl Writer {
     /// A numbered placeholder bound to `value`: it may appear several times
     /// in the statement (a userName column is used in more than one place).

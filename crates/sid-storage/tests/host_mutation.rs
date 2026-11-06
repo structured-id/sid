@@ -6,6 +6,7 @@
 //!
 //! PostgreSQL needs the SID test stack (port 54399, or
 //! `SID_STORAGE_TEST_DATABASE_URL`); SQLite runs in memory.
+#![cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 
 use sid_core::Error;
 use sid_core::models::{
@@ -46,6 +47,7 @@ fn stale_fence() -> ActorFence {
     }
 }
 
+#[cfg(feature = "storage-pg")]
 mod postgres {
     use super::*;
     use sid_storage::PostgresBackend;

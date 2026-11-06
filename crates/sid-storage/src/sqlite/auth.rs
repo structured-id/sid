@@ -246,7 +246,13 @@ impl SqliteBackend {
         .bind(code.authentication.session)
         .execute(&mut *tx)
         .await
-        .map_err(|e| insert_error("authorization code", e))?;
+        .map_err(|e| match &e {
+            // The authorizing session ended before the code was stored.
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                SidError::NotFound(format!("session {}", code.authentication.session))
+            }
+            _ => insert_error("authorization code", e),
+        })?;
         Self::commit_mutation(tx, &format!("auth_code:{}", code.client_id), audit).await
     }
 

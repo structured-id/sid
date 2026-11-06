@@ -534,6 +534,7 @@ history_key_store!(
     write_cutoff_only_rises,
     first_epoch_never_resets_a_history,
     epoch_is_ensured_once,
+    ensures_of_a_known_owner_agree,
     owner_domains_are_separate,
     epoch_rotation,
     lifecycle_follows_the_live_set,
@@ -862,6 +863,7 @@ mod grant_store {
         session_found_by_browser_secret,
         touch_session_keeps_latest_activity,
         auth_code_roundtrip,
+        auth_code_needs_its_authorizing_session,
         auth_code_redeem_once,
         auth_code_concurrent_redeem,
         refresh_token_roundtrip,
@@ -1826,6 +1828,12 @@ async fn test_dropped_job_lock_is_freed() {
 async fn test_job_locks_are_per_job() {
     let (_dir, a, b) = two_instances().await;
     common::job_lock::test_job_locks_are_per_job(&a, &b).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_job_lock_taken_once() {
+    let (_dir, a, b) = two_instances().await;
+    common::job_lock::test_concurrent_job_lock_taken_once(&a, &b).await;
 }
 
 #[tokio::test]
