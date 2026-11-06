@@ -9,17 +9,25 @@ authors.workspace = true
 
 [dependencies]
 sid-authn = { workspace = true, features = ["keyed", "password-operation"] }
+# The fixed CE built-in roles; no transport.
+sid-authz = { path = "../sid-authz", default-features = false }
 sid-core = { workspace = true }
+# The primitives trait only: the host selects the provider.
+sid-crypto = { workspace = true }
+sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
 chrono = { workspace = true }
+secrecy = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+sid-crypto = { workspace = true, features = ["primitives"] }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
