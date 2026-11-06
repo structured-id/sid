@@ -118,6 +118,7 @@ futures = { workspace = true, optional = true }
 keyed = ["dep:sid-proto", "dep:prost"]
 grpc = [
     "keyed",
+    "sid-proto/grpc",
     "dep:tonic",
     "dep:http",
     "dep:tower",
@@ -131,7 +132,7 @@ oauth-http = ["grpc", "dep:sid-proto"]
 # history checker, and the history evaluator in process or as its own
 # service.
 password-operation = [
-    "grpc",
+    "keyed",
     "dep:sid-proto",
     "dep:sid-ids-proto",
     "dep:prost-types",

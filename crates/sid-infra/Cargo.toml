@@ -45,6 +45,7 @@ redis = ["dep:fred"]
 issuer-client = [
     "dep:sid-authn",
     "dep:sid-proto",
+    "sid-proto/grpc",
     "dep:tonic",
     "dep:http",
     "dep:secrecy",

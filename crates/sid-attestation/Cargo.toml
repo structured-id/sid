@@ -27,7 +27,7 @@ sid-serve = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }
 sid-plugin = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg"] }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 
 # Async runtime
 tokio = { workspace = true }

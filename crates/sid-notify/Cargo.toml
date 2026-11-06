@@ -78,7 +78,7 @@ futures = { workspace = true }
 # gRPC
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 prost = { workspace = true }
 prost-types = { workspace = true }
 # The Profile references the identity service takes and answers.
