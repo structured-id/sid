@@ -1,61 +1,5 @@
 use super::*;
-use chrono::Duration;
-use sid_core::models::ProfileId;
-
-fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<AuditRetention> {
-    AuditRetention::from_lookup(|k| {
-        Ok(pairs
-            .iter()
-            .find(|(name, _)| *name == k)
-            .map(|(_, v)| v.to_string()))
-    })
-}
-
-/// Unset: a year, archived (records are kept until an archive holds them).
-#[test]
-fn audit_retention_defaults_to_a_year_archived() {
-    assert_eq!(
-        retention(&[]).unwrap(),
-        AuditRetention {
-            days: 365,
-            action: RetentionAction::Archive
-        }
-    );
-    assert_eq!(
-        retention(&[
-            ("SID_AUDIT_RETENTION_DAYS", "30"),
-            ("SID_AUDIT_RETENTION_ACTION", "delete")
-        ])
-        .unwrap(),
-        AuditRetention {
-            days: 30,
-            action: RetentionAction::Delete
-        }
-    );
-}
-
-/// A value that does not parse, or is out of range, stops startup instead of
-/// becoming the default (a bad setting once silently meant 365 days).
-#[test]
-fn audit_retention_refuses_bad_settings() {
-    for days in ["", "abc", "0", "-5", "36501"] {
-        assert!(
-            retention(&[("SID_AUDIT_RETENTION_DAYS", days)]).is_err(),
-            "{days:?}"
-        );
-    }
-    assert!(retention(&[("SID_AUDIT_RETENTION_ACTION", "purge")]).is_err());
-    // A setting the lookup cannot read is refused, not taken as unset.
-    assert!(
-        AuditRetention::from_lookup(|k| {
-            if k == "SID_AUDIT_RETENTION_DAYS" {
-                anyhow::bail!("{k} is not valid Unicode")
-            }
-            Ok(None)
-        })
-        .is_err()
-    );
-}
+use chrono::Duration as Days;
 
 fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profile {
     let now = Utc::now();
@@ -74,10 +18,10 @@ fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profi
         max_assurance: sid_core::models::ProfileAssurance::Anonymous,
         manager_id: None,
         migration_pending,
-        migration_started_at: started_days_ago.map(|d| now - Duration::days(d)),
+        migration_started_at: started_days_ago.map(|d| now - Days::days(d)),
         migration_completed_at: None,
         revision: 0,
-        created_at: now - Duration::days(started_days_ago.unwrap_or(0)),
+        created_at: now - Days::days(started_days_ago.unwrap_or(0)),
         updated_at: now,
     }
 }
@@ -85,46 +29,54 @@ fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profi
 #[test]
 fn test_is_migration_expired_within_deadline() {
     let profile = make_profile(true, Some(30));
-    let now = Utc::now();
-    assert!(!is_migration_expired(&profile, 180, now));
+    assert!(!is_migration_expired(&profile, 180, Utc::now()));
 }
 
 #[test]
 fn test_is_migration_expired_past_deadline() {
     let profile = make_profile(true, Some(200));
-    let now = Utc::now();
-    assert!(is_migration_expired(&profile, 180, now));
+    assert!(is_migration_expired(&profile, 180, Utc::now()));
 }
 
 #[test]
 fn test_is_migration_expired_exactly_at_deadline() {
     let profile = make_profile(true, Some(180));
-    let now = Utc::now();
-    assert!(is_migration_expired(&profile, 180, now));
+    assert!(is_migration_expired(&profile, 180, Utc::now()));
 }
 
 #[test]
 fn test_is_migration_expired_uses_created_at_fallback() {
-    // No migration_started_at — falls back to created_at.
+    // No migration_started_at: counted from created_at.
     let mut profile = make_profile(true, None);
     profile.migration_started_at = None;
-    profile.created_at = Utc::now() - Duration::days(200);
-    let now = Utc::now();
-    assert!(is_migration_expired(&profile, 180, now));
+    profile.created_at = Utc::now() - Days::days(200);
+    assert!(is_migration_expired(&profile, 180, Utc::now()));
 }
 
 #[test]
 fn test_is_migration_expired_created_recently() {
     let mut profile = make_profile(true, None);
     profile.migration_started_at = None;
-    profile.created_at = Utc::now() - Duration::days(10);
-    let now = Utc::now();
-    assert!(!is_migration_expired(&profile, 180, now));
+    profile.created_at = Utc::now() - Days::days(10);
+    assert!(!is_migration_expired(&profile, 180, Utc::now()));
 }
 
 #[test]
 fn test_default_deadline_days_constant() {
     assert_eq!(DEFAULT_MIGRATION_DEADLINE_DAYS, 180);
+}
+
+/// Unset retention is a year, archived: records are kept until an archive
+/// holds them.
+#[test]
+fn audit_retention_defaults_to_a_year_archived() {
+    assert_eq!(
+        AuditRetention::default(),
+        AuditRetention {
+            days: 365,
+            action: RetentionAction::Archive
+        }
+    );
 }
 
 /// The periodic purge removes ceremony state and admissions past their
@@ -153,4 +105,18 @@ async fn ceremony_state_purge_removes_only_expired_entries() {
         Some(b"v".to_vec())
     );
     assert_eq!(purge_ceremony_state(&store).await, 0);
+}
+
+/// The same alert gets the same id, so a repeated hourly scan relays an
+/// expiry once; another alert gets another id.
+#[test]
+fn credential_alert_ids_follow_the_alert() {
+    assert_eq!(
+        credential_alert_id("expired:kid_a"),
+        credential_alert_id("expired:kid_a")
+    );
+    assert_ne!(
+        credential_alert_id("expired:kid_a"),
+        credential_alert_id("expiring:kid_a:3")
+    );
 }

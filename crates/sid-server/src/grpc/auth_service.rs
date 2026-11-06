@@ -3274,16 +3274,12 @@ impl AuthServiceImpl {
         ))
     }
 
-    /// Drop the records of first enrollments that ended long enough ago that
-    /// none of their steps can still arrive (see
-    /// [`compact_enrollments`](sid_authn::password_operation::compact_enrollments)).
-    pub async fn compact_enrollments(&self) -> sid_core::Result<u64> {
-        sid_authn::password_operation::compact_enrollments(
-            self.storage.as_ref(),
-            self.history_evaluation.as_deref(),
-            chrono::Utc::now(),
-        )
-        .await
+    /// The history evaluator, when it runs in this process: the engine's
+    /// enrollment compaction drops its fences too.
+    pub fn history_evaluation(
+        &self,
+    ) -> Option<Arc<sid_authn::password_operation::HistoryEvaluation>> {
+        self.history_evaluation.clone()
     }
 
     /// The result bytes a finish records for its retries: the response, encoded.
