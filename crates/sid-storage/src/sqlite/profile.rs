@@ -1706,12 +1706,13 @@ impl SqliteBackend {
             .iter()
             .map(row_to_profile)
             .collect::<SidResult<_>>()?;
-        // The page's attributes, one query each, not one per profile.
+        // The page's attributes, one query each per bounded run of profiles,
+        // not one per profile.
         let mut principals = Vec::new();
         let mut emails = Vec::new();
         let mut metadata = Vec::new();
-        if !profiles.is_empty() {
-            let ids = vec!["?"; profiles.len()].join(", ");
+        for page in profiles.chunks(super::rbac::IN_LIST_CHUNK) {
+            let ids = super::rbac::placeholders(page.len());
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pr.*,
                         pb.profile_id AS pb_profile_id,
@@ -1722,43 +1723,31 @@ impl SqliteBackend {
                  INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
                  WHERE pb.profile_id IN ({ids})"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            principals = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_principal)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                principals.push(row_to_principal(&row)?);
+            }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM profile_emails WHERE profile_id IN ({ids})
                  ORDER BY profile_id, is_primary DESC, created_at"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            emails = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_profile_email)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                emails.push(row_to_profile_email(&row)?);
+            }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM profile_metadata WHERE profile_id IN ({ids})"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            metadata = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_profile_metadata)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                metadata.push(row_to_profile_metadata(&row)?);
+            }
         }
         tx.commit().await.map_err(failed)?;
 

@@ -505,15 +505,23 @@ async fn rows_of_assignments<T>(
 where
     T: Send + Unpin + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow>,
 {
-    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {columns} FROM {table} WHERE assignment_id IN ({})",
-        placeholders(ids.len())
-    )));
-    for id in ids {
-        query = query.bind(*id);
+    let mut rows = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let mut query = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {columns} FROM {table} WHERE assignment_id IN ({})",
+            placeholders(chunk.len())
+        )));
+        for id in chunk {
+            query = query.bind(*id);
+        }
+        rows.extend(query.fetch_all(pool).await?);
     }
-    query.fetch_all(pool).await
+    Ok(rows)
 }
+
+/// Values one `IN (...)` list binds: far below SQLite's limit of 32766
+/// variables per statement, so a longer list is read in several statements.
+pub(super) const IN_LIST_CHUNK: usize = 1000;
 
 /// `n` comma-separated `?` placeholders, one per bound value.
 pub(super) fn placeholders(n: usize) -> String {
@@ -711,18 +719,24 @@ impl SqliteBackend {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT * FROM roles WHERE id IN ({})",
-            placeholders(ids.len())
-        )));
-        for id in ids {
-            query = query.bind(*id);
+        let mut roles = Vec::new();
+        for chunk in ids.chunks(IN_LIST_CHUNK) {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM roles WHERE id IN ({})",
+                placeholders(chunk.len())
+            )));
+            for id in chunk {
+                query = query.bind(*id);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
+            for row in &rows {
+                roles.push(row_to_role(row)?);
+            }
         }
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
-        rows.iter().map(row_to_role).collect()
+        Ok(roles)
     }
 
     pub(crate) async fn get_role_by_name_impl(

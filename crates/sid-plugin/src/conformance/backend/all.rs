@@ -258,7 +258,7 @@ macro_rules! __storage_shared_scenarios {
             test_profile_get_by_username_not_found test_profile_update test_profile_delete
             test_profile_list test_profile_list_pages_cover_each_profile_once
             test_profile_username_uniqueness test_session_save_and_get test_role_roundtrip
-            test_cedar_policy_write_contract test_project_write_contract
+            test_many_roles_read_at_once test_cedar_policy_write_contract test_project_write_contract
             test_profile_grant_write_contract test_ensure_system_project_concurrent
             test_cedar_policy_concurrent_update test_consent_roundtrip
             test_invite_list_pages_cover_each_invite_once test_invite_lifecycle test_invite_search

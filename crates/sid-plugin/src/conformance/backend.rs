@@ -461,6 +461,34 @@ pub async fn test_role_roundtrip(backend: &dyn StorageBackend) {
     assert_eq!(updated.permissions, ["content:read"]);
 }
 
+/// Roles are read by any number of ids at once, more than one statement can
+/// bind (SQLite allows 32766 values): the stored ones among them, the rest
+/// absent rather than an error.
+pub async fn test_many_roles_read_at_once(backend: &dyn StorageBackend) {
+    let mut stored = Vec::new();
+    for n in 0..2 {
+        let key = format!("bulk_{n}_{}", Uuid::now_v7().simple());
+        let role = sid_core::models::Role::new(ProjectId::SYSTEM, &key, &key);
+        backend.create_role(&role, test_audit()).await.unwrap();
+        stored.push(role.id);
+    }
+    let mut ids: Vec<sid_core::models::RoleId> = (0..40_000)
+        .map(|_| sid_core::models::RoleId::generate())
+        .collect();
+    ids.insert(20_000, stored[1]);
+    ids.push(stored[0]);
+    let mut read: Vec<_> = backend
+        .get_roles(&ids)
+        .await
+        .expect("a long id list is read, not refused")
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    read.sort();
+    stored.sort();
+    assert_eq!(read, stored);
+}
+
 /// A Cedar policy is created once and updated only over the revision it was
 /// read at: a second create never replaces it, a stale copy never re-enables
 /// a policy disabled since, and an update never recreates a deleted policy.
