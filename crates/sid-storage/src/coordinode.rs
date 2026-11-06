@@ -21,6 +21,7 @@ mod backend;
 mod ceremony;
 mod instance_secret;
 mod operation;
+mod principal;
 mod profile;
 mod work;
 
@@ -61,6 +62,16 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_email_primary FOR (c:SidEmail) REQUIRE c.primary_of IS UNIQUE",
     "CREATE INDEX sid_email_profile ON :SidEmail(profile_id)",
     "CREATE INDEX sid_email_address_lookup ON :SidEmail(email)",
+    "CREATE CONSTRAINT sid_principal_id FOR (p:SidPrincipal) REQUIRE p.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_principal_value FOR (p:SidPrincipal) REQUIRE p.type_value IS UNIQUE",
+    "CREATE INDEX sid_principal_assigned ON :SidPrincipal(assigned_profile_id)",
+    "CREATE CONSTRAINT sid_principal_binding_id FOR (b:SidPrincipalBinding) REQUIRE b.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_principal_binding_pair FOR (b:SidPrincipalBinding) REQUIRE b.pair IS UNIQUE",
+    "CREATE INDEX sid_principal_binding_principal ON :SidPrincipalBinding(principal_id)",
+    "CREATE INDEX sid_principal_binding_profile ON :SidPrincipalBinding(profile_id)",
+    "CREATE CONSTRAINT sid_email_policy FOR (a:SidEmailPolicy) REQUIRE a.scope IS UNIQUE",
+    "CREATE CONSTRAINT sid_email_disposition FOR (d:SidEmailDisposition) REQUIRE d.principal_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_principal_quarantine FOR (q:SidPrincipalQuarantine) REQUIRE q.hash IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -86,6 +97,7 @@ impl CoordinodeBackend {
             })
             .await?;
         backend.transaction(operation::init_state).await?;
+        backend.transaction(principal::init_email_policy).await?;
         Ok(backend)
     }
 
@@ -200,7 +212,7 @@ impl Statements<'_> {
 pub(super) type Row = std::collections::BTreeMap<String, Value>;
 
 /// Statement parameters by name.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Params(HashMap<String, Value>);
 
 impl Params {

@@ -566,67 +566,68 @@ impl StorageBackend for CoordinodeBackend {
 
     // === PRINCIPALS ===
 
-    async fn get_principal(&self, _id: PrincipalId) -> Result<Option<Principal>> {
-        refused("principals")
+    async fn get_principal(&self, id: PrincipalId) -> Result<Option<Principal>> {
+        CoordinodeBackend::get_principal(self, id).await
     }
 
-    async fn get_principals_by_profile(&self, _profile_id: ProfileId) -> Result<Vec<Principal>> {
-        refused("principals")
+    async fn get_principals_by_profile(&self, profile_id: ProfileId) -> Result<Vec<Principal>> {
+        CoordinodeBackend::get_principals_by_profile(self, profile_id).await
     }
 
     async fn get_profile_by_principal(
         &self,
-        _principal_type: PrincipalType,
-        _value: &str,
+        principal_type: PrincipalType,
+        value: &str,
     ) -> Result<Option<Profile>> {
-        refused("principals")
+        CoordinodeBackend::get_profile_by_principal(self, principal_type, value).await
     }
 
-    async fn save_principal(&self, _principal: &Principal, _ctx: MutationContext) -> Result<()> {
-        refused("principals")
+    async fn save_principal(&self, principal: &Principal, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::save_principal(self, principal, ctx).await
     }
 
     async fn unbind_principal(
         &self,
-        _principal_id: PrincipalId,
-        _profile_id: ProfileId,
-        _ctx: MutationContext,
+        principal_id: PrincipalId,
+        profile_id: ProfileId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("principals")
+        CoordinodeBackend::unbind_principal(self, principal_id, profile_id, ctx).await
     }
 
-    async fn count_active_principal_bindings(&self, _principal_id: PrincipalId) -> Result<i64> {
-        refused("principals")
+    async fn count_active_principal_bindings(&self, principal_id: PrincipalId) -> Result<i64> {
+        CoordinodeBackend::count_active_principal_bindings(self, principal_id).await
     }
 
     async fn get_principal_bindings(
         &self,
-        _principal_id: PrincipalId,
+        principal_id: PrincipalId,
     ) -> Result<Vec<PrincipalBinding>> {
-        refused("principals")
+        CoordinodeBackend::get_principal_bindings(self, principal_id).await
     }
 
     async fn get_principal_by_value(
         &self,
-        _principal_type: PrincipalType,
-        _value: &str,
+        principal_type: PrincipalType,
+        value: &str,
     ) -> Result<Option<PrincipalEntity>> {
-        refused("principals")
+        CoordinodeBackend::get_principal_by_value(self, principal_type, value).await
     }
 
     async fn expire_principal_verifications(&self) -> Result<i64> {
-        refused("principals")
+        CoordinodeBackend::expire_principal_verifications(self).await
     }
 
     async fn reconcile_email_key(
         &self,
-        _principal_id: PrincipalId,
-        _profile_id: ProfileId,
-        _contact: &ProfileEmail,
-        _reason: &str,
-        _ctx: MutationContext,
+        principal_id: PrincipalId,
+        profile_id: ProfileId,
+        contact: &ProfileEmail,
+        reason: &str,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("principals")
+        CoordinodeBackend::reconcile_email_key(self, principal_id, profile_id, contact, reason, ctx)
+            .await
     }
 
     // === CONSENTS ===
@@ -1962,20 +1963,27 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn quarantine_principal(
         &self,
-        _principal_hash: &str,
-        _principal_type: &str,
-        _quarantine_until: DateTime<Utc>,
-        _ctx: MutationContext,
+        principal_hash: &str,
+        principal_type: &str,
+        quarantine_until: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("principal quarantine")
+        CoordinodeBackend::quarantine_principal(
+            self,
+            principal_hash,
+            principal_type,
+            quarantine_until,
+            ctx,
+        )
+        .await
     }
 
-    async fn is_principal_quarantined(&self, _principal_hash: &str) -> Result<bool> {
-        refused("principal quarantine")
+    async fn is_principal_quarantined(&self, principal_hash: &str) -> Result<bool> {
+        CoordinodeBackend::is_principal_quarantined(self, principal_hash).await
     }
 
-    async fn cleanup_expired_quarantine(&self, _ctx: MutationContext) -> Result<u64> {
-        refused("principal quarantine")
+    async fn cleanup_expired_quarantine(&self, ctx: MutationContext) -> Result<u64> {
+        CoordinodeBackend::cleanup_expired_quarantine(self, ctx).await
     }
 
     async fn create_closure_request(

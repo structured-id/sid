@@ -372,6 +372,37 @@ pub(super) fn insert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResu
     Ok(())
 }
 
+/// Store `email`, or write it over the stored email with its id; its
+/// creation time and profile stay as stored.
+pub(super) fn upsert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResult<()> {
+    let updated = tx.run(
+        "MATCH (c:SidEmail) WHERE c.id = $id
+         SET c.email = $email, c.address_key = $address_key, c.contact_label = $label,
+             c.custom_label = $custom_label, c.is_primary = $is_primary,
+             c.primary_of = $primary_of, c.verified = $verified,
+             c.verified_at = $verified_at, c.updated_at = $updated_at
+         RETURN c.id AS id",
+        Params::default()
+            .with("id", uuid(&email.id.0))
+            .with(
+                "address_key",
+                key(&[email.profile_id.as_bytes(), email.email.as_bytes()])?,
+            )
+            .with("primary_of", primary_of(email.profile_id, email.is_primary))
+            .with("email", Value::String(email.email.clone()))
+            .with("label", Value::String(email.label.as_str().into()))
+            .with("custom_label", opt_text(email.custom_label.as_deref()))
+            .with("is_primary", Value::Bool(email.is_primary))
+            .with("verified", Value::Bool(email.verified))
+            .with("verified_at", opt_time(email.verified_at))
+            .with("updated_at", time(email.updated_at)),
+    )?;
+    if updated.is_empty() {
+        insert_email(tx, email)?;
+    }
+    Ok(())
+}
+
 /// Delete contact `id` of `label`; only `owner`'s when given.
 fn delete_contact(
     tx: &Statements<'_>,
