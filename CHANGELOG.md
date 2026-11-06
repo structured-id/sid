@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21](https://github.com/structured-id/sid/compare/v0.2.20...v0.2.21) - 2026-11-06
+
+### Added
+
+- *(engine)* open an installation from typed settings ([#446](https://github.com/structured-id/sid/pull/446))
+- *(engine)* consumable lifecycle for work and maintenance ([#443](https://github.com/structured-id/sid/pull/443))
+
 ## [0.2.20](https://github.com/structured-id/sid/compare/v0.2.19...v0.2.20) - 2026-11-06
 
 ### Added

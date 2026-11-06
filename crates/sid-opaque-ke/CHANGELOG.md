@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.2.1](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.2.0...sid-opaque-ke-v4.2.1) - 2026-11-06
+
+### Fixed
+
+- *(opaque-ke)* read an Ed25519 signing key as its seed ([#439](https://github.com/structured-id/sid/pull/439))
+
 ## [4.2.0](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.1.2...sid-opaque-ke-v4.2.0) - 2026-11-02
 
 ### Added
