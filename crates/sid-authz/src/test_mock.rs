@@ -2227,7 +2227,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn update_flow_action(&self, _: &FlowAction, _: MutationContext) -> Result<bool> {
         Ok(false)
     }
-    async fn get_flow_action(&self, _: ActionId) -> Result<Option<FlowAction>> {
+    async fn get_flow_action(&self, _: FlowActionId) -> Result<Option<FlowAction>> {
         Ok(None)
     }
     async fn list_flow_actions(
@@ -2238,7 +2238,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<Vec<FlowAction>> {
         Ok(vec![])
     }
-    async fn delete_flow_action(&self, _: ActionId, _: MutationContext) -> Result<()> {
+    async fn delete_flow_action(&self, _: FlowActionId, _: MutationContext) -> Result<()> {
         Ok(())
     }
     async fn create_branding_config(&self, _: &BrandingConfig, _: MutationContext) -> Result<()> {

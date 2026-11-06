@@ -3,6 +3,46 @@
 use super::*;
 use prost::Message;
 
+/// An address goes on the wire as its octets and comes back as the same
+/// address: IPv4 as 4 bytes, IPv6 as 16, zero addresses included, and an
+/// IPv4-mapped IPv6 address stays IPv6 (RFC 4291 section 2.5.5.2).
+#[test]
+fn an_ip_address_round_trips_with_its_family() {
+    use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    for address in [
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6("2001:db8::7".parse().unwrap()),
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        IpAddr::V6(Ipv4Addr::new(192, 0, 2, 7).to_ipv6_mapped()),
+    ] {
+        let message = sid::v1::common::IpAddress::from(address);
+        let expected_len = if address.is_ipv4() { 4 } else { 16 };
+        assert_eq!(message.value.len(), expected_len, "{address}");
+        assert_eq!(IpAddr::try_from(&message).unwrap(), address, "{address}");
+    }
+    let mapped =
+        sid::v1::common::IpAddress::from(IpAddr::V6(Ipv4Addr::new(192, 0, 2, 7).to_ipv6_mapped()));
+    assert!(IpAddr::try_from(&mapped).unwrap().is_ipv6());
+}
+
+/// A value that is not 4 or 16 bytes is no address; the refusal names the
+/// length only.
+#[test]
+fn an_ip_address_of_another_length_is_refused() {
+    for length in [0, 1, 5, 15, 17] {
+        let message = sid::v1::common::IpAddress {
+            value: vec![7; length],
+        };
+        let err = core::net::IpAddr::try_from(&message).unwrap_err();
+        assert_eq!(err.length(), length);
+        assert_eq!(
+            err.to_string(),
+            format!("an IP address is 4 or 16 bytes, not {length}")
+        );
+    }
+}
+
 fn names(encoded: &[u8]) -> Vec<String> {
     prost_types::FileDescriptorSet::decode(encoded)
         .unwrap()

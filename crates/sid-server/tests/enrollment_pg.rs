@@ -184,8 +184,9 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
         installed.push(
             credential
                 .as_ref()
-                .map(|c| c.id.0.to_string())
-                .unwrap_or_default(),
+                .map(|c| sid_proto::sid::v1::ids::CredentialId {
+                    value: c.id.0.as_bytes().to_vec(),
+                }),
         );
         let registration = sid_core::models::NewRegistration::new(
             profile.clone(),
@@ -205,7 +206,7 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
             )
             .await
             .unwrap();
-        registered.push(profile.id.to_string());
+        registered.push(Some(profile.id.into()));
     }
 
     let read = svc
@@ -249,7 +250,7 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
     assert_eq!(ids(&second), vec![registered[1].clone()]);
     assert_eq!(first.redemptions[0].credential_id, installed[0]);
     assert_eq!(second.redemptions[0].credential_id, installed[1]);
-    assert!(!installed[1].is_empty());
+    assert!(installed[1].is_some());
     assert!(after.redemptions.is_empty());
     assert_eq!(after.next_page_token, "");
     assert!(first.redemptions[0].redeemed_at.is_some());
@@ -257,7 +258,7 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
     let unknown = svc
         .list_invite_redemptions(authed_request(
             ListInviteRedemptionsRequest {
-                invite_id: uuid::Uuid::now_v7().to_string(),
+                invite_id: Some(sid_core::models::InviteId::generate().into()),
                 ..Default::default()
             },
             &bearer,
@@ -268,7 +269,7 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
     let unknown = svc
         .get_invite(authed_request(
             GetInviteRequest {
-                invite_id: uuid::Uuid::now_v7().to_string(),
+                invite_id: Some(sid_core::models::InviteId::generate().into()),
             },
             &bearer,
         ))
@@ -342,7 +343,7 @@ async fn test_pg_enrollment_bulk_create_retry_creates_once() {
 
     assert_eq!(retry, first, "the retry created other invites");
     for invite in &first.invites {
-        let id = sid_core::models::InviteId(uuid::Uuid::parse_str(&invite.id).unwrap());
+        let id: sid_core::models::InviteId = invite.id.as_ref().unwrap().try_into().unwrap();
         assert!(storage.get_invite(id).await.unwrap().is_some());
     }
 }
@@ -470,14 +471,14 @@ async fn test_pg_enrollment_list_pages_through_every_invite() {
             .unwrap()
             .into_inner();
         assert_eq!(page.total_count, 5);
-        seen.extend(page.invites.into_iter().map(|i| i.id));
+        seen.extend(page.invites.into_iter().map(|i| i.id.unwrap().value));
         if page.next_page_token.is_empty() {
             break;
         }
         token = page.next_page_token;
     }
     seen.sort();
-    let mut expected: Vec<_> = created.into_iter().map(|i| i.id).collect();
+    let mut expected: Vec<_> = created.into_iter().map(|i| i.id.unwrap().value).collect();
     expected.sort();
     assert_eq!(seen, expected);
 }
@@ -581,7 +582,7 @@ async fn test_pg_enrollment_refusals_carry_their_reason() {
     let err = svc
         .revoke_invite(authed_request(
             sid_proto::sid::v1::admin::RevokeInviteRequest {
-                invite_id: uuid::Uuid::now_v7().to_string(),
+                invite_id: Some(sid_core::models::InviteId::generate().into()),
             },
             &bearer,
         ))
@@ -669,7 +670,7 @@ async fn test_pg_enrollment_rpcs_refuse_a_non_admin() {
     let err = svc
         .get_invite(authed_request(
             sid_proto::sid::v1::admin::GetInviteRequest {
-                invite_id: uuid::Uuid::now_v7().to_string(),
+                invite_id: Some(sid_core::models::InviteId::generate().into()),
             },
             &token,
         ))

@@ -38,7 +38,7 @@ fn row_to_upstream_provider(row: &sqlx::sqlite::SqliteRow) -> SidResult<Upstream
     let client_secret: Vec<u8> = col(row, "client_secret")?;
     let revision: i64 = col(row, "revision")?;
     Ok(UpstreamProvider {
-        id: UpstreamProviderId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         name: col(row, "name")?,
         protocol: parsed_col(row, "protocol")?,
         trust_category: parsed_col(row, "trust_category")?,
@@ -67,7 +67,7 @@ fn row_to_upstream_identity(row: &sqlx::sqlite::SqliteRow) -> SidResult<Upstream
     Ok(UpstreamIdentity {
         id: UpstreamIdentityId(uuid_col(row, "id")?),
         profile_id: col(row, "profile_id")?,
-        provider_id: UpstreamProviderId(uuid_col(row, "provider_id")?),
+        provider_id: col(row, "provider_id")?,
         upstream_subject: col(row, "upstream_subject")?,
         upstream_issuer: col(row, "upstream_issuer")?,
         upstream_email: col(row, "upstream_email")?,
@@ -164,7 +164,7 @@ impl SqliteBackend {
         id: UpstreamProviderId,
     ) -> SidResult<Option<UpstreamProvider>> {
         let row = sqlx::query("SELECT * FROM upstream_providers WHERE id = ?")
-            .bind(id.0)
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -226,7 +226,7 @@ impl SqliteBackend {
             .map_err(|e| SidError::Validation(format!("provider revision: {e}")))?;
         let mut tx = self.begin_write().await?;
         let written = sqlx::query(sql)
-            .bind(provider.id.0)
+            .bind(provider.id)
             .bind(&provider.name)
             .bind(provider.protocol.as_str())
             .bind(provider.trust_category.as_str())
@@ -249,8 +249,7 @@ impl SqliteBackend {
             .map_err(|e| super::insert_error("upstream provider", e))?
             .rows_affected();
         if written > 0 {
-            Self::commit_mutation(tx, &format!("upstream_provider:{}", provider.id.0), audit)
-                .await?;
+            Self::commit_mutation(tx, &format!("upstream_provider:{}", provider.id), audit).await?;
         }
         Ok(written)
     }
@@ -262,11 +261,11 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::commit_mutation(tx, &format!("upstream_provider:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("upstream_provider:{id}"), audit).await
     }
 
     pub(crate) async fn list_enabled_upstream_providers_impl(
@@ -291,7 +290,7 @@ impl SqliteBackend {
         let row = sqlx::query(
             "SELECT * FROM upstream_identities WHERE provider_id = ? AND upstream_subject = ?",
         )
-        .bind(provider_id.0)
+        .bind(provider_id)
         .bind(upstream_subject)
         .fetch_optional(&self.pool)
         .await
@@ -313,7 +312,7 @@ impl SqliteBackend {
         )
         .bind(identity.id.0)
         .bind(identity.profile_id)
-        .bind(identity.provider_id.0)
+        .bind(identity.provider_id)
         .bind(&identity.upstream_subject)
         .bind(&identity.upstream_issuer)
         .bind(&identity.upstream_email)

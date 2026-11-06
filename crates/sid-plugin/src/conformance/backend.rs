@@ -875,7 +875,7 @@ pub async fn test_consent_roundtrip(backend: &dyn StorageBackend) {
 
 fn test_invite(created_by: ProfileId, max_uses: u32) -> sid_core::models::Invite {
     sid_core::models::Invite {
-        id: sid_core::models::InviteId::new(),
+        id: sid_core::models::InviteId::generate(),
         code: sid_core::models::generate_invite_code(),
         created_by: sid_core::models::InviteCreator::Profile(created_by),
         created_by_name: String::new(),
@@ -907,7 +907,7 @@ pub async fn test_invite_list_pages_cover_each_invite_once(backend: &dyn Storage
             .create_invites(std::slice::from_ref(&invite), test_audit())
             .await
             .unwrap();
-        ids.insert(invite.id.0);
+        ids.insert(invite.id);
     }
 
     let mut seen = Vec::new();
@@ -917,7 +917,7 @@ pub async fn test_invite_list_pages_cover_each_invite_once(backend: &dyn Storage
             .list_invites(&sid_core::models::InviteFilter::default(), offset, 2)
             .await
             .unwrap();
-        seen.extend(page.iter().map(|i| i.id.0).filter(|id| ids.contains(id)));
+        seen.extend(page.iter().map(|i| i.id).filter(|id| ids.contains(id)));
         if page.len() < 2 || seen.len() == ids.len() {
             break;
         }
@@ -1076,14 +1076,14 @@ pub async fn test_invite_search(backend: &dyn StorageBackend) {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|i| i.id.0)
+                .map(|i| i.id)
                 .collect();
             let count = backend.count_invites(&filter).await.unwrap();
             assert_eq!(count, ids.len() as u64, "the count matches the listing");
             ids
         }
     };
-    let set = |invites: &[&Invite]| invites.iter().map(|i| i.id.0).collect();
+    let set = |invites: &[&Invite]| invites.iter().map(|i| i.id).collect();
 
     // The creator's name, in another case.
     assert_eq!(

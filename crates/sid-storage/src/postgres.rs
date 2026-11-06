@@ -169,7 +169,10 @@ async fn admit_registration(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     gate: &sid_core::models::EnrollmentGate,
     registration: &sid_core::models::AuditEntry,
-) -> SidResult<(Option<sid_core::models::RegistrationSource>, Option<Uuid>)> {
+) -> SidResult<(
+    Option<sid_core::models::RegistrationSource>,
+    Option<sid_core::models::InviteId>,
+)> {
     use sid_core::enrollment::EnrollmentDenialReason;
     sqlx::query(crate::LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL)
         .execute(&mut **tx)
@@ -184,7 +187,7 @@ async fn admit_registration(
     };
     // One use, only of a live invite: the condition and the increment are
     // one statement, so concurrent registrations never overspend it.
-    let spent: Option<(Uuid,)> = sqlx::query_as(
+    let spent: Option<(sid_core::models::InviteId,)> = sqlx::query_as(
         "UPDATE invites SET use_count = use_count + 1
          WHERE UPPER(code) = $1 AND active = true
            AND (max_uses = 0 OR use_count < max_uses)
@@ -1462,7 +1465,7 @@ impl PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let written = sqlx::query(sql)
-            .bind(provider.id.0)
+            .bind(provider.id)
             .bind(&provider.name)
             .bind(provider.protocol.as_str())
             .bind(provider.trust_category.as_str())
@@ -1489,7 +1492,7 @@ impl PostgresBackend {
         }
         Self::audit_in_tx(
             &mut tx,
-            &format!("upstream_provider:{}", provider.id.0),
+            &format!("upstream_provider:{}", provider.id),
             audit,
         )
         .await?;
@@ -5646,7 +5649,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::UpstreamProviderRow>(
             "SELECT * FROM upstream_providers WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -5707,11 +5710,11 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("DELETE FROM upstream_providers WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("upstream_provider:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("upstream_provider:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -5738,7 +5741,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::UpstreamIdentityRow>(
             "SELECT * FROM upstream_identities WHERE provider_id = $1 AND upstream_subject = $2",
         )
-        .bind(provider_id.0)
+        .bind(provider_id)
         .bind(upstream_subject)
         .fetch_optional(&self.pool)
         .await
@@ -5763,7 +5766,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(identity.id.0)
-        .bind(identity.provider_id.0)
+        .bind(identity.provider_id)
         .bind(identity.profile_id)
         .bind(&identity.upstream_subject)
         .bind(&identity.upstream_issuer)
@@ -7860,7 +7863,7 @@ impl StorageBackend for PostgresBackend {
                 data, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
-        .bind(action.id.0)
+        .bind(action.id)
         .bind(action.project_id)
         .bind(action.flow_type.as_str())
         .bind(action.action_point.as_str())
@@ -7899,7 +7902,7 @@ impl StorageBackend for PostgresBackend {
                 updated_at = $5, revision = revision + 1
              WHERE id = $1 AND revision = $6",
         )
-        .bind(action.id.0)
+        .bind(action.id)
         .bind(action.action_point.as_str())
         .bind(action.order)
         .bind(&data)
@@ -7922,10 +7925,10 @@ impl StorageBackend for PostgresBackend {
 
     async fn get_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
     ) -> SidResult<Option<sid_core::models::FlowAction>> {
         sqlx::query_as::<_, FlowActionRow>("SELECT data, revision FROM flow_actions WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
@@ -7970,7 +7973,7 @@ impl StorageBackend for PostgresBackend {
 
     async fn delete_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self
@@ -7979,7 +7982,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("DELETE FROM flow_actions WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {e}")))?;
@@ -8008,7 +8011,7 @@ impl StorageBackend for PostgresBackend {
             "INSERT INTO branding_configs (id, project_id, status, data, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(config.id.0)
+        .bind(config.id)
         .bind(config.project_id)
         .bind(config.status.as_str())
         .bind(&data)
@@ -8017,7 +8020,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("branding config", e))?;
-        Self::audit_in_tx(&mut tx, &format!("branding:{}", config.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("branding:{}", config.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8042,7 +8045,7 @@ impl StorageBackend for PostgresBackend {
             "UPDATE branding_configs SET data = $2, updated_at = $3, revision = revision + 1
              WHERE id = $1 AND status = 'draft' AND revision = $4",
         )
-        .bind(config.id.0)
+        .bind(config.id)
         .bind(&data)
         .bind(config.updated_at)
         .bind(revision)
@@ -8054,7 +8057,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("branding:{}", config.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("branding:{}", config.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8085,7 +8088,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT id FROM branding_configs
              WHERE id = $1 AND project_id = $2 AND status = 'draft'",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(project_id)
         .fetch_optional(&mut *tx)
         .await
@@ -8108,7 +8111,7 @@ impl StorageBackend for PostgresBackend {
                 revision = revision + 1
              WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(at)
         .execute(&mut *tx)
         .await
@@ -8116,13 +8119,13 @@ impl StorageBackend for PostgresBackend {
         let published = sqlx::query_as::<_, BrandingRow>(
             "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("read published branding: {e}")))?
         .into_domain()?;
         audit.record_effect(&published)?;
-        Self::audit_in_tx(&mut tx, &format!("branding:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("branding:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8152,7 +8155,7 @@ impl StorageBackend for PostgresBackend {
         sqlx::query_as::<_, BrandingRow>(
             "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
@@ -8190,7 +8193,7 @@ impl StorageBackend for PostgresBackend {
         // A published config is never deleted, even one published meanwhile.
         let deleted =
             sqlx::query("DELETE FROM branding_configs WHERE id = $1 AND status <> 'published'")
-                .bind(id.0)
+                .bind(id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("Delete failed: {e}")))?
@@ -8199,7 +8202,7 @@ impl StorageBackend for PostgresBackend {
         if !deleted {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("branding:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("branding:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8230,7 +8233,7 @@ impl StorageBackend for PostgresBackend {
             sqlx::query(
                 "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-            ).bind(invite.id.0)
+            ).bind(invite.id)
             .bind(&invite.code)
             .bind(by_profile)
             .bind(by_machine)
@@ -8245,7 +8248,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| insert_error("invite", e))?;
         }
-        Self::audit_in_tx(&mut tx, &format!("invite:{}", first.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("invite:{}", first.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8258,7 +8261,7 @@ impl StorageBackend for PostgresBackend {
             invite_columns!(),
             " FROM invites WHERE id = $1"
         ))
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Get invite failed: {e}")))?;
@@ -8331,7 +8334,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
              WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
         .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .fetch_all(&self.pool)
@@ -8367,7 +8370,7 @@ impl StorageBackend for PostgresBackend {
              RETURNING ",
             invite_columns!()
         ))
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Try use invite failed: {e}")))?;
@@ -8375,7 +8378,7 @@ impl StorageBackend for PostgresBackend {
         let Some(row) = row else {
             return Ok(None);
         };
-        Self::audit_in_tx(&mut tx, &format!("invite:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("invite:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8389,11 +8392,11 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("UPDATE invites SET active = false WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Revoke invite failed: {e}")))?;
-        Self::audit_in_tx(&mut tx, &format!("invite:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("invite:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;

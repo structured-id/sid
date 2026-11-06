@@ -171,7 +171,7 @@ fn grants_where(tx: &Statements<'_>, filter: &str, value: Value) -> SidResult<Ve
 fn provider(row: &Row) -> SidResult<UpstreamProvider> {
     let display_order = get_int(row, "display_order")?;
     Ok(UpstreamProvider {
-        id: UpstreamProviderId(get_uuid(row, "id")?),
+        id: get_id(row, "id")?,
         name: get_text(row, "name")?,
         protocol: get_parsed(row, "protocol")?,
         trust_category: get_parsed(row, "trust_category")?,
@@ -196,7 +196,7 @@ fn provider(row: &Row) -> SidResult<UpstreamProvider> {
 
 fn provider_params(p: &UpstreamProvider) -> SidResult<Params> {
     Ok(Params::default()
-        .with("id", uuid(&p.id.0))
+        .with("id", uuid(p.id.as_uuid()))
         .with("name", Value::String(p.name.clone()))
         .with("protocol", Value::String(p.protocol.as_str().into()))
         .with(
@@ -235,7 +235,7 @@ fn identity(row: &Row) -> SidResult<UpstreamIdentity> {
     Ok(UpstreamIdentity {
         id: UpstreamIdentityId(get_uuid(row, "id")?),
         profile_id: get_id(row, "profile_id")?,
-        provider_id: UpstreamProviderId(get_uuid(row, "provider_id")?),
+        provider_id: get_id(row, "provider_id")?,
         upstream_subject: get_text(row, "upstream_subject")?,
         upstream_issuer: get_opt_text(row, "upstream_issuer")?,
         upstream_email: get_opt_text(row, "upstream_email")?,
@@ -627,7 +627,7 @@ impl CoordinodeBackend {
         self.read(move |tx| {
             let rows = tx.run(
                 &format!("MATCH (u:SidUpstreamProvider) WHERE u.id = $id RETURN {PROVIDER}"),
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             rows.first().map(provider).transpose()
         })
@@ -640,7 +640,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let params = provider_params(p)?;
-        self.mutate(format!("upstream_provider:{}", p.id.0), ctx, move |tx| {
+        self.mutate(format!("upstream_provider:{}", p.id), ctx, move |tx| {
             let found = tx.run(
                 "MATCH (u:SidUpstreamProvider) WHERE u.id = $id RETURN u.id AS id",
                 params.clone(),
@@ -671,7 +671,7 @@ impl CoordinodeBackend {
         p: &UpstreamProvider,
         ctx: MutationContext,
     ) -> SidResult<bool> {
-        let (params, chain) = (provider_params(p)?, format!("upstream_provider:{}", p.id.0));
+        let (params, chain) = (provider_params(p)?, format!("upstream_provider:{}", p.id));
         self.transaction(move |tx| {
             // Over the revision it was read at; the creation time never
             // changes.
@@ -703,13 +703,13 @@ impl CoordinodeBackend {
         id: UpstreamProviderId,
         ctx: MutationContext,
     ) -> SidResult<()> {
-        self.mutate(format!("upstream_provider:{}", id.0), ctx, move |tx| {
+        self.mutate(format!("upstream_provider:{id}"), ctx, move |tx| {
             // Its linked identities go with it.
             for query in [
                 "MATCH (i:SidUpstreamIdentity) WHERE i.provider_id = $id DETACH DELETE i",
                 "MATCH (u:SidUpstreamProvider) WHERE u.id = $id DETACH DELETE u",
             ] {
-                tx.run(query, Params::default().with("id", uuid(&id.0)))?;
+                tx.run(query, Params::default().with("id", uuid(id.as_uuid())))?;
             }
             Ok(())
         })
@@ -725,7 +725,7 @@ impl CoordinodeBackend {
             let all = rows.iter().map(provider).collect::<SidResult<Vec<_>>>()?;
             Ok(super::sorted_page(
                 all,
-                |p| (p.display_order, p.id.0),
+                |p| (p.display_order, p.id),
                 0,
                 u64::MAX,
             ))
@@ -740,7 +740,7 @@ impl CoordinodeBackend {
         provider_id: UpstreamProviderId,
         subject: &str,
     ) -> SidResult<Option<UpstreamIdentity>> {
-        let subject_key = key(&[provider_id.0.as_bytes(), subject.as_bytes()])?;
+        let subject_key = key(&[provider_id.as_bytes(), subject.as_bytes()])?;
         self.read(move |tx| {
             Ok(identities_where(
                 tx,
@@ -768,8 +768,8 @@ impl CoordinodeBackend {
             claim_ref(
                 tx,
                 "SidUpstreamProvider",
-                uuid(&i.provider_id.0),
-                &format!("upstream provider {}", i.provider_id.0),
+                uuid(i.provider_id.as_uuid()),
+                &format!("upstream provider {}", i.provider_id),
             )?;
             if !identities_where(
                 tx,
@@ -793,14 +793,14 @@ impl CoordinodeBackend {
                     .with("id", uuid(&i.id.0))
                     .with(
                         "profile_key",
-                        key(&[i.profile_id.as_bytes(), i.provider_id.0.as_bytes()])?,
+                        key(&[i.profile_id.as_bytes(), i.provider_id.as_bytes()])?,
                     )
                     .with(
                         "subject_key",
-                        key(&[i.provider_id.0.as_bytes(), i.upstream_subject.as_bytes()])?,
+                        key(&[i.provider_id.as_bytes(), i.upstream_subject.as_bytes()])?,
                     )
                     .with("profile_id", bin(i.profile_id.as_bytes()))
-                    .with("provider_id", uuid(&i.provider_id.0))
+                    .with("provider_id", uuid(i.provider_id.as_uuid()))
                     .with(
                         "upstream_subject",
                         Value::String(i.upstream_subject.clone()),

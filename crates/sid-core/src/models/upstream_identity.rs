@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn test_upstream_identity_new() {
         let profile_id = ProfileId::generate();
-        let provider_id = UpstreamProviderId::new();
+        let provider_id = UpstreamProviderId::generate();
         let identity = UpstreamIdentity::new(profile_id, provider_id, "google-user-123");
 
         assert_eq!(identity.profile_id, profile_id);
@@ -154,9 +154,12 @@ mod tests {
 
     #[test]
     fn test_with_issuer() {
-        let identity =
-            UpstreamIdentity::new(ProfileId::generate(), UpstreamProviderId::new(), "sub-123")
-                .with_issuer("https://accounts.google.com");
+        let identity = UpstreamIdentity::new(
+            ProfileId::generate(),
+            UpstreamProviderId::generate(),
+            "sub-123",
+        )
+        .with_issuer("https://accounts.google.com");
 
         assert_eq!(
             identity.upstream_issuer.as_deref(),
@@ -166,8 +169,11 @@ mod tests {
 
     #[test]
     fn test_update_claims() {
-        let mut identity =
-            UpstreamIdentity::new(ProfileId::generate(), UpstreamProviderId::new(), "sub-123");
+        let mut identity = UpstreamIdentity::new(
+            ProfileId::generate(),
+            UpstreamProviderId::generate(),
+            "sub-123",
+        );
 
         identity.update_claims(
             Some("alice@sid.example.com".into()),
@@ -188,8 +194,11 @@ mod tests {
 
     #[test]
     fn test_update_claims_clears() {
-        let mut identity =
-            UpstreamIdentity::new(ProfileId::generate(), UpstreamProviderId::new(), "sub-123");
+        let mut identity = UpstreamIdentity::new(
+            ProfileId::generate(),
+            UpstreamProviderId::generate(),
+            "sub-123",
+        );
         identity.update_claims(Some("old@sid.example.com".into()), None, None);
         assert_eq!(
             identity.upstream_email.as_deref(),
@@ -202,8 +211,11 @@ mod tests {
 
     #[test]
     fn test_record_login() {
-        let mut identity =
-            UpstreamIdentity::new(ProfileId::generate(), UpstreamProviderId::new(), "sub-456");
+        let mut identity = UpstreamIdentity::new(
+            ProfileId::generate(),
+            UpstreamProviderId::generate(),
+            "sub-456",
+        );
 
         assert_eq!(identity.login_count, 0);
         assert!(identity.last_login_at.is_none());
@@ -229,7 +241,7 @@ mod tests {
     fn test_identity_serde_roundtrip() {
         let identity = UpstreamIdentity::new(
             ProfileId::generate(),
-            UpstreamProviderId::new(),
+            UpstreamProviderId::generate(),
             "google-sub-abc",
         )
         .with_issuer("https://accounts.google.com");

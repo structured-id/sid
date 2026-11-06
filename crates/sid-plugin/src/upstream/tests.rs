@@ -1,10 +1,9 @@
 use super::*;
-use uuid::Uuid;
 
 #[test]
 fn test_upstream_auth_state_serde_roundtrip() {
     let state = UpstreamAuthState {
-        provider_id: UpstreamProviderId(Uuid::now_v7()),
+        provider_id: UpstreamProviderId::generate(),
         state_token: "abc123state".into(),
         redirect_uri: "https://sid.example.com/callback".into(),
         code_verifier: "pkce-verifier-xyz".into(),
@@ -28,7 +27,7 @@ fn test_upstream_auth_state_serde_roundtrip() {
 #[test]
 fn test_upstream_auth_state_without_nonce() {
     let state = UpstreamAuthState {
-        provider_id: UpstreamProviderId(Uuid::now_v7()),
+        provider_id: UpstreamProviderId::generate(),
         state_token: "state-only".into(),
         redirect_uri: "https://sid.example.com/cb".into(),
         code_verifier: "verifier".into(),

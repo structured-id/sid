@@ -61,7 +61,7 @@ async fn admit_registration(
     registration: &sid_core::models::AuditEntry,
 ) -> SidResult<(
     Option<sid_core::models::RegistrationSource>,
-    Option<uuid::Uuid>,
+    Option<sid_core::models::InviteId>,
 )> {
     use sid_core::enrollment::EnrollmentDenialReason;
     let stored = stored_enrollment_policy(&mut *tx).await?;
@@ -88,7 +88,7 @@ async fn admit_registration(
             EnrollmentDenialReason::InviteInvalid,
         ));
     };
-    let invite = super::uuid_col(&spent, "id")?;
+    let invite: sid_core::models::InviteId = col(&spent, "id")?;
     super::audit::SqliteAuditLog::log_in_conn(
         tx,
         &format!("invite:{invite}"),

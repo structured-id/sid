@@ -2964,7 +2964,7 @@ impl StorageBackend for SqliteBackend {
     }
     async fn get_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
     ) -> SidResult<Option<sid_core::models::FlowAction>> {
         self.get_flow_action_impl(id).await
     }
@@ -2979,12 +2979,12 @@ impl StorageBackend for SqliteBackend {
     }
     async fn delete_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
         ctx: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM flow_actions WHERE id = ?1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete: {e}")))?;

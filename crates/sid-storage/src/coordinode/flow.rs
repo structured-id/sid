@@ -6,7 +6,7 @@
 
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    ActionId, ActionPoint, FlowAction, FlowConfig, FlowType, MutationContext, ProjectId,
+    ActionPoint, FlowAction, FlowActionId, FlowConfig, FlowType, MutationContext, ProjectId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -131,7 +131,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let params = Params::default()
-            .with("id", uuid(&action.id.0))
+            .with("id", uuid(action.id.as_uuid()))
             .with("project_id", project_value(action.project_id))
             .with("flow_type", Value::String(action.flow_type.as_str().into()))
             .with(
@@ -174,7 +174,7 @@ impl CoordinodeBackend {
         let revision = i64::try_from(action.revision)
             .map_err(|_| SidError::Validation("flow action revision out of range".into()))?;
         let params = Params::default()
-            .with("id", uuid(&action.id.0))
+            .with("id", uuid(action.id.as_uuid()))
             .with("revision", Value::Int(revision))
             .with(
                 "action_point",
@@ -202,12 +202,12 @@ impl CoordinodeBackend {
         .await
     }
 
-    pub(super) async fn get_flow_action(&self, id: ActionId) -> SidResult<Option<FlowAction>> {
+    pub(super) async fn get_flow_action(&self, id: FlowActionId) -> SidResult<Option<FlowAction>> {
         self.read(move |tx| {
             let rows = tx.run(
                 "MATCH (a:SidFlowAction) WHERE a.id = $id
                  RETURN a.content AS content, a.revision AS revision",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             rows.first().map(action).transpose()
         })
@@ -238,10 +238,10 @@ impl CoordinodeBackend {
                 .collect::<SidResult<Vec<_>>>()?;
             // In execution order: hook point, then order, then id.
             actions.sort_by(|a, b| {
-                (a.action_point.as_str(), a.order, a.id.0).cmp(&(
+                (a.action_point.as_str(), a.order, a.id).cmp(&(
                     b.action_point.as_str(),
                     b.order,
-                    b.id.0,
+                    b.id,
                 ))
             });
             Ok(actions)
@@ -251,13 +251,13 @@ impl CoordinodeBackend {
 
     pub(super) async fn delete_flow_action(
         &self,
-        id: ActionId,
+        id: FlowActionId,
         ctx: MutationContext,
     ) -> SidResult<()> {
         self.mutate(format!("flow_action:{id}"), ctx, move |tx| {
             tx.run(
                 "MATCH (a:SidFlowAction) WHERE a.id = $id DETACH DELETE a",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             Ok(())
         })

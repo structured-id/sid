@@ -18,7 +18,7 @@ use sid_core::models::upstream_provider::ProviderTrustCategory;
 use sid_core::models::{
     AuditEntry, MutationContext, Profile, UpstreamIdentity, UpstreamLogin,
     UpstreamProtocol as DomainUpstreamProtocol, UpstreamProvider as DomainUpstreamProvider,
-    UpstreamProviderId,
+    UpstreamProviderId, client_secret_context,
 };
 use sid_keys::KeyManager;
 use sid_plugin::UpstreamIdpProvider;
@@ -137,7 +137,7 @@ impl UpstreamServiceImpl {
     /// NEVER includes `client_secret` in the response — it is write-only.
     fn provider_to_proto(p: &DomainUpstreamProvider) -> ProtoUpstreamProvider {
         ProtoUpstreamProvider {
-            id: p.id.to_string(),
+            id: Some(p.id.into()),
             name: p.name.clone(),
             protocol: Self::domain_to_proto_protocol(p.protocol),
             trust_category: Self::domain_to_proto_trust(p.trust_category),
@@ -161,7 +161,7 @@ impl UpstreamServiceImpl {
     /// for the public login screen endpoint.
     fn provider_to_enabled_info(p: &DomainUpstreamProvider) -> EnabledProviderInfo {
         EnabledProviderInfo {
-            id: p.id.to_string(),
+            id: Some(p.id.into()),
             name: p.name.clone(),
             protocol: Self::domain_to_proto_protocol(p.protocol),
             trust_category: Self::domain_to_proto_trust(p.trust_category),
@@ -170,19 +170,12 @@ impl UpstreamServiceImpl {
         }
     }
 
-    /// Parse a provider ID string into the domain type.
-    fn parse_provider_id(id: &str) -> Result<UpstreamProviderId, Status> {
-        Uuid::parse_str(id)
-            .map(UpstreamProviderId)
-            .map_err(|_| invalid_field("provider_id", "not a provider identifier"))
-    }
-
     /// UPSTREAM_PROVIDER_NOT_FOUND for `id`.
     fn provider_not_found(id: UpstreamProviderId) -> Status {
         not_found(
             ErrorReason::UpstreamProviderNotFound,
             "UpstreamProvider",
-            id.0.to_string(),
+            id.to_string(),
         )
     }
 
@@ -203,16 +196,13 @@ impl UpstreamServiceImpl {
                 ErrorReason::InvalidState,
                 "the upstream provider is disabled",
             )
-            .with_precondition("PROVIDER_STATE", provider_id.0.to_string(), "disabled")
+            .with_precondition("PROVIDER_STATE", provider_id.to_string(), "disabled")
             .into());
         }
 
         let secret_bytes = self
             .key_manager
-            .decrypt(
-                &provider.client_secret,
-                &provider_id.client_secret_context(),
-            )
+            .decrypt(&provider.client_secret, &client_secret_context(provider_id))
             .await
             .map_err(|e| internal("decrypt upstream client secret", e))?;
 
@@ -288,14 +278,14 @@ impl UpstreamService for UpstreamServiceImpl {
             let trust_category = Self::proto_to_domain_trust(req.trust_category);
 
             // Generate a new provider ID for context-bound encryption.
-            let provider_id = UpstreamProviderId::new();
+            let provider_id = UpstreamProviderId::generate();
 
             // Encrypt client_secret with context binding to this provider.
             let encrypted_secret = self
                 .key_manager
                 .encrypt(
                     req.client_secret.as_bytes(),
-                    &provider_id.client_secret_context(),
+                    &client_secret_context(provider_id),
                 )
                 .await
                 .map_err(|e| internal("encrypt upstream client secret", e))?;
@@ -321,7 +311,7 @@ impl UpstreamService for UpstreamServiceImpl {
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "upstream_provider.create",
-                provider.id.0.to_string(),
+                provider.id.to_string(),
             ))
             .with_operation(command.completion(response.encode_to_vec()));
             match self.storage.create_upstream_provider(&provider, ctx).await {
@@ -355,7 +345,7 @@ impl UpstreamService for UpstreamServiceImpl {
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let provider_id = Self::parse_provider_id(&req.provider_id)?;
+        let provider_id = convert::wire_id(req.provider_id.as_ref(), "provider_id")?;
 
         let provider = self
             .storage
@@ -376,7 +366,7 @@ impl UpstreamService for UpstreamServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let provider_id = Self::parse_provider_id(&req.provider_id)?;
+        let provider_id = convert::wire_id(req.provider_id.as_ref(), "provider_id")?;
         // A retry of a completed edit answers with the provider as that edit
         // left it and never writes it over a later edit. The fingerprint
         // leaves a new secret out, as for a creation.
@@ -422,7 +412,7 @@ impl UpstreamService for UpstreamServiceImpl {
             if let Some(ref secret) = req.client_secret {
                 provider.client_secret = self
                     .key_manager
-                    .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
+                    .encrypt(secret.as_bytes(), &client_secret_context(provider_id))
                     .await
                     .map_err(|e| internal("encrypt upstream client secret", e))?;
             }
@@ -459,7 +449,7 @@ impl UpstreamService for UpstreamServiceImpl {
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "upstream_provider.update",
-                provider.id.0.to_string(),
+                provider.id.to_string(),
             ))
             .with_operation(command.completion(response.encode_to_vec()));
             match self.storage.update_upstream_provider(&provider, ctx).await {
@@ -489,7 +479,7 @@ impl UpstreamService for UpstreamServiceImpl {
     ) -> Result<Response<DeleteUpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
         let req = request.into_inner();
-        let provider_id = Self::parse_provider_id(&req.provider_id)?;
+        let provider_id = convert::wire_id(req.provider_id.as_ref(), "provider_id")?;
 
         self.storage
             .delete_upstream_provider(
@@ -497,7 +487,7 @@ impl UpstreamService for UpstreamServiceImpl {
                 AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "upstream_provider.delete",
-                    provider_id.0.to_string(),
+                    provider_id.to_string(),
                 )
                 .into(),
             )
@@ -556,7 +546,7 @@ impl UpstreamService for UpstreamServiceImpl {
         // No sign-in starts during maintenance, as no local one does.
         self.auth.check_maintenance().await?;
         let req = request.into_inner();
-        let provider_id = Self::parse_provider_id(&req.provider_id)?;
+        let provider_id = convert::wire_id(req.provider_id.as_ref(), "provider_id")?;
 
         if req.redirect_uri.is_empty() {
             return Err(missing_field("redirect_uri"));
@@ -822,7 +812,7 @@ fn success(
     HandleUpstreamCallbackResponse {
         result: Some(handle_upstream_callback_response::Result::Success(
             UpstreamAuthSuccess {
-                session_id: session_id.to_string(),
+                session_id: Some(session_id.into()),
                 expires_in,
                 new_profile_created,
             },

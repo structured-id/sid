@@ -261,7 +261,7 @@ async fn a_publication_answers_with_the_config_it_published(h: Harness) {
         .ensure_system_project(AuditEntry::system("test", "branding").into())
         .await
         .unwrap();
-    let project = sid_core::models::ProjectId::SYSTEM.to_string();
+    let project = Some(sid_core::models::ProjectId::SYSTEM.into());
     let token = common::administrator_token(&common::test_jwt(), h.storage.as_ref()).await;
     let branding = sid_server::grpc::branding_service::BrandingServiceImpl::new(
         h.storage.clone(),

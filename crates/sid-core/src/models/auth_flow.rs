@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use uuid::Uuid;
 
 use super::project::ProjectId;
 
@@ -129,27 +128,7 @@ impl Default for StepConfig {
 
 // ── Actions ──
 
-/// Unique identifier for an action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ActionId(pub Uuid);
-
-impl ActionId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for ActionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ActionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use sid_ids::FlowActionId;
 
 /// Hook points where actions can execute in the auth pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -256,7 +235,7 @@ pub enum ActionOnError {
 /// An action attached to a flow at a specific hook point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowAction {
-    pub id: ActionId,
+    pub id: FlowActionId,
 
     /// Project this action belongs to.
     pub project_id: ProjectId,
@@ -429,7 +408,7 @@ mod tests {
     #[test]
     fn test_flow_action_serde() {
         let action = FlowAction {
-            id: ActionId::new(),
+            id: FlowActionId::generate(),
             project_id: ProjectId::generate(),
             flow_type: FlowType::Authentication,
             action_point: ActionPoint::PostAuthentication,
@@ -529,8 +508,8 @@ mod tests {
 
     #[test]
     fn test_action_id_unique() {
-        let id1 = ActionId::new();
-        let id2 = ActionId::new();
+        let id1 = FlowActionId::generate();
+        let id2 = FlowActionId::generate();
         assert_ne!(id1, id2);
     }
 

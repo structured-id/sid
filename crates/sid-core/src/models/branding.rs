@@ -6,31 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use uuid::Uuid;
 
 use super::project::ProjectId;
 
-/// Unique identifier for a branding configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BrandingConfigId(pub Uuid);
-
-impl BrandingConfigId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for BrandingConfigId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for BrandingConfigId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use sid_ids::BrandingConfigId;
 
 /// Branding configuration for a project's login/consent UI.
 ///
@@ -371,7 +350,7 @@ mod tests {
     #[test]
     fn test_branding_config_serde() {
         let config = BrandingConfig {
-            id: BrandingConfigId::new(),
+            id: BrandingConfigId::generate(),
             project_id: ProjectId::generate(),
             status: BrandingStatus::Draft,
             revision: 0,
@@ -521,8 +500,8 @@ mod tests {
 
     #[test]
     fn test_branding_config_id_unique() {
-        let id1 = BrandingConfigId::new();
-        let id2 = BrandingConfigId::new();
+        let id1 = BrandingConfigId::generate();
+        let id2 = BrandingConfigId::generate();
         assert_ne!(id1, id2);
     }
 

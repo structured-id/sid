@@ -2275,7 +2275,7 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn get_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
     ) -> Result<Option<sid_core::models::FlowAction>> {
         CoordinodeBackend::get_flow_action(self, id).await
     }
@@ -2291,7 +2291,7 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn delete_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
         ctx: MutationContext,
     ) -> Result<()> {
         CoordinodeBackend::delete_flow_action(self, id, ctx).await
