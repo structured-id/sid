@@ -494,6 +494,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         opaque_router,
         revocation_cache,
         captcha_pow_key,
+        authorization: authz_engine,
         ..
     } = installation;
 
@@ -806,9 +807,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // A provider that was asked for and cannot run stops startup.
     let captcha_provider = sid_authn::captcha::build_captcha_provider_from_env(&captcha_pow_key)
         .map_err(|e| anyhow::anyhow!("CAPTCHA: {e}"))?;
-
-    // One authorization evaluator for every service of this process.
-    let authz_engine = Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
     let ceremony_page = sign_in_page(account.as_ref(), &issuer)?;
     // Named after the installation's issuer, which shares its host with other
