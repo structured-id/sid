@@ -9,13 +9,13 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
+use sid::maintenance::{execute_due_closures, purge_closed_profiles};
 use sid_authn::account_closure::AccountClosureService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_core::models::{
     AuditEntry, ClosureMode, LegalHold, Principal, Profile, ProfileId, ProfileStatus, Session,
 };
-use sid_engine::maintenance::{execute_due_closures, purge_closed_profiles};
 use sid_plugin::StorageBackend;
 
 async fn setup() -> (Arc<dyn StorageBackend>, AccountClosureService, sqlx::PgPool) {

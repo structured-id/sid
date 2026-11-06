@@ -4,7 +4,7 @@
 //! removes records. Removal itself is covered by the storage conformance
 //! suite, on a month no other test writes to.
 
-use sid_engine::maintenance::{AuditRetention, RetentionAction, manage_audit_partitions};
+use sid::maintenance::{AuditRetention, RetentionAction, manage_audit_partitions};
 
 async fn setup() -> (sid_storage::PostgresBackend, sqlx::PgPool) {
     let url = std::env::var("DATABASE_URL")

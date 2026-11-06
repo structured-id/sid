@@ -5479,29 +5479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sid-engine"
-version = "0.2.21"
-dependencies = [
- "async-trait",
- "chrono",
- "secrecy",
- "serde_json",
- "sid-authn",
- "sid-authz",
- "sid-core",
- "sid-crypto",
- "sid-keys",
- "sid-plugin",
- "sid-storage",
- "sqlx",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "sid-fed"
 version = "0.2.21"
 dependencies = [
@@ -5906,7 +5883,6 @@ dependencies = [
  "sid-authz",
  "sid-core",
  "sid-crypto",
- "sid-engine",
  "sid-fed",
  "sid-i18n",
  "sid-ids",
@@ -5923,6 +5899,7 @@ dependencies = [
  "sid-storage",
  "sid-ui-host",
  "sqlx",
+ "structured-id",
  "structured-proxy",
  "subtle",
  "tempfile",
@@ -6509,6 +6486,29 @@ dependencies = [
  "structured-public-domains",
  "unicode-normalization",
  "unicode-security",
+]
+
+[[package]]
+name = "structured-id"
+version = "0.2.21"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "secrecy",
+ "serde_json",
+ "sid-authn",
+ "sid-authz",
+ "sid-core",
+ "sid-crypto",
+ "sid-keys",
+ "sid-plugin",
+ "sid-storage",
+ "sqlx",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
