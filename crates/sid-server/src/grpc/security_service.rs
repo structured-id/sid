@@ -59,9 +59,9 @@ impl SecurityServiceImpl {
 
     #[allow(clippy::result_large_err)]
     async fn require_admin<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        authenticate(req, self.jwt.verifier(), &self.revocation)
+        Ok(authenticate(req, self.jwt.verifier(), &self.revocation)
             .await?
-            .require_admin()
+            .require_admin()?)
     }
 }
 

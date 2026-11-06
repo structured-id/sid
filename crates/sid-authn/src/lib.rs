@@ -22,7 +22,6 @@ pub mod backchannel_logout;
 pub mod bearer_secret;
 pub mod bff_session;
 pub mod browser_session;
-#[cfg(feature = "grpc")]
 pub mod caller;
 pub mod captcha;
 #[cfg(feature = "grpc")]
