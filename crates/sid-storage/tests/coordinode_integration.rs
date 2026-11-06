@@ -631,6 +631,110 @@ async fn commits_racing_retirement_are_never_left_behind() {
     }
 }
 
+/// Two instances of SID on one host database, as two processes sharing it.
+async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend) {
+    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
+    let a = CoordinodeBackend::new(db.clone())
+        .await
+        .expect("first instance");
+    let b = CoordinodeBackend::new(db).await.expect("second instance");
+    (a, b)
+}
+
+mod job_lock {
+    use super::*;
+    use sid_plugin::conformance::backend::job_lock;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_job_lock_exclusive_across_instances() {
+        let (a, b) = two_instances().await;
+        job_lock::test_job_lock_exclusive_across_instances(&a, &b).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dropped_job_lock_is_freed() {
+        let (a, b) = two_instances().await;
+        job_lock::test_dropped_job_lock_is_freed(&a, &b).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_job_locks_are_per_job() {
+        let (a, b) = two_instances().await;
+        job_lock::test_job_locks_are_per_job(&a, &b).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_job_lock_taken_once() {
+        let (a, b) = two_instances().await;
+        job_lock::test_concurrent_job_lock_taken_once(&a, &b).await;
+    }
+}
+
+mod audit_retention {
+    use std::collections::HashMap;
+
+    use coordinode_core::graph::types::Value;
+    use sid_core::models::audit::AuditRecord;
+    use sid_plugin::conformance::backend::audit_retention;
+
+    use super::*;
+
+    /// Store `r` as it stands, as the backend keeps a record, in a host
+    /// transaction: no operation records the past.
+    async fn insert(db: Arc<coordinode_embed::Database>, r: AuditRecord) {
+        tokio::task::spawn_blocking(move || {
+            let id = uuid::Uuid::parse_str(&r.id).expect("record id");
+            let params: HashMap<String, Value> = [
+                ("id", Value::Binary(id.as_bytes().to_vec())),
+                ("at", Value::Int(r.timestamp.timestamp_micros())),
+                ("chain", Value::String(r.chain_id.clone())),
+                ("sequence", Value::Int(i64::try_from(r.sequence).unwrap())),
+                ("actor_id", Value::String(r.actor_id.clone())),
+                ("actor_type", Value::String(r.actor_type.to_string())),
+                ("action", Value::String(r.action.clone())),
+                ("resource", Value::String(r.resource.clone())),
+                ("outcome", Value::String(r.outcome.to_string())),
+                ("metadata", Value::String(r.metadata.to_string())),
+                ("ip", Value::Null),
+                ("device_id", Value::Null),
+                ("prev_hash", Value::String(r.prev_hash.clone())),
+                ("hash", Value::String(r.hash.clone())),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect();
+            let tx = db.begin_transaction().expect("a host transaction");
+            db.execute_in_transaction(
+                tx,
+                "CREATE (r:SidAuditRecord {id: $id, at: $at, chain: $chain, sequence: $sequence,
+                    actor_id: $actor_id, actor_type: $actor_type, action: $action,
+                    resource: $resource, outcome: $outcome, metadata: $metadata, ip: $ip,
+                    device_id: $device_id, prev_hash: $prev_hash, hash: $hash})",
+                Some(params),
+            )
+            .expect("the record is written");
+            db.commit_transaction(tx).expect("the record commits");
+        })
+        .await
+        .expect("the host's write");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_audit_retention_keeps_chains_verifiable() {
+        let store = store().await;
+        let db = store.1.clone();
+        audit_retention::test_audit_retention_keeps_chains_verifiable(&store.0, &store.0, |r| {
+            insert(db.clone(), r)
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_audit_actor_types_round_trip() {
+        audit_retention::test_audit_actor_types_round_trip(&setup().await).await;
+    }
+}
+
 mod audit_chain {
     use super::*;
     use sid_plugin::conformance::backend;

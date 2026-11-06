@@ -55,6 +55,23 @@ pub async fn test_dropped_job_lock_is_freed<B: StorageBackend>(a: &B, b: &B) {
     panic!("a dropped job lock was never freed");
 }
 
+/// Two instances taking one free job's lock at once: exactly one gets it,
+/// and the other is told it is held rather than failing.
+pub async fn test_concurrent_job_lock_taken_once<B: StorageBackend>(a: &B, b: &B) {
+    for _ in 0..8 {
+        let job = unique_job();
+        let (first, second) = tokio::join!(a.try_job_lock(job), b.try_job_lock(job));
+        let held: Vec<_> = [first.unwrap(), second.unwrap()]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(held.len(), 1, "one job lock held by two instances");
+        for lock in held {
+            lock.release().await.unwrap();
+        }
+    }
+}
+
 /// Different jobs do not exclude each other.
 pub async fn test_job_locks_are_per_job<B: StorageBackend>(a: &B, b: &B) {
     let first = a.try_job_lock(unique_job()).await.unwrap();

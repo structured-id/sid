@@ -29,6 +29,7 @@ mod enrollment;
 mod flow;
 mod history;
 mod instance_secret;
+mod job_lock;
 mod keys;
 mod lifecycle;
 mod login_policy;
@@ -276,6 +277,9 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_binding_pair FOR (b:SidBinding) REQUIRE b.pair IS UNIQUE",
     "CREATE CONSTRAINT sid_binding_slot FOR (b:SidBinding) REQUIRE b.slot IS UNIQUE",
     "CREATE INDEX sid_binding_profile ON :SidBinding(profile_id)",
+    "CREATE CONSTRAINT sid_job_lock FOR (l:SidJobLock) REQUIRE l.job IS UNIQUE",
+    "CREATE CONSTRAINT sid_audit_checkpoint FOR (c:SidAuditCheckpoint) REQUIRE c.chain IS UNIQUE",
+    "CREATE INDEX sid_audit_record_at ON :SidAuditRecord(at)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

@@ -2905,6 +2905,11 @@ async fn test_job_locks_are_per_job() {
     common::job_lock::test_job_locks_are_per_job(&setup().await, &setup().await).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_job_lock_taken_once() {
+    common::job_lock::test_concurrent_job_lock_taken_once(&setup().await, &setup().await).await;
+}
+
 /// A database created from different migration SQL is refused, not reported
 /// up to date: before the first stable release a schema change edits the
 /// initial migration and such a database is recreated. A tracking table

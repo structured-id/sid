@@ -1828,6 +1828,12 @@ async fn test_job_locks_are_per_job() {
     common::job_lock::test_job_locks_are_per_job(&a, &b).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_job_lock_taken_once() {
+    let (_dir, a, b) = two_instances().await;
+    common::job_lock::test_concurrent_job_lock_taken_once(&a, &b).await;
+}
+
 #[tokio::test]
 async fn test_mutation_commits_owed_work() {
     common::work::test_mutation_commits_owed_work(&setup().await).await;

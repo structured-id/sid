@@ -2422,21 +2422,27 @@ impl StorageBackend for CoordinodeBackend {
 
     // === JOBS AND AUDIT RETENTION ===
 
-    async fn try_job_lock(&self, _job: i64) -> Result<Option<JobLock>> {
-        refused("job locks")
+    async fn try_job_lock(&self, job: i64) -> Result<Option<JobLock>> {
+        CoordinodeBackend::try_job_lock(self, job).await
     }
 
-    async fn ensure_audit_partition(&self, _month_start: chrono::NaiveDate) -> Result<bool> {
+    async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> Result<bool> {
         // Audit records live in one store here: nothing to prepare.
+        use chrono::Datelike;
+        if month_start.day() != 1 {
+            return Err(SidError::Validation(format!(
+                "{month_start} is not the first day of a month"
+            )));
+        }
         Ok(false)
     }
 
     async fn drop_expired_audit_records(
         &self,
-        _cut_before: DateTime<Utc>,
-        _ctx: MutationContext,
+        cut_before: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("audit retention")
+        CoordinodeBackend::drop_expired_audit_records(self, cut_before, ctx).await
     }
 
     // === NOTIFICATION PREFERENCES ===

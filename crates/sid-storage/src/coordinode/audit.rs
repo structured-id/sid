@@ -3,11 +3,16 @@
 //! one `SidAuditHead` per chain. Every append writes its chain's head, so
 //! concurrent appenders of one chain conflict and append one after another
 //! instead of forking the chain from one head.
+//!
+//! Retention removes the records of months past it; the chain's last
+//! removed record is kept as its `SidAuditCheckpoint`, from which the rest
+//! of the chain still verifies.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use chrono::{DateTime, SubsecRound, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SubsecRound, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::audit::{AuditEntry, AuditError, AuditRecord, compute_record_hash};
 use sid_core::{Error as SidError, Result as SidResult};
@@ -160,6 +165,80 @@ fn audit_error(e: SidError) -> AuditError {
     AuditError::Other(e.to_string())
 }
 
+/// Where `chain` resumes after retention: the sequence and hash of its last
+/// removed record, or the start of the chain.
+fn checkpoint(tx: &Statements<'_>, chain: &str) -> SidResult<(i64, String)> {
+    let rows = tx.run(
+        "MATCH (c:SidAuditCheckpoint) WHERE c.chain = $chain
+         RETURN c.sequence AS sequence, c.hash AS hash",
+        Params::default().with("chain", Value::String(chain.to_owned())),
+    )?;
+    match rows.first() {
+        Some(row) => Ok((get_int(row, "sequence")?, get_text(row, "hash")?)),
+        None => Ok((0, "genesis".to_owned())),
+    }
+}
+
+impl CoordinodeBackend {
+    /// Remove the records of every month that ended before `cut_before`,
+    /// moving each chain's checkpoint to its last removed record first.
+    pub(super) async fn drop_expired_audit_records(
+        &self,
+        cut_before: DateTime<Utc>,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<u64> {
+        let boundary = NaiveDate::from_ymd_opt(cut_before.year(), cut_before.month(), 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| t.and_utc())
+            .ok_or_else(|| SidError::Validation(format!("no month start for {cut_before}")))?;
+        self.transaction(move |tx| {
+            let expired = tx.run(
+                "MATCH (r:SidAuditRecord) WHERE r.at < $boundary
+                 RETURN r.chain AS chain, r.sequence AS sequence, r.hash AS hash",
+                Params::default().with("boundary", time(boundary)),
+            )?;
+            if expired.is_empty() {
+                return Ok(Decision::Abandon(0));
+            }
+            let mut last: BTreeMap<String, (i64, String)> = BTreeMap::new();
+            for row in &expired {
+                let (chain, sequence) = (get_text(row, "chain")?, get_int(row, "sequence")?);
+                if last.get(&chain).is_none_or(|(kept, _)| sequence > *kept) {
+                    last.insert(chain, (sequence, get_text(row, "hash")?));
+                }
+            }
+            for (chain, (sequence, hash)) in last {
+                let (recorded, _) = checkpoint(tx, &chain)?;
+                if sequence <= recorded {
+                    continue;
+                }
+                let params = Params::default()
+                    .with("chain", Value::String(chain))
+                    .with("sequence", Value::Int(sequence))
+                    .with("hash", Value::String(hash))
+                    .with("cut_before", time(boundary));
+                let query = if recorded == 0 {
+                    "CREATE (c:SidAuditCheckpoint {chain: $chain, sequence: $sequence,
+                        hash: $hash, cut_before: $cut_before})"
+                } else {
+                    "MATCH (c:SidAuditCheckpoint) WHERE c.chain = $chain
+                     SET c.sequence = $sequence, c.hash = $hash, c.cut_before = $cut_before"
+                };
+                tx.run(query, params)?;
+            }
+            tx.run(
+                "MATCH (r:SidAuditRecord) WHERE r.at < $boundary DETACH DELETE r",
+                Params::default().with("boundary", time(boundary)),
+            )?;
+            super::finalize(tx, "site:audit_retention", ctx.clone())?;
+            let removed = u64::try_from(expired.len())
+                .map_err(|_| SidError::Storage("removed record count".into()))?;
+            Ok(Decision::Commit(removed))
+        })
+        .await
+    }
+}
+
 #[async_trait]
 impl AuditLog for CoordinodeBackend {
     async fn log(&self, chain_id: &str, entry: AuditEntry) -> Result<AuditRecord, AuditError> {
@@ -203,25 +282,27 @@ impl AuditLog for CoordinodeBackend {
 
     async fn verify_chain(&self, chain_id: &str) -> Result<VerifyResult, AuditError> {
         let chain = chain_id.to_owned();
-        let records = self
-            .transaction(move |tx| {
+        let (records, start) = self
+            .read(move |tx| {
+                // After a retention cut the chain resumes from its checkpoint;
+                // both are read in one snapshot, so a cut in between cannot
+                // leave a gap.
+                let (after, start) = checkpoint(tx, &chain)?;
                 let rows = tx.run(
                     &format!(
-                        "MATCH (r:SidAuditRecord) WHERE r.chain = $chain
+                        "MATCH (r:SidAuditRecord) WHERE r.chain = $chain AND r.sequence > $after
                          RETURN {FIELDS} ORDER BY r.sequence"
                     ),
-                    Params::default().with("chain", Value::String(chain.clone())),
+                    Params::default()
+                        .with("chain", Value::String(chain.clone()))
+                        .with("after", Value::Int(after)),
                 )?;
-                Ok(Decision::Abandon(
-                    rows.iter().map(record).collect::<SidResult<Vec<_>>>()?,
-                ))
+                let records = rows.iter().map(record).collect::<SidResult<Vec<_>>>()?;
+                Ok((records, start))
             })
             .await
             .map_err(audit_error)?;
-        Ok(sid_plugin::audit::verify_records(
-            &records,
-            "genesis".to_owned(),
-        ))
+        Ok(sid_plugin::audit::verify_records(&records, start))
     }
 
     async fn list_chain_ids(&self) -> Result<Vec<String>, AuditError> {
