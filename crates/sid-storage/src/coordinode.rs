@@ -28,6 +28,7 @@ mod enrollment;
 mod flow;
 mod history;
 mod instance_secret;
+mod keys;
 mod lifecycle;
 mod login_policy;
 mod machine;
@@ -269,6 +270,7 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_flow_action_project ON :SidFlowAction(project_id)",
     "CREATE CONSTRAINT sid_branding FOR (b:SidBranding) REQUIRE b.id IS UNIQUE",
     "CREATE INDEX sid_branding_project ON :SidBranding(project_id)",
+    "CREATE CONSTRAINT sid_key_version FOR (k:SidKeyVersion) REQUIRE k.version IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.

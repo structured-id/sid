@@ -33,7 +33,11 @@ pub mod application_store;
     feature = "storage-coordinode"
 ))]
 mod directory_query;
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 mod key_versions;
 #[cfg(any(
     feature = "storage-pg",

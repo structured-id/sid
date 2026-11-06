@@ -1057,15 +1057,15 @@ impl StorageBackend for CoordinodeBackend {
     }
 
     async fn list_key_versions(&self) -> Result<Vec<sid_keys::KeyVersionParams>> {
-        refused("field-encryption key versions")
+        CoordinodeBackend::list_key_versions(self).await
     }
 
     async fn insert_key_version(
         &self,
-        _params: &sid_keys::KeyVersionParams,
-        _ctx: MutationContext,
+        params: &sid_keys::KeyVersionParams,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("field-encryption key versions")
+        CoordinodeBackend::insert_key_version(self, params, ctx).await
     }
 
     // === INSTALLATION ===
@@ -2550,11 +2550,14 @@ impl StorageBackend for CoordinodeBackend {
     }
 
     // === EMAIL PROVIDER ===
+    // Refused rather than kept: provider credentials must not be stored in
+    // clear, and this backend has no sealed storage for them. Nothing is
+    // ever stored, so none is configured here.
 
     async fn get_email_provider_config(
         &self,
     ) -> Result<Option<sid_core::models::EmailProviderConfig>> {
-        refused("the email provider configuration")
+        Ok(None)
     }
 
     async fn upsert_email_provider_config(
