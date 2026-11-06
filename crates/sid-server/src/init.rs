@@ -50,10 +50,10 @@ use sid_authz::grpc::AuthzServiceImpl;
 /// silent default.
 pub fn audit_retention_from_lookup(
     get: impl Fn(&str) -> anyhow::Result<Option<String>>,
-) -> anyhow::Result<sid_engine::AuditRetention> {
-    use sid_engine::RetentionAction;
+) -> anyhow::Result<sid::AuditRetention> {
+    use sid::RetentionAction;
     let days = match get("SID_AUDIT_RETENTION_DAYS")? {
-        None => sid_engine::AuditRetention::default().days,
+        None => sid::AuditRetention::default().days,
         Some(v) => v
             .trim()
             .parse::<u32>()
@@ -70,7 +70,7 @@ pub fn audit_retention_from_lookup(
             anyhow::bail!("SID_AUDIT_RETENTION_ACTION must be archive or delete, got {other:?}")
         }
     };
-    Ok(sid_engine::AuditRetention { days, action })
+    Ok(sid::AuditRetention { days, action })
 }
 
 /// All initialized CE components and gRPC services.
@@ -105,7 +105,7 @@ pub struct CeComponents {
     /// Executes account closures whose grace period has ended.
     pub closure_service: Arc<AccountClosureService>,
     /// How long audit records are kept and what happens to them after.
-    pub audit_retention: sid_engine::AuditRetention,
+    pub audit_retention: sid::AuditRetention,
     /// Days a profile has to finish its password migration.
     pub migration_deadline_days: i64,
     /// The installation's OIDC issuers and their signers.
@@ -311,12 +311,10 @@ pub fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
 /// The installation's management from `SID_INSTALLATION_MANAGEMENT`:
 /// `central` or `self`; unset keeps whatever is recorded. Any other value
 /// stops the start.
-pub(crate) fn management_setting(
-    setting: Option<&str>,
-) -> anyhow::Result<Option<sid_engine::Management>> {
+pub(crate) fn management_setting(setting: Option<&str>) -> anyhow::Result<Option<sid::Management>> {
     match setting {
-        Some("central") => Ok(Some(sid_engine::Management::Central)),
-        Some("self") => Ok(Some(sid_engine::Management::SelfManaged)),
+        Some("central") => Ok(Some(sid::Management::Central)),
+        Some("self") => Ok(Some(sid::Management::SelfManaged)),
         None => Ok(None),
         Some(other) => {
             anyhow::bail!("SID_INSTALLATION_MANAGEMENT {other:?}: expected `central` or `self`")
@@ -466,9 +464,9 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // The master key lives outside the database; the key versions inside.
     let master_key_path =
         env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
-    let installation = sid_engine::Installation::open(
+    let installation = sid::Installation::open(
         storage.clone(),
-        sid_engine::InstallationSettings {
+        sid::InstallationSettings {
             issuer: issuer_base.clone(),
             master_key: master_key_path.clone().into(),
             crypto: Arc::new(sid_crypto::AwsLcPrimitives::new()),
@@ -486,7 +484,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             secrecy::ExposeSecret::expose_secret(&token)
         );
     }
-    let sid_engine::Installation {
+    let sid::Installation {
         key_manager,
         organization,
         issuer: local_issuer,
@@ -1009,7 +1007,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(v) => v
             .parse()
             .with_context(|| format!("SID_MIGRATION_DEADLINE_DAYS {v:?}"))?,
-        None => sid_engine::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
+        None => sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
     };
 
     Ok(CeComponents {
@@ -1127,7 +1125,7 @@ pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> 
 pub fn engine(
     c: &CeComponents,
     also_required: &[sid_core::models::RequiredReceiver],
-) -> anyhow::Result<sid_engine::Engine> {
+) -> anyhow::Result<sid::Engine> {
     let receivers = c
         .required_receivers
         .iter()
@@ -1173,10 +1171,10 @@ pub fn engine(
     let mail_purge = {
         // Ended authentication mail records. Idempotent, so no job lock.
         let storage = c.storage.clone();
-        sid_engine::maintenance::Job::shared(
+        sid::maintenance::Job::shared(
             "authentication_mail_purge",
             std::time::Duration::from_secs(3600),
-            sid_engine::maintenance::FirstRun::AfterInterval,
+            sid::maintenance::FirstRun::AfterInterval,
             Arc::new(move || {
                 let storage = storage.clone();
                 Box::pin(async move {
@@ -1191,7 +1189,7 @@ pub fn engine(
             }),
         )
     };
-    let maintenance = sid_engine::Maintenance::ce(sid_engine::CeMaintenance {
+    let maintenance = sid::Maintenance::ce(sid::CeMaintenance {
         storage: c.storage.clone(),
         closures: c.closure_service.clone(),
         history_evaluation: c.auth_svc.history_evaluation(),
@@ -1200,7 +1198,7 @@ pub fn engine(
         source: "sid-server".into(),
     })
     .with(mail_purge);
-    sid_engine::Engine::new(sid_engine::EngineParts {
+    sid::Engine::new(sid::EngineParts {
         storage: c.storage.clone(),
         worker: format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7()),
         handlers,

@@ -33,7 +33,7 @@ CLIENT_TARGETS=(
 )
 
 # Crates that belong to the server, its storage or its infrastructure.
-SERVER_ONLY='^(sqlx|sqlx-core|sqlx-postgres|sqlx-sqlite|sqlx-macros|sqlx-macros-core|libsqlite3-sys|sid-storage|sid-server|sid-authn|sid-engine|sid-infra|sid-notify|async-nats|fred|coordinode[a-z0-9_-]*) '
+SERVER_ONLY='^(sqlx|sqlx-core|sqlx-postgres|sqlx-sqlite|sqlx-macros|sqlx-macros-core|libsqlite3-sys|sid-storage|sid-server|sid-authn|structured-id|sid-infra|sid-notify|async-nats|fred|coordinode[a-z0-9_-]*) '
 
 # Client-facing packages and their supported feature sets ("pkg|flags").
 CLIENT_SETS=(
@@ -63,7 +63,7 @@ COMBOS=(
   "sid-authn|--features grpc"
   "sid-authz|"
   "sid-authz|--no-default-features"
-  "sid-engine|"
+  "structured-id|"
   "sid-admin|"
   "sid-fed|"
   "sid-i18n|"
