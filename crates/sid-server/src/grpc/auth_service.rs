@@ -544,8 +544,14 @@ fn own_change(
                 Err(changed_concurrently())
             }
         }
-        _ => Err(sid_authn::password_operation::operation_not_pending()),
+        _ => Err(operation_not_pending()),
     }
+}
+
+/// The refusal of a password step whose operation is not pending for the
+/// caller, the same whatever the reason.
+fn operation_not_pending() -> Status {
+    sid_authn::password_operation::PasswordOperationError::NotPending.into()
 }
 
 /// Server-side state for legacy password migration flow.
@@ -3557,7 +3563,7 @@ impl AuthService for AuthServiceImpl {
                 req.proof,
                 |op| match op.purpose {
                     OperationPurpose::Registration { .. } => Ok(()),
-                    _ => Err(sid_authn::password_operation::operation_not_pending()),
+                    _ => Err(operation_not_pending()),
                 },
             )
             .await?
@@ -3568,7 +3574,7 @@ impl AuthService for AuthServiceImpl {
             Finish::Ready(done) => *done,
         };
         let OperationPurpose::Registration { pending } = &done.operation.purpose else {
-            return Err(sid_authn::password_operation::operation_not_pending());
+            return Err(operation_not_pending());
         };
         let pending = pending.clone();
         let profile_id = match &pending {
@@ -6638,13 +6644,13 @@ impl AuthService for AuthServiceImpl {
                         reset = Some(session);
                         Ok(())
                     }
-                    _ => Err(sid_authn::password_operation::operation_not_pending()),
+                    _ => Err(operation_not_pending()),
                 }
             })
             .await?;
         // The operation outlives nothing: a reset that expired or was
         // completed meanwhile does not go on.
-        let session = reset.ok_or_else(sid_authn::password_operation::operation_not_pending)?;
+        let session = reset.ok_or_else(operation_not_pending)?;
         self.verified_reset_session(session).await?;
         Ok(Response::new(ExecutePasswordResetResponse {
             registration_response,
@@ -6682,7 +6688,7 @@ impl AuthService for AuthServiceImpl {
                         reset = Some(session);
                         Ok(())
                     }
-                    _ => Err(sid_authn::password_operation::operation_not_pending()),
+                    _ => Err(operation_not_pending()),
                 },
             )
             .await?
@@ -6692,7 +6698,7 @@ impl AuthService for AuthServiceImpl {
             }
             Finish::Ready(done) => *done,
         };
-        let reset = reset.ok_or_else(sid_authn::password_operation::operation_not_pending)?;
+        let reset = reset.ok_or_else(operation_not_pending)?;
         let session = self.verified_reset_session(reset).await?;
         let profile_id = session.profile_id;
 

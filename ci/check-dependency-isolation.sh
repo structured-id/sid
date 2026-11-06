@@ -12,6 +12,8 @@
 #               copy of the checkout because cargo-hack rewrites manifests
 #   consumers   sid-proto, sid-core and both together as dependencies of
 #               projects outside this workspace
+#   crypto      sid-crypto feature sets without native or foreign primitives
+#   transport   the engine and message-only packages without the gRPC transport
 #   all         everything above
 #
 # Server and storage packages keep their database, broker and cache
@@ -53,6 +55,7 @@ COMBOS=(
   "sid-core|--features grpc"
   "sid-core|--no-default-features --features grpc"
   "sid-proto|"
+  "sid-proto|--features grpc"
   "sid-plugin|"
   "sid-crypto|"
   "sid-crypto|--no-default-features --features primitives"
@@ -61,6 +64,7 @@ COMBOS=(
   "sid-storage|--features storage-sqlite"
   "sid-authn|"
   "sid-authn|--features grpc"
+  "sid-authn|--features password-operation"
   "sid-authz|"
   "sid-authz|--no-default-features"
   "structured-id|"
@@ -165,6 +169,7 @@ check_consumers() {
   done
   local sets=(
     "sid-proto|"
+    "sid-proto|--features grpc"
     "sid-core|"
     "sid-core|--features recovery"
     "sid-core|--features grpc"
@@ -189,6 +194,26 @@ check_consumers() {
       echo "FAIL consumer $name [$flags] pulls server-only crates:"
       echo "$found" | sed 's/^/    /'
       fail=1
+    fi
+  done
+}
+
+# The engine runs in its host's process and sid-proto without `grpc` carries
+# messages only: neither links the gRPC transport.
+check_transport_closures() {
+  local entry pkg flags found
+  for entry in "structured-id|" "sid-proto|" "sid-authn|--features password-operation"; do
+    pkg="${entry%%|*}"
+    flags="${entry#*|}"
+    # shellcheck disable=SC2086
+    found="$(cargo tree --locked -p "$pkg" $flags -e normal --prefix none -f '{p}' \
+      | grep -E '^(tonic|tonic-prost|tonic-types|tonic-health|tonic-reflection) ' | sort -u || true)"
+    if [[ -n "$found" ]]; then
+      echo "FAIL transport closure $pkg [$flags] links the gRPC transport:"
+      echo "$found" | sed 's/^/    /'
+      fail=1
+    else
+      echo "ok   transport closure $pkg [$flags]"
     fi
   done
 }
@@ -223,8 +248,9 @@ case "${1:-all}" in
   each) check_each ;;
   consumers) check_consumers ;;
   crypto) check_crypto_closures ;;
-  all) check_closure; check_combos; check_each; check_consumers; check_crypto_closures ;;
-  *) echo "usage: $0 [closure|combos|each|consumers|crypto|all]"; exit 2 ;;
+  transport) check_transport_closures ;;
+  all) check_closure; check_combos; check_each; check_consumers; check_crypto_closures; check_transport_closures ;;
+  *) echo "usage: $0 [closure|combos|each|consumers|crypto|transport|all]"; exit 2 ;;
 esac
 
 exit "$fail"

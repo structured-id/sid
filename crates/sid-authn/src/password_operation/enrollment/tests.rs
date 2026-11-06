@@ -7,7 +7,6 @@ use sid_core::models::{ProfileId, WorkId, WorkState};
 use sid_ids::PasswordOperationId;
 use sid_plugin::StorageBackend;
 use sid_plugin::history_keys::HistoryKeyStore;
-use tonic::Code;
 
 /// The evaluator's audit entry for `action`.
 fn audit(action: &str) -> AuditEntry {
@@ -117,11 +116,9 @@ async fn an_abandoned_registration_loses_its_key() {
             .is_empty()
     );
     let refused = evaluation.evaluate(&id, &[2; 32]).await.unwrap_err();
-    assert_eq!(
-        refused.code(),
-        Code::FailedPrecondition,
-        "{}",
-        refused.message()
+    assert!(
+        matches!(refused, PasswordOperationError::NotPending),
+        "{refused}"
     );
     assert_eq!(
         handler.handle(&work).await,
@@ -214,11 +211,9 @@ async fn an_abort_before_its_preparation_fences_it() {
         })
         .await
         .unwrap_err();
-    assert_eq!(
-        delayed.code(),
-        Code::FailedPrecondition,
-        "{}",
-        delayed.message()
+    assert!(
+        matches!(delayed, PasswordOperationError::NotPending),
+        "{delayed}"
     );
     assert!(
         storage
@@ -491,7 +486,13 @@ async fn first_enrollments_are_refused_at_capacity() {
         .await
         .map(|_| ())
         .unwrap_err();
-    assert_eq!(refused.code(), Code::Unavailable, "{}", refused.message());
+    assert!(
+        matches!(
+            refused,
+            PasswordOperationError::Unavailable("enrollment capacity")
+        ),
+        "{refused}"
+    );
     assert!(
         storage
             .history_keys()
@@ -517,6 +518,12 @@ async fn first_enrollments_are_refused_at_capacity() {
         .await
         .map(|_| ())
         .unwrap_err();
-    assert_eq!(decoy.code(), refused.code(), "{}", decoy.message());
-    assert_eq!(decoy.message(), refused.message());
+    assert_eq!(decoy.to_string(), refused.to_string());
+    assert!(
+        matches!(
+            decoy,
+            PasswordOperationError::Unavailable("enrollment capacity")
+        ),
+        "{decoy}"
+    );
 }
