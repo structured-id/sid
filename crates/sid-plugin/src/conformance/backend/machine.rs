@@ -5,9 +5,9 @@
 use chrono::{DateTime, Duration, Utc};
 use sid_core::Error;
 use sid_core::models::machine_user::{
-    CredentialStatus, MachineCredentialType, MachineUserCredential, MachineUserStatus, OwnerType,
+    CredentialStatus, MachineCredentialType, MachineUserCredential, MachineUserStatus,
 };
-use sid_core::models::{MachineUser, ProjectId};
+use sid_core::models::{MachineOwner, MachineUser, OrgId, ProfileId, ProjectId};
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
 
@@ -24,8 +24,7 @@ async fn machine_user(backend: &dyn StorageBackend) -> MachineUser {
         ProjectId::SYSTEM,
         format!("mu-{}", tag()),
         "ci",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     )
 }
 
@@ -76,6 +75,25 @@ pub async fn test_create_machine_user_never_replaces(backend: &dyn StorageBacken
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
     let stored = backend.get_machine_user(deleted.id).await.unwrap().unwrap();
     assert_eq!(stored.status, MachineUserStatus::Deleted);
+}
+
+/// Each kind of owner reads back as the owner stored: a profile's machine
+/// user never reads back as an organization's or the installation's.
+pub async fn test_machine_user_owner_round_trips(backend: &dyn StorageBackend) {
+    for owner in [
+        MachineOwner::Profile(ProfileId::generate()),
+        MachineOwner::Organization(OrgId::generate()),
+        MachineOwner::System,
+    ] {
+        let mut mu = machine_user(backend).await;
+        mu.owner = owner;
+        backend
+            .create_machine_user(&mu, test_audit())
+            .await
+            .unwrap();
+        let stored = backend.get_machine_user(mu.id).await.unwrap().unwrap();
+        assert_eq!(stored.owner, owner);
+    }
 }
 
 /// A settings update keeps the stored status: a suspension made after the
@@ -401,8 +419,7 @@ pub async fn test_machine_users_by_client_and_project(backend: &dyn StorageBacke
             project.id,
             format!("{name}-{}", tag()),
             name,
-            OwnerType::System,
-            "system",
+            MachineOwner::System,
         )
     };
     let (ci, deploy) = (in_project("ci"), in_project("deploy"));

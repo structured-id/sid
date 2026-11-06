@@ -19,7 +19,7 @@ fn valid_request() -> ClientRegistrationRequest {
 
 fn valid_iat() -> InitialAccessToken {
     InitialAccessToken {
-        id: InitialAccessTokenId::new(),
+        id: InitialAccessTokenId::generate(),
         token_hash: vec![0; 32],
         project_id: ProjectId::SYSTEM,
         max_clients: 10,
@@ -29,7 +29,7 @@ fn valid_iat() -> InitialAccessToken {
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
         expires_at: Utc::now() + chrono::Duration::hours(24),
         created_at: Utc::now(),
-        created_by: "admin".into(),
+        created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     }
 }

@@ -51,9 +51,11 @@ macro_rules! storage_conformance {
             );
             $crate::__storage_scenarios!($setup, application:
                 test_application_roles_are_stored_together
+                test_project_in_use_is_not_deleted
                 test_concurrent_indicator_registration
                 test_system_integration_exists_once
                 test_application_update_and_list
+                test_records_update_from_the_object_they_were_created_with
                 test_resource_update_and_retirement
                 test_resource_access
                 test_machine_user_resource_access
@@ -141,6 +143,7 @@ macro_rules! storage_conformance {
             );
             $crate::__storage_scenarios!($setup, machine:
                 test_create_machine_user_never_replaces
+                test_machine_user_owner_round_trips
                 test_update_machine_user_keeps_status
                 test_transition_machine_user_is_compare_and_swap
                 test_add_machine_credential_never_replaces
@@ -257,7 +260,7 @@ macro_rules! __storage_shared_scenarios {
             test_profile_get_by_username_not_found test_profile_update test_profile_delete
             test_profile_list test_profile_list_pages_cover_each_profile_once
             test_profile_username_uniqueness test_session_save_and_get test_role_roundtrip
-            test_cedar_policy_write_contract test_project_write_contract
+            test_many_roles_read_at_once test_cedar_policy_write_contract test_project_write_contract
             test_profile_grant_write_contract test_ensure_system_project_concurrent
             test_cedar_policy_concurrent_update test_consent_roundtrip
             test_invite_list_pages_cover_each_invite_once test_invite_lifecycle test_invite_search

@@ -404,8 +404,8 @@ fn test_registration_policy_serde_roundtrip() {
 
 #[test]
 fn test_initial_access_token_id_unique() {
-    let id1 = InitialAccessTokenId::new();
-    let id2 = InitialAccessTokenId::new();
+    let id1 = InitialAccessTokenId::generate();
+    let id2 = InitialAccessTokenId::generate();
     assert_ne!(id1, id2);
 }
 

@@ -30,8 +30,7 @@ fn setup_machine_user_for_exchange(
         ProjectId::SYSTEM,
         "mu_test_exchange",
         "Test Exchange Bot",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let mu_id = mu.id;
 
@@ -565,8 +564,7 @@ async fn test_token_exchange_no_grant_for_target() {
         ProjectId::SYSTEM,
         "mu_no_grant",
         "No Grant Bot",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let cred = MachineUserCredential::new(
         mu.id,

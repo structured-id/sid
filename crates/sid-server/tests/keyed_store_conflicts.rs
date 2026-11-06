@@ -179,7 +179,9 @@ async fn concurrent_provider_creations_with_one_key_create_one(h: Harness) {
 /// answer with the rotation the winner made, though the losers may read the
 /// rotated credential already out of its active state.
 async fn concurrent_rotations_with_one_key_rotate_once(h: Harness) {
-    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+    use sid_core::models::machine_user::{
+        MachineCredentialType, MachineOwner, MachineUserCredential,
+    };
     use sid_core::models::{MachineUser, ProjectId};
     use sid_proto::sid::v1::RotateMachineCredentialRequest;
     use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
@@ -191,8 +193,7 @@ async fn concurrent_rotations_with_one_key_rotate_once(h: Harness) {
         ProjectId::SYSTEM,
         format!("mu_{}", tag()),
         "Rotated",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     h.storage
         .create_machine_user(&machine, AuditEntry::system("test", "machine").into())
@@ -226,7 +227,7 @@ async fn concurrent_rotations_with_one_key_rotate_once(h: Harness) {
         let service = service.clone();
         let request = call(
             RotateMachineCredentialRequest {
-                machine_user_id: machine.id.to_string(),
+                machine_user_id: Some(machine.id.into()),
                 kid: kid.clone(),
                 ..Default::default()
             },

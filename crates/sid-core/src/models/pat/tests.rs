@@ -91,8 +91,8 @@ fn test_pat_record_use() {
 
 #[test]
 fn test_pat_id_unique() {
-    let id1 = PatId::new();
-    let id2 = PatId::new();
+    let id1 = PatId::generate();
+    let id2 = PatId::generate();
     assert_ne!(id1, id2);
 }
 

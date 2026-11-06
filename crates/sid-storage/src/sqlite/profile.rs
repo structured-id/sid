@@ -22,7 +22,7 @@ const CONSUME_ADMIN_CLAIM_SQL: &str = "DELETE FROM instance_secrets
 
 use super::{
     SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, parse_dt,
-    parse_dt_opt, parsed_col,
+    parse_dt_opt, parsed_col, uuid_col,
 };
 
 /// The stored enrollment policy, read on `conn`; the allowed domains are a
@@ -119,7 +119,7 @@ where
         "INSERT INTO credentials (id, profile_id, credential_type, status, data, label, policy_version, zkpp_verified, opaque_curve, legacy_algorithm, opaque_credential_identifier, zkpp_artifact, created_at, last_used_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(credential.id.to_string())
+    .bind(credential.id.0)
     .bind(credential.profile_id)
     .bind(credential.credential_type.as_str())
     .bind(credential.status.as_str())
@@ -224,29 +224,26 @@ fn row_to_principal(row: &sqlx::sqlite::SqliteRow) -> SidResult<Principal> {
         source_field: row
             .try_get::<Option<String>, _>("pb_source_field")
             .unwrap_or(None),
-        source_email_id: row
-            .try_get::<Option<String>, _>("pb_source_email_id")
-            .ok()
-            .flatten()
-            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-            .map(ProfileEmailId),
-        source_phone_id: row
-            .try_get::<Option<String>, _>("pb_source_phone_id")
-            .ok()
-            .flatten()
-            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-            .map(ProfilePhoneId),
+        source_email_id: opt_binding_source(row, "pb_source_email_id")?.map(ProfileEmailId),
+        source_phone_id: opt_binding_source(row, "pb_source_phone_id")?.map(ProfilePhoneId),
         created_at: parse_dt(&row.get::<String, _>("created_at")),
         updated_at: parse_dt(&row.get::<String, _>("updated_at")),
     };
     Ok(principal.as_seen_by_subject())
 }
 
+/// The binding's source contact id `name`; `None` when the query selects no
+/// binding columns or the binding has no such source.
+fn opt_binding_source(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<Option<uuid::Uuid>> {
+    use sqlx::Row;
+    if row.try_column(name).is_err() {
+        return Ok(None);
+    }
+    col(row, name)
+}
+
 fn principal_id(row: &sqlx::sqlite::SqliteRow) -> SidResult<PrincipalId> {
-    let id: String = col(row, "id")?;
-    uuid::Uuid::parse_str(&id)
-        .map(PrincipalId)
-        .map_err(|e| SidError::Storage(format!("principal id: {e}")))
+    Ok(PrincipalId(uuid_col(row, "id")?))
 }
 
 fn principal_type(row: &sqlx::sqlite::SqliteRow) -> SidResult<PrincipalType> {
@@ -269,13 +266,10 @@ fn row_to_credential(row: &sqlx::sqlite::SqliteRow) -> SidResult<Credential> {
         .parse()
         .map_err(SidError::Storage)?;
 
-    let id_str: String = row.get("id");
-    let id = uuid::Uuid::parse_str(&id_str)
-        .map_err(|e| SidError::Storage(format!("credential id {id_str}: {e}")))?;
     let data: Vec<u8> = row.get("data");
 
     Ok(Credential {
-        id: CredentialId(id),
+        id: CredentialId(uuid_col(row, "id")?),
         profile_id: col(row, "profile_id")?,
         credential_type,
         status,
@@ -316,9 +310,8 @@ fn row_to_profile_metadata(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileMe
 }
 
 pub(super) fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone> {
-    let id_str: String = row.get("id");
     Ok(ProfilePhone {
-        id: ProfilePhoneId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),
+        id: ProfilePhoneId(uuid_col(row, "id")?),
         profile_id: col(row, "profile_id")?,
         e164: row.get::<i64, _>("e164") as u64,
         extension: row.get::<Option<i32>, _>("extension").map(|e| e as u32),
@@ -340,9 +333,8 @@ pub(super) fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<P
 }
 
 pub(super) fn row_to_profile_email(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileEmail> {
-    let id_str: String = row.get("id");
     Ok(ProfileEmail {
-        id: ProfileEmailId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),
+        id: ProfileEmailId(uuid_col(row, "id")?),
         profile_id: col(row, "profile_id")?,
         email: row.get("email"),
         label: EmailLabel::from_str_lossy(&row.get::<String, _>("label")),
@@ -503,13 +495,13 @@ impl SqliteBackend {
         // Principal first: the (principal_type, value) key decides a registration race,
         // and a taken identifier drops the transaction with nothing written.
         // A new identifier is first used here: it is assigned to the registrant.
-        let inserted: Option<String> = sqlx::query_scalar(
+        let inserted: Option<uuid::Uuid> = sqlx::query_scalar(
             "INSERT INTO principals (id, principal_type, value, verified, verified_at, verification_expires, assigned_profile_id, assignment_revision, email_policy_revision, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
              ON CONFLICT(principal_type, value) DO NOTHING
              RETURNING id",
         )
-        .bind(principal.id.to_string())
+        .bind(principal.id.0)
         .bind(principal.principal_type.as_str())
         .bind(&principal.value)
         .bind(principal.verified)
@@ -538,7 +530,7 @@ impl SqliteBackend {
                 "INSERT INTO profile_emails (id, profile_id, email, label, custom_label, is_primary, verified, verified_at, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(email.id.to_string())
+            .bind(email.id.0)
             .bind(email.profile_id)
             .bind(&email.email)
             .bind(email.label.as_str())
@@ -558,7 +550,7 @@ impl SqliteBackend {
                 "INSERT INTO profile_phones (id, profile_id, e164, extension, label, custom_label, is_primary, can_receive_sms, can_receive_fax, can_receive_voice, verified, verified_at, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(phone.id.to_string())
+            .bind(phone.id.0)
             .bind(phone.profile_id)
             .bind(phone.e164 as i64)
             .bind(phone.extension.map(|e| e as i32))
@@ -581,13 +573,13 @@ impl SqliteBackend {
             "INSERT INTO principal_bindings (id, principal_id, profile_id, is_primary, source_field, source_email_id, source_phone_id, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(principal.id.to_string())
-        .bind(principal.profile_id.to_string())
+        .bind(uuid::Uuid::now_v7())
+        .bind(principal.id.0)
+        .bind(principal.profile_id)
         .bind(principal.is_primary)
         .bind(&principal.source_field)
-        .bind(principal.source_email_id.map(|id| id.to_string()))
-        .bind(principal.source_phone_id.map(|id| id.to_string()))
+        .bind(principal.source_email_id.map(|id| id.0))
+        .bind(principal.source_phone_id.map(|id| id.0))
         .bind(fmt_dt(&principal.created_at))
         .execute(&mut *tx)
         .await
@@ -603,9 +595,9 @@ impl SqliteBackend {
                 "INSERT INTO invite_redemptions (invite_id, profile_id, credential_id, redeemed_at)
                  VALUES (?, ?, ?, ?)",
             )
-            .bind(invite.to_string())
+            .bind(invite)
             .bind(profile.id)
-            .bind(credential.as_ref().map(|c| c.id.to_string()))
+            .bind(credential.as_ref().map(|c| c.id.0))
             .bind(fmt_dt(&chrono::Utc::now()))
             .execute(&mut *tx)
             .await
@@ -633,7 +625,7 @@ impl SqliteBackend {
         id: ProfilePhoneId,
     ) -> SidResult<Option<ProfilePhone>> {
         let row = sqlx::query("SELECT * FROM profile_phones WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -683,7 +675,7 @@ impl SqliteBackend {
         id: ProfileEmailId,
     ) -> SidResult<Option<ProfileEmail>> {
         let row = sqlx::query("SELECT * FROM profile_emails WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -738,7 +730,7 @@ impl SqliteBackend {
              LEFT JOIN principal_bindings pb ON pr.id = pb.principal_id
              WHERE pr.id = ?"
         )
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -860,7 +852,7 @@ impl SqliteBackend {
              JOIN profiles prof ON pb.profile_id = prof.id
              WHERE pb.principal_id = ? AND prof.status = 'active'",
         )
-        .bind(principal_id.to_string())
+        .bind(principal_id.0)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))
@@ -874,34 +866,22 @@ impl SqliteBackend {
             "SELECT id, principal_id, profile_id, is_primary, source_field, source_email_id, source_phone_id, created_at
              FROM principal_bindings WHERE principal_id = ?"
         )
-        .bind(principal_id.to_string())
+        .bind(principal_id.0)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
 
         let mut bindings = Vec::with_capacity(rows.len());
         for row in rows {
-            let id_str: String = row.get("id");
-            let pid_str: String = row.get("principal_id");
             bindings.push(sid_core::models::PrincipalBinding {
-                id: sid_core::models::PrincipalBindingId(
-                    uuid::Uuid::parse_str(&id_str)
-                        .map_err(|e| SidError::Storage(format!("Invalid UUID: {e}")))?,
-                ),
-                principal_id: sid_core::models::PrincipalId(
-                    uuid::Uuid::parse_str(&pid_str)
-                        .map_err(|e| SidError::Storage(format!("Invalid UUID: {e}")))?,
-                ),
+                id: sid_core::models::PrincipalBindingId(uuid_col(&row, "id")?),
+                principal_id: sid_core::models::PrincipalId(uuid_col(&row, "principal_id")?),
                 profile_id: col(&row, "profile_id")?,
                 is_primary: row.get::<bool, _>("is_primary"),
                 source_field: row.get("source_field"),
-                source_email_id: row
-                    .get::<Option<String>, _>("source_email_id")
-                    .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+                source_email_id: col::<Option<uuid::Uuid>>(&row, "source_email_id")?
                     .map(ProfileEmailId),
-                source_phone_id: row
-                    .get::<Option<String>, _>("source_phone_id")
-                    .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+                source_phone_id: col::<Option<uuid::Uuid>>(&row, "source_phone_id")?
                     .map(ProfilePhoneId),
                 created_at: parse_dt(&row.get::<String, _>("created_at")),
             });
@@ -934,8 +914,8 @@ impl SqliteBackend {
                            WHERE d.principal_id = principals.id
                              AND d.disposition = 'quarantined')",
         )
-        .bind(principal_id.to_string())
-        .bind(profile_id.to_string())
+        .bind(principal_id.0)
+        .bind(profile_id)
         .bind(fmt_dt(&chrono::Utc::now()))
         .execute(&mut *tx)
         .await
@@ -949,9 +929,9 @@ impl SqliteBackend {
             "UPDATE principal_bindings SET source_field = 'email', source_email_id = ?3
              WHERE principal_id = ?1 AND profile_id = ?2",
         )
-        .bind(principal_id.to_string())
-        .bind(profile_id.to_string())
-        .bind(contact.id.to_string())
+        .bind(principal_id.0)
+        .bind(profile_id)
+        .bind(contact.id.0)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("link reconciled key: {e}")))?;
@@ -963,7 +943,7 @@ impl SqliteBackend {
                  recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE principal_id = ?1",
         )
-        .bind(principal_id.to_string())
+        .bind(principal_id.0)
         .bind(reason)
         .execute(&mut *tx)
         .await
@@ -979,8 +959,8 @@ impl SqliteBackend {
                  INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
                  WHERE pr.id = ? AND pb.profile_id = ?",
             )
-            .bind(principal_id.to_string())
-            .bind(profile_id.to_string())
+            .bind(principal_id.0)
+            .bind(profile_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("read the reconciled principal: {e}")))?;
@@ -1016,7 +996,7 @@ impl SqliteBackend {
         id: CredentialId,
     ) -> SidResult<Option<Credential>> {
         let row = sqlx::query("SELECT * FROM credentials WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1056,8 +1036,8 @@ impl SqliteBackend {
              ORDER BY id LIMIT ?",
         )
         .bind(credential_type.as_str())
-        .bind(after.map(|id| id.to_string()))
-        .bind(after.map(|id| id.to_string()))
+        .bind(after.map(|id| id.0))
+        .bind(after.map(|id| id.0))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -1373,12 +1353,12 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let profile_id: Option<String> = sqlx::query_scalar(
+        let profile_id: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE credentials SET label = ?
              WHERE id = ? AND status = 'active' RETURNING profile_id",
         )
         .bind(label)
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1400,7 +1380,7 @@ impl SqliteBackend {
         let (verified, policy_version, artifact) =
             crate::policy_evidence::columns(&new.policy_evidence)?;
         let mut tx = self.begin_write().await?;
-        let profile_id: Option<String> = sqlx::query_scalar(
+        let profile_id: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE credentials SET data = ?,
                 policy_version = ?, zkpp_verified = ?,
                 opaque_credential_identifier = ?, zkpp_artifact = ?, last_used_at = ?
@@ -1412,7 +1392,7 @@ impl SqliteBackend {
         .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
         .bind(artifact)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1421,7 +1401,7 @@ impl SqliteBackend {
             return Ok(false);
         };
         if let Some(history) = history {
-            if history.owner.to_string() != profile_id {
+            if history.owner != profile_id {
                 return Err(SidError::Validation(
                     "password history belongs to the credential's profile".into(),
                 ));
@@ -1442,12 +1422,12 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let profile_id: Option<String> = sqlx::query_scalar(
+        let profile_id: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE credentials SET data = ?
              WHERE id = ? AND data = ? RETURNING profile_id",
         )
         .bind(data)
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1465,12 +1445,12 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let profile_id: Option<String> = sqlx::query_scalar(
+        let profile_id: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE credentials SET last_used_at = ?
              WHERE id = ? AND status = 'active' RETURNING profile_id",
         )
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1489,13 +1469,13 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let profile_id: Option<String> = sqlx::query_scalar(
+        let profile_id: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE credentials SET data = ?, last_used_at = ?
              WHERE id = ? AND status = 'active' AND data = ? RETURNING profile_id",
         )
         .bind(data)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1545,7 +1525,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM credentials WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1564,7 +1544,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         let target: Option<(String, String)> =
             sqlx::query_as("SELECT credential_type, status FROM credentials WHERE id = ?")
-                .bind(id.to_string())
+                .bind(id.0)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(storage)?;
@@ -1582,7 +1562,7 @@ impl SqliteBackend {
                    AND id <> ?1 AND status = 'active'
                    AND credential_type IN (SELECT value FROM json_each(?2))",
             )
-            .bind(id.to_string())
+            .bind(id.0)
             .bind(serde_json::to_string(&primary_types).expect("names serialize"))
             .fetch_one(&mut *tx)
             .await
@@ -1592,7 +1572,7 @@ impl SqliteBackend {
             }
         }
         sqlx::query("UPDATE credentials SET status = 'revoked' WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -1726,12 +1706,13 @@ impl SqliteBackend {
             .iter()
             .map(row_to_profile)
             .collect::<SidResult<_>>()?;
-        // The page's attributes, one query each, not one per profile.
+        // The page's attributes, one query each per bounded run of profiles,
+        // not one per profile.
         let mut principals = Vec::new();
         let mut emails = Vec::new();
         let mut metadata = Vec::new();
-        if !profiles.is_empty() {
-            let ids = vec!["?"; profiles.len()].join(", ");
+        for page in profiles.chunks(super::rbac::IN_LIST_CHUNK) {
+            let ids = super::rbac::placeholders(page.len());
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pr.*,
                         pb.profile_id AS pb_profile_id,
@@ -1742,43 +1723,31 @@ impl SqliteBackend {
                  INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
                  WHERE pb.profile_id IN ({ids})"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            principals = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_principal)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                principals.push(row_to_principal(&row)?);
+            }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM profile_emails WHERE profile_id IN ({ids})
                  ORDER BY profile_id, is_primary DESC, created_at"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            emails = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_profile_email)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                emails.push(row_to_profile_email(&row)?);
+            }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM profile_metadata WHERE profile_id IN ({ids})"
             )));
-            for profile in &profiles {
+            for profile in page {
                 read = read.bind(profile.id);
             }
-            metadata = read
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(failed)?
-                .iter()
-                .map(row_to_profile_metadata)
-                .collect::<SidResult<_>>()?;
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                metadata.push(row_to_profile_metadata(&row)?);
+            }
         }
         tx.commit().await.map_err(failed)?;
 

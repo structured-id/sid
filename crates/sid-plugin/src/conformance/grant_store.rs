@@ -1043,6 +1043,32 @@ pub async fn auth_code_roundtrip<H: GrantHarness>(h: &H) {
     );
 }
 
+/// A code is stored only while its authorizing session exists: one issued
+/// after that session ended (a logout racing the authorization) is refused
+/// as `NotFound` and stores nothing, so it can never mint a session later.
+pub async fn auth_code_needs_its_authorizing_session<H: GrantHarness>(h: &H) {
+    let code = code(h, h.owner().await, h.resource().await).await;
+    h.store()
+        .delete_session(code.authentication.session, &end(), ctx())
+        .await
+        .unwrap();
+
+    let err = h
+        .store()
+        .create_auth_code(&code, ctx())
+        .await
+        .expect_err("a code of an ended session");
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+    assert!(
+        h.store()
+            .get_auth_code_by_hash(&code.code_hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused code was stored"
+    );
+}
+
 /// A code is redeemed once: the redemption stores its session and refresh
 /// token and marks the code; a second one stores nothing and names the first
 /// session so its tokens can be revoked (RFC 6749 §4.1.2). Issuing the code

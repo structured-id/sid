@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::ProjectId;
+use super::{OrgId, ProfileId, ProjectId};
 
 /// Validated UUIDv7 identifier of a machine user; construction and decoding go through `sid_ids`.
 pub use sid_ids::MachineUserId;
@@ -131,15 +131,12 @@ impl std::fmt::Display for MachineCredentialType {
     }
 }
 
-/// Who owns this machine user.
+/// The kind of a machine user's owner, as stored beside the owner's id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnerType {
-    /// Owned by a human profile (personal service account).
     Profile,
-    /// Owned by an organization (shared service account).
     Organization,
-    /// System-level (sid-operator managed).
     System,
 }
 
@@ -149,6 +146,56 @@ impl OwnerType {
             Self::Profile => "profile",
             Self::Organization => "organization",
             Self::System => "system",
+        }
+    }
+}
+
+/// Who a machine user acts for. Set at its creation and never changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "id", rename_all = "snake_case")]
+pub enum MachineOwner {
+    /// A Profile's own machine user.
+    Profile(ProfileId),
+    /// An organization's machine user, created by its administrators.
+    Organization(OrgId),
+    /// The installation's own, established by its provisioning only.
+    System,
+}
+
+impl MachineOwner {
+    /// The owner's kind, as stored.
+    pub fn kind(&self) -> OwnerType {
+        match self {
+            Self::Profile(_) => OwnerType::Profile,
+            Self::Organization(_) => OwnerType::Organization,
+            Self::System => OwnerType::System,
+        }
+    }
+
+    /// The owner's id, as stored; the installation has none.
+    pub fn id(&self) -> Option<uuid::Uuid> {
+        match self {
+            Self::Profile(id) => Some(*id.as_uuid()),
+            Self::Organization(id) => Some(*id.as_uuid()),
+            Self::System => None,
+        }
+    }
+
+    /// The owner a stored kind and id name. A profile or organization
+    /// without a valid id, or the installation with one, is corruption.
+    pub fn from_stored(kind: OwnerType, id: Option<uuid::Uuid>) -> Result<Self, String> {
+        match (kind, id) {
+            (OwnerType::Profile, Some(id)) => ProfileId::from_uuid(id)
+                .map(Self::Profile)
+                .map_err(|e| e.to_string()),
+            (OwnerType::Organization, Some(id)) => OrgId::from_uuid(id)
+                .map(Self::Organization)
+                .map_err(|e| e.to_string()),
+            (OwnerType::System, None) => Ok(Self::System),
+            (kind, id) => Err(format!(
+                "machine user owner {} with id {id:?}",
+                kind.as_str()
+            )),
         }
     }
 }
@@ -170,10 +217,8 @@ pub struct MachineUser {
     /// Project this machine user belongs to.
     pub project_id: ProjectId,
 
-    /// Owner of this machine user.
-    pub owner_type: OwnerType,
-    /// Owner ID (profile_id, org_id, or "system").
-    pub owner_id: String,
+    /// Who the machine user acts for.
+    pub owner: MachineOwner,
 
     /// OAuth2 client_id used for authentication.
     pub client_id: String,
@@ -209,15 +254,13 @@ impl MachineUser {
         project_id: ProjectId,
         client_id: impl Into<String>,
         display_name: impl Into<String>,
-        owner_type: OwnerType,
-        owner_id: impl Into<String>,
+        owner: MachineOwner,
     ) -> Self {
         let now = Utc::now();
         Self {
             id: MachineUserId::generate(),
             project_id,
-            owner_type,
-            owner_id: owner_id.into(),
+            owner,
             client_id: client_id.into(),
             display_name: display_name.into(),
             description: None,

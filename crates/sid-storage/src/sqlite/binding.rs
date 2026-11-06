@@ -174,7 +174,7 @@ impl SqliteBackend {
                 .map_err(storage("touch service binding"))?;
             return binding(row);
         }
-        let profile: Option<String> = sqlx::query_scalar("SELECT id FROM profiles WHERE id = ?")
+        let profile: Option<i64> = sqlx::query_scalar("SELECT 1 FROM profiles WHERE id = ?")
             .bind(profile_id)
             .fetch_optional(&mut *tx)
             .await

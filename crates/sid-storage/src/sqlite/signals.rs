@@ -6,16 +6,12 @@ use sid_core::{
     models::{AnomalyEventId, AnomalyEventRecord, MutationContext},
 };
 use sqlx::Row;
-use uuid::Uuid;
 
-use super::{SqliteBackend, col, fmt_dt, parse_dt};
+use super::{SqliteBackend, col, fmt_dt, parse_dt, uuid_col};
 
 fn row_to_anomaly_event(row: &sqlx::sqlite::SqliteRow) -> SidResult<AnomalyEventRecord> {
-    let id: String = col(row, "id")?;
     Ok(AnomalyEventRecord {
-        id: AnomalyEventId(
-            Uuid::parse_str(&id).map_err(|e| SidError::Storage(format!("column id: {e}")))?,
-        ),
+        id: AnomalyEventId(uuid_col(row, "id")?),
         rule_id: col(row, "rule_id")?,
         profile_id: col(row, "profile_id")?,
         ip_address: super::ip_col(row, "ip_address")?,
@@ -35,7 +31,7 @@ impl SqliteBackend {
             "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(event.id.to_string())
+        .bind(event.id.0)
         .bind(&event.rule_id)
         .bind(&event.profile_id)
         .bind(event.ip_address.map(super::ip_to_bytes))

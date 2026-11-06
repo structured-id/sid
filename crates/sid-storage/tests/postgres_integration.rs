@@ -936,6 +936,7 @@ macro_rules! history_key_store {
 history_key_store!(
     first_epoch_never_resets_a_history,
     epoch_is_ensured_once,
+    ensures_of_a_known_owner_agree,
     owner_domains_are_separate,
     epoch_rotation,
     lifecycle_follows_the_live_set,
@@ -1301,6 +1302,7 @@ mod grant_store {
         session_found_by_browser_secret,
         touch_session_keeps_latest_activity,
         auth_code_roundtrip,
+        auth_code_needs_its_authorizing_session,
         auth_code_redeem_once,
         auth_code_concurrent_redeem,
         refresh_token_roundtrip,
@@ -1772,6 +1774,11 @@ async fn test_application_roles_are_stored_together() {
 }
 
 #[tokio::test]
+async fn test_project_in_use_is_not_deleted() {
+    common::application::test_project_in_use_is_not_deleted(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_concurrent_indicator_registration() {
     common::application::test_concurrent_indicator_registration(&setup().await).await;
 }
@@ -1784,6 +1791,12 @@ async fn test_system_integration_exists_once() {
 #[tokio::test]
 async fn test_application_update_and_list() {
     common::application::test_application_update_and_list(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_records_update_from_the_object_they_were_created_with() {
+    common::application::test_records_update_from_the_object_they_were_created_with(&setup().await)
+        .await;
 }
 
 #[tokio::test]
@@ -2903,6 +2916,11 @@ async fn test_dropped_job_lock_is_freed() {
 #[tokio::test]
 async fn test_job_locks_are_per_job() {
     common::job_lock::test_job_locks_are_per_job(&setup().await, &setup().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_job_lock_taken_once() {
+    common::job_lock::test_concurrent_job_lock_taken_once(&setup().await, &setup().await).await;
 }
 
 /// A database created from different migration SQL is refused, not reported

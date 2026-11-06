@@ -217,7 +217,7 @@ pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBacke
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE password_history_epochs SET created_at = ? WHERE id = ?")
             .bind(&old)
-            .bind(expected.epochs[0].id.0.to_string())
+            .bind(expected.epochs[0].id.0)
             .execute(sqlite.pool())
             .await
             .unwrap();

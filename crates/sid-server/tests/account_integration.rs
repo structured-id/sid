@@ -469,7 +469,7 @@ async fn the_integration_is_disabled_not_edited() {
             .delete_application(admin(
                 &svc,
                 DeleteApplicationRequest {
-                    id: integration.application.id.to_string(),
+                    id: Some(integration.application.id.into()),
                 },
             ))
             .await
@@ -494,7 +494,7 @@ async fn the_integration_is_disabled_not_edited() {
                 &svc,
                 RemoveResourceAccessRequest {
                     client_id: client_id.clone(),
-                    resource_id: integration.resource.id.to_string(),
+                    resource_id: Some(integration.resource.id.into()),
                 },
             ))
             .await
@@ -505,7 +505,7 @@ async fn the_integration_is_disabled_not_edited() {
             .update_resource_role(admin(
                 &svc,
                 UpdateResourceRoleRequest {
-                    resource_id: integration.resource.id.to_string(),
+                    resource_id: Some(integration.resource.id.into()),
                     scopes: Some(ScopeList {
                         scopes: vec!["everything".into()],
                     }),

@@ -147,12 +147,11 @@ impl ProjectServiceImpl {
     async fn load_application(
         &self,
         field: &'static str,
-        id: &str,
+        id: Option<&sid_ids_proto::ApplicationId>,
     ) -> Result<model::Application, Status> {
-        let parsed =
-            ApplicationId::parse(id).map_err(|e| invalid_field(field, format!("{field}: {e}")))?;
+        let id: ApplicationId = convert::wire_id(id, field)?;
         self.storage
-            .get_application(parsed)
+            .get_application(id)
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| application_not_found(id))
@@ -241,22 +240,14 @@ impl ProjectServiceImpl {
     async fn load_resource(
         &self,
         field: &'static str,
-        id: &str,
+        id: Option<&sid_ids_proto::ResourceId>,
     ) -> Result<model::ProtectedResource, Status> {
-        let parsed =
-            ResourceId::parse(id).map_err(|e| invalid_field(field, format!("{field}: {e}")))?;
+        let id: ResourceId = convert::wire_id(id, field)?;
         self.storage
-            .get_protected_resource(parsed)
+            .get_protected_resource(id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| {
-                ApiError::new(
-                    ErrorReason::ResourceNotFound,
-                    "no protected resource has this identifier",
-                )
-                .with_resource("ProtectedResource", id)
-                .into()
-            })
+            .ok_or_else(|| resource_not_found(id))
     }
 
     /// A new client role of `app` from `settings`, with the secret a
@@ -437,22 +428,31 @@ impl ProjectServiceImpl {
 
 fn project_to_proto(p: &Project) -> sid_proto::sid::v1::Project {
     sid_proto::sid::v1::Project {
-        id: p.id.to_string(),
+        id: Some(p.id.into()),
         name: p.name.clone(),
         description: p.description.clone(),
-        owner_profile_id: p.owner_id.map(|id| id.to_string()).unwrap_or_default(),
+        owner_profile_id: p.owner_id.map(Into::into),
         is_system: p.is_system,
         created_at: Some(convert::to_timestamp(p.created_at)),
         updated_at: Some(convert::to_timestamp(p.updated_at)),
     }
 }
 
-fn application_not_found(id: &str) -> Status {
+fn application_not_found(id: ApplicationId) -> Status {
     ApiError::new(
         ErrorReason::ApplicationNotFound,
         "no application has this identifier",
     )
-    .with_resource("Application", id)
+    .with_resource("Application", id.to_string())
+    .into()
+}
+
+fn resource_not_found(id: ResourceId) -> Status {
+    ApiError::new(
+        ErrorReason::ResourceNotFound,
+        "no protected resource has this identifier",
+    )
+    .with_resource("ProtectedResource", id.to_string())
     .into()
 }
 
@@ -616,14 +616,23 @@ fn decode_result(result: &[u8]) -> Result<sid_proto::sid::v1::Project, Status> {
     })
 }
 
-#[allow(clippy::result_large_err)]
-fn parse_project_id(id: &str) -> Result<ProjectId, Status> {
-    ProjectId::parse(id).map_err(|_| invalid_field("project_id", "not a project identifier"))
-}
-
 /// PROJECT_NOT_FOUND for `id`.
 fn project_not_found(id: ProjectId) -> Status {
     not_found(ErrorReason::ProjectNotFound, "Project", id.to_string())
+}
+
+/// INVALID_STATE: an application or SCIM target still belongs to the project.
+fn project_in_use(id: ProjectId) -> Status {
+    ApiError::new(
+        ErrorReason::InvalidState,
+        "the project still has applications or SCIM targets",
+    )
+    .with_precondition(
+        "PROJECT_IN_USE",
+        id.to_string(),
+        "remove its applications and SCIM targets first",
+    )
+    .into()
 }
 
 /// The initial access token is unknown, revoked, expired or used up: it
@@ -649,11 +658,11 @@ fn subject_migration_required(client_id: &str) -> Status {
 }
 
 /// INITIAL_ACCESS_TOKEN_NOT_FOUND for `id`.
-fn iat_not_found(id: &str) -> Status {
+fn iat_not_found(id: InitialAccessTokenId) -> Status {
     not_found(
         ErrorReason::InitialAccessTokenNotFound,
         "InitialAccessToken",
-        id,
+        id.to_string(),
     )
 }
 
@@ -742,11 +751,11 @@ impl ProjectService for ProjectServiceImpl {
         // A failure a concurrent attempt of this command caused (a value its
         // project took) is that attempt's answer.
         let answer: Result<sid_proto::sid::v1::Project, Status> = async {
-            let owner_id = if req.owner_profile_id.is_empty() {
-                None
-            } else {
-                Some(convert::parse_profile_id(&req.owner_profile_id)?)
-            };
+            let owner_id = req
+                .owner_profile_id
+                .as_ref()
+                .map(|id| convert::wire_id(Some(id), "owner_profile_id"))
+                .transpose()?;
 
             let mut project = Project::new(&req.name, owner_id);
             project.description = req.description;
@@ -791,7 +800,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Project>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.id)?;
+        let project_id = convert::wire_id(req.id.as_ref(), "id")?;
 
         match self.storage.get_project(project_id).await {
             Ok(Some(p)) => Ok(Response::new(project_to_proto(&p))),
@@ -836,7 +845,7 @@ impl ProjectService for ProjectServiceImpl {
         self.check_maintenance().await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.id)?;
+        let project_id = convert::wire_id(req.id.as_ref(), "id")?;
 
         if project_id.is_system() {
             return Err(system_project("update"));
@@ -885,7 +894,7 @@ impl ProjectService for ProjectServiceImpl {
         self.check_maintenance().await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.id)?;
+        let project_id = convert::wire_id(req.id.as_ref(), "id")?;
 
         if project_id.is_system() {
             return Err(system_project("delete"));
@@ -910,7 +919,13 @@ impl ProjectService for ProjectServiceImpl {
                     project_id.to_string(),
                 ))
                 .with_operation(command.completion(().encode_to_vec()));
-                self.storage.delete_project(project_id, ctx).await?;
+                self.storage
+                    .delete_project(project_id, ctx)
+                    .await
+                    .map_err(|e| match e {
+                        SidError::InvalidState(_) => Effect::from(project_in_use(project_id)),
+                        e => Effect::from(e),
+                    })?;
                 info!("Deleted project {project_id}");
                 Ok(())
             })
@@ -963,7 +978,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let app = self.load_application("id", &req.id).await?;
+        let app = self.load_application("id", req.id.as_ref()).await?;
         Ok(Response::new(self.application_view(&app).await?))
     }
 
@@ -975,7 +990,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<ListApplicationsResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
         let limit = if req.page_size > 0 {
             req.page_size as u64
         } else {
@@ -1017,7 +1032,7 @@ impl ProjectService for ProjectServiceImpl {
         );
         let view = command
             .run(&*self.storage, || async {
-                let mut app = self.load_application("id", &req.id).await?;
+                let mut app = self.load_application("id", req.id.as_ref()).await?;
                 if let Some(name) = req.name.clone() {
                     if name.is_empty() {
                         return Err(missing_field("name").into());
@@ -1039,7 +1054,7 @@ impl ProjectService for ProjectServiceImpl {
                 if !self.storage.update_application(&app, ctx).await? {
                     // Deleted meanwhile, or changed since it was read.
                     return Err(match self.storage.get_application(app.id).await {
-                        Ok(None) => application_not_found(&req.id),
+                        Ok(None) => application_not_found(app.id),
                         Ok(Some(_)) => changed_concurrently(),
                         Err(e) => storage_failure(e),
                     }
@@ -1084,8 +1099,7 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let id =
-            ApplicationId::parse(&req.id).map_err(|e| invalid_field("id", format!("id: {e}")))?;
+        let id: ApplicationId = convert::wire_id(req.id.as_ref(), "id")?;
         // Deleting it would only bring it back, with new identifiers, at the
         // next start; an integration is disabled instead.
         if self
@@ -1108,7 +1122,7 @@ impl ProjectService for ProjectServiceImpl {
                 let ctx = admin_ctx(&caller, "application.delete", id.to_string())
                     .with_operation(command.completion(().encode_to_vec()));
                 if !self.storage.delete_application(id, ctx).await? {
-                    return Err(application_not_found(&req.id).into());
+                    return Err(application_not_found(id).into());
                 }
                 info!("Deleted application {}", id);
                 Ok(())
@@ -1137,7 +1151,7 @@ impl ProjectService for ProjectServiceImpl {
         let mut response = command
             .run(&*self.storage, || async {
                 let app = self
-                    .load_application("application_id", &req.application_id)
+                    .load_application("application_id", req.application_id.as_ref())
                     .await?;
                 let settings = req
                     .settings
@@ -1200,7 +1214,7 @@ impl ProjectService for ProjectServiceImpl {
         let view = command
             .run(&*self.storage, || async {
                 let app = self
-                    .load_application("application_id", &req.application_id)
+                    .load_application("application_id", req.application_id.as_ref())
                     .await?;
                 let settings = req
                     .settings
@@ -1293,8 +1307,7 @@ impl ProjectService for ProjectServiceImpl {
         if req.client_id.is_empty() {
             return Err(missing_field("client_id"));
         }
-        let resource = ResourceId::parse(&req.resource_id)
-            .map_err(|e| invalid_field("resource_id", format!("resource_id: {e}")))?;
+        let resource: ResourceId = convert::wire_id(req.resource_id.as_ref(), "resource_id")?;
         if let Some(app) = self.system_client(&req.client_id).await? {
             return Err(system_managed(
                 app,
@@ -1341,8 +1354,7 @@ impl ProjectService for ProjectServiceImpl {
                 .await
                 .map_err(storage_failure)?,
             Some(Subject::ResourceId(id)) => {
-                let resource = ResourceId::parse(&id)
-                    .map_err(|e| invalid_field("resource_id", format!("resource_id: {e}")))?;
+                let resource: ResourceId = convert::wire_id(Some(&id), "resource_id")?;
                 self.storage
                     .list_resource_access_by_resource(resource)
                     .await
@@ -1376,7 +1388,7 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
 
         if req.key.is_empty() {
             return Err(missing_field("key"));
@@ -1438,9 +1450,14 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let role_id = RoleId::parse(&req.role_id)
-            .map_err(|_| invalid_field("role_id", "not a role identifier"))?;
-        let role_not_found = || not_found(ErrorReason::RoleNotFound, "Role", req.role_id.clone());
+        let role_id: RoleId = convert::wire_id(req.role_id.as_ref(), "role_id")?;
+        // An absent project leaves the role's own project; a named one must be it.
+        let project_id: Option<ProjectId> = req
+            .project_id
+            .as_ref()
+            .map(|id| convert::wire_id(Some(id), "project_id"))
+            .transpose()?;
+        let role_not_found = || not_found(ErrorReason::RoleNotFound, "Role", role_id.to_string());
 
         // A retry of a completed removal answers as the removal did.
         let command =
@@ -1453,11 +1470,8 @@ impl ProjectService for ProjectServiceImpl {
                     .get_role(role_id)
                     .await?
                     .ok_or_else(role_not_found)?;
-                if !req.project_id.is_empty() {
-                    let project_id = parse_project_id(&req.project_id)?;
-                    if role.project_id != project_id {
-                        return Err(role_not_found().into());
-                    }
+                if project_id.is_some_and(|project| project != role.project_id) {
+                    return Err(role_not_found().into());
                 }
                 let ctx = admin_ctx(&caller, "role.delete", role_id.to_string())
                     .with_operation(command.completion(().encode_to_vec()));
@@ -1619,7 +1633,7 @@ impl ProjectService for ProjectServiceImpl {
                 // The actor is the holder of the initial access token, not
                 // the administrator who created it.
                 AuditEntry::machine(
-                    format!("iat:{}", iat.id.0),
+                    format!("iat:{}", iat.id),
                     "dcr.register",
                     client.client_id.clone(),
                 )
@@ -1636,10 +1650,7 @@ impl ProjectService for ProjectServiceImpl {
                 e => storage_failure(e),
             })?;
 
-        info!(
-            "DCR: registered client '{}' via IAT {}",
-            client_id, iat.id.0
-        );
+        info!("DCR: registered client '{}' via IAT {}", client_id, iat.id);
 
         Ok(Response::new(RegisterClientResponse {
             client: Some(self.client_view(&client)?),
@@ -1789,7 +1800,7 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
 
         // A retry of a completed creation answers with the token it created,
         // without its value: SID keeps only its hash, and a retry creates no
@@ -1816,7 +1827,7 @@ impl ProjectService for ProjectServiceImpl {
                 let token_hash = sha256_hash(token_value.expose_secret().as_bytes());
                 let now = chrono::Utc::now();
                 let token = InitialAccessToken {
-                    id: InitialAccessTokenId::new(),
+                    id: InitialAccessTokenId::generate(),
                     token_hash,
                     project_id,
                     max_clients: req.max_clients,
@@ -1826,21 +1837,21 @@ impl ProjectService for ProjectServiceImpl {
                     allowed_redirect_patterns: req.allowed_redirect_patterns.clone(),
                     expires_at: now + expires_in,
                     created_at: now,
-                    created_by: caller.profile_id.to_string(),
+                    created_by: caller.profile_id,
                     revoked: false,
                 };
                 let recorded = CreateInitialAccessTokenResponse {
                     token: Some(iat_to_proto(&token)),
                     token_value: String::new(),
                 };
-                let ctx = admin_ctx(&caller, "iat.create", token.id.0.to_string())
+                let ctx = admin_ctx(&caller, "iat.create", token.id.to_string())
                     .with_operation(command.completion(recorded.encode_to_vec()));
                 self.storage
                     .create_initial_access_token(&token, ctx)
                     .await?;
                 info!(
                     "Created IAT {} for project {} (max_clients: {}, expires: {})",
-                    token.id.0, project_id, token.max_clients, token.expires_at
+                    token.id, project_id, token.max_clients, token.expires_at
                 );
                 issued = Some(token_value);
                 Ok(recorded)
@@ -1860,7 +1871,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<ListInitialAccessTokensResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
 
         let tokens = self
             .storage
@@ -1884,9 +1895,7 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let token_id = uuid::Uuid::parse_str(&req.id)
-            .map(InitialAccessTokenId)
-            .map_err(|_| invalid_field("id", "not an initial access token identifier"))?;
+        let token_id: InitialAccessTokenId = convert::wire_id(req.id.as_ref(), "id")?;
 
         // A retry of a completed revocation answers as the revocation did.
         let command = KeyedCommand::by_profile::<keyed::RevokeInitialAccessToken>(
@@ -1899,13 +1908,13 @@ impl ProjectService for ProjectServiceImpl {
                 self.storage
                     .get_initial_access_token(token_id)
                     .await?
-                    .ok_or_else(|| iat_not_found(&req.id))?;
-                let ctx = admin_ctx(&caller, "iat.revoke", token_id.0.to_string())
+                    .ok_or_else(|| iat_not_found(token_id))?;
+                let ctx = admin_ctx(&caller, "iat.revoke", token_id.to_string())
                     .with_operation(command.completion(().encode_to_vec()));
                 self.storage
                     .revoke_initial_access_token(token_id, ctx)
                     .await?;
-                info!("Revoked IAT {}", token_id.0);
+                info!("Revoked IAT {}", token_id);
                 Ok(())
             })
             .await?;
@@ -1929,8 +1938,8 @@ fn sha256_hash(data: &[u8]) -> Vec<u8> {
 
 fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToken {
     sid_proto::sid::v1::InitialAccessToken {
-        id: t.id.0.to_string(),
-        project_id: t.project_id.to_string(),
+        id: Some(t.id.into()),
+        project_id: Some(t.project_id.into()),
         max_clients: t.max_clients,
         clients_registered: t.clients_registered,
         allowed_scopes: t.allowed_scopes.clone(),
@@ -1938,7 +1947,7 @@ fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToke
         allowed_redirect_patterns: t.allowed_redirect_patterns.clone(),
         expires_at: Some(convert::to_timestamp(t.expires_at)),
         created_at: Some(convert::to_timestamp(t.created_at)),
-        created_by: t.created_by.clone(),
+        created_by: Some(t.created_by.into()),
         revoked: t.revoked,
     }
 }
@@ -1953,7 +1962,7 @@ impl ProjectServiceImpl {
         command: &KeyedCommand,
         req: CreateApplicationRequest,
     ) -> Result<(CreateApplicationResponse, Option<SecretBox<String>>), Effect> {
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
         self.storage
             .get_project(project_id)
             .await?
@@ -1961,14 +1970,15 @@ impl ProjectServiceImpl {
 
         // Every application belongs to the installation's organization; a
         // request naming another one names an organization that is not here.
-        if let Some(requested) = req.org_id.as_deref().filter(|o| !o.is_empty())
-            && model::OrgId::parse(requested).ok() != Some(self.org)
-        {
-            return Err(invalid_field(
-                "org_id",
-                format!("organization {requested} is not this installation's"),
-            )
-            .into());
+        if let Some(requested) = req.org_id.as_ref() {
+            let requested: model::OrgId = convert::wire_id(Some(requested), "org_id")?;
+            if requested != self.org {
+                return Err(invalid_field(
+                    "org_id",
+                    format!("organization {requested} is not this installation's"),
+                )
+                .into());
+            }
         }
         if req.name.is_empty() {
             return Err(missing_field("name").into());
@@ -2039,7 +2049,7 @@ impl ProjectServiceImpl {
     ) -> Result<Application, Effect> {
         let mut client = self.load_client(&req.client_id).await?;
         // Only the activity of an integration's client is the administrator's.
-        let edits_settings = req.default_resource_id.is_some()
+        let edits_settings = req.default_resource.is_some()
             || req.name.is_some()
             || !req.redirect_uris.is_empty()
             || !req.allowed_scopes.is_empty()
@@ -2056,23 +2066,26 @@ impl ProjectServiceImpl {
 
         // A default target is one this client already has access to: a
         // default never grants access by itself.
-        if let Some(requested) = req.default_resource_id.as_deref() {
-            client.default_resource = if requested.is_empty() {
-                None
-            } else {
-                let resource = self.load_resource("default_resource_id", requested).await?;
-                let access = self
-                    .storage
-                    .resource_access(&client.client_id, resource.id)
-                    .await?;
-                if access.is_none() {
-                    return Err(invalid_field(
-                        "default_resource_id",
-                        "the client has no access to this resource",
-                    )
-                    .into());
+        if let Some(requested) = &req.default_resource {
+            client.default_resource = match &requested.resource_id {
+                None => None,
+                Some(id) => {
+                    let resource = self
+                        .load_resource("default_resource.resource_id", Some(id))
+                        .await?;
+                    let access = self
+                        .storage
+                        .resource_access(&client.client_id, resource.id)
+                        .await?;
+                    if access.is_none() {
+                        return Err(invalid_field(
+                            "default_resource",
+                            "the client has no access to this resource",
+                        )
+                        .into());
+                    }
+                    Some(resource.id)
                 }
-                Some(resource.id)
             };
         }
 
@@ -2119,7 +2132,7 @@ impl ProjectServiceImpl {
             .storage
             .get_application(client.application_id)
             .await?
-            .ok_or_else(|| application_not_found(&client.application_id.to_string()))?;
+            .ok_or_else(|| application_not_found(client.application_id))?;
         let mut left = client.clone();
         left.revision += 1;
         let mut view = self.application_view(&app).await?;
@@ -2140,7 +2153,9 @@ impl ProjectServiceImpl {
         command: &KeyedCommand,
         req: UpdateResourceRoleRequest,
     ) -> Result<sid_proto::sid::v1::ProtectedResource, Effect> {
-        let mut resource = self.load_resource("resource_id", &req.resource_id).await?;
+        let mut resource = self
+            .load_resource("resource_id", req.resource_id.as_ref())
+            .await?;
         if resource.state == ResourceState::Retired {
             return Err(resource_retired(&resource).into());
         }
@@ -2218,7 +2233,9 @@ impl ProjectServiceImpl {
             return Err(system_managed(app, "its client's access follows the integration").into());
         }
         let served = self.requester_served(&req.client_id).await?;
-        let resource = self.load_resource("resource_id", &req.resource_id).await?;
+        let resource = self
+            .load_resource("resource_id", req.resource_id.as_ref())
+            .await?;
         if resource.state == ResourceState::Retired {
             return Err(resource_retired(&resource).into());
         }
@@ -2271,14 +2288,7 @@ impl ProjectServiceImpl {
             .map_err(|e| match e {
                 // Retired or gone between the check above and the write.
                 SidError::InvalidState(_) => resource_retired(&resource).into(),
-                SidError::NotFound(_) => Status::from(
-                    ApiError::new(
-                        ErrorReason::ResourceNotFound,
-                        "no protected resource has this identifier",
-                    )
-                    .with_resource("ProtectedResource", req.resource_id.clone()),
-                )
-                .into(),
+                SidError::NotFound(_) => resource_not_found(resource.id).into(),
                 e => Effect::from(e),
             })?;
         Ok(view)
@@ -2350,7 +2360,7 @@ impl ProjectServiceImpl {
                     )
                     .with_precondition(
                         "INITIAL_ACCESS_TOKEN",
-                        iat_id.0.to_string(),
+                        iat_id.to_string(),
                         "deleted",
                     ),
                 )

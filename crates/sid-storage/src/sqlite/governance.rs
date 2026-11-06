@@ -55,7 +55,7 @@ async fn decide_in_tx(
     .bind(request.reviewed_by)
     .bind(&request.review_comment)
     .bind(fmt_dt_opt(request.reviewed_at))
-    .bind(request.id.to_string())
+    .bind(request.id)
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("Decide access_request failed: {e}")))?
@@ -75,9 +75,9 @@ impl SqliteBackend {
             access_request_columns!(),
             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ))
-        .bind(request.id.to_string())
+        .bind(request.id)
         .bind(request.requester_id)
-        .bind(request.project_id.to_string())
+        .bind(request.project_id)
         .bind(&request.role_key)
         .bind(&request.justification)
         .bind(request.requested_duration_hours.map(i64::from))
@@ -102,7 +102,7 @@ impl SqliteBackend {
             access_request_columns!(),
             " FROM access_requests WHERE id = ?"
         ))
-        .bind(id.to_string())
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;

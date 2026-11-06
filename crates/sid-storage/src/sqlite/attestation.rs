@@ -69,7 +69,7 @@ impl SqliteBackend {
                 revoked_at = excluded.revoked_at \
              WHERE device_attestations.status = 'revoked'"
         ))
-        .bind(att.id.to_string())
+        .bind(att.id.0)
         .bind(att.device_id)
         .bind(att.profile_id)
         .bind(att.format.as_str())
@@ -170,7 +170,7 @@ impl SqliteBackend {
             attestation_columns!(),
             " FROM device_attestations WHERE id = ?"
         ))
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;

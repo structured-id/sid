@@ -35,18 +35,23 @@ async fn has_table(pool: &SqlitePool, name: &str) -> bool {
         == 1
 }
 
-async fn add_profile(pool: &SqlitePool, id: &str) {
+/// The 16-byte id `n` names in these tests.
+fn id(n: u8) -> uuid::Uuid {
+    uuid::Uuid::from_bytes([n; 16])
+}
+
+async fn add_profile(pool: &SqlitePool, n: u8) {
     sqlx::query("INSERT INTO profiles (id, username) VALUES (?, ?)")
-        .bind(id)
-        .bind(id)
+        .bind(id(n))
+        .bind(format!("p{n}"))
         .execute(pool)
         .await
         .unwrap();
 }
 
-async fn has_profile(pool: &SqlitePool, id: &str) -> bool {
+async fn has_profile(pool: &SqlitePool, n: u8) -> bool {
     sqlx::query_scalar::<_, i64>("SELECT count(*) FROM profiles WHERE id = ?")
-        .bind(id)
+        .bind(id(n))
         .fetch_one(pool)
         .await
         .unwrap()
@@ -75,14 +80,14 @@ async fn reopening_keeps_the_data() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
     prepare(&pool, SCHEMA).await.unwrap();
-    add_profile(&pool, "p1").await;
+    add_profile(&pool, 1).await;
     pool.close().await;
 
     let pool = open(&path).await;
     prepare(&pool, SCHEMA).await.unwrap();
     prepare(&pool, SCHEMA).await.unwrap();
     assert_eq!(version(&pool).await, SCHEMA_VERSION);
-    assert!(has_profile(&pool, "p1").await);
+    assert!(has_profile(&pool, 1).await);
 }
 
 /// An unversioned file of any shape is refused and left as it was: its data
@@ -95,12 +100,12 @@ async fn an_unversioned_file_is_refused_unchanged() {
         .execute(&pool)
         .await
         .unwrap();
-    add_profile(&pool, "p1").await;
+    add_profile(&pool, 1).await;
 
     let err = prepare(&pool, SCHEMA).await.unwrap_err();
     assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
     assert_eq!(version(&pool).await, 0);
-    assert!(has_profile(&pool, "p1").await);
+    assert!(has_profile(&pool, 1).await);
     assert!(!has_table(&pool, "sessions").await);
 }
 
@@ -111,7 +116,7 @@ async fn a_file_of_another_version_is_refused_unchanged() {
         let (_dir, path) = scratch();
         let pool = open(&path).await;
         prepare(&pool, SCHEMA).await.unwrap();
-        add_profile(&pool, "p1").await;
+        add_profile(&pool, 1).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "PRAGMA user_version = {other}"
         )))
@@ -122,7 +127,7 @@ async fn a_file_of_another_version_is_refused_unchanged() {
         let err = prepare(&pool, SCHEMA).await.unwrap_err();
         assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
         assert_eq!(version(&pool).await, other);
-        assert!(has_profile(&pool, "p1").await);
+        assert!(has_profile(&pool, 1).await);
     }
 }
 
@@ -152,24 +157,29 @@ async fn disagreeing_policy_evidence_is_refused() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
     prepare(&pool, SCHEMA).await.unwrap();
-    add_profile(&pool, "p-1").await;
-    add_profile(&pool, "p-2").await;
+    add_profile(&pool, 1).await;
+    add_profile(&pool, 2).await;
     sqlx::query(
         "INSERT INTO credentials (id, profile_id, credential_type, data)
-         VALUES ('c1', 'p-1', 'opaque', X'00')",
+         VALUES (?, ?, 'opaque', X'00')",
     )
+    .bind(id(11))
+    .bind(id(1))
     .execute(&pool)
     .await
     .unwrap();
 
     let disagreeing = sqlx::query(
         "INSERT INTO credentials (id, profile_id, credential_type, data, zkpp_verified, policy_version)
-         VALUES ('c2', 'p-2', 'opaque', X'00', 1, 1)",
+         VALUES (?, ?, 'opaque', X'00', 1, 1)",
     )
+    .bind(id(12))
+    .bind(id(2))
     .execute(&pool)
     .await;
     assert!(disagreeing.is_err(), "a verdict without its artifact");
-    let disagreeing = sqlx::query("UPDATE credentials SET zkpp_verified = 1 WHERE id = 'c1'")
+    let disagreeing = sqlx::query("UPDATE credentials SET zkpp_verified = 1 WHERE id = ?")
+        .bind(id(11))
         .execute(&pool)
         .await;
     assert!(
@@ -178,9 +188,10 @@ async fn disagreeing_policy_evidence_is_refused() {
     );
     sqlx::query(
         "UPDATE credentials SET zkpp_verified = 1, policy_version = 1, zkpp_artifact = ?
-         WHERE id = 'c1'",
+         WHERE id = ?",
     )
     .bind(vec![7u8; 32])
+    .bind(id(11))
     .execute(&pool)
     .await
     .expect("a complete verdict is stored");

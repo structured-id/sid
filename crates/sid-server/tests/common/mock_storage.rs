@@ -48,7 +48,7 @@ pub struct MockStorageInner {
     provisioning_connectors: HashMap<ProvisioningConnectorId, ProvisioningConnector>,
     provisioning_credentials: Vec<ProvisioningCredential>,
     impersonation_grants: Vec<ImpersonationGrant>,
-    initial_access_tokens: HashMap<Uuid, InitialAccessToken>,
+    initial_access_tokens: HashMap<InitialAccessTokenId, InitialAccessToken>,
     magic_links: HashMap<Uuid, MagicLinkSession>,
     device_codes: HashMap<DeviceAuthCodeId, DeviceAuthorizationCode>,
     key_versions: Vec<sid_keys::KeyVersionParams>,
@@ -754,7 +754,7 @@ impl MockStorage {
 
     pub fn with_initial_access_token(self, iat: InitialAccessToken) -> Self {
         let mut inner = self.inner.lock().unwrap();
-        inner.initial_access_tokens.insert(iat.id.0, iat);
+        inner.initial_access_tokens.insert(iat.id, iat);
         drop(inner);
         self
     }
@@ -3856,9 +3856,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.owe(&audit)?;
-        inner
-            .initial_access_tokens
-            .insert(token.id.0, token.clone());
+        inner.initial_access_tokens.insert(token.id, token.clone());
         Ok(())
     }
     async fn list_key_versions(&self) -> SidResult<Vec<sid_keys::KeyVersionParams>> {
@@ -4130,8 +4128,8 @@ impl StorageBackend for MockStorage {
         }
         let token = inner
             .initial_access_tokens
-            .get(&iat.0)
-            .ok_or_else(|| sid_core::Error::NotFound(format!("initial access token {}", iat.0)))?;
+            .get(&iat)
+            .ok_or_else(|| sid_core::Error::NotFound(format!("initial access token {iat}")))?;
         if token.revoked {
             return Err(sid_core::Error::Revoked("initial access token".into()));
         }
@@ -4151,7 +4149,7 @@ impl StorageBackend for MockStorage {
             inner.applications.remove(&app.id);
             return Err(e);
         }
-        if let Some(token) = inner.initial_access_tokens.get_mut(&iat.0) {
+        if let Some(token) = inner.initial_access_tokens.get_mut(&iat) {
             token.clients_registered += 1;
         }
         inner
@@ -4164,7 +4162,7 @@ impl StorageBackend for MockStorage {
         id: InitialAccessTokenId,
     ) -> SidResult<Option<InitialAccessToken>> {
         let inner = self.inner.lock().unwrap();
-        Ok(inner.initial_access_tokens.get(&id.0).cloned())
+        Ok(inner.initial_access_tokens.get(&id).cloned())
     }
     async fn get_initial_access_token_by_hash(
         &self,
@@ -4196,7 +4194,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.owe(&audit)?;
-        if let Some(iat) = inner.initial_access_tokens.get_mut(&id.0) {
+        if let Some(iat) = inner.initial_access_tokens.get_mut(&id) {
             iat.revoked = true;
         }
         Ok(())
@@ -4250,6 +4248,12 @@ impl StorageBackend for MockStorage {
             return Err(sid_core::Error::Validation(
                 "Cannot delete system project".into(),
             ));
+        }
+        // As every backend: an application keeps its project.
+        if inner.applications.values().any(|a| a.project_id == id) {
+            return Err(sid_core::Error::InvalidState(format!(
+                "project {id} is in use"
+            )));
         }
         inner.owe(&ctx)?;
         inner.projects.remove(&id);

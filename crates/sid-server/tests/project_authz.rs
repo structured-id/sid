@@ -25,7 +25,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 
 fn new_app() -> CreateApplicationRequest {
     CreateApplicationRequest {
-        project_id: ProjectId::SYSTEM.to_string(),
+        project_id: Some(ProjectId::SYSTEM.into()),
         name: "rogue".to_string(),
         client: Some(ClientRoleSettings {
             redirect_uris: vec!["https://attacker.example.com/cb".to_string()],
@@ -37,7 +37,7 @@ fn new_app() -> CreateApplicationRequest {
 
 fn new_iat() -> CreateInitialAccessTokenRequest {
     CreateInitialAccessTokenRequest {
-        project_id: ProjectId::SYSTEM.to_string(),
+        project_id: Some(ProjectId::SYSTEM.into()),
         ..Default::default()
     }
 }
@@ -92,7 +92,7 @@ async fn test_project_rpcs_refuse_a_non_admin() {
             .map(|e| e.code()),
         p.list_applications(authed(
             ListApplicationsRequest {
-                project_id: ProjectId::SYSTEM.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 ..Default::default()
             },
             &token,
@@ -121,7 +121,7 @@ async fn test_iat_records_its_creator() {
         .into_inner()
         .token
         .expect("token");
-    assert_eq!(created.created_by, admin.to_string());
+    assert_eq!(created.created_by, Some(admin.into()));
 }
 
 /// An administrator creates and lists projects.

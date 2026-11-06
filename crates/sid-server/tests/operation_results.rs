@@ -245,9 +245,9 @@ async fn test_retired_period_leaves_no_effect_before_the_commit() {
     );
 }
 
-fn rename(id: &str, name: &str) -> UpdateProjectRequest {
+fn rename(id: &Option<sid_ids_proto::ProjectId>, name: &str) -> UpdateProjectRequest {
     UpdateProjectRequest {
-        id: id.to_string(),
+        id: id.clone(),
         name: Some(name.to_string()),
         ..Default::default()
     }
@@ -333,7 +333,7 @@ async fn test_initial_access_token_retry_answers_without_its_value() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let create = || CreateInitialAccessTokenRequest {
-        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+        project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
         max_clients: 1,
         ..Default::default()
     };
@@ -358,7 +358,7 @@ async fn test_initial_access_token_retry_answers_without_its_value() {
         .project
         .list_initial_access_tokens(keyed(
             ListInitialAccessTokensRequest {
-                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+                project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
             },
             &token,
             None,
@@ -377,7 +377,7 @@ async fn test_create_application_retry_answers_without_its_secret() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let create = || CreateApplicationRequest {
-        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+        project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
         name: "billing".to_string(),
         client: Some(ClientRoleSettings {
             // A web client (the unspecified type) gets a secret.
@@ -407,7 +407,7 @@ async fn test_create_application_retry_answers_without_its_secret() {
         .project
         .list_applications(keyed(
             ListApplicationsRequest {
-                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+                project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
                 ..Default::default()
             },
             &token,
@@ -900,7 +900,7 @@ async fn machine_user_with_secret(
         .machine_user
         .create_machine_user(keyed(
             CreateMachineUserRequest {
-                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
+                project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
                 display_name: "ci".into(),
                 ..Default::default()
             },
@@ -912,7 +912,7 @@ async fn machine_user_with_secret(
         .into_inner()
         .machine_user
         .unwrap();
-    let id = sid_core::models::MachineUserId::parse(&created.id).unwrap();
+    let id: sid_core::models::MachineUserId = sid_ids_proto::required(created.id.as_ref()).unwrap();
     let added = svc
         .machine_user
         .add_machine_credential(keyed(
@@ -942,7 +942,7 @@ async fn test_machine_credential_rotation_retry_rotates_once() {
     let rotate = || {
         keyed(
             RotateMachineCredentialRequest {
-                machine_user_id: id.to_string(),
+                machine_user_id: Some(id.into()),
                 kid: kid.clone(),
                 ..Default::default()
             },
@@ -993,7 +993,7 @@ async fn test_machine_user_suspension_retry_keeps_a_later_reactivation() {
     let suspend = || {
         keyed(
             SuspendMachineUserRequest {
-                machine_user_id: id.to_string(),
+                machine_user_id: Some(id.into()),
             },
             &token,
             Some("op-suspend-mu"),
@@ -1009,7 +1009,7 @@ async fn test_machine_user_suspension_retry_keeps_a_later_reactivation() {
     svc.machine_user
         .reactivate_machine_user(keyed(
             ReactivateMachineUserRequest {
-                machine_user_id: id.to_string(),
+                machine_user_id: Some(id.into()),
             },
             &token,
             Some("op-reactivate-mu"),

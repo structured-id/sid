@@ -27,11 +27,23 @@ pub use postgres_blob::PostgresBlobStore;
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub mod application_store;
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 mod directory_query;
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 mod key_versions;
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 mod policy_evidence;
 
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
@@ -58,7 +70,11 @@ const LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL: &str =
 
 /// The record of a registration's use of invite `invite`, for the invite's
 /// own audit chain: same actor and origin as the registration's record.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn invite_use_entry(
     registration: &sid_core::models::AuditEntry,
     invite: uuid::Uuid,
@@ -144,6 +160,11 @@ fn warn_quarantined_email_keys(count: i64) {
 /// Refuse a closure of administrator `closing` when no other administrator
 /// (`admins`: id and stored status of each) is active or suspended: the
 /// instance would be left without one.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn check_other_administrator(
     closing: sid_core::models::ProfileId,
     admins: &[(sid_core::models::ProfileId, String)],
@@ -163,6 +184,11 @@ fn check_other_administrator(
 
 /// Whether an administrator Profile in the stored `status` still
 /// administers: active or suspended, not closing or closed.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn usable_administrator(status: &str) -> bool {
     matches!(status, "active" | "suspended")
 }
@@ -172,7 +198,11 @@ fn usable_administrator(status: &str) -> bool {
 /// stored status) belongs to an active or suspended Profile: the
 /// installation would be left without a usable administrator. Removing an
 /// assignment that is no administrator's is never refused.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn check_other_administrator_assignment(
     removed: sid_core::models::RoleAssignmentId,
     administrators: &[(uuid::Uuid, String)],
@@ -196,7 +226,11 @@ fn check_other_administrator_assignment(
 
 /// The refusal of deleting the installation administrator role while it is
 /// assigned: the deletion would take every assignment with it.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn administrator_role_assigned() -> sid_core::Error {
     sid_core::Error::InvalidState(
         "the installation administrator role cannot be deleted while it is assigned".into(),
@@ -205,7 +239,11 @@ fn administrator_role_assigned() -> sid_core::Error {
 
 /// The time before which an IP reputation entry counts as stale for a decay
 /// window of `older_than`; a window that no date can express is refused.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn decay_cutoff(
     older_than: std::time::Duration,
 ) -> sid_core::Result<chrono::DateTime<chrono::Utc>> {
@@ -220,3 +258,7 @@ fn decay_cutoff(
 // SQLite backend (embedded-dev mode)
 #[cfg(feature = "storage-sqlite")]
 pub mod sqlite;
+
+// SID's records in a host's CoordiNode database (embedded server hosts).
+#[cfg(feature = "storage-coordinode")]
+pub mod coordinode;

@@ -5,6 +5,10 @@
 //! [`super::migrations::SCHEMA_VERSION`], and a file of another version is
 //! recreated, not migrated. Foreign keys and WAL are connection options, not
 //! part of it.
+//!
+//! Every table is STRICT, so a column holds only its declared storage class.
+//! A UUID is a 16-byte BLOB, checked for its length, in keys, references and
+//! indexes alike.
 
 /// Every table, index and constraint of the schema.
 pub(crate) const SCHEMA: &str = r#"
@@ -15,7 +19,7 @@ pub(crate) const SCHEMA: &str = r#"
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS profiles (
-    id              TEXT PRIMARY KEY,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
     username        TEXT UNIQUE,
     given_name          TEXT,
     family_name         TEXT,
@@ -27,14 +31,14 @@ CREATE TABLE IF NOT EXISTS profiles (
     visibility      TEXT NOT NULL DEFAULT 'public',
     roles           TEXT NOT NULL DEFAULT '',
     max_assurance   TEXT NOT NULL DEFAULT 'anonymous',
-    manager_id      TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+    manager_id      BLOB CHECK (length(manager_id) = 16) REFERENCES profiles(id) ON DELETE SET NULL,
     migration_pending       INTEGER NOT NULL DEFAULT 0,
     migration_started_at    TEXT,
     migration_completed_at  TEXT,
     revision        INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_profiles_username ON profiles(username);
 CREATE INDEX IF NOT EXISTS idx_profiles_status ON profiles(status);
@@ -54,8 +58,8 @@ CREATE TRIGGER IF NOT EXISTS update_profiles_updated_at
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS profile_phones (
-    id                  TEXT PRIMARY KEY,
-    profile_id          TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id                  BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id          BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     e164                INTEGER NOT NULL,
     extension           INTEGER,
     label               TEXT NOT NULL DEFAULT 'mobile',
@@ -68,7 +72,7 @@ CREATE TABLE IF NOT EXISTS profile_phones (
     verified_at         TEXT,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_phones_profile_e164
     ON profile_phones (profile_id, e164);
@@ -89,8 +93,8 @@ CREATE TRIGGER IF NOT EXISTS update_profile_phones_updated_at
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS profile_emails (
-    id              TEXT PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     email           TEXT NOT NULL,
     label           TEXT NOT NULL DEFAULT 'personal',
     custom_label    TEXT,
@@ -99,7 +103,7 @@ CREATE TABLE IF NOT EXISTS profile_emails (
     verified_at     TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_emails_profile_email
     ON profile_emails (profile_id, email);
@@ -122,8 +126,8 @@ CREATE TRIGGER IF NOT EXISTS update_profile_emails_updated_at
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS credentials (
-    id                  TEXT PRIMARY KEY,
-    profile_id          TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id                  BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id          BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     credential_type     TEXT NOT NULL
         CHECK (credential_type IN ('opaque', 'webauthn', 'totp', 'recovery', 'legacy_hash')),
     status              TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
@@ -139,7 +143,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     last_used_at        TEXT,
     -- The artifact a policy verdict was verified against.
     zkpp_artifact       BLOB CHECK (length(zkpp_artifact) = 32)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_credentials_profile_id ON credentials(profile_id);
 CREATE INDEX IF NOT EXISTS idx_credentials_type ON credentials(credential_type);
@@ -167,13 +171,13 @@ BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS webauthn_user_handles (
-    profile_id  TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles (id) ON DELETE CASCADE,
     rp_id       TEXT NOT NULL,
     user_handle BLOB NOT NULL CHECK (length(user_handle) = 16),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (profile_id, rp_id),
     UNIQUE (rp_id, user_handle)
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- password history: per-owner epochs with
@@ -182,13 +186,13 @@ CREATE TABLE IF NOT EXISTS webauthn_user_handles (
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS password_histories (
-    owner_id    TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    owner_id    BLOB PRIMARY KEY CHECK (length(owner_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     revision    INTEGER NOT NULL CHECK (revision > 0)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS password_history_epochs (
-    id              TEXT PRIMARY KEY,
-    owner_id        TEXT NOT NULL REFERENCES password_histories(owner_id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    owner_id        BLOB NOT NULL CHECK (length(owner_id) = 16) REFERENCES password_histories(owner_id) ON DELETE CASCADE,
     suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
     public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
     ksf_memory_kib  INTEGER NOT NULL CHECK (ksf_memory_kib > 0),
@@ -197,21 +201,21 @@ CREATE TABLE IF NOT EXISTS password_history_epochs (
     ksf_salt        BLOB NOT NULL CHECK (length(ksf_salt) = 32),
     status          TEXT NOT NULL CHECK (status IN ('active', 'compare_only', 'retired')),
     created_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS password_history_one_active_epoch
     ON password_history_epochs (owner_id) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS password_history_entries (
-    epoch_id        TEXT NOT NULL REFERENCES password_history_epochs(id) ON DELETE CASCADE,
-    owner_id        TEXT NOT NULL REFERENCES password_histories(owner_id) ON DELETE CASCADE,
+    epoch_id        BLOB NOT NULL CHECK (length(epoch_id) = 16) REFERENCES password_history_epochs(id) ON DELETE CASCADE,
+    owner_id        BLOB NOT NULL CHECK (length(owner_id) = 16) REFERENCES password_histories(owner_id) ON DELETE CASCADE,
     seq             INTEGER NOT NULL,
     entry           BLOB NOT NULL CHECK (length(entry) = 32),
-    operation_id    TEXT NOT NULL,
+    operation_id    BLOB NOT NULL CHECK (length(operation_id) = 16),
     policy_version  INTEGER NOT NULL,
     created_at      TEXT NOT NULL,
     PRIMARY KEY (epoch_id, seq)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS password_history_entries_owner
     ON password_history_entries (owner_id, seq);
@@ -219,7 +223,7 @@ CREATE INDEX IF NOT EXISTS password_history_entries_owner
 CREATE TABLE IF NOT EXISTS password_history_write_cutoff (
     singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
     not_before TEXT
-);
+) STRICT;
 INSERT OR IGNORE INTO password_history_write_cutoff (singleton) VALUES (1);
 
 --------------------------------------------------------------------------------
@@ -230,11 +234,11 @@ INSERT OR IGNORE INTO password_history_write_cutoff (singleton) VALUES (1);
 CREATE TABLE IF NOT EXISTS history_key_write_cutoff (
     singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
     not_before TEXT
-);
+) STRICT;
 INSERT OR IGNORE INTO history_key_write_cutoff (singleton) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS history_key_epochs (
-    id              TEXT PRIMARY KEY,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
     owner_domain    BLOB NOT NULL CHECK (length(owner_domain) = 32),
     suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
     public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
@@ -245,8 +249,9 @@ CREATE TABLE IF NOT EXISTS history_key_epochs (
     ksf_salt        BLOB NOT NULL CHECK (length(ksf_salt) = 32),
     status          TEXT NOT NULL CHECK (status IN ('active', 'compare_only', 'retired')),
     created_at      TEXT NOT NULL,
-    created_by      TEXT
-);
+    -- The first enrollment operation that made it, if any.
+    created_by      BLOB CHECK (length(created_by) = 16)
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS history_key_one_active_epoch
     ON history_key_epochs (owner_domain) WHERE status = 'active';
@@ -257,30 +262,36 @@ CREATE INDEX IF NOT EXISTS history_key_epochs_created_by
     ON history_key_epochs (created_by) WHERE created_by IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS history_key_abandoned (
-    operation_id TEXT PRIMARY KEY,
+    operation_id BLOB PRIMARY KEY CHECK (length(operation_id) = 16),
     owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
     abandoned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS history_key_lifecycle (
     owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
-    revision     INTEGER NOT NULL CHECK (revision >= 0),
-    live_epochs  TEXT NOT NULL
-);
+    revision     INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+
+-- The live epochs the lifecycle revision of an owner recorded.
+CREATE TABLE IF NOT EXISTS history_key_live (
+    owner_domain BLOB NOT NULL REFERENCES history_key_lifecycle(owner_domain) ON DELETE CASCADE,
+    epoch_id     BLOB NOT NULL CHECK (length(epoch_id) = 16),
+    PRIMARY KEY (owner_domain, epoch_id)
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS history_key_replaced (
-    epoch_id             TEXT PRIMARY KEY REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    epoch_id             BLOB PRIMARY KEY CHECK (length(epoch_id) = 16) REFERENCES history_key_epochs(id) ON DELETE CASCADE,
     owner_domain         BLOB NOT NULL CHECK (length(owner_domain) = 32),
     replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS history_key_uses (
-    operation_id TEXT NOT NULL,
-    epoch_id     TEXT NOT NULL REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    operation_id BLOB NOT NULL CHECK (length(operation_id) = 16),
+    epoch_id     BLOB NOT NULL CHECK (length(epoch_id) = 16) REFERENCES history_key_epochs(id) ON DELETE CASCADE,
     owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
     expires_at   TEXT NOT NULL,
     PRIMARY KEY (operation_id, epoch_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS history_key_uses_owner ON history_key_uses (owner_domain, epoch_id);
 
@@ -293,7 +304,7 @@ CREATE TABLE IF NOT EXISTS history_key_audit (
     resource    TEXT NOT NULL,
     outcome     TEXT NOT NULL,
     metadata    TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS history_key_versions (
     version    INTEGER PRIMARY KEY CHECK (version > 0),
@@ -301,22 +312,22 @@ CREATE TABLE IF NOT EXISTS history_key_versions (
     algorithm  TEXT NOT NULL,
     context    TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS history_key_purged (
     owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
     purged_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- sessions
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id                TEXT PRIMARY KEY,
-    profile_id        TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id        BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     client_id         TEXT,
-    device_id         TEXT,
+    device_id         BLOB CHECK (length(device_id) = 16),
     ip_address        BLOB CHECK (length(ip_address) IN (4, 16)),
     user_agent        TEXT,
     scopes            TEXT NOT NULL DEFAULT '',
@@ -337,12 +348,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     browser_secret_hash BLOB UNIQUE,
     -- The IdP session whose authentication a session redeemed from a grant
     -- reuses; ending it ends this one.
-    authenticated_by  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    authenticated_by  BLOB CHECK (length(authenticated_by) = 16) REFERENCES sessions(id) ON DELETE SET NULL,
     -- The CSRF token a browser session carries.
     browser_csrf      BLOB,
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_profile_id ON sessions(profile_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
@@ -354,19 +365,19 @@ CREATE INDEX IF NOT EXISTS idx_sessions_authenticated_by ON sessions(authenticat
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS principals (
-    id              TEXT PRIMARY KEY,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
     principal_type  TEXT NOT NULL,
     value           TEXT NOT NULL,
     verified        INTEGER NOT NULL DEFAULT 0,
     verified_at     TEXT,
     verification_expires TEXT,
-    assigned_profile_id TEXT,
+    assigned_profile_id BLOB CHECK (length(assigned_profile_id) = 16),
     assignment_revision INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     -- The email policy revision an email key was written under.
     email_policy_revision INTEGER
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_principals_type_value ON principals(principal_type, value);
 CREATE INDEX IF NOT EXISTS idx_principals_value ON principals(value);
@@ -376,17 +387,17 @@ CREATE TABLE IF NOT EXISTS email_policy_activations (
     scope        TEXT PRIMARY KEY,
     revision     INTEGER NOT NULL CHECK (revision > 0),
     activated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 INSERT OR IGNORE INTO email_policy_activations (scope, revision) VALUES ('installation', 1);
 
 CREATE TABLE IF NOT EXISTS email_policy_dispositions (
-    principal_id  TEXT PRIMARY KEY REFERENCES principals (id) ON DELETE CASCADE,
+    principal_id  BLOB PRIMARY KEY CHECK (length(principal_id) = 16) REFERENCES principals (id) ON DELETE CASCADE,
     from_revision INTEGER NOT NULL,
     to_revision   INTEGER NOT NULL,
     disposition   TEXT NOT NULL CHECK (disposition IN ('migrated', 'quarantined')),
     reason        TEXT NOT NULL,
     recorded_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 -- An email key is written only under the active revision.
 CREATE TRIGGER IF NOT EXISTS principals_email_policy_insert
@@ -412,16 +423,16 @@ BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS principal_bindings (
-    id              TEXT PRIMARY KEY,
-    principal_id    TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
-    profile_id      TEXT NOT NULL,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    principal_id    BLOB NOT NULL CHECK (length(principal_id) = 16) REFERENCES principals(id) ON DELETE CASCADE,
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16),
     is_primary      INTEGER NOT NULL DEFAULT 0,
     source_field    TEXT,
-    source_email_id TEXT REFERENCES profile_emails(id) ON DELETE SET NULL,
-    source_phone_id TEXT REFERENCES profile_phones(id) ON DELETE SET NULL,
+    source_email_id BLOB CHECK (length(source_email_id) = 16) REFERENCES profile_emails(id) ON DELETE SET NULL,
+    source_phone_id BLOB CHECK (length(source_phone_id) = 16) REFERENCES profile_phones(id) ON DELETE SET NULL,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (principal_id, profile_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_principal_bindings_principal_id ON principal_bindings(principal_id);
 CREATE INDEX IF NOT EXISTS idx_principal_bindings_profile ON principal_bindings(profile_id);
@@ -431,14 +442,14 @@ CREATE INDEX IF NOT EXISTS idx_principal_bindings_profile ON principal_bindings(
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS projects (
-    id          TEXT PRIMARY KEY,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    owner_id    TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+    owner_id    BLOB CHECK (length(owner_id) = 16) REFERENCES profiles(id) ON DELETE SET NULL,
     is_system   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id) WHERE owner_id IS NOT NULL;
 
@@ -449,17 +460,17 @@ CREATE TRIGGER IF NOT EXISTS update_projects_updated_at
         UPDATE projects SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = NEW.id;
     END;
 
--- Default system project
+-- Default system project: the nil UUID.
 INSERT OR IGNORE INTO projects (id, name, description, is_system)
-VALUES ('00000000-0000-0000-0000-000000000000', 'SID', 'Default system project', 1);
+VALUES (X'00000000000000000000000000000000', 'SID', 'Default system project', 1);
 
 --------------------------------------------------------------------------------
 -- applications: the container of a client role, a resource role, or both
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS applications (
-    id          TEXT PRIMARY KEY,
-    project_id  TEXT NOT NULL REFERENCES projects(id),
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id  BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
     name        TEXT NOT NULL,
     -- The installation's own integration this is; each exists at most once.
     system_integration TEXT UNIQUE,
@@ -468,7 +479,7 @@ CREATE TABLE IF NOT EXISTS applications (
     updated_at  TEXT NOT NULL,
     -- Target of the composite key below: a role's project is its application's.
     UNIQUE (id, project_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_applications_project ON applications(project_id);
 
@@ -479,9 +490,9 @@ CREATE INDEX IF NOT EXISTS idx_applications_project ON applications(project_id);
 CREATE TABLE IF NOT EXISTS oauth2_clients (
     client_id                           TEXT PRIMARY KEY,
     -- One client role per application, in the application's project.
-    application_id                      TEXT NOT NULL UNIQUE,
+    application_id                      BLOB NOT NULL UNIQUE CHECK (length(application_id) = 16),
     -- The resource a token is for when a request names none.
-    default_resource                    TEXT REFERENCES protected_resources(id),
+    default_resource                    BLOB CHECK (length(default_resource) = 16) REFERENCES protected_resources(id),
     client_secret_hash                  BLOB,
     -- Public keys of a private_key_jwt client: a JWK Set as JSON text.
     jwks                                TEXT,
@@ -491,8 +502,8 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     grant_types                         TEXT NOT NULL DEFAULT 'authorization_code',
     client_name                         TEXT NOT NULL,
     active                              INTEGER NOT NULL DEFAULT 1,
-    project_id                          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'
-                                        REFERENCES projects(id),
+    project_id                          BLOB NOT NULL DEFAULT X'00000000000000000000000000000000'
+                                        CHECK (length(project_id) = 16) REFERENCES projects(id),
     application_type                    TEXT NOT NULL DEFAULT 'web',
     required_acr                        TEXT,
     required_amr                        TEXT NOT NULL DEFAULT '',
@@ -515,17 +526,17 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     client_id_issued_at                 TEXT NOT NULL,
     client_secret_expires_at            TEXT,
     -- The initial access token a dynamically registered client came from.
-    registration_iat                    TEXT,
+    registration_iat                    BLOB CHECK (length(registration_iat) = 16),
     registration_access_token_hash      BLOB,
     login_strategy                      TEXT NOT NULL DEFAULT 'local_first',
     show_federation_button              INTEGER NOT NULL DEFAULT 1,
     federation_timeout_ms               INTEGER NOT NULL DEFAULT 500,
     unified_input                       INTEGER NOT NULL DEFAULT 0,
-    org_id                             TEXT REFERENCES organizations(id),
+    org_id                              BLOB CHECK (length(org_id) = 16) REFERENCES organizations(id),
     revision                            INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at                          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     FOREIGN KEY (application_id, project_id) REFERENCES applications (id, project_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_oauth2_clients_project ON oauth2_clients(project_id);
 
@@ -533,9 +544,9 @@ CREATE INDEX IF NOT EXISTS idx_oauth2_clients_project ON oauth2_clients(project_
 -- retires it (application_id NULL), so its indicator is never given to
 -- another resource of the issuer.
 CREATE TABLE IF NOT EXISTS protected_resources (
-    id              TEXT PRIMARY KEY,
-    application_id  TEXT UNIQUE REFERENCES applications(id),
-    issuer_id       TEXT NOT NULL REFERENCES oidc_issuers(id),
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    application_id  BLOB UNIQUE CHECK (length(application_id) = 16) REFERENCES applications(id),
+    issuer_id       BLOB NOT NULL CHECK (length(issuer_id) = 16) REFERENCES oidc_issuers(id),
     indicator       TEXT NOT NULL,
     scopes          TEXT NOT NULL DEFAULT '',
     state           TEXT NOT NULL CHECK (state IN ('active', 'inactive', 'retired')),
@@ -544,7 +555,7 @@ CREATE TABLE IF NOT EXISTS protected_resources (
     updated_at      TEXT NOT NULL,
     UNIQUE (issuer_id, indicator),
     CHECK ((state = 'retired') = (application_id IS NULL))
-);
+) STRICT;
 
 -- Explicit permission of one client to obtain tokens for one resource. The
 -- client is an OAuth client or a machine user; `client_id` is its identifier
@@ -555,11 +566,11 @@ CREATE TABLE IF NOT EXISTS resource_access (
     machine_client_id  TEXT REFERENCES machine_users(client_id) ON DELETE CASCADE,
     client_id          TEXT NOT NULL
                        GENERATED ALWAYS AS (COALESCE(oauth_client_id, machine_client_id)) STORED,
-    resource_id        TEXT NOT NULL REFERENCES protected_resources(id),
+    resource_id        BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
     scopes             TEXT NOT NULL DEFAULT '',
     created_at         TEXT NOT NULL,
     CHECK ((oauth_client_id IS NULL) != (machine_client_id IS NULL))
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_access_client
     ON resource_access(client_id, resource_id);
@@ -571,23 +582,23 @@ CREATE INDEX IF NOT EXISTS idx_resource_access_resource ON resource_access(resou
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
-    id          TEXT PRIMARY KEY,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     token_hash  BLOB NOT NULL UNIQUE,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    session_id  BLOB NOT NULL CHECK (length(session_id) = 16) REFERENCES sessions(id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     client_id   TEXT NOT NULL,
     scopes      TEXT NOT NULL DEFAULT '',
     expires_at  TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     revoked     INTEGER NOT NULL DEFAULT 0,
-    replaced_by TEXT,
-    family_id   TEXT NOT NULL,
+    replaced_by BLOB CHECK (length(replaced_by) = 16),
+    family_id   BLOB NOT NULL CHECK (length(family_id) = 16),
     grace_expires_at TEXT,
     -- JWK thumbprint of the DPoP key the token is bound to.
     dpop_jkt    TEXT,
     -- The resource the grant was issued for (RFC 8707).
-    resource_id TEXT NOT NULL REFERENCES protected_resources(id)
-);
+    resource_id BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id)
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_session ON refresh_tokens(session_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_profile ON refresh_tokens(profile_id);
@@ -603,19 +614,19 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS native_generations (
-    id              TEXT PRIMARY KEY,
-    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    session_id      BLOB NOT NULL CHECK (length(session_id) = 16) REFERENCES sessions(id) ON DELETE CASCADE,
     key_jkt         TEXT NOT NULL,
     expires_at      TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     exchange        BLOB CHECK (exchange IS NULL OR length(exchange) = 16),
-    successor_id    TEXT,
+    successor_id    BLOB CHECK (length(successor_id) = 16),
     redeliver_until TEXT,
     sealed          BLOB,
     CHECK ((exchange IS NULL) = (successor_id IS NULL)),
     CHECK ((exchange IS NULL) = (redeliver_until IS NULL)),
     CHECK (sealed IS NULL OR exchange IS NOT NULL)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_native_generations_session ON native_generations(session_id);
 -- A generation's predecessor, found by every rotation; a generation has at
@@ -626,8 +637,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_native_generations_successor
 -- One row per credential of a generation: its SHA-256, never the credential.
 CREATE TABLE IF NOT EXISTS native_credentials (
     credential_hash BLOB PRIMARY KEY,
-    generation_id   TEXT NOT NULL REFERENCES native_generations(id) ON DELETE CASCADE
-);
+    generation_id   BLOB NOT NULL CHECK (length(generation_id) = 16) REFERENCES native_generations(id) ON DELETE CASCADE
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_native_credentials_generation ON native_credentials(generation_id);
 
@@ -637,7 +648,7 @@ CREATE INDEX IF NOT EXISTS idx_native_credentials_generation ON native_credentia
 
 CREATE TABLE IF NOT EXISTS authorization_codes (
     code_hash       BLOB PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     client_id       TEXT NOT NULL,
     redirect_uri    TEXT NOT NULL,
     scopes          TEXT NOT NULL DEFAULT '',
@@ -648,12 +659,13 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     used            INTEGER NOT NULL DEFAULT 0,
     -- Session created by the redemption; a reuse of the code revokes it.
-    session_id      TEXT,
+    session_id      BLOB CHECK (length(session_id) = 16),
     -- The resource the authorization was granted for (RFC 8707).
-    resource_id     TEXT NOT NULL REFERENCES protected_resources(id),
+    resource_id     BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
     -- The authentication of the session that authorized the code, which the
     -- tokens it redeems into report.
-    authorizing_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    authorizing_session_id BLOB NOT NULL CHECK (length(authorizing_session_id) = 16)
+                    REFERENCES sessions(id) ON DELETE CASCADE,
     authenticated_at TEXT NOT NULL,
     amr             TEXT NOT NULL,
     assurance_level TEXT NOT NULL CHECK (assurance_level IN ('basic', 'standard')),
@@ -661,7 +673,7 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
     elevation_until TEXT,
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON authorization_codes(expires_at);
 
@@ -670,19 +682,19 @@ CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON authorization_codes(expires
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS initial_access_tokens (
-    id                        TEXT PRIMARY KEY,
-    project_id                TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id                        BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id                BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     token_hash                BLOB NOT NULL UNIQUE,
     max_clients               INTEGER NOT NULL DEFAULT 0,
     clients_registered        INTEGER NOT NULL DEFAULT 0,
     allowed_scopes            TEXT NOT NULL DEFAULT '',
     allowed_grant_types       TEXT NOT NULL DEFAULT '',
     allowed_redirect_patterns TEXT NOT NULL DEFAULT '',
-    created_by                TEXT NOT NULL DEFAULT '',
+    created_by                BLOB NOT NULL CHECK (length(created_by) = 16),
     revoked                   INTEGER NOT NULL DEFAULT 0,
     expires_at                TEXT NOT NULL,
     created_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_iat_project ON initial_access_tokens(project_id);
 
@@ -696,7 +708,7 @@ CREATE TABLE IF NOT EXISTS key_versions (
     algorithm   TEXT NOT NULL,
     context     TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- durable_work (required work committed with its state change; fenced claims)
@@ -712,7 +724,7 @@ CREATE TABLE IF NOT EXISTS operation_period_state (
     issued_through     INTEGER NOT NULL DEFAULT 0 CHECK (issued_through >= 0),
     acceptance_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (acceptance_seconds > 0),
     retention_seconds  INTEGER NOT NULL DEFAULT 86400 CHECK (retention_seconds >= 0)
-);
+) STRICT;
 INSERT OR IGNORE INTO operation_period_state (id) VALUES (1);
 
 -- The periods keyed commands are admitted under: issued in increasing order
@@ -722,7 +734,7 @@ CREATE TABLE IF NOT EXISTS operation_periods (
     period            INTEGER PRIMARY KEY CHECK (period > 0),
     issued_at_ms      INTEGER NOT NULL,
     accepted_until_ms INTEGER NOT NULL
-);
+) STRICT;
 
 -- The completion of a caller's keyed command, committed with its effect.
 CREATE TABLE IF NOT EXISTS operation_results (
@@ -739,7 +751,7 @@ CREATE TABLE IF NOT EXISTS operation_results (
     -- until its owner purges it.
     retain_until_ms INTEGER,
     PRIMARY KEY (namespace, op_key)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS operation_results_retain_until
     ON operation_results (retain_until_ms) WHERE retain_until_ms IS NOT NULL;
 
@@ -756,7 +768,7 @@ CREATE TABLE IF NOT EXISTS operation_resources (
     resource    BLOB NOT NULL,
     bound_at_ms INTEGER NOT NULL,
     PRIMARY KEY (namespace, op_key)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS operation_resources_period
     ON operation_resources (period) WHERE period IS NOT NULL;
 
@@ -768,7 +780,7 @@ CREATE TABLE IF NOT EXISTS ceremony_states (
     value         BLOB NOT NULL,
     expires_at_ms INTEGER NOT NULL,
     PRIMARY KEY (namespace, state_key)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS ceremony_states_expires_at
     ON ceremony_states (expires_at_ms);
 
@@ -779,7 +791,7 @@ CREATE TABLE IF NOT EXISTS ceremony_counts (
     count          INTEGER NOT NULL,
     window_ends_ms INTEGER NOT NULL,
     PRIMARY KEY (namespace, count_key)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS ceremony_counts_window_ends
     ON ceremony_counts (window_ends_ms);
 
@@ -789,10 +801,10 @@ CREATE TABLE IF NOT EXISTS job_locks (
     job        INTEGER PRIMARY KEY,
     holder     TEXT NOT NULL,
     expires_at TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS durable_work (
-    id           TEXT PRIMARY KEY,
+    id           BLOB PRIMARY KEY CHECK (length(id) = 16),
     kind         TEXT NOT NULL,
     payload      BLOB NOT NULL,
     state        TEXT NOT NULL DEFAULT 'pending',
@@ -808,7 +820,7 @@ CREATE TABLE IF NOT EXISTS durable_work (
     expires_at   TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_durable_work_open
     ON durable_work (kind, not_before) WHERE state IN ('pending', 'claimed');
@@ -821,13 +833,13 @@ CREATE TABLE IF NOT EXISTS instance_secrets (
     name        TEXT PRIMARY KEY,
     sealed      BLOB NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS bootstrap_policy (
     scope      TEXT PRIMARY KEY CHECK (scope = 'installation'),
     policy     TEXT NOT NULL CHECK (policy = 'centrally_managed'),
     adopted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE TRIGGER IF NOT EXISTS instance_secrets_no_claim_when_centrally_managed_insert
 BEFORE INSERT ON instance_secrets
@@ -854,14 +866,14 @@ CREATE TABLE IF NOT EXISTS enrollment_policy (
     updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     CONSTRAINT enrollment_policy_domains_for_restricted_mode
         CHECK (mode <> 'domain_restricted' OR json_array_length(allowed_domains) > 0)
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- organizations (the installation's own organization is `is_instance`)
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS organizations (
-    id                TEXT PRIMARY KEY,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
     org_type          TEXT NOT NULL
         CHECK (org_type IN ('family', 'community', 'commercial', 'government')),
     status            TEXT NOT NULL
@@ -870,7 +882,7 @@ CREATE TABLE IF NOT EXISTS organizations (
     canonical_domain  TEXT NOT NULL,
     is_instance       INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS organizations_one_instance
     ON organizations (is_instance) WHERE is_instance;
@@ -881,46 +893,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS organizations_one_instance
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS oidc_issuers (
-    id                TEXT PRIMARY KEY,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
     handle            TEXT NOT NULL UNIQUE,
     canonical_url     TEXT NOT NULL UNIQUE,
     authority         TEXT NOT NULL CHECK (authority IN ('local')),
-    recipient_org     TEXT NOT NULL REFERENCES organizations(id),
+    recipient_org     BLOB NOT NULL CHECK (length(recipient_org) = 16) REFERENCES organizations(id),
     created_at        TEXT NOT NULL,
     UNIQUE (authority, recipient_org)
-);
+) STRICT;
 
 -- Token-signing keys, one row per generation; the private key only sealed.
 CREATE TABLE IF NOT EXISTS oidc_issuer_signing_keys (
-    issuer_id           TEXT NOT NULL REFERENCES oidc_issuers(id),
+    issuer_id           BLOB NOT NULL CHECK (length(issuer_id) = 16) REFERENCES oidc_issuers(id),
     generation          INTEGER NOT NULL CHECK (generation >= 1),
     key_id              TEXT NOT NULL,
     public_key          BLOB NOT NULL CHECK (length(public_key) = 32),
     sealed_private_key  BLOB NOT NULL,
     created_at          TEXT NOT NULL,
     PRIMARY KEY (issuer_id, generation)
-);
+) STRICT;
 
 -- A Profile's pairwise identity at one organization (scope): the pairwise
 -- `sub` of every client of that scope, allocated on the first visit.
 CREATE TABLE IF NOT EXISTS service_bindings (
-    binding_id    TEXT PRIMARY KEY,
-    profile_id    TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    binding_id    BLOB PRIMARY KEY CHECK (length(binding_id) = 16),
+    profile_id    BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     scope         TEXT NOT NULL CHECK (trim(scope) <> ''),
     binding_index INTEGER NOT NULL CHECK (binding_index >= 0),
     created_at    TEXT NOT NULL,
     last_used_at  TEXT NOT NULL,
     UNIQUE (profile_id, scope),
     UNIQUE (profile_id, binding_index)
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- roles
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS roles (
-    id          TEXT PRIMARY KEY,
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id  BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     key         TEXT NOT NULL DEFAULT '',
     name        TEXT NOT NULL,
     description TEXT,
@@ -931,7 +943,7 @@ CREATE TABLE IF NOT EXISTS roles (
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE(project_id, name),
     UNIQUE(project_id, key)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_roles_project_id ON roles(project_id);
 
@@ -940,15 +952,15 @@ CREATE INDEX IF NOT EXISTS idx_roles_project_id ON roles(project_id);
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS groups (
-    id              TEXT PRIMARY KEY,
-    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id      BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
     description     TEXT,
-    parent_group_id TEXT REFERENCES groups(id) ON DELETE SET NULL,
+    parent_group_id BLOB CHECK (length(parent_group_id) = 16) REFERENCES groups(id) ON DELETE SET NULL,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE(project_id, name)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_groups_project_id ON groups(project_id);
 CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_group_id) WHERE parent_group_id IS NOT NULL;
@@ -958,11 +970,11 @@ CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_group_id) WHERE pa
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS group_members (
-    group_id    TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    group_id    BLOB NOT NULL CHECK (length(group_id) = 16) REFERENCES groups(id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     added_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (group_id, profile_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_group_members_profile_id ON group_members(profile_id);
 
@@ -971,15 +983,16 @@ CREATE INDEX IF NOT EXISTS idx_group_members_profile_id ON group_members(profile
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS role_assignments (
-    id               TEXT PRIMARY KEY,
-    profile_id       TEXT REFERENCES profiles(id) ON DELETE CASCADE,
-    group_id         TEXT REFERENCES groups(id) ON DELETE CASCADE,
-    machine_user_id  TEXT,
+    id               BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id       BLOB CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    group_id         BLOB CHECK (length(group_id) = 16) REFERENCES groups(id) ON DELETE CASCADE,
+    machine_user_id  BLOB CHECK (length(machine_user_id) = 16),
     -- An independent OAuth client as its own principal.
     oauth_client_id  TEXT REFERENCES oauth2_clients(client_id) ON DELETE CASCADE,
     -- A provisioning connector as its own principal.
-    provisioning_connector_id TEXT REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
-    role_id          TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    provisioning_connector_id BLOB CHECK (length(provisioning_connector_id) = 16)
+                     REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
+    role_id          BLOB NOT NULL CHECK (length(role_id) = 16) REFERENCES roles(id) ON DELETE CASCADE,
     scope            TEXT,
     expires_at       TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -987,8 +1000,9 @@ CREATE TABLE IF NOT EXISTS role_assignments (
     -- delegation authority. A redelegated administrative assignment ends with
     -- its source.
     granted_by               TEXT,
-    basis_assignment_id      TEXT,
-    depends_on_assignment_id TEXT REFERENCES role_assignments(id) ON DELETE CASCADE,
+    basis_assignment_id      BLOB CHECK (length(basis_assignment_id) = 16),
+    depends_on_assignment_id BLOB CHECK (length(depends_on_assignment_id) = 16)
+                             REFERENCES role_assignments(id) ON DELETE CASCADE,
     revision                 INTEGER NOT NULL DEFAULT 0,
     CHECK (
         (profile_id IS NOT NULL) + (group_id IS NOT NULL) + (machine_user_id IS NOT NULL)
@@ -996,48 +1010,53 @@ CREATE TABLE IF NOT EXISTS role_assignments (
     ),
     CHECK (granted_by IS NOT NULL
            OR (basis_assignment_id IS NULL AND depends_on_assignment_id IS NULL))
-);
+) STRICT;
 
 -- The envelope of an administrative assignment. A group recipients are
 -- restricted to cannot be deleted from under it: that would widen it.
 CREATE TABLE IF NOT EXISTS role_assignment_admin (
-    assignment_id      TEXT PRIMARY KEY REFERENCES role_assignments(id) ON DELETE CASCADE,
-    recipient_group_id TEXT REFERENCES groups(id) ON DELETE RESTRICT,
+    assignment_id      BLOB PRIMARY KEY CHECK (length(assignment_id) = 16)
+                       REFERENCES role_assignments(id) ON DELETE CASCADE,
+    recipient_group_id BLOB CHECK (length(recipient_group_id) = 16) REFERENCES groups(id) ON DELETE RESTRICT,
     max_validity_secs  INTEGER NOT NULL CHECK (max_validity_secs > 0)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS role_assignment_admin_entries (
-    assignment_id TEXT NOT NULL REFERENCES role_assignment_admin(assignment_id) ON DELETE CASCADE,
+    assignment_id BLOB NOT NULL CHECK (length(assignment_id) = 16)
+                  REFERENCES role_assignment_admin(assignment_id) ON DELETE CASCADE,
     kind          TEXT NOT NULL CHECK (kind IN ('operation', 'recipient_kind', 'permission')),
     value         TEXT NOT NULL,
     PRIMARY KEY (assignment_id, kind, value),
     CHECK (kind <> 'operation' OR value IN ('assign', 'revoke', 'edit_role', 'redelegate')),
     CHECK (kind <> 'recipient_kind'
            OR value IN ('profile', 'group', 'machine_user', 'oauth_client'))
-);
+) STRICT;
 
 -- A deleted role leaves the envelope: that only narrows it.
 CREATE TABLE IF NOT EXISTS role_assignment_admin_roles (
-    assignment_id TEXT NOT NULL REFERENCES role_assignment_admin(assignment_id) ON DELETE CASCADE,
-    role_id       TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    assignment_id BLOB NOT NULL CHECK (length(assignment_id) = 16)
+                  REFERENCES role_assignment_admin(assignment_id) ON DELETE CASCADE,
+    role_id       BLOB NOT NULL CHECK (length(role_id) = 16) REFERENCES roles(id) ON DELETE CASCADE,
     PRIMARY KEY (assignment_id, role_id)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS idx_role_assignment_admin_roles_role
     ON role_assignment_admin_roles(role_id);
 
 CREATE TABLE IF NOT EXISTS role_assignment_policy_admin (
-    assignment_id TEXT NOT NULL REFERENCES role_assignments(id) ON DELETE CASCADE,
+    assignment_id BLOB NOT NULL CHECK (length(assignment_id) = 16)
+                  REFERENCES role_assignments(id) ON DELETE CASCADE,
     operation TEXT NOT NULL CHECK (operation IN ('read', 'edit', 'redelegate')),
     PRIMARY KEY (assignment_id, operation)
-);
+) STRICT;
 
--- The permission ceiling an envelope approved a working assignment under; its
--- role is never edited past it while the assignment exists.
+-- The permission ceiling an envelope approved a non-administrative assignment
+-- under; its role is never edited past it while the assignment exists.
 CREATE TABLE IF NOT EXISTS role_assignment_ceilings (
-    assignment_id TEXT NOT NULL REFERENCES role_assignments(id) ON DELETE CASCADE,
+    assignment_id BLOB NOT NULL CHECK (length(assignment_id) = 16)
+                  REFERENCES role_assignments(id) ON DELETE CASCADE,
     permission    TEXT NOT NULL,
     PRIMARY KEY (assignment_id, permission)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_role_assignments_oauth_client_id ON role_assignments(oauth_client_id);
 CREATE INDEX IF NOT EXISTS idx_role_assignments_provisioning_connector_id
@@ -1053,12 +1072,12 @@ CREATE INDEX IF NOT EXISTS idx_role_assignments_role_id ON role_assignments(role
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS sod_conflict_rules (
-    id                TEXT PRIMARY KEY,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
     name              TEXT NOT NULL,
     description       TEXT,
     conflicting_roles TEXT NOT NULL DEFAULT '',
     severity          TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('warning', 'block'))
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- cedar_policies
@@ -1067,9 +1086,9 @@ CREATE TABLE IF NOT EXISTS sod_conflict_rules (
 -- A policy's scope: the installation (neither column), one project or one
 -- protected resource.
 CREATE TABLE IF NOT EXISTS cedar_policies (
-    id          TEXT PRIMARY KEY,
-    project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
-    resource_id TEXT REFERENCES protected_resources(id),
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id  BLOB CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
+    resource_id BLOB CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
     name        TEXT NOT NULL,
     description TEXT,
     policy_text TEXT NOT NULL,
@@ -1079,39 +1098,26 @@ CREATE TABLE IF NOT EXISTS cedar_policies (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     CHECK (project_id IS NULL OR resource_id IS NULL)
-);
+) STRICT;
 
 -- One name per scope; SQLite keeps NULLs distinct in a UNIQUE constraint.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cedar_policies_scope_name
-    ON cedar_policies(COALESCE(project_id, ''), COALESCE(resource_id, ''), name);
+    ON cedar_policies(COALESCE(project_id, X''), COALESCE(resource_id, X''), name);
 CREATE INDEX IF NOT EXISTS idx_cedar_policies_project_id ON cedar_policies(project_id);
 CREATE INDEX IF NOT EXISTS idx_cedar_policies_resource_id ON cedar_policies(resource_id);
-
---------------------------------------------------------------------------------
--- entity_attributes
---------------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS entity_attributes (
-    entity_id   TEXT NOT NULL,
-    attr_key    TEXT NOT NULL,
-    attr_value  TEXT NOT NULL,
-    PRIMARY KEY (entity_id, attr_key)
-);
-
-CREATE INDEX IF NOT EXISTS idx_entity_attributes_entity_id ON entity_attributes(entity_id);
 
 --------------------------------------------------------------------------------
 -- profile_metadata
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS profile_metadata (
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (profile_id, key)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_profile_metadata_profile_id ON profile_metadata(profile_id);
 
@@ -1120,16 +1126,16 @@ CREATE INDEX IF NOT EXISTS idx_profile_metadata_profile_id ON profile_metadata(p
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS profile_grants (
-    id          TEXT PRIMARY KEY,
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id  BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     role_keys   TEXT NOT NULL DEFAULT '',
     granted_by  TEXT,
     expires_at  TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (project_id, profile_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_profile_grants_profile_id ON profile_grants(profile_id);
 CREATE INDEX IF NOT EXISTS idx_profile_grants_project_id ON profile_grants(project_id);
@@ -1139,8 +1145,8 @@ CREATE INDEX IF NOT EXISTS idx_profile_grants_project_id ON profile_grants(proje
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS devices (
-    id                TEXT PRIMARY KEY,
-    profile_id        TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id        BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     display_name      TEXT,
     device_type       TEXT NOT NULL DEFAULT 'desktop',
     os_info           TEXT,
@@ -1151,7 +1157,7 @@ CREATE TABLE IF NOT EXISTS devices (
     last_ip_geo       TEXT,
     first_seen_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_seen_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_devices_profile_id ON devices(profile_id);
 CREATE INDEX IF NOT EXISTS idx_devices_fingerprint ON devices(profile_id, fingerprint_hash);
@@ -1161,24 +1167,24 @@ CREATE INDEX IF NOT EXISTS idx_devices_fingerprint ON devices(profile_id, finger
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS device_authorization_codes (
-    id                TEXT PRIMARY KEY,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
     client_id         TEXT NOT NULL,
     device_code_hash  BLOB NOT NULL,
     user_code         TEXT NOT NULL,
     scope             TEXT,
     status            TEXT NOT NULL DEFAULT 'pending'
                           CHECK (status IN ('pending', 'authorized', 'denied', 'expired', 'redeemed')),
-    authorized_by     TEXT REFERENCES profiles(id) ON DELETE SET NULL,
-    project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    authorized_by     BLOB CHECK (length(authorized_by) = 16) REFERENCES profiles(id) ON DELETE SET NULL,
+    project_id        BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     interval_secs     INTEGER NOT NULL DEFAULT 5,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_at        TEXT NOT NULL,
     authorized_at     TEXT,
     last_polled_at    TEXT,
-    redeemed_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    redeemed_session_id BLOB CHECK (length(redeemed_session_id) = 16) REFERENCES sessions(id) ON DELETE SET NULL,
     -- The resource the device requested a token for (RFC 8707).
-    resource_id       TEXT NOT NULL REFERENCES protected_resources(id)
-);
+    resource_id       BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id)
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_device_auth_device_code_hash ON device_authorization_codes(device_code_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_authorization_codes(user_code);
@@ -1189,7 +1195,7 @@ CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_authorization_co
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS upstream_providers (
-    id                      TEXT PRIMARY KEY,
+    id                      BLOB PRIMARY KEY CHECK (length(id) = 16),
     name                    TEXT NOT NULL UNIQUE,
     protocol                TEXT NOT NULL CHECK (protocol IN ('oidc', 'oauth2')),
     trust_category          TEXT NOT NULL DEFAULT 'social'
@@ -1208,7 +1214,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
     revision                INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_upstream_providers_enabled ON upstream_providers(enabled) WHERE enabled = 1;
 
@@ -1217,9 +1223,9 @@ CREATE INDEX IF NOT EXISTS idx_upstream_providers_enabled ON upstream_providers(
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS upstream_identities (
-    id                TEXT PRIMARY KEY,
-    profile_id        TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    provider_id       TEXT NOT NULL REFERENCES upstream_providers(id) ON DELETE CASCADE,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id        BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    provider_id       BLOB NOT NULL CHECK (length(provider_id) = 16) REFERENCES upstream_providers(id) ON DELETE CASCADE,
     upstream_subject  TEXT NOT NULL,
     upstream_issuer   TEXT,
     upstream_email    TEXT,
@@ -1230,7 +1236,7 @@ CREATE TABLE IF NOT EXISTS upstream_identities (
     login_count       INTEGER NOT NULL DEFAULT 0,
     UNIQUE(profile_id, provider_id),
     UNIQUE(provider_id, upstream_subject)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_upstream_identities_profile ON upstream_identities(profile_id);
 
@@ -1239,8 +1245,8 @@ CREATE INDEX IF NOT EXISTS idx_upstream_identities_profile ON upstream_identitie
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS personal_access_tokens (
-    id            TEXT PRIMARY KEY,
-    profile_id    TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id            BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id    BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     name          TEXT NOT NULL,
     description   TEXT,
     token_hash    TEXT NOT NULL,
@@ -1255,7 +1261,7 @@ CREATE TABLE IF NOT EXISTS personal_access_tokens (
     revoked_at    TEXT,
     revoked_by    TEXT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pat_token_hash ON personal_access_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_pat_profile_status ON personal_access_tokens(profile_id, status);
@@ -1265,13 +1271,14 @@ CREATE INDEX IF NOT EXISTS idx_pat_profile_status ON personal_access_tokens(prof
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS machine_users (
-    id                  TEXT PRIMARY KEY,
-    project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id                  BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id          BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     machine_type        TEXT NOT NULL DEFAULT 'service'
                         CHECK (machine_type IN ('service', 'bot', 'agent')),
-    owner_type          TEXT NOT NULL DEFAULT 'profile'
+    owner_type          TEXT NOT NULL
                         CHECK (owner_type IN ('profile', 'organization', 'system')),
-    owner_id            TEXT NOT NULL,
+    owner_id            BLOB CHECK (length(owner_id) = 16)
+                        CHECK ((owner_type = 'system') = (owner_id IS NULL)),
     client_id           TEXT NOT NULL UNIQUE,
     display_name        TEXT NOT NULL,
     description         TEXT,
@@ -1285,7 +1292,7 @@ CREATE TABLE IF NOT EXISTS machine_users (
     expires_at          TEXT,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_machine_users_project ON machine_users(project_id);
 CREATE INDEX IF NOT EXISTS idx_machine_users_owner ON machine_users(owner_type, owner_id);
@@ -1296,7 +1303,7 @@ CREATE INDEX IF NOT EXISTS idx_machine_users_owner ON machine_users(owner_type, 
 
 CREATE TABLE IF NOT EXISTS machine_user_credentials (
     kid             TEXT PRIMARY KEY,
-    machine_user_id TEXT NOT NULL REFERENCES machine_users(id) ON DELETE CASCADE,
+    machine_user_id BLOB NOT NULL CHECK (length(machine_user_id) = 16) REFERENCES machine_users(id) ON DELETE CASCADE,
     credential_type TEXT NOT NULL
                     CHECK (credential_type IN ('client_secret', 'private_key_jwt', 'mtls', 'workload_identity')),
     credential_data TEXT NOT NULL,
@@ -1305,7 +1312,7 @@ CREATE TABLE IF NOT EXISTS machine_user_credentials (
                     CHECK (status IN ('active', 'grace_period', 'expired', 'revoked')),
     expires_at      TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_machine_creds_user ON machine_user_credentials(machine_user_id);
 
@@ -1314,16 +1321,13 @@ CREATE INDEX IF NOT EXISTS idx_machine_creds_user ON machine_user_credentials(ma
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS impersonation_grants (
-    id              TEXT PRIMARY KEY,
-    machine_user_id TEXT NOT NULL REFERENCES machine_users(id) ON DELETE CASCADE,
+    machine_user_id BLOB NOT NULL CHECK (length(machine_user_id) = 16) REFERENCES machine_users(id) ON DELETE CASCADE,
     target_type     TEXT NOT NULL CHECK (target_type IN ('role', 'user')),
     target          TEXT NOT NULL,
     allowed_scopes  TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE(machine_user_id, target_type, target)
-);
-
-CREATE INDEX IF NOT EXISTS idx_impersonation_machine ON impersonation_grants(machine_user_id);
+    PRIMARY KEY (machine_user_id, target_type, target)
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- principal_quarantine
@@ -1334,7 +1338,7 @@ CREATE TABLE IF NOT EXISTS principal_quarantine (
     principal_type   TEXT NOT NULL,
     quarantine_until TEXT NOT NULL,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_principal_quarantine_until ON principal_quarantine(quarantine_until);
 
@@ -1343,26 +1347,26 @@ CREATE INDEX IF NOT EXISTS idx_principal_quarantine_until ON principal_quarantin
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS closure_requests (
-    profile_id       TEXT PRIMARY KEY REFERENCES profiles(id),
+    profile_id       BLOB PRIMARY KEY CHECK (length(profile_id) = 16) REFERENCES profiles(id),
     mode             TEXT NOT NULL
                      CHECK (mode IN ('voluntary', 'gdpr_erasure', 'admin_termination', 'regulatory_order')),
     closure_reason   TEXT,
-    requested_by     TEXT NOT NULL,
+    requested_by     BLOB NOT NULL CHECK (length(requested_by) = 16),
     requested_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     grace_period_end TEXT,
     export_status    TEXT NOT NULL DEFAULT 'not_started'
                      CHECK (export_status IN ('not_started', 'preparing', 'ready', 'downloaded', 'expired')),
     cancel_count     INTEGER NOT NULL DEFAULT 0,
     legal_hold       TEXT
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- export_jobs
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS export_jobs (
-    id              TEXT PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     format          TEXT NOT NULL CHECK (format IN ('json')),
     status          TEXT NOT NULL
                     CHECK (status IN ('not_started', 'preparing', 'ready', 'downloaded', 'expired')),
@@ -1372,7 +1376,7 @@ CREATE TABLE IF NOT EXISTS export_jobs (
     created_at      TEXT NOT NULL,
     ready_at        TEXT,
     expires_at      TEXT
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_export_jobs_profile ON export_jobs(profile_id);
 
@@ -1381,7 +1385,7 @@ CREATE INDEX IF NOT EXISTS idx_export_jobs_profile ON export_jobs(profile_id);
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS magic_link_sessions (
-    id          TEXT PRIMARY KEY,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     email       TEXT NOT NULL,
     destination TEXT NOT NULL,
     token_hash  TEXT NOT NULL,
@@ -1392,7 +1396,7 @@ CREATE TABLE IF NOT EXISTS magic_link_sessions (
     scopes      TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_at  TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_magic_link_email ON magic_link_sessions(email);
 CREATE INDEX IF NOT EXISTS idx_magic_link_expires ON magic_link_sessions(expires_at);
@@ -1417,7 +1421,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
     prev_hash   TEXT NOT NULL,
     hash        TEXT NOT NULL,
     UNIQUE (chain_id, sequence)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_audit_chain_id ON audit_records(chain_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_records(timestamp);
@@ -1433,7 +1437,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_heads (
     last_record_id  TEXT NOT NULL,
     last_hash       TEXT NOT NULL,
     sequence        INTEGER NOT NULL
-);
+) STRICT;
 
 -- Where a chain resumes after retention removed its oldest records.
 CREATE TABLE IF NOT EXISTS audit_chain_checkpoints (
@@ -1441,7 +1445,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_checkpoints (
     sequence    INTEGER NOT NULL CHECK (sequence > 0),
     hash        TEXT NOT NULL,
     cut_before  TEXT NOT NULL
-);
+) STRICT;
 
 -- Audit records are append-only: never updated, and deleted only by a
 -- retention cut, which first records the cut as a checkpoint.
@@ -1463,15 +1467,15 @@ END;
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS branding_configs (
-    id              TEXT PRIMARY KEY,
-    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id      BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     status          TEXT NOT NULL DEFAULT 'draft'
                     CHECK (status IN ('draft', 'published', 'archived')),
     data            TEXT NOT NULL,
     revision        INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_branding_configs_project_status
     ON branding_configs(project_id, status);
@@ -1485,16 +1489,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_branding_configs_published
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS flow_configs (
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    project_id  BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     flow_type   TEXT NOT NULL,
     data        TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (project_id, flow_type)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS flow_actions (
-    id            TEXT PRIMARY KEY,
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id            BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id    BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     flow_type     TEXT NOT NULL,
     action_point  TEXT NOT NULL,
     action_order  INTEGER NOT NULL DEFAULT 0,
@@ -1502,7 +1506,7 @@ CREATE TABLE IF NOT EXISTS flow_actions (
     revision      INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_flow_actions_project_flow
     ON flow_actions(project_id, flow_type, action_point, action_order);
@@ -1512,8 +1516,8 @@ CREATE INDEX IF NOT EXISTS idx_flow_actions_project_flow
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS consents (
-    id              TEXT PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     client_id       TEXT NOT NULL,
     status          TEXT NOT NULL
                         CHECK (status IN ('requested', 'active', 'revoked', 'expired')),
@@ -1521,29 +1525,29 @@ CREATE TABLE IF NOT EXISTS consents (
     revoked_at      TEXT,
     updated_at      TEXT NOT NULL,
     UNIQUE (profile_id, client_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_consents_client ON consents(client_id);
 
 CREATE TABLE IF NOT EXISTS claim_grants (
-    id              TEXT PRIMARY KEY,
-    consent_id      TEXT NOT NULL REFERENCES consents(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    consent_id      BLOB NOT NULL CHECK (length(consent_id) = 16) REFERENCES consents(id) ON DELETE CASCADE,
     claim_name      TEXT NOT NULL,
     claim_type      TEXT NOT NULL CHECK (claim_type IN ('data', 'attestation')),
     granted_at      TEXT NOT NULL,
     revoked_at      TEXT,
     UNIQUE (consent_id, claim_name)
-);
+) STRICT;
 
 --------------------------------------------------------------------------------
 -- invites, registration_sources
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS invites (
-    id                 TEXT PRIMARY KEY,
+    id                 BLOB PRIMARY KEY CHECK (length(id) = 16),
     code               TEXT NOT NULL,
-    created_by         TEXT REFERENCES profiles(id),
-    created_by_machine TEXT REFERENCES machine_users(id),
+    created_by         BLOB CHECK (length(created_by) = 16) REFERENCES profiles(id),
+    created_by_machine BLOB CHECK (length(created_by_machine) = 16) REFERENCES machine_users(id),
     created_by_name    TEXT NOT NULL,
     metadata           TEXT NOT NULL,
     max_uses           INTEGER NOT NULL CHECK (max_uses >= 0),
@@ -1553,30 +1557,30 @@ CREATE TABLE IF NOT EXISTS invites (
     created_at         TEXT NOT NULL,
     CONSTRAINT invites_one_creator
         CHECK ((created_by IS NULL) <> (created_by_machine IS NULL))
-);
+) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_code ON invites (UPPER(code));
 CREATE INDEX IF NOT EXISTS idx_invites_created_id ON invites (created_at DESC, id DESC);
 
 -- The registrations that used an invite, and the credential each installed.
 CREATE TABLE IF NOT EXISTS invite_redemptions (
-    invite_id     TEXT NOT NULL REFERENCES invites(id) ON DELETE CASCADE,
-    profile_id    TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    invite_id     BLOB NOT NULL CHECK (length(invite_id) = 16) REFERENCES invites(id) ON DELETE CASCADE,
+    profile_id    BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     redeemed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    credential_id BLOB CHECK (length(credential_id) = 16) REFERENCES credentials(id) ON DELETE SET NULL,
     PRIMARY KEY (invite_id, profile_id)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_invite_redemptions_order
     ON invite_redemptions (invite_id, redeemed_at, profile_id);
 
 CREATE TABLE IF NOT EXISTS registration_sources (
-    profile_id      TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_id      BLOB PRIMARY KEY CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     source_type     TEXT NOT NULL CHECK (source_type IN (
                         'self_signup', 'invite', 'admin_created',
                         'scim_provisioned', 'federation', 'identity_brokered')),
     source_id       TEXT NOT NULL,
-    referrer_id     TEXT REFERENCES profiles(id),
+    referrer_id     BLOB CHECK (length(referrer_id) = 16) REFERENCES profiles(id),
     utm_source      TEXT NOT NULL,
     utm_medium      TEXT NOT NULL,
     utm_campaign    TEXT NOT NULL,
@@ -1584,7 +1588,7 @@ CREATE TABLE IF NOT EXISTS registration_sources (
     utm_content     TEXT NOT NULL,
     client_id       TEXT,
     created_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_registration_sources_type_date
     ON registration_sources (source_type, created_at DESC);
@@ -1594,27 +1598,27 @@ CREATE INDEX IF NOT EXISTS idx_registration_sources_type_date
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS access_requests (
-    id                       TEXT PRIMARY KEY,
-    requester_id             TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    project_id               TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id                       BLOB PRIMARY KEY CHECK (length(id) = 16),
+    requester_id             BLOB NOT NULL CHECK (length(requester_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    project_id               BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id) ON DELETE CASCADE,
     role_key                 TEXT NOT NULL,
     justification            TEXT,
     requested_duration_hours INTEGER CHECK (requested_duration_hours >= 0),
     status                   TEXT NOT NULL CHECK (status IN (
                                  'pending', 'approved', 'denied', 'cancelled', 'expired')),
-    reviewed_by              TEXT REFERENCES profiles(id),
+    reviewed_by              BLOB CHECK (length(reviewed_by) = 16) REFERENCES profiles(id),
     review_comment           TEXT,
     created_at               TEXT NOT NULL,
     reviewed_at              TEXT,
     expires_at               TEXT
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests(status);
 
 CREATE TABLE IF NOT EXISTS device_attestations (
-    id                      TEXT PRIMARY KEY,
-    device_id               TEXT NOT NULL UNIQUE,
-    profile_id              TEXT NOT NULL,
+    id                      BLOB PRIMARY KEY CHECK (length(id) = 16),
+    device_id               BLOB NOT NULL UNIQUE CHECK (length(device_id) = 16),
+    profile_id              BLOB NOT NULL CHECK (length(profile_id) = 16),
     format                  TEXT NOT NULL,
     key_storage             TEXT NOT NULL,
     status                  TEXT NOT NULL,
@@ -1626,13 +1630,13 @@ CREATE TABLE IF NOT EXISTS device_attestations (
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     revoked_at              TEXT
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_device_attestations_profile_id
     ON device_attestations (profile_id);
 
 CREATE TABLE IF NOT EXISTS anomaly_events (
-    id          TEXT PRIMARY KEY,
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     rule_id     TEXT NOT NULL,
     profile_id  TEXT NOT NULL,
     ip_address  BLOB CHECK (length(ip_address) IN (4, 16)),
@@ -1640,7 +1644,7 @@ CREATE TABLE IF NOT EXISTS anomaly_events (
     risk_score  INTEGER NOT NULL,
     reaction    TEXT NOT NULL,
     timestamp   TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_anomaly_events_rule_id ON anomaly_events (rule_id);
@@ -1654,7 +1658,7 @@ CREATE TABLE IF NOT EXISTS ip_reputation (
     last_failed_at  TEXT,
     last_success_at TEXT,
     updated_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_ip_reputation_score ON ip_reputation (score DESC);
 
@@ -1662,10 +1666,10 @@ CREATE TABLE IF NOT EXISTS ip_allowlist_entries (
     cidr        TEXT PRIMARY KEY,
     description TEXT NOT NULL,
     created_at  TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS profile_locations (
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     country     TEXT NOT NULL,
     latitude    REAL NOT NULL,
     longitude   REAL NOT NULL,
@@ -1674,14 +1678,14 @@ CREATE TABLE IF NOT EXISTS profile_locations (
     last_seen   TEXT NOT NULL,
     designated  INTEGER NOT NULL,
     PRIMARY KEY (profile_id, country)
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_device_lookup
     ON sessions (profile_id, device_id, created_at DESC) WHERE device_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS password_reset_sessions (
-    id              TEXT PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id      BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     email           TEXT NOT NULL,
     destination     TEXT NOT NULL,
     token_hash      TEXT NOT NULL,
@@ -1691,15 +1695,15 @@ CREATE TABLE IF NOT EXISTS password_reset_sessions (
     expires_at      TEXT NOT NULL,
     verified_at     TEXT,
     completed_at    TEXT
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_password_reset_sessions_profile
     ON password_reset_sessions (profile_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS scim_outbound_targets (
-    id                TEXT PRIMARY KEY,
+    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
     client_id         TEXT NOT NULL,
-    project_id        TEXT NOT NULL REFERENCES projects(id),
+    project_id        BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
     display_name      TEXT NOT NULL,
     endpoint_url      TEXT NOT NULL,
     auth_config       TEXT NOT NULL,
@@ -1709,14 +1713,14 @@ CREATE TABLE IF NOT EXISTS scim_outbound_targets (
     enabled           INTEGER NOT NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_scim_outbound_targets_project
     ON scim_outbound_targets (project_id);
 
 CREATE TABLE IF NOT EXISTS scim_outbound_records (
-    target_id       TEXT NOT NULL REFERENCES scim_outbound_targets(id) ON DELETE CASCADE,
-    sid_entity_id   TEXT NOT NULL,
+    target_id       BLOB NOT NULL CHECK (length(target_id) = 16) REFERENCES scim_outbound_targets(id) ON DELETE CASCADE,
+    sid_entity_id   BLOB NOT NULL CHECK (length(sid_entity_id) = 16),
     entity_type     TEXT NOT NULL CHECK (entity_type IN ('user', 'group')),
     downstream_id   TEXT NOT NULL,
     last_synced_at  TEXT NOT NULL,
@@ -1725,32 +1729,32 @@ CREATE TABLE IF NOT EXISTS scim_outbound_records (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     PRIMARY KEY (target_id, sid_entity_id, entity_type)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS scim_outbound_dlq (
-    id              TEXT PRIMARY KEY,
-    target_id       TEXT NOT NULL REFERENCES scim_outbound_targets(id) ON DELETE CASCADE,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    target_id       BLOB NOT NULL CHECK (length(target_id) = 16) REFERENCES scim_outbound_targets(id) ON DELETE CASCADE,
     event_type      TEXT NOT NULL,
     payload         TEXT NOT NULL,
-    sid_entity_id   TEXT NOT NULL,
+    sid_entity_id   BLOB NOT NULL CHECK (length(sid_entity_id) = 16),
     entity_type     TEXT NOT NULL CHECK (entity_type IN ('user', 'group')),
     error           TEXT NOT NULL,
     attempts        INTEGER NOT NULL CHECK (attempts >= 0),
     first_attempt   TEXT NOT NULL,
     last_attempt    TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_scim_outbound_dlq_target ON scim_outbound_dlq (target_id);
 
 CREATE TABLE IF NOT EXISTS notification_preferences (
-    profile_id      TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_id      BLOB PRIMARY KEY CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     preferences     TEXT NOT NULL,
     updated_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS provisioning_connectors (
-    id              TEXT PRIMARY KEY,
-    org_id          TEXT NOT NULL,
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    org_id          BLOB NOT NULL CHECK (length(org_id) = 16),
     direction       TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
     client_id       TEXT NOT NULL UNIQUE,
     display_name    TEXT NOT NULL,
@@ -1758,20 +1762,20 @@ CREATE TABLE IF NOT EXISTS provisioning_connectors (
     revision        INTEGER NOT NULL CHECK (revision >= 1),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_connectors_org
     ON provisioning_connectors (org_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS provisioning_credentials (
-    id              TEXT PRIMARY KEY,
-    connector_id    TEXT NOT NULL REFERENCES provisioning_connectors(id),
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    connector_id    BLOB NOT NULL CHECK (length(connector_id) = 16) REFERENCES provisioning_connectors(id),
     kind            TEXT NOT NULL CHECK (kind IN ('scim_bearer', 'client_secret')),
     status          TEXT NOT NULL CHECK (status IN ('active', 'grace_period', 'expired', 'revoked')),
     verifier        TEXT NOT NULL UNIQUE,
     expires_at      TEXT,
     created_at      TEXT NOT NULL
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_credentials_connector
     ON provisioning_credentials (connector_id, created_at DESC);
@@ -1779,5 +1783,5 @@ CREATE INDEX IF NOT EXISTS idx_provisioning_credentials_connector
 CREATE TABLE IF NOT EXISTS login_policy_epoch (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     epoch           INTEGER NOT NULL
-);
+) STRICT;
 "#;

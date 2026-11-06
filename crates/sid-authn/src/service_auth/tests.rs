@@ -6,9 +6,9 @@ use super::*;
 use crate::issuer::IssuerRegistry;
 use crate::jwt::{ClientGrant, JwtService};
 use sid_core::models::{
-    Application, ApplicationId, AuditEntry, MachineCredentialType, MachineUser,
-    MachineUserCredential, MachineUserStatus, MutationContext, OAuth2Client, OidcIssuer, OwnerType,
-    ProjectId, ResourceIndicator, TokenEndpointAuthMethod,
+    Application, ApplicationId, AuditEntry, MachineCredentialType, MachineOwner, MachineUser,
+    MachineUserCredential, MachineUserStatus, MutationContext, OAuth2Client, OidcIssuer, ProjectId,
+    ResourceIndicator, TokenEndpointAuthMethod,
 };
 use sid_plugin::ClientResourceRegistry;
 use sid_storage::sqlite::SqliteBackend;
@@ -63,8 +63,7 @@ async fn fixture() -> Fixture {
         ProjectId::SYSTEM,
         "mu_checker",
         "Route checker",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     storage
         .create_machine_user(&machine, audit())

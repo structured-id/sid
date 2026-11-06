@@ -27,7 +27,6 @@ fn count_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u32> {
 /// A malformed id or time is an error: a replacement read as none would hide
 /// a refresh token's rotation from reuse detection.
 fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken> {
-    let replaced_by: Option<String> = col(row, "replaced_by")?;
     Ok(RefreshToken {
         id: uuid_col(row, "id")?,
         token_hash: col(row, "token_hash")?,
@@ -39,12 +38,7 @@ fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken
         expires_at: dt_col(row, "expires_at")?,
         created_at: dt_col(row, "created_at")?,
         revoked: col(row, "revoked")?,
-        replaced_by: replaced_by
-            .map(|s| {
-                Uuid::parse_str(&s)
-                    .map_err(|e| SidError::Storage(format!("column replaced_by: {e}")))
-            })
-            .transpose()?,
+        replaced_by: col(row, "replaced_by")?,
         family_id: uuid_col(row, "family_id")?,
         grace_expires_at: dt_col_opt(row, "grace_expires_at")?,
         dpop_jkt: col(row, "dpop_jkt")?,
@@ -80,7 +74,7 @@ fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCod
 
 fn row_to_initial_access_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<InitialAccessToken> {
     Ok(InitialAccessToken {
-        id: InitialAccessTokenId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         project_id: super::col(row, "project_id")?,
         token_hash: col(row, "token_hash")?,
         max_clients: count_col(row, "max_clients")?,
@@ -107,7 +101,7 @@ pub(super) async fn insert_refresh_token(
             resource_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(token.id.to_string())
+    .bind(token.id)
     .bind(&token.token_hash)
     .bind(token.session_id)
     .bind(token.profile_id)
@@ -116,8 +110,8 @@ pub(super) async fn insert_refresh_token(
     .bind(fmt_dt(&token.expires_at))
     .bind(fmt_dt(&token.created_at))
     .bind(token.revoked)
-    .bind(token.replaced_by.map(|u| u.to_string()))
-    .bind(token.family_id.to_string())
+    .bind(token.replaced_by)
+    .bind(token.family_id)
     .bind(token.grace_expires_at.as_ref().map(fmt_dt))
     .bind(&token.dpop_jkt)
     .bind(token.resource)
@@ -181,7 +175,7 @@ impl SqliteBackend {
             "UPDATE refresh_tokens SET revoked = 1, grace_expires_at = NULL
              WHERE family_id = ? AND (revoked = 0 OR grace_expires_at IS NOT NULL)",
         )
-        .bind(family_id.to_string())
+        .bind(family_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -203,9 +197,9 @@ impl SqliteBackend {
                 grace_expires_at = COALESCE(grace_expires_at, ?)
              WHERE id = ? AND expires_at > ? AND (revoked = 0 OR grace_expires_at > ?)",
         )
-        .bind(new.id.to_string())
+        .bind(new.id)
         .bind(fmt_dt(&grace_expires_at))
-        .bind(old_id.to_string())
+        .bind(old_id)
         .bind(&now)
         .bind(&now)
         .execute(&mut *tx)
@@ -252,7 +246,13 @@ impl SqliteBackend {
         .bind(code.authentication.session)
         .execute(&mut *tx)
         .await
-        .map_err(|e| insert_error("authorization code", e))?;
+        .map_err(|e| match &e {
+            // The authorizing session ended before the code was stored.
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                SidError::NotFound(format!("session {}", code.authentication.session))
+            }
+            _ => insert_error("authorization code", e),
+        })?;
         Self::commit_mutation(tx, &format!("auth_code:{}", code.client_id), audit).await
     }
 
@@ -321,22 +321,22 @@ impl SqliteBackend {
             "INSERT INTO initial_access_tokens (id, project_id, token_hash, max_clients, clients_registered, allowed_scopes, allowed_grant_types, allowed_redirect_patterns, created_by, revoked, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(token.id.to_string())
-        .bind(token.project_id.to_string())
+        .bind(token.id)
+        .bind(token.project_id)
         .bind(&token.token_hash)
         .bind(i64::from(token.max_clients))
         .bind(i64::from(token.clients_registered))
         .bind(token.allowed_scopes.join(" "))
         .bind(token.allowed_grant_types.join(" "))
         .bind(token.allowed_redirect_patterns.join(" "))
-        .bind(&token.created_by)
+        .bind(token.created_by)
         .bind(token.revoked)
         .bind(fmt_dt(&token.expires_at))
         .bind(fmt_dt(&token.created_at))
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("initial access token", e))?;
-        Self::commit_mutation(tx, &format!("iat:{}", token.id.0), audit).await
+        Self::commit_mutation(tx, &format!("iat:{}", token.id), audit).await
     }
 
     pub(crate) async fn get_initial_access_token_impl(
@@ -344,7 +344,7 @@ impl SqliteBackend {
         id: InitialAccessTokenId,
     ) -> SidResult<Option<InitialAccessToken>> {
         let row = sqlx::query("SELECT * FROM initial_access_tokens WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -368,7 +368,7 @@ impl SqliteBackend {
         project_id: ProjectId,
     ) -> SidResult<Vec<InitialAccessToken>> {
         let rows = sqlx::query("SELECT * FROM initial_access_tokens WHERE project_id = ?")
-            .bind(project_id.to_string())
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -382,14 +382,14 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         let revoked = sqlx::query("UPDATE initial_access_tokens SET revoked = 1 WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?
             .rows_affected();
         if revoked == 0 {
-            return Err(SidError::NotFound(format!("initial access token {}", id.0)));
+            return Err(SidError::NotFound(format!("initial access token {id}")));
         }
-        Self::commit_mutation(tx, &format!("iat:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("iat:{id}"), audit).await
     }
 }
