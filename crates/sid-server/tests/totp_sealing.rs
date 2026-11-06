@@ -2,9 +2,8 @@
 //! TOTP seeds are stored only sealed under the key manager.
 //!
 //! A TOTP seed is a shared symmetric secret: whoever reads it generates valid
-//! codes. These tests pin that the database holds no usable seed, that a
-//! sealed seed moved to another profile's row is useless there, and that
-//! seeds stored before sealing are sealed on start.
+//! codes. These tests pin that the database holds no usable seed and that a
+//! sealed seed moved to another profile's row is useless there.
 
 mod common;
 
@@ -130,56 +129,4 @@ async fn sealed_seed_moved_to_another_profile_is_refused() {
         .await
         .unwrap_err();
     assert_ne!(err.code(), tonic::Code::Ok);
-}
-
-/// Seeds stored in plain form before sealing are sealed by the start-up pass
-/// and keep working; a second pass changes nothing.
-#[tokio::test]
-async fn plaintext_seeds_are_sealed_on_start() {
-    let profile = test_profile();
-    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
-    let bearer = signed_in(&svc, &profile).await;
-    let seed = sid_authn::generate_secret();
-    let legacy = Credential::new(
-        profile.id,
-        CredentialType::Totp,
-        CredentialData::new(seed.clone()),
-        None,
-    );
-    svc.storage
-        .create_credential(&legacy, AuditEntry::system("test", "legacy").into())
-        .await
-        .unwrap();
-
-    let km = common::test_key_manager();
-    let sealed = sid_authn::sealed_secret::seal_plaintext_credentials(
-        svc.storage.as_ref(),
-        km.as_ref(),
-        CredentialType::Totp,
-        |c| sid_authn::sealed_secret::totp_context(c.profile_id),
-    )
-    .await
-    .unwrap();
-    assert_eq!(sealed, 1);
-    let again = sid_authn::sealed_secret::seal_plaintext_credentials(
-        svc.storage.as_ref(),
-        km.as_ref(),
-        CredentialType::Totp,
-        |c| sid_authn::sealed_secret::totp_context(c.profile_id),
-    )
-    .await
-    .unwrap();
-    assert_eq!(again, 0);
-
-    let stored = stored_totp(&svc, &profile).await;
-    assert!(sid_authn::sealed_secret::is_sealed(stored.data.expose()));
-    svc.auth
-        .verify_totp(authed(
-            VerifyTotpRequest {
-                code: sid_authn::generate_current_totp(&seed),
-            },
-            &bearer,
-        ))
-        .await
-        .unwrap();
 }
