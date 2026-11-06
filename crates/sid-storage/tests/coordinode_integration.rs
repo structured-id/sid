@@ -694,7 +694,10 @@ mod audit_retention {
                 ("action", Value::String(r.action.clone())),
                 ("resource", Value::String(r.resource.clone())),
                 ("outcome", Value::String(r.outcome.to_string())),
-                ("metadata", Value::String(r.metadata.to_string())),
+                (
+                    "metadata",
+                    Value::Document(rmpv::ext::to_value(&r.metadata).expect("metadata")),
+                ),
                 ("ip", Value::Null),
                 ("device_id", Value::Null),
                 ("prev_hash", Value::String(r.prev_hash.clone())),

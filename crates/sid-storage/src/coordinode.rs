@@ -46,6 +46,9 @@ mod session;
 mod signals;
 mod work;
 
+#[cfg(test)]
+mod tests;
+
 /// How often one change is run again after a conflicting commit before it is
 /// reported: each retry follows a commit that changed what it read, so a
 /// change that keeps losing is contended past any useful bound.
@@ -553,16 +556,25 @@ pub(super) fn key(parts: &[&[u8]]) -> SidResult<Value> {
 
 /// A structured value as a CoordiNode document, never as serialized text.
 pub(super) fn document<T: serde::Serialize>(value: &T, name: &str) -> SidResult<Value> {
-    rmpv::ext::to_value(value)
+    // Structs as maps by field name: positional fields would shift into the
+    // place of one left out (`skip_serializing_if`).
+    let bytes =
+        rmp_serde::to_vec_named(value).map_err(|e| SidError::Validation(format!("{name}: {e}")))?;
+    rmpv::decode::read_value(&mut bytes.as_slice())
         .map(Value::Document)
-        .map_err(|e| SidError::Validation(format!("{name}: {e}")))
+        .map_err(|e| SidError::Internal(format!("{name}: {e}")))
 }
 
 /// The structured value the document `name` of `row` holds.
 pub(super) fn get_document<T: serde::de::DeserializeOwned>(row: &Row, name: &str) -> SidResult<T> {
     match field(row, name)? {
-        Value::Document(document) => rmpv::ext::from_value(document.clone())
-            .map_err(|e| SidError::Storage(format!("{name}: {e}"))),
+        // Read back by the codec that wrote it.
+        Value::Document(document) => {
+            let mut bytes = Vec::new();
+            rmpv::encode::write_value(&mut bytes, document)
+                .map_err(|e| SidError::Storage(format!("{name}: {e}")))?;
+            rmp_serde::from_slice(&bytes).map_err(|e| SidError::Storage(format!("{name}: {e}")))
+        }
         other => Err(SidError::Storage(format!(
             "{name} is not a document: {other:?}"
         ))),

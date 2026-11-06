@@ -351,12 +351,10 @@ fn client(row: &Row) -> SidResult<OAuth2Client> {
                 .ok_or_else(|| SidError::Storage(format!("required_acr: unknown {s:?}")))
         })
         .transpose()?;
-    let claim_mappings = get_opt_text(row, "claim_mappings")?
-        .map(|s| {
-            serde_json::from_str(&s).map_err(|e| SidError::Storage(format!("claim_mappings: {e}")))
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let claim_mappings = match row.get("claim_mappings") {
+        None | Some(Value::Null) => Default::default(),
+        Some(_) => super::get_document(row, "claim_mappings")?,
+    };
     let opt_bool = |name: &str| -> SidResult<Option<bool>> {
         match row.get(name) {
             None | Some(Value::Null) => Ok(None),
@@ -426,10 +424,7 @@ fn client_params(client: &OAuth2Client) -> SidResult<Params> {
     let claim_mappings = if client.claim_mappings.is_empty() {
         Value::Null
     } else {
-        Value::String(
-            serde_json::to_string(&client.claim_mappings)
-                .map_err(|e| SidError::Internal(format!("claim mappings: {e}")))?,
-        )
+        super::document(&client.claim_mappings, "claim mappings")?
     };
     let opt_bool = |v: Option<bool>| v.map_or(Value::Null, Value::Bool);
     Ok(Params::default()

@@ -85,7 +85,10 @@ pub(super) fn append(
             .with("action", Value::String(record.action.clone()))
             .with("resource", Value::String(record.resource.clone()))
             .with("outcome", Value::String(record.outcome.to_string()))
-            .with("metadata", Value::String(record.metadata.to_string()))
+            .with(
+                "metadata",
+                super::document(&record.metadata, "audit metadata")?,
+            )
             .with("ip", record.ip_address.map_or(Value::Null, ip_value))
             .with("device_id", opt_text(record.device_id.as_deref()))
             .with("prev_hash", Value::String(record.prev_hash.clone()))
@@ -137,7 +140,6 @@ fn named<T: serde::de::DeserializeOwned>(row: &Row, name: &str) -> SidResult<T> 
 fn record(row: &Row) -> SidResult<AuditRecord> {
     let id = Uuid::from_slice(&get_bytes(row, "id")?)
         .map_err(|e| SidError::Storage(format!("bad audit record id: {e}")))?;
-    let metadata = get_text(row, "metadata")?;
     Ok(AuditRecord {
         id: id.to_string(),
         timestamp: get_time(row, "at")?,
@@ -149,8 +151,7 @@ fn record(row: &Row) -> SidResult<AuditRecord> {
         action: get_text(row, "action")?,
         resource: get_text(row, "resource")?,
         outcome: named(row, "outcome")?,
-        metadata: serde_json::from_str(&metadata)
-            .map_err(|e| SidError::Storage(format!("audit metadata: {e}")))?,
+        metadata: super::get_document(row, "metadata")?,
         ip_address: get_opt_bytes(row, "ip")?
             .as_deref()
             .map(ip_of)
