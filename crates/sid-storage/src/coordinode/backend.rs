@@ -2040,97 +2040,97 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_closure_request(
         &self,
-        _req: &ClosureRequest,
-        _ctx: MutationContext,
+        req: &ClosureRequest,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("closure requests")
+        CoordinodeBackend::create_closure_request(self, req, ctx).await
     }
 
     async fn request_profile_closure(
         &self,
-        _profile: &Profile,
-        _req: &ClosureRequest,
-        _ctx: MutationContext,
+        profile: &Profile,
+        req: &ClosureRequest,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("closure requests")
+        CoordinodeBackend::request_profile_closure(self, profile, req, ctx).await
     }
 
     async fn cancel_profile_closure(
         &self,
-        _profile: &Profile,
-        _ctx: MutationContext,
+        profile: &Profile,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("closure requests")
+        CoordinodeBackend::cancel_profile_closure(self, profile, ctx).await
     }
 
-    async fn get_closure_request(&self, _profile_id: ProfileId) -> Result<Option<ClosureRequest>> {
-        refused("closure requests")
+    async fn get_closure_request(&self, profile_id: ProfileId) -> Result<Option<ClosureRequest>> {
+        CoordinodeBackend::get_closure_request(self, profile_id).await
     }
 
     // === DATA EXPORT ===
 
-    async fn create_export_job(&self, _job: &ExportJob, _ctx: MutationContext) -> Result<()> {
-        refused("export jobs")
+    async fn create_export_job(&self, job: &ExportJob, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_export_job(self, job, ctx).await
     }
 
     async fn acknowledge_export_job(
         &self,
-        _id: Uuid,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        id: Uuid,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("export jobs")
+        CoordinodeBackend::acknowledge_export_job(self, id, at, ctx).await
     }
 
     async fn expire_export_job(
         &self,
-        _id: Uuid,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        id: Uuid,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("export jobs")
+        CoordinodeBackend::expire_export_job(self, id, at, ctx).await
     }
 
-    async fn get_export_job(&self, _profile_id: ProfileId) -> Result<Option<ExportJob>> {
-        refused("export jobs")
+    async fn get_export_job(&self, profile_id: ProfileId) -> Result<Option<ExportJob>> {
+        CoordinodeBackend::get_export_job(self, profile_id).await
     }
 
-    async fn get_export_job_by_id(&self, _job_id: Uuid) -> Result<Option<ExportJob>> {
-        refused("export jobs")
+    async fn get_export_job_by_id(&self, job_id: Uuid) -> Result<Option<ExportJob>> {
+        CoordinodeBackend::get_export_job_by_id(self, job_id).await
     }
 
     // === MAGIC LINKS ===
 
     async fn create_magic_link_session(
         &self,
-        _session: &MagicLinkSession,
-        _ctx: MutationContext,
+        session: &MagicLinkSession,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("magic links")
+        CoordinodeBackend::create_magic_link_session(self, session, ctx).await
     }
 
-    async fn get_magic_link_session(&self, _id: Uuid) -> Result<Option<MagicLinkSession>> {
-        refused("magic links")
+    async fn get_magic_link_session(&self, id: Uuid) -> Result<Option<MagicLinkSession>> {
+        CoordinodeBackend::get_magic_link_session(self, id).await
     }
 
-    async fn consume_magic_link_session(&self, _id: Uuid, _ctx: MutationContext) -> Result<()> {
-        refused("magic links")
+    async fn consume_magic_link_session(&self, id: Uuid, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::consume_magic_link_session(self, id, ctx).await
     }
 
     async fn try_consume_magic_link_session(
         &self,
-        _id: Uuid,
-        _ctx: MutationContext,
+        id: Uuid,
+        ctx: MutationContext,
     ) -> Result<Option<MagicLinkSession>> {
-        refused("magic links")
+        CoordinodeBackend::try_consume_magic_link_session(self, id, ctx).await
     }
 
-    async fn delete_expired_magic_link_sessions(&self, _ctx: MutationContext) -> Result<u64> {
-        refused("magic links")
+    async fn delete_expired_magic_link_sessions(&self, ctx: MutationContext) -> Result<u64> {
+        CoordinodeBackend::delete_expired_magic_link_sessions(self, ctx).await
     }
 
-    async fn count_active_magic_links_for_email(&self, _email: &str) -> Result<u32> {
-        refused("magic links")
+    async fn count_active_magic_links_for_email(&self, email: &str) -> Result<u32> {
+        CoordinodeBackend::count_active_magic_links_for_email(self, email).await
     }
 
     // === SCIM OUTBOUND ===

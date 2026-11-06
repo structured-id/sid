@@ -156,7 +156,11 @@ fn warn_quarantined_email_keys(count: i64) {
 /// Refuse a closure of administrator `closing` when no other administrator
 /// (`admins`: id and stored status of each) is active or suspended: the
 /// instance would be left without one.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn check_other_administrator(
     closing: sid_core::models::ProfileId,
     admins: &[(sid_core::models::ProfileId, String)],

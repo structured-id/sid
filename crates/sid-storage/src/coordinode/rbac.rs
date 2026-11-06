@@ -844,6 +844,33 @@ fn keep_last_administrator(tx: &Statements<'_>, assignment_id: RoleAssignmentId)
     crate::check_other_administrator_assignment(assignment_id, &administrators)
 }
 
+/// The Profiles holding a live installation administrator assignment, with
+/// their stored status. The administrator role's turn and each Profile are
+/// held by the caller's commit, so an assignment removed or an
+/// administrator's status changed meanwhile conflicts with it.
+pub(super) fn held_administrators(tx: &Statements<'_>) -> SidResult<Vec<(ProfileId, String)>> {
+    take_turn(
+        tx,
+        "SidRole",
+        "id",
+        bin(Role::installation_administrator().id.as_bytes()),
+    )?;
+    let mut held = Vec::new();
+    for a in administrator_assignments(tx, None)? {
+        let RoleAssignmentPrincipal::Profile(holder) = a.principal else {
+            continue;
+        };
+        let rows = tx.run(
+            "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node, p.status AS status",
+            Params::default().with("id", bin(holder.as_bytes())),
+        )?;
+        if hold_first(tx, &rows)? {
+            held.push((holder, get_text(&rows[0], "status")?));
+        }
+    }
+    Ok(held)
+}
+
 /// Check in `tx` that `basis` still holds: its assignment unexpired at the
 /// checked revision and, when it reached the actor through a group, the
 /// actor still a member. Both are held for the commit.

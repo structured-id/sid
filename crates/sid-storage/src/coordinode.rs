@@ -23,6 +23,7 @@ mod credential;
 mod directory;
 mod enrollment;
 mod instance_secret;
+mod lifecycle;
 mod login_policy;
 mod machine;
 mod operation;
@@ -200,6 +201,12 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_pat_hash FOR (t:SidPat) REQUIRE t.token_hash IS UNIQUE",
     "CREATE INDEX sid_pat_profile ON :SidPat(profile_id)",
     "CREATE INDEX sid_pat_status ON :SidPat(status)",
+    "CREATE CONSTRAINT sid_closure_request FOR (c:SidClosureRequest) REQUIRE c.profile_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_export_job FOR (e:SidExportJob) REQUIRE e.id IS UNIQUE",
+    "CREATE INDEX sid_export_job_profile ON :SidExportJob(profile_id)",
+    "CREATE CONSTRAINT sid_magic_link FOR (l:SidMagicLink) REQUIRE l.id IS UNIQUE",
+    "CREATE INDEX sid_magic_link_email ON :SidMagicLink(email)",
+    "CREATE INDEX sid_magic_link_expires ON :SidMagicLink(expires_at)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

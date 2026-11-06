@@ -230,6 +230,7 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     super::rbac::delete_profile_records(tx, id)?;
     super::enrollment::delete_profile_records(tx, id)?;
     super::directory::delete_profile_records(tx, id)?;
+    super::lifecycle::delete_profile_records(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
         Params::default().with("id", profile_id(id)),
