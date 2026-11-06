@@ -16,9 +16,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_int,
-    get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_time, get_uuid, opt_text,
-    opt_time, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_id,
+    get_int, get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_time, get_uuid,
+    opt_text, opt_time, time, uuid,
 };
 
 const CLOSURE: &str = "c.profile_id AS profile_id, c.mode AS mode,
@@ -43,11 +43,6 @@ fn bin(bytes: &[u8; 16]) -> Value {
     Value::Binary(bytes.to_vec())
 }
 
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_slice(&get_bytes(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
-}
-
 // === Closure requests ===
 
 fn closure(row: &Row) -> SidResult<ClosureRequest> {
@@ -57,7 +52,7 @@ fn closure(row: &Row) -> SidResult<ClosureRequest> {
             reason: get_opt_text(row, "hold_reason")?,
             placed_at: get_time(row, "hold_placed_at")?,
             expected_end: get_opt_time(row, "hold_expected_end")?,
-            placed_by: profile_of(row, "hold_placed_by")?,
+            placed_by: get_id(row, "hold_placed_by")?,
             reviewing_counsel: get_opt_text(row, "hold_counsel")?,
             previous_status: get_parsed(row, "hold_previous_status")?,
         }),
@@ -65,10 +60,10 @@ fn closure(row: &Row) -> SidResult<ClosureRequest> {
     };
     let cancel_count = get_int(row, "cancel_count")?;
     Ok(ClosureRequest {
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         mode: get_parsed(row, "mode")?,
         closure_reason: get_opt_text(row, "closure_reason")?,
-        requested_by: profile_of(row, "requested_by")?,
+        requested_by: get_id(row, "requested_by")?,
         requested_at: get_time(row, "requested_at")?,
         grace_period_end: get_opt_time(row, "grace_period_end")?,
         export_status: get_parsed(row, "export_status")?,
@@ -162,7 +157,7 @@ fn insert_closure(tx: &Statements<'_>, req: &ClosureRequest, replace: bool) -> S
 fn export(row: &Row) -> SidResult<ExportJob> {
     Ok(ExportJob {
         id: get_uuid(row, "id")?,
-        profile_id: profile_of(row, "profile_id")?,
+        profile_id: get_id(row, "profile_id")?,
         format: get_parsed(row, "format")?,
         status: get_parsed(row, "status")?,
         archive_path: get_opt_text(row, "archive_path")?,

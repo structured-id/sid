@@ -24,9 +24,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_count, get_int, get_opt_bytes, get_opt_parsed, get_opt_text, get_opt_time,
-    get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text,
-    opt_time, opt_uuid, page, sorted_page, texts, time, uuid,
+    get_bytes, get_count, get_id, get_int, get_opt_bytes, get_opt_id, get_opt_parsed, get_opt_text,
+    get_opt_time, get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first,
+    key, opt_text, opt_time, opt_uuid, page, sorted_page, texts, time, uuid,
 };
 
 const ISSUER: &str = "i.id AS id, i.handle AS handle, i.canonical_url AS canonical_url,
@@ -392,7 +392,7 @@ fn client(row: &Row) -> SidResult<OAuth2Client> {
         contacts: get_texts(row, "contacts")?,
         client_id_issued_at: get_time(row, "client_id_issued_at")?,
         client_secret_expires_at: get_opt_time(row, "client_secret_expires_at")?,
-        registration_iat: get_opt_uuid(row, "registration_iat")?.map(InitialAccessTokenId),
+        registration_iat: get_opt_id(row, "registration_iat")?,
         registration_access_token_hash: get_opt_bytes(row, "registration_access_token_hash")?,
         required_acr,
         required_amr: get_texts(row, "required_amr")?,
@@ -474,7 +474,7 @@ fn client_params(client: &OAuth2Client) -> SidResult<Params> {
         )
         .with(
             "registration_iat",
-            opt_uuid(client.registration_iat.as_ref().map(|i| &i.0)),
+            opt_uuid(client.registration_iat.as_ref().map(|i| i.as_uuid())),
         )
         .with(
             "registration_access_token_hash",
@@ -685,7 +685,7 @@ fn iat(row: &Row) -> SidResult<InitialAccessToken> {
         u32::try_from(value).map_err(|_| SidError::Storage(format!("{name}: {value}")))
     };
     Ok(InitialAccessToken {
-        id: InitialAccessTokenId(get_uuid(row, "id")?),
+        id: get_id(row, "id")?,
         token_hash: get_bytes(row, "token_hash")?,
         project_id: ProjectId::from_uuid(get_uuid(row, "project_id")?)
             .map_err(stored("token project"))?,
@@ -694,7 +694,7 @@ fn iat(row: &Row) -> SidResult<InitialAccessToken> {
         allowed_scopes: get_texts(row, "allowed_scopes")?,
         allowed_grant_types: get_texts(row, "allowed_grant_types")?,
         allowed_redirect_patterns: get_texts(row, "allowed_redirect_patterns")?,
-        created_by: get_text(row, "created_by")?,
+        created_by: get_id(row, "created_by")?,
         revoked: get_bool(row, "revoked")?,
         expires_at: get_time(row, "expires_at")?,
         created_at: get_time(row, "created_at")?,
@@ -1540,8 +1540,8 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let token = token.clone();
-        self.mutate(format!("iat:{}", token.id.0), ctx, move |tx| {
-            if get_iat(tx, "id", uuid(&token.id.0))?.is_some() {
+        self.mutate(format!("iat:{}", token.id), ctx, move |tx| {
+            if get_iat(tx, "id", uuid(token.id.as_uuid()))?.is_some() {
                 return Err(SidError::Conflict(
                     "initial access token already exists".into(),
                 ));
@@ -1555,7 +1555,7 @@ impl CoordinodeBackend {
                     created_by: $created_by, revoked: $revoked, expires_at: $expires_at,
                     created_at: $created_at})",
                 Params::default()
-                    .with("id", uuid(&token.id.0))
+                    .with("id", uuid(token.id.as_uuid()))
                     .with("token_hash", Value::Binary(token.token_hash.clone()))
                     .with("project_id", uuid(token.project_id.as_uuid()))
                     .with("max_clients", Value::Int(i64::from(token.max_clients)))
@@ -1569,7 +1569,7 @@ impl CoordinodeBackend {
                         "allowed_redirect_patterns",
                         texts(&token.allowed_redirect_patterns),
                     )
-                    .with("created_by", text(&token.created_by))
+                    .with("created_by", uuid(token.created_by.as_uuid()))
                     .with("revoked", Value::Bool(token.revoked))
                     .with("expires_at", time(token.expires_at))
                     .with("created_at", time(token.created_at)),
@@ -1583,7 +1583,8 @@ impl CoordinodeBackend {
         &self,
         id: InitialAccessTokenId,
     ) -> SidResult<Option<InitialAccessToken>> {
-        self.read(move |tx| get_iat(tx, "id", uuid(&id.0))).await
+        self.read(move |tx| get_iat(tx, "id", uuid(id.as_uuid())))
+            .await
     }
 
     pub(super) async fn get_initial_access_token_by_hash(
@@ -1607,7 +1608,12 @@ impl CoordinodeBackend {
                 Params::default().with("project", uuid(project.as_uuid())),
             )?;
             let all = rows.iter().map(iat).collect::<SidResult<Vec<_>>>()?;
-            Ok(sorted_page(all, |t| (t.created_at, t.id.0), 0, u64::MAX))
+            Ok(sorted_page(
+                all,
+                |t| (t.created_at, *t.id.as_uuid()),
+                0,
+                u64::MAX,
+            ))
         })
         .await
     }
@@ -1617,14 +1623,14 @@ impl CoordinodeBackend {
         id: InitialAccessTokenId,
         ctx: MutationContext,
     ) -> SidResult<()> {
-        self.mutate(format!("iat:{}", id.0), ctx, move |tx| {
+        self.mutate(format!("iat:{id}"), ctx, move |tx| {
             let revoked = tx.run(
                 "MATCH (t:SidInitialAccessToken) WHERE t.id = $id SET t.revoked = true
                  RETURN t.id AS id",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             if revoked.is_empty() {
-                return Err(SidError::NotFound(format!("initial access token {}", id.0)));
+                return Err(SidError::NotFound(format!("initial access token {id}")));
             }
             Ok(())
         })
@@ -1649,25 +1655,17 @@ impl CoordinodeBackend {
             format!("oauth2_client:{}", client.client_id),
             ctx,
             move |tx| {
-                let token = get_iat(tx, "id", uuid(&iat_id.0))?.ok_or_else(|| {
-                    SidError::NotFound(format!("initial access token {}", iat_id.0))
-                })?;
+                let token = get_iat(tx, "id", uuid(iat_id.as_uuid()))?
+                    .ok_or_else(|| SidError::NotFound(format!("initial access token {iat_id}")))?;
                 if token.revoked {
-                    return Err(SidError::Revoked(format!(
-                        "initial access token {}",
-                        iat_id.0
-                    )));
+                    return Err(SidError::Revoked(format!("initial access token {iat_id}")));
                 }
                 if token.expires_at <= Utc::now() {
-                    return Err(SidError::Expired(format!(
-                        "initial access token {}",
-                        iat_id.0
-                    )));
+                    return Err(SidError::Expired(format!("initial access token {iat_id}")));
                 }
                 if token.max_clients > 0 && token.clients_registered >= token.max_clients {
                     return Err(SidError::InvalidState(format!(
-                        "initial access token {} reached its client limit",
-                        iat_id.0
+                        "initial access token {iat_id} reached its client limit"
                     )));
                 }
                 // Every registration under the token writes its count:
@@ -1675,7 +1673,7 @@ impl CoordinodeBackend {
                 tx.run(
                     "MATCH (t:SidInitialAccessToken) WHERE t.id = $id
                  SET t.clients_registered = t.clients_registered + 1",
-                    Params::default().with("id", uuid(&iat_id.0)),
+                    Params::default().with("id", uuid(iat_id.as_uuid())),
                 )?;
                 insert_application(tx, &app)?;
                 insert_client(

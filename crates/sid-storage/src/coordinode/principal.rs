@@ -18,9 +18,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_count, get_int,
-    get_opt_int, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_time, get_uuid, key,
-    opt_text, opt_time, opt_uuid, profile, profile::profile_value, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_count, get_id,
+    get_int, get_opt_int, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_time, get_uuid,
+    key, opt_text, opt_time, opt_uuid, profile, profile::profile_value, time, uuid,
 };
 
 const ENTITY: &str = "p.id AS id, p.principal_type AS principal_type, p.value AS value,
@@ -44,11 +44,6 @@ fn type_value_key(principal_type: PrincipalType, value: &str) -> SidResult<Value
 
 fn pair_key(principal: &uuid::Uuid, profile: ProfileId) -> SidResult<Value> {
     key(&[principal.as_bytes(), profile.as_bytes()])
-}
-
-fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
-    ProfileId::from_uuid(get_uuid(row, name)?)
-        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
 }
 
 fn opt_profile_of(row: &Row, name: &str) -> SidResult<Option<ProfileId>> {
@@ -80,7 +75,7 @@ fn binding(row: &Row) -> SidResult<PrincipalBinding> {
     Ok(PrincipalBinding {
         id: PrincipalBindingId(get_uuid(row, "b_id")?),
         principal_id: PrincipalId(get_uuid(row, "b_principal_id")?),
-        profile_id: profile_of(row, "b_profile_id")?,
+        profile_id: get_id(row, "b_profile_id")?,
         is_primary: get_bool(row, "b_is_primary")?,
         source_field: get_opt_text(row, "b_source_field")?,
         source_email_id: get_opt_uuid(row, "b_source_email_id")?.map(ProfileEmailId),
