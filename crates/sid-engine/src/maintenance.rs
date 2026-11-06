@@ -377,16 +377,29 @@ async fn schedule(job: Job, storage: Arc<dyn StorageBackend>, mut stop: watch::R
                 continue;
             }
         }
+        // A tick and a drain ready together may resolve to the tick.
+        if *stop.borrow() {
+            return;
+        }
         match job.lock {
             None => (job.run)().await,
             Some(lock) => {
                 if let Some(held) = take_job_lock(storage.as_ref(), lock, job.name).await {
-                    (job.run)().await;
-                    release_job_lock(held, job.name).await;
+                    run_held(&job, held, &stop).await;
                 }
             }
         }
     }
+}
+
+/// Run `job` under its lock `held`, then free it. The lock can arrive after a
+/// drain began (it waits for a pooled connection), so a drain seen by then
+/// frees the lock without starting the run.
+async fn run_held(job: &Job, held: sid_plugin::storage::JobLock, stop: &watch::Receiver<bool>) {
+    if !*stop.borrow() {
+        (job.run)().await;
+    }
+    release_job_lock(held, job.name).await;
 }
 
 /// This round's lock of `job`: `None` when another instance holds it, or

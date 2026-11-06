@@ -120,3 +120,62 @@ fn credential_alert_ids_follow_the_alert() {
         credential_alert_id("expiring:kid_a:3")
     );
 }
+
+/// A job lock records whether it was freed.
+struct Held(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl sid_plugin::storage::JobLockHolder for Held {
+    async fn release(self: Box<Self>) -> sid_core::Result<()> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A lock that arrives after a drain began frees itself without starting the
+/// run, so a drain waiting on a pooled connection does not prolong shutdown
+/// by a whole job; before a drain the run goes ahead and frees the lock.
+#[tokio::test]
+async fn a_lock_taken_after_a_drain_starts_no_run() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let job = Job::exclusive(
+        "late_lock",
+        std::time::Duration::from_secs(60),
+        FirstRun::AtStart,
+        9_002,
+        Arc::new(move || {
+            let counted = counted.clone();
+            Box::pin(async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    let (drain, stop) = watch::channel(false);
+
+    let freed = Arc::new(AtomicBool::new(false));
+    run_held(
+        &job,
+        sid_plugin::storage::JobLock::new(Held(freed.clone())),
+        &stop,
+    )
+    .await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert!(freed.load(Ordering::SeqCst));
+
+    drain.send(true).unwrap();
+    let freed = Arc::new(AtomicBool::new(false));
+    run_held(
+        &job,
+        sid_plugin::storage::JobLock::new(Held(freed.clone())),
+        &stop,
+    )
+    .await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "a run started after the drain"
+    );
+    assert!(freed.load(Ordering::SeqCst), "the late lock stayed held");
+}
