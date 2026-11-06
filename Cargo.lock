@@ -6052,15 +6052,20 @@ version = "0.2.20"
 dependencies = [
  "async-trait",
  "chrono",
+ "secrecy",
  "serde_json",
  "sid-authn",
+ "sid-authz",
  "sid-core",
+ "sid-crypto",
+ "sid-keys",
  "sid-plugin",
  "sid-storage",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

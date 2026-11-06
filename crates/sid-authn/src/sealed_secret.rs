@@ -6,18 +6,15 @@
 //! AES-256-GCM field under a key held outside the database, bound to the
 //! record it belongs to, so a database dump alone yields nothing usable.
 
-use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialId, CredentialType};
+use sid_core::models::{AuditEntry, Credential, CredentialData};
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError};
+use sid_plugin::CredentialStore;
 use sid_plugin::crypto::{CurveId, StoredCredential};
-use sid_plugin::{CredentialStore, StorageBackend};
 use zeroize::Zeroizing;
 
 /// Leads every sealed value, so a stored value is recognised as sealed
 /// without guessing (the legacy form was the bare secret).
 const SEALED_PREFIX: &[u8; 8] = b"\0sidkm1\0";
-
-/// Credentials rewritten per page by [`seal_plaintext_credentials`].
-const SEAL_PAGE: u32 = 200;
 
 /// Why a sealed secret could not be produced or read.
 #[derive(Debug, thiserror::Error)]
@@ -214,54 +211,6 @@ where
     match open(key_manager, context, now.data.expose()).await {
         Ok(reopened) if bool::from(reopened.secret.as_slice().ct_eq(secret)) => Ok(now.data),
         _ => Ok(credential.data.clone()),
-    }
-}
-
-/// Seal every credential of `credential_type` still stored in plain form,
-/// with the context `context_for` gives it. Returns how many were sealed.
-///
-/// Idempotent: sealed values are skipped, so replicas running it at the same
-/// time only repeat work; every write stores a valid sealing of the same secret.
-pub async fn seal_plaintext_credentials(
-    storage: &dyn StorageBackend,
-    key_manager: &dyn KeyManager,
-    credential_type: CredentialType,
-    context_for: impl Fn(&Credential) -> String,
-) -> Result<u64, SealedSecretError> {
-    let mut sealed = 0u64;
-    let mut after: Option<CredentialId> = None;
-    loop {
-        let page = storage
-            .list_credentials_by_type(credential_type, after, SEAL_PAGE)
-            .await?;
-        let Some(last) = page.last() else {
-            return Ok(sealed);
-        };
-        after = Some(last.id);
-        for credential in page {
-            if is_sealed(credential.data.expose()) {
-                continue;
-            }
-            let stored = seal(
-                key_manager,
-                &context_for(&credential),
-                credential.data.expose(),
-            )
-            .await?;
-            // Another replica sealing the same value first is not an error.
-            if storage
-                .reseal_credential_data(
-                    credential.id,
-                    credential.data.expose(),
-                    &stored,
-                    AuditEntry::system("credential.secret_sealed", credential.id.0.to_string())
-                        .into(),
-                )
-                .await?
-            {
-                sealed += 1;
-            }
-        }
     }
 }
 

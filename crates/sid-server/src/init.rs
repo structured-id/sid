@@ -289,14 +289,6 @@ pub fn account_settings(
         .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))
 }
 
-/// The installation's domain: the host of its issuer URL.
-pub(crate) fn instance_domain(issuer: &str) -> anyhow::Result<String> {
-    url::Url::parse(issuer)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .with_context(|| format!("SID_ISSUER {issuer:?} is not a URL with a host"))
-}
-
 /// The setting `name` as `read` from the environment: unset is `None`, a
 /// value that is no text stops the start like any other invalid value,
 /// never read as unset.
@@ -316,73 +308,20 @@ pub fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
     setting(name, std::env::var(name))
 }
 
-/// Apply the installation's bootstrap policy `setting`
-/// (`SID_INSTALLATION_MANAGEMENT`): `central` records it centrally managed,
-/// which a self-managed installation with a local administrator refuses;
-/// `self` refuses an installation already centrally managed, which never
-/// returns to a local claim; unset keeps whatever is recorded. Any other value,
-/// a refusal or a storage failure stops the start.
-pub(crate) async fn apply_bootstrap_policy(
-    storage: &dyn StorageBackend,
+/// The installation's management from `SID_INSTALLATION_MANAGEMENT`:
+/// `central` or `self`; unset keeps whatever is recorded. Any other value
+/// stops the start.
+pub(crate) fn management_setting(
     setting: Option<&str>,
-) -> anyhow::Result<()> {
-    use sid_core::models::{BootstrapPolicy, CentralAdoption};
+) -> anyhow::Result<Option<sid_engine::Management>> {
     match setting {
-        Some("central") => match storage
-            .adopt_central_management(
-                AuditEntry::system("installation.centrally_managed", "bootstrap_policy").into(),
-            )
-            .await
-            .context("bootstrap policy")?
-        {
-            CentralAdoption::Adopted => {
-                info!("installation recorded centrally managed: it offers no local claim");
-                Ok(())
-            }
-            CentralAdoption::AlreadyCentral => Ok(()),
-            CentralAdoption::LocalAdministrator => anyhow::bail!(
-                "SID_INSTALLATION_MANAGEMENT=central: this installation has a local \
-                 administrator, it is self-managed"
-            ),
-        },
-        Some("self") => {
-            if storage
-                .bootstrap_policy()
-                .await
-                .context("bootstrap policy")?
-                == BootstrapPolicy::CentrallyManaged
-            {
-                anyhow::bail!(
-                    "SID_INSTALLATION_MANAGEMENT=self: this installation is centrally managed \
-                     and never returns to a local administrator claim"
-                );
-            }
-            Ok(())
-        }
-        None => Ok(()),
+        Some("central") => Ok(Some(sid_engine::Management::Central)),
+        Some("self") => Ok(Some(sid_engine::Management::SelfManaged)),
+        None => Ok(None),
         Some(other) => {
             anyhow::bail!("SID_INSTALLATION_MANAGEMENT {other:?}: expected `central` or `self`")
         }
     }
-}
-
-/// While the instance's claim is open, write its token to the log for the
-/// operator; a storage failure stops the start.
-pub(crate) async fn announce_admin_claim(
-    storage: &dyn StorageBackend,
-    keys: &dyn sid_keys::KeyManager,
-) -> anyhow::Result<()> {
-    let claim = sid_authn::admin_claim::open_claim(storage, keys)
-        .await
-        .context("administrator claim")?;
-    if let Some(token) = claim {
-        tracing::warn!(
-            "No administrator yet. Register and enter this claim token to become the \
-             first administrator: {}",
-            secrecy::ExposeSecret::expose_secret(&token)
-        );
-    }
-    Ok(())
 }
 
 /// What a host binary supplies to the CE components it composes.
@@ -474,12 +413,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .context("the SQLite file")?,
     );
 
-    // Ensure system project exists
-    storage
-        .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
-        .await
-        .expect("Failed to ensure system project");
-
     // ── JWT keys ──
     let data_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| "/var/lib/sid".into());
     let jwt_private_key_path = env_setting("SID_JWT_PRIVATE_KEY_PATH")?
@@ -491,7 +424,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let issuer = env_setting("SID_ISSUER")?
         .filter(|issuer| !issuer.is_empty())
         .context("SID_ISSUER is required")?;
-    let instance_domain = instance_domain(&issuer)?;
+    let issuer_base = Url::parse(&issuer).context("SID_ISSUER is not a URL")?;
 
     if ensure_jwt_key_pair(&jwt_private_key_path, &jwt_public_key_path)? {
         info!("Generated JWT key pair at '{}'", data_dir);
@@ -523,57 +456,48 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         None => 30,
     };
 
-    // ── Field encryption: master key outside the database, versions inside ──
-    let master_key_path =
-        env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
-    let key_manager = sid_authn::field_keys::field_key_manager(
-        storage.as_ref(),
-        std::path::Path::new(&master_key_path),
-        Arc::new(sid_crypto::AwsLcPrimitives::new()),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("Field-encryption key manager: {e}"));
-    // TOTP seeds written before field encryption are sealed before serving.
-    let sealed = sid_authn::sealed_secret::seal_plaintext_credentials(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        sid_core::models::CredentialType::Totp,
-        |c| sid_authn::sealed_secret::totp_context(c.profile_id),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("Sealing stored TOTP seeds: {e}"));
-    if sealed > 0 {
-        info!(
-            "Sealed {} stored TOTP seed(s) under the key manager",
-            sealed
-        );
-    }
-    // OPAQUE envelopes likewise (defense in depth, storage-cache Key Manager).
-    let sealed = sid_authn::sealed_secret::seal_plaintext_credentials(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        sid_core::models::CredentialType::Opaque,
-        |c| sid_authn::sealed_secret::opaque_context(c.profile_id),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Sealing stored OPAQUE envelopes: {e}"))?;
-    if sealed > 0 {
-        info!(
-            "Sealed {} stored OPAQUE envelope(s) under the key manager",
-            sealed
-        );
-    }
-    // The PoW CAPTCHA key every replica signs and checks challenges with.
-    let captcha_pow_key =
-        sid_authn::captcha::load_or_create_pow_key(storage.as_ref(), key_manager.as_ref())
-            .await
-            .map_err(|e| anyhow::anyhow!("CAPTCHA key: {e}"))?;
-
     // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
         sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref())
             .await
             .unwrap_or_else(|e| panic!("Shared cache: {e}"));
+
+    // ── The installation: keys, organization, issuer and their resources ──
+    // The master key lives outside the database; the key versions inside.
+    let master_key_path =
+        env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
+    let installation = sid_engine::Installation::open(
+        storage.clone(),
+        sid_engine::InstallationSettings {
+            issuer: issuer_base.clone(),
+            master_key: master_key_path.clone().into(),
+            crypto: Arc::new(sid_crypto::AwsLcPrimitives::new()),
+            cache: cache_backend.clone(),
+            access_token_ttl,
+            management: management_setting(env_setting("SID_INSTALLATION_MANAGEMENT")?.as_deref())?,
+        },
+    )
+    .await
+    .context("installation")?;
+    if let Some(token) = installation.admin_claim().await? {
+        tracing::warn!(
+            "No administrator yet. Register and enter this claim token to become the \
+             first administrator: {}",
+            secrecy::ExposeSecret::expose_secret(&token)
+        );
+    }
+    let sid_engine::Installation {
+        key_manager,
+        organization,
+        issuer: local_issuer,
+        authorization_api,
+        enrollment_api,
+        issuers,
+        opaque_router,
+        revocation_cache,
+        captcha_pow_key,
+        ..
+    } = installation;
 
     // ── WebAuthn ──
     // RP_ID must match the domain users access (e.g., "structured.id", "localhost").
@@ -589,29 +513,9 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         key_manager.clone(),
     )?);
 
-    // ── OPAQUE ──
-    let opaque_router = Arc::new(
-        sid_authn::opaque::server_setup::router(storage.as_ref(), key_manager.as_ref())
-            .await
-            .unwrap_or_else(|e| panic!("OPAQUE server setup: {e}")),
-    );
-
     // ── ZKPP ──
     let zkpp_cache_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| ".sid-data".to_string());
     let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
-
-    // ── Revocation cache ──
-    // Revocations are committed in the store; the shared cache carries them
-    // to the other replicas and is not needed to refuse a revoked token.
-    let revocation_cache = Arc::new(RevocationCache::recorded_in(
-        access_token_ttl
-            .duration()
-            .to_std()
-            .expect("access token lifetime is positive"),
-        cache_backend.clone(),
-        storage.clone(),
-    ));
-    revocation_cache.listen().await;
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;
@@ -634,62 +538,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
 
-    let management = env_setting("SID_INSTALLATION_MANAGEMENT")?;
-    apply_bootstrap_policy(storage.as_ref(), management.as_deref()).await?;
-    announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
     let enrollment_pin =
         crate::enrollment::pinned_mode_setting(std::env::var(crate::enrollment::PIN_VARIABLE))?;
     if let Some(mode) = enrollment_pin {
         info!(%mode, "enrollment mode pinned by the deployment");
     }
 
-    // The installation's organization, and every application in it.
-    let organization = sid_authn::instance_org::ensure(storage.as_ref(), &instance_domain)
-        .await
-        .context("installation organization")?;
-    let assigned = storage
-        .assign_unowned_clients(
-            organization.id,
-            AuditEntry::system(
-                "application.organization_assigned",
-                organization.id.to_string(),
-            )
-            .into(),
-        )
-        .await
-        .context("assign applications to the installation organization")?;
-    if assigned > 0 {
-        info!(assigned, org = %organization.id, "applications assigned to the installation organization");
-    }
-
-    // The organization's OIDC issuer; its key must open under this
-    // installation's master key, or the start fails rather than signing with
-    // a key its published set lacks.
-    let issuer_base = Url::parse(&issuer).context("SID_ISSUER is not a URL")?;
-    let local_issuer = sid_authn::issuer::ensure_local_issuer(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        &issuer_base,
-        organization.id,
-    )
-    .await
-    .context("installation OIDC issuer")?;
-    // The issuer's UserInfo resource: the token target OIDC-only clients select.
-    sid_authn::issuer::ensure_userinfo_resource(storage.as_ref(), &local_issuer)
-        .await
-        .context("installation OIDC issuer UserInfo resource")?;
-    // The authorization API resource: a permission checker's own token
-    // targets it (D054).
-    let authorization_api =
-        sid_authn::issuer::ensure_authorization_api_resource(storage.as_ref(), &local_issuer)
-            .await
-            .context("installation authorization API resource")?;
-    // The enrollment API resource: invite-issuing services hold the invite
-    // actions on it and their tokens target it.
-    let enrollment_api =
-        sid_authn::issuer::ensure_enrollment_api_resource(storage.as_ref(), &local_issuer)
-            .await
-            .context("installation enrollment API resource")?;
     // The SCIM directory resource: provisioning connectors hold their roles
     // on it and their tokens target it.
     #[cfg(feature = "scim")]
@@ -727,31 +581,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             );
         }
     }
-    // The built-in role assigned to token inspectors, one resource at a time.
-    sid_authz::builtin::ensure_token_inspector_role(storage.as_ref())
-        .await
-        .context("token inspector role")?;
-    // The built-in role assigned to SCIM provisioning connectors.
-    sid_authz::builtin::ensure_scim_provisioner_role(storage.as_ref())
-        .await
-        .context("SCIM provisioner role")?;
-    // The built-in role assigned to services that ask about others'
-    // permissions, one resource at a time.
-    sid_authz::builtin::ensure_permission_checker_role(storage.as_ref())
-        .await
-        .context("permission checker role")?;
-    // The built-in role assigned to services that issue invites.
-    sid_authz::builtin::ensure_invite_issuer_role(storage.as_ref())
-        .await
-        .context("invite issuer role")?;
-    let issuers = Arc::new(sid_authn::issuer::IssuerRegistry::new(
-        storage.clone(),
-        key_manager.clone(),
-    ));
-    issuers
-        .signer(&local_issuer)
-        .await
-        .context("installation OIDC issuer signing key")?;
     info!(issuer = %local_issuer.canonical_url, "installation OIDC issuer");
 
     // The services accept the installation's own tokens and the account
