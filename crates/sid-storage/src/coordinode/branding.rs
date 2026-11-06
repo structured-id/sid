@@ -14,8 +14,8 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, document, finalize, get_document,
-    get_int, get_parsed, get_time, hold_first, project::project_value, sorted_page, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, document, finalize,
+    get_document, get_int, get_parsed, get_time, project::project_value, sorted_page, time, uuid,
 };
 
 const CONFIG: &str = "b.content AS content, b.status AS status, b.revision AS revision,
@@ -78,7 +78,7 @@ impl CoordinodeBackend {
                 "MATCH (j:SidProject) WHERE j.id = $project_id RETURN id(j) AS node",
                 params.clone(),
             )?;
-            if !hold_first(tx, &held)? {
+            if !claim_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("project {project}")));
             }
             if get(tx, id)?.is_some() {

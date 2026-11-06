@@ -22,9 +22,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 use sid_keys::EncryptedField;
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_int,
-    get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first,
-    key, opt_text, opt_time, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time,
+    get_uuid, key, opt_text, opt_time, texts, time, uuid,
 };
 
 const CONSENT: &str = "c.id AS id, c.profile_id AS profile_id, c.client_id AS client_id,
@@ -62,14 +62,14 @@ fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
         .map_err(|e| SidError::Storage(format!("{name}: {e}")))
 }
 
-/// Hold the node of `label` whose `id` is `value` for the commit, or refuse
-/// the reference to it.
-fn hold_ref(tx: &Statements<'_>, label: &str, value: Value, what: &str) -> SidResult<()> {
+/// Claim the node of `label` whose `id` is `value` for a record created
+/// under it, or refuse the reference to it.
+fn claim_ref(tx: &Statements<'_>, label: &str, value: Value, what: &str) -> SidResult<()> {
     let rows = tx.run(
         &format!("MATCH (n:{label}) WHERE n.id = $id RETURN id(n) AS node"),
         Params::default().with("id", value),
     )?;
-    if !hold_first(tx, &rows)? {
+    if !claim_first(tx, &rows)? {
         return Err(SidError::NotFound(what.to_owned()));
     }
     Ok(())
@@ -305,7 +305,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let c = c.clone();
         self.mutate(format!("consent:{}", c.id.0), ctx, move |tx| {
-            hold_ref(
+            claim_ref(
                 tx,
                 "SidProfile",
                 bin(c.profile_id.as_bytes()),
@@ -554,13 +554,13 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let g = g.clone();
         self.mutate(format!("profile_grant:{}", g.id.0), ctx, move |tx| {
-            hold_ref(
+            claim_ref(
                 tx,
                 "SidProject",
                 bin(g.project_id.as_bytes()),
                 &format!("project {}", g.project_id),
             )?;
-            hold_ref(
+            claim_ref(
                 tx,
                 "SidProfile",
                 bin(g.profile_id.as_bytes()),
@@ -764,13 +764,13 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let i = i.clone();
         self.mutate(format!("upstream_identity:{}", i.id.0), ctx, move |tx| {
-            hold_ref(
+            claim_ref(
                 tx,
                 "SidProfile",
                 bin(i.profile_id.as_bytes()),
                 &format!("profile {}", i.profile_id),
             )?;
-            hold_ref(
+            claim_ref(
                 tx,
                 "SidUpstreamProvider",
                 uuid(&i.provider_id.0),

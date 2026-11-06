@@ -27,10 +27,10 @@ use uuid::Uuid;
 
 use super::audit::{ip_of, ip_value};
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
-    get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_texts,
-    get_time, get_uuid, hold_first, opt_text, opt_time, opt_uuid, profile::profile_value, texts,
-    time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_count, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid,
+    get_text, get_texts, get_time, get_uuid, opt_text, opt_time, opt_uuid, profile::profile_value,
+    texts, time, uuid,
 };
 
 const SESSION: &str = "s.id AS id, s.profile_id AS profile_id, s.client_id AS client_id,
@@ -585,29 +585,26 @@ fn insert_generation(tx: &Statements<'_>, generation: &NativeGeneration) -> SidR
     Ok(())
 }
 
-/// Whether session `id` exists unexpired, held for the commit: ending it
-/// meanwhile refuses this transaction.
-fn hold_live_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
+/// Whether session `id` exists unexpired, claimed for a record created under
+/// it: ending it, which removes what it reads of the session's, conflicts
+/// with this transaction either way round.
+fn claim_live_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
     let rows = tx.run(
         "MATCH (s:SidSession) WHERE s.id = $id AND s.expires_at > $now RETURN id(s) AS node",
         Params::default()
             .with("id", session_value(id))
             .with("now", time(Utc::now())),
     )?;
-    match rows.first() {
-        Some(row) => tx.hold(get_int(row, "node")?),
-        None => Ok(false),
-    }
+    claim_first(tx, &rows)
 }
 
-/// Whether session `id` exists, held for the commit as [`hold_live_session`]
-/// holds it.
-fn hold_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
+/// Whether session `id` exists, claimed as [`claim_live_session`] claims it.
+fn claim_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
     let rows = tx.run(
         "MATCH (s:SidSession) WHERE s.id = $id RETURN id(s) AS node",
         Params::default().with("id", session_value(id)),
     )?;
-    hold_first(tx, &rows)
+    claim_first(tx, &rows)
 }
 
 impl CoordinodeBackend {
@@ -896,7 +893,7 @@ impl CoordinodeBackend {
             // A logout racing the authorization either ends the session first,
             // and no code is stored, or conflicts with this commit and finds
             // the code to end with it.
-            if !hold_session(tx, auth.session)? {
+            if !claim_session(tx, auth.session)? {
                 return Err(SidError::NotFound(format!("session {}", auth.session)));
             }
             tx.run(
@@ -1002,7 +999,7 @@ impl CoordinodeBackend {
             format!("session:{}", generation.session_id),
             ctx,
             move |tx| {
-                if !hold_live_session(tx, generation.session_id)? {
+                if !claim_live_session(tx, generation.session_id)? {
                     return Err(SidError::Fenced(
                         "the session ended before its native generation".into(),
                     ));
@@ -1057,7 +1054,7 @@ impl CoordinodeBackend {
             let Some(current) = rows.first().map(presented).transpose()? else {
                 return Ok(Decision::Abandon(NativeRotationOutcome::Ended));
             };
-            if !hold_live_session(tx, current.session_id)? {
+            if !claim_live_session(tx, current.session_id)? {
                 return Ok(Decision::Abandon(NativeRotationOutcome::Ended));
             }
             match current.state {

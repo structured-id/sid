@@ -18,9 +18,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_int,
-    get_opt_bytes, get_opt_text, get_opt_time, get_parsed, get_text, get_time, get_uuid,
-    hold_first, opt_text, opt_time, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_parsed, get_text, get_time,
+    get_uuid, hold_first, opt_text, opt_time, time, uuid,
 };
 
 const DEVICE: &str = "d.id AS id, d.profile_id AS profile_id, d.display_name AS display_name,
@@ -214,7 +214,7 @@ impl CoordinodeBackend {
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", bin(d.profile_id.as_bytes())),
             )?;
-            if !hold_first(tx, &owner)? {
+            if !claim_first(tx, &owner)? {
                 return Err(SidError::NotFound(format!("profile {}", d.profile_id)));
             }
             if get_device(tx, d.id)?.is_some() {
@@ -591,19 +591,27 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let c = c.clone();
         self.mutate(format!("device_auth:{}", c.id.0), ctx, move |tx| {
-            for (label, value, what) in [
-                ("SidProject", bin(c.project_id.as_bytes()), "project"),
+            // The project is claimed: its deletion removes the authorizations
+            // it reads. The resource is only referenced and only held.
+            for (label, value, what, claim) in [
+                ("SidProject", bin(c.project_id.as_bytes()), "project", true),
                 (
                     "SidResource",
                     bin(c.resource.as_bytes()),
                     "protected resource",
+                    false,
                 ),
             ] {
                 let held = tx.run(
                     &format!("MATCH (n:{label}) WHERE n.id = $id RETURN id(n) AS node"),
                     Params::default().with("id", value),
                 )?;
-                if !hold_first(tx, &held)? {
+                let present = if claim {
+                    claim_first(tx, &held)?
+                } else {
+                    hold_first(tx, &held)?
+                };
+                if !present {
                     return Err(SidError::NotFound(format!("the device request's {what}")));
                 }
             }

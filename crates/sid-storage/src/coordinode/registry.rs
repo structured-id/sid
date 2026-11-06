@@ -23,10 +23,10 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
-    get_int, get_opt_bytes, get_opt_parsed, get_opt_text, get_opt_time, get_opt_uuid, get_parsed,
-    get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text, opt_time, opt_uuid, page,
-    sorted_page, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_count, get_int, get_opt_bytes, get_opt_parsed, get_opt_text, get_opt_time,
+    get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text,
+    opt_time, opt_uuid, page, sorted_page, texts, time, uuid,
 };
 
 const ISSUER: &str = "i.id AS id, i.handle AS handle, i.canonical_url AS canonical_url,
@@ -173,9 +173,9 @@ pub(super) struct Created {
     pub(super) resource: Option<ResourceId>,
 }
 
-/// Hold application `id` of `project` for the commit; false when it is not
-/// stored there.
-fn hold_application(
+/// Claim application `id` of `project` for a role created under it; false
+/// when it is not stored there.
+fn claim_application(
     tx: &Statements<'_>,
     id: ApplicationId,
     project: ProjectId,
@@ -191,16 +191,16 @@ fn hold_application(
             .with("id", uuid(id.as_uuid()))
             .with("project", uuid(project.as_uuid())),
     )?;
-    hold_first(tx, &rows)
+    claim_first(tx, &rows)
 }
 
-/// Store a new application in `tx`, in a project held for the commit.
+/// Store a new application in `tx`, in a project claimed for the commit.
 pub(super) fn insert_application(tx: &Statements<'_>, app: &Application) -> SidResult<()> {
     let project = tx.run(
         "MATCH (j:SidProject) WHERE j.id = $id RETURN id(j) AS node",
         Params::default().with("id", uuid(app.project_id.as_uuid())),
     )?;
-    if !hold_first(tx, &project)? {
+    if !claim_first(tx, &project)? {
         return Err(SidError::NotFound(format!("project {}", app.project_id)));
     }
     if get_application(tx, app.id)?.is_some() {
@@ -302,7 +302,7 @@ fn write_resource(tx: &Statements<'_>, resource: &ProtectedResource) -> SidResul
     Ok(())
 }
 
-/// Add a live resource role to its held application in `tx`; a taken
+/// Add a live resource role to its claimed application in `tx`; a taken
 /// indicator of the issuer or a second resource role is `Conflict`.
 fn insert_resource(
     tx: &Statements<'_>,
@@ -328,7 +328,7 @@ fn insert_resource(
             "MATCH (a:SidApplication) WHERE a.id = $id RETURN id(a) AS node",
             Params::default().with("id", uuid(app.as_uuid())),
         )?;
-        hold_first(tx, &held)?
+        claim_first(tx, &held)?
     };
     if !present {
         return Err(SidError::NotFound(format!("application {app}")));
@@ -561,8 +561,9 @@ fn get_client(tx: &Statements<'_>, client_id: &str) -> SidResult<Option<OAuth2Cl
     rows.first().map(client).transpose()
 }
 
-/// Hold what `client` references for the commit: its default resource and
-/// its organization.
+/// Hold what `client` references for the commit: its default resource,
+/// claimed, since retiring a resource clears the clients it reads naming it,
+/// and its organization, which is never deleted.
 fn hold_client_references(
     tx: &Statements<'_>,
     client: &OAuth2Client,
@@ -575,7 +576,7 @@ fn hold_client_references(
             "MATCH (r:SidResource) WHERE r.id = $id RETURN id(r) AS node",
             Params::default().with("id", uuid(resource.as_uuid())),
         )?;
-        if !hold_first(tx, &rows)? {
+        if !claim_first(tx, &rows)? {
             return Err(SidError::NotFound(format!("protected resource {resource}")));
         }
     }
@@ -593,7 +594,7 @@ pub(super) fn insert_client(
     client: &OAuth2Client,
     created: Created,
 ) -> SidResult<()> {
-    if !hold_application(tx, client.application_id, client.project_id, created)? {
+    if !claim_application(tx, client.application_id, client.project_id, created)? {
         return Err(SidError::NotFound(format!(
             "application {} in project {}",
             client.application_id, client.project_id
@@ -1324,7 +1325,7 @@ impl CoordinodeBackend {
                     "MATCH (a:SidApplication) WHERE a.id = $id RETURN id(a) AS node",
                     Params::default().with("id", uuid(app.as_uuid())),
                 )?;
-                if !hold_first(tx, &held)? {
+                if !claim_first(tx, &held)? {
                     return Err(SidError::NotFound(format!("application {app}")));
                 }
             }
@@ -1392,8 +1393,9 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let grant = grant.clone();
         self.transaction(move |tx| {
-            // The resource is held: a retirement committed meanwhile
-            // refuses this grant.
+            // The resource and the client are claimed: a retirement or a
+            // client deletion, which removes the accesses it reads, conflicts
+            // with this grant and sees it.
             let resource = tx.run(
                 "MATCH (r:SidResource) WHERE r.id = $id RETURN id(r) AS node, r.state AS state",
                 Params::default().with("id", uuid(grant.resource_id.as_uuid())),
@@ -1410,14 +1412,14 @@ impl CoordinodeBackend {
                     grant.resource_id
                 )));
             }
-            tx.hold(get_int(row, "node")?)?;
+            tx.claim(get_int(row, "node")?)?;
             // The client is an OAuth client or, failing that, a live machine
             // user, the order in which the token endpoint resolves a client id.
             let oauth = tx.run(
                 "MATCH (c:SidClient) WHERE c.client_id = $id RETURN id(c) AS node",
                 Params::default().with("id", text(&grant.client_id)),
             )?;
-            let target = if hold_first(tx, &oauth)? {
+            let target = if claim_first(tx, &oauth)? {
                 "oauth2_client"
             } else {
                 let machine = tx.run(
@@ -1425,7 +1427,7 @@ impl CoordinodeBackend {
                      RETURN id(m) AS node",
                     Params::default().with("id", text(&grant.client_id)),
                 )?;
-                if !hold_first(tx, &machine)? {
+                if !claim_first(tx, &machine)? {
                     return Err(SidError::NotFound(format!("client {}", grant.client_id)));
                 }
                 "machine_user"

@@ -11,8 +11,8 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, document, finalize, get_document,
-    get_int, hold_first, key, project::project_value, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, document, finalize,
+    get_document, get_int, key, project::project_value, time, uuid,
 };
 
 fn config_key(project: ProjectId, flow_type: FlowType) -> SidResult<Value> {
@@ -32,13 +32,13 @@ fn action(row: &Row) -> SidResult<FlowAction> {
     Ok(action)
 }
 
-/// Hold project `id` for the commit, or refuse what refers to it.
-fn hold_project(tx: &Statements<'_>, id: ProjectId) -> SidResult<()> {
+/// Claim project `id` for a record created under it, or refuse it.
+fn claim_project(tx: &Statements<'_>, id: ProjectId) -> SidResult<()> {
     let rows = tx.run(
         "MATCH (j:SidProject) WHERE j.id = $id RETURN id(j) AS node",
         Params::default().with("id", project_value(id)),
     )?;
-    if !hold_first(tx, &rows)? {
+    if !claim_first(tx, &rows)? {
         return Err(SidError::NotFound(format!("project {id}")));
     }
     Ok(())
@@ -88,7 +88,7 @@ impl CoordinodeBackend {
             .with("updated_at", time(config.updated_at));
         let project = config.project_id;
         self.mutate(config_chain(project, config.flow_type), ctx, move |tx| {
-            hold_project(tx, project)?;
+            claim_project(tx, project)?;
             // The whole configuration is replaced: one per project and type.
             let updated = tx.run(
                 "MATCH (c:SidFlowConfig) WHERE c.pair = $pair
@@ -144,7 +144,7 @@ impl CoordinodeBackend {
             .with("updated_at", time(action.updated_at));
         let project = action.project_id;
         self.mutate(format!("flow_action:{}", action.id), ctx, move |tx| {
-            hold_project(tx, project)?;
+            claim_project(tx, project)?;
             let found = tx.run(
                 "MATCH (a:SidFlowAction) WHERE a.id = $id RETURN a.id AS id",
                 params.clone(),

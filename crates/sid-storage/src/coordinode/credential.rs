@@ -23,9 +23,10 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
-    get_int, get_opt_bytes, get_opt_int, get_opt_text, get_opt_time, get_text, get_time, get_uuid,
-    hold_first, key, opt_text, opt_time, profile::profile_value, sorted_page, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_count, get_int, get_opt_bytes, get_opt_int, get_opt_text, get_opt_time,
+    get_text, get_time, get_uuid, hold_first, key, opt_text, opt_time, profile::profile_value,
+    sorted_page, time, uuid,
 };
 
 const CREDENTIAL: &str = "c.id AS id, c.profile_id AS profile_id,
@@ -942,12 +943,13 @@ impl CoordinodeBackend {
                     .ok_or_else(|| SidError::Storage("user_handle: not 16 bytes".into()))?;
                 return Ok(Decision::Abandon(handle));
             }
-            // The profile is held: a deletion committed meanwhile refuses this.
+            // The profile is claimed: its deletion, which removes the handles
+            // it reads, conflicts with this one either way round.
             let profile = tx.run(
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", profile_value(owner)),
             )?;
-            if !hold_first(tx, &profile)? {
+            if !claim_first(tx, &profile)? {
                 return Err(SidError::NotFound(format!("profile {owner}")));
             }
             tx.run(

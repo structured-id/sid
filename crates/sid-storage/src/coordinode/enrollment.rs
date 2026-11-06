@@ -21,9 +21,10 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_int,
-    get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_parsed, get_text, get_texts,
-    get_time, get_uuid, hold_first, key, opt_text, opt_time, sorted_page, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_parsed,
+    get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text, opt_time, sorted_page,
+    texts, time, uuid,
 };
 
 /// The scope both installation policies are recorded under.
@@ -603,7 +604,8 @@ impl CoordinodeBackend {
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", bin(profile.as_bytes())),
             )?;
-            if !hold_first(tx, &held)? {
+            // Claimed: the role assignment is the profile's, deleted with it.
+            if !claim_first(tx, &held)? {
                 // Dropped: the claim stays for a stored claimer.
                 return Ok(Decision::Abandon(false));
             }

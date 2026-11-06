@@ -19,9 +19,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bytes, get_int,
-    get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first,
-    key, opt_text, opt_time, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bytes,
+    get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, key,
+    opt_text, opt_time, texts, time, uuid,
 };
 
 const METADATA: &str = "m.profile_id AS profile_id, m.meta_key AS meta_key, m.value AS value,
@@ -67,8 +67,9 @@ fn metadata_of(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Vec<Profile
     rows.iter().map(metadata).collect()
 }
 
-/// Set one metadata key of a profile in `tx`. `created` names a profile
-/// this transaction created itself, which needs no hold.
+/// Set one metadata key of a profile in `tx`, claiming the profile, which is
+/// deleted with its metadata. `created` names a profile this transaction
+/// created itself, which needs no claim.
 fn set_metadata(
     tx: &Statements<'_>,
     m: &ProfileMetadata,
@@ -79,7 +80,7 @@ fn set_metadata(
             "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
             Params::default().with("id", bin(m.profile_id.as_bytes())),
         )?;
-        if !hold_first(tx, &held)? {
+        if !claim_first(tx, &held)? {
             return Err(SidError::NotFound(format!("profile {}", m.profile_id)));
         }
     }

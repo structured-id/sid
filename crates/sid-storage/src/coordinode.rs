@@ -5,6 +5,9 @@
 //! since it began, or whose pinned reads ([`Statements::hold`]) changed, and
 //! the whole transaction is run again from the start. A plain read is not
 //! checked at commit: what a decision rests on is either written or held.
+//! A decision on the absence of children cannot hold what is not there, so
+//! every child creation claims its parent ([`Statements::claim`]) and the
+//! parent's deletion, which writes the parent, conflicts with it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -215,6 +218,22 @@ impl Statements<'_> {
             .map_err(storage)?;
         Ok(true)
     }
+
+    /// Hold the parent node `node` for a child this transaction creates, and
+    /// write it: a deletion of the parent that read its children before this
+    /// commit then conflicts and runs again, seeing the child. A hold alone
+    /// would leave that deletion's decision, built on no child, unchecked.
+    pub(super) fn claim(&self, node: i64) -> SidResult<bool> {
+        if !self.hold(node)? {
+            return Ok(false);
+        }
+        // The owner's `turn`, as the owners of other records take it.
+        self.run(
+            "MATCH (n) WHERE id(n) = $node SET n.turn = coalesce(n.turn, 0) + 1",
+            Params::default().with("node", Value::Int(node)),
+        )?;
+        Ok(true)
+    }
 }
 
 /// One result row, by column name (CoordiNode's row shape).
@@ -423,6 +442,15 @@ pub(super) fn get_opt_parsed<T: std::str::FromStr<Err = String>>(
 pub(super) fn hold_first(tx: &Statements<'_>, rows: &[Row]) -> SidResult<bool> {
     match rows.first() {
         Some(row) => tx.hold(get_int(row, "node")?),
+        None => Ok(false),
+    }
+}
+
+/// Claim the parent node the first row's `node` column names for a child
+/// this transaction creates: true when there is one and it still stands.
+pub(super) fn claim_first(tx: &Statements<'_>, rows: &[Row]) -> SidResult<bool> {
+    match rows.first() {
+        Some(row) => tx.claim(get_int(row, "node")?),
         None => Ok(false),
     }
 }

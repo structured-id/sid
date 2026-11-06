@@ -158,8 +158,9 @@ impl CoordinodeBackend {
             match get(tx, id)? {
                 Some(stored) if !stored.is_system => {
                     // An application or SCIM target keeps its project: no live
-                    // client or outbound target outlives it. Creating either
-                    // holds the project, so one racing this deletion conflicts.
+                    // client or outbound target outlives it. Creating any child
+                    // claims the project, so one racing this deletion conflicts
+                    // with it and is seen when it runs again.
                     for holder in ["SidApplication", "SidScimTarget"] {
                         let held = tx.run(
                             &format!(

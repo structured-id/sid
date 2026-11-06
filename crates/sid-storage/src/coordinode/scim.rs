@@ -16,8 +16,8 @@ use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
 
 use super::{
-    CoordinodeBackend, Params, Row, Statements, document, get_bool, get_document, get_int,
-    get_opt_text, get_parsed, get_text, get_time, get_uuid, hold_first, key, opt_text,
+    CoordinodeBackend, Params, Row, Statements, claim_first, document, get_bool, get_document,
+    get_int, get_opt_text, get_parsed, get_text, get_time, get_uuid, key, opt_text,
     project::project_value, time, uuid,
 };
 
@@ -105,20 +105,21 @@ fn record_chain(target_id: ScimOutboundTargetId, entity: Uuid) -> String {
     format!("scim_outbound_record:{}:{entity}", target_id.0)
 }
 
-/// Hold target `id` for the commit, or refuse the reference to it.
-fn hold_target(tx: &Statements<'_>, id: ScimOutboundTargetId) -> SidResult<()> {
+/// Claim target `id` for a mapping or dead letter written under it, which
+/// its deletion removes, or refuse the reference to it.
+fn claim_target(tx: &Statements<'_>, id: ScimOutboundTargetId) -> SidResult<()> {
     let rows = tx.run(
         "MATCH (t:SidScimTarget) WHERE t.id = $id RETURN id(t) AS node",
         Params::default().with("id", uuid(&id.0)),
     )?;
-    if !hold_first(tx, &rows)? {
+    if !claim_first(tx, &rows)? {
         return Err(SidError::NotFound(format!("SCIM outbound target {}", id.0)));
     }
     Ok(())
 }
 
 fn insert_letter(tx: &Statements<'_>, d: &OutboundDlqEntry) -> SidResult<()> {
-    hold_target(tx, d.target_id)?;
+    claim_target(tx, d.target_id)?;
     let found = tx.run(
         "MATCH (d:SidScimDeadLetter) WHERE d.id = $id RETURN d.id AS id",
         Params::default().with("id", uuid(&d.id)),
@@ -188,7 +189,8 @@ impl CoordinodeBackend {
                 "MATCH (j:SidProject) WHERE j.id = $id RETURN id(j) AS node",
                 Params::default().with("id", project_value(project)),
             )?;
-            if !hold_first(tx, &held)? {
+            // Claimed: the project's deletion refuses while it has a target.
+            if !claim_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("project {project}")));
             }
             let found = tx.run(
@@ -262,7 +264,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let r = r.clone();
         self.mutate(record_chain(r.target_id, r.sid_entity_id), ctx, move |tx| {
-            hold_target(tx, r.target_id)?;
+            claim_target(tx, r.target_id)?;
             let pair = record_key(r.target_id, r.sid_entity_id, r.entity_type)?;
             let found = tx.run(
                 "MATCH (r:SidScimRecord) WHERE r.pair = $pair RETURN r.pair AS pair",
@@ -303,7 +305,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let r = r.clone();
         self.mutate(record_chain(r.target_id, r.sid_entity_id), ctx, move |tx| {
-            hold_target(tx, r.target_id)?;
+            claim_target(tx, r.target_id)?;
             let pair = record_key(r.target_id, r.sid_entity_id, r.entity_type)?;
             let synced = time(r.last_synced_at);
             // Point the mapping at the downstream id just provisioned and

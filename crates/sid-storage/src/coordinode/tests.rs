@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Decision, Params, Row, document, get_document, get_text, hold_first, in_transaction};
+use super::{
+    Decision, Params, Row, claim_first, document, get_document, get_text, hold_first,
+    in_transaction,
+};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum Shape {
@@ -73,6 +76,61 @@ fn a_decision_on_a_node_changed_after_the_snapshot_runs_again() {
     })
     .unwrap();
     assert_eq!(seen.as_deref(), Some("new"));
+    assert_eq!(attempts.get(), 2);
+}
+
+/// Create a child of parent `k` in a transaction of its own, claiming the
+/// parent as a child creation does.
+fn create_child(db: &coordinode_embed::Database, k: i64) {
+    in_transaction(db, |tx| {
+        let rows = tx.run(
+            &format!("MATCH (p:SidProbe) WHERE p.k = {k} RETURN id(p) AS node"),
+            Params::default(),
+        )?;
+        if !claim_first(tx, &rows)? {
+            return Ok(Decision::Abandon(()));
+        }
+        tx.run(
+            &format!("CREATE (c:SidProbeChild {{parent: {k}}})"),
+            Params::default(),
+        )?;
+        Ok(Decision::Commit(()))
+    })
+    .unwrap();
+}
+
+/// A deletion that decides from the children it reads sees a child created
+/// after its read: the child's claim on the parent makes the deletion run
+/// again, so no child outlives its parent (the foreign key of a SQL store).
+#[test]
+fn a_child_created_during_its_parents_deletion_is_seen() {
+    let db = coordinode_embed::Database::open_in_memory().unwrap();
+    write(&db, "CREATE (p:SidProbe {k: 2})");
+    let attempts = std::cell::Cell::new(0);
+    let deleted = in_transaction(&db, |tx| {
+        attempts.set(attempts.get() + 1);
+        let children = tx.run(
+            "MATCH (c:SidProbeChild) WHERE c.parent = 2 RETURN c.parent AS p",
+            Params::default(),
+        )?;
+        if attempts.get() == 1 {
+            // A child is created and committed between the read and the delete.
+            create_child(&db, 2);
+        }
+        if !children.is_empty() {
+            return Ok(Decision::Abandon(false));
+        }
+        tx.run(
+            "MATCH (p:SidProbe) WHERE p.k = 2 DETACH DELETE p",
+            Params::default(),
+        )?;
+        Ok(Decision::Commit(true))
+    })
+    .unwrap();
+    assert!(
+        !deleted,
+        "the parent was deleted under a child created meanwhile"
+    );
     assert_eq!(attempts.get(), 2);
 }
 

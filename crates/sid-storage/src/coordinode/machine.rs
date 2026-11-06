@@ -22,9 +22,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bytes, get_int,
-    get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, hold_first,
-    key, opt_text, opt_time, sorted_page, texts, time,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bytes,
+    get_int, get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time,
+    hold_first, key, opt_text, opt_time, sorted_page, texts, time,
 };
 
 const MACHINE: &str = "m.id AS id, m.project_id AS project_id, m.machine_type AS machine_type,
@@ -354,7 +354,7 @@ impl CoordinodeBackend {
                 "MATCH (j:SidProject) WHERE j.id = $id RETURN id(j) AS node",
                 Params::default().with("id", bin(m.project_id.as_bytes())),
             )?;
-            if !hold_first(tx, &project)? {
+            if !claim_first(tx, &project)? {
                 return Err(SidError::NotFound(format!("project {}", m.project_id)));
             }
             if !machine_where(tx, "m.id = $value", bin(m.id.as_bytes()))?.is_empty() {
@@ -681,7 +681,7 @@ impl CoordinodeBackend {
                     "MATCH (m:SidMachineUser) WHERE m.id = $id RETURN id(m) AS node",
                     Params::default().with("id", bin(g.machine_user_id.as_bytes())),
                 )?;
-                if !hold_first(tx, &machine)? {
+                if !claim_first(tx, &machine)? {
                     return Err(SidError::NotFound(format!(
                         "machine user {}",
                         g.machine_user_id

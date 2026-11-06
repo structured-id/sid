@@ -24,9 +24,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_int,
-    get_opt_bytes, get_opt_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts,
-    get_time, hold_first, key, opt_text, opt_time, texts, time,
+    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
+    get_bytes, get_int, get_opt_bytes, get_opt_int, get_opt_text, get_opt_time, get_parsed,
+    get_text, get_texts, get_time, hold_first, key, opt_text, opt_time, texts, time,
 };
 
 const ROLE: &str = "r.id AS id, r.project_id AS project_id, r.role_key AS role_key,
@@ -136,6 +136,17 @@ fn hold(tx: &Statements<'_>, label: &str, property: &str, value: Value) -> SidRe
     hold_first(tx, &rows)
 }
 
+/// Claim the node of `label` whose `property` is `value` for a record
+/// created under it, which its deletion removes or detaches; false when
+/// there is none.
+fn claim(tx: &Statements<'_>, label: &str, property: &str, value: Value) -> SidResult<bool> {
+    let rows = tx.run(
+        &format!("MATCH (n:{label}) WHERE n.{property} = $value RETURN id(n) AS node"),
+        Params::default().with("value", value),
+    )?;
+    claim_first(tx, &rows)
+}
+
 // === Roles ===
 
 fn role(row: &Row) -> SidResult<Role> {
@@ -165,10 +176,10 @@ fn name_key(project: ProjectId, name: &str) -> SidResult<Value> {
     key(&[project.as_bytes(), name.as_bytes()])
 }
 
-/// Store a new role of a held project in `tx`; its id, or its key or name
+/// Store a new role of a claimed project in `tx`; its id, or its key or name
 /// in the project, already stored is `Conflict`.
 fn insert_role(tx: &Statements<'_>, r: &Role) -> SidResult<()> {
-    if !hold(tx, "SidProject", "id", bin(r.project_id.as_bytes()))? {
+    if !claim(tx, "SidProject", "id", bin(r.project_id.as_bytes()))? {
         return Err(SidError::NotFound(format!("project {}", r.project_id)));
     }
     if get_role(tx, r.id)?.is_some() {
@@ -260,14 +271,15 @@ fn get_group(tx: &Statements<'_>, group_id: GroupId) -> SidResult<Option<Group>>
     rows.first().map(group).transpose()
 }
 
-/// Store a new group of a held project in `tx`; its id, or its name in the
+/// Store a new group of a claimed project in `tx`, under a claimed parent
+/// group, whose deletion detaches its subgroups; its id, or its name in the
 /// project, already stored is `Conflict`.
 pub(super) fn insert_group(tx: &Statements<'_>, g: &Group) -> SidResult<()> {
-    if !hold(tx, "SidProject", "id", bin(g.project_id.as_bytes()))? {
+    if !claim(tx, "SidProject", "id", bin(g.project_id.as_bytes()))? {
         return Err(SidError::NotFound(format!("project {}", g.project_id)));
     }
     if let Some(parent) = g.parent_group_id
-        && !hold(tx, "SidGroup", "id", bin(parent.as_bytes()))?
+        && !claim(tx, "SidGroup", "id", bin(parent.as_bytes()))?
     {
         return Err(SidError::NotFound(format!("group {parent}")));
     }
@@ -336,7 +348,8 @@ pub(super) fn add_member(tx: &Statements<'_>, m: &GroupMember) -> SidResult<()> 
     if !take_turn(tx, "SidGroup", "id", bin(m.group_id.as_bytes()))? {
         return Err(missing());
     }
-    if !hold(tx, "SidProfile", "id", bin(m.profile_id.as_bytes()))? {
+    // The member is claimed: its deletion removes its memberships.
+    if !claim(tx, "SidProfile", "id", bin(m.profile_id.as_bytes()))? {
         return Err(missing());
     }
     let granted = tx.run(
@@ -571,8 +584,11 @@ fn bump_connector(tx: &Statements<'_>, c: ProvisioningConnectorId) -> SidResult<
 }
 
 /// Store `a` in `tx`. An existing id is `Conflict`; a missing role,
-/// principal or referenced assignment is refused. `created` names a
-/// Profile this transaction created itself, which needs no hold.
+/// principal or referenced assignment is refused. What deletes or refuses
+/// its deletion over the assignments it reads is claimed: the principal, the
+/// assignment it depends on, the restricting group and the administered
+/// roles. `created` names a Profile this transaction created itself, which
+/// needs no claim.
 pub(super) fn insert_assignment(
     tx: &Statements<'_>,
     a: &RoleAssignment,
@@ -589,7 +605,7 @@ pub(super) fn insert_assignment(
     let present = match &a.principal {
         RoleAssignmentPrincipal::Profile(p) => {
             profile = Some(p);
-            created == Some(*p) || hold(tx, "SidProfile", "id", bin(p.as_bytes()))?
+            created == Some(*p) || claim(tx, "SidProfile", "id", bin(p.as_bytes()))?
         }
         RoleAssignmentPrincipal::Group(g) => {
             group_id = Some(g);
@@ -603,7 +619,7 @@ pub(super) fn insert_assignment(
         }
         RoleAssignmentPrincipal::OAuthClient(c) => {
             client = Some(c.as_str());
-            hold(tx, "SidClient", "client_id", Value::String(c.clone()))?
+            claim(tx, "SidClient", "client_id", Value::String(c.clone()))?
         }
         RoleAssignmentPrincipal::ProvisioningConnector(c) => {
             connector = Some(c);
@@ -615,7 +631,7 @@ pub(super) fn insert_assignment(
     }
     let provenance = a.provenance.as_ref();
     if let Some(source) = provenance.and_then(|p| p.depends_on)
-        && !hold(tx, "SidRoleAssignment", "id", bin(source.as_bytes()))?
+        && !claim(tx, "SidRoleAssignment", "id", bin(source.as_bytes()))?
     {
         return Err(SidError::NotFound(format!("role assignment {source}")));
     }
@@ -634,13 +650,13 @@ pub(super) fn insert_assignment(
             .map_err(|e| SidError::Validation(e.to_string()))?;
         if let Some(restricted) = envelope.recipient_group
             && group_id != Some(&restricted)
-            && !hold(tx, "SidGroup", "id", bin(restricted.as_bytes()))?
+            && !claim(tx, "SidGroup", "id", bin(restricted.as_bytes()))?
         {
             return Err(SidError::NotFound(format!("group {restricted}")));
         }
         for administered in &envelope.roles {
             if *administered != a.role_id
-                && !hold(tx, "SidRole", "id", bin(administered.as_bytes()))?
+                && !claim(tx, "SidRole", "id", bin(administered.as_bytes()))?
             {
                 return Err(SidError::NotFound(format!("role {administered}")));
             }
@@ -1528,10 +1544,12 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let p = p.clone();
         self.mutate(format!("cedar_policy:{}", p.id), ctx, move |tx| {
+            // A project deletes its policies, so it is claimed; a resource is
+            // retired with its policies kept, so it is only held.
             let held = match p.scope {
                 PolicyScope::Installation => true,
                 PolicyScope::Project(project) => {
-                    hold(tx, "SidProject", "id", bin(project.as_bytes()))?
+                    claim(tx, "SidProject", "id", bin(project.as_bytes()))?
                 }
                 PolicyScope::Resource(resource) => {
                     hold(tx, "SidResource", "id", bin(resource.as_bytes()))?
@@ -1669,10 +1687,11 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let q = q.clone();
         self.mutate(format!("access_request:{}", q.id), ctx, move |tx| {
-            if !hold(tx, "SidProfile", "id", bin(q.requester_id.as_bytes()))? {
+            // Both delete the requests they read.
+            if !claim(tx, "SidProfile", "id", bin(q.requester_id.as_bytes()))? {
                 return Err(SidError::NotFound(format!("profile {}", q.requester_id)));
             }
-            if !hold(tx, "SidProject", "id", bin(q.project_id.as_bytes()))? {
+            if !claim(tx, "SidProject", "id", bin(q.project_id.as_bytes()))? {
                 return Err(SidError::NotFound(format!("project {}", q.project_id)));
             }
             let found = tx.run(
