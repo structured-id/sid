@@ -144,6 +144,7 @@ fn warn_quarantined_email_keys(count: i64) {
 /// Refuse a closure of administrator `closing` when no other administrator
 /// (`admins`: id and stored status of each) is active or suspended: the
 /// instance would be left without one.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 fn check_other_administrator(
     closing: sid_core::models::ProfileId,
     admins: &[(sid_core::models::ProfileId, String)],
@@ -163,6 +164,7 @@ fn check_other_administrator(
 
 /// Whether an administrator Profile in the stored `status` still
 /// administers: active or suspended, not closing or closed.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 fn usable_administrator(status: &str) -> bool {
     matches!(status, "active" | "suspended")
 }
@@ -220,3 +222,7 @@ fn decay_cutoff(
 // SQLite backend (embedded-dev mode)
 #[cfg(feature = "storage-sqlite")]
 pub mod sqlite;
+
+// SID's records in a host's CoordiNode database (embedded server hosts).
+#[cfg(feature = "storage-coordinode")]
+pub mod coordinode;
