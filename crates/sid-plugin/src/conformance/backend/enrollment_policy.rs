@@ -317,7 +317,7 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
             .use_count,
         1
     );
-    let chain = format!("invite:{}", invite.id.0);
+    let chain = format!("invite:{}", invite.id);
     // The invite's creation and its one use; the refused registration
     // recorded nothing.
     assert_eq!(log.query(&chain, None, None).await.unwrap().len(), 2);

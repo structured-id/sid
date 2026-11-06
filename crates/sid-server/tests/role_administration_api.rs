@@ -41,6 +41,7 @@ async fn harness() -> Harness {
     sid_storage::migrator::run_migrations(backend.pool(), None)
         .await
         .expect("Failed to run migrations");
+    common::adopt_operation_period(&backend).await;
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let jwt = test_jwt();
     let svc = AuthzServiceImpl::new(

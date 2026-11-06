@@ -28,6 +28,7 @@ async fn pg_storage() -> Arc<dyn StorageBackend> {
     sid_storage::migrator::run_migrations(backend.pool(), None)
         .await
         .expect("Failed to run migrations");
+    common::adopt_operation_period(&backend).await;
     Arc::new(backend)
 }
 

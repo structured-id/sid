@@ -4,8 +4,8 @@
 
 use chrono::Utc;
 use sid_core::models::{
-    ActionConfig, ActionId, ActionOnError, ActionPoint, ActionType, FlowAction, FlowType, Project,
-    ProjectId,
+    ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowType,
+    Project, ProjectId,
 };
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -24,7 +24,7 @@ async fn project(backend: &dyn StorageBackend) -> ProjectId {
 fn action(project_id: ProjectId, point: ActionPoint, order: i32) -> FlowAction {
     let now = Utc::now();
     FlowAction {
-        id: ActionId::new(),
+        id: FlowActionId::generate(),
         project_id,
         flow_type: FlowType::Authentication,
         action_point: point,
@@ -49,7 +49,7 @@ async fn listed(
     backend: &dyn StorageBackend,
     project_id: ProjectId,
     point: Option<ActionPoint>,
-) -> Vec<ActionId> {
+) -> Vec<FlowActionId> {
     backend
         .list_flow_actions(project_id, FlowType::Authentication, point)
         .await

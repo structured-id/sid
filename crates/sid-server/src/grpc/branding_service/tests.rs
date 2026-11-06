@@ -1,4 +1,5 @@
 use super::*;
+use sid_core::models::ProjectId;
 
 #[test]
 fn test_tokens_roundtrip() {
@@ -72,7 +73,7 @@ fn test_text_roundtrip() {
 #[test]
 fn test_domain_to_proto_status() {
     let config = BrandingConfig {
-        id: BrandingConfigId::new(),
+        id: BrandingConfigId::generate(),
         project_id: ProjectId::generate(),
         status: BrandingStatus::Published,
         revision: 0,
@@ -104,8 +105,8 @@ fn test_non_empty_or() {
 #[test]
 fn test_branding_refusals_carry_their_reason() {
     use tonic_types::StatusExt;
-    let id = BrandingConfigId::new();
-    let missing = branding_not_found(id.0.to_string());
+    let id = BrandingConfigId::generate();
+    let missing = branding_not_found(id.to_string());
     assert_eq!(missing.code(), tonic::Code::NotFound);
     assert_eq!(
         missing.get_details_error_info().unwrap().reason,

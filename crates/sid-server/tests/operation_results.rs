@@ -436,7 +436,7 @@ async fn test_admin_suspension_retry_keeps_a_later_reactivation() {
     let svc = TestServices::new(MockStorage::new().with_profile(user.clone()));
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let status = |s: sid_proto::sid::v1::ProfileStatus| AdminUpdateProfileRequest {
-        profile_id: user.id.to_string(),
+        profile_id: Some(user.id.into()),
         profile_status: s as i32,
         ..Default::default()
     };
@@ -513,7 +513,7 @@ async fn test_revoke_all_sessions_retry_keeps_a_later_session() {
     let revoke = || {
         keyed(
             RevokeAllSessionsRequest {
-                profile_id: user.id.to_string(),
+                profile_id: Some(user.id.into()),
             },
             &token,
             Some("op-revoke"),

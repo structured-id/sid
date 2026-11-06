@@ -494,7 +494,7 @@ impl SecurityService for SecurityServiceImpl {
                 c.required_acr.is_some() || c.enforcement_mode != EnforcementMode::default()
             })
             .map(|c| pb::ApplicationOverride {
-                application_id: c.client_id.clone(),
+                client_id: c.client_id.clone(),
                 application_name: c.client_name.clone(),
                 min_auth_level: c.required_acr.as_ref().map(|l| l.as_str().to_string()),
                 enforcement_mode: if c.enforcement_mode != EnforcementMode::default() {
@@ -553,15 +553,11 @@ impl SecurityService for SecurityServiceImpl {
         self.require_admin(&request).await?;
         let req = request.into_inner();
 
-        if req.profile_id.is_empty() {
-            return Err(missing_field("profile_id"));
-        }
+        let profile_id: sid_core::models::ProfileId =
+            super::convert::wire_id(req.profile_id.as_ref(), "profile_id")?;
         if req.client_id.is_empty() {
             return Err(missing_field("client_id"));
         }
-
-        let profile_id = sid_core::models::ProfileId::parse(&req.profile_id)
-            .map_err(|_| invalid_field("profile_id", "not a profile identifier"))?;
 
         // Verify the profile exists.
         let _profile = self
@@ -573,7 +569,7 @@ impl SecurityService for SecurityServiceImpl {
                 not_found(
                     ErrorReason::ProfileNotFound,
                     "Profile",
-                    req.profile_id.clone(),
+                    profile_id.to_string(),
                 )
             })?;
 

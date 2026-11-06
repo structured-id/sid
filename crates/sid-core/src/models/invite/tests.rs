@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn test_invite_id_unique() {
-    let id1 = InviteId::new();
-    let id2 = InviteId::new();
+    let id1 = InviteId::generate();
+    let id2 = InviteId::generate();
     assert_ne!(id1, id2);
 }
 
@@ -31,7 +31,7 @@ fn test_invite_status_as_str() {
 
 fn make_test_invite() -> Invite {
     Invite {
-        id: InviteId::new(),
+        id: InviteId::generate(),
         code: "ABCD1234".to_string(),
         created_by: InviteCreator::Profile(ProfileId::generate()),
         created_by_name: "Admin".to_string(),

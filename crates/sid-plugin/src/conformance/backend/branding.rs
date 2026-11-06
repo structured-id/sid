@@ -22,7 +22,7 @@ async fn project(backend: &dyn StorageBackend) -> ProjectId {
 fn draft(project_id: ProjectId) -> BrandingConfig {
     let now = Utc::now();
     BrandingConfig {
-        id: BrandingConfigId::new(),
+        id: BrandingConfigId::generate(),
         project_id,
         status: BrandingStatus::Draft,
         assets: Default::default(),

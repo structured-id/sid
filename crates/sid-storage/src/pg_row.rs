@@ -1742,7 +1742,7 @@ impl ScimOutboundDlqRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct InviteRow {
-    pub id: Uuid,
+    pub id: InviteId,
     pub code: String,
     pub created_by: Option<ProfileId>,
     pub created_by_machine: Option<models::MachineUserId>,
@@ -1772,7 +1772,7 @@ impl InviteRow {
             }
         };
         Ok(models::Invite {
-            id: InviteId(self.id),
+            id: self.id,
             code: self.code,
             created_by,
             created_by_name: self.created_by_name,

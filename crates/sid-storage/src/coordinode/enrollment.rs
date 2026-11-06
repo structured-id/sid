@@ -22,8 +22,8 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_id, get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid,
-    get_parsed, get_text, get_texts, get_time, get_uuid, hold_first, key, opt_text, opt_time,
+    get_bytes, get_id, get_int, get_opt_bytes, get_opt_id, get_opt_text, get_opt_time,
+    get_opt_uuid, get_parsed, get_text, get_texts, get_time, hold_first, key, opt_text, opt_time,
     sorted_page, texts, time, uuid,
 };
 
@@ -176,23 +176,16 @@ fn delete_claim(tx: &Statements<'_>) -> SidResult<()> {
 // === Invites ===
 
 fn invite(row: &Row) -> SidResult<Invite> {
-    let id = InviteId(get_uuid(row, "id")?);
+    let id: InviteId = get_id(row, "id")?;
     let created_by = match (
-        get_opt_bytes(row, "created_by")?,
-        get_opt_bytes(row, "created_by_machine")?,
+        get_opt_id::<ProfileId>(row, "created_by")?,
+        get_opt_id::<MachineUserId>(row, "created_by_machine")?,
     ) {
-        (Some(profile), None) => InviteCreator::Profile(
-            ProfileId::from_slice(&profile)
-                .map_err(|e| SidError::Storage(format!("invite creator: {e}")))?,
-        ),
-        (None, Some(machine)) => InviteCreator::MachineUser(
-            MachineUserId::from_slice(&machine)
-                .map_err(|e| SidError::Storage(format!("invite creator: {e}")))?,
-        ),
+        (Some(profile), None) => InviteCreator::Profile(profile),
+        (None, Some(machine)) => InviteCreator::MachineUser(machine),
         _ => {
             return Err(SidError::Storage(format!(
-                "invite {} names no single creator",
-                id.0
+                "invite {id} names no single creator"
             )));
         }
     };
@@ -201,7 +194,7 @@ fn invite(row: &Row) -> SidResult<Invite> {
         get_texts(row, "metadata_values")?,
     );
     if keys.len() != values.len() {
-        return Err(SidError::Storage(format!("invite {} metadata", id.0)));
+        return Err(SidError::Storage(format!("invite {id} metadata")));
     }
     Ok(Invite {
         id,
@@ -246,7 +239,7 @@ fn spend(tx: &Statements<'_>, filter: &str, value: Value) -> SidResult<Option<In
              SET i.use_count = i.use_count + 1 RETURN {INVITE}"
         ),
         Params::default()
-            .with("id", uuid(&stored.id.0))
+            .with("id", uuid(stored.id.as_uuid()))
             .with("count", Value::Int(i64::from(stored.use_count))),
     )?;
     used.first().map(invite).transpose()
@@ -279,8 +272,8 @@ fn admit(
     };
     super::audit::append(
         tx,
-        &format!("invite:{}", spent.id.0),
-        crate::invite_use_entry(registration, spent.id.0),
+        &format!("invite:{}", spent.id),
+        crate::invite_use_entry(registration, spent.id),
         Utc::now(),
     )?;
     Ok((admission.source(), Some(spent.id)))
@@ -440,8 +433,8 @@ fn register(
             "CREATE (r:SidInviteRedemption {pair: $pair, invite_id: $invite,
                 profile_id: $profile, credential_id: $credential, redeemed_at: $now})",
             Params::default()
-                .with("pair", key(&[invite.0.as_bytes(), profile.id.as_bytes()])?)
-                .with("invite", uuid(&invite.0))
+                .with("pair", key(&[invite.as_bytes(), profile.id.as_bytes()])?)
+                .with("invite", uuid(invite.as_uuid()))
                 .with("profile", bin(profile.id.as_bytes()))
                 .with(
                     "credential",
@@ -621,7 +614,7 @@ impl CoordinodeBackend {
         let Some(first) = invites.first() else {
             return Ok(());
         };
-        let chain = format!("invite:{}", first.id.0);
+        let chain = format!("invite:{}", first.id);
         let invites = invites.to_vec();
         self.mutate(chain, ctx, move |tx| {
             for i in &invites {
@@ -641,7 +634,7 @@ impl CoordinodeBackend {
                 }
                 let found = tx.run(
                     "MATCH (i:SidInvite) WHERE i.id = $id RETURN i.id AS id",
-                    Params::default().with("id", uuid(&i.id.0)),
+                    Params::default().with("id", uuid(i.id.as_uuid())),
                 )?;
                 if !found.is_empty() {
                     return Err(SidError::Conflict("invite already exists".into()));
@@ -658,7 +651,7 @@ impl CoordinodeBackend {
                         metadata_values: $values, max_uses: $max_uses, use_count: $use_count,
                         expires_at: $expires_at, active: $active, created_at: $created_at})",
                     Params::default()
-                        .with("id", uuid(&i.id.0))
+                        .with("id", uuid(i.id.as_uuid()))
                         .with("code", Value::String(i.code.clone()))
                         .with("code_key", Value::String(i.code.trim().to_uppercase()))
                         .with("created_by", by_profile)
@@ -682,7 +675,7 @@ impl CoordinodeBackend {
         self.read(move |tx| {
             let rows = tx.run(
                 &format!("MATCH (i:SidInvite) WHERE i.id = $id RETURN {INVITE}"),
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             rows.first().map(invite).transpose()
         })
@@ -720,7 +713,7 @@ impl CoordinodeBackend {
             .collect();
         Ok(sorted_page(
             selected,
-            |i| (std::cmp::Reverse(i.created_at), std::cmp::Reverse(i.id.0)),
+            |i| (std::cmp::Reverse(i.created_at), std::cmp::Reverse(i.id)),
             0,
             u64::MAX,
         ))
@@ -754,7 +747,7 @@ impl CoordinodeBackend {
                 "MATCH (r:SidInviteRedemption) WHERE r.invite_id = $id
                  RETURN r.profile_id AS profile_id, r.credential_id AS credential_id,
                         r.redeemed_at AS redeemed_at",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             let mut redemptions = Vec::with_capacity(rows.len());
             for row in &rows {
@@ -788,20 +781,20 @@ impl CoordinodeBackend {
     ) -> SidResult<Option<Invite>> {
         self.transaction(move |tx| {
             // No use, nothing recorded.
-            let Some(used) = spend(tx, "i.id = $value", uuid(&id.0))? else {
+            let Some(used) = spend(tx, "i.id = $value", uuid(id.as_uuid()))? else {
                 return Ok(Decision::Abandon(None));
             };
-            finalize(tx, &format!("invite:{}", id.0), ctx.clone())?;
+            finalize(tx, &format!("invite:{id}"), ctx.clone())?;
             Ok(Decision::Commit(Some(used)))
         })
         .await
     }
 
     pub(super) async fn revoke_invite(&self, id: InviteId, ctx: MutationContext) -> SidResult<()> {
-        self.mutate(format!("invite:{}", id.0), ctx, move |tx| {
+        self.mutate(format!("invite:{id}"), ctx, move |tx| {
             tx.run(
                 "MATCH (i:SidInvite) WHERE i.id = $id SET i.active = false",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             Ok(())
         })

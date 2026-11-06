@@ -4,7 +4,7 @@
 
 use sid_core::{
     Error as SidError, Result as SidResult,
-    models::{ActionId, ActionPoint, FlowAction, FlowType, MutationContext, ProjectId},
+    models::{ActionPoint, FlowAction, FlowActionId, FlowType, MutationContext, ProjectId},
 };
 
 use super::{SqliteBackend, col, fmt_dt};
@@ -37,7 +37,7 @@ impl SqliteBackend {
                 data, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(action.id.0)
+        .bind(action.id)
         .bind(action.project_id)
         .bind(action.flow_type.as_str())
         .bind(action.action_point.as_str())
@@ -71,7 +71,7 @@ impl SqliteBackend {
         .bind(action.order)
         .bind(&data)
         .bind(fmt_dt(&action.updated_at))
-        .bind(action.id.0)
+        .bind(action.id)
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -85,9 +85,12 @@ impl SqliteBackend {
         Ok(true)
     }
 
-    pub(crate) async fn get_flow_action_impl(&self, id: ActionId) -> SidResult<Option<FlowAction>> {
+    pub(crate) async fn get_flow_action_impl(
+        &self,
+        id: FlowActionId,
+    ) -> SidResult<Option<FlowAction>> {
         sqlx::query("SELECT data, revision FROM flow_actions WHERE id = ?")
-            .bind(id.0)
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("Query: {e}")))?

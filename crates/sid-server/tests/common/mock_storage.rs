@@ -5919,7 +5919,7 @@ impl StorageBackend for MockStorage {
     }
     async fn get_flow_action(
         &self,
-        _: sid_core::models::ActionId,
+        _: sid_core::models::FlowActionId,
     ) -> SidResult<Option<sid_core::models::FlowAction>> {
         Ok(None)
     }
@@ -5933,7 +5933,7 @@ impl StorageBackend for MockStorage {
     }
     async fn delete_flow_action(
         &self,
-        _: sid_core::models::ActionId,
+        _: sid_core::models::FlowActionId,
         _: MutationContext,
     ) -> SidResult<()> {
         Ok(())

@@ -1,4 +1,5 @@
 use super::*;
+use sid_core::models::ProjectId;
 
 #[test]
 fn test_flow_type_to_proto() {
@@ -97,7 +98,7 @@ fn test_flow_config_proto_roundtrip() {
     };
 
     let proto = domain_config_to_proto(&config);
-    assert_eq!(proto.project_id, config.project_id.to_string());
+    assert_eq!(proto.project_id, Some(config.project_id.into()));
     assert_eq!(proto.flow_type, pb::admin::FlowType::Authentication as i32);
     assert_eq!(proto.steps.len(), 1);
     assert_eq!(proto.timeout_seconds, 300);
@@ -106,7 +107,7 @@ fn test_flow_config_proto_roundtrip() {
 #[test]
 fn test_flow_action_proto_roundtrip() {
     let action = FlowAction {
-        id: ActionId::new(),
+        id: FlowActionId::generate(),
         project_id: ProjectId::generate(),
         flow_type: FlowType::Registration,
         action_point: ActionPoint::PostRegistration,
@@ -127,7 +128,7 @@ fn test_flow_action_proto_roundtrip() {
     };
 
     let proto = domain_action_to_proto(&action);
-    assert_eq!(proto.action_id, action.id.0.to_string());
+    assert_eq!(proto.action_id, Some(action.id.into()));
     assert_eq!(proto.name, "Welcome webhook");
     assert_eq!(proto.flow_type, pb::admin::FlowType::Registration as i32);
     assert_eq!(

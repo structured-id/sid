@@ -94,7 +94,7 @@ pub use application::{
 pub use audit::{ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainHead};
 pub use auth_code::{AuthCodeError, AuthCodeRedemption, AuthorizationCode, ExchangedCode};
 pub use auth_flow::{
-    ActionConfig, ActionId, ActionOnError, ActionPoint, ActionType, FlowAction, FlowConfig,
+    ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowConfig,
     FlowType, StepConfig,
 };
 pub use authz::{

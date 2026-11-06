@@ -16,6 +16,7 @@ use sid_core::models::{
     RoleAssignment, RoleAssignmentPrincipal,
 };
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
+use sid_proto::sid::v1::admin::invite::CreatedBy;
 use sid_proto::sid::v1::admin::{
     CreateInviteRequest, GetInviteRequest, ListInviteRedemptionsRequest, ListInvitesRequest,
     RevokeInviteRequest,
@@ -209,10 +210,12 @@ async fn a_service_holding_the_invite_issuer_role_manages_invites() {
         .await
         .unwrap()
         .into_inner();
-    // created_by keeps its Profile-only meaning: a machine creator has its
-    // own field, never read as a Profile ID.
-    assert_eq!(invite.created_by, "");
-    assert_eq!(invite.created_by_machine_user_id, i.machine.id.to_string());
+    // A machine creator is its own case of the creator, never read as a
+    // Profile ID.
+    assert_eq!(
+        invite.created_by,
+        Some(CreatedBy::CreatedByMachineUserId(i.machine.id.into()))
+    );
     assert_eq!(invite.created_by_name, "Onboarding service");
 
     let read = i
@@ -227,10 +230,7 @@ async fn a_service_holding_the_invite_issuer_role_manages_invites() {
         .unwrap()
         .into_inner();
     assert_eq!(read.code, invite.code);
-    assert_eq!(
-        read.created_by_machine_user_id,
-        invite.created_by_machine_user_id
-    );
+    assert_eq!(read.created_by, invite.created_by);
 
     let redemptions = i
         .enrollment
@@ -303,7 +303,7 @@ async fn a_service_without_the_role_on_the_enrollment_api_is_refused() {
             .list_invite_redemptions(bearing(
                 &token,
                 ListInviteRedemptionsRequest {
-                    invite_id: uuid::Uuid::now_v7().to_string(),
+                    invite_id: Some(sid_core::models::InviteId::generate().into()),
                     ..Default::default()
                 },
             ))
@@ -379,8 +379,10 @@ async fn administrators_keep_invites_and_other_users_are_refused() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(invite.created_by, admin.to_string());
-    assert_eq!(invite.created_by_machine_user_id, "");
+    assert_eq!(
+        invite.created_by,
+        Some(CreatedBy::CreatedByProfileId(admin.into()))
+    );
     i.enrollment
         .get_invite(bearing(
             &admin_token,

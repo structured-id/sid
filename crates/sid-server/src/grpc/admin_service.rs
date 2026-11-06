@@ -29,11 +29,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
-/// The profile an administrator request names.
-#[allow(clippy::result_large_err)]
-fn parse_profile_id(id: &str) -> Result<ProfileId, Status> {
-    ProfileId::parse(id).map_err(|_| invalid_field("profile_id", "not a profile identifier"))
-}
+use super::convert::wire_id;
 
 fn profile_not_found(id: ProfileId) -> Status {
     not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
@@ -143,7 +139,7 @@ impl AdminServiceImpl {
 
         // A status change owes its event in the same commit.
         let response = AdminUpdateProfileResponse {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
         };
         let mut ctx = MutationContext::from(AuditEntry::admin(
             actor.to_owned(),
@@ -237,7 +233,7 @@ impl AdminService for AdminServiceImpl {
         let operation = context(&request)?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         // A retry of a completed update answers as it did and never writes
         // its copy again over a later change.
@@ -281,7 +277,7 @@ impl AdminService for AdminServiceImpl {
         let operation = context(&request)?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         // A retry of a completed revocation answers with the count it ended
         // and never ends sessions signed in after it. The store records that
@@ -324,7 +320,7 @@ impl AdminService for AdminServiceImpl {
         self.require_admin(&request).await?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         let entries = self
             .storage
@@ -345,7 +341,7 @@ impl AdminService for AdminServiceImpl {
         self.require_admin(&request).await?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         let meta = self
             .storage
@@ -372,7 +368,7 @@ impl AdminService for AdminServiceImpl {
         let operation = context(&request)?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         // A retry of a completed write answers with the entry it wrote and
         // never writes it again over a later value.
@@ -414,7 +410,7 @@ impl AdminService for AdminServiceImpl {
         let operation = context(&request)?;
 
         let req = request.into_inner();
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         // A retry of a completed deletion answers as it did and never
         // deletes a value written after it.
@@ -446,7 +442,7 @@ impl AdminService for AdminServiceImpl {
 
 fn to_proto_metadata(m: ProfileMetadata) -> ProfileMetadataEntry {
     ProfileMetadataEntry {
-        profile_id: m.profile_id.to_string(),
+        profile_id: Some(m.profile_id.into()),
         key: m.key,
         value: Some(json_to_pbjson_value(m.value)),
         updated_at: Some(prost_types::Timestamp {

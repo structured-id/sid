@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Invite and registration source operations for SQLite backend.
 
-use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, uuid_col};
+use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error};
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -31,7 +31,7 @@ macro_rules! invite_status_sql {
 
 fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> SidResult<Invite> {
     let metadata: String = col(row, "metadata")?;
-    let id = InviteId(uuid_col(row, "id")?);
+    let id: InviteId = col(row, "id")?;
     // The table's check names exactly one creator.
     let created_by = match (
         col::<Option<ProfileId>>(row, "created_by")?,
@@ -41,8 +41,7 @@ fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> SidResult<Invite> {
         (None, Some(machine)) => InviteCreator::MachineUser(machine),
         _ => {
             return Err(SidError::Storage(format!(
-                "invite {} names no single creator",
-                id.0
+                "invite {id} names no single creator"
             )));
         }
     };
@@ -130,7 +129,7 @@ impl SqliteBackend {
                 "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(invite.id.0)
+            .bind(invite.id)
             .bind(&invite.code)
             .bind(by_profile)
             .bind(by_machine)
@@ -145,7 +144,7 @@ impl SqliteBackend {
             .await
             .map_err(|e| insert_error("invite", e))?;
         }
-        Self::commit_mutation(tx, &format!("invite:{}", first.id.0), audit).await
+        Self::commit_mutation(tx, &format!("invite:{}", first.id), audit).await
     }
 
     pub(crate) async fn get_invite_impl(&self, id: InviteId) -> SidResult<Option<Invite>> {
@@ -154,7 +153,7 @@ impl SqliteBackend {
             invite_columns!(),
             " FROM invites WHERE id = ?"
         ))
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -229,7 +228,7 @@ impl SqliteBackend {
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions \
              WHERE invite_id = ? ORDER BY redeemed_at, profile_id LIMIT ? OFFSET ?",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
         .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .fetch_all(&self.pool)
@@ -262,7 +261,7 @@ impl SqliteBackend {
              RETURNING ",
             invite_columns!()
         ))
-        .bind(id.0)
+        .bind(id)
         .bind(fmt_dt(&chrono::Utc::now()))
         .fetch_optional(&mut *tx)
         .await
@@ -272,7 +271,7 @@ impl SqliteBackend {
             return Ok(None);
         };
         let invite = row_to_invite(&row)?;
-        Self::commit_mutation(tx, &format!("invite:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("invite:{id}"), audit).await?;
         Ok(Some(invite))
     }
 
@@ -283,11 +282,11 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("UPDATE invites SET active = 0 WHERE id = ?")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Revoke invite failed: {e}")))?;
-        Self::commit_mutation(tx, &format!("invite:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("invite:{id}"), audit).await
     }
 
     pub(crate) async fn get_registration_source_impl(
