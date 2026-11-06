@@ -1761,6 +1761,21 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(open).await;
 }
 
+/// On SQLite an instance's namespace is its own database file. The file is
+/// separated by the host's file access, not by an account inside SQLite, so
+/// SQLite qualifies the engine-level isolation and offers no native
+/// namespace refusal.
+#[tokio::test]
+async fn test_instances_are_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = |name: &str| {
+        let path = format!("sqlite://{}", dir.path().join(name).display());
+        async move { SqliteBackend::new(&path).await.unwrap() }
+    };
+    let (a, b) = (open("a.db").await, open("b.db").await);
+    common::namespace::test_instances_are_isolated(&a, &b).await;
+}
+
 /// SQLite's online copy, `VACUUM INTO`, is the backup; the restore opens a
 /// store on the copied file.
 #[tokio::test]
