@@ -206,6 +206,7 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
         )?;
     }
     super::project::disown(tx, id)?;
+    super::session::delete_profile_grants(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
         Params::default().with("id", profile_id(id)),

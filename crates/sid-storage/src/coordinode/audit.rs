@@ -105,14 +105,14 @@ pub(super) fn append(
 }
 
 /// An address as its octets: 4 for IPv4, 16 for IPv6.
-fn ip_value(ip: IpAddr) -> Value {
+pub(super) fn ip_value(ip: IpAddr) -> Value {
     Value::Binary(match ip {
         IpAddr::V4(v4) => v4.octets().to_vec(),
         IpAddr::V6(v6) => v6.octets().to_vec(),
     })
 }
 
-fn ip_of(octets: &[u8]) -> SidResult<IpAddr> {
+pub(super) fn ip_of(octets: &[u8]) -> SidResult<IpAddr> {
     if let Ok(v4) = <[u8; 4]>::try_from(octets) {
         return Ok(IpAddr::from(v4));
     }

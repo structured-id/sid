@@ -110,104 +110,132 @@ impl GrantStore for CoordinodeBackend {
 
     async fn create_session_atomic(
         &self,
-        _session: &Session,
-        _max_sessions: u32,
-        _proved_by: Option<SignInProof<'_>>,
-        _ctx: MutationContext,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<SignInProof<'_>>,
+        ctx: MutationContext,
     ) -> Result<Vec<SessionId>> {
-        refused("sessions")
+        CoordinodeBackend::create_session_atomic(self, session, max_sessions, proved_by, None, ctx)
+            .await
     }
 
     async fn complete_pending_session(
         &self,
-        _pending: SessionId,
-        _end: &SessionEnd,
-        _session: &Session,
-        _max_sessions: u32,
-        _proved_by: Option<SignInProof<'_>>,
-        _ctx: MutationContext,
+        pending: SessionId,
+        end: &SessionEnd,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<SignInProof<'_>>,
+        ctx: MutationContext,
     ) -> Result<Vec<SessionId>> {
-        refused("sessions")
+        CoordinodeBackend::create_session_atomic(
+            self,
+            session,
+            max_sessions,
+            proved_by,
+            Some((pending, end)),
+            ctx,
+        )
+        .await
     }
 
-    async fn get_session(&self, _id: SessionId) -> Result<Option<Session>> {
-        refused("sessions")
+    async fn get_session(&self, id: SessionId) -> Result<Option<Session>> {
+        CoordinodeBackend::get_session(self, id).await
     }
 
     async fn get_session_by_browser_secret(
         &self,
-        _hash: &BrowserSecretHash,
+        hash: &BrowserSecretHash,
     ) -> Result<Option<Session>> {
-        refused("sessions")
+        CoordinodeBackend::get_session_by_browser_secret(self, hash).await
     }
 
-    async fn list_sessions(&self, _owner: &ProfileId) -> Result<Vec<Session>> {
-        refused("sessions")
+    async fn list_sessions(&self, owner: &ProfileId) -> Result<Vec<Session>> {
+        CoordinodeBackend::list_sessions(self, *owner).await
     }
 
-    async fn touch_session(&self, _id: SessionId, _at: DateTime<Utc>) -> Result<()> {
-        refused("sessions")
+    async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> Result<()> {
+        CoordinodeBackend::touch_session(self, id, at).await
     }
 
     async fn delete_session(
         &self,
-        _id: SessionId,
-        _end: &SessionEnd,
-        _ctx: MutationContext,
+        id: SessionId,
+        end: &SessionEnd,
+        ctx: MutationContext,
     ) -> Result<Vec<SessionId>> {
-        refused("sessions")
+        CoordinodeBackend::delete_session(self, id, end, ctx).await
     }
 
-    async fn get_refresh_token_by_hash(&self, _token_hash: &[u8]) -> Result<Option<RefreshToken>> {
-        refused("refresh tokens")
+    async fn get_refresh_token_by_hash(&self, token_hash: &[u8]) -> Result<Option<RefreshToken>> {
+        CoordinodeBackend::get_refresh_token_by_hash(self, token_hash).await
     }
 
     async fn revoke_refresh_tokens_by_session(
         &self,
-        _session_id: SessionId,
-        _ctx: MutationContext,
+        session_id: SessionId,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("refresh tokens")
+        CoordinodeBackend::revoke_refresh_tokens_by_session(self, session_id, ctx).await
     }
 
     async fn revoke_refresh_tokens_by_family(
         &self,
-        _family_id: Uuid,
-        _ctx: MutationContext,
+        family_id: Uuid,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("refresh tokens")
+        CoordinodeBackend::revoke_refresh_tokens_by_family(self, family_id, ctx).await
     }
 
     async fn rotate_refresh_token(
         &self,
-        _old_id: Uuid,
-        _new: &RefreshToken,
-        _grace_expires_at: DateTime<Utc>,
-        _ctx: MutationContext,
+        old_id: Uuid,
+        new: &RefreshToken,
+        grace_expires_at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("refresh tokens")
+        CoordinodeBackend::rotate_refresh_token(self, old_id, new, grace_expires_at, ctx).await
     }
 
-    async fn create_auth_code(
+    async fn issue_native_generation(
         &self,
-        _code: &AuthorizationCode,
-        _ctx: MutationContext,
+        generation: &sid_core::models::NativeGeneration,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("authorization codes")
+        CoordinodeBackend::issue_native_generation(self, generation, ctx).await
     }
 
-    async fn get_auth_code_by_hash(&self, _code_hash: &[u8]) -> Result<Option<AuthorizationCode>> {
-        refused("authorization codes")
+    async fn native_generation_by_credential(
+        &self,
+        hash: &[u8],
+    ) -> Result<Option<sid_core::models::NativePresented>> {
+        CoordinodeBackend::native_generation_by_credential(self, hash).await
+    }
+
+    async fn rotate_native_generation(
+        &self,
+        rotation: sid_core::models::NativeRotation<'_>,
+        ctx: MutationContext,
+    ) -> Result<sid_core::models::NativeRotationOutcome> {
+        CoordinodeBackend::rotate_native_generation(self, rotation, ctx).await
+    }
+
+    async fn create_auth_code(&self, code: &AuthorizationCode, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_auth_code(self, code, ctx).await
+    }
+
+    async fn get_auth_code_by_hash(&self, code_hash: &[u8]) -> Result<Option<AuthorizationCode>> {
+        CoordinodeBackend::get_auth_code_by_hash(self, code_hash).await
     }
 
     async fn redeem_auth_code(
         &self,
-        _code_hash: &[u8],
-        _session: &Session,
-        _refresh_token: &RefreshToken,
-        _ctx: MutationContext,
+        code_hash: &[u8],
+        session: &Session,
+        refresh_token: &RefreshToken,
+        ctx: MutationContext,
     ) -> Result<AuthCodeRedemption> {
-        refused("authorization codes")
+        CoordinodeBackend::redeem_auth_code(self, code_hash, session, refresh_token, ctx).await
     }
 }
 
@@ -728,27 +756,27 @@ impl StorageBackend for CoordinodeBackend {
 
     // === SESSIONS ===
 
-    async fn create_session(&self, _session: &Session, _ctx: MutationContext) -> Result<()> {
-        refused("sessions")
+    async fn create_session(&self, session: &Session, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_session(self, session, ctx).await
     }
 
     async fn record_session_authentication(
         &self,
-        _id: SessionId,
-        _expected: &SessionAuthentication,
-        _new: &SessionAuthentication,
-        _ctx: MutationContext,
+        id: SessionId,
+        expected: &SessionAuthentication,
+        new: &SessionAuthentication,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("sessions")
+        CoordinodeBackend::record_session_authentication(self, id, expected, new, ctx).await
     }
 
     async fn delete_sessions_by_profile(
         &self,
-        _profile_id: ProfileId,
-        _end: &SessionEnd,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        end: &SessionEnd,
+        ctx: MutationContext,
     ) -> Result<Vec<Session>> {
-        refused("sessions")
+        CoordinodeBackend::delete_sessions_by_profile(self, profile_id, end, ctx).await
     }
 
     // === PROJECTS ===
@@ -985,12 +1013,8 @@ impl StorageBackend for CoordinodeBackend {
 
     // === TOKENS ===
 
-    async fn create_refresh_token(
-        &self,
-        _token: &RefreshToken,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("refresh tokens")
+    async fn create_refresh_token(&self, token: &RefreshToken, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_refresh_token(self, token, ctx).await
     }
 
     async fn create_initial_access_token(

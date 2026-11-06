@@ -24,6 +24,7 @@ mod operation;
 mod principal;
 mod profile;
 mod project;
+mod session;
 mod work;
 
 /// How often one change is run again after a conflicting commit before it is
@@ -75,6 +76,23 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_principal_quarantine FOR (q:SidPrincipalQuarantine) REQUIRE q.hash IS UNIQUE",
     "CREATE CONSTRAINT sid_project_id FOR (j:SidProject) REQUIRE j.id IS UNIQUE",
     "CREATE INDEX sid_project_owner ON :SidProject(owner_id)",
+    "CREATE CONSTRAINT sid_session_id FOR (s:SidSession) REQUIRE s.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_session_browser FOR (s:SidSession) REQUIRE s.browser_secret_hash IS UNIQUE",
+    "CREATE INDEX sid_session_profile ON :SidSession(profile_id)",
+    "CREATE INDEX sid_session_authenticated_by ON :SidSession(authenticated_by)",
+    "CREATE CONSTRAINT sid_refresh_token_id FOR (t:SidRefreshToken) REQUIRE t.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_refresh_token_hash FOR (t:SidRefreshToken) REQUIRE t.token_hash IS UNIQUE",
+    "CREATE INDEX sid_refresh_token_session ON :SidRefreshToken(session_id)",
+    "CREATE INDEX sid_refresh_token_family ON :SidRefreshToken(family_id)",
+    "CREATE INDEX sid_refresh_token_profile ON :SidRefreshToken(profile_id)",
+    "CREATE CONSTRAINT sid_auth_code_hash FOR (a:SidAuthCode) REQUIRE a.code_hash IS UNIQUE",
+    "CREATE INDEX sid_auth_code_session ON :SidAuthCode(authorizing_session_id)",
+    "CREATE INDEX sid_auth_code_profile ON :SidAuthCode(profile_id)",
+    "CREATE CONSTRAINT sid_native_generation_id FOR (g:SidNativeGeneration) REQUIRE g.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_native_generation_successor FOR (g:SidNativeGeneration) REQUIRE g.successor_id IS UNIQUE",
+    "CREATE INDEX sid_native_generation_session ON :SidNativeGeneration(session_id)",
+    "CREATE CONSTRAINT sid_native_credential FOR (c:SidNativeCredential) REQUIRE c.credential_hash IS UNIQUE",
+    "CREATE INDEX sid_native_credential_generation ON :SidNativeCredential(generation_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
