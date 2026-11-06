@@ -659,44 +659,44 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn revoke_consents_by_profile(
         &self,
-        _profile_id: ProfileId,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("consents")
+        CoordinodeBackend::revoke_consents_by_profile(self, profile_id, ctx).await
     }
 
-    async fn create_consent(&self, _consent: &ConsentRecord, _ctx: MutationContext) -> Result<()> {
-        refused("consents")
+    async fn create_consent(&self, consent: &ConsentRecord, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_consent(self, consent, ctx).await
     }
 
     async fn change_claim_grant(
         &self,
-        _id: ConsentId,
-        _claim_name: &str,
-        _decision: sid_core::models::consent::ClaimDecision,
-        _ctx: MutationContext,
+        id: ConsentId,
+        claim_name: &str,
+        decision: sid_core::models::consent::ClaimDecision,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::consent::ClaimGrantChange> {
-        refused("consents")
+        CoordinodeBackend::change_claim_grant(self, id, claim_name, decision, ctx).await
     }
 
-    async fn get_consent(&self, _id: ConsentId) -> Result<Option<ConsentRecord>> {
-        refused("consents")
+    async fn get_consent(&self, id: ConsentId) -> Result<Option<ConsentRecord>> {
+        CoordinodeBackend::get_consent(self, id).await
     }
 
     async fn get_consent_by_client(
         &self,
-        _profile_id: ProfileId,
-        _client_id: &str,
+        profile_id: ProfileId,
+        client_id: &str,
     ) -> Result<Option<ConsentRecord>> {
-        refused("consents")
+        CoordinodeBackend::get_consent_by_client(self, profile_id, client_id).await
     }
 
-    async fn list_consents_by_profile(&self, _profile_id: ProfileId) -> Result<Vec<ConsentRecord>> {
-        refused("consents")
+    async fn list_consents_by_profile(&self, profile_id: ProfileId) -> Result<Vec<ConsentRecord>> {
+        CoordinodeBackend::list_consents_by_profile(self, profile_id).await
     }
 
-    async fn delete_consent(&self, _id: ConsentId, _ctx: MutationContext) -> Result<bool> {
-        refused("consents")
+    async fn delete_consent(&self, id: ConsentId, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::delete_consent(self, id, ctx).await
     }
 
     // === SIGNALS ===
@@ -1612,111 +1612,112 @@ impl StorageBackend for CoordinodeBackend {
 
     // === PROFILE GRANTS ===
 
-    async fn get_profile_grant(&self, _id: ProfileGrantId) -> Result<Option<ProfileGrant>> {
-        refused("profile grants")
+    async fn get_profile_grant(&self, id: ProfileGrantId) -> Result<Option<ProfileGrant>> {
+        CoordinodeBackend::get_profile_grant(self, id).await
     }
 
-    async fn create_profile_grant(
-        &self,
-        _grant: &ProfileGrant,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("profile grants")
+    async fn create_profile_grant(&self, grant: &ProfileGrant, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_profile_grant(self, grant, ctx).await
     }
 
-    async fn delete_profile_grant(&self, _id: ProfileGrantId, _ctx: MutationContext) -> Result<()> {
-        refused("profile grants")
+    async fn delete_profile_grant(&self, id: ProfileGrantId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_profile_grant(self, id, ctx).await
     }
 
     async fn list_profile_grants_for_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<ProfileGrant>> {
-        refused("profile grants")
+        CoordinodeBackend::list_profile_grants_for_profile(self, profile_id).await
     }
 
     async fn list_profile_grants_for_project(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<ProfileGrant>> {
-        refused("profile grants")
+        CoordinodeBackend::list_profile_grants_for_project(self, project_id).await
     }
 
     // === UPSTREAM PROVIDERS ===
 
     async fn get_upstream_provider(
         &self,
-        _id: UpstreamProviderId,
+        id: UpstreamProviderId,
     ) -> Result<Option<UpstreamProvider>> {
-        refused("upstream providers")
+        CoordinodeBackend::get_upstream_provider(self, id).await
     }
 
     async fn create_upstream_provider(
         &self,
-        _provider: &UpstreamProvider,
-        _ctx: MutationContext,
+        provider: &UpstreamProvider,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("upstream providers")
+        CoordinodeBackend::create_upstream_provider(self, provider, ctx).await
     }
 
     async fn update_upstream_provider(
         &self,
-        _provider: &UpstreamProvider,
-        _ctx: MutationContext,
+        provider: &UpstreamProvider,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("upstream providers")
+        CoordinodeBackend::update_upstream_provider(self, provider, ctx).await
     }
 
     async fn delete_upstream_provider(
         &self,
-        _id: UpstreamProviderId,
-        _ctx: MutationContext,
+        id: UpstreamProviderId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("upstream providers")
+        CoordinodeBackend::delete_upstream_provider(self, id, ctx).await
     }
 
     async fn list_enabled_upstream_providers(&self) -> Result<Vec<UpstreamProvider>> {
-        refused("upstream providers")
+        CoordinodeBackend::list_enabled_upstream_providers(self).await
     }
 
     async fn get_upstream_identity_by_provider_subject(
         &self,
-        _provider_id: UpstreamProviderId,
-        _upstream_subject: &str,
+        provider_id: UpstreamProviderId,
+        upstream_subject: &str,
     ) -> Result<Option<UpstreamIdentity>> {
-        refused("upstream identities")
+        CoordinodeBackend::get_upstream_identity_by_provider_subject(
+            self,
+            provider_id,
+            upstream_subject,
+        )
+        .await
     }
 
     async fn create_upstream_identity(
         &self,
-        _identity: &UpstreamIdentity,
-        _ctx: MutationContext,
+        identity: &UpstreamIdentity,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("upstream identities")
+        CoordinodeBackend::create_upstream_identity(self, identity, ctx).await
     }
 
     async fn record_upstream_login(
         &self,
-        _id: UpstreamIdentityId,
-        _login: &UpstreamLogin,
-        _ctx: MutationContext,
+        id: UpstreamIdentityId,
+        login: &UpstreamLogin,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("upstream identities")
+        CoordinodeBackend::record_upstream_login(self, id, login, ctx).await
     }
 
     async fn list_upstream_identities_by_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<UpstreamIdentity>> {
-        refused("upstream identities")
+        CoordinodeBackend::list_upstream_identities_by_profile(self, profile_id).await
     }
 
     async fn delete_upstream_identity(
         &self,
-        _id: UpstreamIdentityId,
-        _ctx: MutationContext,
+        id: UpstreamIdentityId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("upstream identities")
+        CoordinodeBackend::delete_upstream_identity(self, id, ctx).await
     }
 
     // === PERSONAL ACCESS TOKENS ===

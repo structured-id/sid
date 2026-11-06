@@ -160,6 +160,7 @@ impl CoordinodeBackend {
                     super::rbac::delete_project_records(tx, id)?;
                     super::machine::delete_project_records(tx, id)?;
                     super::device::delete_project_records(tx, id)?;
+                    super::consent::delete_project_records(tx, id)?;
                 }
                 _ => return Ok(()),
             }

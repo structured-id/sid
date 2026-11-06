@@ -232,6 +232,7 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     super::directory::delete_profile_records(tx, id)?;
     super::lifecycle::delete_profile_records(tx, id)?;
     super::device::delete_profile_records(tx, id)?;
+    super::consent::delete_profile_records(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
         Params::default().with("id", profile_id(id)),

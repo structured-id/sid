@@ -19,6 +19,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 mod audit;
 mod backend;
 mod ceremony;
+mod consent;
 mod credential;
 mod device;
 mod directory;
@@ -220,6 +221,24 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_device_auth_expires ON :SidDeviceAuth(expires_at)",
     "CREATE INDEX sid_device_auth_project ON :SidDeviceAuth(project_id)",
     "CREATE INDEX sid_device_auth_authorized_by ON :SidDeviceAuth(authorized_by)",
+    "CREATE CONSTRAINT sid_consent_id FOR (c:SidConsent) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_consent_pair FOR (c:SidConsent) REQUIRE c.pair IS UNIQUE",
+    "CREATE INDEX sid_consent_profile ON :SidConsent(profile_id)",
+    "CREATE CONSTRAINT sid_claim_grant_id FOR (g:SidClaimGrant) REQUIRE g.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_claim_grant_pair FOR (g:SidClaimGrant) REQUIRE g.pair IS UNIQUE",
+    "CREATE INDEX sid_claim_grant_consent ON :SidClaimGrant(consent_id)",
+    "CREATE CONSTRAINT sid_profile_grant_id FOR (g:SidProfileGrant) REQUIRE g.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_profile_grant_pair FOR (g:SidProfileGrant) REQUIRE g.pair IS UNIQUE",
+    "CREATE INDEX sid_profile_grant_profile ON :SidProfileGrant(profile_id)",
+    "CREATE INDEX sid_profile_grant_project ON :SidProfileGrant(project_id)",
+    "CREATE CONSTRAINT sid_upstream_provider_id FOR (u:SidUpstreamProvider) REQUIRE u.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_upstream_provider_name FOR (u:SidUpstreamProvider) REQUIRE u.name IS UNIQUE",
+    "CREATE INDEX sid_upstream_provider_enabled ON :SidUpstreamProvider(enabled)",
+    "CREATE CONSTRAINT sid_upstream_identity_id FOR (i:SidUpstreamIdentity) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_upstream_identity_profile FOR (i:SidUpstreamIdentity) REQUIRE i.profile_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_upstream_identity_subject FOR (i:SidUpstreamIdentity) REQUIRE i.subject_key IS UNIQUE",
+    "CREATE INDEX sid_upstream_identity_profile_id ON :SidUpstreamIdentity(profile_id)",
+    "CREATE INDEX sid_upstream_identity_provider ON :SidUpstreamIdentity(provider_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
