@@ -7406,12 +7406,11 @@ impl AuthServiceImpl {
             &self.revocation_cache,
         )
         .await
-        .map_err(|e| {
-            if e.code() == Code::Unavailable {
-                e
-            } else {
-                invalid_subject()
+        .map_err(|e| match e {
+            unavailable @ sid_authn::caller::CallerError::Unavailable { .. } => {
+                Status::from(unavailable)
             }
+            _ => invalid_subject(),
         })?;
         let subject = sid_authn::caller::Caller::from_claims(&target_claims)
             .map_err(|_| invalid_subject())?;

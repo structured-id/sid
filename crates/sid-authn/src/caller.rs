@@ -1,24 +1,52 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Shared gRPC caller authentication and authorization.
+//! Caller authentication and authorization, the same for every entry point.
 //!
-//! [`authenticate`] turns the bearer token of a request into a [`Caller`]; the
-//! caller's checks decide whether it may act on a target. Every management RPC
-//! goes through them, so the rules are the same in every service.
+//! [`authenticate_token`] turns a verified access token into a [`Caller`],
+//! the only way to obtain one; the caller's checks decide whether it may act
+//! on a target. The gRPC services reach them through the request's bearer
+//! token (`grpc` feature), an embedding application by presenting the token
+//! itself, so the rules are the same in every service and in process.
 
 use crate::account_api::AccountApiToken;
 use crate::jwt::{AccessTokenClaims, TokenVerifier, VerifiedAccess};
 use crate::revocation_cache::RevocationCache;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::ProfileId;
-use tonic::{Request, Status};
 
 use crate::account_roles::ADMIN_ROLE_CLAIM;
+
+#[cfg(feature = "grpc")]
+mod grpc;
+#[cfg(feature = "grpc")]
+pub use grpc::{authenticate, bearer_token, verify_factor_request, verify_request};
 
 /// `acr` of a token exchanged from a personal access token. Such a token
 /// carries no resource-bound grant, so it is never an installation caller.
 const ACR_PAT: &str = "urn:sid:acr:pat";
 /// `acr` of an impersonation token (RFC 8693 token exchange).
 pub const ACR_IMPERSONATION: &str = "urn:sid:acr:impersonation";
+
+/// Why a caller was not admitted.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CallerError {
+    /// No valid, current access token.
+    #[error("authentication required")]
+    Unauthenticated,
+    /// The caller may not perform the operation.
+    #[error("the caller may not perform this operation")]
+    Denied,
+    /// A source the decision needs (`what`) could not answer.
+    #[error("{what} unavailable: {detail}")]
+    Unavailable { what: &'static str, detail: String },
+}
+
+impl CallerError {
+    fn unavailable(what: &'static str, cause: impl std::fmt::Display) -> Self {
+        Self::Unavailable {
+            what,
+            detail: cause.to_string(),
+        }
+    }
+}
 
 /// What kind of session the caller's token stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,28 +79,29 @@ impl Caller {
     }
 
     /// Allow only an administrator.
-    #[allow(clippy::result_large_err)]
-    pub fn require_admin(&self) -> Result<(), Status> {
-        if self.admin { Ok(()) } else { Err(denied()) }
+    pub fn require_admin(&self) -> Result<(), CallerError> {
+        if self.admin {
+            Ok(())
+        } else {
+            Err(CallerError::Denied)
+        }
     }
 
     /// Allow the owner of `target` or an administrator.
-    #[allow(clippy::result_large_err)]
-    pub fn require_self_or_admin(&self, target: ProfileId) -> Result<(), Status> {
+    pub fn require_self_or_admin(&self, target: ProfileId) -> Result<(), CallerError> {
         if self.admin || self.profile_id == target {
             Ok(())
         } else {
-            Err(denied())
+            Err(CallerError::Denied)
         }
     }
 
     /// Allow authorization queries only about the caller's own subject
     /// (`user:<profile_id>`), or about any subject for an administrator.
-    #[allow(clippy::result_large_err)]
     pub fn require_own_subjects<'a>(
         &self,
         subjects: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(), Status> {
+    ) -> Result<(), CallerError> {
         if self.admin {
             return Ok(());
         }
@@ -80,32 +109,19 @@ impl Caller {
         if subjects.into_iter().all(|s| s == own) {
             Ok(())
         } else {
-            Err(denied())
+            Err(CallerError::Denied)
         }
     }
 
     /// Allow only a user's own sign-in session: credentials, login handles and
     /// sessions are never managed through an impersonation token.
-    #[allow(clippy::result_large_err)]
-    pub fn require_interactive(&self) -> Result<(), Status> {
+    pub fn require_interactive(&self) -> Result<(), CallerError> {
         if self.kind == TokenKind::Interactive {
             Ok(())
         } else {
-            Err(denied())
+            Err(CallerError::Denied)
         }
     }
-}
-
-fn denied() -> Status {
-    ApiError::new(
-        ErrorReason::InsufficientPermissions,
-        "the caller may not perform this operation",
-    )
-    .into()
-}
-
-fn unauthenticated() -> Status {
-    ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
 }
 
 /// Where a verifier learns whether a validly signed token can still act.
@@ -113,20 +129,20 @@ fn unauthenticated() -> Status {
 pub trait CurrentToken: Send + Sync {
     /// Whether `token`, verified as `claims`, can no longer act. A source
     /// that cannot answer refuses the request as unavailable.
-    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status>;
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, CallerError>;
 }
 
 /// In the issuer's own process: its revocation record.
 #[async_trait::async_trait]
 impl CurrentToken for RevocationCache {
-    async fn ended(&self, _token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+    async fn ended(&self, _token: &str, claims: &AccessTokenClaims) -> Result<bool, CallerError> {
         check_revocation(self, claims).await
     }
 }
 
 #[async_trait::async_trait]
 impl<T: CurrentToken + ?Sized> CurrentToken for std::sync::Arc<T> {
-    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, CallerError> {
         (**self).ended(token, claims).await
     }
 }
@@ -142,46 +158,23 @@ pub struct AtIssuer {
 
 #[async_trait::async_trait]
 impl CurrentToken for AtIssuer {
-    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, CallerError> {
         if claims.iss != self.issuer.issuer() {
             return Ok(true);
         }
         if let Ok(true) = self.known.is_revoked(&claims.jti, &claims.sid).await {
             return Ok(true);
         }
-        let active =
-            self.issuer.active(token).await.map_err(|e| {
-                sid_core::grpc_error::refuse::dependency_unavailable("token state", e)
-            })?;
+        let active = self
+            .issuer
+            .active(token)
+            .await
+            .map_err(|e| CallerError::unavailable("token state", e))?;
         Ok(!active)
     }
 }
 
-/// The bearer access token of `request`.
-///
-/// A `DPoP` authorization scheme is refused: these services do not verify
-/// DPoP proofs, and accepting the token without its proof would drop the
-/// sender constraint (RFC 9449 §7.1).
-#[allow(clippy::result_large_err)]
-pub fn bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
-    let header = request
-        .metadata()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(unauthenticated)?;
-    let (scheme, token) = header.split_once(' ').ok_or_else(unauthenticated)?;
-    // RFC 7235 §2.1: the auth-scheme is case-insensitive.
-    if !scheme.eq_ignore_ascii_case("Bearer") {
-        return Err(unauthenticated());
-    }
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(unauthenticated());
-    }
-    Ok(token)
-}
-
-/// A request's verified access token and the caller it stands for.
+/// A verified access token and the caller it stands for.
 #[derive(Debug)]
 pub struct Verified {
     pub claims: AccessTokenClaims,
@@ -189,7 +182,7 @@ pub struct Verified {
     pub source: TokenSource,
 }
 
-/// Which kind of access token a request presented.
+/// Which kind of access token was presented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenSource {
     /// The installation's own token (its `sid` names an IdP session).
@@ -201,31 +194,28 @@ pub enum TokenSource {
 impl Verified {
     /// Allow only the installation's own token: an application's token, the
     /// account API's included, never stands for the IdP session.
-    #[allow(clippy::result_large_err)]
-    pub fn require_installation(&self) -> Result<(), Status> {
+    pub fn require_installation(&self) -> Result<(), CallerError> {
         if self.source == TokenSource::Installation {
             Ok(())
         } else {
-            Err(denied())
+            Err(CallerError::Denied)
         }
     }
 }
 
-/// Verify the bearer access token of `request`, the installation's own or an
-/// account API token: signature, issuer, audience, expiry, revocation, and
-/// that it is not a DPoP-bound token presented as a bearer token
-/// (RFC 9449 §7.1). The caller is resolved from the verified kind.
-#[allow(clippy::result_large_err)]
-pub async fn verify_request<T>(
-    request: &Request<T>,
+/// Verify `token`, the installation's own access token or an account API
+/// token: signature, issuer, audience, expiry, revocation, and that it is not
+/// a DPoP-bound token presented as a bearer token (RFC 9449 §7.1). The caller
+/// is resolved from the verified kind.
+pub async fn authenticate_token(
+    token: &str,
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
-) -> Result<Verified, Status> {
-    let token = bearer_token(request)?;
+) -> Result<Verified, CallerError> {
     let (claims, caller, source) = match verifier
         .verify(token)
         .await
-        .map_err(|_| unauthenticated())?
+        .map_err(|_| CallerError::Unauthenticated)?
     {
         VerifiedAccess::Session(claims) => {
             let caller = Caller::from_claims(&claims)?;
@@ -237,10 +227,10 @@ pub async fn verify_request<T>(
         }
     };
     if claims.cnf.is_some() {
-        return Err(unauthenticated());
+        return Err(CallerError::Unauthenticated);
     }
     if current.ended(token, &claims).await? {
-        return Err(unauthenticated());
+        return Err(CallerError::Unauthenticated);
     }
     Ok(Verified {
         claims,
@@ -254,76 +244,59 @@ pub async fn verify_request<T>(
 pub enum FactorToken {
     /// The token of a sign-in owing this factor: its claims, verified.
     Pending(AccessTokenClaims),
-    /// A caller's ordinary token, as [`verify_request`] verifies it.
+    /// A caller's ordinary token, as [`authenticate_token`] verifies it.
     Session(Verified),
 }
 
-/// Verify the bearer token of a second-factor verification: the token of a
-/// sign-in owing its second factor, which nothing else accepts, or any token
-/// [`verify_request`] accepts.
-#[allow(clippy::result_large_err)]
-pub async fn verify_factor_request<T>(
-    request: &Request<T>,
+/// Verify `token`, presented with a second-factor verification: the token of
+/// a sign-in owing its second factor, which nothing else accepts, or any
+/// token [`authenticate_token`] accepts.
+pub async fn authenticate_factor_token(
+    token: &str,
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
-) -> Result<FactorToken, Status> {
-    let token = bearer_token(request)?;
+) -> Result<FactorToken, CallerError> {
     if let Ok(claims) = verifier.validate_pending_access_token(token) {
         if claims.cnf.is_some() || current.ended(token, &claims).await? {
-            return Err(unauthenticated());
+            return Err(CallerError::Unauthenticated);
         }
         return Ok(FactorToken::Pending(claims));
     }
-    verify_request(request, verifier, current)
+    authenticate_token(token, verifier, current)
         .await
         .map(FactorToken::Session)
 }
 
 /// Verify an access token presented anywhere else than the authorization
 /// header (a token-exchange `subject_token`), with the same checks as
-/// [`verified_claims`].
-#[allow(clippy::result_large_err)]
+/// [`authenticate_token`].
 pub async fn verify_token(
     token: &str,
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
-) -> Result<AccessTokenClaims, Status> {
+) -> Result<AccessTokenClaims, CallerError> {
     let claims = verifier
         .validate_access_token(token)
-        .map_err(|_| unauthenticated())?;
+        .map_err(|_| CallerError::Unauthenticated)?;
     if claims.cnf.is_some() {
-        return Err(unauthenticated());
+        return Err(CallerError::Unauthenticated);
     }
     if current.ended(token, &claims).await? {
-        return Err(unauthenticated());
+        return Err(CallerError::Unauthenticated);
     }
     Ok(claims)
 }
 
 /// Whether `claims` were revoked. A revocation check the shared cache cannot
 /// answer refuses the token as unavailable rather than accepting it.
-#[allow(clippy::result_large_err)]
 pub async fn check_revocation(
     revocation: &RevocationCache,
     claims: &AccessTokenClaims,
-) -> Result<bool, Status> {
+) -> Result<bool, CallerError> {
     revocation
         .is_revoked(&claims.jti, &claims.sid)
         .await
-        .map_err(|e| {
-            sid_core::grpc_error::refuse::dependency_unavailable("token revocation state", e)
-        })
-}
-
-/// Authenticate the caller of `request` from its bearer access token (see
-/// [`verify_request`]).
-#[allow(clippy::result_large_err)]
-pub async fn authenticate<T>(
-    request: &Request<T>,
-    verifier: &TokenVerifier,
-    current: &(impl CurrentToken + ?Sized),
-) -> Result<Caller, Status> {
-    Ok(verify_request(request, verifier, current).await?.caller)
+        .map_err(|e| CallerError::unavailable("token revocation state", e))
 }
 
 impl Caller {
@@ -340,16 +313,16 @@ impl Caller {
         }
     }
 
-    /// The caller described by already verified claims (see [`verified_claims`]).
-    #[allow(clippy::result_large_err)]
-    pub fn from_claims(claims: &AccessTokenClaims) -> Result<Self, Status> {
+    /// The caller described by already verified claims (see
+    /// [`authenticate_token`]).
+    pub fn from_claims(claims: &AccessTokenClaims) -> Result<Self, CallerError> {
         let profile_id = claims
             .pid
             .as_deref()
             .and_then(|pid| ProfileId::parse(pid).ok())
-            .ok_or_else(unauthenticated)?;
+            .ok_or(CallerError::Unauthenticated)?;
         let kind = match claims.acr.as_str() {
-            ACR_PAT => return Err(unauthenticated()),
+            ACR_PAT => return Err(CallerError::Unauthenticated),
             ACR_IMPERSONATION => TokenKind::Impersonation,
             _ if claims.act.is_some() => TokenKind::Impersonation,
             _ => TokenKind::Interactive,
@@ -366,3 +339,6 @@ impl Caller {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;
