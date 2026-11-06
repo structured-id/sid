@@ -77,7 +77,7 @@ const LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL: &str =
 ))]
 fn invite_use_entry(
     registration: &sid_core::models::AuditEntry,
-    invite: uuid::Uuid,
+    invite: sid_core::models::InviteId,
 ) -> sid_core::models::AuditEntry {
     sid_core::models::AuditEntry {
         action: "invite.use".into(),

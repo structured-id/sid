@@ -266,7 +266,7 @@ async fn test_pg_evaluate_enforcement_allow_for_basic_user() {
     // Evaluate enforcement.
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             client_id,
         },
         &token,
@@ -313,7 +313,7 @@ async fn test_pg_evaluate_enforcement_step_up_for_elevated_client() {
     // Evaluate enforcement.
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             client_id,
         },
         &token,
@@ -428,7 +428,7 @@ async fn test_pg_evaluate_enforcement_profile_not_found() {
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: ProfileId::generate().to_string(),
+            profile_id: Some(ProfileId::generate().into()),
             client_id: "any-client".to_string(),
         },
         &token,

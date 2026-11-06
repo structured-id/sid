@@ -318,21 +318,16 @@ impl EnrollmentServiceImpl {
     }
 
     /// The stored invite `invite_id` names; NOT_FOUND for an unknown one.
-    async fn stored_invite(&self, invite_id: &str) -> Result<Invite, Status> {
-        let invite_id = uuid::Uuid::parse_str(invite_id)
-            .map(InviteId)
-            .map_err(|_| invalid_field("invite_id", "not an invite identifier"))?;
+    async fn stored_invite(
+        &self,
+        invite_id: Option<&sid_proto::sid::v1::ids::InviteId>,
+    ) -> Result<Invite, Status> {
+        let invite_id: InviteId = super::convert::wire_id(invite_id, "invite_id")?;
         self.storage
             .get_invite(invite_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| {
-                not_found(
-                    ErrorReason::InviteNotFound,
-                    "Invite",
-                    invite_id.0.to_string(),
-                )
-            })
+            .ok_or_else(|| not_found(ErrorReason::InviteNotFound, "Invite", invite_id.to_string()))
     }
 
     /// The display name of an invite's creator, recorded with the invite for
@@ -514,7 +509,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                     .await?;
 
                 let invite = Invite {
-                    id: InviteId::new(),
+                    id: InviteId::generate(),
                     code: generate_invite_code(),
                     created_by: actor.creator(),
                     created_by_name: self.invite_creator_name(actor).await?,
@@ -527,12 +522,12 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 };
                 let response = invite_to_proto(&invite);
                 let ctx =
-                    MutationContext::from(actor.audit("invite.create", invite.id.0.to_string()))
+                    MutationContext::from(actor.audit("invite.create", invite.id.to_string()))
                         .with_operation(command.completion(response.encode_to_vec()));
                 self.storage
                     .create_invites(std::slice::from_ref(&invite), ctx)
                     .await?;
-                info!("Created invite {}", invite.id.0);
+                info!("Created invite {}", invite.id);
                 Ok(response)
             })
             .await?;
@@ -546,7 +541,9 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::GetInviteRequest>,
     ) -> Result<Response<ProtoInvite>, Status> {
         self.invite_actor(&request, INVITE_READ).await?;
-        let invite = self.stored_invite(&request.into_inner().invite_id).await?;
+        let invite = self
+            .stored_invite(request.into_inner().invite_id.as_ref())
+            .await?;
         Ok(Response::new(invite_to_proto(&invite)))
     }
 
@@ -557,7 +554,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
     ) -> Result<Response<sid_proto::sid::v1::admin::ListInviteRedemptionsResponse>, Status> {
         self.invite_actor(&request, INVITE_READ).await?;
         let req = request.into_inner();
-        let invite = self.stored_invite(&req.invite_id).await?;
+        let invite = self.stored_invite(req.invite_id.as_ref()).await?;
         // AIP-158: a page size above the maximum is coerced to it.
         let limit = match u64::from(req.page_size) {
             0 => DEFAULT_PAGE_SIZE,
@@ -579,12 +576,17 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             sid_proto::sid::v1::admin::ListInviteRedemptionsResponse {
                 redemptions: redemptions
                     .into_iter()
-                    .map(|r| sid_proto::sid::v1::admin::InviteRedemption {
-                        profile_id: r.profile_id.to_string(),
-                        credential_id: r.credential_id.map(|c| c.0.to_string()).unwrap_or_default(),
-                        redeemed_at: Some(convert::to_timestamp(r.redeemed_at)),
+                    .map(|r| {
+                        Ok(sid_proto::sid::v1::admin::InviteRedemption {
+                            profile_id: Some(r.profile_id.into()),
+                            credential_id: match r.credential_id {
+                                Some(c) => convert::stored_id::<sid_ids::CredentialId, _>(c.0)?,
+                                None => None,
+                            },
+                            redeemed_at: Some(convert::to_timestamp(r.redeemed_at)),
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<_, Status>>()?,
                 next_page_token,
             },
         ))
@@ -642,31 +644,17 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let actor = self.invite_actor(&request, INVITE_REVOKE).await?;
         let req = request.into_inner();
 
-        let invite_id = uuid::Uuid::parse_str(&req.invite_id)
-            .map(InviteId)
-            .map_err(|_| invalid_field("invite_id", "not an invite identifier"))?;
-
-        self.storage
-            .get_invite(invite_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| {
-                not_found(
-                    ErrorReason::InviteNotFound,
-                    "Invite",
-                    invite_id.0.to_string(),
-                )
-            })?;
+        let invite_id = self.stored_invite(req.invite_id.as_ref()).await?.id;
 
         self.storage
             .revoke_invite(
                 invite_id,
-                actor.audit("invite.revoke", invite_id.0.to_string()).into(),
+                actor.audit("invite.revoke", invite_id.to_string()).into(),
             )
             .await
             .map_err(storage_failure)?;
 
-        info!("Revoked invite {}", invite_id.0);
+        info!("Revoked invite {}", invite_id);
         Ok(Response::new(()))
     }
 
@@ -710,7 +698,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 let now = chrono::Utc::now();
                 let invites: Vec<Invite> = (0..count)
                     .map(|_| Invite {
-                        id: InviteId::new(),
+                        id: InviteId::generate(),
                         code: generate_invite_code(),
                         created_by: actor.creator(),
                         created_by_name: created_by_name.clone(),
@@ -725,7 +713,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 let response = sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
                     invites: invites.iter().map(invite_to_proto).collect(),
                 };
-                let ids: Vec<String> = invites.iter().map(|i| i.id.0.to_string()).collect();
+                let ids: Vec<String> = invites.iter().map(|i| i.id.to_string()).collect();
                 let ctx = MutationContext::from(actor.audit("invite.bulk_create", ids.join(",")))
                     .with_operation(command.completion(response.encode_to_vec()));
                 self.storage.create_invites(&invites, ctx).await?;
@@ -774,7 +762,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let mut referrers = Vec::with_capacity(top_referrers.len());
         for (pid, count) in &top_referrers {
             referrers.push(sid_proto::sid::v1::admin::ReferrerEntry {
-                profile_id: pid.to_string(),
+                profile_id: Some((*pid).into()),
                 display_name: self.creator_name(*pid).await?,
                 referral_count: *count as u32,
             });
@@ -901,15 +889,15 @@ fn source_type_to_proto(
 /// `invite` as the API returns it: `created_by` names only a Profile
 /// creator, a machine user creator has its own field.
 fn invite_to_proto(invite: &Invite) -> ProtoInvite {
-    let (created_by, created_by_machine_user_id) = match invite.created_by {
-        InviteCreator::Profile(id) => (id.to_string(), String::new()),
-        InviteCreator::MachineUser(id) => (String::new(), id.to_string()),
+    use sid_proto::sid::v1::admin::invite::CreatedBy;
+    let created_by = match invite.created_by {
+        InviteCreator::Profile(id) => CreatedBy::CreatedByProfileId(id.into()),
+        InviteCreator::MachineUser(id) => CreatedBy::CreatedByMachineUserId(id.into()),
     };
     ProtoInvite {
-        id: invite.id.0.to_string(),
+        id: Some(invite.id.into()),
         code: invite.code.clone(),
-        created_by,
-        created_by_machine_user_id,
+        created_by: Some(created_by),
         created_by_name: invite.created_by_name.clone(),
         metadata: invite.metadata.clone().into_iter().collect(),
         max_uses: invite.max_uses,

@@ -1917,7 +1917,7 @@ pub trait StorageBackend:
     /// Get a flow action by ID.
     async fn get_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
     ) -> Result<Option<sid_core::models::FlowAction>>;
 
     /// List flow actions for a project, flow type, and action point.
@@ -1931,7 +1931,7 @@ pub trait StorageBackend:
     /// Delete a flow action by ID.
     async fn delete_flow_action(
         &self,
-        id: sid_core::models::ActionId,
+        id: sid_core::models::FlowActionId,
         ctx: MutationContext,
     ) -> Result<()>;
 

@@ -12,8 +12,8 @@ use sid_core::grpc_error::refuse::{
     changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
 };
 use sid_core::models::{
-    ActionConfig, ActionId, ActionOnError, ActionPoint, ActionType, AuditEntry, FlowAction,
-    FlowConfig, FlowType, MutationContext, ProjectId, StepConfig,
+    ActionConfig, ActionOnError, ActionPoint, ActionType, AuditEntry, FlowAction, FlowActionId,
+    FlowConfig, FlowType, MutationContext, StepConfig,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::flow_action_service_server::FlowActionService;
@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
-use uuid::Uuid;
+
+use super::convert::wire_id;
 
 pub struct FlowConfigServiceImpl {
     storage: Arc<dyn StorageBackend>,
@@ -63,6 +64,31 @@ impl FlowActionServiceImpl {
             revocation,
         }
     }
+
+    /// The stored action the request addresses: its project, flow type and
+    /// id together. An action of another project or flow type is not found
+    /// here, the same answer as one that does not exist.
+    async fn scoped_action(
+        &self,
+        project_id: Option<&sid_proto::sid::v1::ids::ProjectId>,
+        flow_type: i32,
+        action_id: Option<&sid_proto::sid::v1::ids::FlowActionId>,
+    ) -> Result<FlowAction, Status> {
+        let project_id = wire_id(project_id, "project_id")?;
+        let flow_type = proto_flow_type_to_domain(flow_type)?;
+        let action_id = wire_id(action_id, "action_id")?;
+        match self
+            .storage
+            .get_flow_action(action_id)
+            .await
+            .map_err(storage_failure)?
+        {
+            Some(action) if action.project_id == project_id && action.flow_type == flow_type => {
+                Ok(action)
+            }
+            _ => Err(flow_action_not_found(action_id)),
+        }
+    }
 }
 
 // ── Shared Helpers ──
@@ -81,28 +107,24 @@ async fn require_admin<T>(
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-    ProjectId::parse(s).map_err(|_| invalid_field("project_id", "not a project identifier"))
+fn proto_flow_type_to_domain(v: i32) -> Result<FlowType, Status> {
+    use pb::admin::FlowType as P;
+    match P::try_from(v) {
+        Ok(P::Authentication) => Ok(FlowType::Authentication),
+        Ok(P::Registration) => Ok(FlowType::Registration),
+        Ok(P::Recovery) => Ok(FlowType::Recovery),
+        Ok(P::DeviceGrant) => Ok(FlowType::DeviceGrant),
+        Ok(P::DirectGrant) => Ok(FlowType::DirectGrant),
+        Ok(P::Enrollment) => Ok(FlowType::Enrollment),
+        Ok(P::Unspecified) | Err(_) => Err(invalid_field("flow_type", "not a flow type")),
+    }
 }
 
-#[allow(clippy::result_large_err)]
-fn parse_action_id(s: &str) -> Result<ActionId, Status> {
-    Uuid::parse_str(s)
-        .map(ActionId)
-        .map_err(|_| invalid_field("action_id", "not a flow action identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_flow_type_str(s: &str) -> Result<FlowType, Status> {
-    s.parse::<FlowType>()
-        .map_err(|_| invalid_field("flow_type", "not a flow type"))
-}
-
-fn flow_action_not_found(id: ActionId) -> Status {
+fn flow_action_not_found(id: FlowActionId) -> Status {
     not_found(
         ErrorReason::FlowActionNotFound,
         "FlowAction",
-        id.0.to_string(),
+        id.to_string(),
     )
 }
 
@@ -277,7 +299,7 @@ fn proto_step_to_domain(step: &pb::admin::StepConfig) -> (String, StepConfig) {
 
 fn domain_config_to_proto(config: &FlowConfig) -> pb::FlowConfig {
     pb::FlowConfig {
-        project_id: config.project_id.to_string(),
+        project_id: Some(config.project_id.into()),
         flow_type: domain_flow_type_to_proto(&config.flow_type),
         steps: config
             .steps
@@ -311,8 +333,8 @@ fn domain_action_to_proto(action: &FlowAction) -> pb::FlowAction {
     };
 
     pb::FlowAction {
-        action_id: action.id.0.to_string(),
-        project_id: action.project_id.to_string(),
+        action_id: Some(action.id.into()),
+        project_id: Some(action.project_id.into()),
         flow_type: domain_flow_type_to_proto(&action.flow_type),
         action_point: domain_action_point_to_proto(&action.action_point),
         name: action.name.clone(),
@@ -352,8 +374,8 @@ impl FlowConfigService for FlowConfigServiceImpl {
     ) -> Result<Response<pb::FlowConfig>, Status> {
         require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let project_id = parse_project_id(&inner.project_id)?;
-        let flow_type = parse_flow_type_str(&inner.flow_type)?;
+        let project_id = wire_id(inner.project_id.as_ref(), "project_id")?;
+        let flow_type = proto_flow_type_to_domain(inner.flow_type)?;
 
         let config = self
             .storage
@@ -378,8 +400,8 @@ impl FlowConfigService for FlowConfigServiceImpl {
     ) -> Result<Response<pb::FlowConfig>, Status> {
         let admin_sub = require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let project_id = parse_project_id(&inner.project_id)?;
-        let flow_type = parse_flow_type_str(&inner.flow_type)?;
+        let project_id = wire_id(inner.project_id.as_ref(), "project_id")?;
+        let flow_type = proto_flow_type_to_domain(inner.flow_type)?;
 
         let steps: HashMap<String, StepConfig> =
             inner.steps.iter().map(proto_step_to_domain).collect();
@@ -420,7 +442,7 @@ impl FlowConfigService for FlowConfigServiceImpl {
     ) -> Result<Response<pb::ListFlowConfigsResponse>, Status> {
         require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let project_id = parse_project_id(&inner.project_id)?;
+        let project_id = wire_id(inner.project_id.as_ref(), "project_id")?;
 
         let configs = self
             .storage
@@ -445,8 +467,8 @@ impl FlowActionService for FlowActionServiceImpl {
     ) -> Result<Response<pb::FlowAction>, Status> {
         let admin_sub = require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let project_id = parse_project_id(&inner.project_id)?;
-        let flow_type = parse_flow_type_str(&inner.flow_type)?;
+        let project_id = wire_id(inner.project_id.as_ref(), "project_id")?;
+        let flow_type = proto_flow_type_to_domain(inner.flow_type)?;
         let action_point = proto_action_point_to_domain(inner.action_point)?;
 
         if inner.name.is_empty() {
@@ -467,7 +489,7 @@ impl FlowActionService for FlowActionServiceImpl {
 
         let now = chrono::Utc::now();
         let action = FlowAction {
-            id: ActionId::new(),
+            id: FlowActionId::generate(),
             project_id,
             flow_type,
             action_point,
@@ -499,14 +521,13 @@ impl FlowActionService for FlowActionServiceImpl {
     ) -> Result<Response<pb::FlowAction>, Status> {
         require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let action_id = parse_action_id(&inner.action_id)?;
-
         let action = self
-            .storage
-            .get_flow_action(action_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| flow_action_not_found(action_id))?;
+            .scoped_action(
+                inner.project_id.as_ref(),
+                inner.flow_type,
+                inner.action_id.as_ref(),
+            )
+            .await?;
 
         Ok(Response::new(domain_action_to_proto(&action)))
     }
@@ -518,8 +539,8 @@ impl FlowActionService for FlowActionServiceImpl {
     ) -> Result<Response<pb::ListFlowActionsResponse>, Status> {
         require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let project_id = parse_project_id(&inner.project_id)?;
-        let flow_type = parse_flow_type_str(&inner.flow_type)?;
+        let project_id = wire_id(inner.project_id.as_ref(), "project_id")?;
+        let flow_type = proto_flow_type_to_domain(inner.flow_type)?;
 
         let action_point = if inner.action_point != 0 {
             Some(proto_action_point_to_domain(inner.action_point)?)
@@ -545,14 +566,13 @@ impl FlowActionService for FlowActionServiceImpl {
     ) -> Result<Response<pb::FlowAction>, Status> {
         let admin_sub = require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let action_id = parse_action_id(&inner.action_id)?;
-
         let mut action = self
-            .storage
-            .get_flow_action(action_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| flow_action_not_found(action_id))?;
+            .scoped_action(
+                inner.project_id.as_ref(),
+                inner.flow_type,
+                inner.action_id.as_ref(),
+            )
+            .await?;
 
         if let Some(name) = inner.name {
             if name.is_empty() {
@@ -615,14 +635,14 @@ impl FlowActionService for FlowActionServiceImpl {
     ) -> Result<Response<()>, Status> {
         let admin_sub = require_admin(&self.jwt, &self.revocation, &req).await?;
         let inner = req.into_inner();
-        let action_id = parse_action_id(&inner.action_id)?;
-
-        // Verify action exists
-        self.storage
-            .get_flow_action(action_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| flow_action_not_found(action_id))?;
+        let action_id = self
+            .scoped_action(
+                inner.project_id.as_ref(),
+                inner.flow_type,
+                inner.action_id.as_ref(),
+            )
+            .await?
+            .id;
 
         let audit: MutationContext =
             AuditEntry::admin(&admin_sub, "flow_action.delete", action_id.to_string()).into();

@@ -4948,11 +4948,11 @@ async fn test_maintenance_mode_blocks_upstream_sign_in() {
     use sid_proto::sid::v1::upstream_service_server::UpstreamService;
     use sid_proto::sid::v1::{HandleUpstreamCallbackRequest, InitiateUpstreamAuthRequest};
     let svc = maintenance_mode_services().await;
-    let provider = uuid::Uuid::now_v7().to_string();
+    let provider = sid_core::models::UpstreamProviderId::generate();
     let started = svc
         .upstream
         .initiate_upstream_auth(Request::new(InitiateUpstreamAuthRequest {
-            provider_id: provider.clone(),
+            provider_id: Some(provider.into()),
             redirect_uri: "https://sid.example.com/account/login/upstream".into(),
         }))
         .await
@@ -4962,7 +4962,7 @@ async fn test_maintenance_mode_blocks_upstream_sign_in() {
     let callback = svc
         .upstream
         .handle_upstream_callback(Request::new(HandleUpstreamCallbackRequest {
-            provider_id: provider,
+            provider_id: Some(provider.into()),
             code: "the-code".into(),
             state: "the-state".into(),
             redirect_uri: "https://sid.example.com/account/login/upstream".into(),
@@ -5792,7 +5792,7 @@ async fn test_password_reset_event_carries_no_secret() {
 async fn test_admin_update_profile_requires_auth() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(AdminUpdateProfileRequest {
-        profile_id: Uuid::new_v4().to_string(),
+        profile_id: Some(ProfileId::generate().into()),
         ..Default::default()
     });
 
@@ -5811,7 +5811,7 @@ async fn test_admin_update_profile_requires_admin_role() {
 
     let req = authed_request(
         AdminUpdateProfileRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             ..Default::default()
         },
         &token,
@@ -5832,7 +5832,7 @@ async fn test_admin_update_profile_suspend() {
 
     let req = authed_request(
         AdminUpdateProfileRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
             profile_status: sid_proto::sid::v1::ProfileStatus::Suspended.into(),
             ..Default::default()
         },
@@ -5840,7 +5840,7 @@ async fn test_admin_update_profile_suspend() {
     );
 
     let resp = svc.admin.admin_update_profile(req).await.unwrap();
-    assert_eq!(resp.into_inner().profile_id, pid.to_string());
+    assert_eq!(resp.into_inner().profile_id, Some(pid.into()));
 }
 
 /// Suspension ends access: a suspended profile's live session (and so its
@@ -5863,7 +5863,7 @@ async fn test_admin_suspend_ends_live_sessions() {
     svc.admin
         .admin_update_profile(authed_request(
             AdminUpdateProfileRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
                 profile_status: sid_proto::sid::v1::ProfileStatus::Suspended.into(),
                 ..Default::default()
             },
@@ -5907,7 +5907,7 @@ async fn test_admin_update_profile_invalid_status() {
     for status in [sid_proto::sid::v1::ProfileStatus::Closed as i32, 99] {
         let req = authed_request(
             AdminUpdateProfileRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
                 profile_status: status,
                 roles: vec!["editor".to_string()],
                 ..Default::default()
@@ -5942,7 +5942,7 @@ async fn test_admin_update_profile_refuses_the_administrator_label() {
 
     let req = authed_request(
         AdminUpdateProfileRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
             roles: vec!["editor".to_string(), "admin".to_string()],
             ..Default::default()
         },
@@ -5984,7 +5984,7 @@ async fn test_admin_activate_never_reopens_a_closed_account() {
             .admin
             .admin_update_profile(authed_request(
                 AdminUpdateProfileRequest {
-                    profile_id: pid.to_string(),
+                    profile_id: Some(pid.into()),
                     profile_status: sid_proto::sid::v1::ProfileStatus::Active.into(),
                     ..Default::default()
                 },
@@ -6010,7 +6010,7 @@ async fn test_admin_update_profile_not_found() {
 
     let req = authed_request(
         AdminUpdateProfileRequest {
-            profile_id: nonexistent_id.to_string(),
+            profile_id: Some(nonexistent_id.into()),
             profile_status: sid_proto::sid::v1::ProfileStatus::Suspended.into(),
             ..Default::default()
         },
@@ -6039,7 +6039,7 @@ async fn test_admin_rpc_revoke_all_sessions() {
 
     let req = authed_request(
         RevokeAllSessionsRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
         },
         &admin_token,
     );
@@ -6068,7 +6068,7 @@ async fn test_admin_revoke_all_sessions_stops_tokens_and_owes_logout() {
     svc.admin
         .revoke_all_sessions(authed_request(
             RevokeAllSessionsRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
             },
             &admin_token,
         ))
@@ -6095,7 +6095,7 @@ async fn test_admin_revoke_all_sessions_stops_tokens_and_owes_logout() {
 async fn test_admin_rpc_revoke_all_sessions_requires_admin() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(RevokeAllSessionsRequest {
-        profile_id: Uuid::new_v4().to_string(),
+        profile_id: Some(ProfileId::generate().into()),
     });
 
     let err = svc.admin.revoke_all_sessions(req).await.unwrap_err();
@@ -6114,7 +6114,7 @@ async fn test_admin_metadata_set_and_get() {
     // Set metadata
     let req = authed_request(
         SetProfileMetadataRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
             key: "department".to_string(),
             value: Some(prost_types::Value {
                 kind: Some(prost_types::value::Kind::StringValue(
@@ -6141,7 +6141,7 @@ async fn test_admin_metadata_list_empty() {
 
     let req = authed_request(
         ListProfileMetadataRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
         },
         &admin_token,
     );
@@ -6161,7 +6161,7 @@ async fn test_admin_metadata_get_not_found() {
 
     let req = authed_request(
         GetProfileMetadataRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
             key: "nonexistent".to_string(),
         },
         &admin_token,
@@ -6187,7 +6187,7 @@ async fn test_admin_metadata_set_for_unknown_profile() {
         .admin
         .set_profile_metadata(authed_request(
             SetProfileMetadataRequest {
-                profile_id: ProfileId::generate().to_string(),
+                profile_id: Some(ProfileId::generate().into()),
                 key: "department".to_string(),
                 value: None,
             },
@@ -6213,7 +6213,7 @@ async fn test_admin_metadata_delete() {
 
     let req = authed_request(
         DeleteProfileMetadataRequest {
-            profile_id: pid.to_string(),
+            profile_id: Some(pid.into()),
             key: "some-key".to_string(),
         },
         &admin_token,
@@ -6228,7 +6228,7 @@ async fn test_admin_metadata_requires_admin() {
     let svc = TestServices::new(MockStorage::new());
 
     let req = Request::new(ListProfileMetadataRequest {
-        profile_id: Uuid::new_v4().to_string(),
+        profile_id: Some(ProfileId::generate().into()),
     });
 
     let err = svc.admin.list_profile_metadata(req).await.unwrap_err();
@@ -6243,8 +6243,8 @@ async fn test_admin_metadata_requires_admin() {
 async fn test_flow_config_requires_auth() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(GetFlowConfigRequest {
-        project_id: sid_core::models::ProjectId::generate().to_string(),
-        flow_type: "authentication".to_string(),
+        project_id: Some(sid_core::models::ProjectId::generate().into()),
+        flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
     });
     let err = svc.flow_config.get_flow_config(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -6258,8 +6258,8 @@ async fn test_flow_config_requires_admin_role() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
         },
         &token,
     );
@@ -6274,8 +6274,8 @@ async fn test_flow_config_get_not_found() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
         },
         &admin_token,
     );
@@ -6290,8 +6290,9 @@ async fn test_flow_config_invalid_flow_type() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "nonexistent".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            // A value the enum does not define.
+            flow_type: 99,
         },
         &admin_token,
     );
@@ -6303,13 +6304,13 @@ async fn test_flow_config_invalid_flow_type() {
 async fn test_flow_config_save_and_list() {
     let svc = TestServices::new(MockStorage::new());
     let admin_token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
-    let project_id = sid_core::models::ProjectId::generate().to_string();
+    let project_id = sid_core::models::ProjectId::generate();
 
     // Save a config
     let req = authed_request(
         SaveFlowConfigRequest {
-            project_id: project_id.clone(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(project_id.into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
             steps: vec![sid_proto::sid::v1::admin::StepConfig {
                 step_type: "identification".to_string(),
                 enabled: true,
@@ -6321,14 +6322,14 @@ async fn test_flow_config_save_and_list() {
     );
     let resp = svc.flow_config.save_flow_config(req).await.unwrap();
     let config = resp.into_inner();
-    assert_eq!(config.project_id, project_id);
+    assert_eq!(config.project_id, Some(project_id.into()));
     assert_eq!(config.timeout_seconds, 600);
     assert_eq!(config.steps.len(), 1);
 
     // List configs
     let req = authed_request(
         ListFlowConfigsRequest {
-            project_id: project_id.clone(),
+            project_id: Some(project_id.into()),
         },
         &admin_token,
     );
@@ -6346,8 +6347,8 @@ async fn test_flow_config_save_and_list() {
 async fn test_flow_action_requires_auth() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(ListFlowActionsRequest {
-        project_id: sid_core::models::ProjectId::generate().to_string(),
-        flow_type: "authentication".to_string(),
+        project_id: Some(sid_core::models::ProjectId::generate().into()),
+        flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
         action_point: 0,
     });
     let err = svc.flow_action.list_flow_actions(req).await.unwrap_err();
@@ -6361,8 +6362,8 @@ async fn test_flow_action_create_requires_name() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
             action_point: 2,      // POST_AUTHENTICATION
             name: "".to_string(), // empty name
             action_type: 1,       // WEBHOOK
@@ -6389,8 +6390,8 @@ async fn test_flow_action_create_requires_config() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
             action_point: 1, // PRE_AUTHENTICATION
             name: "Test hook".to_string(),
             action_type: 1,
@@ -6412,8 +6413,8 @@ async fn test_flow_action_create_validates_webhook_url() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "registration".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Registration as i32,
             action_point: 6, // POST_REGISTRATION
             name: "Bad hook".to_string(),
             action_type: 1,
@@ -6440,8 +6441,8 @@ async fn test_flow_action_create_success() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
             action_point: 2, // POST_AUTHENTICATION
             name: "Risk check".to_string(),
             action_type: 1, // WEBHOOK
@@ -6463,7 +6464,7 @@ async fn test_flow_action_create_success() {
     assert_eq!(action.flow_type, 1); // AUTHENTICATION
     assert_eq!(action.action_point, 2); // POST_AUTHENTICATION
     assert!(action.enabled);
-    assert!(!action.action_id.is_empty());
+    assert!(action.action_id.is_some());
 }
 
 #[tokio::test]
@@ -6473,9 +6474,9 @@ async fn test_flow_action_get_not_found() {
 
     let req = authed_request(
         GetFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
-            action_id: Uuid::new_v4().to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
+            action_id: Some(sid_core::models::FlowActionId::generate().into()),
         },
         &admin_token,
     );
@@ -6490,9 +6491,9 @@ async fn test_flow_action_delete_not_found() {
 
     let req = authed_request(
         DeleteFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
-            action_id: Uuid::new_v4().to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
+            action_id: Some(sid_core::models::FlowActionId::generate().into()),
         },
         &admin_token,
     );
@@ -6507,9 +6508,9 @@ async fn test_flow_action_update_not_found() {
 
     let req = authed_request(
         UpdateFlowActionRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
-            action_id: Uuid::new_v4().to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
+            action_id: Some(sid_core::models::FlowActionId::generate().into()),
             name: Some("Updated name".to_string()),
             action_point: None,
             config: None,
@@ -6530,8 +6531,8 @@ async fn test_flow_action_list_empty() {
 
     let req = authed_request(
         ListFlowActionsRequest {
-            project_id: sid_core::models::ProjectId::generate().to_string(),
-            flow_type: "authentication".to_string(),
+            project_id: Some(sid_core::models::ProjectId::generate().into()),
+            flow_type: sid_proto::sid::v1::admin::FlowType::Authentication as i32,
             action_point: 0, // unspecified = all
         },
         &admin_token,
@@ -6846,7 +6847,7 @@ async fn test_security_evaluate_enforcement_allow() {
     let admin_token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             client_id: "test-client".to_string(),
         },
         &admin_token,
@@ -6875,7 +6876,7 @@ async fn test_security_evaluate_enforcement_unreadable_client_is_reported() {
     svc.mock_storage.fail_client_reads();
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             client_id: "test-client".to_string(),
         },
         &admin_token,
@@ -6897,7 +6898,7 @@ async fn test_security_evaluate_enforcement_unknown_client() {
     let admin_token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
             client_id: "no-such-client".to_string(),
         },
         &admin_token,
@@ -6912,7 +6913,8 @@ async fn test_security_evaluate_enforcement_invalid_profile_id() {
     let admin_token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: "not-a-uuid".to_string(),
+            // Fifteen bytes: not a UUID.
+            profile_id: Some(sid_proto::sid::v1::ids::ProfileId { value: vec![7; 15] }),
             client_id: "test-client".to_string(),
         },
         &admin_token,
@@ -6927,7 +6929,7 @@ async fn test_security_evaluate_enforcement_profile_not_found() {
     let admin_token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {
-            profile_id: ProfileId::generate().to_string(),
+            profile_id: Some(ProfileId::generate().into()),
             client_id: "test-client".to_string(),
         },
         &admin_token,
@@ -8455,7 +8457,7 @@ async fn test_enrollment_create_invite_returns_valid_response() {
     );
     let invite = svc.create_invite(req).await.unwrap().into_inner();
     assert!(!invite.code.is_empty());
-    assert!(!invite.id.is_empty());
+    assert!(invite.id.is_some());
     assert_eq!(invite.max_uses, 3);
     assert_eq!(invite.use_count, 0);
     assert!(invite.active);
@@ -8534,7 +8536,7 @@ async fn test_enrollment_revoke_nonexistent_returns_not_found() {
 
     let req = authed_request(
         sid_proto::sid::v1::admin::RevokeInviteRequest {
-            invite_id: uuid::Uuid::now_v7().to_string(),
+            invite_id: Some(sid_core::models::InviteId::generate().into()),
         },
         &token,
     );
@@ -8557,7 +8559,8 @@ async fn test_enrollment_revoke_invalid_id_returns_invalid_argument() {
 
     let req = authed_request(
         sid_proto::sid::v1::admin::RevokeInviteRequest {
-            invite_id: "not-a-uuid".to_string(),
+            // Fifteen bytes: not a UUID.
+            invite_id: Some(sid_proto::sid::v1::ids::InviteId { value: vec![7; 15] }),
         },
         &token,
     );
@@ -10208,7 +10211,7 @@ async fn test_event_user_deactivated_on_admin_suspend() {
     svc.admin
         .admin_update_profile(authed_request(
             AdminUpdateProfileRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
                 profile_status: sid_proto::sid::v1::ProfileStatus::Suspended.into(),
                 ..Default::default()
             },
@@ -10250,7 +10253,7 @@ async fn test_event_user_unlocked_on_admin_reactivate() {
     svc.admin
         .admin_update_profile(authed_request(
             AdminUpdateProfileRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
                 profile_status: sid_proto::sid::v1::ProfileStatus::Active.into(),
                 ..Default::default()
             },
@@ -10347,7 +10350,7 @@ async fn test_event_session_revoked_on_admin_revoke_all() {
     svc.admin
         .revoke_all_sessions(authed_request(
             RevokeAllSessionsRequest {
-                profile_id: pid.to_string(),
+                profile_id: Some(pid.into()),
             },
             &admin_token,
         ))

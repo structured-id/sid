@@ -34,7 +34,7 @@ fn config(row: &Row) -> SidResult<BrandingConfig> {
 fn get(tx: &Statements<'_>, id: BrandingConfigId) -> SidResult<Option<BrandingConfig>> {
     let rows = tx.run(
         &format!("MATCH (b:SidBranding) WHERE b.id = $id RETURN {CONFIG}"),
-        Params::default().with("id", uuid(&id.0)),
+        Params::default().with("id", uuid(id.as_uuid())),
     )?;
     rows.first().map(config).transpose()
 }
@@ -66,14 +66,14 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let params = Params::default()
-            .with("id", uuid(&c.id.0))
+            .with("id", uuid(c.id.as_uuid()))
             .with("project_id", project_value(c.project_id))
             .with("status", Value::String(c.status.as_str().into()))
             .with("content", document(c, "branding")?)
             .with("created_at", time(c.created_at))
             .with("updated_at", time(c.updated_at));
         let (id, project) = (c.id, c.project_id);
-        self.mutate(format!("branding:{}", id.0), ctx, move |tx| {
+        self.mutate(format!("branding:{}", id), ctx, move |tx| {
             let held = tx.run(
                 "MATCH (j:SidProject) WHERE j.id = $project_id RETURN id(j) AS node",
                 params.clone(),
@@ -104,7 +104,7 @@ impl CoordinodeBackend {
         let revision = i64::try_from(c.revision)
             .map_err(|_| SidError::Validation("branding revision out of range".into()))?;
         let params = Params::default()
-            .with("id", uuid(&c.id.0))
+            .with("id", uuid(c.id.as_uuid()))
             .with("revision", Value::Int(revision))
             .with(
                 "draft",
@@ -112,7 +112,7 @@ impl CoordinodeBackend {
             )
             .with("content", document(c, "branding")?)
             .with("updated_at", time(c.updated_at));
-        let chain = format!("branding:{}", c.id.0);
+        let chain = format!("branding:{}", c.id);
         self.transaction(move |tx| {
             let updated = tx.run(
                 "MATCH (b:SidBranding)
@@ -140,9 +140,9 @@ impl CoordinodeBackend {
         at: DateTime<Utc>,
         ctx: MutationContext,
     ) -> SidResult<bool> {
-        let chain = format!("branding:{}", id.0);
+        let chain = format!("branding:{}", id);
         let params = Params::default()
-            .with("id", uuid(&id.0))
+            .with("id", uuid(id.as_uuid()))
             .with("project_id", project_value(project))
             .with("at", time(at))
             .with(
@@ -230,7 +230,7 @@ impl CoordinodeBackend {
             // Last changed first, then by id.
             Ok(sorted_page(
                 all,
-                |c| (std::cmp::Reverse(c.updated_at), c.id.0),
+                |c| (std::cmp::Reverse(c.updated_at), c.id),
                 0,
                 u64::MAX,
             ))
@@ -244,7 +244,7 @@ impl CoordinodeBackend {
         id: BrandingConfigId,
         ctx: MutationContext,
     ) -> SidResult<bool> {
-        let chain = format!("branding:{}", id.0);
+        let chain = format!("branding:{}", id);
         self.transaction(move |tx| {
             match get(tx, id)? {
                 Some(c) if c.status != BrandingStatus::Published => {}
@@ -254,7 +254,7 @@ impl CoordinodeBackend {
             // conflicts and runs again on the published config.
             tx.run(
                 "MATCH (b:SidBranding) WHERE b.id = $id DETACH DELETE b",
-                Params::default().with("id", uuid(&id.0)),
+                Params::default().with("id", uuid(id.as_uuid())),
             )?;
             finalize(tx, &chain, ctx.clone())?;
             Ok(Decision::Commit(true))

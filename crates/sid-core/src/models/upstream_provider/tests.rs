@@ -141,28 +141,27 @@ fn test_trust_category_serde_roundtrip() {
 
 #[test]
 fn test_provider_id_unique() {
-    let id1 = UpstreamProviderId::new();
-    let id2 = UpstreamProviderId::new();
+    let id1 = UpstreamProviderId::generate();
+    let id2 = UpstreamProviderId::generate();
     assert_ne!(id1, id2);
 }
 
+const PROVIDER: &str = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e";
+
 #[test]
 fn test_provider_id_display() {
-    let id = UpstreamProviderId(Uuid::nil());
-    assert_eq!(id.to_string(), "00000000-0000-0000-0000-000000000000");
+    let id = UpstreamProviderId::parse(PROVIDER).unwrap();
+    assert_eq!(id.to_string(), PROVIDER);
 }
 
-// The stored form secrets were sealed under: changing it would make every
-// existing client secret unreadable.
+// The form secrets are sealed under: changing it would make every stored
+// client secret unreadable.
 #[test]
 fn test_client_secret_context_names_the_provider() {
-    let id = UpstreamProviderId(Uuid::nil());
-    assert_eq!(
-        id.client_secret_context(),
-        "upstream:00000000-0000-0000-0000-000000000000"
-    );
+    let id = UpstreamProviderId::parse(PROVIDER).unwrap();
+    assert_eq!(client_secret_context(id), format!("upstream:{PROVIDER}"));
     assert_ne!(
-        UpstreamProviderId::new().client_secret_context(),
-        UpstreamProviderId::new().client_secret_context()
+        client_secret_context(UpstreamProviderId::generate()),
+        client_secret_context(UpstreamProviderId::generate())
     );
 }

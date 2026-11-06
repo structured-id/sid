@@ -94,7 +94,7 @@ pub use application::{
 pub use audit::{ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainHead};
 pub use auth_code::{AuthCodeError, AuthCodeRedemption, AuthorizationCode, ExchangedCode};
 pub use auth_flow::{
-    ActionConfig, ActionId, ActionOnError, ActionPoint, ActionType, FlowAction, FlowConfig,
+    ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowConfig,
     FlowType, StepConfig,
 };
 pub use authz::{
@@ -269,6 +269,7 @@ pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{
     ProviderTrustCategory, UpstreamProtocol, UpstreamProvider, UpstreamProviderId,
+    client_secret_context,
 };
 pub use username::{
     SuspensionReason, UsernameError, UsernameStatus, validate_corporate_login, validate_username,

@@ -13,29 +13,7 @@ use super::MachineUserId;
 use super::credential::CredentialId;
 use super::profile::ProfileId;
 
-// ── ID type ─────────────────────────────────────────────────────
-
-/// Unique identifier for an invite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct InviteId(pub Uuid);
-
-impl core::fmt::Display for InviteId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl InviteId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for InviteId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use sid_ids::InviteId;
 
 // ── Status enum ─────────────────────────────────────────────────
 

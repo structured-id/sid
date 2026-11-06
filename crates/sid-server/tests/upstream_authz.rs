@@ -13,7 +13,6 @@ use sid_core::models::{Profile, ProfileId};
 use sid_proto::sid::v1::upstream_service_server::UpstreamService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request};
-use uuid::Uuid;
 
 /// `msg` with `token` as its bearer, or without credentials.
 /// `msg` as one new command, of `token`'s when given (a method that promises
@@ -43,7 +42,7 @@ fn new_provider() -> CreateUpstreamProviderRequest {
 /// `token`; `None` when the call succeeds.
 async fn admin_codes(svc: &TestServices, token: Option<&str>) -> Vec<Option<Code>> {
     let u = &svc.upstream;
-    let id = Uuid::now_v7().to_string();
+    let id = sid_core::models::UpstreamProviderId::generate();
     vec![
         u.create_upstream_provider(req(new_provider(), token))
             .await
@@ -51,7 +50,7 @@ async fn admin_codes(svc: &TestServices, token: Option<&str>) -> Vec<Option<Code
             .map(|e| e.code()),
         u.get_upstream_provider(req(
             GetUpstreamProviderRequest {
-                provider_id: id.clone(),
+                provider_id: Some(id.into()),
             },
             token,
         ))
@@ -60,7 +59,7 @@ async fn admin_codes(svc: &TestServices, token: Option<&str>) -> Vec<Option<Code
         .map(|e| e.code()),
         u.update_upstream_provider(req(
             UpdateUpstreamProviderRequest {
-                provider_id: id.clone(),
+                provider_id: Some(id.into()),
                 enabled: Some(true),
                 ..Default::default()
             },
@@ -71,7 +70,7 @@ async fn admin_codes(svc: &TestServices, token: Option<&str>) -> Vec<Option<Code
         .map(|e| e.code()),
         u.delete_upstream_provider(req(
             DeleteUpstreamProviderRequest {
-                provider_id: id.clone(),
+                provider_id: Some(id.into()),
             },
             token,
         ))
@@ -132,12 +131,12 @@ async fn test_unknown_provider_is_upstream_provider_not_found() {
     use tonic_types::StatusExt;
     let svc = TestServices::new(MockStorage::new());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
-    let id = Uuid::now_v7().to_string();
+    let id = sid_core::models::UpstreamProviderId::generate();
     let err = svc
         .upstream
         .get_upstream_provider(req(
             GetUpstreamProviderRequest {
-                provider_id: id.clone(),
+                provider_id: Some(id.into()),
             },
             Some(&token),
         ))
@@ -149,7 +148,10 @@ async fn test_unknown_provider_is_upstream_provider_not_found() {
         details.error_info().unwrap().reason,
         "UPSTREAM_PROVIDER_NOT_FOUND"
     );
-    assert_eq!(details.resource_info().unwrap().resource_name, id);
+    assert_eq!(
+        details.resource_info().unwrap().resource_name,
+        id.to_string()
+    );
 }
 
 /// A provider registered by an administrator records that administrator as

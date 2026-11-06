@@ -17,7 +17,6 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, BackgroundConfig, BrandingAssets, BrandingConfig, BrandingConfigId, BrandingStatus,
     BrandingText, ButtonStyle, DarkModeConfig, DarkModeTokens, DesignTokens, MutationContext,
-    ProjectId,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::branding_service as keyed;
@@ -26,7 +25,8 @@ use sid_proto::sid::v1::{self as pb};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
-use uuid::Uuid;
+
+use super::convert::wire_id;
 
 /// BRANDING_NOT_FOUND for `name` (a config id, or a project without
 /// published branding).
@@ -38,7 +38,7 @@ fn branding_not_found(name: impl Into<String>) -> Status {
 /// another.
 fn branding_state(id: BrandingConfigId, state: &'static str, why: &'static str) -> Status {
     ApiError::new(ErrorReason::InvalidState, why)
-        .with_precondition("BRANDING_STATUS", id.0.to_string(), state)
+        .with_precondition("BRANDING_STATUS", id.to_string(), state)
         .into()
 }
 
@@ -88,27 +88,14 @@ impl BrandingServiceImpl {
             .map_err(|e| sid_core::grpc_error::refuse::internal("read the caller", e))?;
         Ok(KeyedCommand::by_profile::<M>(admin, context, req))
     }
-
-    #[allow(clippy::result_large_err)]
-    fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-        sid_core::models::ProjectId::parse(s)
-            .map_err(|_| invalid_field("project_id", "not a project identifier"))
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn parse_config_id(s: &str) -> Result<BrandingConfigId, Status> {
-        Uuid::parse_str(s)
-            .map(BrandingConfigId)
-            .map_err(|_| invalid_field("config_id", "not a branding config identifier"))
-    }
 }
 
 // ── Proto ↔ Domain conversions ──
 
 fn domain_to_proto(config: &BrandingConfig) -> pb::BrandingConfig {
     pb::BrandingConfig {
-        id: config.id.0.to_string(),
-        project_id: config.project_id.to_string(),
+        id: Some(config.id.into()),
+        project_id: Some(config.project_id.into()),
         status: match config.status {
             BrandingStatus::Draft => pb::BrandingStatus::Draft.into(),
             BrandingStatus::Published => pb::BrandingStatus::Published.into(),
@@ -308,7 +295,7 @@ impl BrandingService for BrandingServiceImpl {
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         // Published branding is readable without admin (login page needs it).
         let req = request.into_inner();
-        let project_id = Self::parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         let config = self
             .storage
@@ -327,14 +314,14 @@ impl BrandingService for BrandingServiceImpl {
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         self.require_admin(&request).await?;
         let req = request.into_inner();
-        let config_id = Self::parse_config_id(&req.config_id)?;
+        let config_id = wire_id(req.config_id.as_ref(), "config_id")?;
 
         let config = self
             .storage
             .get_branding_config(config_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
+            .ok_or_else(|| branding_not_found(config_id.to_string()))?;
 
         Ok(Response::new(domain_to_proto(&config)))
     }
@@ -346,7 +333,7 @@ impl BrandingService for BrandingServiceImpl {
     ) -> Result<Response<pb::ListBrandingConfigsResponse>, Status> {
         self.require_admin(&request).await?;
         let req = request.into_inner();
-        let project_id = Self::parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         let configs = self
             .storage
@@ -367,12 +354,12 @@ impl BrandingService for BrandingServiceImpl {
         let admin_sub = self.require_admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let project_id = Self::parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
         let now = chrono::Utc::now();
         let command = self.command::<keyed::CreateBrandingConfig>(&admin_sub, operation, &req)?;
 
         let config = BrandingConfig {
-            id: BrandingConfigId::new(),
+            id: BrandingConfigId::generate(),
             project_id,
             status: BrandingStatus::Draft,
             tokens: req
@@ -423,7 +410,7 @@ impl BrandingService for BrandingServiceImpl {
         let admin_sub = self.require_admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let config_id = Self::parse_config_id(&req.config_id)?;
+        let config_id = wire_id(req.config_id.as_ref(), "config_id")?;
 
         // A retry of a completed edit answers with the draft as that edit
         // left it and never writes it over a later edit.
@@ -434,7 +421,7 @@ impl BrandingService for BrandingServiceImpl {
                     .storage
                     .get_branding_config(config_id)
                     .await?
-                    .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
+                    .ok_or_else(|| branding_not_found(config_id.to_string()))?;
 
                 if let Some(tokens) = &req.tokens {
                     config.tokens = tokens_from_proto(tokens);
@@ -481,8 +468,8 @@ impl BrandingService for BrandingServiceImpl {
         let admin_sub = self.require_admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let config_id = Self::parse_config_id(&req.config_id)?;
-        let project_id = Self::parse_project_id(&req.project_id)?;
+        let config_id = wire_id(req.config_id.as_ref(), "config_id")?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         // A retry of a completed publication answers as it did, not as a
         // config no longer a draft, and never publishes it again over a
@@ -494,12 +481,12 @@ impl BrandingService for BrandingServiceImpl {
                     .storage
                     .get_branding_config(config_id)
                     .await?
-                    .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
+                    .ok_or_else(|| branding_not_found(config_id.to_string()))?;
                 // The draft is published in its own project only: publishing
                 // it under another project would archive that project's
                 // branding.
                 if config.project_id != project_id {
-                    return Err(branding_not_found(config_id.0.to_string()).into());
+                    return Err(branding_not_found(config_id.to_string()).into());
                 }
                 if config.status != BrandingStatus::Draft {
                     return Err(not_a_draft(config_id).into());
@@ -536,7 +523,7 @@ impl BrandingService for BrandingServiceImpl {
     ) -> Result<Response<()>, Status> {
         let admin_sub = self.require_admin(&request).await?;
         let req = request.into_inner();
-        let config_id = Self::parse_config_id(&req.config_id)?;
+        let config_id = wire_id(req.config_id.as_ref(), "config_id")?;
 
         let audit: MutationContext =
             AuditEntry::admin(&admin_sub, "branding.delete", config_id.to_string()).into();
