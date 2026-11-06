@@ -8,7 +8,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_count,
-    get_opt_uuid, get_text, get_time, get_uuid, opt_uuid, page, time, uuid,
+    get_opt_uuid, get_text, get_time, get_uuid, opt_uuid, sorted_page, time, uuid,
 };
 
 const PROJECT: &str = "j.id AS id, j.name AS name, j.description AS description,
@@ -66,6 +66,16 @@ fn insert(tx: &Statements<'_>, project: &Project) -> SidResult<()> {
             .with("updated_at", time(project.updated_at)),
     )?;
     Ok(())
+}
+
+/// Create the system project of an empty store: every installation has it
+/// from the start.
+pub(super) fn init_system_project(tx: &Statements<'_>) -> SidResult<Decision<()>> {
+    if get(tx, ProjectId::SYSTEM)?.is_some() {
+        return Ok(Decision::Abandon(()));
+    }
+    insert(tx, &Project::system())?;
+    Ok(Decision::Commit(()))
 }
 
 /// Clear `owner` from the projects it owns, in `tx`: the projects outlive
@@ -156,20 +166,19 @@ impl CoordinodeBackend {
     }
 
     pub(super) async fn list_projects(&self, offset: u64, limit: u64) -> SidResult<Vec<Project>> {
-        let (offset, limit) = (page(offset)?, page(limit)?);
         self.transaction(move |tx| {
             let rows = tx.run(
-                &format!(
-                    "MATCH (j:SidProject) RETURN {PROJECT}
-                     ORDER BY j.created_at DESC, j.id SKIP $offset LIMIT $limit"
-                ),
-                Params::default()
-                    .with("offset", offset.clone())
-                    .with("limit", limit.clone()),
+                &format!("MATCH (j:SidProject) RETURN {PROJECT}"),
+                Params::default(),
             )?;
-            Ok(Decision::Abandon(
-                rows.iter().map(project).collect::<SidResult<Vec<_>>>()?,
-            ))
+            let all = rows.iter().map(project).collect::<SidResult<Vec<_>>>()?;
+            // Newest first, then by id.
+            Ok(Decision::Abandon(sorted_page(
+                all,
+                |p| (std::cmp::Reverse(p.created_at), *p.id.as_uuid()),
+                offset,
+                limit,
+            )))
         })
         .await
     }

@@ -24,6 +24,7 @@ mod operation;
 mod principal;
 mod profile;
 mod project;
+mod registry;
 mod session;
 mod work;
 
@@ -93,6 +94,29 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_native_generation_session ON :SidNativeGeneration(session_id)",
     "CREATE CONSTRAINT sid_native_credential FOR (c:SidNativeCredential) REQUIRE c.credential_hash IS UNIQUE",
     "CREATE INDEX sid_native_credential_generation ON :SidNativeCredential(generation_id)",
+    "CREATE CONSTRAINT sid_issuer_id FOR (i:SidIssuer) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_issuer_handle FOR (i:SidIssuer) REQUIRE i.handle IS UNIQUE",
+    "CREATE CONSTRAINT sid_issuer_authority FOR (i:SidIssuer) REQUIRE i.authority_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_issuer_key FOR (k:SidIssuerKey) REQUIRE k.generation_key IS UNIQUE",
+    "CREATE INDEX sid_issuer_key_issuer ON :SidIssuerKey(issuer_id)",
+    "CREATE CONSTRAINT sid_organization_id FOR (o:SidOrganization) REQUIRE o.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_organization_instance FOR (o:SidOrganization) REQUIRE o.is_instance IS UNIQUE",
+    "CREATE CONSTRAINT sid_application_id FOR (a:SidApplication) REQUIRE a.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_application_system FOR (a:SidApplication) REQUIRE a.system_integration IS UNIQUE",
+    "CREATE INDEX sid_application_project ON :SidApplication(project_id)",
+    "CREATE CONSTRAINT sid_client_id FOR (c:SidClient) REQUIRE c.client_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_client_application FOR (c:SidClient) REQUIRE c.application_id IS UNIQUE",
+    "CREATE INDEX sid_client_project ON :SidClient(project_id)",
+    "CREATE INDEX sid_client_default_resource ON :SidClient(default_resource)",
+    "CREATE CONSTRAINT sid_resource_id FOR (r:SidResource) REQUIRE r.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_resource_indicator FOR (r:SidResource) REQUIRE r.indicator_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_resource_application FOR (r:SidResource) REQUIRE r.application_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_resource_access FOR (x:SidResourceAccess) REQUIRE x.pair IS UNIQUE",
+    "CREATE INDEX sid_resource_access_client ON :SidResourceAccess(client_id)",
+    "CREATE INDEX sid_resource_access_resource ON :SidResourceAccess(resource_id)",
+    "CREATE CONSTRAINT sid_iat_id FOR (t:SidInitialAccessToken) REQUIRE t.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_iat_hash FOR (t:SidInitialAccessToken) REQUIRE t.token_hash IS UNIQUE",
+    "CREATE INDEX sid_iat_project ON :SidInitialAccessToken(project_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -119,6 +143,7 @@ impl CoordinodeBackend {
             .await?;
         backend.transaction(operation::init_state).await?;
         backend.transaction(principal::init_email_policy).await?;
+        backend.transaction(project::init_system_project).await?;
         Ok(backend)
     }
 
@@ -145,6 +170,16 @@ impl CoordinodeBackend {
         self.blocking(move |db| in_transaction(db, change)).await
     }
 
+    /// Run `read` in a transaction that writes nothing.
+    async fn read<T, F>(&self, mut read: F) -> SidResult<T>
+    where
+        T: Send + 'static,
+        F: FnMut(&Statements<'_>) -> SidResult<T> + Send + 'static,
+    {
+        self.transaction(move |tx| read(tx).map(Decision::Abandon))
+            .await
+    }
+
     /// Commit `ctx` with whatever `change` wrote in the same transaction:
     /// its audit record on `chain`, its command completion and its owed
     /// work, all of it or none.
@@ -167,7 +202,8 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     // nothing. Fences are checked against the stores that hold the actor or
     // policy; this backend holds none of them yet, so it cannot confirm one.
     if let Some(fence) = &ctx.fence {
-        return Err(SidError::Storage(format!(
+        // A fence is checked or refused, never ignored.
+        return Err(SidError::Fenced(format!(
             "CoordiNode storage cannot check the fence {fence:?}"
         )));
     }
@@ -378,6 +414,38 @@ pub(super) fn get_texts(row: &Row, name: &str) -> SidResult<Vec<String>> {
     }
 }
 
+/// A stored name of an owning enum; an unknown one is an error, never a
+/// default.
+pub(super) fn get_parsed<T: std::str::FromStr<Err = String>>(
+    row: &Row,
+    name: &str,
+) -> SidResult<T> {
+    get_text(row, name)?
+        .parse()
+        .map_err(|e| SidError::Storage(format!("{name}: {e}")))
+}
+
+pub(super) fn get_opt_parsed<T: std::str::FromStr<Err = String>>(
+    row: &Row,
+    name: &str,
+) -> SidResult<Option<T>> {
+    get_opt_text(row, name)?
+        .map(|text| {
+            text.parse()
+                .map_err(|e| SidError::Storage(format!("{name}: {e}")))
+        })
+        .transpose()
+}
+
+/// Hold the node the first row's `node` column names for the commit:
+/// true when there is one and it still stands as read.
+pub(super) fn hold_first(tx: &Statements<'_>, rows: &[Row]) -> SidResult<bool> {
+    match rows.first() {
+        Some(row) => tx.hold(get_int(row, "node")?),
+        None => Ok(false),
+    }
+}
+
 /// The count a `count(..) AS n` query returned.
 pub(super) fn get_count(rows: &[Row]) -> SidResult<u64> {
     let n = rows
@@ -386,6 +454,21 @@ pub(super) fn get_count(rows: &[Row]) -> SidResult<u64> {
         .transpose()?
         .unwrap_or(0);
     u64::try_from(n).map_err(|_| SidError::Storage(format!("bad count: {n}")))
+}
+
+/// Page `offset..offset + limit` of `items`, ordered by `key`. CoordiNode
+/// orders no binary values (coordinode#84), and ids are 16 bytes: an order
+/// they break ties of is taken here.
+pub(super) fn sorted_page<T, K: Ord>(
+    mut items: Vec<T>,
+    key: impl Fn(&T) -> K,
+    offset: u64,
+    limit: u64,
+) -> Vec<T> {
+    items.sort_by_key(|item| key(item));
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    items.into_iter().skip(offset).take(limit).collect()
 }
 
 /// A page bound as the statement's integer.

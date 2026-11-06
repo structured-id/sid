@@ -194,13 +194,16 @@ fn by_id(tx: &Statements<'_>, id: PrincipalId) -> SidResult<Option<PrincipalEnti
 
 fn bindings_of(tx: &Statements<'_>, id: PrincipalId) -> SidResult<Vec<PrincipalBinding>> {
     let rows = tx.run(
-        &format!(
-            "MATCH (b:SidPrincipalBinding) WHERE b.principal_id = $id RETURN {BINDING}
-             ORDER BY b.created_at, b.id"
-        ),
+        &format!("MATCH (b:SidPrincipalBinding) WHERE b.principal_id = $id RETURN {BINDING}"),
         Params::default().with("id", uuid(&id.0)),
     )?;
-    rows.iter().map(binding).collect()
+    let all = rows.iter().map(binding).collect::<SidResult<Vec<_>>>()?;
+    Ok(super::sorted_page(
+        all,
+        |b| (b.created_at, b.id.0),
+        0,
+        u64::MAX,
+    ))
 }
 
 fn claim_of(
@@ -375,16 +378,16 @@ impl CoordinodeBackend {
         self.transaction(move |tx| {
             let rows = tx.run(
                 &format!(
-                    "MATCH (b:SidPrincipalBinding) WHERE b.profile_id = $holder RETURN {BINDING}
-                     ORDER BY b.created_at, b.id"
+                    "MATCH (b:SidPrincipalBinding) WHERE b.profile_id = $holder RETURN {BINDING}"
                 ),
                 Params::default().with("holder", profile_value(holder)),
             )?;
-            let mut principals = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let claim = binding(row)?;
+            let claims = rows.iter().map(binding).collect::<SidResult<Vec<_>>>()?;
+            let claims = super::sorted_page(claims, |b| (b.created_at, b.id.0), 0, u64::MAX);
+            let mut principals = Vec::with_capacity(claims.len());
+            for claim in &claims {
                 if let Some(entity) = by_id(tx, claim.principal_id)? {
-                    principals.push(claimed(entity, &claim));
+                    principals.push(claimed(entity, claim));
                 }
             }
             Ok(Decision::Abandon(principals))

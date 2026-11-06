@@ -339,7 +339,7 @@ impl WorkStore for CoordinodeBackend {
     async fn export_work(&self) -> SidResult<Vec<WorkSnapshot>> {
         self.transaction(|tx| {
             let rows = tx.run(
-                &format!("MATCH (w:SidWork) RETURN {FIELDS} ORDER BY w.created_at, w.id"),
+                &format!("MATCH (w:SidWork) RETURN {FIELDS}"),
                 Params::default(),
             )?;
             let work = rows
@@ -351,7 +351,12 @@ impl WorkStore for CoordinodeBackend {
                     })
                 })
                 .collect::<SidResult<Vec<_>>>()?;
-            Ok(Decision::Abandon(work))
+            Ok(Decision::Abandon(super::sorted_page(
+                work,
+                |w| (w.record.created_at, w.record.id.0),
+                0,
+                u64::MAX,
+            )))
         })
         .await
     }

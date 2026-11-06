@@ -19,6 +19,273 @@ async fn setup() -> CoordinodeBackend {
 // The complete storage contract, one test per scenario.
 sid_plugin::storage_conformance!(setup);
 
+/// The capability harnesses over this backend: registration goes through
+/// the administrative application API, owners are Profiles.
+mod harness {
+    use async_trait::async_trait;
+    use chrono::{SubsecRound, Utc};
+    use sid_core::models::{
+        Application, ApplicationId, IssuerId, OAuth2Client, OrgId, Principal,
+        PrincipalAssignmentFence, PrincipalType, ProfileId, ProjectId, ProtectedResource,
+        ResourceAccess, ResourceId,
+    };
+    use sid_plugin::conformance::backend::application::{
+        grant_resource, instance_issuer, store_client,
+    };
+    use sid_plugin::conformance::backend::{create_test_profile, instance_org, test_audit};
+    use sid_plugin::conformance::client_registry::RegistryHarness;
+    use sid_plugin::conformance::grant_store::{
+        AssignmentHarness, GrantHarness, OwnerStatusHarness,
+    };
+    use sid_plugin::conformance::issuer_store::IssuerHarness;
+    use sid_plugin::{
+        ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, StorageBackend,
+    };
+    use sid_storage::coordinode::CoordinodeBackend;
+
+    pub struct Store(pub CoordinodeBackend);
+
+    #[async_trait]
+    impl GrantHarness for Store {
+        type Owner = ProfileId;
+
+        fn store(&self) -> &dyn GrantStore<Owner = ProfileId> {
+            &self.0
+        }
+
+        fn credentials(&self) -> &dyn CredentialStore<Owner = ProfileId> {
+            &self.0
+        }
+
+        async fn owner(&self) -> ProfileId {
+            let profile = create_test_profile("grant");
+            self.0
+                .create_profile(&profile, test_audit())
+                .await
+                .expect("a test profile");
+            profile.id
+        }
+
+        async fn resource(&self) -> ResourceId {
+            grant_resource(&self.0).await
+        }
+    }
+
+    #[async_trait]
+    impl OwnerStatusHarness for Store {
+        async fn suspend(&self, owner: &ProfileId) {
+            let mut profile = self
+                .0
+                .get_profile(*owner)
+                .await
+                .unwrap()
+                .expect("the owner's profile");
+            profile.status = sid_core::models::ProfileStatus::Suspended;
+            assert!(
+                self.0.update_profile(&profile, test_audit()).await.unwrap(),
+                "the suspension applies"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl AssignmentHarness for Store {
+        async fn assign(&self, owner: &ProfileId) -> PrincipalAssignmentFence {
+            let principal = Principal::new_federated_subject(
+                *owner,
+                "https://central.sid.example.com/i/c",
+                &uuid::Uuid::now_v7().to_string(),
+            );
+            self.0
+                .save_principal(&principal, test_audit())
+                .await
+                .expect("the assignment");
+            let stored = self
+                .0
+                .get_principal_by_value(PrincipalType::FederatedSubject, &principal.value)
+                .await
+                .unwrap()
+                .expect("the stored principal");
+            PrincipalAssignmentFence::of(&stored).expect("assigned to its owner")
+        }
+
+        async fn release(&self, fence: &PrincipalAssignmentFence) {
+            assert!(
+                self.0
+                    .unbind_principal(fence.principal, fence.profile, test_audit())
+                    .await
+                    .unwrap(),
+                "the release applies"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl IssuerHarness for Store {
+        fn store(&self) -> &dyn IssuerStore {
+            &self.0
+        }
+
+        async fn organization(&self) -> OrgId {
+            instance_org(&self.0).await
+        }
+    }
+
+    fn application(id: ApplicationId, name: &str) -> Application {
+        let now = Utc::now().trunc_subsecs(3);
+        Application {
+            id,
+            project_id: ProjectId::SYSTEM,
+            name: name.to_owned(),
+            system: None,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[async_trait]
+    impl RegistryHarness for Store {
+        fn registry(&self) -> &dyn ClientResourceRegistry {
+            &self.0
+        }
+
+        async fn issuer(&self) -> IssuerId {
+            instance_issuer(&self.0).await
+        }
+
+        async fn other_issuer(&self) -> IssuerId {
+            IssuerId::generate()
+        }
+
+        async fn organization(&self) -> OrgId {
+            instance_org(&self.0).await
+        }
+
+        async fn register_client(&self, client: &OAuth2Client) {
+            assert!(client.default_resource.is_none());
+            store_client(&self.0, client, test_audit()).await.unwrap();
+        }
+
+        async fn register_resource(&self, resource: &ProtectedResource) {
+            let app_id = resource
+                .application_id
+                .expect("a registered resource names its application");
+            self.0
+                .create_application(
+                    &application(app_id, "Conformance resource"),
+                    None,
+                    Some(resource),
+                    test_audit(),
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn grant_access(&self, access: &ResourceAccess) {
+            self.0
+                .set_resource_access(access, test_audit())
+                .await
+                .unwrap();
+        }
+
+        async fn set_default_resource(&self, client: &str, resource: ResourceId) {
+            let mut stored = self
+                .0
+                .get_oauth2_client(client)
+                .await
+                .unwrap()
+                .expect("a registered client");
+            stored.default_resource = Some(resource);
+            assert!(
+                self.0
+                    .update_oauth2_client(&stored, test_audit())
+                    .await
+                    .unwrap()
+            );
+        }
+
+        async fn retire_resource(&self, resource: ResourceId) {
+            let app_id = self
+                .0
+                .get_protected_resource(resource)
+                .await
+                .unwrap()
+                .and_then(|r| r.application_id)
+                .expect("an active resource with its application");
+            assert!(
+                self.0
+                    .delete_application(app_id, test_audit())
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+}
+
+/// Run capability conformance `scenario` of `$module` on a fresh store.
+macro_rules! capability {
+    ($module:ident: $($scenario:ident),* $(,)?) => {
+        mod $module {
+            use super::*;
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                async fn $scenario() {
+                    sid_plugin::conformance::$module::$scenario(&harness::Store(setup().await)).await;
+                }
+            )*
+        }
+    };
+}
+
+capability!(grant_store:
+    session_refused_once_its_owner_is_suspended,
+    a_pending_context_takes_no_session_slot,
+    a_pending_context_evicts_no_session,
+    a_pending_context_completes_once,
+    a_login_policy_fence_is_never_ignored,
+    an_assignment_proof_is_never_ignored,
+    a_session_commits_only_under_its_current_assignment,
+    session_refused_after_its_password_changed,
+    session_fence_is_the_owners_credential,
+    session_fence_serializes_with_a_reset,
+    session_fence_serializes_with_a_revocation,
+    session_create_never_replaces,
+    session_end,
+    sessions_listed_per_owner,
+    session_end_ends_what_it_authenticated,
+    session_end_takes_refresh_tokens,
+    session_limit_evicts_oldest,
+    session_found_by_browser_secret,
+    touch_session_keeps_latest_activity,
+    auth_code_roundtrip,
+    auth_code_redeem_once,
+    auth_code_concurrent_redeem,
+    refresh_token_roundtrip,
+    rotate_refresh_token,
+    rotate_after_sign_out_is_refused,
+    concurrent_rotation,
+    native_generation_issued_for_a_live_session,
+    native_generation_rotates_once,
+    native_redelivery_ends_with_its_window,
+    concurrent_native_rotation,
+    native_generations_end_with_their_session,
+);
+
+capability!(client_registry:
+    client_found_by_id,
+    resource_found_by_id_and_indicator,
+    retired_resource_still_found,
+    resource_access_exact,
+);
+
+capability!(issuer_store:
+    issuer_provisioned_once,
+    foreign_first_key_refused,
+    unknown_handle_names_nothing,
+    unknown_organization_refused,
+);
+
 /// Run work store conformance `scenario` against this backend.
 macro_rules! work_store {
     ($($scenario:ident),* $(,)?) => {$(

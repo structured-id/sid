@@ -51,28 +51,28 @@ fn refused<T>(capability: &str) -> Result<T> {
 
 #[async_trait]
 impl ClientResourceRegistry for CoordinodeBackend {
-    async fn get_oauth2_client(&self, _client_id: &str) -> Result<Option<OAuth2Client>> {
-        refused("OAuth clients")
+    async fn get_oauth2_client(&self, client_id: &str) -> Result<Option<OAuth2Client>> {
+        CoordinodeBackend::get_oauth2_client(self, client_id).await
     }
 
-    async fn get_protected_resource(&self, _id: ResourceId) -> Result<Option<ProtectedResource>> {
-        refused("protected resources")
+    async fn get_protected_resource(&self, id: ResourceId) -> Result<Option<ProtectedResource>> {
+        CoordinodeBackend::get_protected_resource(self, id).await
     }
 
     async fn protected_resource_by_indicator(
         &self,
-        _issuer: IssuerId,
-        _indicator: &ResourceIndicator,
+        issuer: IssuerId,
+        indicator: &ResourceIndicator,
     ) -> Result<Option<ProtectedResource>> {
-        refused("protected resources")
+        CoordinodeBackend::protected_resource_by_indicator(self, issuer, indicator).await
     }
 
     async fn resource_access(
         &self,
-        _client_id: &str,
-        _resource: ResourceId,
+        client_id: &str,
+        resource: ResourceId,
     ) -> Result<Option<ResourceAccess>> {
-        refused("resource access")
+        CoordinodeBackend::resource_access(self, client_id, resource).await
     }
 }
 
@@ -80,27 +80,27 @@ impl ClientResourceRegistry for CoordinodeBackend {
 impl IssuerStore for CoordinodeBackend {
     async fn oidc_issuer_for(
         &self,
-        _authority: IssuerAuthority,
-        _recipient_org: OrgId,
+        authority: IssuerAuthority,
+        recipient_org: OrgId,
     ) -> Result<Option<OidcIssuer>> {
-        refused("OIDC issuers")
+        CoordinodeBackend::oidc_issuer_for(self, authority, recipient_org).await
     }
 
-    async fn oidc_issuer_by_handle(&self, _handle: &IssuerHandle) -> Result<Option<OidcIssuer>> {
-        refused("OIDC issuers")
+    async fn oidc_issuer_by_handle(&self, handle: &IssuerHandle) -> Result<Option<OidcIssuer>> {
+        CoordinodeBackend::oidc_issuer_by_handle(self, handle).await
     }
 
     async fn insert_oidc_issuer(
         &self,
-        _issuer: &OidcIssuer,
-        _first_key: &IssuerSigningKey,
-        _ctx: MutationContext,
+        issuer: &OidcIssuer,
+        first_key: &IssuerSigningKey,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("OIDC issuers")
+        CoordinodeBackend::insert_oidc_issuer(self, issuer, first_key, ctx).await
     }
 
-    async fn oidc_issuer_signing_keys(&self, _issuer: IssuerId) -> Result<Vec<IssuerSigningKey>> {
-        refused("OIDC issuers")
+    async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> Result<Vec<IssuerSigningKey>> {
+        CoordinodeBackend::oidc_issuer_signing_keys(self, issuer).await
     }
 }
 
@@ -812,11 +812,11 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_oauth2_clients_by_project(
         &self,
-        _project_id: ProjectId,
-        _offset: u64,
-        _limit: u64,
+        project_id: ProjectId,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<OAuth2Client>> {
-        refused("OAuth clients")
+        CoordinodeBackend::list_oauth2_clients(self, Some(project_id), offset, limit).await
     }
 
     async fn ensure_system_project(&self, ctx: MutationContext) -> Result<()> {
@@ -827,152 +827,161 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn update_oauth2_client(
         &self,
-        _client: &OAuth2Client,
-        _ctx: MutationContext,
+        client: &OAuth2Client,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("OAuth clients")
+        CoordinodeBackend::update_oauth2_client(self, client, ctx).await
     }
 
     async fn create_oauth2_client(
         &self,
-        _client: &OAuth2Client,
-        _ctx: MutationContext,
+        client: &OAuth2Client,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("OAuth clients")
+        CoordinodeBackend::create_oauth2_client(self, client, ctx).await
     }
 
-    async fn delete_oauth2_client(&self, _client_id: &str, _ctx: MutationContext) -> Result<()> {
-        refused("OAuth clients")
+    async fn delete_oauth2_client(&self, client_id: &str, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_oauth2_client(self, client_id, ctx).await
     }
 
-    async fn list_oauth2_clients(&self, _offset: u64, _limit: u64) -> Result<Vec<OAuth2Client>> {
-        refused("OAuth clients")
+    async fn list_oauth2_clients(&self, offset: u64, limit: u64) -> Result<Vec<OAuth2Client>> {
+        CoordinodeBackend::list_oauth2_clients(self, None, offset, limit).await
     }
 
     async fn oauth2_client_of_application(
         &self,
-        _id: sid_core::models::ApplicationId,
+        id: sid_core::models::ApplicationId,
     ) -> Result<Option<OAuth2Client>> {
-        refused("OAuth clients")
+        CoordinodeBackend::oauth2_client_of_application(self, id).await
     }
 
     async fn create_application(
         &self,
-        _app: &sid_core::models::Application,
-        _client: Option<&OAuth2Client>,
-        _resource: Option<&ProtectedResource>,
-        _ctx: MutationContext,
+        app: &sid_core::models::Application,
+        client: Option<&OAuth2Client>,
+        resource: Option<&ProtectedResource>,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("applications")
+        CoordinodeBackend::create_application(self, app, client, resource, ctx).await
     }
 
     async fn get_application(
         &self,
-        _id: sid_core::models::ApplicationId,
+        id: sid_core::models::ApplicationId,
     ) -> Result<Option<sid_core::models::Application>> {
-        refused("applications")
+        CoordinodeBackend::get_application(self, id).await
     }
 
     async fn system_application(
         &self,
-        _kind: sid_core::models::SystemIntegration,
+        kind: sid_core::models::SystemIntegration,
     ) -> Result<Option<sid_core::models::Application>> {
-        refused("applications")
+        CoordinodeBackend::system_application(self, kind).await
     }
 
     async fn list_applications_by_project(
         &self,
-        _project_id: ProjectId,
-        _offset: u64,
-        _limit: u64,
+        project_id: ProjectId,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<sid_core::models::Application>> {
-        refused("applications")
+        CoordinodeBackend::list_applications_by_project(self, project_id, offset, limit).await
     }
 
     async fn update_application(
         &self,
-        _app: &sid_core::models::Application,
-        _ctx: MutationContext,
+        app: &sid_core::models::Application,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("applications")
+        CoordinodeBackend::update_application(self, app, ctx).await
     }
 
     async fn delete_application(
         &self,
-        _id: sid_core::models::ApplicationId,
-        _ctx: MutationContext,
+        id: sid_core::models::ApplicationId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("applications")
+        CoordinodeBackend::delete_application(self, id, ctx).await
     }
 
     async fn create_protected_resource(
         &self,
-        _resource: &ProtectedResource,
-        _ctx: MutationContext,
+        resource: &ProtectedResource,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("protected resources")
+        CoordinodeBackend::create_protected_resource(self, resource, ctx).await
     }
 
     async fn protected_resource_of_application(
         &self,
-        _id: sid_core::models::ApplicationId,
+        id: sid_core::models::ApplicationId,
     ) -> Result<Option<ProtectedResource>> {
-        refused("protected resources")
+        CoordinodeBackend::protected_resource_of_application(self, id).await
     }
 
     async fn list_protected_resources(
         &self,
-        _offset: u64,
-        _limit: u64,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<ProtectedResource>> {
-        refused("protected resources")
+        CoordinodeBackend::list_protected_resources(self, offset, limit).await
     }
 
     async fn import_protected_resource(
         &self,
-        _resource: &ProtectedResource,
-        _ctx: MutationContext,
+        resource: &ProtectedResource,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("protected resources")
+        CoordinodeBackend::import_protected_resource(self, resource, ctx).await
     }
 
     async fn update_protected_resource(
         &self,
-        _resource: &ProtectedResource,
-        _ctx: MutationContext,
+        resource: &ProtectedResource,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("protected resources")
+        CoordinodeBackend::update_protected_resource(self, resource, ctx).await
     }
 
     async fn set_resource_access(
         &self,
-        _access: &ResourceAccess,
-        _ctx: MutationContext,
+        access: &ResourceAccess,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("resource access")
+        CoordinodeBackend::set_resource_access(self, access, ctx).await
     }
 
     async fn remove_resource_access(
         &self,
-        _client_id: &str,
-        _resource: ResourceId,
-        _ctx: MutationContext,
+        client_id: &str,
+        resource: ResourceId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("resource access")
+        CoordinodeBackend::remove_resource_access(self, client_id, resource, ctx).await
     }
 
-    async fn list_resource_access_by_client(
-        &self,
-        _client_id: &str,
-    ) -> Result<Vec<ResourceAccess>> {
-        refused("resource access")
+    async fn list_resource_access_by_client(&self, client_id: &str) -> Result<Vec<ResourceAccess>> {
+        CoordinodeBackend::list_resource_access(
+            self,
+            "client_id",
+            coordinode_core::graph::types::Value::String(client_id.to_owned()),
+            "resource_id",
+        )
+        .await
     }
 
     async fn list_resource_access_by_resource(
         &self,
-        _resource: ResourceId,
+        resource: ResourceId,
     ) -> Result<Vec<ResourceAccess>> {
-        refused("resource access")
+        CoordinodeBackend::list_resource_access(
+            self,
+            "resource_id",
+            super::uuid(resource.as_uuid()),
+            "client_id",
+        )
+        .await
     }
 
     // === ADMIN QUERIES ===
@@ -1019,20 +1028,20 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_initial_access_token(
         &self,
-        _token: &InitialAccessToken,
-        _ctx: MutationContext,
+        token: &InitialAccessToken,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("initial access tokens")
+        CoordinodeBackend::create_initial_access_token(self, token, ctx).await
     }
 
     async fn register_dynamic_client(
         &self,
-        _app: &sid_core::models::Application,
-        _client: &OAuth2Client,
-        _iat: InitialAccessTokenId,
-        _ctx: MutationContext,
+        app: &sid_core::models::Application,
+        client: &OAuth2Client,
+        iat: InitialAccessTokenId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("dynamic client registration")
+        CoordinodeBackend::register_dynamic_client(self, app, client, iat, ctx).await
     }
 
     async fn list_key_versions(&self) -> Result<Vec<sid_keys::KeyVersionParams>> {
@@ -1087,23 +1096,23 @@ impl StorageBackend for CoordinodeBackend {
     }
 
     async fn instance_organization(&self) -> Result<Option<sid_core::models::Organization>> {
-        refused("the instance organization")
+        CoordinodeBackend::instance_organization(self).await
     }
 
     async fn insert_instance_organization(
         &self,
-        _org: &sid_core::models::Organization,
-        _ctx: MutationContext,
+        org: &sid_core::models::Organization,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("the instance organization")
+        CoordinodeBackend::insert_instance_organization(self, org, ctx).await
     }
 
     async fn assign_unowned_clients(
         &self,
-        _org_id: sid_core::models::OrgId,
-        _ctx: MutationContext,
+        org_id: sid_core::models::OrgId,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("OAuth clients")
+        CoordinodeBackend::assign_unowned_clients(self, org_id, ctx).await
     }
 
     // === SERVICE BINDINGS ===
@@ -1151,31 +1160,31 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn get_initial_access_token(
         &self,
-        _id: InitialAccessTokenId,
+        id: InitialAccessTokenId,
     ) -> Result<Option<InitialAccessToken>> {
-        refused("initial access tokens")
+        CoordinodeBackend::get_initial_access_token(self, id).await
     }
 
     async fn get_initial_access_token_by_hash(
         &self,
-        _token_hash: &[u8],
+        token_hash: &[u8],
     ) -> Result<Option<InitialAccessToken>> {
-        refused("initial access tokens")
+        CoordinodeBackend::get_initial_access_token_by_hash(self, token_hash).await
     }
 
     async fn list_initial_access_tokens_by_project(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<InitialAccessToken>> {
-        refused("initial access tokens")
+        CoordinodeBackend::list_initial_access_tokens_by_project(self, project_id).await
     }
 
     async fn revoke_initial_access_token(
         &self,
-        _id: InitialAccessTokenId,
-        _ctx: MutationContext,
+        id: InitialAccessTokenId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("initial access tokens")
+        CoordinodeBackend::revoke_initial_access_token(self, id, ctx).await
     }
 
     // === ROLES ===

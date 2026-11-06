@@ -330,13 +330,13 @@ pub(super) fn delete_profile_grants(tx: &Statements<'_>, profile: ProfileId) -> 
 
 fn profile_sessions(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Vec<Session>> {
     let rows = tx.run(
-        &format!(
-            "MATCH (s:SidSession) WHERE s.profile_id = $profile RETURN {SESSION}
-             ORDER BY s.created_at DESC"
-        ),
+        &format!("MATCH (s:SidSession) WHERE s.profile_id = $profile RETURN {SESSION}"),
         Params::default().with("profile", profile_value(profile)),
     )?;
-    rows.iter().map(session).collect()
+    let mut sessions = rows.iter().map(session).collect::<SidResult<Vec<_>>>()?;
+    // Newest first, in one total order: ids of one instant by id.
+    sessions.sort_by(|a, b| (b.created_at, b.id.as_uuid()).cmp(&(a.created_at, a.id.as_uuid())));
+    Ok(sessions)
 }
 
 /// Hold what `proof` proved for `profile` for the commit, or refuse.

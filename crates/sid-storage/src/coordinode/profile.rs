@@ -16,7 +16,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_count, get_int,
     get_opt_int, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_texts, get_time, get_uuid,
-    key, opt_text, opt_time, opt_uuid, page, texts, time, uuid,
+    key, opt_text, opt_time, opt_uuid, sorted_page, texts, time, uuid,
 };
 
 /// Every property of a profile node, as `RETURN` lists them.
@@ -195,6 +195,21 @@ pub(super) fn get(tx: &Statements<'_>, id: ProfileId) -> SidResult<Option<Profil
         Params::default().with("id", profile_id(id)),
     )?;
     rows.first().map(profile).transpose()
+}
+
+/// The profiles `filter` selects, oldest first (creation time, then id).
+fn profiles(tx: &Statements<'_>, filter: &str, params: Params) -> SidResult<Vec<Profile>> {
+    let rows = tx.run(
+        &format!("MATCH (p:SidProfile) {filter} RETURN {PROFILE}"),
+        params,
+    )?;
+    let all = rows.iter().map(profile).collect::<SidResult<Vec<_>>>()?;
+    Ok(sorted_page(
+        all,
+        |p| (p.created_at, *p.id.as_uuid()),
+        0,
+        u64::MAX,
+    ))
 }
 
 /// Delete profile `id` with everything it owns, in `tx`.
@@ -525,16 +540,6 @@ fn set_primary(
 }
 
 impl CoordinodeBackend {
-    async fn read<T, F>(&self, read: F) -> SidResult<T>
-    where
-        T: Send + 'static,
-        F: FnMut(&Statements<'_>) -> SidResult<T> + Send + 'static,
-    {
-        let mut read = read;
-        self.transaction(move |tx| read(tx).map(Decision::Abandon))
-            .await
-    }
-
     pub(super) async fn get_profile(&self, id: ProfileId) -> SidResult<Option<Profile>> {
         self.read(move |tx| get(tx, id)).await
     }
@@ -609,18 +614,14 @@ impl CoordinodeBackend {
     }
 
     pub(super) async fn list_profiles(&self, offset: u64, limit: u64) -> SidResult<Vec<Profile>> {
-        let (offset, limit) = (page(offset)?, page(limit)?);
         self.read(move |tx| {
-            let rows = tx.run(
-                &format!(
-                    "MATCH (p:SidProfile) RETURN {PROFILE}
-                     ORDER BY p.created_at, p.id SKIP $offset LIMIT $limit"
-                ),
-                Params::default()
-                    .with("offset", offset.clone())
-                    .with("limit", limit.clone()),
-            )?;
-            rows.iter().map(profile).collect()
+            let all = profiles(tx, "", Params::default())?;
+            Ok(sorted_page(
+                all,
+                |p| (p.created_at, *p.id.as_uuid()),
+                offset,
+                limit,
+            ))
         })
         .await
     }
@@ -640,30 +641,18 @@ impl CoordinodeBackend {
         status: sid_core::models::ProfileStatus,
     ) -> SidResult<Vec<Profile>> {
         self.read(move |tx| {
-            let rows = tx.run(
-                &format!(
-                    "MATCH (p:SidProfile) WHERE p.status = $status RETURN {PROFILE}
-                     ORDER BY p.created_at, p.id"
-                ),
+            profiles(
+                tx,
+                "WHERE p.status = $status",
                 Params::default().with("status", Value::String(status.as_str().into())),
-            )?;
-            rows.iter().map(profile).collect()
+            )
         })
         .await
     }
 
     pub(super) async fn list_profiles_with_pending_migration(&self) -> SidResult<Vec<Profile>> {
-        self.read(|tx| {
-            let rows = tx.run(
-                &format!(
-                    "MATCH (p:SidProfile) WHERE p.migration_pending = true RETURN {PROFILE}
-                     ORDER BY p.created_at, p.id"
-                ),
-                Params::default(),
-            )?;
-            rows.iter().map(profile).collect()
-        })
-        .await
+        self.read(|tx| profiles(tx, "WHERE p.migration_pending = true", Params::default()))
+            .await
     }
 
     // === Contacts ===
