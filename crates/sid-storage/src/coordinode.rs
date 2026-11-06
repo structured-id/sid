@@ -6,6 +6,7 @@
 //! the whole transaction is run again from the start. A plain read is not
 //! checked at commit: what a decision rests on is either written or held.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
+mod ceremony;
 mod operation;
 mod work;
 
@@ -23,6 +25,9 @@ mod work;
 /// reported: each retry follows a commit that changed what it read, so a
 /// change that keeps losing is contended past any useful bound.
 const CONFLICT_RETRIES: u32 = 64;
+
+/// The pause before a run again, multiplied by the round (up to 40).
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_micros(50);
 
 /// The schema SID's records rely on: what keeps an identifier unique across
 /// concurrent writers. Nodes that writers of one thing meet on (a work kind's
@@ -37,6 +42,8 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_operation_slot FOR (o:SidOperation) REQUIRE o.slot IS UNIQUE",
     "CREATE CONSTRAINT sid_operation_period FOR (p:SidOperationPeriod) REQUIRE p.period IS UNIQUE",
     "CREATE CONSTRAINT sid_operation_state FOR (s:SidOperationState) REQUIRE s.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_ceremony_state FOR (c:SidCeremonyState) REQUIRE c.slot IS UNIQUE",
+    "CREATE CONSTRAINT sid_ceremony_count FOR (c:SidCeremonyCount) REQUIRE c.slot IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -138,13 +145,21 @@ pub(super) enum Decision<T> {
 pub(super) struct Statements<'a> {
     db: &'a Database,
     id: TransactionId,
+    /// Set when a statement was refused for a concurrent transaction: the
+    /// whole transaction runs again rather than failing.
+    contended: Cell<bool>,
 }
 
 impl Statements<'_> {
     pub(super) fn run(&self, query: &str, params: Params) -> SidResult<Vec<Row>> {
         self.db
             .execute_in_transaction(self.id, query, Some(params.0))
-            .map_err(storage)
+            .map_err(|e| {
+                if contention(&e) {
+                    self.contended.set(true);
+                }
+                storage(e)
+            })
     }
 
     /// Commit only while the node `node` (its `id(n)`) stays as it is now:
@@ -182,14 +197,26 @@ fn in_transaction<T, F>(db: &Database, mut change: F) -> SidResult<T>
 where
     F: FnMut(&Statements<'_>) -> SidResult<Decision<T>>,
 {
-    for _ in 0..=CONFLICT_RETRIES {
+    for attempt in 0..=CONFLICT_RETRIES {
+        if attempt > 0 {
+            // A refusal for a claim another transaction holds clears only
+            // when that one ends: give it the time, longer each round.
+            std::thread::sleep(RETRY_PAUSE * attempt.min(40));
+        }
         let id = db.begin_transaction().map_err(storage)?;
-        let statements = Statements { db, id };
+        let statements = Statements {
+            db,
+            id,
+            contended: Cell::new(false),
+        };
         let decided = match change(&statements) {
             Ok(decided) => decided,
             Err(e) => {
                 // A failed statement already ended the transaction.
                 db.rollback_transaction(id).ok();
+                if statements.contended.get() {
+                    continue;
+                }
                 return Err(e);
             }
         };
@@ -200,10 +227,7 @@ where
             }
             Decision::Commit(answer) => match db.commit_transaction(id) {
                 Ok(_) => return Ok(answer),
-                Err(
-                    DatabaseError::TransactionConflict { .. }
-                    | DatabaseError::RevisionMismatch { .. },
-                ) => continue,
+                Err(e) if contention(&e) => continue,
                 Err(e) => return Err(storage(e)),
             },
         }
@@ -213,11 +237,34 @@ where
     )))
 }
 
+/// A refusal caused by a concurrent transaction, which nothing applied and
+/// a run again resolves on what that transaction left.
+fn contention(e: &DatabaseError) -> bool {
+    matches!(
+        e,
+        DatabaseError::TransactionConflict { .. }
+            | DatabaseError::RevisionMismatch { .. }
+            | DatabaseError::InvariantRefused { .. }
+    )
+}
+
 fn storage(e: DatabaseError) -> SidError {
     SidError::Storage(format!("CoordiNode: {e}"))
 }
 
 // ─── Values ───
+
+/// The node key of `key` in `namespace`: the namespace's length first, so
+/// no two pairs share one.
+pub(super) fn slot(namespace: &str, key: &str) -> SidResult<Vec<u8>> {
+    let length = u32::try_from(namespace.len())
+        .map_err(|_| SidError::Validation("namespace too long".into()))?;
+    let mut slot = Vec::with_capacity(4 + namespace.len() + key.len());
+    slot.extend_from_slice(&length.to_be_bytes());
+    slot.extend_from_slice(namespace.as_bytes());
+    slot.extend_from_slice(key.as_bytes());
+    Ok(slot)
+}
 
 pub(super) fn time(t: chrono::DateTime<chrono::Utc>) -> Value {
     Value::Int(t.timestamp_micros())

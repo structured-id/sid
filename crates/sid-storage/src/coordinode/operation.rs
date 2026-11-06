@@ -56,16 +56,8 @@ pub(super) fn init_state(tx: &Statements<'_>) -> SidResult<Decision<()>> {
     Ok(Decision::Commit(()))
 }
 
-/// The node key of `key` in `namespace`: the namespace's length first, so
-/// no two pairs share one.
 fn slot(namespace: &str, key: &OperationKey) -> SidResult<Vec<u8>> {
-    let length = u32::try_from(namespace.len())
-        .map_err(|_| SidError::Validation("operation namespace too long".into()))?;
-    let mut slot = Vec::with_capacity(4 + namespace.len() + key.as_str().len());
-    slot.extend_from_slice(&length.to_be_bytes());
-    slot.extend_from_slice(namespace.as_bytes());
-    slot.extend_from_slice(key.as_str().as_bytes());
-    Ok(slot)
+    super::slot(namespace, key.as_str())
 }
 
 /// `period` as its stored integer.

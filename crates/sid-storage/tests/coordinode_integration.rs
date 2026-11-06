@@ -76,6 +76,37 @@ mod operation_result_store {
     );
 }
 
+/// Run ceremony state conformance `scenario`; each one uses namespaces of
+/// its own.
+macro_rules! ceremony_state {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::ceremony_state::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ceremony_state {
+    use super::*;
+
+    ceremony_state!(
+        state_is_taken_once,
+        concurrent_takers_get_it_once,
+        expired_state_is_refused_at_use,
+        put_replaces,
+        replace_applies_only_to_what_was_read,
+        concurrent_replacements_apply_once,
+        key_is_admitted_once,
+        concurrent_admissions_succeed_once,
+        events_count_within_their_window,
+        concurrent_events_are_counted_once,
+        counts_are_read_and_cleared,
+        admission_is_confirmed_only_to_its_holder,
+        concurrent_holders_admit_once,
+    );
+}
+
 /// The race `operation_periods_bound_admission` runs once, many times over:
 /// commits under a period racing its retirement are each refused or dropped
 /// with it, never left behind. CoordiNode checks only writes and pinned reads
