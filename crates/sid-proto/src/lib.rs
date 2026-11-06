@@ -92,6 +92,57 @@ pub mod sid {
     }
 }
 
+/// A `sid.v1.common.IpAddress` whose value is not 4 or 16 bytes. Carries the
+/// length, nothing of the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpAddressError {
+    length: usize,
+}
+
+impl IpAddressError {
+    /// The length the message carried.
+    pub const fn length(&self) -> usize {
+        self.length
+    }
+}
+
+impl core::fmt::Display for IpAddressError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "an IP address is 4 or 16 bytes, not {}", self.length)
+    }
+}
+
+impl core::error::Error for IpAddressError {}
+
+impl From<core::net::IpAddr> for sid::v1::common::IpAddress {
+    /// The address's octets in network order: 4 for IPv4, 16 for IPv6. An
+    /// IPv4-mapped IPv6 address stays 16 bytes.
+    fn from(address: core::net::IpAddr) -> Self {
+        let value = match address {
+            core::net::IpAddr::V4(v4) => v4.octets().to_vec(),
+            core::net::IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        Self { value }
+    }
+}
+
+impl TryFrom<&sid::v1::common::IpAddress> for core::net::IpAddr {
+    type Error = IpAddressError;
+
+    /// The address the message carries; the length is the family. An
+    /// IPv4-mapped IPv6 address is read as IPv6, never folded into IPv4.
+    fn try_from(message: &sid::v1::common::IpAddress) -> Result<Self, IpAddressError> {
+        let length = message.value.len();
+        if let Ok(v4) = <[u8; 4]>::try_from(message.value.as_slice()) {
+            Ok(Self::V4(v4.into()))
+        } else if let Ok(v6) = <[u8; 16]>::try_from(message.value.as_slice()) {
+            Ok(Self::V6(v6.into()))
+        } else {
+            Err(IpAddressError { length })
+        }
+    }
+}
+
 /// The Google API types the SID protos use, such as `google.api.HttpBody`.
 pub mod google {
     pub mod api {
