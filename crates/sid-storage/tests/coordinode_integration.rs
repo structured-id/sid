@@ -16,6 +16,9 @@ async fn setup() -> CoordinodeBackend {
         .expect("SID's schema in CoordiNode")
 }
 
+// The complete storage contract, one test per scenario.
+sid_plugin::storage_conformance!(setup);
+
 /// Run work store conformance `scenario` against this backend.
 macro_rules! work_store {
     ($($scenario:ident),* $(,)?) => {$(

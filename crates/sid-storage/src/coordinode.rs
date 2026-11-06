@@ -17,6 +17,7 @@ use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
+mod backend;
 mod ceremony;
 mod instance_secret;
 mod operation;
