@@ -2,7 +2,7 @@
 
 use super::*;
 use secrecy::SecretBox;
-use sid_core::models::ProfileId;
+use sid_core::models::{CredentialType, ProfileId};
 use sid_crypto::RustCryptoPrimitives;
 use sid_keys::{KeyVersionParams, SoftwareKeyManager};
 use std::sync::Arc;

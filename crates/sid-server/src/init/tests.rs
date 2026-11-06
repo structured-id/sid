@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use sid_plugin::{CredentialStore, InstanceSecretStore};
+use sid_plugin::CredentialStore;
 
 /// The bundled bus serves the single-binary installation, which runs no
 /// separate receiver: unset owes facts to nobody there, rather than to an
@@ -669,17 +669,54 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
     );
 }
 
-/// A machine-credential alert keeps its id across scans (relayed once) and
-/// a different alert (another credential or another day) gets another id.
+fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<sid_engine::AuditRetention> {
+    audit_retention_from_lookup(|k| {
+        Ok(pairs
+            .iter()
+            .find(|(name, _)| *name == k)
+            .map(|(_, v)| v.to_string()))
+    })
+}
+
+/// Unset: a year, archived (records are kept until an archive holds them);
+/// both settings are read.
 #[test]
-fn test_credential_alert_id_is_stable_per_alert() {
-    let expired = credential_alert_id("expired:kid-1");
-    assert_eq!(expired, credential_alert_id("expired:kid-1"));
-    assert!(uuid::Uuid::parse_str(&expired).is_ok());
-    assert_ne!(expired, credential_alert_id("expired:kid-2"));
-    assert_ne!(
-        credential_alert_id("expiring:kid-1:3"),
-        credential_alert_id("expiring:kid-1:2")
+fn audit_retention_defaults_to_a_year_archived() {
+    use sid_engine::{AuditRetention, RetentionAction};
+    assert_eq!(retention(&[]).unwrap(), AuditRetention::default());
+    assert_eq!(
+        retention(&[
+            ("SID_AUDIT_RETENTION_DAYS", "30"),
+            ("SID_AUDIT_RETENTION_ACTION", "delete")
+        ])
+        .unwrap(),
+        AuditRetention {
+            days: 30,
+            action: RetentionAction::Delete
+        }
+    );
+}
+
+/// A value that does not parse, or is out of range, stops startup instead of
+/// becoming the default (a bad setting once silently meant 365 days).
+#[test]
+fn audit_retention_refuses_bad_settings() {
+    for days in ["", "abc", "0", "-5", "36501"] {
+        assert!(
+            retention(&[("SID_AUDIT_RETENTION_DAYS", days)]).is_err(),
+            "{days:?}"
+        );
+    }
+    assert!(retention(&[("SID_AUDIT_RETENTION_ACTION", "purge")]).is_err());
+    // A setting the lookup cannot read is refused, not taken as unset.
+    assert!(
+        audit_retention_from_lookup(|k| {
+            if k == "SID_AUDIT_RETENTION_DAYS" {
+                anyhow::bail!("{k} is not valid Unicode")
+            }
+            Ok(None)
+        })
+        .is_err()
     );
 }
 
@@ -733,130 +770,6 @@ async fn store() -> sid_storage::sqlite::SqliteBackend {
         .unwrap()
 }
 
-fn keys() -> sid_keys::SoftwareKeyManager {
-    sid_keys::SoftwareKeyManager::new(
-        secrecy::SecretBox::new(Box::new([0x5Au8; 32])),
-        vec![sid_keys::KeyVersionParams::new(1, vec![0x01; 32], "key-v1")],
-        Arc::new(sid_crypto::RustCryptoPrimitives::new()),
-    )
-    .expect("test key manager")
-}
-
-/// Store `root`, an installation administrator as role administration makes
-/// one.
-async fn store_administrator(storage: &impl StorageBackend) {
-    let root = sid_core::models::Profile::new(Some("root"));
-    storage
-        .create_profile(&root, AuditEntry::system("test", "profile").into())
-        .await
-        .unwrap();
-    storage
-        .create_role(
-            &sid_core::models::Role::installation_administrator(),
-            AuditEntry::system("test", "role").into(),
-        )
-        .await
-        .unwrap();
-    storage
-        .create_role_assignment(
-            &sid_core::models::RoleAssignment::new(
-                sid_core::models::RoleAssignmentPrincipal::Profile(root.id),
-                sid_core::models::Role::installation_administrator().id,
-            )
-            .on_installation(),
-            AuditEntry::system("test", "assignment").into(),
-        )
-        .await
-        .unwrap();
-}
-
-/// A fresh instance opens its administrator claim at start; a start of an
-/// instance that has an administrator opens none. No start grants a role.
-#[tokio::test]
-async fn start_opens_the_claim_only_without_an_admin() {
-    let (storage, keys) = (store().await, keys());
-    announce_admin_claim(&storage, &keys).await.unwrap();
-    assert!(
-        storage
-            .get_instance_secret(sid_core::models::InstanceSecret::AdminClaim)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(!storage.admin_exists().await.unwrap());
-
-    let (storage, keys) = (store().await, keys);
-    store_administrator(&storage).await;
-    announce_admin_claim(&storage, &keys).await.unwrap();
-    assert!(
-        storage
-            .get_instance_secret(sid_core::models::InstanceSecret::AdminClaim)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-/// A centrally managed start removes a claim stored earlier and opens none,
-/// starts again unchanged, and keeps the policy when started unset.
-#[tokio::test]
-async fn central_start_offers_no_claim() {
-    let (storage, keys) = (store().await, keys());
-    announce_admin_claim(&storage, &keys).await.unwrap();
-    apply_bootstrap_policy(&storage, Some("central"))
-        .await
-        .unwrap();
-    announce_admin_claim(&storage, &keys).await.unwrap();
-    let claim = || async {
-        storage
-            .get_instance_secret(sid_core::models::InstanceSecret::AdminClaim)
-            .await
-            .unwrap()
-    };
-    assert!(claim().await.is_none());
-
-    for setting in [Some("central"), None] {
-        apply_bootstrap_policy(&storage, setting).await.unwrap();
-        announce_admin_claim(&storage, &keys).await.unwrap();
-        assert!(claim().await.is_none(), "{setting:?}");
-    }
-    assert_eq!(
-        storage.bootstrap_policy().await.unwrap(),
-        sid_core::models::BootstrapPolicy::CentrallyManaged
-    );
-}
-
-/// A centrally managed installation never starts self-managed, and a claimed
-/// self-managed one never starts centrally managed; neither start changes it.
-#[tokio::test]
-async fn start_refuses_a_policy_change() {
-    let (storage, _) = (store().await, keys());
-    apply_bootstrap_policy(&storage, Some("central"))
-        .await
-        .unwrap();
-    assert!(
-        apply_bootstrap_policy(&storage, Some("self"))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        storage.bootstrap_policy().await.unwrap(),
-        sid_core::models::BootstrapPolicy::CentrallyManaged
-    );
-
-    let storage = store().await;
-    store_administrator(&storage).await;
-    assert!(
-        apply_bootstrap_policy(&storage, Some("central"))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        storage.bootstrap_policy().await.unwrap(),
-        sid_core::models::BootstrapPolicy::SelfManaged
-    );
-}
-
 /// An unset setting is none; one that is no text stops the start, naming it,
 /// rather than reading as unset: an unset management setting would let a
 /// self-managed claim open, an unset account URL would leave the issuer
@@ -882,28 +795,21 @@ fn setting_refuses_non_text() {
     assert!(error.to_string().contains(NAME), "{error}");
 }
 
-/// A setting other than `central` or `self` stops the start.
-#[tokio::test]
-async fn unknown_policy_setting_stops_the_start() {
-    let storage = store().await;
+/// `central` and `self` name the management, unset keeps the recorded one,
+/// and any other value stops the start.
+#[test]
+fn management_setting_names_central_or_self() {
+    use sid_engine::Management;
+    assert_eq!(
+        management_setting(Some("central")).unwrap(),
+        Some(Management::Central)
+    );
+    assert_eq!(
+        management_setting(Some("self")).unwrap(),
+        Some(Management::SelfManaged)
+    );
+    assert_eq!(management_setting(None).unwrap(), None);
     for setting in ["Central", "", "managed"] {
-        assert!(
-            apply_bootstrap_policy(&storage, Some(setting))
-                .await
-                .is_err(),
-            "{setting:?}"
-        );
+        assert!(management_setting(Some(setting)).is_err(), "{setting:?}");
     }
-}
-
-/// A store that cannot be read stops the start.
-#[tokio::test]
-async fn unreadable_store_stops_the_start() {
-    let (storage, keys) = (store().await, keys());
-    // The administrators are read from the role assignments.
-    sqlx::query("DROP TABLE role_assignments")
-        .execute(storage.pool())
-        .await
-        .unwrap();
-    assert!(announce_admin_claim(&storage, &keys).await.is_err());
 }

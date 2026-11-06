@@ -7,7 +7,6 @@
 #![allow(clippy::result_large_err)]
 
 pub mod auth_mail;
-pub mod background_tasks;
 pub mod embedded_nats;
 pub mod enrollment;
 pub mod feature_flags;

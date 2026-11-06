@@ -15,8 +15,8 @@ use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_core::models::{
     AuditEntry, ClosureMode, LegalHold, Principal, Profile, ProfileId, ProfileStatus, Session,
 };
+use sid_engine::maintenance::{execute_due_closures, purge_closed_profiles};
 use sid_plugin::StorageBackend;
-use sid_server::background_tasks::{execute_due_closures, purge_closed_profiles};
 
 async fn setup() -> (Arc<dyn StorageBackend>, AccountClosureService, sqlx::PgPool) {
     let url = std::env::var("DATABASE_URL")

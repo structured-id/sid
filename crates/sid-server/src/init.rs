@@ -25,7 +25,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::webauthn::WebAuthnServer;
-use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
+use sid_authn::work_runner::{RunnerConfig, WorkHandler};
 use sid_core::models::AuditEntry;
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::event_bus::EventBus;
@@ -44,26 +44,33 @@ use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 
-// Advisory lock IDs for background tasks (multi-instance coordination).
-// Lock 42 is reserved for migrations (migrator.rs).
-const LOCK_PAT_AUTO_REVOKE: i64 = 43;
-const LOCK_CREDENTIAL_EXPIRY: i64 = 44;
-const LOCK_ROLE_EXPIRY: i64 = 45;
-const LOCK_QUARANTINE_CLEANUP: i64 = 46;
-const LOCK_PROFILE_PURGE: i64 = 47;
-const LOCK_MIGRATION_DEADLINE: i64 = 48;
-const LOCK_AUDIT_PARTITION: i64 = 49;
-const LOCK_PRINCIPAL_EXPIRY: i64 = 50;
-const LOCK_ENROLLMENT_COMPACTION: i64 = 51;
-
-/// Namespace of machine-credential alert event ids.
-const CREDENTIAL_ALERT_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x9b47_2c1e_65fa_4d38_a0c2_e81f_3d96_7b54);
-
-/// The id of a machine-credential alert: the same alert gets the same id, so
-/// a repeated scan relays it once.
-fn credential_alert_id(alert: &str) -> String {
-    uuid::Uuid::new_v5(&CREDENTIAL_ALERT_NAMESPACE, alert.as_bytes()).to_string()
+/// Audit retention from `SID_AUDIT_RETENTION_DAYS` (default 365, 1 to 36500)
+/// and `SID_AUDIT_RETENTION_ACTION` (`archive`, the default, or `delete`);
+/// anything else, including a setting `get` cannot read, is an error, never a
+/// silent default.
+pub fn audit_retention_from_lookup(
+    get: impl Fn(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<sid_engine::AuditRetention> {
+    use sid_engine::RetentionAction;
+    let days = match get("SID_AUDIT_RETENTION_DAYS")? {
+        None => sid_engine::AuditRetention::default().days,
+        Some(v) => v
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|d| (1..=36500).contains(d))
+            .ok_or_else(|| {
+                anyhow::anyhow!("SID_AUDIT_RETENTION_DAYS must be 1 to 36500 days, got {v:?}")
+            })?,
+    };
+    let action = match get("SID_AUDIT_RETENTION_ACTION")?.as_deref().map(str::trim) {
+        None | Some("archive") => RetentionAction::Archive,
+        Some("delete") => RetentionAction::Delete,
+        Some(other) => {
+            anyhow::bail!("SID_AUDIT_RETENTION_ACTION must be archive or delete, got {other:?}")
+        }
+    };
+    Ok(sid_engine::AuditRetention { days, action })
 }
 
 /// All initialized CE components and gRPC services.
@@ -98,7 +105,7 @@ pub struct CeComponents {
     /// Executes account closures whose grace period has ended.
     pub closure_service: Arc<AccountClosureService>,
     /// How long audit records are kept and what happens to them after.
-    pub audit_retention: crate::background_tasks::AuditRetention,
+    pub audit_retention: sid_engine::AuditRetention,
     /// Days a profile has to finish its password migration.
     pub migration_deadline_days: i64,
     /// The installation's OIDC issuers and their signers.
@@ -282,14 +289,6 @@ pub fn account_settings(
         .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))
 }
 
-/// The installation's domain: the host of its issuer URL.
-pub(crate) fn instance_domain(issuer: &str) -> anyhow::Result<String> {
-    url::Url::parse(issuer)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .with_context(|| format!("SID_ISSUER {issuer:?} is not a URL with a host"))
-}
-
 /// The setting `name` as `read` from the environment: unset is `None`, a
 /// value that is no text stops the start like any other invalid value,
 /// never read as unset.
@@ -309,73 +308,20 @@ pub fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
     setting(name, std::env::var(name))
 }
 
-/// Apply the installation's bootstrap policy `setting`
-/// (`SID_INSTALLATION_MANAGEMENT`): `central` records it centrally managed,
-/// which a self-managed installation with a local administrator refuses;
-/// `self` refuses an installation already centrally managed, which never
-/// returns to a local claim; unset keeps whatever is recorded. Any other value,
-/// a refusal or a storage failure stops the start.
-pub(crate) async fn apply_bootstrap_policy(
-    storage: &dyn StorageBackend,
+/// The installation's management from `SID_INSTALLATION_MANAGEMENT`:
+/// `central` or `self`; unset keeps whatever is recorded. Any other value
+/// stops the start.
+pub(crate) fn management_setting(
     setting: Option<&str>,
-) -> anyhow::Result<()> {
-    use sid_core::models::{BootstrapPolicy, CentralAdoption};
+) -> anyhow::Result<Option<sid_engine::Management>> {
     match setting {
-        Some("central") => match storage
-            .adopt_central_management(
-                AuditEntry::system("installation.centrally_managed", "bootstrap_policy").into(),
-            )
-            .await
-            .context("bootstrap policy")?
-        {
-            CentralAdoption::Adopted => {
-                info!("installation recorded centrally managed: it offers no local claim");
-                Ok(())
-            }
-            CentralAdoption::AlreadyCentral => Ok(()),
-            CentralAdoption::LocalAdministrator => anyhow::bail!(
-                "SID_INSTALLATION_MANAGEMENT=central: this installation has a local \
-                 administrator, it is self-managed"
-            ),
-        },
-        Some("self") => {
-            if storage
-                .bootstrap_policy()
-                .await
-                .context("bootstrap policy")?
-                == BootstrapPolicy::CentrallyManaged
-            {
-                anyhow::bail!(
-                    "SID_INSTALLATION_MANAGEMENT=self: this installation is centrally managed \
-                     and never returns to a local administrator claim"
-                );
-            }
-            Ok(())
-        }
-        None => Ok(()),
+        Some("central") => Ok(Some(sid_engine::Management::Central)),
+        Some("self") => Ok(Some(sid_engine::Management::SelfManaged)),
+        None => Ok(None),
         Some(other) => {
             anyhow::bail!("SID_INSTALLATION_MANAGEMENT {other:?}: expected `central` or `self`")
         }
     }
-}
-
-/// While the instance's claim is open, write its token to the log for the
-/// operator; a storage failure stops the start.
-pub(crate) async fn announce_admin_claim(
-    storage: &dyn StorageBackend,
-    keys: &dyn sid_keys::KeyManager,
-) -> anyhow::Result<()> {
-    let claim = sid_authn::admin_claim::open_claim(storage, keys)
-        .await
-        .context("administrator claim")?;
-    if let Some(token) = claim {
-        tracing::warn!(
-            "No administrator yet. Register and enter this claim token to become the \
-             first administrator: {}",
-            secrecy::ExposeSecret::expose_secret(&token)
-        );
-    }
-    Ok(())
 }
 
 /// What a host binary supplies to the CE components it composes.
@@ -467,12 +413,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .context("the SQLite file")?,
     );
 
-    // Ensure system project exists
-    storage
-        .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
-        .await
-        .expect("Failed to ensure system project");
-
     // ── JWT keys ──
     let data_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| "/var/lib/sid".into());
     let jwt_private_key_path = env_setting("SID_JWT_PRIVATE_KEY_PATH")?
@@ -484,7 +424,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let issuer = env_setting("SID_ISSUER")?
         .filter(|issuer| !issuer.is_empty())
         .context("SID_ISSUER is required")?;
-    let instance_domain = instance_domain(&issuer)?;
+    let issuer_base = Url::parse(&issuer).context("SID_ISSUER is not a URL")?;
 
     if ensure_jwt_key_pair(&jwt_private_key_path, &jwt_public_key_path)? {
         info!("Generated JWT key pair at '{}'", data_dir);
@@ -516,57 +456,48 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         None => 30,
     };
 
-    // ── Field encryption: master key outside the database, versions inside ──
-    let master_key_path =
-        env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
-    let key_manager = sid_authn::field_keys::field_key_manager(
-        storage.as_ref(),
-        std::path::Path::new(&master_key_path),
-        Arc::new(sid_crypto::AwsLcPrimitives::new()),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("Field-encryption key manager: {e}"));
-    // TOTP seeds written before field encryption are sealed before serving.
-    let sealed = sid_authn::sealed_secret::seal_plaintext_credentials(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        sid_core::models::CredentialType::Totp,
-        |c| sid_authn::sealed_secret::totp_context(c.profile_id),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("Sealing stored TOTP seeds: {e}"));
-    if sealed > 0 {
-        info!(
-            "Sealed {} stored TOTP seed(s) under the key manager",
-            sealed
-        );
-    }
-    // OPAQUE envelopes likewise (defense in depth, storage-cache Key Manager).
-    let sealed = sid_authn::sealed_secret::seal_plaintext_credentials(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        sid_core::models::CredentialType::Opaque,
-        |c| sid_authn::sealed_secret::opaque_context(c.profile_id),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Sealing stored OPAQUE envelopes: {e}"))?;
-    if sealed > 0 {
-        info!(
-            "Sealed {} stored OPAQUE envelope(s) under the key manager",
-            sealed
-        );
-    }
-    // The PoW CAPTCHA key every replica signs and checks challenges with.
-    let captcha_pow_key =
-        sid_authn::captcha::load_or_create_pow_key(storage.as_ref(), key_manager.as_ref())
-            .await
-            .map_err(|e| anyhow::anyhow!("CAPTCHA key: {e}"))?;
-
     // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
         sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref())
             .await
             .unwrap_or_else(|e| panic!("Shared cache: {e}"));
+
+    // ── The installation: keys, organization, issuer and their resources ──
+    // The master key lives outside the database; the key versions inside.
+    let master_key_path =
+        env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
+    let installation = sid_engine::Installation::open(
+        storage.clone(),
+        sid_engine::InstallationSettings {
+            issuer: issuer_base.clone(),
+            master_key: master_key_path.clone().into(),
+            crypto: Arc::new(sid_crypto::AwsLcPrimitives::new()),
+            cache: cache_backend.clone(),
+            access_token_ttl,
+            management: management_setting(env_setting("SID_INSTALLATION_MANAGEMENT")?.as_deref())?,
+        },
+    )
+    .await
+    .context("installation")?;
+    if let Some(token) = installation.admin_claim().await? {
+        tracing::warn!(
+            "No administrator yet. Register and enter this claim token to become the \
+             first administrator: {}",
+            secrecy::ExposeSecret::expose_secret(&token)
+        );
+    }
+    let sid_engine::Installation {
+        key_manager,
+        organization,
+        issuer: local_issuer,
+        authorization_api,
+        enrollment_api,
+        issuers,
+        opaque_router,
+        revocation_cache,
+        captcha_pow_key,
+        ..
+    } = installation;
 
     // ── WebAuthn ──
     // RP_ID must match the domain users access (e.g., "structured.id", "localhost").
@@ -582,29 +513,9 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         key_manager.clone(),
     )?);
 
-    // ── OPAQUE ──
-    let opaque_router = Arc::new(
-        sid_authn::opaque::server_setup::router(storage.as_ref(), key_manager.as_ref())
-            .await
-            .unwrap_or_else(|e| panic!("OPAQUE server setup: {e}")),
-    );
-
     // ── ZKPP ──
     let zkpp_cache_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| ".sid-data".to_string());
     let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
-
-    // ── Revocation cache ──
-    // Revocations are committed in the store; the shared cache carries them
-    // to the other replicas and is not needed to refuse a revoked token.
-    let revocation_cache = Arc::new(RevocationCache::recorded_in(
-        access_token_ttl
-            .duration()
-            .to_std()
-            .expect("access token lifetime is positive"),
-        cache_backend.clone(),
-        storage.clone(),
-    ));
-    revocation_cache.listen().await;
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;
@@ -627,62 +538,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
 
-    let management = env_setting("SID_INSTALLATION_MANAGEMENT")?;
-    apply_bootstrap_policy(storage.as_ref(), management.as_deref()).await?;
-    announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
     let enrollment_pin =
         crate::enrollment::pinned_mode_setting(std::env::var(crate::enrollment::PIN_VARIABLE))?;
     if let Some(mode) = enrollment_pin {
         info!(%mode, "enrollment mode pinned by the deployment");
     }
 
-    // The installation's organization, and every application in it.
-    let organization = sid_authn::instance_org::ensure(storage.as_ref(), &instance_domain)
-        .await
-        .context("installation organization")?;
-    let assigned = storage
-        .assign_unowned_clients(
-            organization.id,
-            AuditEntry::system(
-                "application.organization_assigned",
-                organization.id.to_string(),
-            )
-            .into(),
-        )
-        .await
-        .context("assign applications to the installation organization")?;
-    if assigned > 0 {
-        info!(assigned, org = %organization.id, "applications assigned to the installation organization");
-    }
-
-    // The organization's OIDC issuer; its key must open under this
-    // installation's master key, or the start fails rather than signing with
-    // a key its published set lacks.
-    let issuer_base = Url::parse(&issuer).context("SID_ISSUER is not a URL")?;
-    let local_issuer = sid_authn::issuer::ensure_local_issuer(
-        storage.as_ref(),
-        key_manager.as_ref(),
-        &issuer_base,
-        organization.id,
-    )
-    .await
-    .context("installation OIDC issuer")?;
-    // The issuer's UserInfo resource: the token target OIDC-only clients select.
-    sid_authn::issuer::ensure_userinfo_resource(storage.as_ref(), &local_issuer)
-        .await
-        .context("installation OIDC issuer UserInfo resource")?;
-    // The authorization API resource: a permission checker's own token
-    // targets it (D054).
-    let authorization_api =
-        sid_authn::issuer::ensure_authorization_api_resource(storage.as_ref(), &local_issuer)
-            .await
-            .context("installation authorization API resource")?;
-    // The enrollment API resource: invite-issuing services hold the invite
-    // actions on it and their tokens target it.
-    let enrollment_api =
-        sid_authn::issuer::ensure_enrollment_api_resource(storage.as_ref(), &local_issuer)
-            .await
-            .context("installation enrollment API resource")?;
     // The SCIM directory resource: provisioning connectors hold their roles
     // on it and their tokens target it.
     #[cfg(feature = "scim")]
@@ -720,31 +581,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             );
         }
     }
-    // The built-in role assigned to token inspectors, one resource at a time.
-    sid_authz::builtin::ensure_token_inspector_role(storage.as_ref())
-        .await
-        .context("token inspector role")?;
-    // The built-in role assigned to SCIM provisioning connectors.
-    sid_authz::builtin::ensure_scim_provisioner_role(storage.as_ref())
-        .await
-        .context("SCIM provisioner role")?;
-    // The built-in role assigned to services that ask about others'
-    // permissions, one resource at a time.
-    sid_authz::builtin::ensure_permission_checker_role(storage.as_ref())
-        .await
-        .context("permission checker role")?;
-    // The built-in role assigned to services that issue invites.
-    sid_authz::builtin::ensure_invite_issuer_role(storage.as_ref())
-        .await
-        .context("invite issuer role")?;
-    let issuers = Arc::new(sid_authn::issuer::IssuerRegistry::new(
-        storage.clone(),
-        key_manager.clone(),
-    ));
-    issuers
-        .signer(&local_issuer)
-        .await
-        .context("installation OIDC issuer signing key")?;
     info!(issuer = %local_issuer.canonical_url, "installation OIDC issuer");
 
     // The services accept the installation's own tokens and the account
@@ -1168,12 +1004,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         revocation_cache.clone(),
     ));
 
-    let audit_retention = crate::background_tasks::AuditRetention::from_lookup(env_setting)?;
+    let audit_retention = audit_retention_from_lookup(env_setting)?;
     let migration_deadline_days = match env_setting("SID_MIGRATION_DEADLINE_DAYS")? {
         Some(v) => v
             .parse()
             .with_context(|| format!("SID_MIGRATION_DEADLINE_DAYS {v:?}"))?,
-        None => crate::background_tasks::DEFAULT_MIGRATION_DEADLINE_DAYS,
+        None => sid_engine::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
     };
 
     Ok(CeComponents {
@@ -1282,403 +1118,96 @@ pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> 
         .with_context(|| format!("write key file {path}"))
 }
 
-/// This round's lock of background job `job`: `None` when another instance
-/// holds it, or when the store cannot be asked (logged; the next round retries).
-async fn take_job_lock(
-    storage: &dyn sid_plugin::storage::StorageBackend,
-    job: i64,
-    name: &str,
-) -> Option<sid_plugin::storage::JobLock> {
-    match storage.try_job_lock(job).await {
-        Ok(lock) => lock,
-        Err(e) => {
-            tracing::warn!(job = name, error = %e, "background job lock unavailable, skipping this round");
-            None
-        }
+/// The work and maintenance engine of these components: the CE handlers and
+/// those this server owes on top (authentication mail), and the CE
+/// maintenance with the purge of ended authentication mail. Facts are owed
+/// to the deployment's required receivers and to `also_required`
+/// (receivers this server runs). Every replica runs one; leases keep an
+/// attempt on a single replica, job locks a maintenance run on one instance.
+pub fn engine(
+    c: &CeComponents,
+    also_required: &[sid_core::models::RequiredReceiver],
+) -> anyhow::Result<sid_engine::Engine> {
+    let receivers = c
+        .required_receivers
+        .iter()
+        .chain(also_required)
+        .cloned()
+        .collect();
+    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
+        Arc::new(BackChannelLogoutHandler::new(
+            c.issuers.clone(),
+            c.storage.clone(),
+        )?),
+        Arc::new(EventRelayHandler::new(
+            c.storage.clone(),
+            receivers,
+            sid_plugin::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
+            c.event_bus.clone(),
+            c.storage.clone(),
+            sid_plugin::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
+            c.event_bus.clone(),
+        )),
+        Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
+            c.storage.clone(),
+        )),
+        Arc::new(
+            sid_authn::session_revocation::SessionRevocationHandler::new(
+                c.revocation_cache.clone(),
+            ),
+        ),
+        c.auth_svc.enrollment_handler(),
+        c.auth_svc.owner_purge_handler(),
+        c.code_mail.clone(),
+    ];
+    if let Some(mail) = &c.magic_link_mail {
+        handlers.push(mail.clone());
     }
-}
-
-/// Free a job lock after the job's run. A failed release is logged: the lock
-/// frees itself (closed session, lease end), so the job resumes later.
-async fn release_job_lock(lock: sid_plugin::storage::JobLock, name: &str) {
-    if let Err(e) = lock.release().await {
-        tracing::warn!(job = name, error = %e, "background job lock release failed");
+    if let Some(mail) = &c.reset_mail {
+        handlers.push(mail.clone());
     }
-}
-
-/// Spawn all CE background tasks, each run by one instance at a time.
-pub fn spawn_ce_background_tasks(c: &CeComponents) {
-    // Ended first enrollments' records (hourly): their work, aborts and
-    // fences are dropped once no step of them can still arrive.
-    {
+    let mail_purge = {
+        // Ended authentication mail records. Idempotent, so no job lock.
         let storage = c.storage.clone();
-        let auth = c.auth_svc.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) = take_job_lock(
-                    &*storage,
-                    LOCK_ENROLLMENT_COMPACTION,
-                    "enrollment_compaction",
-                )
-                .await
-                {
-                    match auth.compact_enrollments().await {
-                        Ok(0) => {}
-                        Ok(n) => info!("Compacted {} ended enrollment records", n),
-                        Err(e) => tracing::warn!("enrollment compaction failed: {}", e),
-                    }
-                    release_job_lock(lock, "enrollment_compaction").await;
-                }
-            }
-        });
-    }
-
-    // Ended authentication mail records (hourly). Idempotent, so no job lock.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(3600);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now()).await
-                {
-                    Ok(0) => {}
-                    Ok(n) => info!("Dropped {} ended authentication mail records", n),
-                    Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
-                }
-            }
-        });
-    }
-
-    // Operation results and periods past their retention (every minute): a
-    // retained sign-in delivery is dropped within a minute of its
-    // operation's end, and a period that stopped accepting new commands is
-    // retired with its completions once its retention passed.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(60);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                sid_authn::operation::upkeep(storage.as_ref(), chrono::Utc::now()).await;
-            }
-        });
-    }
-
-    // Ceremony state past its deadline (every minute): one-time proofs,
-    // codes and counts leave rows behind, which no database expires by
-    // itself. Idempotent like the purge above, so no job lock.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(60);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                crate::background_tasks::purge_ceremony_state(storage.as_ref()).await;
-            }
-        });
-    }
-
-    // PAT auto-revoke (hourly)
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PAT_AUTO_REVOKE, "pat_auto_revoke").await
-                {
-                    match storage
-                        .revoke_unused_pats(
-                            sid_core::models::pat::PAT_AUTO_REVOKE_UNUSED_DAYS,
-                            AuditEntry::system("pat.auto_revoke_unused", "background_task").into(),
-                        )
+        sid_engine::maintenance::Job::shared(
+            "authentication_mail_purge",
+            std::time::Duration::from_secs(3600),
+            sid_engine::maintenance::FirstRun::AfterInterval,
+            Arc::new(move || {
+                let storage = storage.clone();
+                Box::pin(async move {
+                    match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now())
                         .await
                     {
                         Ok(0) => {}
-                        Ok(n) => info!("Auto-revoked {} unused PATs", n),
-                        Err(e) => tracing::warn!("PAT auto-revoke failed: {}", e),
+                        Ok(n) => info!("Dropped {} ended authentication mail records", n),
+                        Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
                     }
-                    release_job_lock(lock, "pat_auto_revoke").await;
-                }
-            }
-        });
-    }
-
-    // Machine credential expiry (hourly). Each alert is relayed as durable
-    // work whose id follows from the credential (and the day count), so the
-    // hourly scan announces an expiry once and each day's warning once.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let alert_days = sid_core::models::machine_user::CREDENTIAL_ALERT_BEFORE_EXPIRY_DAYS;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                let Some(lock) =
-                    take_job_lock(&*storage, LOCK_CREDENTIAL_EXPIRY, "credential_expiry").await
-                else {
-                    continue;
-                };
-                match storage.list_expiring_machine_credentials(alert_days).await {
-                    Ok(creds) => {
-                        let now = chrono::Utc::now();
-                        for cred in &creds {
-                            if let Some(exp) = cred.expires_at {
-                                if exp <= now {
-                                    let mut event = sid_core::models::event::Event::new(
-                                        "sid-server",
-                                        sid_core::models::event::event_types::MACHINE_USER_CREDENTIAL_EXPIRED,
-                                    )
-                                    .with_subject(format!("machine_credential/{}", cred.kid))
-                                    .with_data(serde_json::json!({
-                                        "kid": cred.kid,
-                                        "machine_user_id": cred.machine_user_id,
-                                        "expired_at": exp.to_rfc3339(),
-                                    }));
-                                    event.id =
-                                        credential_alert_id(&format!("expired:{}", cred.kid));
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay credential_expired event: {}",
-                                            e
-                                        );
-                                    }
-                                    tracing::warn!(
-                                        kid = %cred.kid,
-                                        machine_user_id = %cred.machine_user_id,
-                                        "Machine credential expired, should be revoked"
-                                    );
-                                } else {
-                                    let days_left = (exp - now).num_days();
-                                    let mut event = sid_core::models::event::Event::new(
-                                        "sid-server",
-                                        sid_core::models::event::event_types::MACHINE_USER_CREDENTIAL_EXPIRING,
-                                    )
-                                    .with_subject(format!("machine_credential/{}", cred.kid))
-                                    .with_data(serde_json::json!({
-                                        "kid": cred.kid,
-                                        "machine_user_id": cred.machine_user_id,
-                                        "expires_at": exp.to_rfc3339(),
-                                        "days_left": days_left,
-                                    }));
-                                    event.id = credential_alert_id(&format!(
-                                        "expiring:{}:{days_left}",
-                                        cred.kid
-                                    ));
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay credential_expiring event: {}",
-                                            e
-                                        );
-                                    }
-                                    tracing::info!(
-                                        kid = %cred.kid,
-                                        machine_user_id = %cred.machine_user_id,
-                                        days_left = days_left,
-                                        "Machine credential expiring soon"
-                                    );
-                                }
-                            }
-                        }
-                        if !creds.is_empty() {
-                            info!(
-                                "Credential expiry scan: {} credentials expiring/expired",
-                                creds.len()
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!("Credential expiry scan failed: {}", e),
-                }
-                release_job_lock(lock, "credential_expiry").await;
-            }
-        });
-    }
-
-    // Role assignment auto-revoke (every 5 minutes). Each warning threshold is
-    // announced once per assignment; each removal owes its expired event in
-    // the removal's own transaction.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                let Some(lock) = take_job_lock(&*storage, LOCK_ROLE_EXPIRY, "role_expiry").await
-                else {
-                    continue;
-                };
-
-                let max_window = *sid_core::models::authz::ROLE_EXPIRY_ALERT_HOURS
-                    .first()
-                    .unwrap_or(&72);
-                match storage.list_expiring_role_assignments(max_window).await {
-                    Ok(assignments) => {
-                        let now = chrono::Utc::now();
-                        for a in &assignments {
-                            if let Some(exp) = a.expires_at {
-                                if exp <= now {
-                                    continue;
-                                }
-                                let hours_left = (exp - now).num_hours();
-                                // The thresholds descend: the last one reached
-                                // is the tightest warning due now.
-                                if let Some(&threshold) =
-                                    sid_core::models::authz::ROLE_EXPIRY_ALERT_HOURS
-                                        .iter()
-                                        .rev()
-                                        .find(|&&t| hours_left <= t)
-                                {
-                                    let event = a.expiring_event(threshold, hours_left);
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay role_expiring event: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!("Role expiry scan failed: {}", e),
-                }
-
-                match storage
-                    .cleanup_expired_role_assignments(
-                        AuditEntry::system("role_assignment.auto_revoke", "background_task").into(),
-                    )
-                    .await
-                {
-                    Ok(removed) if removed.is_empty() => {}
-                    Ok(removed) => {
-                        info!("Auto-revoked {} expired role assignments", removed.len())
-                    }
-                    Err(e) => tracing::warn!("Role assignment auto-revoke failed: {}", e),
-                }
-                release_job_lock(lock, "role_expiry").await;
-            }
-        });
-    }
-
-    // Quarantine cleanup (daily)
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_QUARANTINE_CLEANUP, "quarantine_cleanup").await
-                {
-                    crate::background_tasks::cleanup_quarantine(storage.as_ref()).await;
-                    release_job_lock(lock, "quarantine_cleanup").await;
-                }
-            }
-        });
-    }
-
-    // Account closure lifecycle (hourly, leader-only): closures whose grace
-    // period ended are executed, closed profiles are purged at quarantine end.
-    {
-        let storage = c.storage.clone();
-        let closures = c.closure_service.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PROFILE_PURGE, "profile_purge").await
-                {
-                    crate::background_tasks::execute_due_closures(storage.as_ref(), &closures)
-                        .await;
-                    crate::background_tasks::purge_closed_profiles(storage.as_ref()).await;
-                    release_job_lock(lock, "profile_purge").await;
-                }
-            }
-        });
-    }
-
-    // Migration deadline enforcement (daily)
-    {
-        let storage = c.storage.clone();
-        let deadline_days = c.migration_deadline_days;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_MIGRATION_DEADLINE, "migration_deadline").await
-                {
-                    crate::background_tasks::enforce_migration_deadline(
-                        storage.as_ref(),
-                        deadline_days,
-                    )
-                    .await;
-                    release_job_lock(lock, "migration_deadline").await;
-                }
-            }
-        });
-    }
-
-    // Audit storage maintenance (daily, leader-only): this and next month's
-    // storage prepared, months past retention removed when the site chose
-    // `delete`.
-    {
-        let storage = c.storage.clone();
-        let retention = c.audit_retention;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_AUDIT_PARTITION, "audit_partition").await
-                {
-                    if let Err(e) = crate::background_tasks::manage_audit_partitions(
-                        storage.as_ref(),
-                        retention,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "audit storage maintenance failed");
-                    }
-                    release_job_lock(lock, "audit_partition").await;
-                }
-            }
-        });
-    }
-
-    // ── Principal verification expiry (daily, leader-only) ──
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PRINCIPAL_EXPIRY, "principal_expiry").await
-                {
-                    crate::background_tasks::expire_principal_verifications(storage.as_ref()).await;
-                    release_job_lock(lock, "principal_expiry").await;
-                }
-            }
-        });
-    }
+                })
+            }),
+        )
+    };
+    let maintenance = sid_engine::Maintenance::ce(sid_engine::CeMaintenance {
+        storage: c.storage.clone(),
+        closures: c.closure_service.clone(),
+        history_evaluation: c.auth_svc.history_evaluation(),
+        audit_retention: c.audit_retention,
+        migration_deadline_days: c.migration_deadline_days,
+        source: "sid-server".into(),
+    })
+    .with(mail_purge);
+    sid_engine::Engine::new(sid_engine::EngineParts {
+        storage: c.storage.clone(),
+        worker: format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7()),
+        handlers,
+        runner: RunnerConfig::default(),
+        maintenance,
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The receivers `SID_EVENT_RECEIVERS` names (comma-separated; `none` for a
@@ -1799,65 +1328,6 @@ pub(crate) fn bus_carries_history_evaluator(
         );
     }
     Ok(())
-}
-
-/// Start the runner for work the storage commits with a mutation (owed
-/// back-channel logouts and session revocations, relayed events and their
-/// deliveries, contestation checks). Every replica runs one; leases keep an attempt on a single
-/// replica. Facts are owed to the deployment's required receivers and to
-/// `also_required` (receivers this server runs). Runs until `shutdown`
-/// resolves, then lets attempts in flight record their outcome.
-pub fn spawn_work_runner(
-    c: &CeComponents,
-    also_required: &[sid_core::models::RequiredReceiver],
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let receivers = c
-        .required_receivers
-        .iter()
-        .chain(also_required)
-        .cloned()
-        .collect();
-    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
-        Arc::new(BackChannelLogoutHandler::new(
-            c.issuers.clone(),
-            c.storage.clone(),
-        )?),
-        Arc::new(EventRelayHandler::new(
-            c.storage.clone(),
-            receivers,
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
-            c.event_bus.clone(),
-            c.storage.clone(),
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
-            c.event_bus.clone(),
-        )),
-        Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
-            c.storage.clone(),
-        )),
-        Arc::new(
-            sid_authn::session_revocation::SessionRevocationHandler::new(
-                c.revocation_cache.clone(),
-            ),
-        ),
-        c.auth_svc.enrollment_handler(),
-        c.auth_svc.owner_purge_handler(),
-        c.code_mail.clone(),
-    ];
-    if let Some(mail) = &c.magic_link_mail {
-        handlers.push(mail.clone());
-    }
-    if let Some(mail) = &c.reset_mail {
-        handlers.push(mail.clone());
-    }
-    let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
-    let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
-        .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;
-    Ok(tokio::spawn(runner.run(shutdown)))
 }
 
 /// With a separate history evaluator, consume the cleanup settlements it
