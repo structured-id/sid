@@ -163,6 +163,7 @@ impl CoordinodeBackend {
                     super::consent::delete_project_records(tx, id)?;
                     super::scim::delete_project_records(tx, id)?;
                     super::flow::delete_project_records(tx, id)?;
+                    super::branding::delete_project_records(tx, id)?;
                 }
                 _ => return Ok(()),
             }

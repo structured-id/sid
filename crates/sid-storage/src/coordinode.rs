@@ -18,6 +18,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
 mod backend;
+mod branding;
 mod ceremony;
 mod consent;
 mod credential;
@@ -266,6 +267,8 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_flow_config_project ON :SidFlowConfig(project_id)",
     "CREATE CONSTRAINT sid_flow_action FOR (a:SidFlowAction) REQUIRE a.id IS UNIQUE",
     "CREATE INDEX sid_flow_action_project ON :SidFlowAction(project_id)",
+    "CREATE CONSTRAINT sid_branding FOR (b:SidBranding) REQUIRE b.id IS UNIQUE",
+    "CREATE INDEX sid_branding_project ON :SidBranding(project_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

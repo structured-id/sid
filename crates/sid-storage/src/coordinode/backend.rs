@@ -2301,57 +2301,57 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_branding_config(
         &self,
-        _config: &sid_core::models::BrandingConfig,
-        _ctx: MutationContext,
+        config: &sid_core::models::BrandingConfig,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("branding")
+        CoordinodeBackend::create_branding_config(self, config, ctx).await
     }
 
     async fn update_branding_draft(
         &self,
-        _config: &sid_core::models::BrandingConfig,
-        _ctx: MutationContext,
+        config: &sid_core::models::BrandingConfig,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("branding")
+        CoordinodeBackend::update_branding_draft(self, config, ctx).await
     }
 
     async fn publish_branding_config(
         &self,
-        _id: sid_core::models::BrandingConfigId,
-        _project_id: ProjectId,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        id: sid_core::models::BrandingConfigId,
+        project_id: ProjectId,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("branding")
+        CoordinodeBackend::publish_branding_config(self, id, project_id, at, ctx).await
     }
 
     async fn get_published_branding(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Option<sid_core::models::BrandingConfig>> {
-        refused("branding")
+        CoordinodeBackend::get_published_branding(self, project_id).await
     }
 
     async fn get_branding_config(
         &self,
-        _id: sid_core::models::BrandingConfigId,
+        id: sid_core::models::BrandingConfigId,
     ) -> Result<Option<sid_core::models::BrandingConfig>> {
-        refused("branding")
+        CoordinodeBackend::get_branding_config(self, id).await
     }
 
     async fn list_branding_configs(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<sid_core::models::BrandingConfig>> {
-        refused("branding")
+        CoordinodeBackend::list_branding_configs(self, project_id).await
     }
 
     async fn delete_branding_config(
         &self,
-        _id: sid_core::models::BrandingConfigId,
-        _ctx: MutationContext,
+        id: sid_core::models::BrandingConfigId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("branding")
+        CoordinodeBackend::delete_branding_config(self, id, ctx).await
     }
 
     // === INVITES AND REGISTRATION SOURCES ===
