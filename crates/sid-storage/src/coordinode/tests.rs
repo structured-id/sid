@@ -134,6 +134,71 @@ fn a_child_created_during_its_parents_deletion_is_seen() {
     assert_eq!(attempts.get(), 2);
 }
 
+/// Create a child of probe `k` that writes its parent's turn, committed in a
+/// transaction of its own; false when the parent is gone.
+fn create_child_writing_parent(db: &coordinode_embed::Database, k: i64) -> bool {
+    in_transaction(db, |tx| {
+        let rows = tx.run(
+            &format!(
+                "MATCH (p:SidProbe) WHERE p.k = {k} SET p.turn = coalesce(p.turn, 0) + 1
+                 RETURN p.k AS k"
+            ),
+            Params::default(),
+        )?;
+        if rows.is_empty() {
+            return Ok(Decision::Abandon(false));
+        }
+        tx.run(
+            &format!("CREATE (c:SidProbeChild {{parent: {k}}})"),
+            Params::default(),
+        )?;
+        Ok(Decision::Commit(true))
+    })
+    .unwrap()
+}
+
+/// Writing the parent is enough for a child: a deletion that read the
+/// children before the child committed runs again and sees it.
+#[test]
+fn a_child_writing_its_parent_during_the_deletion_is_seen() {
+    let db = coordinode_embed::Database::open_in_memory().unwrap();
+    write(&db, "CREATE (p:SidProbe {k: 3})");
+    let attempts = std::cell::Cell::new(0);
+    let deleted = in_transaction(&db, |tx| {
+        attempts.set(attempts.get() + 1);
+        let children = tx.run(
+            "MATCH (c:SidProbeChild) WHERE c.parent = 3 RETURN c.parent AS p",
+            Params::default(),
+        )?;
+        if attempts.get() == 1 {
+            assert!(create_child_writing_parent(&db, 3));
+        }
+        if !children.is_empty() {
+            return Ok(Decision::Abandon(false));
+        }
+        tx.run(
+            "MATCH (p:SidProbe) WHERE p.k = 3 DETACH DELETE p",
+            Params::default(),
+        )?;
+        Ok(Decision::Commit(true))
+    })
+    .unwrap();
+    assert!(
+        !deleted,
+        "the parent was deleted under a child created meanwhile"
+    );
+    assert_eq!(attempts.get(), 2);
+}
+
+/// A child written after its parent's deletion committed finds no parent.
+#[test]
+fn a_child_after_the_parents_deletion_finds_none() {
+    let db = coordinode_embed::Database::open_in_memory().unwrap();
+    write(&db, "CREATE (p:SidProbe {k: 4})");
+    write(&db, "MATCH (p:SidProbe) WHERE p.k = 4 DETACH DELETE p");
+    assert!(!create_child_writing_parent(&db, 4));
+}
+
 /// A free-form JSON value reads back as written, numbers keeping their kind.
 #[test]
 fn json_values_round_trip() {

@@ -19,9 +19,9 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
-    CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bytes,
-    get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, key,
-    opt_text, opt_time, texts, time, uuid,
+    CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bytes, get_int,
+    get_opt_text, get_opt_time, get_parsed, get_text, get_texts, get_time, get_uuid, key, opt_text,
+    opt_time, texts, time, uuid,
 };
 
 const METADATA: &str = "m.profile_id AS profile_id, m.meta_key AS meta_key, m.value AS value,
@@ -68,22 +68,9 @@ fn metadata_of(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Vec<Profile
 }
 
 /// Set one metadata key of a profile in `tx`, claiming the profile, which is
-/// deleted with its metadata. `created` names a profile this transaction
-/// created itself, which needs no claim.
-fn set_metadata(
-    tx: &Statements<'_>,
-    m: &ProfileMetadata,
-    created: Option<ProfileId>,
-) -> SidResult<()> {
-    if created != Some(m.profile_id) {
-        let held = tx.run(
-            "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
-            Params::default().with("id", bin(m.profile_id.as_bytes())),
-        )?;
-        if !claim_first(tx, &held)? {
-            return Err(SidError::NotFound(format!("profile {}", m.profile_id)));
-        }
-    }
+/// deleted with its metadata.
+fn set_metadata(tx: &Statements<'_>, m: &ProfileMetadata) -> SidResult<()> {
+    super::profile::claim_profile(tx, m.profile_id)?;
     let document = super::document(&m.value, "metadata value")?;
     let pair = metadata_pair(m.profile_id, &m.key)?;
     let updated = tx.run(
@@ -413,11 +400,8 @@ fn write_user(
     ctx: &mut MutationContext,
 ) -> SidResult<Vec<Session>> {
     let profile_id = write.profile_id();
-    let created = match write.mode {
-        DirectoryWriteMode::Create => {
-            super::profile::insert(tx, &write.profile)?;
-            Some(profile_id)
-        }
+    match write.mode {
+        DirectoryWriteMode::Create => super::profile::insert(tx, &write.profile)?,
         DirectoryWriteMode::Update => {
             // A missing account or one changed since it was read refuses
             // the whole write.
@@ -429,9 +413,8 @@ fn write_user(
                     )),
                 });
             }
-            None
         }
-    };
+    }
     for id in &write.unbind {
         super::principal::unbind(tx, *id, profile_id)?;
     }
@@ -466,7 +449,7 @@ fn write_user(
                 "a directory write sets its own account's metadata only".into(),
             ));
         }
-        set_metadata(tx, m, created)?;
+        set_metadata(tx, m)?;
     }
     Ok(match &write.end_access {
         Some(end) => {
@@ -563,7 +546,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let m = m.clone();
         self.mutate(format!("profile:{}", m.profile_id), ctx, move |tx| {
-            set_metadata(tx, &m, None)
+            set_metadata(tx, &m)
         })
         .await
     }

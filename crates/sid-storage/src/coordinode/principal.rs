@@ -553,6 +553,7 @@ impl CoordinodeBackend {
                     .with("revision", Value::Int(active))
                     .with("now", now.clone()),
             )?;
+            super::profile::claim_profile(tx, holder)?;
             super::profile::upsert_email(tx, &contact)?;
             tx.run(
                 "MATCH (b:SidPrincipalBinding) WHERE b.pair = $pair

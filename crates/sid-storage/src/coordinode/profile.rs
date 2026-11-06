@@ -49,6 +49,22 @@ pub(super) fn profile_value(id: ProfileId) -> Value {
     Value::Binary(id.as_bytes().to_vec())
 }
 
+/// Claim profile `id` for a record this transaction gives it, which its
+/// deletion removes: writing the profile makes a deletion that read the
+/// profile's records before this commit conflict and run again (the foreign
+/// key of a SQL store). `NotFound` when the profile is gone.
+pub(super) fn claim_profile(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
+    let rows = tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id
+         SET p.turn = coalesce(p.turn, 0) + 1 RETURN p.id AS id",
+        Params::default().with("id", profile_value(id)),
+    )?;
+    if rows.is_empty() {
+        return Err(SidError::NotFound(format!("profile {id}")));
+    }
+    Ok(())
+}
+
 fn revision(value: u64) -> SidResult<Value> {
     i64::try_from(value)
         .map(Value::Int)
@@ -753,6 +769,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let stored = stored.clone();
         self.mutate(format!("profile_phone:{}", stored.id.0), ctx, move |tx| {
+            claim_profile(tx, stored.profile_id)?;
             insert_phone(tx, &stored)
         })
         .await
@@ -861,6 +878,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let stored = stored.clone();
         self.mutate(format!("profile_email:{}", stored.id.0), ctx, move |tx| {
+            claim_profile(tx, stored.profile_id)?;
             insert_email(tx, &stored)
         })
         .await

@@ -474,6 +474,7 @@ pub(super) fn apply_history(tx: &Statements<'_>, commit: &HistoryCommit) -> SidR
     commit.validate()?;
     commit.check_write_cutoff(held_cutoff(tx)?)?;
     let owner = commit.owner;
+    super::profile::claim_profile(tx, owner)?;
     let params = || Params::default().with("owner", profile_value(owner));
     let moved = if commit.expected_revision == 0 {
         let exists = tx.run(
@@ -1060,6 +1061,7 @@ impl CoordinodeBackend {
                     "existing password history differs from archive".into(),
                 ));
             }
+            super::profile::claim_profile(tx, archive.owner)?;
             tx.run(
                 "CREATE (r:SidPasswordHistory {owner_id: $owner, revision: $revision})",
                 Params::default()

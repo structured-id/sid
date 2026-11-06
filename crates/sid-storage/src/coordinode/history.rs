@@ -121,6 +121,7 @@ impl CoordinodeBackend {
                 )
                 .with("now", now);
             if stored.is_empty() {
+                super::profile::claim_profile(tx, profile)?;
                 tx.run(
                     "CREATE (l:SidLoginLocation {pair: $pair, profile_id: $profile,
                         country: $country, latitude: $latitude, longitude: $longitude,

@@ -615,6 +615,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let stored = session.clone();
         self.mutate(format!("session:{}", session.id), ctx, move |tx| {
+            super::profile::claim_profile(tx, stored.profile_id)?;
             insert(tx, &stored)
         })
         .await
@@ -783,6 +784,11 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let stored = token.clone();
         self.mutate(format!("refresh_token:{}", token.id), ctx, move |tx| {
+            // Ending the session removes its tokens: the claim makes that
+            // conflict with this creation.
+            if !claim_session(tx, stored.session_id)? {
+                return Err(SidError::NotFound(format!("session {}", stored.session_id)));
+            }
             insert_token(tx, &stored)
         })
         .await
