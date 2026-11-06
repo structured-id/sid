@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.23](https://github.com/structured-id/sid/compare/v0.2.22...v0.2.23) - 2026-11-06
+
+### Added
+
+- *(admin)* typed ids in admin, federation and session validation ([#452](https://github.com/structured-id/sid/pull/452))
+- *(storage)* store sqlite ids as 16-byte blobs ([#447](https://github.com/structured-id/sid/pull/447))
+
 ## [0.2.22](https://github.com/structured-id/sid/compare/v0.2.21...v0.2.22) - 2026-11-06
 
 ### Added
