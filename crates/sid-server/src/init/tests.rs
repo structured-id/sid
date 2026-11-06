@@ -669,7 +669,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
     );
 }
 
-fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<sid_engine::AuditRetention> {
+fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<sid::AuditRetention> {
     audit_retention_from_lookup(|k| {
         Ok(pairs
             .iter()
@@ -682,7 +682,7 @@ fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<sid_engine::AuditRetentio
 /// both settings are read.
 #[test]
 fn audit_retention_defaults_to_a_year_archived() {
-    use sid_engine::{AuditRetention, RetentionAction};
+    use sid::{AuditRetention, RetentionAction};
     assert_eq!(retention(&[]).unwrap(), AuditRetention::default());
     assert_eq!(
         retention(&[
@@ -799,7 +799,7 @@ fn setting_refuses_non_text() {
 /// and any other value stops the start.
 #[test]
 fn management_setting_names_central_or_self() {
-    use sid_engine::Management;
+    use sid::Management;
     assert_eq!(
         management_setting(Some("central")).unwrap(),
         Some(Management::Central)

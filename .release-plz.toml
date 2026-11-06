@@ -39,7 +39,6 @@ changelog_include = [
   "sid-authn",
   "sid-authz",
   "sid-core",
-  "sid-engine",
   "sid-fed",
   "sid-i18n",
   "sid-infra",
@@ -54,6 +53,7 @@ changelog_include = [
   "sid-serve",
   "sid-storage",
   "sid-ui-host",
+  "structured-id",
 ]
 
 [[package]]

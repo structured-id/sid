@@ -1,11 +1,15 @@
 [package]
-name = "sid-engine"
-description = "StructuredID CE engine composition: lifecycle of the durable work runner and the maintenance an installation owes, transport-free"
+name = "structured-id"
+description = "StructuredID CE engine library: open an installation, run its durable work and the maintenance it owes, transport-free"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+# The crates.io name `sid` belongs to another project; the library keeps it.
+[lib]
+name = "sid"
 
 [dependencies]
 sid-authn = { workspace = true, features = ["keyed", "password-operation"] }
