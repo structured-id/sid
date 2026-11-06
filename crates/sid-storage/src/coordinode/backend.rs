@@ -243,139 +243,136 @@ impl GrantStore for CoordinodeBackend {
 impl CredentialStore for CoordinodeBackend {
     type Owner = ProfileId;
 
-    async fn get_credential(&self, _id: CredentialId) -> Result<Option<Credential>> {
-        refused("credentials")
+    async fn get_credential(&self, id: CredentialId) -> Result<Option<Credential>> {
+        CoordinodeBackend::get_credential(self, id).await
     }
 
     async fn get_credentials_by_profile(
         &self,
-        _profile_id: ProfileId,
-        _credential_type: Option<CredentialType>,
+        profile_id: ProfileId,
+        credential_type: Option<CredentialType>,
     ) -> Result<Vec<Credential>> {
-        refused("credentials")
+        CoordinodeBackend::get_credentials_by_profile(self, profile_id, credential_type).await
     }
 
-    async fn create_credential(
-        &self,
-        _credential: &Credential,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("credentials")
+    async fn create_credential(&self, credential: &Credential, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_credential(self, credential, ctx).await
     }
 
     async fn set_credential_label(
         &self,
-        _id: CredentialId,
-        _label: Option<&str>,
-        _ctx: MutationContext,
+        id: CredentialId,
+        label: Option<&str>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("credentials")
+        CoordinodeBackend::set_credential_label(self, id, label, ctx).await
     }
 
     async fn change_password(
         &self,
-        _id: CredentialId,
-        _expected: &[u8],
-        _new: &Credential,
-        _history: Option<&HistoryCommit>,
-        _ctx: MutationContext,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("credentials")
+        CoordinodeBackend::change_password(self, id, expected, new, history, ctx).await
     }
 
-    async fn get_password_history(&self, _owner: ProfileId) -> Result<PasswordHistory> {
-        refused("password history")
+    async fn get_password_history(&self, owner: ProfileId) -> Result<PasswordHistory> {
+        CoordinodeBackend::get_password_history(self, owner).await
     }
 
     async fn history_write_cutoff(&self) -> Result<Option<DateTime<Utc>>> {
-        refused("password history")
+        CoordinodeBackend::history_write_cutoff(self).await
     }
 
     async fn raise_history_write_cutoff(
         &self,
-        _not_before: DateTime<Utc>,
-        _ctx: MutationContext,
+        not_before: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<DateTime<Utc>> {
-        refused("password history")
+        CoordinodeBackend::raise_history_write_cutoff(self, not_before, ctx).await
     }
 
     async fn reseal_credential_data(
         &self,
-        _id: CredentialId,
-        _expected: &[u8],
-        _data: &[u8],
-        _ctx: MutationContext,
+        id: CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("credentials")
+        CoordinodeBackend::reseal_credential_data(self, id, expected, data, ctx).await
     }
 
-    async fn mark_credential_used(&self, _id: CredentialId, _ctx: MutationContext) -> Result<bool> {
-        refused("credentials")
+    async fn mark_credential_used(&self, id: CredentialId, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::mark_credential_used(self, id, ctx).await
     }
 
     async fn replace_credential_data(
         &self,
-        _id: CredentialId,
-        _expected: &[u8],
-        _data: &[u8],
-        _ctx: MutationContext,
+        id: CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("credentials")
+        CoordinodeBackend::replace_credential_data(self, id, expected, data, ctx).await
     }
 
     async fn replace_credential(
         &self,
-        _credential: &Credential,
-        _ctx: MutationContext,
+        credential: &Credential,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("credentials")
+        CoordinodeBackend::replace_credential(self, credential, ctx).await
     }
 
     async fn enroll_credential(
         &self,
-        _credential: &Credential,
-        _recovery: Option<&Credential>,
-        _ctx: MutationContext,
+        credential: &Credential,
+        recovery: Option<&Credential>,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("credentials")
+        CoordinodeBackend::enroll_credential(self, credential, recovery, ctx).await
     }
 
-    async fn delete_credential(&self, _id: CredentialId, _ctx: MutationContext) -> Result<()> {
-        refused("credentials")
+    async fn delete_credential(&self, id: CredentialId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_credential(self, id, ctx).await
     }
 
     async fn revoke_credential(
         &self,
-        _id: CredentialId,
-        _ctx: MutationContext,
+        id: CredentialId,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::CredentialRevocation> {
-        refused("credentials")
+        CoordinodeBackend::revoke_credential(self, id, ctx).await
     }
 
     async fn delete_credentials_by_profile(
         &self,
-        _profile_id: ProfileId,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("credentials")
+        CoordinodeBackend::delete_credentials_by_profile(self, profile_id, ctx).await
     }
 
     async fn ensure_webauthn_user_handle(
         &self,
-        _profile_id: ProfileId,
-        _rp_id: &str,
-        _candidate: sid_core::models::WebAuthnUserHandle,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        rp_id: &str,
+        candidate: sid_core::models::WebAuthnUserHandle,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::WebAuthnUserHandle> {
-        refused("WebAuthn user handles")
+        CoordinodeBackend::ensure_webauthn_user_handle(self, profile_id, rp_id, candidate, ctx)
+            .await
     }
 
     async fn get_profile_by_webauthn_user_handle(
         &self,
-        _rp_id: &str,
-        _handle: sid_core::models::WebAuthnUserHandle,
+        rp_id: &str,
+        handle: sid_core::models::WebAuthnUserHandle,
     ) -> Result<Option<ProfileId>> {
-        refused("WebAuthn user handles")
+        CoordinodeBackend::get_profile_by_webauthn_user_handle(self, rp_id, handle).await
     }
 }
 
@@ -1012,12 +1009,23 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_profiles_with_pending_migration(self).await
     }
 
-    async fn end_legacy_migration(
+    async fn end_legacy_migration(&self, profile: &Profile, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::end_legacy_migration(self, profile, ctx).await
+    }
+
+    async fn export_password_history(
         &self,
-        _profile: &Profile,
-        _ctx: MutationContext,
+        owner: ProfileId,
+    ) -> Result<Option<sid_core::models::HistoryArchive>> {
+        CoordinodeBackend::export_password_history(self, owner).await
+    }
+
+    async fn import_password_history(
+        &self,
+        archive: &sid_core::models::HistoryArchive,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("profiles")
+        CoordinodeBackend::import_password_history(self, archive, ctx).await
     }
 
     // === TOKENS ===
@@ -1151,11 +1159,11 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_credentials_by_type(
         &self,
-        _credential_type: CredentialType,
-        _after: Option<CredentialId>,
-        _limit: u32,
+        credential_type: CredentialType,
+        after: Option<CredentialId>,
+        limit: u32,
     ) -> Result<Vec<Credential>> {
-        refused("credentials")
+        CoordinodeBackend::list_credentials_by_type(self, credential_type, after, limit).await
     }
 
     async fn get_initial_access_token(

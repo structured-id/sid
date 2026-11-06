@@ -34,6 +34,7 @@ mod harness {
     };
     use sid_plugin::conformance::backend::{create_test_profile, instance_org, test_audit};
     use sid_plugin::conformance::client_registry::RegistryHarness;
+    use sid_plugin::conformance::credential_store::CredentialHarness;
     use sid_plugin::conformance::grant_store::{
         AssignmentHarness, GrantHarness, OwnerStatusHarness,
     };
@@ -117,6 +118,28 @@ mod harness {
                     .unwrap(),
                 "the release applies"
             );
+        }
+    }
+
+    #[async_trait]
+    impl CredentialHarness for Store {
+        type Owner = ProfileId;
+
+        fn store(&self) -> &dyn CredentialStore<Owner = ProfileId> {
+            &self.0
+        }
+
+        async fn owner(&self) -> ProfileId {
+            let profile = create_test_profile("credential");
+            self.0
+                .create_profile(&profile, test_audit())
+                .await
+                .expect("a test profile");
+            profile.id
+        }
+
+        fn missing_owner(&self) -> ProfileId {
+            ProfileId::generate()
         }
     }
 
@@ -277,6 +300,35 @@ capability!(client_registry:
     resource_found_by_id_and_indicator,
     retired_resource_still_found,
     resource_access_exact,
+);
+
+capability!(credential_store:
+    revoke_keeps_last_primary,
+    credential_deletion,
+    single_active_password,
+    replace_credential_data_is_compare_and_swap,
+    mark_used_only_when_active,
+    create_never_replaces,
+    label_only_on_active,
+    change_password_is_compare_and_swap,
+    reseal_keeps_status,
+    replace_password_swaps_only_password,
+    replace_recovery_codes_swaps_only_the_set,
+    policy_evidence_roundtrip,
+    enroll_stores_factor_with_codes,
+    history_is_empty_until_written,
+    history_rotation_is_published_by_its_commit,
+    history_descriptor_conflict_writes_nothing,
+    history_commit_is_compare_and_swap,
+    history_retains_depth,
+    history_of_another_owner_is_refused,
+    history_write_cutoff_fences_commits,
+    history_write_cutoff_races_a_commit,
+    user_handle_is_created_once,
+    concurrent_enrollments_agree_on_one_handle,
+    user_handle_resolves_only_at_its_rp,
+    user_handle_is_unique_per_rp,
+    user_handle_needs_an_owner,
 );
 
 capability!(issuer_store:

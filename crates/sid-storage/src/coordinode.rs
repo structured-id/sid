@@ -19,6 +19,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 mod audit;
 mod backend;
 mod ceremony;
+mod credential;
 mod instance_secret;
 mod operation;
 mod principal;
@@ -117,6 +118,20 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_iat_id FOR (t:SidInitialAccessToken) REQUIRE t.id IS UNIQUE",
     "CREATE CONSTRAINT sid_iat_hash FOR (t:SidInitialAccessToken) REQUIRE t.token_hash IS UNIQUE",
     "CREATE INDEX sid_iat_project ON :SidInitialAccessToken(project_id)",
+    "CREATE CONSTRAINT sid_credential_id FOR (c:SidCredential) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_credential_active_password FOR (c:SidCredential) REQUIRE c.active_password_of IS UNIQUE",
+    "CREATE INDEX sid_credential_profile ON :SidCredential(profile_id)",
+    "CREATE INDEX sid_credential_type ON :SidCredential(credential_type)",
+    "CREATE CONSTRAINT sid_webauthn_pair FOR (w:SidWebAuthnHandle) REQUIRE w.pair IS UNIQUE",
+    "CREATE CONSTRAINT sid_webauthn_handle FOR (w:SidWebAuthnHandle) REQUIRE w.handle_key IS UNIQUE",
+    "CREATE INDEX sid_webauthn_profile ON :SidWebAuthnHandle(profile_id)",
+    "CREATE CONSTRAINT sid_password_history FOR (r:SidPasswordHistory) REQUIRE r.owner_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_history_epoch_id FOR (e:SidHistoryEpoch) REQUIRE e.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_history_epoch_active FOR (e:SidHistoryEpoch) REQUIRE e.active_of IS UNIQUE",
+    "CREATE INDEX sid_history_epoch_owner ON :SidHistoryEpoch(owner_id)",
+    "CREATE CONSTRAINT sid_history_entry FOR (h:SidHistoryEntry) REQUIRE h.key IS UNIQUE",
+    "CREATE INDEX sid_history_entry_owner ON :SidHistoryEntry(owner_id)",
+    "CREATE CONSTRAINT sid_history_cutoff FOR (c:SidHistoryCutoff) REQUIRE c.id IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -144,6 +159,7 @@ impl CoordinodeBackend {
         backend.transaction(operation::init_state).await?;
         backend.transaction(principal::init_email_policy).await?;
         backend.transaction(project::init_system_project).await?;
+        backend.transaction(credential::init_cutoff).await?;
         Ok(backend)
     }
 
