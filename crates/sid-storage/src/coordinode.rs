@@ -2,15 +2,21 @@
 //! SID's records in a host's CoordiNode database, through the database handle
 //! the host already holds. Every change runs in one interactive transaction:
 //! CoordiNode refuses a commit whose write set another transaction changed
-//! since it began, and the whole transaction is run again from the start.
+//! since it began, or whose pinned reads ([`Statements::hold`]) changed, and
+//! the whole transaction is run again from the start. A plain read is not
+//! checked at commit: what a decision rests on is either written or held.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use coordinode_core::graph::node::NodeId;
 use coordinode_core::graph::types::Value;
 use coordinode_embed::{Database, DatabaseError, TransactionId};
+use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
+mod audit;
+mod operation;
 mod work;
 
 /// How often one change is run again after a conflicting commit before it is
@@ -19,11 +25,18 @@ mod work;
 const CONFLICT_RETRIES: u32 = 64;
 
 /// The schema SID's records rely on: what keeps an identifier unique across
-/// concurrent writers. A work kind's admission node is unique too, so the
-/// first enqueues of a kind meet on one node instead of each creating its own.
+/// concurrent writers. Nodes that writers of one thing meet on (a work kind's
+/// admission, an audit chain's head, a command key) are unique too, so the
+/// first writers create one node and conflict instead of each creating its
+/// own.
 const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_work_id FOR (w:SidWork) REQUIRE w.id IS UNIQUE",
     "CREATE CONSTRAINT sid_work_kind FOR (k:SidWorkKind) REQUIRE k.kind IS UNIQUE",
+    "CREATE CONSTRAINT sid_audit_head FOR (h:SidAuditHead) REQUIRE h.chain IS UNIQUE",
+    "CREATE CONSTRAINT sid_audit_record FOR (r:SidAuditRecord) REQUIRE r.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_operation_slot FOR (o:SidOperation) REQUIRE o.slot IS UNIQUE",
+    "CREATE CONSTRAINT sid_operation_period FOR (p:SidOperationPeriod) REQUIRE p.period IS UNIQUE",
+    "CREATE CONSTRAINT sid_operation_state FOR (s:SidOperationState) REQUIRE s.id IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -48,6 +61,7 @@ impl CoordinodeBackend {
                 Ok(())
             })
             .await?;
+        backend.transaction(operation::init_state).await?;
         Ok(backend)
     }
 
@@ -73,6 +87,43 @@ impl CoordinodeBackend {
     {
         self.blocking(move |db| in_transaction(db, change)).await
     }
+
+    /// Commit `ctx` with whatever `change` wrote in the same transaction:
+    /// its audit record on `chain`, its command completion and its owed
+    /// work, all of it or none.
+    async fn mutate<F>(&self, chain: String, ctx: MutationContext, mut change: F) -> SidResult<()>
+    where
+        F: FnMut(&Statements<'_>) -> SidResult<()> + Send + 'static,
+    {
+        self.transaction(move |tx| {
+            change(tx)?;
+            finalize(tx, &chain, ctx.clone())?;
+            Ok(Decision::Commit(()))
+        })
+        .await
+    }
+}
+
+/// What every mutation commits besides its own state, in its transaction.
+fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult<()> {
+    // The authority first: a write whose actor or policy changed commits
+    // nothing. Fences are checked against the stores that hold the actor or
+    // policy; this backend holds none of them yet, so it cannot confirm one.
+    if let Some(fence) = &ctx.fence {
+        return Err(SidError::Storage(format!(
+            "CoordiNode storage cannot check the fence {fence:?}"
+        )));
+    }
+    // Then the completion: a keyed command another commit already completed
+    // commits nothing, not even its audit or work.
+    if let Some(completion) = &ctx.operation {
+        operation::record(tx, completion)?;
+    }
+    audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
+    for owed in &ctx.work {
+        work::insert(tx, owed, sid_plugin::OWED_WORK_CAPACITY)?;
+    }
+    Ok(())
 }
 
 /// What a transaction's body decided.
@@ -94,6 +145,22 @@ impl Statements<'_> {
         self.db
             .execute_in_transaction(self.id, query, Some(params.0))
             .map_err(storage)
+    }
+
+    /// Commit only while the node `node` (its `id(n)`) stays as it is now:
+    /// a decision built on it is refused, and run again, when another commit
+    /// changed or deleted it meanwhile. `false` when it is gone already.
+    pub(super) fn hold(&self, node: i64) -> SidResult<bool> {
+        let node = NodeId::from_raw(
+            u64::try_from(node).map_err(|_| SidError::Storage(format!("bad node id {node}")))?,
+        );
+        let Some(version) = self.db.node_version(node).map_err(storage)? else {
+            return Ok(false);
+        };
+        self.db
+            .expect_node_version(self.id, node, Some(version))
+            .map_err(storage)?;
+        Ok(true)
     }
 }
 
@@ -133,7 +200,10 @@ where
             }
             Decision::Commit(answer) => match db.commit_transaction(id) {
                 Ok(_) => return Ok(answer),
-                Err(DatabaseError::TransactionConflict { .. }) => continue,
+                Err(
+                    DatabaseError::TransactionConflict { .. }
+                    | DatabaseError::RevisionMismatch { .. },
+                ) => continue,
                 Err(e) => return Err(storage(e)),
             },
         }
@@ -197,6 +267,20 @@ pub(super) fn get_opt_text(row: &Row, name: &str) -> SidResult<Option<String>> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(v)) => Ok(Some(v.clone())),
         Some(other) => Err(SidError::Storage(format!("{name} is not text: {other:?}"))),
+    }
+}
+
+pub(super) fn get_opt_int(row: &Row, name: &str) -> SidResult<Option<i64>> {
+    match row.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => get_int(row, name).map(Some),
+    }
+}
+
+pub(super) fn get_opt_bytes(row: &Row, name: &str) -> SidResult<Option<Vec<u8>>> {
+    match row.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => get_bytes(row, name).map(Some),
     }
 }
 
