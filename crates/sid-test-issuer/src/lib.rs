@@ -46,6 +46,28 @@ pub struct Setup {
     pub checkers: Vec<Checker>,
 }
 
+/// What the replicas of one installation share: issuers started on the same
+/// one are its replicas, and an issuer started again on it is the
+/// installation after a restart.
+#[derive(Clone)]
+pub struct Installation {
+    /// The SQLite database URL the replicas keep their state in.
+    pub store: String,
+    /// The cache they share (single-use admissions, ceremony state), as
+    /// replicas share their cache server.
+    pub cache: Arc<dyn CacheBackend>,
+}
+
+impl Installation {
+    /// An installation keeping its state in the SQLite file `path`.
+    pub fn at(path: &std::path::Path) -> Self {
+        Self {
+            store: format!("sqlite://{}", path.display()),
+            cache: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        }
+    }
+}
+
 /// An access token from a stored sign-in.
 pub struct Issued {
     pub token: String,
@@ -64,6 +86,7 @@ pub struct TestIssuer {
     issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     jwt: Arc<JwtService>,
     resources: Vec<ProtectedResource>,
+    auth: Arc<sid_server::grpc::auth_service::AuthServiceImpl>,
     addr: SocketAddr,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     serving: Option<tokio::task::JoinHandle<()>>,
@@ -89,9 +112,25 @@ impl TestIssuer {
     /// Provision the issuer as a server start does, create `setup`, and
     /// serve it.
     pub async fn start(setup: Setup) -> Self {
-        let backend = sid_storage::sqlite::SqliteBackend::new_in_memory()
-            .await
-            .expect("SQLite storage");
+        Self::start_in(setup, None).await
+    }
+
+    /// A replica of `installation`, provisioned and serving as [`start`]
+    /// does. Its first replica creates `setup`; the others pass an empty one.
+    ///
+    /// [`start`]: Self::start
+    pub async fn replica(setup: Setup, installation: &Installation) -> Self {
+        Self::start_in(setup, Some(installation)).await
+    }
+
+    async fn start_in(setup: Setup, installation: Option<&Installation>) -> Self {
+        let backend = match installation {
+            Some(installation) => {
+                sid_storage::sqlite::SqliteBackend::new(&installation.store).await
+            }
+            None => sid_storage::sqlite::SqliteBackend::new_in_memory().await,
+        }
+        .expect("SQLite storage");
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
         );
@@ -207,7 +246,10 @@ impl TestIssuer {
         ))
         .expect("request verifiers");
 
-        let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+        let cache: Arc<dyn CacheBackend> = match installation {
+            Some(installation) => installation.cache.clone(),
+            None => Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        };
         let revocation = Arc::new(RevocationCache::recorded_in(
             std::time::Duration::from_secs(900),
             cache.clone(),
@@ -254,7 +296,7 @@ impl TestIssuer {
             authz.clone(),
         );
         let routes = tonic::service::Routes::new(
-            sid_proto::sid::v1::auth_service_server::AuthServiceServer::from_arc(auth),
+            sid_proto::sid::v1::auth_service_server::AuthServiceServer::from_arc(auth.clone()),
         )
         .add_service(sid_proto::sid::v1::authz_service_server::AuthzServiceServer::from_arc(authz))
         .add_service(
@@ -285,6 +327,7 @@ impl TestIssuer {
             issuers,
             jwt,
             resources,
+            auth,
             addr,
             stop: Some(stop),
             serving: Some(serving),
@@ -525,6 +568,91 @@ impl TestIssuer {
             .expect("end session");
     }
 
+    /// Register `principal` (an email address) with `password` through the
+    /// issuer's password registration; returns the Profile it created. On an
+    /// installation not claimed yet the account registers with the open
+    /// claim token, as its first administrator does; afterwards it registers
+    /// as the installation's registration policy admits.
+    pub async fn password_account(&self, principal: &str, password: &[u8]) -> Profile {
+        use secrecy::ExposeSecret;
+        use sid_proto::sid::v1::auth_service_server::AuthService;
+        use sid_proto::sid::v1::{
+            OpaqueZkppRegistrationFinishRequest, OpaqueZkppRegistrationStartRequest,
+        };
+        let claim_token =
+            sid_authn::admin_claim::open_claim(self.storage.as_ref(), key_manager().as_ref())
+                .await
+                .expect("installation claim")
+                .map(|token| token.expose_secret().to_owned());
+        let started = password::start_registration(password);
+        let prepared = self
+            .auth
+            .opaque_zkpp_registration_start(tonic::Request::new(
+                OpaqueZkppRegistrationStartRequest {
+                    principal: principal.to_owned(),
+                    registration_request: started.request.clone(),
+                    claim_token,
+                    invite_code: None,
+                },
+            ))
+            .await
+            .expect("registration start")
+            .into_inner();
+        let operation_id = prepared
+            .history
+            .expect("the registration's history context")
+            .operation_id;
+        let record =
+            password::finish_registration(started, password, &prepared.registration_response);
+        self.auth
+            .opaque_zkpp_registration_finish(tonic::Request::new(
+                OpaqueZkppRegistrationFinishRequest {
+                    operation_id,
+                    registration_record: record,
+                    proof: None,
+                },
+            ))
+            .await
+            .expect("registration finish");
+        self.storage
+            .get_profile_by_email(principal)
+            .await
+            .expect("profile lookup")
+            .expect("the registered profile")
+    }
+
+    /// Start a password sign-in of `principal` and answer the issuer's
+    /// challenge as the client does; returns the finish request the client
+    /// sends next. Its `login_id` is the reference a native proof of the
+    /// sign-in binds (`sid_cer`).
+    pub async fn start_password_login(
+        &self,
+        principal: &str,
+        password: &[u8],
+    ) -> sid_proto::sid::v1::OpaqueLoginFinishRequest {
+        use sid_proto::sid::v1::auth_service_server::AuthService;
+        use sid_proto::sid::v1::{OpaqueLoginFinishRequest, OpaqueLoginStartRequest};
+        let login = password::start_login(password);
+        let started = self
+            .auth
+            .opaque_login_start(tonic::Request::new(OpaqueLoginStartRequest {
+                principal: principal.to_owned(),
+                credential_request: login.request.clone(),
+            }))
+            .await
+            .expect("login start")
+            .into_inner();
+        OpaqueLoginFinishRequest {
+            principal: principal.to_owned(),
+            credential_finalization: password::finish_login(
+                login,
+                password,
+                &started.credential_response,
+            ),
+            login_id: started.login_id,
+        }
+    }
+
     /// Stop serving and wait until the issuer is unreachable: its listener
     /// is closed and its connections are gone.
     pub async fn stop(&mut self) {
@@ -654,7 +782,12 @@ fn auth_service(
     use sid_authn::opaque::{OpaqueRouter, P256Opaque, PallasOpaque, RistrettoOpaque};
     use sid_plugin::crypto::{CurveId, OpaqueOperations};
     let primary = Box::new(PallasOpaque::new());
-    let setup = primary.create_setup(None).expect("OPAQUE setup");
+    // Every issuer of the test installation derives the same OPAQUE server
+    // setup, so a registration or a login started at one replica finishes at
+    // another, as an installation's replicas share theirs.
+    let setup = primary
+        .create_setup(Some(b"sid-test-issuer OPAQUE server setup"))
+        .expect("OPAQUE setup");
     let mut verifiers: std::collections::HashMap<CurveId, Box<dyn OpaqueOperations>> =
         std::collections::HashMap::new();
     verifiers.insert(CurveId::Ristretto255, Box::new(RistrettoOpaque::new()));
@@ -722,6 +855,8 @@ fn auth_service(
         password_history,
     ))
 }
+
+mod password;
 
 #[cfg(test)]
 mod tests;
