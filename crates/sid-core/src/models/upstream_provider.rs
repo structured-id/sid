@@ -8,37 +8,16 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::principal_verification::AssuranceLevel;
 use sid_keys::EncryptedField;
 
-/// Unique identifier for an upstream provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct UpstreamProviderId(pub Uuid);
+pub use sid_ids::UpstreamProviderId;
 
-impl UpstreamProviderId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Binding context of this provider's client secret, the only context
-    /// it is sealed and opened under.
-    pub fn client_secret_context(self) -> String {
-        format!("upstream:{}", self.0)
-    }
-}
-
-impl Default for UpstreamProviderId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for UpstreamProviderId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// Binding context of `provider`'s client secret, the only context it is
+/// sealed and opened under: `upstream:` and the id's hyphenated text.
+pub fn client_secret_context(provider: UpstreamProviderId) -> String {
+    format!("upstream:{provider}")
 }
 
 /// Upstream IdP protocol.
@@ -190,7 +169,7 @@ impl UpstreamProvider {
     ) -> Self {
         let now = Utc::now();
         Self {
-            id: UpstreamProviderId::new(),
+            id: UpstreamProviderId::generate(),
             name: name.into(),
             protocol,
             trust_category: ProviderTrustCategory::Social,

@@ -269,6 +269,7 @@ pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{
     ProviderTrustCategory, UpstreamProtocol, UpstreamProvider, UpstreamProviderId,
+    client_secret_context,
 };
 pub use username::{
     SuspensionReason, UsernameError, UsernameStatus, validate_corporate_login, validate_username,

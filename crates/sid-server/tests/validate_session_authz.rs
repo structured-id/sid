@@ -99,6 +99,35 @@ async fn test_validate_session_answers_the_owner_and_an_administrator() {
             .expect("answered")
             .into_inner();
         assert!(resp.valid);
-        assert_eq!(resp.profile_id, Some(f.owner.id.to_string()));
+        assert_eq!(resp.profile_id, Some(f.owner.id.into()));
+        assert!(resp.expires_at.is_some());
     }
+}
+
+/// Regression: an expired session was answered with its owner and expiry
+/// although the contract sets both only for a valid session. The owner
+/// learns it is no longer valid, and nothing more.
+#[tokio::test]
+async fn test_validate_session_names_no_owner_of_an_expired_session() {
+    let owner = test_profile();
+    let session = Session::new(
+        owner.id,
+        None,
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    );
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_profile(owner.clone())
+            .with_session(session.clone()),
+    );
+    let token = issue_token(&svc.jwt, &owner, &["openid".to_string()]);
+    let resp = svc
+        .auth
+        .validate_session(authed(validate(&session), &token))
+        .await
+        .expect("answered")
+        .into_inner();
+    assert!(!resp.valid);
+    assert!(resp.profile_id.is_none());
+    assert!(resp.expires_at.is_none());
 }

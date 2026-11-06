@@ -4714,11 +4714,13 @@ impl AuthService for AuthServiceImpl {
                 let now = chrono::Utc::now();
                 let valid = session.expires_at > now;
 
+                // The owner and the expiry are set only for a valid session,
+                // as the response contract says.
                 Ok(Response::new(ValidateSessionResponse {
                     valid,
-                    profile_id: Some(session.profile_id.to_string()),
+                    profile_id: valid.then(|| session.profile_id.into()),
                     scopes: vec![],
-                    expires_at: Some(super::convert::to_timestamp(session.expires_at)),
+                    expires_at: valid.then(|| super::convert::to_timestamp(session.expires_at)),
                 }))
             }
             Ok(_) => Ok(Response::new(ValidateSessionResponse {

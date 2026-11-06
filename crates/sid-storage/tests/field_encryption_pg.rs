@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use secrecy::SecretBox;
-use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider, UpstreamProviderId};
+use sid_core::models::{
+    AuditEntry, UpstreamProtocol, UpstreamProvider, UpstreamProviderId, client_secret_context,
+};
 use sid_crypto::RustCryptoPrimitives;
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError, KeyVersionParams, SoftwareKeyManager};
 use sid_plugin::storage::StorageBackend;
@@ -65,14 +67,14 @@ async fn stored_provider(
     km: &SoftwareKeyManager,
     secret: &[u8],
 ) -> UpstreamProvider {
-    let id = UpstreamProviderId::new();
+    let id = UpstreamProviderId::generate();
     let encrypted = km
-        .encrypt(secret, &id.client_secret_context())
+        .encrypt(secret, &client_secret_context(id))
         .await
         .expect("encryption succeeds");
 
     let mut provider = UpstreamProvider::new(
-        format!("test-{}", id.0),
+        format!("test-{id}"),
         UpstreamProtocol::Oidc,
         "client-id",
         encrypted,
@@ -99,11 +101,8 @@ async fn secret_of(
     km: &SoftwareKeyManager,
     provider: &UpstreamProvider,
 ) -> Result<Vec<u8>, KeyManagerError> {
-    km.decrypt(
-        &provider.client_secret,
-        &provider.id.client_secret_context(),
-    )
-    .await
+    km.decrypt(&provider.client_secret, &client_secret_context(provider.id))
+        .await
 }
 
 /// The ordinary path: what one process encrypts and stores, a process that
@@ -180,7 +179,7 @@ async fn test_lazy_rotation_through_storage() {
     assert!(current.needs_rotation(&loaded.client_secret));
 
     let rotated = current
-        .rotate(&loaded.client_secret, &loaded.id.client_secret_context())
+        .rotate(&loaded.client_secret, &client_secret_context(loaded.id))
         .await
         .expect("rotation succeeds");
     assert_eq!(rotated.key_version, 2);

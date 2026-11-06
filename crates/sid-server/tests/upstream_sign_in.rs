@@ -43,7 +43,7 @@ async fn storage() -> Arc<dyn StorageBackend> {
 struct Setup {
     storage: Arc<dyn StorageBackend>,
     provider: Provider,
-    provider_id: String,
+    provider_id: sid_core::models::UpstreamProviderId,
     service: UpstreamServiceImpl,
 }
 
@@ -80,13 +80,16 @@ async fn setup_on(
     common::crypto::install_tls();
     let provider = Provider::start(None).await;
     let keys = common::test_key_manager();
-    let id = sid_core::models::UpstreamProviderId::new();
+    let id = sid_core::models::UpstreamProviderId::generate();
     let secret = keys
-        .encrypt(b"provider-secret", &id.client_secret_context())
+        .encrypt(
+            b"provider-secret",
+            &sid_core::models::client_secret_context(id),
+        )
         .await
         .unwrap();
     let mut registered = UpstreamProvider::new(
-        format!("Test IdP {}", id.0),
+        format!("Test IdP {id}"),
         UpstreamProtocol::Oidc,
         CLIENT,
         secret,
@@ -96,7 +99,7 @@ async fn setup_on(
     storage
         .create_upstream_provider(
             &registered,
-            AuditEntry::system("upstream_provider.create", id.0.to_string()).into(),
+            AuditEntry::system("upstream_provider.create", id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -104,7 +107,7 @@ async fn setup_on(
         service: service(storage.clone(), pin, policy),
         storage,
         provider,
-        provider_id: id.0.to_string(),
+        provider_id: id,
     }
 }
 
@@ -127,7 +130,7 @@ impl Setup {
         let started = self
             .service
             .initiate_upstream_auth(Request::new(InitiateUpstreamAuthRequest {
-                provider_id: self.provider_id.clone(),
+                provider_id: Some(self.provider_id.into()),
                 redirect_uri: REDIRECT.into(),
             }))
             .await
@@ -152,7 +155,7 @@ impl Setup {
         origin: Option<&str>,
     ) -> Request<HandleUpstreamCallbackRequest> {
         let mut request = Request::new(HandleUpstreamCallbackRequest {
-            provider_id: self.provider_id.clone(),
+            provider_id: Some(self.provider_id.into()),
             code: "the-code".into(),
             state,
             redirect_uri: REDIRECT.into(),
@@ -166,10 +169,8 @@ impl Setup {
     }
 
     async fn linked(&self, sub: &str) -> bool {
-        let provider =
-            sid_core::models::UpstreamProviderId(uuid::Uuid::parse_str(&self.provider_id).unwrap());
         self.storage
-            .get_upstream_identity_by_provider_subject(provider, sub)
+            .get_upstream_identity_by_provider_subject(self.provider_id, sub)
             .await
             .unwrap()
             .is_some()
@@ -268,7 +269,7 @@ async fn an_upstream_sign_in_creates_a_session() {
         sid_core::models::ProfileId::from_uuid(uuid::Uuid::parse_str(&claims.sub).unwrap())
             .unwrap();
     let sessions = s.storage.list_sessions(&profile).await.unwrap();
-    let ids: Vec<String> = sessions.iter().map(|x| x.id.to_string()).collect();
+    let ids: Vec<_> = sessions.iter().map(|x| Some(x.id.into())).collect();
     assert!(ids.contains(&first.session_id), "{ids:?}");
     assert!(ids.contains(&second.session_id), "{ids:?}");
 }

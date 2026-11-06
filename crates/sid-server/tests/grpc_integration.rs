@@ -4948,11 +4948,11 @@ async fn test_maintenance_mode_blocks_upstream_sign_in() {
     use sid_proto::sid::v1::upstream_service_server::UpstreamService;
     use sid_proto::sid::v1::{HandleUpstreamCallbackRequest, InitiateUpstreamAuthRequest};
     let svc = maintenance_mode_services().await;
-    let provider = uuid::Uuid::now_v7().to_string();
+    let provider = sid_core::models::UpstreamProviderId::generate();
     let started = svc
         .upstream
         .initiate_upstream_auth(Request::new(InitiateUpstreamAuthRequest {
-            provider_id: provider.clone(),
+            provider_id: Some(provider.into()),
             redirect_uri: "https://sid.example.com/account/login/upstream".into(),
         }))
         .await
@@ -4962,7 +4962,7 @@ async fn test_maintenance_mode_blocks_upstream_sign_in() {
     let callback = svc
         .upstream
         .handle_upstream_callback(Request::new(HandleUpstreamCallbackRequest {
-            provider_id: provider,
+            provider_id: Some(provider.into()),
             code: "the-code".into(),
             state: "the-state".into(),
             redirect_uri: "https://sid.example.com/account/login/upstream".into(),

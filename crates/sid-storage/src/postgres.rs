@@ -1465,7 +1465,7 @@ impl PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let written = sqlx::query(sql)
-            .bind(provider.id.0)
+            .bind(provider.id)
             .bind(&provider.name)
             .bind(provider.protocol.as_str())
             .bind(provider.trust_category.as_str())
@@ -1492,7 +1492,7 @@ impl PostgresBackend {
         }
         Self::audit_in_tx(
             &mut tx,
-            &format!("upstream_provider:{}", provider.id.0),
+            &format!("upstream_provider:{}", provider.id),
             audit,
         )
         .await?;
@@ -5649,7 +5649,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::UpstreamProviderRow>(
             "SELECT * FROM upstream_providers WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -5710,11 +5710,11 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("DELETE FROM upstream_providers WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("upstream_provider:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("upstream_provider:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -5741,7 +5741,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::UpstreamIdentityRow>(
             "SELECT * FROM upstream_identities WHERE provider_id = $1 AND upstream_subject = $2",
         )
-        .bind(provider_id.0)
+        .bind(provider_id)
         .bind(upstream_subject)
         .fetch_optional(&self.pool)
         .await
@@ -5766,7 +5766,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(identity.id.0)
-        .bind(identity.provider_id.0)
+        .bind(identity.provider_id)
         .bind(identity.profile_id)
         .bind(&identity.upstream_subject)
         .bind(&identity.upstream_issuer)

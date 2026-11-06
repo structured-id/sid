@@ -1204,7 +1204,7 @@ impl DeviceAuthRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct UpstreamProviderRow {
-    pub id: Uuid,
+    pub id: UpstreamProviderId,
     pub name: String,
     pub protocol: String,
     pub trust_category: String,
@@ -1234,7 +1234,7 @@ impl UpstreamProviderRow {
             .map_err(|e| SidError::Storage(format!("column client_secret: {e}")))?;
 
         Ok(UpstreamProvider {
-            id: UpstreamProviderId(self.id),
+            id: self.id,
             name: self.name,
             protocol: parsed("protocol", &self.protocol)?,
             trust_category: parsed("trust_category", &self.trust_category)?,
@@ -1264,7 +1264,7 @@ impl UpstreamProviderRow {
 pub struct UpstreamIdentityRow {
     pub id: Uuid,
     pub profile_id: ProfileId,
-    pub provider_id: Uuid,
+    pub provider_id: UpstreamProviderId,
     pub upstream_subject: String,
     pub upstream_issuer: Option<String>,
     pub upstream_email: Option<String>,
@@ -1280,7 +1280,7 @@ impl UpstreamIdentityRow {
         Ok(UpstreamIdentity {
             id: UpstreamIdentityId(self.id),
             profile_id: self.profile_id,
-            provider_id: UpstreamProviderId(self.provider_id),
+            provider_id: self.provider_id,
             upstream_subject: self.upstream_subject,
             upstream_issuer: self.upstream_issuer,
             upstream_email: self.upstream_email,
