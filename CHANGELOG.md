@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.22](https://github.com/structured-id/sid/compare/v0.2.21...v0.2.22) - 2026-11-06
+
+### Added
+
+- *(storage)* CoordiNode backend for embedding server hosts ([#436](https://github.com/structured-id/sid/pull/436))
+
 ## [0.2.21](https://github.com/structured-id/sid/compare/v0.2.20...v0.2.21) - 2026-11-06
 
 ### Added
