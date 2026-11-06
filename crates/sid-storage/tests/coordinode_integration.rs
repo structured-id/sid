@@ -664,6 +664,40 @@ mod history_key_store {
     );
 }
 
+/// The principal store harness the SQL backends use: owners are Profiles.
+mod common {
+    pub use sid_plugin::conformance::backend::*;
+
+    #[path = "../common/principal_conformance.rs"]
+    pub mod principal_conformance;
+}
+
+/// Run principal store conformance `scenario` against this backend.
+macro_rules! principal_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::principal_store::$scenario(
+                &common::principal_conformance::ProfilePrincipals(&backend),
+            )
+            .await;
+        }
+    )*};
+}
+
+mod principal_store {
+    use super::*;
+
+    principal_store!(
+        held_principal_resolves_its_owner,
+        unknown_principal_resolves_nobody,
+        other_type_resolves_nobody,
+        other_key_revision_resolves_nobody,
+        released_principal_resolves_nobody,
+    );
+}
+
 /// Two instances of SID on one host database, as two processes sharing it.
 async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend) {
     let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
