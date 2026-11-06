@@ -4251,6 +4251,12 @@ impl StorageBackend for MockStorage {
                 "Cannot delete system project".into(),
             ));
         }
+        // As every backend: an application keeps its project.
+        if inner.applications.values().any(|a| a.project_id == id) {
+            return Err(sid_core::Error::InvalidState(format!(
+                "project {id} is in use"
+            )));
+        }
         inner.owe(&ctx)?;
         inner.projects.remove(&id);
         Ok(())

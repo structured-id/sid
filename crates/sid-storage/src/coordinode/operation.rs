@@ -469,9 +469,12 @@ impl OperationResultStore for CoordinodeBackend {
         now: DateTime<Utc>,
         acceptance: Duration,
     ) -> SidResult<IssuedOperationPeriod> {
-        let until = now.checked_add_signed(acceptance).ok_or_else(|| {
-            SidError::Validation("operation period acceptance out of range".into())
-        })?;
+        let until = now
+            .checked_add_signed(acceptance)
+            .map(super::stored_time)
+            .ok_or_else(|| {
+                SidError::Validation("operation period acceptance out of range".into())
+            })?;
         self.transaction(move |tx| {
             let current = tx.run(
                 "MATCH (p:SidOperationPeriod) WHERE p.retired = false AND p.issued_at <= $now

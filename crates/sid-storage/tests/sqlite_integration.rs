@@ -863,6 +863,7 @@ mod grant_store {
         session_found_by_browser_secret,
         touch_session_keeps_latest_activity,
         auth_code_roundtrip,
+        auth_code_needs_its_authorizing_session,
         auth_code_redeem_once,
         auth_code_concurrent_redeem,
         refresh_token_roundtrip,

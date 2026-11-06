@@ -450,6 +450,13 @@ pub(super) fn time(t: chrono::DateTime<chrono::Utc>) -> Value {
     Value::Int(t.timestamp_micros())
 }
 
+/// `t` as [`time`] stores it and [`get_time`] reads it back: a value the
+/// store issues itself is answered as every later reader sees it.
+pub(super) fn stored_time(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    use chrono::SubsecRound;
+    t.trunc_subsecs(6)
+}
+
 pub(super) fn opt_time(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
     t.map_or(Value::Null, time)
 }

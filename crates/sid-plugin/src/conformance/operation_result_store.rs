@@ -277,7 +277,10 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         .max()
         .map_or(horizon - Duration::days(28), |until| {
             until + Duration::hours(1)
-        });
+        })
+        // A caller's clock may be finer than the store keeps instants: the
+        // period issued and the one read back are still the same.
+        + Duration::nanoseconds(463);
     assert!(t0 + Duration::hours(4) < horizon, "the scenario's window");
     let (a, b) = tokio::join!(
         store.current_operation_period(t0, acceptance),

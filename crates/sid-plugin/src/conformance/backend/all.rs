@@ -51,6 +51,7 @@ macro_rules! storage_conformance {
             );
             $crate::__storage_scenarios!($setup, application:
                 test_application_roles_are_stored_together
+                test_project_in_use_is_not_deleted
                 test_concurrent_indicator_registration
                 test_system_integration_exists_once
                 test_application_update_and_list

@@ -52,6 +52,10 @@ pub async fn test_binding_is_stable(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("allocated binding is found");
     assert_eq!(found.binding_id, first.binding_id);
+    // Each use answers with the binding as stored, so a later reader sees
+    // the same instants however fine the caller's clock is.
+    assert_eq!(found.created_at, first.created_at);
+    assert_eq!(found.last_used_at, again.last_used_at);
 }
 
 /// Different scopes of one profile get different bindings with distinct

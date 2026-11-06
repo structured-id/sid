@@ -160,18 +160,6 @@ fn delete_target(tx: &Statements<'_>, id: ScimOutboundTargetId) -> SidResult<()>
     Ok(())
 }
 
-/// Delete in `tx` the SCIM outbound targets of `project`.
-pub(super) fn delete_project_records(tx: &Statements<'_>, project: ProjectId) -> SidResult<()> {
-    let rows = tx.run(
-        "MATCH (t:SidScimTarget) WHERE t.project_id = $id RETURN t.id AS id",
-        Params::default().with("id", project_value(project)),
-    )?;
-    for row in &rows {
-        delete_target(tx, ScimOutboundTargetId(get_uuid(row, "id")?))?;
-    }
-    Ok(())
-}
-
 impl CoordinodeBackend {
     pub(super) async fn create_scim_outbound_target(
         &self,

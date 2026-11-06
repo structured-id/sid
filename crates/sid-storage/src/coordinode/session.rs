@@ -29,7 +29,8 @@ use super::audit::{ip_of, ip_value};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_count,
     get_int, get_opt_bytes, get_opt_text, get_opt_time, get_opt_uuid, get_text, get_texts,
-    get_time, get_uuid, opt_text, opt_time, opt_uuid, profile::profile_value, texts, time, uuid,
+    get_time, get_uuid, hold_first, opt_text, opt_time, opt_uuid, profile::profile_value, texts,
+    time, uuid,
 };
 
 const SESSION: &str = "s.id AS id, s.profile_id AS profile_id, s.client_id AS client_id,
@@ -599,6 +600,16 @@ fn hold_live_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
     }
 }
 
+/// Whether session `id` exists, held for the commit as [`hold_live_session`]
+/// holds it.
+fn hold_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
+    let rows = tx.run(
+        "MATCH (s:SidSession) WHERE s.id = $id RETURN id(s) AS node",
+        Params::default().with("id", session_value(id)),
+    )?;
+    hold_first(tx, &rows)
+}
+
 impl CoordinodeBackend {
     pub(super) async fn create_session(
         &self,
@@ -882,6 +893,12 @@ impl CoordinodeBackend {
             }
             let auth = &code.authentication;
             check_levels(auth.assurance_level, auth.elevation)?;
+            // A logout racing the authorization either ends the session first,
+            // and no code is stored, or conflicts with this commit and finds
+            // the code to end with it.
+            if !hold_session(tx, auth.session)? {
+                return Err(SidError::NotFound(format!("session {}", auth.session)));
+            }
             tx.run(
                 "CREATE (a:SidAuthCode {code_hash: $hash, profile_id: $profile_id,
                     client_id: $client_id, redirect_uri: $redirect_uri, scopes: $scopes,

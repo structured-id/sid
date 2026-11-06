@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, SubsecRound, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::audit::{AuditEntry, AuditError, AuditRecord, compute_record_hash};
 use sid_core::{Error as SidError, Result as SidResult};
@@ -54,7 +54,7 @@ pub(super) fn append(
     // record keeps (microseconds): one read back hashes the same digits.
     let mut record = AuditRecord {
         id: Uuid::now_v7().to_string(),
-        timestamp: at.trunc_subsecs(6),
+        timestamp: super::stored_time(at),
         chain_id: chain.to_owned(),
         sequence: u64::try_from(sequence).map_err(|_| SidError::Storage("sequence".into()))?,
         actor_id: entry.actor_id,

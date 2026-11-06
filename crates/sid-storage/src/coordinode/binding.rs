@@ -120,7 +120,8 @@ impl CoordinodeBackend {
     ) -> SidResult<ServiceBinding> {
         let scope = scope.clone();
         self.transaction(move |tx| {
-            let now = Utc::now();
+            // Answered as stored: a concurrent caller reads the same instant.
+            let now = super::stored_time(Utc::now());
             if let Some(mut existing) = find(tx, profile, &scope)? {
                 // Recording the use is not a change of the binding: no audit.
                 tx.run(

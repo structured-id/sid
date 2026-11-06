@@ -157,11 +157,25 @@ impl CoordinodeBackend {
         self.mutate(format!("project:{id}"), ctx, move |tx| {
             match get(tx, id)? {
                 Some(stored) if !stored.is_system => {
+                    // An application or SCIM target keeps its project: no live
+                    // client or outbound target outlives it. Creating either
+                    // holds the project, so one racing this deletion conflicts.
+                    for holder in ["SidApplication", "SidScimTarget"] {
+                        let held = tx.run(
+                            &format!(
+                                "MATCH (n:{holder}) WHERE n.project_id = $id
+                                 RETURN n.project_id AS p LIMIT 1"
+                            ),
+                            Params::default().with("id", project_value(id)),
+                        )?;
+                        if !held.is_empty() {
+                            return Err(SidError::InvalidState(format!("project {id} is in use")));
+                        }
+                    }
                     super::rbac::delete_project_records(tx, id)?;
                     super::machine::delete_project_records(tx, id)?;
                     super::device::delete_project_records(tx, id)?;
                     super::consent::delete_project_records(tx, id)?;
-                    super::scim::delete_project_records(tx, id)?;
                     super::flow::delete_project_records(tx, id)?;
                     super::branding::delete_project_records(tx, id)?;
                 }

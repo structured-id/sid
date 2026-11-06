@@ -305,6 +305,80 @@ pub async fn test_application_roles_are_stored_together(backend: &dyn StorageBac
     );
 }
 
+/// A project is not deleted while an application or a SCIM target belongs to
+/// it: the refusal is `InvalidState` and leaves the project and what it holds
+/// in place, so no live client outlives its project. Once they are removed,
+/// the project is deleted.
+pub async fn test_project_in_use_is_not_deleted(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        AttributeMapping, GroupPushConfig, OutboundAuthConfig, OutboundSyncConfig,
+        ScimOutboundTarget, ScimOutboundTargetId,
+    };
+
+    let project = Project::new("In use", None);
+    backend
+        .create_project(&project, test_audit())
+        .await
+        .unwrap();
+    let app = application(project.id, "Held");
+    backend
+        .create_application(&app, None, None, test_audit())
+        .await
+        .unwrap();
+    let refused = |e: Result<(), SidError>| {
+        assert!(matches!(e, Err(SidError::InvalidState(_))), "{e:?}");
+    };
+    refused(backend.delete_project(project.id, test_audit()).await);
+    assert!(backend.get_project(project.id).await.unwrap().is_some());
+    assert!(backend.get_application(app.id).await.unwrap().is_some());
+
+    assert!(
+        backend
+            .delete_application(app.id, test_audit())
+            .await
+            .unwrap()
+    );
+    let now = Utc::now();
+    let target = ScimOutboundTarget {
+        id: ScimOutboundTargetId::new(),
+        client_id: format!("held-{}", Uuid::now_v7().simple()),
+        project_id: project.id,
+        display_name: "Downstream".into(),
+        endpoint_url: "https://scim.sid.example.com/v2".into(),
+        auth: OutboundAuthConfig::Bearer {
+            token_secret: "sealed-token".into(),
+        },
+        attribute_mapping: AttributeMapping::default(),
+        group_push: GroupPushConfig::default(),
+        sync_config: OutboundSyncConfig::default(),
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+    backend
+        .create_scim_outbound_target(&target, test_audit())
+        .await
+        .unwrap();
+    refused(backend.delete_project(project.id, test_audit()).await);
+    assert!(
+        backend
+            .get_scim_outbound_target(target.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    backend
+        .delete_scim_outbound_target(target.id, test_audit())
+        .await
+        .unwrap();
+    backend
+        .delete_project(project.id, test_audit())
+        .await
+        .unwrap();
+    assert!(backend.get_project(project.id).await.unwrap().is_none());
+}
+
 /// Concurrent registrations of one indicator: exactly one resource is stored.
 pub async fn test_concurrent_indicator_registration(backend: &dyn StorageBackend) {
     let issuer = instance_issuer(backend).await;
