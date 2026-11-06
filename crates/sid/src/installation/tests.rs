@@ -18,7 +18,7 @@ struct MasterKey(PathBuf);
 
 impl MasterKey {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("sid-engine-{}", uuid::Uuid::now_v7()));
+        let dir = std::env::temp_dir().join(format!("sid-installation-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
