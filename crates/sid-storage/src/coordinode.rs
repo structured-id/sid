@@ -36,6 +36,7 @@ mod project;
 mod rbac;
 mod registry;
 mod reset;
+mod scim;
 mod session;
 mod signals;
 mod work;
@@ -254,6 +255,12 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_notification_preferences FOR (n:SidNotificationPreferences) REQUIRE n.profile_id IS UNIQUE",
     "CREATE CONSTRAINT sid_login_location FOR (l:SidLoginLocation) REQUIRE l.pair IS UNIQUE",
     "CREATE INDEX sid_login_location_profile ON :SidLoginLocation(profile_id)",
+    "CREATE CONSTRAINT sid_scim_target FOR (t:SidScimTarget) REQUIRE t.id IS UNIQUE",
+    "CREATE INDEX sid_scim_target_project ON :SidScimTarget(project_id)",
+    "CREATE CONSTRAINT sid_scim_record FOR (r:SidScimRecord) REQUIRE r.pair IS UNIQUE",
+    "CREATE INDEX sid_scim_record_target ON :SidScimRecord(target_id)",
+    "CREATE CONSTRAINT sid_scim_dead_letter FOR (d:SidScimDeadLetter) REQUIRE d.id IS UNIQUE",
+    "CREATE INDEX sid_scim_dead_letter_target ON :SidScimDeadLetter(target_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -523,6 +530,24 @@ pub(super) fn key(parts: &[&[u8]]) -> SidResult<Value> {
         key.extend_from_slice(part);
     }
     Ok(Value::Binary(key))
+}
+
+/// A structured value as a CoordiNode document, never as serialized text.
+pub(super) fn document<T: serde::Serialize>(value: &T, name: &str) -> SidResult<Value> {
+    rmpv::ext::to_value(value)
+        .map(Value::Document)
+        .map_err(|e| SidError::Validation(format!("{name}: {e}")))
+}
+
+/// The structured value the document `name` of `row` holds.
+pub(super) fn get_document<T: serde::de::DeserializeOwned>(row: &Row, name: &str) -> SidResult<T> {
+    match field(row, name)? {
+        Value::Document(document) => rmpv::ext::from_value(document.clone())
+            .map_err(|e| SidError::Storage(format!("{name}: {e}"))),
+        other => Err(SidError::Storage(format!(
+            "{name} is not a document: {other:?}"
+        ))),
+    }
 }
 
 pub(super) fn texts(values: &[String]) -> Value {

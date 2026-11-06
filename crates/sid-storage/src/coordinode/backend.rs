@@ -2151,84 +2151,85 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_scim_outbound_target(
         &self,
-        _target: &ScimOutboundTarget,
-        _ctx: MutationContext,
+        target: &ScimOutboundTarget,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::create_scim_outbound_target(self, target, ctx).await
     }
 
     async fn get_scim_outbound_target(
         &self,
-        _id: ScimOutboundTargetId,
+        id: ScimOutboundTargetId,
     ) -> Result<Option<ScimOutboundTarget>> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::get_scim_outbound_target(self, id).await
     }
 
     async fn list_scim_outbound_targets(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<ScimOutboundTarget>> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::list_scim_outbound_targets(self, project_id).await
     }
 
     async fn delete_scim_outbound_target(
         &self,
-        _id: ScimOutboundTargetId,
-        _ctx: MutationContext,
+        id: ScimOutboundTargetId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::delete_scim_outbound_target(self, id, ctx).await
     }
 
     async fn create_scim_outbound_record(
         &self,
-        _record: &ScimOutboundRecord,
-        _ctx: MutationContext,
+        record: &ScimOutboundRecord,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::create_scim_outbound_record(self, record, ctx).await
     }
 
     async fn record_scim_outbound_sync(
         &self,
-        _record: &ScimOutboundRecord,
-        _ctx: MutationContext,
+        record: &ScimOutboundRecord,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::record_scim_outbound_sync(self, record, ctx).await
     }
 
     async fn record_scim_outbound_dead_letter(
         &self,
-        _entry: &OutboundDlqEntry,
-        _ctx: MutationContext,
+        entry: &OutboundDlqEntry,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::record_scim_outbound_dead_letter(self, entry, ctx).await
     }
 
     async fn get_scim_outbound_record(
         &self,
-        _target_id: ScimOutboundTargetId,
-        _sid_entity_id: Uuid,
-        _entity_type: OutboundEntityType,
+        target_id: ScimOutboundTargetId,
+        sid_entity_id: Uuid,
+        entity_type: OutboundEntityType,
     ) -> Result<Option<ScimOutboundRecord>> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::get_scim_outbound_record(self, target_id, sid_entity_id, entity_type)
+            .await
     }
 
     async fn create_outbound_dlq_entry(
         &self,
-        _entry: &OutboundDlqEntry,
-        _ctx: MutationContext,
+        entry: &OutboundDlqEntry,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::create_outbound_dlq_entry(self, entry, ctx).await
     }
 
     async fn list_outbound_dlq_entries(
         &self,
-        _target_id: ScimOutboundTargetId,
+        target_id: ScimOutboundTargetId,
     ) -> Result<Vec<OutboundDlqEntry>> {
-        refused("SCIM outbound provisioning")
+        CoordinodeBackend::list_outbound_dlq_entries(self, target_id).await
     }
 
-    async fn delete_outbound_dlq_entry(&self, _id: Uuid, _ctx: MutationContext) -> Result<()> {
-        refused("SCIM outbound provisioning")
+    async fn delete_outbound_dlq_entry(&self, id: Uuid, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_outbound_dlq_entry(self, id, ctx).await
     }
 
     // === FLOWS ===

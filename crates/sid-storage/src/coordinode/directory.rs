@@ -46,19 +46,10 @@ fn profile_of(row: &Row, name: &str) -> SidResult<ProfileId> {
 // === Profile metadata ===
 
 fn metadata(row: &Row) -> SidResult<ProfileMetadata> {
-    let value = match row.get("value") {
-        Some(Value::Document(document)) => rmpv::ext::from_value(document.clone())
-            .map_err(|e| SidError::Storage(format!("metadata value: {e}")))?,
-        other => {
-            return Err(SidError::Storage(format!(
-                "metadata value is not a document: {other:?}"
-            )));
-        }
-    };
     Ok(ProfileMetadata {
         profile_id: profile_of(row, "profile_id")?,
         key: get_text(row, "meta_key")?,
-        value,
+        value: super::get_document(row, "value")?,
         created_at: get_time(row, "created_at")?,
         updated_at: get_time(row, "updated_at")?,
     })
@@ -92,10 +83,7 @@ fn set_metadata(
             return Err(SidError::NotFound(format!("profile {}", m.profile_id)));
         }
     }
-    let document = Value::Document(
-        rmpv::ext::to_value(&m.value)
-            .map_err(|e| SidError::Validation(format!("metadata value: {e}")))?,
-    );
+    let document = super::document(&m.value, "metadata value")?;
     let pair = metadata_pair(m.profile_id, &m.key)?;
     let updated = tx.run(
         "MATCH (m:SidProfileMetadata) WHERE m.pair = $pair

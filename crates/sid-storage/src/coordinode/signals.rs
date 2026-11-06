@@ -414,18 +414,9 @@ impl CoordinodeBackend {
             let Some(row) = rows.first() else {
                 return Ok(None);
             };
-            let categories = match row.get("categories") {
-                Some(Value::Document(document)) => rmpv::ext::from_value(document.clone())
-                    .map_err(|e| SidError::Storage(format!("notification preferences: {e}")))?,
-                other => {
-                    return Err(SidError::Storage(format!(
-                        "notification preferences are not a document: {other:?}"
-                    )));
-                }
-            };
             Ok(Some(NotificationPreferences {
                 profile_id: profile,
-                categories,
+                categories: super::get_document(row, "categories")?,
                 updated_at: get_time(row, "updated_at")?,
             }))
         })
@@ -437,10 +428,7 @@ impl CoordinodeBackend {
         p: &NotificationPreferences,
         ctx: MutationContext,
     ) -> SidResult<()> {
-        let document = Value::Document(
-            rmpv::ext::to_value(&p.categories)
-                .map_err(|e| SidError::Validation(format!("notification preferences: {e}")))?,
-        );
+        let document = super::document(&p.categories, "notification preferences")?;
         let (profile, updated_at) = (p.profile_id, p.updated_at);
         self.mutate(format!("profile:{profile}"), ctx, move |tx| {
             let held = tx.run(
