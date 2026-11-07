@@ -22,11 +22,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
-use sid_authn::webauthn::{
-    AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
-    VerifiedAssertion, WebAuthnServer,
-};
-use sid_core::models::WebAuthnUserHandle;
+use sid_authn::webauthn::{AssertionPurpose, AssertionResponse, VerifiedAssertion, WebAuthnServer};
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
@@ -280,6 +276,23 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
     }
 }
 
+/// The answer to a refused or failed passkey ceremony.
+fn passkey_refusal(e: sid::passkey::PasskeyError) -> Status {
+    use sid::passkey::PasskeyError as E;
+    match e {
+        E::InvalidField { field, reason } => invalid_field(field, reason),
+        E::ProfileNotFound(id) => {
+            not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
+        }
+        E::Expired(ceremony) => ceremony_expired(ceremony),
+        E::AuthenticationFailed => authentication_failed(),
+        E::Enrollment(e) => e.into_status(),
+        E::SignIn(e) => sign_in_refusal(e),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
 /// The answer to a refused or failed password replacement.
 fn password_refusal(e: sid::password::PasswordError) -> Status {
     use sid::password::PasswordError as E;
@@ -332,9 +345,8 @@ pub struct AuthServiceImpl {
     pub(crate) password_ops: Arc<sid::password_operation::PasswordOperations>,
     /// The history evaluator, when it runs in this process.
     history_evaluation: Option<Arc<sid_authn::password_operation::HistoryEvaluation>>,
-    /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
-    /// only that profile may finish it.
-    webauthn_state: ChallengeStore<ProfileId>,
+    /// Passkey binding and sign-in ceremonies.
+    passkeys: sid::passkey::Passkeys,
     /// WebAuthn ceremony of a pending step-up, keyed by session and step-up
     /// challenge id: only a completion on the same session consumes it.
     step_up_state: ChallengeStore<String>,
@@ -487,6 +499,8 @@ impl AuthServiceImpl {
             key_manager.clone(),
             issuer.clone(),
         );
+        let passkeys =
+            sid::passkey::Passkeys::new(webauthn.clone(), ceremonies.clone(), key_manager.clone());
         let sign_ins = sid::sign_in::SignIn::new(sid::sign_in::SignInParts {
             storage: storage.clone(),
             jwt: jwt.clone(),
@@ -510,12 +524,7 @@ impl AuthServiceImpl {
             feature_flags,
             password_ops,
             history_evaluation,
-            webauthn_state: ChallengeStore::new(
-                ceremonies.clone(),
-                key_manager.clone(),
-                "webauthn-binding",
-                ttl,
-            ),
+            passkeys,
             step_up_state: ChallengeStore::new(
                 ceremonies.clone(),
                 key_manager.clone(),
@@ -1127,58 +1136,21 @@ impl AuthServiceImpl {
 
     /// The profile's passkeys that may still sign in (revoked ones never do).
     async fn active_passkeys(&self, profile_id: ProfileId) -> Result<Vec<Credential>, Status> {
-        Ok(self
-            .storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::WebAuthn))
+        sid::passkey::active(self.storage.as_ref(), profile_id)
             .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .filter(|c| c.status.is_active())
-            .collect())
+            .map_err(storage_failure)
     }
 
     /// Record a successful assertion on the passkey that made it (see
-    /// [`sid_authn::webauthn::record_passkey_use`]): a lost race or a revoked
-    /// passkey fails the sign-in. Returns the RFC 8176 method of the key and
-    /// the fence that proved this sign-in's first factor.
+    /// [`sid::passkey::record_use`]).
     async fn record_passkey_use(
         &self,
         passkeys: &[Credential],
         verified: &VerifiedAssertion,
     ) -> Result<(&'static str, sid_core::models::CredentialFence), Status> {
-        sid_authn::webauthn::record_passkey_use(self.storage.as_ref(), passkeys, verified)
+        sid::passkey::record_use(self.storage.as_ref(), passkeys, verified)
             .await
-            .map_err(storage_failure)?
-            .map(|fence| (verified.key_amr, fence))
-            .ok_or_else(authentication_failed)
-    }
-
-    /// The result of a passkey assertion finish: a refused assertion counts
-    /// as a failed sign-in of `profile_id`; any other failure is internal.
-    async fn passkey_outcome(
-        &self,
-        finished: sid_core::Result<VerifiedAssertion>,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-    ) -> Result<VerifiedAssertion, Status> {
-        match finished {
-            Ok(verified) => Ok(verified),
-            Err(sid_core::Error::AuthenticationFailed(why)) => {
-                warn!("WebAuthn authentication failed: {why}");
-                self.record_failed_login(&profile_id.to_string(), client_ip)
-                    .await?;
-                Err(authentication_failed())
-            }
-            Err(other) => Err(internal("finish passkey sign-in", other)),
-        }
-    }
-
-    /// The active account `identifier` signs in to, or the same refusal as a
-    /// wrong password whatever keeps it from resolving.
-    async fn resolve_profile(&self, identifier: &str) -> Result<sid_core::models::Profile, Status> {
-        self.resolve_profile_optional(identifier)
-            .await?
-            .ok_or_else(authentication_failed)
+            .map_err(passkey_refusal)
     }
 
     /// The caller's verified access token and the caller it stands for
@@ -2231,67 +2203,11 @@ impl AuthService for AuthServiceImpl {
 
         // Profile from the verified token, never a client-sent profile_id
         let caller = self.caller_claims(&request).await?.caller;
-        let profile_id = caller.profile_id;
-        self.require_enrollment_authority(&caller, profile_id, CredentialType::WebAuthn)
-            .await?;
-
-        let _req = request.into_inner();
-
-        let profile = self
-            .storage
-            .get_profile(profile_id)
+        self.passkeys
+            .registration_start(&self.sign_ins, &caller)
             .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| {
-                not_found(
-                    ErrorReason::ProfileNotFound,
-                    "Profile",
-                    profile_id.to_string(),
-                )
-            })?;
-
-        // The profile's passkeys are excluded, so one authenticator does not
-        // register twice; a storage failure fails the start.
-        let existing = self.active_passkeys(profile.id).await?;
-
-        // The profile's account handle at this RP: created by its first
-        // authorized enrollment and kept for every later passkey.
-        let user_handle = self
-            .storage
-            .ensure_webauthn_user_handle(
-                profile.id,
-                self.webauthn.rp_id(),
-                WebAuthnUserHandle(rand::random()),
-                AuditEntry::user(
-                    profile.id.to_string(),
-                    "webauthn.user_handle",
-                    profile.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        let result = self
-            .webauthn
-            .registration_start(
-                user_handle,
-                profile.username.as_deref().unwrap_or(""),
-                &existing,
-            )
-            .await
-            .map_err(|e| internal("start passkey registration", e))?;
-
-        // Only the profile that started the ceremony may finish it.
-        self.webauthn_state
-            .insert(&result.state_key, &profile.id)
-            .await
-            .or_status()?;
-
-        Ok(Response::new(WebAuthnRegistrationStartResponse {
-            challenge: result.state_key.into_bytes(),
-            options: result.options,
-        }))
+            .map(Response::new)
+            .map_err(passkey_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "web_authn_registration_finish"))]
@@ -2304,67 +2220,11 @@ impl AuthService for AuthServiceImpl {
 
         // Profile from the verified token, never a client-sent profile_id
         let caller = self.caller_claims(&request).await?.caller;
-        let profile_id = caller.profile_id;
-
-        let req = request.into_inner();
-
-        let credential = RegistrationResponse::parse(&req.credential)
-            .map_err(|_| invalid_field("credential", "not a WebAuthn registration response"))?;
-
-        // The ceremony is the one the response answers; it must be the
-        // caller's own (another profile's pending ceremony reads as expired).
-        let expired = || ceremony_expired("passkey registration");
-        let state_key = credential.state_key().map_err(|_| expired())?;
-        let started_by = self
-            .webauthn_state
-            .take(&state_key)
+        self.passkeys
+            .registration_finish(&self.sign_ins, &caller, request.into_inner())
             .await
-            .or_status()?
-            .ok_or_else(expired)?;
-        if started_by != profile_id {
-            return Err(expired());
-        }
-        // The account may have changed since the start.
-        self.require_enrollment_authority(&caller, profile_id, CredentialType::WebAuthn)
-            .await?;
-
-        let passkey = self
-            .webauthn
-            .registration_finish(&credential)
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::AuthenticationFailed(_) => {
-                    warn!("WebAuthn registration finish failed: {}", e);
-                    invalid_field("credential", "the passkey registration does not verify")
-                }
-                other => internal("finish passkey registration", other),
-            })?;
-        let data = passkey.data;
-
-        let label = req.label.unwrap_or_else(|| "Passkey".to_string());
-        let cred = Credential::new(profile_id, CredentialType::WebAuthn, data, Some(label));
-
-        self.storage
-            .create_credential(
-                &cred,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "credential.save",
-                    cred.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!(
-            "Registered passkey {} for profile {}",
-            cred.id.0, profile_id
-        );
-
-        Ok(Response::new(WebAuthnRegistrationFinishResponse {
-            credential_id: credential_wire(cred.id)?,
-        }))
+            .map(Response::new)
+            .map_err(passkey_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "web_authn_authentication_start"))]
@@ -2374,44 +2234,11 @@ impl AuthService for AuthServiceImpl {
         request: Request<WebAuthnAuthenticationStartRequest>,
     ) -> Result<Response<WebAuthnAuthenticationStartResponse>, Status> {
         self.check_maintenance().await?;
-        let req = request.into_inner();
-
-        let result = if let Some(identifier) = &req.principal {
-            // Identifier-based: fetch passkeys for this user
-            let profile = self.resolve_profile(identifier).await?;
-
-            let passkeys = self.active_passkeys(profile.id).await?;
-
-            // An account without passkeys is answered like an unknown one.
-            if passkeys.is_empty() {
-                return Err(authentication_failed());
-            }
-
-            let r = self
-                .webauthn
-                .authentication_start(AssertionPurpose::SignIn, &passkeys)
-                .await
-                .map_err(|e| internal("start passkey sign-in", e))?;
-
-            // The ceremony signs in this profile only.
-            self.webauthn_state
-                .insert(&r.state_key, &profile.id)
-                .await
-                .or_status()?;
-            r
-        } else {
-            // Conditional UI: the profile comes from the authenticator's user
-            // handle at finish; the ceremony state itself is single-use.
-            self.webauthn
-                .discoverable_authentication_start()
-                .await
-                .map_err(|e| internal("start discoverable passkey sign-in", e))?
-        };
-
-        Ok(Response::new(WebAuthnAuthenticationStartResponse {
-            challenge: result.state_key.into_bytes(),
-            options: result.options,
-        }))
+        self.passkeys
+            .authentication_start(&self.sign_ins, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(passkey_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "web_authn_authentication_finish"))]
@@ -2433,132 +2260,35 @@ impl AuthService for AuthServiceImpl {
             "/sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
         )?;
         let req = request.into_inner();
-
-        let not_an_assertion = || invalid_field("credential", "not a WebAuthn assertion");
-        let expired = || ceremony_expired("passkey sign-in");
-
-        let user_verified;
-        let key_amr;
-        let proved_by;
-        // The key is bound to the ceremony the assertion answers (its
-        // start's `challenge`, taken from the assertion's own challenge),
-        // checked before that ceremony is consumed.
-        let native_key;
-        let profile = if let Some(identifier) = &req.principal {
-            // ── Identifier-based flow ──
-            let credential =
-                AssertionResponse::parse(&req.credential).map_err(|_| not_an_assertion())?;
-            let state_key = credential.state_key().map_err(|_| expired())?;
-            native_key = self
-                .native_ceremony_key(native.as_ref(), state_key.as_bytes())
-                .await?;
-            let p = self.resolve_profile(identifier).await?;
-
-            // The ceremony the assertion answers, started for this profile.
-            let started_for = self
-                .webauthn_state
-                .take(&state_key)
-                .await
-                .or_status()?
-                .ok_or_else(expired)?;
-            if started_for != p.id {
-                return Err(expired());
-            }
-
-            let passkeys = self.active_passkeys(p.id).await?;
-            let finished = self
-                .webauthn
-                .authentication_finish(AssertionPurpose::SignIn, &credential, &passkeys)
-                .await;
-            let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
-            user_verified = verified.user_verified;
-            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
-
-            p
-        } else {
-            // ── Conditional UI / Discoverable flow ──
-            // The ceremony state is found from the assertion and consumed by
-            // the finish below (single use).
-            let credential = DiscoverableAssertionResponse::parse(&req.credential)
-                .map_err(|_| not_an_assertion())?;
-            let state_key = credential.state_key().map_err(|_| expired())?;
-            native_key = self
-                .native_ceremony_key(native.as_ref(), state_key.as_bytes())
-                .await?;
-
-            // The returned handle names an account only through the stored
-            // association at this RP; an unknown one authenticates nobody
-            // and creates nothing.
-            let user_handle = credential.user_handle();
-            let profile_id = self
-                .storage
-                .get_profile_by_webauthn_user_handle(self.webauthn.rp_id(), user_handle)
-                .await
-                .map_err(storage_failure)?
-                .ok_or_else(authentication_failed)?;
-            let p = self
-                .storage
-                .get_profile(profile_id)
-                .await
-                .map_err(storage_failure)?
-                // Generic error: don't reveal profile existence
-                .ok_or_else(authentication_failed)?;
-
-            let passkeys = self.active_passkeys(p.id).await?;
-            let finished = self
-                .webauthn
-                .discoverable_authentication_finish(&credential, user_handle, &passkeys)
-                .await;
-            let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
-            user_verified = verified.user_verified;
-            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
-
-            p
-        };
-
-        // Evaluate login security (anomaly detection + policy enforcement).
-        let method = LoginMethod::Passkey {
-            user_verified,
-            key_amr,
-        };
-        let admission = self
-            .evaluate_first_factor(
-                profile.id,
-                client_ip,
-                "webauthn",
-                (
-                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                AttemptContext {
-                    captcha_pass: captcha_pass.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                },
-            )
+        let assertion = sid::passkey::Assertion::parse(req.principal, &req.credential)
+            .map_err(passkey_refusal)?;
+        // The key is bound to the ceremony the assertion answers, checked
+        // before that ceremony is consumed.
+        let ceremony = assertion.ceremony().map_err(passkey_refusal)?;
+        let native_key = self
+            .native_ceremony_key(native.as_ref(), ceremony.as_bytes())
             .await?;
-
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
             enrollable_factors,
             browser_csrf,
         } = self
-            .complete_first_factor(
-                &profile,
-                method,
-                user_agent.as_deref().map(compute_device_id),
-                client_ip,
+            .passkeys
+            .authentication_finish(
+                &self.sign_ins,
+                self.oauth.login_policy(),
+                assertion,
                 client,
+                client_ip,
+                AttemptContext {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
                 native_key.as_deref(),
-                // The asserting passkey, as it holds after this use, fences
-                // the session's commit (or the pending context's completion).
-                Some(&proved_by),
-                admission,
             )
-            .await?;
-
-        info!("WebAuthn login for profile {}", profile.id);
-
+            .await
+            .map_err(passkey_refusal)?;
         signed_in.respond(
             |session_id, expires_in| WebAuthnAuthenticationFinishResponse {
                 session_id: Some(session_id.into()),

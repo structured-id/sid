@@ -1212,6 +1212,21 @@ fn attempt<'a>(
     }
 }
 
+/// The organization's login requirements as `login_policy` states them; a
+/// source that cannot state them refuses rather than leaving a baseline in
+/// their place.
+pub async fn organization_requirements(
+    login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+) -> Result<LoginRequirements, SignInError> {
+    login_policy
+        .requirements(None)
+        .await
+        .map_err(|e| SignInError::Unavailable {
+            what: "login policy",
+            cause: e.to_string(),
+        })
+}
+
 pub(crate) fn unavailable(cause: impl std::fmt::Display) -> SignInError {
     SignInRefusal::Unavailable(cause.to_string()).into()
 }
