@@ -680,7 +680,7 @@ fn test_verify_totp_function_reexported() {
 fn step_up_after_anomaly_names_the_need_not_the_rule() {
     use tonic_types::StatusExt;
     let status: Status = super::refusal::step_up_after_anomaly("new_device_ip").into();
-    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     let details = status.get_error_details();
     assert_eq!(details.error_info().unwrap().reason, "STEP_UP_REQUIRED");
     let violations = &details.precondition_failure().unwrap().violations;

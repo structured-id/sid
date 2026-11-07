@@ -631,19 +631,7 @@ impl SignIn {
     pub async fn resolve_profile(&self, identifier: &str) -> Result<Option<Profile>, SignInError> {
         let handle = sid_authn::normalize::normalize_principal(identifier)
             .map_err(|e| SignInError::InvalidIdentifier(e.to_string()))?;
-        let principal_type = handle.principal_type.to_principal_type();
-        let Some(profile_id) = self
-            .storage
-            .resolve_sign_in_principal(principal_type, &handle.normalized, handle.key_revision())
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(self
-            .storage
-            .get_profile(profile_id)
-            .await?
-            .filter(|p| p.status == sid_core::models::ProfileStatus::Active))
+        Ok(resolve_handle(self.storage.as_ref(), &handle).await?)
     }
 
     /// The OPAQUE password file of `credential`, opened, with its curve, and
@@ -1139,6 +1127,27 @@ impl SignIn {
         }
         Ok(())
     }
+}
+
+/// The active account the normalized principal `handle` signs in to. The
+/// explicit assignment is the only route: other claims neither select nor
+/// block a subject, an email key of another policy revision routes nobody,
+/// and a profile's stored user name or email is not a second route to it.
+pub(crate) async fn resolve_handle(
+    storage: &dyn StorageBackend,
+    handle: &sid_authn::normalize::NormalizedPrincipal,
+) -> sid_core::Result<Option<Profile>> {
+    let principal_type = handle.principal_type.to_principal_type();
+    let Some(profile_id) = storage
+        .resolve_sign_in_principal(principal_type, &handle.normalized, handle.key_revision())
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(storage
+        .get_profile(profile_id)
+        .await?
+        .filter(|p| p.status == sid_core::models::ProfileStatus::Active))
 }
 
 /// One verified sign-in as the rules see it.
