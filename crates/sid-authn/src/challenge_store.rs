@@ -183,6 +183,22 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         }))
     }
 
+    /// What a mutation completing the ceremony `read` under `key` consumes
+    /// in its own transaction (`MutationContext::consuming`): exactly the
+    /// state as read, so a ceremony changed or completed meanwhile completes
+    /// nothing.
+    pub fn consumption(
+        &self,
+        key: &str,
+        read: &Versioned<V>,
+    ) -> sid_core::models::CeremonyConsumption {
+        sid_core::models::CeremonyConsumption {
+            namespace: self.namespace,
+            key: key.to_owned(),
+            stored: read.stored.clone(),
+        }
+    }
+
     /// The sealing context of `key`: binds a sealed value to the ceremony
     /// kind and state key it was stored under.
     fn context(&self, key: &str) -> String {

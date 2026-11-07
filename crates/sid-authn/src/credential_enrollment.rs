@@ -67,11 +67,31 @@ pub fn check_enrollment<O>(
     passkey_satisfies_mfa: bool,
     now: DateTime<Utc>,
 ) -> Result<(), EnrollmentRefusal> {
+    check_binding(
+        session,
+        active,
+        credential_assurance(credential_type, passkey_satisfies_mfa),
+        passkey_satisfies_mfa,
+        now,
+    )
+}
+
+/// Check that `session` may bind a key used at `assurance` (a device key,
+/// whose possession alone raises no assurance) to an account whose active
+/// credentials are `active`, at `now`.
+pub fn check_binding<O>(
+    session: &Session<O>,
+    active: &[Credential<O>],
+    assurance: AuthLevel,
+    passkey_satisfies_mfa: bool,
+    now: DateTime<Utc>,
+) -> Result<(), EnrollmentRefusal> {
+    // A provisional session, a sign-in still owing its second factor among
+    // them, binds nothing here.
     if session.is_provisional {
         return Err(EnrollmentRefusal::Provisional);
     }
-    let required = established_assurance(active, passkey_satisfies_mfa)
-        .min(credential_assurance(credential_type, passkey_satisfies_mfa));
+    let required = established_assurance(active, passkey_satisfies_mfa).min(assurance);
     if session.assurance_at(now) < required {
         return Err(EnrollmentRefusal::Insufficient { required });
     }
@@ -187,6 +207,33 @@ pub async fn authorize(
         passkey_satisfies_mfa,
         Utc::now(),
     )?)
+}
+
+/// Refuse unless `session`, the stored own sign-in of `profile`, may bind a
+/// key used at `assurance` now (see [`check_binding`]); the session as it
+/// stands. A ceremony calls it at its start and again at its finish.
+pub async fn authorize_binding(
+    storage: &dyn sid_plugin::StorageBackend,
+    profile: ProfileId,
+    session: SessionId,
+    assurance: AuthLevel,
+    passkey_satisfies_mfa: bool,
+) -> Result<Session, EnrollmentError> {
+    let session = storage
+        .get_session(session)
+        .await
+        .map_err(EnrollmentError::Storage)?
+        .filter(|s| s.profile_id == profile && !s.is_expired())
+        .ok_or(EnrollmentError::SessionInvalid)?;
+    let active = active_credentials(storage, profile).await?;
+    check_binding(
+        &session,
+        &active,
+        assurance,
+        passkey_satisfies_mfa,
+        Utc::now(),
+    )?;
+    Ok(session)
 }
 
 /// Refuse unless `pending` may bind the account's first second factor now,
