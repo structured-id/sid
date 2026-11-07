@@ -226,6 +226,76 @@ async fn test_a_stopped_listener_turns_the_cache_cold() {
     }
 }
 
+/// A shared cache whose first subscription succeeds and every later one
+/// fails, as a broker lost after a process started.
+struct LostAfterFirst {
+    inner: Arc<dyn CacheBackend>,
+    subscribed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl CacheBackend for LostAfterFirst {
+    async fn get(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        self.inner.get(key).await
+    }
+    async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<()> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> CacheResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn take(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        self.inner.take(key).await
+    }
+    async fn publish(&self, channel: &str, payload: &[u8]) -> CacheResult<()> {
+        self.inner.publish(channel, payload).await
+    }
+    async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        if self
+            .subscribed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(CacheError::Connection("lost".into()));
+        }
+        self.inner.subscribe(channel).await
+    }
+    async fn health_check(&self) -> CacheResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+/// A warm listener replaced by one whose subscription fails leaves no right
+/// to answer from the local maps: the new listener starts cold, and the old
+/// one's stop cannot restore it, so a later revocation is still refused.
+#[tokio::test]
+async fn test_a_replacing_listener_without_a_subscription_is_cold() {
+    let shared: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let a = RevocationCache::new(Duration::from_millis(20), shared.clone());
+    let b = Arc::new(RevocationCache::new(
+        Duration::from_millis(20),
+        Arc::new(LostAfterFirst {
+            inner: shared,
+            subscribed: std::sync::atomic::AtomicBool::new(false),
+        }),
+    ));
+    let first = b.listen().await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!revoked(&b, "jti-replaced", "any").await, "warm and clean");
+    let second = b.listen().await;
+    first.stop().await;
+    a.revoke_jti("jti-replaced".to_string(), Duration::from_millis(20))
+        .await
+        .unwrap();
+    assert!(
+        revoked(&b, "jti-replaced", "any").await,
+        "a revocation without a live subscription is refused"
+    );
+    second.stop().await;
+}
+
 /// A stop interrupted at its first wait leaves no task running: every task
 /// was aborted before the wait, and the listener still owns the rest.
 #[tokio::test]

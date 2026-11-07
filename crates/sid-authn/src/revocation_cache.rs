@@ -86,8 +86,11 @@ pub struct RevocationCache {
     /// revocation, or [`ALWAYS_COLD`] while not subscribed.
     cold_until: AtomicU64,
     /// The listener whose subscription may warm the local maps; a stopped or
-    /// superseded listener's tasks no longer can.
-    listening: AtomicU64,
+    /// superseded listener's tasks no longer can. Every write of `cold_until`
+    /// that grants the right to answer from the maps happens under it, so a
+    /// generation check and its publication are one step; reads stay
+    /// lock-free.
+    listening: parking_lot::Mutex<u64>,
     /// Where revocations are committed and cold misses confirmed.
     record: Record,
     /// A publication was lost within a token lifetime (store-backed only):
@@ -191,7 +194,7 @@ impl RevocationCache {
             shared,
             origin: Instant::now(),
             cold_until: AtomicU64::new(ALWAYS_COLD),
-            listening: AtomicU64::new(0),
+            listening: parking_lot::Mutex::new(0),
             record,
             gap: AtomicBool::new(false),
         }
@@ -294,8 +297,15 @@ impl RevocationCache {
     /// returned listener is held; it releases the cache and the store when it
     /// stops or is dropped.
     pub async fn listen(self: &Arc<Self>) -> RevocationListener {
-        // One generation per call; a u64 counter of listens does not wrap.
-        let generation = self.listening.fetch_add(1, Ordering::AcqRel) + 1;
+        // A new listener owns the maps from now on and starts cold: the one
+        // it replaces no longer feeds them, whether or not this subscribes.
+        let generation = {
+            let mut current = self.listening.lock();
+            // One generation per call; a u64 counter of listens does not wrap.
+            *current += 1;
+            self.cold_until.store(ALWAYS_COLD, Ordering::Release);
+            *current
+        };
         let first = match self.shared.subscribe(REVOCATION_CHANNEL).await {
             Ok(received) => {
                 self.warm_after_lifetime(generation);
@@ -362,7 +372,8 @@ impl RevocationCache {
     /// Local answers become complete one token lifetime from now, while the
     /// listener of `generation` is the current one.
     fn warm_after_lifetime(&self, generation: u64) {
-        if self.listening.load(Ordering::Acquire) != generation {
+        let current = self.listening.lock();
+        if *current != generation {
             return;
         }
         let now = millis(self.origin.elapsed());
@@ -370,25 +381,14 @@ impl RevocationCache {
             .checked_add(millis(self.max_token_lifetime))
             .unwrap_or(ALWAYS_COLD);
         self.cold_until.store(until, Ordering::Release);
-        // The listener stopped between the check and the store: undo it.
-        if self.listening.load(Ordering::Acquire) != generation {
-            self.cold_until.store(ALWAYS_COLD, Ordering::Release);
-        }
     }
 
     /// The listener of `generation` stopped: if it is the current one, no
     /// subscription warms the maps any more and every local miss is confirmed.
     fn stop_listening(&self, generation: u64) {
-        if self
-            .listening
-            .compare_exchange(
-                generation,
-                generation + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
+        let mut current = self.listening.lock();
+        if *current == generation {
+            *current += 1;
             self.cold_until.store(ALWAYS_COLD, Ordering::Release);
         }
     }

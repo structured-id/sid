@@ -53,6 +53,8 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Atomic swap for hot-reload (ZKPP keygen, config reload)
 arc-swap = "1"
+# A lock around one small invariant where no atomic expresses it.
+parking_lot = "0.12"
 
 # gRPC
 tonic = "0.14"
