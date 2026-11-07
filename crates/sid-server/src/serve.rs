@@ -97,9 +97,6 @@ impl CeServices {
             .await
             .add(OidcProviderServiceServer::new(
                 crate::grpc::oidc_provider_service::OidcProviderServiceImpl::new(
-                    c.issuers.clone(),
-                    c.storage.clone(),
-                    c.revocation_cache.clone(),
                     c.auth_svc.clone(),
                     c.project_svc.clone(),
                     c.login_url.clone(),
