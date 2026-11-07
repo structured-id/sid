@@ -37,6 +37,7 @@ use tracing::warn;
 
 use crate::rate_limit::{RateLimitStats, RateLimiter};
 
+pub mod authorization;
 pub mod device_approval;
 mod grants;
 pub use grants::{ACCESS_TOKEN_TYPE, DEVICE_CODE_GRANT};

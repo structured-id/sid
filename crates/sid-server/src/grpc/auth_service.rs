@@ -23,7 +23,7 @@ use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
 use sid_authn::webauthn::WebAuthnServer;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{AuditEntry, CredentialId, ProfileId, SessionId};
+use sid_core::models::{CredentialId, ProfileId, SessionId};
 use sid_core::models::{OidcIssuer, RevocationReason};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::context;
@@ -51,6 +51,7 @@ mod authorize;
 mod end_session;
 mod refusal;
 mod sign_in_security;
+use authorize::authorization_refusal;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use refusal::{
@@ -61,25 +62,6 @@ use refusal::{
 use sid::second_factor::{Enroller, FactorCaller};
 use sid_authn::sign_in_security::device_id as compute_device_id;
 use sign_in_security::sign_in_refusal;
-
-/// Parse space-separated acr_values string into the highest requested AuthLevel.
-///
-/// Supports all formats recognized by `AuthLevel::from_acr_value()`:
-/// - SID canonical: `urn:sid:acr:basic`, `urn:sid:acr:standard`, etc.
-/// - Plain names: `basic`, `standard`, `elevated`, `critical`
-///
-/// Returns the highest (strictest) level found, or None if no recognizable values.
-fn parse_acr_values(acr_values: &str) -> Option<sid_core::models::session::AuthLevel> {
-    use sid_core::models::session::AuthLevel;
-
-    let mut highest: Option<AuthLevel> = None;
-    for val in acr_values.split_whitespace() {
-        if let Some(l) = AuthLevel::from_acr_value(val) {
-            highest = Some(highest.map_or(l, |h: AuthLevel| h.max(l)));
-        }
-    }
-    highest
-}
 
 /// Extract User-Agent from gRPC metadata.
 ///
@@ -387,7 +369,6 @@ fn password_refusal(e: sid::password::PasswordError) -> Status {
 
 pub struct AuthServiceImpl {
     pub(crate) storage: Arc<dyn StorageBackend>,
-    pub(crate) oauth2: Arc<OAuth2Server>,
     pub(crate) jwt: Arc<JwtService>,
     pub(crate) opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     pub(crate) revocation_cache: Arc<RevocationCache>,
@@ -444,7 +425,7 @@ pub struct AuthServiceImpl {
     registration: sid::registration::Registration,
     /// Browser authorization requests kept while the user signs in, by
     /// reference, shared by every replica.
-    continuations: ChallengeStore<authorize::PendingAuthorization>,
+    authorizations: sid::oauth::authorization::Authorizations,
     /// One-time values of the logout confirmation form, each naming the IdP
     /// session it ends and where the browser returns, shared by every replica.
     logout_confirmations: ChallengeStore<end_session::LogoutConfirmation>,
@@ -528,7 +509,7 @@ impl AuthServiceImpl {
         let password_ops = Arc::new(password_ops);
         let oauth = sid::oauth::OAuth::new(sid::oauth::OAuthParts {
             storage: storage.clone(),
-            oauth2: oauth2.clone(),
+            oauth2,
             jwt: jwt.clone(),
             issuers: issuers.clone(),
             installation_org,
@@ -569,7 +550,6 @@ impl AuthServiceImpl {
         });
         Self {
             storage,
-            oauth2,
             jwt,
             opaque_zkpp,
             revocation_cache,
@@ -582,11 +562,9 @@ impl AuthServiceImpl {
                 ceremonies.clone(),
                 key_manager.clone(),
             ),
-            continuations: ChallengeStore::new(
+            authorizations: sid::oauth::authorization::Authorizations::new(
                 ceremonies.clone(),
                 key_manager.clone(),
-                "authorize-continuation",
-                authorize::CONTINUATION_TTL,
             ),
             logout_confirmations: ChallengeStore::new(
                 ceremonies.clone(),
@@ -892,33 +870,6 @@ impl AuthServiceImpl {
             )),
             None => Ok(None),
         }
-    }
-
-    /// The issuer a request's path names, when it serves clients of
-    /// `client_org` ([`sid::oauth::OAuth::issuer_serving`]).
-    async fn issuer_serving(
-        &self,
-        handle: &str,
-        client_org: Option<sid_core::models::OrgId>,
-    ) -> Result<Option<OidcIssuer>, Status> {
-        self.oauth
-            .issuer_serving(handle, client_org)
-            .await
-            .map_err(oauth_refusal)
-    }
-
-    /// The resource a new grant of `requester` under `issuer` is for
-    /// ([`sid::oauth::OAuth::select_target`]).
-    async fn select_target<'r>(
-        &self,
-        issuer: &OidcIssuer,
-        requester: impl Into<sid_authn::target::Requester<'r>>,
-        resource: &[String],
-    ) -> Result<sid_authn::target::Target, Status> {
-        self.oauth
-            .select_target(issuer, requester, resource)
-            .await
-            .map_err(oauth_refusal)
     }
 
     /// Who binds a second factor in `request`: a sign-in's pending context
@@ -1962,38 +1913,19 @@ impl AuthService for AuthServiceImpl {
             .await?;
 
         // The bearer token names the session; the code carries that session's
-        // authentication, so it must still authorize and be fresh enough for
-        // the request. A caller of this RPC is its own interface, so the
-        // interaction `prompt` asks for is its to have shown.
-        // Only the IdP session's own token: an application's session never
-        // authorizes codes for other clients.
+        // authentication.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation().or_status()?;
-        let prompt = sid_authn::oauth2::prompt::Prompt::parse(request.get_ref().prompt.as_deref())
-            .map_err(authorize_refusal)?;
-        let now = Utc::now();
-        let session_id = SessionId::parse(&verified.claims.sid)
-            .map_err(|e| internal("read session id of a verified token", e))?;
-        // An ended session, and one authenticated too long ago for the
-        // request's max_age or prompt, answer alike: sign in again.
-        let session = self
-            .storage
-            .get_session(session_id)
+        self.oauth
+            .authorize_session(
+                &self.sign_ins,
+                &verified,
+                &client,
+                &issuer,
+                request.into_inner(),
+            )
             .await
-            .map_err(storage_failure)?
-            .filter(|session| session.profile_id == verified.caller.profile_id)
-            .filter(|session| self.authorizes(session, now))
-            .filter(|session| {
-                prompt
-                    .authenticated_after(request.get_ref().max_age, now)
-                    .is_none_or(|after| session.authenticated_at >= after)
-            })
-            .ok_or_else(session_ended)?;
-
-        let answer = self
-            .authorize_with(&client, &issuer, &session, request.into_inner())
-            .await?;
-        Ok(Response::new(answer))
+            .map(Response::new)
+            .map_err(authorization_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "o_auth2_token"))]
