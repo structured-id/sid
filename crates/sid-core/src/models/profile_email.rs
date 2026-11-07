@@ -37,7 +37,7 @@ impl Default for ProfileEmailId {
 /// `+tag` preserved; the domain in its canonical ASCII form): the address
 /// mail goes to. A login handle's resolution key is the principal's, never
 /// this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileEmail {
     pub id: ProfileEmailId,
     pub profile_id: ProfileId,

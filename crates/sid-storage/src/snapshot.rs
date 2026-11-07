@@ -15,13 +15,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sid_core::models::{
     Application, BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device,
-    DeviceAttestation, DeviceAuthorizationCode, ExportJob, Group, GroupMember, ImpersonationGrant,
-    InitialAccessToken, IssuerSigningKey, MachineUser, MachineUserCredential, MagicLinkSession,
-    OAuth2Client, OidcIssuer, OperationPeriodState, OperationRecord, OperationResourceBinding,
-    Organization, OutboundDlqEntry, PersonalAccessToken, Principal, Profile, ProfileGrant,
-    ProfileMetadata, Project, ProtectedResource, ResourceAccess, Role, RoleAssignment,
-    ScimOutboundRecord, ScimOutboundTarget, ServiceBinding, Session, SessionGrants,
-    SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
+    DeviceAttestation, DeviceAuthorizationCode, EmailPolicyActivation, ExportJob, Group,
+    GroupMember, ImpersonationGrant, InitialAccessToken, IssuerSigningKey, MachineUser,
+    MachineUserCredential, MagicLinkSession, OAuth2Client, OidcIssuer, OperationPeriodState,
+    OperationRecord, OperationResourceBinding, Organization, OutboundDlqEntry, PersonalAccessToken,
+    Profile, ProfileEmail, ProfileGrant, ProfileMetadata, ProfilePhone, Project, ProtectedResource,
+    QuarantinedPrincipal, ResourceAccess, Role, RoleAssignment, ScimOutboundRecord,
+    ScimOutboundTarget, ServiceBinding, Session, SessionGrants, SodConflictRule, StoredPrincipal,
+    StoredUserHandle, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
 };
 
 pub mod archive;
@@ -98,8 +99,23 @@ pub struct Snapshot {
     /// User profiles.
     pub profiles: Vec<Profile>,
 
-    /// Profile principals (email, phone, username login handles).
-    pub principals: Vec<Principal>,
+    /// The profiles' email and phone contacts, which claims name as their
+    /// source.
+    pub profile_emails: Vec<ProfileEmail>,
+    pub profile_phones: Vec<ProfilePhone>,
+
+    /// The email policy revision email keys are written under.
+    pub email_policy: Option<EmailPolicyActivation>,
+
+    /// Principals as stored: assignment, proof, every Profile's claim and
+    /// an email key's disposition.
+    pub principals: Vec<StoredPrincipal>,
+
+    /// Released principals kept from reuse.
+    pub principal_quarantine: Vec<QuarantinedPrincipal>,
+
+    /// The profiles' WebAuthn user handles, which their passkeys carry.
+    pub webauthn_user_handles: Vec<StoredUserHandle>,
 
     /// Authentication credentials (OPAQUE, WebAuthn, TOTP, recovery).
     pub credentials: Vec<Credential>,
@@ -274,7 +290,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -319,7 +335,12 @@ impl Snapshot {
             key_versions: Vec::new(),
             opaque_server_setup: None,
             profiles: Vec::new(),
+            profile_emails: Vec::new(),
+            profile_phones: Vec::new(),
+            email_policy: None,
             principals: Vec::new(),
+            principal_quarantine: Vec::new(),
+            webauthn_user_handles: Vec::new(),
             credentials: Vec::new(),
             password_histories: Vec::new(),
             history_keys: Vec::new(),
@@ -378,7 +399,12 @@ impl Snapshot {
             u64::from(self.opaque_server_setup.is_some()),
             self.projects.len() as u64,
             self.profiles.len() as u64,
+            self.profile_emails.len() as u64,
+            self.profile_phones.len() as u64,
+            u64::from(self.email_policy.is_some()),
             self.principals.len() as u64,
+            self.principal_quarantine.len() as u64,
+            self.webauthn_user_handles.len() as u64,
             self.credentials.len() as u64,
             self.password_histories
                 .iter()

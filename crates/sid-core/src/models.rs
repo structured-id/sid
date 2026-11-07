@@ -126,7 +126,7 @@ pub use consent::{
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialFence, CredentialId,
     CredentialRevocation, CredentialType, PolicyEvidence, PrincipalAssignmentFence, SignInProof,
-    WebAuthnUserHandle,
+    StoredUserHandle, WebAuthnUserHandle,
 };
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
@@ -215,9 +215,10 @@ pub use password_reset::{
 };
 pub use pat::{PatId, PatModel, PatStatus, PersonalAccessToken};
 pub use principal::{
+    EmailKeyDisposition, EmailKeyOutcome, EmailPolicyActivation,
     INSTALLATION_EMAIL_POLICY_REVISION, Principal, PrincipalBinding, PrincipalBindingId,
-    PrincipalEligibility, PrincipalEntity, PrincipalId, PrincipalType, UnknownPrincipalType,
-    check_principal_eligibility, federated_subject_value,
+    PrincipalEligibility, PrincipalEntity, PrincipalId, PrincipalType, QuarantinedPrincipal,
+    StoredPrincipal, UnknownPrincipalType, check_principal_eligibility, federated_subject_value,
 };
 pub use principal_contest::{
     ContestCheck, PRINCIPAL_CONTEST_CHECK_ATTEMPTS, PRINCIPAL_CONTEST_CHECK_KIND,

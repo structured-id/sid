@@ -12,8 +12,9 @@
 
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    MutationContext, Principal, PrincipalBinding, PrincipalBindingId, PrincipalEntity, PrincipalId,
-    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileId, ProfilePhoneId,
+    EmailKeyDisposition, EmailKeyOutcome, EmailPolicyActivation, MutationContext, Principal,
+    PrincipalBinding, PrincipalBindingId, PrincipalEntity, PrincipalId, PrincipalType, Profile,
+    ProfileEmail, ProfileEmailId, ProfileId, ProfilePhoneId, QuarantinedPrincipal, StoredPrincipal,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -641,4 +642,323 @@ impl CoordinodeBackend {
         })
         .await
     }
+
+    // === Moving principals ===
+
+    pub(super) async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> SidResult<Vec<StoredPrincipal>> {
+        self.transaction(move |tx| {
+            let rows = tx.run(
+                "MATCH (p:SidPrincipal) RETURN p.id AS id",
+                Params::default(),
+            )?;
+            let mut ids = rows
+                .iter()
+                .map(|r| get_uuid(r, "id"))
+                .collect::<SidResult<Vec<_>>>()?;
+            ids.sort();
+            let mut principals = Vec::new();
+            for id in ids
+                .into_iter()
+                .filter(|id| after.is_none_or(|a| *id > a.0))
+                .take(limit as usize)
+            {
+                if let Some(principal) = stored(tx, PrincipalId(id))? {
+                    principals.push(principal);
+                }
+            }
+            Ok(Decision::Abandon(principals))
+        })
+        .await
+    }
+
+    pub(super) async fn import_principal(
+        &self,
+        principal: &StoredPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        if principal
+            .claims
+            .iter()
+            .any(|c| c.principal_id != principal.entity.id)
+        {
+            return Err(SidError::Validation(
+                "a claim names another principal than the one it moves with".into(),
+            ));
+        }
+        let mut given = principal.clone();
+        given.claims.sort_by_key(|c| c.id.0);
+        self.transaction(move |tx| {
+            match stored(tx, given.entity.id)? {
+                Some(held) if held == given => return Ok(Decision::Abandon(false)),
+                Some(_) => {
+                    return Err(SidError::Conflict(format!(
+                        "another principal {} is stored",
+                        given.entity.id.0
+                    )));
+                }
+                None => {}
+            }
+            let e = &given.entity;
+            if by_value(tx, e.principal_type, &e.value)?.is_some() {
+                return Err(SidError::Conflict(
+                    "another principal holds the same value".into(),
+                ));
+            }
+            if e.email_policy_revision.is_some()
+                && e.email_policy_revision != Some(active_email_revision(tx)?)
+            {
+                return Err(SidError::Conflict(
+                    "the email key was written under another policy revision".into(),
+                ));
+            }
+            tx.run(
+                "CREATE (p:SidPrincipal {id: $id, type_value: $key, principal_type: $type,
+                    value: $value, verified: $verified, verified_at: $verified_at,
+                    verification_expires: $expires, assigned_profile_id: $assigned,
+                    assignment_revision: $revision, email_policy_revision: $email_revision,
+                    claims: 0, created_at: $created_at, updated_at: $updated_at})",
+                Params::default()
+                    .with("id", uuid(&e.id.0))
+                    .with("key", type_value_key(e.principal_type, &e.value)?)
+                    .with("type", Value::String(e.principal_type.as_str().into()))
+                    .with("value", Value::String(e.value.clone()))
+                    .with("verified", Value::Bool(e.verified))
+                    .with("verified_at", opt_time(e.verified_at))
+                    .with("expires", opt_time(e.verification_expires))
+                    .with(
+                        "assigned",
+                        e.assigned_profile_id.map_or(Value::Null, profile_value),
+                    )
+                    .with("revision", Value::Int(e.assignment_revision))
+                    .with(
+                        "email_revision",
+                        e.email_policy_revision.map_or(Value::Null, Value::Int),
+                    )
+                    .with("created_at", time(e.created_at))
+                    .with("updated_at", time(e.updated_at)),
+            )?;
+            for claim in &given.claims {
+                // The claiming Profile is held: its removal takes its claims.
+                super::profile::claim_profile(tx, claim.profile_id)?;
+                tx.run(
+                    "CREATE (b:SidPrincipalBinding {id: $binding, pair: $pair,
+                        principal_id: $principal, profile_id: $profile, is_primary: $is_primary,
+                        source_field: $source_field, source_email_id: $source_email_id,
+                        source_phone_id: $source_phone_id, created_at: $created_at})",
+                    Params::default()
+                        .with("binding", uuid(&claim.id.0))
+                        .with("pair", pair_key(&e.id.0, claim.profile_id)?)
+                        .with("principal", uuid(&e.id.0))
+                        .with("profile", profile_value(claim.profile_id))
+                        .with("is_primary", Value::Bool(claim.is_primary))
+                        .with("source_field", opt_text(claim.source_field.as_deref()))
+                        .with(
+                            "source_email_id",
+                            opt_uuid(claim.source_email_id.as_ref().map(|i| &i.0)),
+                        )
+                        .with(
+                            "source_phone_id",
+                            opt_uuid(claim.source_phone_id.as_ref().map(|i| &i.0)),
+                        )
+                        .with("created_at", time(claim.created_at)),
+                )?;
+            }
+            count_claims(tx, e.id)?;
+            if let Some(d) = &given.disposition {
+                tx.run(
+                    "CREATE (d:SidEmailDisposition {principal_id: $id, from_revision: $from,
+                        to_revision: $to, disposition: $disposition, reason: $reason,
+                        recorded_at: $at})",
+                    Params::default()
+                        .with("id", uuid(&e.id.0))
+                        .with("from", Value::Int(d.from_revision))
+                        .with("to", Value::Int(d.to_revision))
+                        .with(
+                            "disposition",
+                            Value::String(disposition_text(d.outcome).into()),
+                        )
+                        .with("reason", Value::String(d.reason.clone()))
+                        .with("at", time(d.recorded_at)),
+                )?;
+            }
+            finalize(tx, &format!("principal:{}", e.id.0), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn email_policy_activation(&self) -> SidResult<EmailPolicyActivation> {
+        self.transaction(move |tx| Ok(Decision::Abandon(activation(tx)?)))
+            .await
+    }
+
+    pub(super) async fn import_email_policy_activation(
+        &self,
+        given: &EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let given = *given;
+        self.transaction(move |tx| {
+            // Held, as every email key write holds it.
+            active_email_revision(tx)?;
+            if activation(tx)? == given {
+                return Ok(Decision::Abandon(false));
+            }
+            let keys = get_count(&tx.run(
+                "MATCH (p:SidPrincipal) WHERE p.principal_type = 'email' RETURN count(p) AS n",
+                Params::default(),
+            )?)?;
+            if keys > 0 {
+                return Err(SidError::Conflict(
+                    "email keys are stored under another policy revision".into(),
+                ));
+            }
+            tx.run(
+                "MATCH (a:SidEmailPolicy) WHERE a.scope = $scope
+                 SET a.revision = $revision, a.activated_at = $at",
+                Params::default()
+                    .with("scope", Value::String(EMAIL_POLICY_SCOPE.into()))
+                    .with("revision", Value::Int(given.revision))
+                    .with("at", time(given.activated_at)),
+            )?;
+            finalize(tx, "email_policy", ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn export_principal_quarantine(&self) -> SidResult<Vec<QuarantinedPrincipal>> {
+        self.transaction(move |tx| {
+            let mut entries = tx
+                .run(
+                    &format!("MATCH (q:SidPrincipalQuarantine) RETURN {QUARANTINE}"),
+                    Params::default(),
+                )?
+                .iter()
+                .map(quarantined)
+                .collect::<SidResult<Vec<_>>>()?;
+            entries.sort_by(|a, b| a.principal_hash.cmp(&b.principal_hash));
+            Ok(Decision::Abandon(entries))
+        })
+        .await
+    }
+
+    pub(super) async fn import_principal_quarantine(
+        &self,
+        entry: &QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let entry = entry.clone();
+        self.transaction(move |tx| {
+            let held = tx
+                .run(
+                    &format!(
+                        "MATCH (q:SidPrincipalQuarantine) WHERE q.hash = $hash RETURN {QUARANTINE}"
+                    ),
+                    Params::default().with("hash", Value::String(entry.principal_hash.clone())),
+                )?
+                .first()
+                .map(quarantined)
+                .transpose()?;
+            match held {
+                Some(held) if held == entry => return Ok(Decision::Abandon(false)),
+                Some(_) => {
+                    return Err(SidError::Conflict(
+                        "another quarantine entry of the same principal is stored".into(),
+                    ));
+                }
+                None => {}
+            }
+            tx.run(
+                "CREATE (q:SidPrincipalQuarantine {hash: $hash, principal_type: $type,
+                    until: $until, created_at: $created_at})",
+                Params::default()
+                    .with("hash", Value::String(entry.principal_hash.clone()))
+                    .with("type", Value::String(entry.principal_type.clone()))
+                    .with("until", time(entry.until))
+                    .with("created_at", time(entry.created_at)),
+            )?;
+            finalize(tx, "quarantine", ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+}
+
+const QUARANTINE: &str = "q.hash AS hash, q.principal_type AS principal_type, q.until AS until,
+    q.created_at AS created_at";
+
+fn quarantined(row: &Row) -> SidResult<QuarantinedPrincipal> {
+    Ok(QuarantinedPrincipal {
+        principal_hash: get_text(row, "hash")?,
+        principal_type: get_text(row, "principal_type")?,
+        until: get_time(row, "until")?,
+        created_at: get_time(row, "created_at")?,
+    })
+}
+
+fn disposition_text(outcome: EmailKeyOutcome) -> &'static str {
+    match outcome {
+        EmailKeyOutcome::Migrated => "migrated",
+        EmailKeyOutcome::Quarantined => "quarantined",
+    }
+}
+
+/// The installation's email policy activation, read in `tx`.
+fn activation(tx: &Statements<'_>) -> SidResult<EmailPolicyActivation> {
+    let rows = tx.run(
+        "MATCH (a:SidEmailPolicy) WHERE a.scope = $scope
+         RETURN a.revision AS revision, a.activated_at AS activated_at",
+        Params::default().with("scope", Value::String(EMAIL_POLICY_SCOPE.into())),
+    )?;
+    let row = rows
+        .first()
+        .ok_or_else(|| SidError::Storage("email policy revision missing".into()))?;
+    Ok(EmailPolicyActivation {
+        revision: get_int(row, "revision")?,
+        activated_at: get_time(row, "activated_at")?,
+    })
+}
+
+/// Principal `id` as stored, read in `tx`.
+fn stored(tx: &Statements<'_>, id: PrincipalId) -> SidResult<Option<StoredPrincipal>> {
+    let Some(entity) = by_id(tx, id)? else {
+        return Ok(None);
+    };
+    let mut claims = bindings_of(tx, id)?;
+    claims.sort_by_key(|c| c.id.0);
+    let disposition = tx
+        .run(
+            "MATCH (d:SidEmailDisposition) WHERE d.principal_id = $id
+             RETURN d.from_revision AS from_revision, d.to_revision AS to_revision,
+                    d.disposition AS disposition, d.reason AS reason,
+                    d.recorded_at AS recorded_at",
+            Params::default().with("id", uuid(&id.0)),
+        )?
+        .first()
+        .map(|row| {
+            Ok::<_, SidError>(EmailKeyDisposition {
+                from_revision: get_int(row, "from_revision")?,
+                to_revision: get_int(row, "to_revision")?,
+                outcome: match get_text(row, "disposition")?.as_str() {
+                    "migrated" => EmailKeyOutcome::Migrated,
+                    "quarantined" => EmailKeyOutcome::Quarantined,
+                    other => {
+                        return Err(SidError::Storage(format!("disposition: unknown {other}")));
+                    }
+                },
+                reason: get_text(row, "reason")?,
+                recorded_at: get_time(row, "recorded_at")?,
+            })
+        })
+        .transpose()?;
+    Ok(Some(StoredPrincipal {
+        entity,
+        claims,
+        disposition,
+    }))
 }

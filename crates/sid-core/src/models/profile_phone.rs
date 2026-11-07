@@ -37,7 +37,7 @@ impl Default for ProfilePhoneId {
 ///
 /// E.164 number stored as digits (BIGINT), formatted with `+` prefix at display/serialization time.
 /// Extension stored separately from the main number (RFC 3966 `;ext=N`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfilePhone {
     pub id: ProfilePhoneId,
     pub profile_id: ProfileId,

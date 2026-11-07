@@ -476,15 +476,73 @@ pub async fn import(
         }
     }
 
-    info!(count = snapshot.principals.len(), "importing principals...");
-    for principal in &snapshot.principals {
+    // Contacts before the claims that name them as their source.
+    for email in &snapshot.profile_emails {
+        result.contacts += created(
+            backend
+                .create_profile_email(
+                    email,
+                    audit("import_profile_email", &email.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_profile_email(email.id).await?.as_ref() == Some(email)) },
+        )
+        .await?;
+    }
+    for phone in &snapshot.profile_phones {
+        result.contacts += created(
+            backend
+                .create_profile_phone(
+                    phone,
+                    audit("import_profile_phone", &phone.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_profile_phone(phone.id).await?.as_ref() == Some(phone)) },
+        )
+        .await?;
+    }
+    for handle in &snapshot.webauthn_user_handles {
+        if backend
+            .import_webauthn_user_handle(
+                handle,
+                audit(
+                    "import_webauthn_user_handle",
+                    &handle.profile_id.to_string(),
+                ),
+            )
+            .await?
+        {
+            result.contacts += 1;
+        }
+    }
+    // The revision before the email keys written under it.
+    if let Some(activation) = &snapshot.email_policy {
         backend
-            .save_principal(
-                principal,
-                audit("import_principal", &principal.id.to_string()),
+            .import_email_policy_activation(
+                activation,
+                audit("import_email_policy", "installation"),
             )
             .await?;
-        result.principals += 1;
+    }
+    info!(count = snapshot.principals.len(), "importing principals...");
+    for principal in &snapshot.principals {
+        if backend
+            .import_principal(
+                principal,
+                audit("import_principal", &principal.entity.id.0.to_string()),
+            )
+            .await?
+        {
+            result.principals += 1;
+        }
+    }
+    for entry in &snapshot.principal_quarantine {
+        if backend
+            .import_principal_quarantine(entry, audit("import_principal_quarantine", "quarantine"))
+            .await?
+        {
+            result.principals += 1;
+        }
     }
 
     info!(
@@ -1028,6 +1086,8 @@ pub struct ImportResult {
     pub password_histories: u64,
     pub projects: u64,
     pub profiles: u64,
+    /// Email and phone contacts.
+    pub contacts: u64,
     pub principals: u64,
     pub credentials: u64,
     pub sessions: u64,
@@ -1078,6 +1138,7 @@ impl ImportResult {
             self.password_histories,
             self.projects,
             self.profiles,
+            self.contacts,
             self.principals,
             self.credentials,
             self.sessions,
@@ -1130,6 +1191,7 @@ impl std::fmt::Display for ImportResult {
         writeln!(f, "  Password Histories:   {}", self.password_histories)?;
         writeln!(f, "  Projects:             {}", self.projects)?;
         writeln!(f, "  Profiles:             {}", self.profiles)?;
+        writeln!(f, "  Contacts:             {}", self.contacts)?;
         writeln!(f, "  Principals:           {}", self.principals)?;
         writeln!(f, "  Credentials:          {}", self.credentials)?;
         writeln!(f, "  Sessions:             {}", self.sessions)?;

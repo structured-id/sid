@@ -47,6 +47,7 @@ pub mod role;
 pub mod service_binding;
 pub mod session;
 pub mod session_elevation;
+pub mod transfer;
 pub mod upstream;
 pub mod work;
 

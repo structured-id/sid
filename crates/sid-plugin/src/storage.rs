@@ -314,8 +314,55 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// Principals as stored, with every claim and disposition, ordered by id,
+    /// at most `limit` of those after `after`.
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>>;
+
+    /// Restore `principal` exactly as exported, its claims and disposition
+    /// with it, in one transaction. Returns `false`, writing nothing, when it
+    /// is already stored as given; a different principal or claim under the
+    /// same key is `Conflict` and nothing is written.
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// The email policy revision active for the installation.
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation>;
+
+    /// Make `activation` the installation's active revision as exported,
+    /// while no email key is stored. Returns `false`, writing nothing, when it
+    /// already is; otherwise a store holding email keys is `Conflict`.
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// Every WebAuthn user handle `profile_id` holds, as stored, by relying
+    /// party.
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>>;
+
+    /// Restore `handle` exactly as exported. Returns `false`, writing
+    /// nothing, when it is already stored as given; another handle of the
+    /// Profile at that relying party, or the handle held by another Profile,
+    /// is `Conflict`.
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // Credential reads, transitions, password history and WebAuthn user
-    // handles are `CredentialStore`'s.
+    // handle allocation are `CredentialStore`'s.
 
     // === PASSWORD HISTORY TRANSFER ===
 
@@ -1711,6 +1758,21 @@ pub trait StorageBackend:
 
     /// Remove expired quarantine entries. Returns count removed.
     async fn cleanup_expired_quarantine(&self, ctx: MutationContext) -> Result<u64>;
+
+    /// Every quarantine entry as stored, expired ones not yet removed
+    /// included.
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>>;
+
+    /// Restore `entry` exactly as exported. Returns `false`, writing nothing,
+    /// when it is already stored as given; another entry of the same hash is
+    /// `Conflict`.
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     // === CLOSURE REQUEST OPERATIONS ===
 

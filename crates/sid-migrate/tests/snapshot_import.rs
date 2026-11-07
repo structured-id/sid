@@ -1299,6 +1299,59 @@ async fn history_transfer_refuses_a_different_authority() {
     assert_eq!(target.count_profiles().await.unwrap(), 0);
 }
 
+/// A self-registered profile moves with its email contact and the claim
+/// that names it: the import failed before contacts moved, since the claim's
+/// source contact was missing. After the move the address still routes
+/// sign-in to the same profile with the same assignment.
+#[tokio::test]
+async fn a_registered_profile_moves_with_its_contacts() {
+    use sid_core::models::*;
+    let org = Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let profile = Profile::new(Some("registered"));
+    let registration = NewRegistration::new(
+        profile.clone(),
+        SignupIdentifier::Email {
+            key: "registered@sid.example.com",
+            address: "registered@sid.example.com",
+            revision: INSTALLATION_EMAIL_POLICY_REVISION,
+        },
+        None,
+    )
+    .unwrap();
+    source
+        .register_profile(&registration, AuditEntry::system("test", "register").into())
+        .await
+        .unwrap();
+
+    let snapshot = export(&source).await.unwrap();
+    let target = uninitialized().await;
+    import(&target, &snapshot).await.unwrap();
+    assert_eq!(
+        target
+            .get_profile_by_principal(PrincipalType::Email, "registered@sid.example.com")
+            .await
+            .unwrap()
+            .map(|p| p.id),
+        Some(profile.id)
+    );
+    assert_eq!(
+        target.list_profile_emails(profile.id).await.unwrap().len(),
+        source.list_profile_emails(profile.id).await.unwrap().len()
+    );
+    assert_eq!(
+        target
+            .get_principal_by_value(PrincipalType::Email, "registered@sid.example.com")
+            .await
+            .unwrap(),
+        source
+            .get_principal_by_value(PrincipalType::Email, "registered@sid.example.com")
+            .await
+            .unwrap()
+    );
+    assert!(verify(&source, &target).await.unwrap().passed);
+}
+
 /// An initialized installation of the same authority is not an import
 /// destination: only the interrupted import of this same snapshot is
 /// resumed there. A different snapshot of that authority, or one whose

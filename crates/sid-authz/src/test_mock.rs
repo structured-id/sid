@@ -1655,6 +1655,55 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<bool> {
         unimplemented!()
     }
+    async fn export_principals(
+        &self,
+        _: Option<sid_core::models::PrincipalId>,
+        _: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>> {
+        unimplemented!()
+    }
+    async fn import_principal(
+        &self,
+        _: &sid_core::models::StoredPrincipal,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation> {
+        unimplemented!()
+    }
+    async fn export_webauthn_user_handles(
+        &self,
+        _: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>> {
+        unimplemented!()
+    }
+    async fn import_webauthn_user_handle(
+        &self,
+        _: &sid_core::models::StoredUserHandle,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_email_policy_activation(
+        &self,
+        _: &sid_core::models::EmailPolicyActivation,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>> {
+        unimplemented!()
+    }
+    async fn import_principal_quarantine(
+        &self,
+        _: &sid_core::models::QuarantinedPrincipal,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
     async fn revoke_device_attestation(&self, _: DeviceId, _: MutationContext) -> Result<bool> {
         unimplemented!()
     }

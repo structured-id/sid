@@ -39,6 +39,7 @@ mod native_session;
 mod oidc_issuer;
 mod operation;
 mod password_history;
+mod principal_transfer;
 pub use password_history::SqliteHistoryKeyStore;
 mod profile;
 mod project;
@@ -2767,6 +2768,64 @@ impl StorageBackend for SqliteBackend {
 
     async fn cleanup_expired_quarantine(&self, audit: MutationContext) -> SidResult<u64> {
         self.cleanup_expired_quarantine_impl(audit).await
+    }
+
+    async fn export_principal_quarantine(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::QuarantinedPrincipal>> {
+        self.export_principal_quarantine_impl().await
+    }
+
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_quarantine_impl(entry, ctx).await
+    }
+
+    async fn export_principals(
+        &self,
+        after: Option<sid_core::models::PrincipalId>,
+        limit: u32,
+    ) -> SidResult<Vec<sid_core::models::StoredPrincipal>> {
+        self.export_principals_impl(after, limit).await
+    }
+
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+    ) -> SidResult<Vec<sid_core::models::StoredUserHandle>> {
+        self.export_webauthn_user_handles_impl(profile_id).await
+    }
+
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_webauthn_user_handle_impl(handle, ctx).await
+    }
+
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_impl(principal, ctx).await
+    }
+
+    async fn email_policy_activation(&self) -> SidResult<sid_core::models::EmailPolicyActivation> {
+        self.email_policy_activation_impl().await
+    }
+
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_email_policy_activation_impl(activation, ctx)
+            .await
     }
 
     // Closure request operations — see lifecycle.rs

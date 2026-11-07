@@ -301,6 +301,12 @@ macro_rules! __storage_conformance {
                 test_session_elevation_roundtrip
                 test_session_base_level_refuses_step_up_levels
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],transfer:
+                test_principals_move_as_stored
+                test_email_policy_activation_moves
+                test_quarantine_moves_as_stored
+                test_user_handles_move_as_stored
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],upstream:
                 test_upstream_provider_write_contract
                 test_upstream_identity_never_relinked

@@ -206,7 +206,7 @@ pub enum CredentialRevocation {
 /// A Profile's WebAuthn user handle (`user.id`, WebAuthn Level 3 §5.4.3) at
 /// one relying party: random and opaque, the same for every passkey of that
 /// Profile there, and never a ProfileId or a BindingId.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WebAuthnUserHandle(pub [u8; 16]);
 
 impl WebAuthnUserHandle {
@@ -214,6 +214,16 @@ impl WebAuthnUserHandle {
     pub fn from_slice(bytes: &[u8]) -> Option<Self> {
         bytes.try_into().ok().map(Self)
     }
+}
+
+/// A Profile's user handle at one relying party as stored, for a move
+/// between stores: its passkeys there carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredUserHandle {
+    pub profile_id: ProfileId,
+    pub rp_id: String,
+    pub handle: WebAuthnUserHandle,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Credential lifecycle status.

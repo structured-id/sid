@@ -75,8 +75,14 @@ pub async fn export(
             snapshot.history_keys.push(archive);
         }
         snapshot
-            .principals
-            .extend(backend.get_principals_by_profile(pid).await?);
+            .profile_emails
+            .extend(backend.list_profile_emails(pid).await?);
+        snapshot
+            .profile_phones
+            .extend(backend.list_profile_phones(pid).await?);
+        snapshot
+            .webauthn_user_handles
+            .extend(backend.export_webauthn_user_handles(pid).await?);
         snapshot
             .credentials
             .extend(backend.get_credentials_by_profile(pid, None).await?);
@@ -231,6 +237,17 @@ pub async fn export(
         }
         snapshot.scim_outbound_targets.extend(scim_targets);
     }
+
+    info!("exporting principals...");
+    snapshot.email_policy = Some(backend.email_policy_activation().await?);
+    let mut after = None;
+    loop {
+        let batch = backend.export_principals(after, 1000).await?;
+        let Some(last) = batch.last() else { break };
+        after = Some(last.entity.id);
+        snapshot.principals.extend(batch);
+    }
+    snapshot.principal_quarantine = backend.export_principal_quarantine().await?;
 
     info!("exporting installation-wide entities...");
     // Upstream providers, disabled ones included: an import restores them as

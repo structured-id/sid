@@ -7421,6 +7421,64 @@ impl StorageBackend for PostgresBackend {
         Ok(result.rows_affected())
     }
 
+    async fn export_principal_quarantine(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::QuarantinedPrincipal>> {
+        self.export_principal_quarantine_impl().await
+    }
+
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_quarantine_impl(entry, ctx).await
+    }
+
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> SidResult<Vec<sid_core::models::StoredPrincipal>> {
+        self.export_principals_impl(after, limit).await
+    }
+
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> SidResult<Vec<sid_core::models::StoredUserHandle>> {
+        self.export_webauthn_user_handles_impl(profile_id).await
+    }
+
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_webauthn_user_handle_impl(handle, ctx).await
+    }
+
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_impl(principal, ctx).await
+    }
+
+    async fn email_policy_activation(&self) -> SidResult<sid_core::models::EmailPolicyActivation> {
+        self.email_policy_activation_impl().await
+    }
+
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_email_policy_activation_impl(activation, ctx)
+            .await
+    }
+
     // === CLOSURE REQUEST ===
 
     async fn create_closure_request(
@@ -9309,6 +9367,7 @@ mod operation;
 pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;
+mod principal_transfer;
 mod provisioning_connector;
 mod refresh_token;
 mod session;

@@ -4822,6 +4822,72 @@ impl StorageBackend for MockStorage {
             "the mock store does not restore device bindings".into(),
         ))
     }
+    // The server tests never move a snapshot through this mock.
+    async fn export_principals(
+        &self,
+        _: Option<sid_core::models::PrincipalId>,
+        _: u32,
+    ) -> SidResult<Vec<sid_core::models::StoredPrincipal>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_principal(
+        &self,
+        _: &sid_core::models::StoredPrincipal,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn email_policy_activation(&self) -> SidResult<sid_core::models::EmailPolicyActivation> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn export_webauthn_user_handles(
+        &self,
+        _: ProfileId,
+    ) -> SidResult<Vec<sid_core::models::StoredUserHandle>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_webauthn_user_handle(
+        &self,
+        _: &sid_core::models::StoredUserHandle,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn import_email_policy_activation(
+        &self,
+        _: &sid_core::models::EmailPolicyActivation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn export_principal_quarantine(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::QuarantinedPrincipal>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_principal_quarantine(
+        &self,
+        _: &sid_core::models::QuarantinedPrincipal,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
     async fn revoke_device_attestation(
         &self,
         _device_id: DeviceId,

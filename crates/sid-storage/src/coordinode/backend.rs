@@ -2073,6 +2073,63 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::cleanup_expired_quarantine(self, ctx).await
     }
 
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>> {
+        CoordinodeBackend::export_principal_quarantine(self).await
+    }
+
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_principal_quarantine(self, entry, ctx).await
+    }
+
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>> {
+        CoordinodeBackend::export_principals(self, after, limit).await
+    }
+
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>> {
+        CoordinodeBackend::export_webauthn_user_handles(self, profile_id).await
+    }
+
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_webauthn_user_handle(self, handle, ctx).await
+    }
+
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_principal(self, principal, ctx).await
+    }
+
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation> {
+        CoordinodeBackend::email_policy_activation(self).await
+    }
+
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_email_policy_activation(self, activation, ctx).await
+    }
+
     async fn create_closure_request(
         &self,
         req: &ClosureRequest,
