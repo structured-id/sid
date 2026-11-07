@@ -431,6 +431,43 @@ impl PostgresBackend {
         .collect()
     }
 
+    pub(super) async fn connector_export(&self) -> SidResult<Vec<ProvisioningConnector>> {
+        sqlx::query_as::<_, ConnectorRow>("SELECT * FROM provisioning_connectors ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(failed("export connectors"))?
+            .into_iter()
+            .map(ConnectorRow::into_domain)
+            .collect()
+    }
+
+    pub(super) async fn connector_import_credential(
+        &self,
+        cred: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.connector_tx().await?;
+        let held = sqlx::query_as::<_, CredentialRow>(
+            "SELECT * FROM provisioning_credentials WHERE id = $1",
+        )
+        .bind(cred.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(failed("read connector credential"))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row.into_domain()?, cred, "connector credential");
+        }
+        Self::insert_credential(&mut tx, cred).await?;
+        Self::audit_in_tx(
+            &mut tx,
+            &format!("provisioning_credential:{}", cred.id),
+            ctx,
+        )
+        .await?;
+        Self::connector_commit(tx).await?;
+        Ok(true)
+    }
+
     pub(super) async fn connector_find_credential(
         &self,
         verifier: &str,

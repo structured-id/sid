@@ -491,7 +491,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     let altered = uninitialized().await;
     import(&altered, &mismatched).await.unwrap();
     let comparison = verify(&source, &altered).await.unwrap();
-    assert!(comparison.counts.iter().all(|c| c.matches));
+    assert!(comparison.counts.iter().all(|c| c.matches), "{comparison}");
     assert_eq!(
         comparison.integrity_issues,
         vec!["OPAQUE server setup differs"]
@@ -909,6 +909,9 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         owner_domain: domain,
         epochs: key_epochs,
         replaced: vec![(old.epoch.id, 2)],
+        created_by: Vec::new(),
+        lifecycle: None,
+        uses: Vec::new(),
     };
     // A compare-only epoch emptied by retention is a valid state: the
     // evaluator retires it at the owner's next preparation, from the live
@@ -1005,6 +1008,9 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
             owner_domain: domain,
             epochs,
             replaced,
+            created_by: Vec::new(),
+            lifecycle: None,
+            uses: Vec::new(),
         }];
         snapshot
     };

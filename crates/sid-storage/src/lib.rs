@@ -240,6 +240,24 @@ fn administrator_role_assigned() -> sid_core::Error {
     )
 }
 
+/// An exported record found already stored under its key: `false` when it
+/// is the same record, so a repeated import writes nothing, a `Conflict` when
+/// another one holds the key.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+fn transfer_repeat<T: PartialEq>(stored: &T, wanted: &T, what: &str) -> sid_core::Result<bool> {
+    if stored == wanted {
+        Ok(false)
+    } else {
+        Err(sid_core::Error::Conflict(format!(
+            "another {what} is stored under the exported one's key"
+        )))
+    }
+}
+
 /// The time before which an IP reputation entry counts as stale for a decay
 /// window of `older_than`; a window that no date can express is refused.
 #[cfg(any(

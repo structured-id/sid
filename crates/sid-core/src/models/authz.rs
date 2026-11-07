@@ -798,8 +798,10 @@ parse_stored!(SodSeverity, "sod severity", [Warning, Block]);
 ///
 /// Defines pairs of roles that should not be assigned to the same principal.
 /// Conflicts produce warnings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SodConflictRule {
+    /// The rule's stored identity.
+    pub id: uuid::Uuid,
     /// Rule name (e.g., "payment_segregation").
     pub name: String,
     /// Human-readable description.

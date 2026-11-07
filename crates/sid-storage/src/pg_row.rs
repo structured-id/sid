@@ -1600,6 +1600,7 @@ impl ExportJobRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct SodRuleRow {
+    pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
     pub conflicting_roles: String,
@@ -1611,6 +1612,7 @@ impl SodRuleRow {
     /// would stop blocking.
     pub fn into_domain(self) -> SidResult<SodConflictRule> {
         Ok(SodConflictRule {
+            id: self.id,
             name: self.name,
             description: self.description,
             conflicting_roles: split_ws(&self.conflicting_roles),

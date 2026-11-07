@@ -775,6 +775,21 @@ impl sid_plugin::SignInHistoryStore for SqliteBackend {
     ) -> SidResult<Vec<String>> {
         self.get_designated_countries_impl(profile_id).await
     }
+
+    async fn export_login_locations(
+        &self,
+    ) -> SidResult<Vec<(sid_core::models::ProfileId, sid_plugin::LoginLocation)>> {
+        self.export_login_locations_impl().await
+    }
+
+    async fn import_login_location(
+        &self,
+        owner: sid_core::models::ProfileId,
+        location: &sid_plugin::LoginLocation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_login_location_impl(owner, location, ctx).await
+    }
 }
 
 #[async_trait]
@@ -1353,6 +1368,37 @@ impl StorageBackend for SqliteBackend {
         self.list_ip_allowlist_entries_impl().await
     }
 
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_ip_allowlist_entry_impl(cidr, description, created_at, ctx)
+            .await
+    }
+
+    async fn import_anomaly_event(
+        &self,
+        event: &sid_core::models::AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_anomaly_event_impl(event, ctx).await
+    }
+
+    async fn export_ip_reputation(&self) -> SidResult<Vec<sid_core::models::IpReputation>> {
+        self.export_ip_reputation_impl().await
+    }
+
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_ip_reputation_impl(reputation, ctx).await
+    }
+
     // Session operations — see session.rs
     async fn create_session(
         &self,
@@ -1721,6 +1767,14 @@ impl StorageBackend for SqliteBackend {
         self.set_enrollment_policy_impl(policy, mode, audit).await
     }
 
+    async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
+        Self::login_policy_epoch(&self.pool).await
+    }
+
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> SidResult<bool> {
+        self.import_login_policy_epoch_impl(epoch, ctx).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -2062,6 +2116,14 @@ impl StorageBackend for SqliteBackend {
 
     async fn list_sod_rules(&self) -> SidResult<Vec<sid_core::models::SodConflictRule>> {
         self.list_sod_rules_impl().await
+    }
+
+    async fn import_sod_rule(
+        &self,
+        rule: &sid_core::models::SodConflictRule,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_sod_rule_impl(rule, ctx).await
     }
 
     // Cedar policy operations — see rbac.rs
@@ -2638,6 +2700,12 @@ impl StorageBackend for SqliteBackend {
         self.connector_list(org_id).await
     }
 
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::ProvisioningConnector>> {
+        self.connector_export().await
+    }
+
     async fn create_provisioning_connector(
         &self,
         connector: &sid_core::models::ProvisioningConnector,
@@ -2701,6 +2769,14 @@ impl StorageBackend for SqliteBackend {
         connector_id: sid_core::models::ProvisioningConnectorId,
     ) -> SidResult<Vec<sid_core::models::ProvisioningCredential>> {
         self.connector_list_credentials(connector_id).await
+    }
+
+    async fn import_provisioning_credential(
+        &self,
+        credential: &sid_core::models::ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.connector_import_credential(credential, ctx).await
     }
 
     async fn find_provisioning_credential(
@@ -3231,6 +3307,15 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
         self.list_invite_redemptions_impl(id, offset, limit).await
     }
+    async fn import_invite_redemption(
+        &self,
+        id: sid_core::models::InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_invite_redemption_impl(id, redemption, ctx)
+            .await
+    }
     async fn try_use_invite(
         &self,
         id: sid_core::models::InviteId,
@@ -3251,6 +3336,15 @@ impl StorageBackend for SqliteBackend {
         profile_id: sid_core::models::ProfileId,
     ) -> SidResult<Option<sid_core::models::RegistrationSource>> {
         self.get_registration_source_impl(profile_id).await
+    }
+    async fn import_registration_source(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        source: &sid_core::models::RegistrationSource,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_registration_source_impl(profile_id, source, ctx)
+            .await
     }
     async fn count_registrations_by_source(
         &self,
@@ -3341,6 +3435,9 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<Vec<sid_core::models::AccessRequest>> {
         self.list_pending_access_requests_impl().await
     }
+    async fn export_access_requests(&self) -> SidResult<Vec<sid_core::models::AccessRequest>> {
+        self.export_access_requests_impl().await
+    }
     async fn decide_access_request(
         &self,
         request: &sid_core::models::AccessRequest,
@@ -3369,6 +3466,11 @@ impl StorageBackend for SqliteBackend {
         id: sid_core::models::ResetSessionId,
     ) -> SidResult<Option<sid_core::models::PasswordResetSession>> {
         self.get_reset_session_impl(id).await
+    }
+    async fn export_reset_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::PasswordResetSession>> {
+        self.export_reset_sessions_impl().await
     }
     async fn verify_reset_session(
         &self,

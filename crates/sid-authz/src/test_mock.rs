@@ -2196,6 +2196,79 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<Vec<sid_core::models::DeviceAuthorizationCode>> {
         unimplemented!()
     }
+    async fn import_anomaly_event(
+        &self,
+        _: &sid_core::models::AnomalyEventRecord,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>> {
+        unimplemented!()
+    }
+    async fn import_ip_reputation(
+        &self,
+        _: &sid_core::models::IpReputation,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_ip_allowlist_entry(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
+        unimplemented!()
+    }
+    async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_sod_rule(
+        &self,
+        _: &sid_core::models::SodConflictRule,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> Result<Vec<sid_core::models::ProvisioningConnector>> {
+        unimplemented!()
+    }
+    async fn import_provisioning_credential(
+        &self,
+        _: &sid_core::models::ProvisioningCredential,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_invite_redemption(
+        &self,
+        _: sid_core::models::InviteId,
+        _: &sid_core::models::InviteRedemption,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_registration_source(
+        &self,
+        _: sid_core::models::ProfileId,
+        _: &sid_core::models::RegistrationSource,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_access_requests(&self) -> Result<Vec<sid_core::models::AccessRequest>> {
+        unimplemented!()
+    }
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>> {
+        unimplemented!()
+    }
     async fn count_active_magic_links_for_email(&self, _: &str) -> Result<u32> {
         Ok(0)
     }

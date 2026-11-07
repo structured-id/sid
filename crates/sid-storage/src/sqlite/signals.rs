@@ -3,7 +3,7 @@
 
 use sid_core::{
     Error as SidError, Result as SidResult,
-    models::{AnomalyEventId, AnomalyEventRecord, MutationContext},
+    models::{AnomalyEventId, AnomalyEventRecord, IpReputation, MutationContext},
 };
 use sqlx::Row;
 
@@ -218,6 +218,129 @@ impl SqliteBackend {
         .map_err(|e| SidError::Storage(format!("list_ip_allowlist_entries: {e}")))?;
         allowlist_rows(&rows)
     }
+
+    pub(crate) async fn import_anomaly_event_impl(
+        &self,
+        event: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query(
+            "SELECT id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp \
+             FROM anomaly_events WHERE id = ?",
+        )
+        .bind(event.id.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("import_anomaly_event: {e}")))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row_to_anomaly_event(&row)?, event, "anomaly event");
+        }
+        sqlx::query(
+            "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(event.id.0)
+        .bind(&event.rule_id)
+        .bind(&event.profile_id)
+        .bind(event.ip_address.map(super::ip_to_bytes))
+        .bind(&event.description)
+        .bind(event.risk_score)
+        .bind(&event.reaction)
+        .bind(fmt_dt(&event.timestamp))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("anomaly event", e))?;
+        Self::commit_mutation(tx, &format!("anomaly_event:{}", event.id), ctx).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn export_ip_reputation_impl(&self) -> SidResult<Vec<IpReputation>> {
+        let rows = sqlx::query("SELECT * FROM ip_reputation ORDER BY ip")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("export_ip_reputation: {e}")))?;
+        rows.iter().map(row_to_reputation).collect()
+    }
+
+    pub(crate) async fn import_ip_reputation_impl(
+        &self,
+        reputation: &IpReputation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query("SELECT * FROM ip_reputation WHERE ip = ?")
+            .bind(&reputation.ip)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("import_ip_reputation: {e}")))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row_to_reputation(&row)?, reputation, "IP reputation");
+        }
+        // The score as recording an event computes it from the counts.
+        sqlx::query(
+            "INSERT INTO ip_reputation (ip, failed_count, success_count, score, first_seen_at, \
+                 last_failed_at, last_success_at, updated_at) \
+             VALUES (?1, ?2, ?3, CAST(?2 AS REAL) / (?2 + ?3 + 1), ?4, ?5, ?6, ?7)",
+        )
+        .bind(&reputation.ip)
+        .bind(reputation.failed_count)
+        .bind(reputation.success_count)
+        .bind(fmt_dt(&reputation.first_seen_at))
+        .bind(super::fmt_dt_opt(reputation.last_failed_at))
+        .bind(super::fmt_dt_opt(reputation.last_success_at))
+        .bind(fmt_dt(&reputation.updated_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("IP reputation", e))?;
+        Self::commit_mutation(tx, "ip_reputation", ctx).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn import_ip_allowlist_entry_impl(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query(
+            "SELECT cidr, description, created_at FROM ip_allowlist_entries WHERE cidr = ?",
+        )
+        .bind(cidr)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("import_ip_allowlist_entry: {e}")))?;
+        let wanted = (cidr.to_owned(), description.to_owned(), created_at);
+        if let Some(row) = held {
+            let stored = allowlist_rows(std::slice::from_ref(&row))?;
+            return crate::transfer_repeat(&stored[0], &wanted, "IP allowlist entry");
+        }
+        sqlx::query(
+            "INSERT INTO ip_allowlist_entries (cidr, description, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(cidr)
+        .bind(description)
+        .bind(fmt_dt(&created_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("IP allowlist entry", e))?;
+        Self::commit_allowlist_change(tx, ctx).await?;
+        Ok(true)
+    }
+}
+
+fn row_to_reputation(row: &sqlx::sqlite::SqliteRow) -> SidResult<IpReputation> {
+    Ok(IpReputation {
+        ip: col(row, "ip")?,
+        failed_count: col(row, "failed_count")?,
+        success_count: col(row, "success_count")?,
+        first_seen_at: super::dt_col(row, "first_seen_at")?,
+        last_failed_at: super::dt_col_opt(row, "last_failed_at")?,
+        last_success_at: super::dt_col_opt(row, "last_success_at")?,
+        updated_at: super::dt_col(row, "updated_at")?,
+    })
 }
 
 /// The allowlist entries of `rows`.

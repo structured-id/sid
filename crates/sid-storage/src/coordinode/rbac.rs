@@ -1747,6 +1747,23 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn export_access_requests(&self) -> SidResult<Vec<AccessRequest>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                &format!("MATCH (q:SidAccessRequest) RETURN {REQUEST}"),
+                Params::default(),
+            )?;
+            let all = rows.iter().map(request).collect::<SidResult<Vec<_>>>()?;
+            Ok(super::sorted_page(
+                all,
+                |q| (q.created_at, q.id),
+                0,
+                u64::MAX,
+            ))
+        })
+        .await
+    }
+
     pub(super) async fn list_pending_access_requests(&self) -> SidResult<Vec<AccessRequest>> {
         self.read(|tx| {
             let rows = tx.run(

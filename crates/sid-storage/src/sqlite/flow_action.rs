@@ -31,11 +31,14 @@ impl SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let data = data_of(action)?;
+        // A new action is at revision 0; an imported one keeps its own.
+        let revision = i64::try_from(action.revision)
+            .map_err(|e| SidError::Validation(format!("flow action revision: {e}")))?;
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO flow_actions (id, project_id, flow_type, action_point, action_order,
-                data, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                data, revision, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(action.id)
         .bind(action.project_id)
@@ -43,6 +46,7 @@ impl SqliteBackend {
         .bind(action.action_point.as_str())
         .bind(action.order)
         .bind(&data)
+        .bind(revision)
         .bind(fmt_dt(&action.created_at))
         .bind(fmt_dt(&action.updated_at))
         .execute(&mut *tx)

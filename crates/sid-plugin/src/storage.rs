@@ -446,6 +446,15 @@ pub trait StorageBackend:
         offset: i32,
     ) -> Result<Vec<AnomalyEventRecord>>;
 
+    /// Store an exported anomaly event as it was recorded. The same event
+    /// stored before is `false` with nothing written; another one under its
+    /// id is a `Conflict`.
+    async fn import_anomaly_event(
+        &self,
+        event: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // === IP REPUTATION ===
 
     /// Record a login event for IP reputation tracking.
@@ -472,6 +481,18 @@ pub trait StorageBackend:
     /// and deletes entries with both counters at zero.
     async fn decay_ip_reputation(&self, older_than: std::time::Duration) -> Result<u64>;
 
+    /// Every address's learned reputation, for an instance transfer.
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>>;
+
+    /// Store an exported reputation as it was learned. The same one stored
+    /// before is `false` with nothing written; another for its address is a
+    /// `Conflict`.
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // === IP ALLOWLIST ===
 
     /// Add a CIDR to the admin-configured IP allowlist, or relabel it, under
@@ -492,6 +513,17 @@ pub trait StorageBackend:
     async fn list_ip_allowlist_entries(
         &self,
     ) -> Result<Vec<(String, String, chrono::DateTime<chrono::Utc>)>>;
+
+    /// Store an exported allowlist entry with the time it was added. The
+    /// same entry stored before is `false` with nothing written; another for
+    /// its CIDR is a `Conflict`.
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     // === SESSION OPERATIONS ===
 
@@ -852,6 +884,14 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// The installation's login policy epoch, advanced by every change of a
+    /// policy a login is admitted under; `None` until the first change.
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>>;
+
+    /// Store an exported login policy epoch into a store that has none. The
+    /// same epoch stored before is `false`; another one is a `Conflict`.
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> Result<bool>;
+
     /// Make `profile` the first administrator, consuming the admin claim
     /// stored as `claim_sealed`: the claim is removed and the installation
     /// administrator assignment (the built-in role stored if it is not) is
@@ -1140,6 +1180,11 @@ pub trait StorageBackend:
 
     /// List all SoD conflict rules.
     async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>>;
+
+    /// Store an exported SoD conflict rule as it was defined. The same rule
+    /// stored before is `false` with nothing written; another one under its
+    /// id is a `Conflict`.
+    async fn import_sod_rule(&self, rule: &SodConflictRule, ctx: MutationContext) -> Result<bool>;
 
     // === CEDAR POLICY OPERATIONS ===
 
@@ -1640,6 +1685,10 @@ pub trait StorageBackend:
         org_id: OrgId,
     ) -> Result<Vec<ProvisioningConnector>>;
 
+    /// Every organization's provisioning connectors, retired ones included,
+    /// for an instance transfer.
+    async fn export_provisioning_connectors(&self) -> Result<Vec<ProvisioningConnector>>;
+
     /// Store a new connector. An existing id is refused with
     /// `Error::Conflict`: a create never replaces.
     async fn create_provisioning_connector(
@@ -1714,6 +1763,16 @@ pub trait StorageBackend:
         &self,
         connector_id: ProvisioningConnectorId,
     ) -> Result<Vec<ProvisioningCredential>>;
+
+    /// Store an exported credential as it was, whatever the state of it and
+    /// its stored connector. The same credential stored before is `false`
+    /// with nothing written; another under its id or verifier is a
+    /// `Conflict`.
+    async fn import_provisioning_credential(
+        &self,
+        credential: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     /// The credential stored with `verifier` and its connector, whatever
     /// their states: the caller decides usability at the time of use.
@@ -2117,6 +2176,17 @@ pub trait StorageBackend:
         limit: u64,
     ) -> Result<Vec<sid_core::models::InviteRedemption>>;
 
+    /// Store an exported redemption of invite `id` as it was recorded,
+    /// leaving the invite's use count as stored. The same one stored before
+    /// is `false` with nothing written; another for its Profile is a
+    /// `Conflict`.
+    async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// Atomically increment invite use_count. Returns updated invite if successful
     /// (use_count < max_uses and active and not expired). Returns None if invite
     /// cannot be used — prevents TOCTOU race.
@@ -2135,6 +2205,16 @@ pub trait StorageBackend:
         &self,
         profile_id: ProfileId,
     ) -> Result<Option<RegistrationSource>>;
+
+    /// Store the exported registration source of `profile_id`. The same one
+    /// stored before is `false` with nothing written; another is a
+    /// `Conflict`.
+    async fn import_registration_source(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     /// Count registrations by source type in a time range.
     async fn count_registrations_by_source(
@@ -2216,6 +2296,9 @@ pub trait StorageBackend:
     /// List pending access requests (status = Pending, not expired).
     async fn list_pending_access_requests(&self) -> Result<Vec<AccessRequest>>;
 
+    /// Every access request, decided ones included, for an instance transfer.
+    async fn export_access_requests(&self) -> Result<Vec<AccessRequest>>;
+
     /// Record the decision in `request` (status, reviewer, comment, review
     /// time) on a request that is still pending in storage. Returns `false`
     /// and writes nothing when it was already decided, so of concurrent
@@ -2254,6 +2337,10 @@ pub trait StorageBackend:
         &self,
         id: sid_core::models::ResetSessionId,
     ) -> Result<Option<sid_core::models::PasswordResetSession>>;
+
+    /// Every password reset session in any state, for an instance transfer:
+    /// a completed one still answers its token as used.
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>>;
 
     /// Mark a pending, unexpired reset session verified (its emailed token
     /// was checked). Returns `false` and writes nothing otherwise, so a token

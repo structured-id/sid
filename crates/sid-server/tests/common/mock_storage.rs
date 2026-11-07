@@ -1089,6 +1089,18 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
     async fn import_keys(&self, _: &KeyArchive, _: AuditEntry) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
     }
+
+    async fn export_key_records(&self) -> SidResult<sid_core::models::KeyStoreRecords> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+
+    async fn import_key_records(
+        &self,
+        _: &sid_core::models::KeyStoreRecords,
+        _: AuditEntry,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
 }
 
 #[async_trait]
@@ -5908,6 +5920,81 @@ impl StorageBackend for MockStorage {
         Err(sid_core::Error::Storage(
             "the mock store exports no snapshot".into(),
         ))
+    }
+    async fn import_anomaly_event(
+        &self,
+        _: &sid_core::models::AnomalyEventRecord,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_ip_reputation(&self) -> SidResult<Vec<sid_core::models::IpReputation>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_ip_reputation(
+        &self,
+        _: &sid_core::models::IpReputation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_ip_allowlist_entry(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_sod_rule(
+        &self,
+        _: &sid_core::models::SodConflictRule,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::ProvisioningConnector>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_provisioning_credential(
+        &self,
+        _: &sid_core::models::ProvisioningCredential,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_invite_redemption(
+        &self,
+        _: sid_core::models::InviteId,
+        _: &sid_core::models::InviteRedemption,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_registration_source(
+        &self,
+        _: sid_core::models::ProfileId,
+        _: &sid_core::models::RegistrationSource,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_access_requests(&self) -> SidResult<Vec<sid_core::models::AccessRequest>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_reset_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::PasswordResetSession>> {
+        unimplemented!("instance transfer is tested against the real backends")
     }
     async fn count_active_magic_links_for_email(&self, email: &str) -> SidResult<u32> {
         let inner = self.inner.lock().unwrap();

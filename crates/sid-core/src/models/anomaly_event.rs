@@ -36,7 +36,7 @@ impl Default for AnomalyEventId {
 ///
 /// Created when AnomalyDetector fires a rule during login.
 /// Stored in anomaly_events table, queried via GetAnomalyEventLog RPC.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnomalyEventRecord {
     pub id: AnomalyEventId,
     /// Which anomaly rule triggered (e.g., "brute_force", "credential_stuffing").

@@ -26,4 +26,5 @@ in_process!(
     counts_are_read_and_cleared,
     admission_is_confirmed_only_to_its_holder,
     concurrent_holders_admit_once,
+    records_move_with_their_deadlines,
 );

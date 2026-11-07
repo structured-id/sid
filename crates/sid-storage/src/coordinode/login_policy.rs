@@ -63,4 +63,33 @@ impl CoordinodeBackend {
         })
         .await
     }
+
+    pub(super) async fn import_login_policy_epoch(
+        &self,
+        epoch: i64,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        self.transaction(move |tx| {
+            let rows = tx.run(
+                "MATCH (e:SidLoginPolicyEpoch) WHERE e.id = 1 RETURN e.epoch AS epoch",
+                Params::default(),
+            )?;
+            if let Some(row) = rows.first() {
+                return crate::transfer_repeat(
+                    &get_int(row, "epoch")?,
+                    &epoch,
+                    "login policy epoch",
+                )
+                .map(super::Decision::Abandon);
+            }
+            // Concurrent importers meet on the unique node.
+            tx.run(
+                "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: $epoch})",
+                Params::default().with("epoch", coordinode_core::graph::types::Value::Int(epoch)),
+            )?;
+            super::finalize(tx, "installation:login_policy", ctx.clone())?;
+            Ok(super::Decision::Commit(true))
+        })
+        .await
+    }
 }

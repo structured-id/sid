@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::{CeremonyStateStore, SingleUseAdmissions};
+use sid_plugin::{
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
+};
 
 use super::SqliteBackend;
 
@@ -291,4 +293,138 @@ impl CeremonyStateStore for SqliteBackend {
             .await?;
         Ok(states + counts)
     }
+
+    async fn export_ceremony_state(&self) -> SidResult<CeremonyRecords> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(failure("export ceremony state"))?;
+        let now = now_ms();
+        let states: Vec<(String, String, Vec<u8>, i64)> = sqlx::query_as(
+            "SELECT namespace, state_key, value, expires_at_ms FROM ceremony_states
+             WHERE expires_at_ms > ? ORDER BY namespace, state_key",
+        )
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failure("export ceremony state"))?;
+        let counts: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT namespace, count_key, count, window_ends_ms FROM ceremony_counts
+             WHERE window_ends_ms > ? ORDER BY namespace, count_key",
+        )
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failure("export ceremony counts"))?;
+        tx.commit()
+            .await
+            .map_err(failure("export ceremony state"))?;
+        Ok(CeremonyRecords {
+            states: states
+                .into_iter()
+                .map(|(namespace, key, value, ms)| {
+                    Ok(CeremonyEntry {
+                        namespace,
+                        key,
+                        value,
+                        expires_at: instant(ms)?,
+                    })
+                })
+                .collect::<SidResult<_>>()?,
+            counts: counts
+                .into_iter()
+                .map(|(namespace, key, count, ms)| {
+                    Ok(CeremonyCount {
+                        namespace,
+                        count: u64::try_from(count)
+                            .map_err(|_| SidError::Storage(format!("count of {key} is {count}")))?,
+                        key,
+                        window_ends: instant(ms)?,
+                    })
+                })
+                .collect::<SidResult<_>>()?,
+        })
+    }
+
+    async fn import_ceremony_state(&self, records: &CeremonyRecords) -> SidResult<u64> {
+        let mut tx = self.begin_write().await?;
+        let now = now_ms();
+        let mut stored = 0;
+        for entry in &records.states {
+            let held: Option<(Vec<u8>, i64)> = sqlx::query_as(
+                "SELECT value, expires_at_ms FROM ceremony_states
+                 WHERE namespace = ? AND state_key = ? AND expires_at_ms > ?",
+            )
+            .bind(&entry.namespace)
+            .bind(&entry.key)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(failure("import ceremony state"))?;
+            let wanted = (entry.value.clone(), entry.expires_at.timestamp_millis());
+            if let Some(held) = held {
+                crate::transfer_repeat(&held, &wanted, "ceremony state")?;
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT (namespace, state_key) DO UPDATE SET
+                     value = excluded.value, expires_at_ms = excluded.expires_at_ms",
+            )
+            .bind(&entry.namespace)
+            .bind(&entry.key)
+            .bind(&entry.value)
+            .bind(wanted.1)
+            .execute(&mut *tx)
+            .await
+            .map_err(failure("import ceremony state"))?;
+            stored += 1;
+        }
+        for count in &records.counts {
+            let held: Option<(i64, i64)> = sqlx::query_as(
+                "SELECT count, window_ends_ms FROM ceremony_counts
+                 WHERE namespace = ? AND count_key = ? AND window_ends_ms > ?",
+            )
+            .bind(&count.namespace)
+            .bind(&count.key)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(failure("import ceremony count"))?;
+            let value = i64::try_from(count.count).map_err(|_| {
+                SidError::Validation(format!("count of {} is too large", count.key))
+            })?;
+            let wanted = (value, count.window_ends.timestamp_millis());
+            if let Some(held) = held {
+                crate::transfer_repeat(&held, &wanted, "ceremony count")?;
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO ceremony_counts (namespace, count_key, count, window_ends_ms)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT (namespace, count_key) DO UPDATE SET
+                     count = excluded.count, window_ends_ms = excluded.window_ends_ms",
+            )
+            .bind(&count.namespace)
+            .bind(&count.key)
+            .bind(value)
+            .bind(wanted.1)
+            .execute(&mut *tx)
+            .await
+            .map_err(failure("import ceremony count"))?;
+            stored += 1;
+        }
+        tx.commit()
+            .await
+            .map_err(failure("import ceremony state"))?;
+        Ok(stored)
+    }
+}
+
+/// The instant of a stored millisecond deadline.
+fn instant(ms: i64) -> SidResult<chrono::DateTime<Utc>> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .ok_or_else(|| SidError::Storage(format!("ceremony deadline {ms} is out of range")))
 }

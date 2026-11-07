@@ -13,6 +13,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sid_core::models::consent::ConsentRecord;
+use sid_core::models::notification::NotificationPreferences;
+use sid_core::models::{
+    AccessRequest, AnomalyEventRecord, BootstrapPolicy, EnrollmentPolicy, FlowAction, FlowConfig,
+    Invite, InviteId, InviteRedemption, IpReputation, PasswordResetSession, ProfileId,
+    ProvisioningConnector, ProvisioningCredential, RegistrationSource,
+};
 use sid_core::models::{
     Application, BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device,
     DeviceAttestation, DeviceAuthorizationCode, EmailPolicyActivation, ExportJob, Group,
@@ -163,6 +170,10 @@ pub struct Snapshot {
     /// epoch created before it is selected or evaluated.
     pub history_key_write_cutoff: Option<DateTime<Utc>>,
 
+    /// The evaluator's fences of aborted first enrollments and purged owners,
+    /// and its own audit trail where it keeps one apart from the audit chains.
+    pub history_key_records: sid_core::models::KeyStoreRecords,
+
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
 
@@ -279,6 +290,62 @@ pub struct Snapshot {
 
     /// Branding configurations (per-project theming).
     pub branding_configs: Vec<BrandingConfig>,
+
+    /// Each profile's consents to clients with their claim grants, revoked
+    /// ones included.
+    pub consents: Vec<ConsentRecord>,
+
+    /// The profiles' notification preferences.
+    pub notification_preferences: Vec<NotificationPreferences>,
+
+    /// The projects' flow configurations and the actions attached to them.
+    pub flow_configs: Vec<FlowConfig>,
+    pub flow_actions: Vec<FlowAction>,
+
+    /// Invites in every state, and the registrations that spent them.
+    pub invites: Vec<Invite>,
+    pub invite_redemptions: Vec<(InviteId, InviteRedemption)>,
+
+    /// Where each profile came from.
+    pub registration_sources: Vec<(ProfileId, RegistrationSource)>,
+
+    /// Access requests, decided ones included.
+    pub access_requests: Vec<AccessRequest>,
+
+    /// The installation's enrollment policy, when one was set.
+    pub enrollment_policy: Option<EnrollmentPolicy>,
+
+    /// Whether the installation was adopted for central management: a
+    /// centrally managed one never takes a local administrator claim again.
+    pub bootstrap_policy: BootstrapPolicy,
+
+    /// The login policy epoch: a decision taken under an earlier policy
+    /// never commits after the move.
+    pub login_policy_epoch: Option<i64>,
+
+    /// The IP allowlist, with when each entry was added.
+    pub ip_allowlist: Vec<(String, String, DateTime<Utc>)>,
+
+    /// Learned IP reputation and the anomaly events the sign-in rules fired.
+    pub ip_reputation: Vec<IpReputation>,
+    pub anomaly_events: Vec<AnomalyEventRecord>,
+
+    /// The countries each profile signed in from.
+    pub login_locations: Vec<(ProfileId, sid_plugin::LoginLocation)>,
+
+    /// Password reset sessions in every state: a completed one still
+    /// refuses its token.
+    pub reset_sessions: Vec<PasswordResetSession>,
+
+    /// Provisioning connectors of every organization and their credentials,
+    /// retired and revoked ones included.
+    pub provisioning_connectors: Vec<ProvisioningConnector>,
+    pub provisioning_credentials: Vec<ProvisioningCredential>,
+
+    /// Live ceremony state, single-use admissions and attempt counts: a
+    /// challenge in flight, a replay record or a lockout count still holds
+    /// after the move.
+    pub ceremony: sid_plugin::CeremonyRecords,
 }
 
 /// Metadata about the snapshot.
@@ -307,7 +374,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -365,6 +432,7 @@ impl Snapshot {
             history_key_versions: Vec::new(),
             history_write_cutoff: None,
             history_key_write_cutoff: None,
+            history_key_records: Default::default(),
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),
@@ -404,6 +472,25 @@ impl Snapshot {
             scim_outbound_records: Vec::new(),
             outbound_dlq_entries: Vec::new(),
             branding_configs: Vec::new(),
+            consents: Vec::new(),
+            notification_preferences: Vec::new(),
+            flow_configs: Vec::new(),
+            flow_actions: Vec::new(),
+            invites: Vec::new(),
+            invite_redemptions: Vec::new(),
+            registration_sources: Vec::new(),
+            access_requests: Vec::new(),
+            enrollment_policy: None,
+            bootstrap_policy: BootstrapPolicy::SelfManaged,
+            login_policy_epoch: None,
+            ip_allowlist: Vec::new(),
+            ip_reputation: Vec::new(),
+            anomaly_events: Vec::new(),
+            login_locations: Vec::new(),
+            reset_sessions: Vec::new(),
+            provisioning_connectors: Vec::new(),
+            provisioning_credentials: Vec::new(),
+            ceremony: Default::default(),
         }
     }
 
@@ -434,6 +521,9 @@ impl Snapshot {
                 .count() as u64,
             self.history_keys.len() as u64,
             self.history_key_versions.len() as u64,
+            (self.history_key_records.abandoned.len()
+                + self.history_key_records.purged.len()
+                + self.history_key_records.audit.len()) as u64,
             self.sessions.len() as u64,
             self.service_bindings.len() as u64,
             self.applications.len() as u64,
@@ -477,6 +567,25 @@ impl Snapshot {
             self.scim_outbound_records.len() as u64,
             self.outbound_dlq_entries.len() as u64,
             self.branding_configs.len() as u64,
+            self.consents.len() as u64,
+            self.notification_preferences.len() as u64,
+            self.flow_configs.len() as u64,
+            self.flow_actions.len() as u64,
+            self.invites.len() as u64,
+            self.invite_redemptions.len() as u64,
+            self.registration_sources.len() as u64,
+            self.access_requests.len() as u64,
+            u64::from(self.enrollment_policy.is_some()),
+            u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
+            u64::from(self.login_policy_epoch.is_some()),
+            self.ip_allowlist.len() as u64,
+            self.ip_reputation.len() as u64,
+            self.anomaly_events.len() as u64,
+            self.login_locations.len() as u64,
+            self.reset_sessions.len() as u64,
+            self.provisioning_connectors.len() as u64,
+            self.provisioning_credentials.len() as u64,
+            (self.ceremony.states.len() + self.ceremony.counts.len()) as u64,
         ];
         sizes.iter().sum()
     }

@@ -123,6 +123,18 @@ impl SqliteBackend {
         rows.iter().map(row_to_access_request).collect()
     }
 
+    pub(crate) async fn export_access_requests_impl(&self) -> SidResult<Vec<AccessRequest>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            access_request_columns!(),
+            " FROM access_requests ORDER BY created_at, id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        rows.iter().map(row_to_access_request).collect()
+    }
+
     pub(crate) async fn decide_access_request_impl(
         &self,
         request: &AccessRequest,

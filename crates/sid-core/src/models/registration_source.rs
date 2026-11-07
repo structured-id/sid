@@ -70,7 +70,7 @@ impl std::fmt::Display for RegistrationSourceType {
 // ── UTM params ──────────────────────────────────────────────────
 
 /// UTM tracking parameters captured from registration URL.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UtmParams {
     pub source: String,
     pub medium: String,
@@ -93,7 +93,7 @@ impl UtmParams {
 // ── Registration source entity ──────────────────────────────────
 
 /// How a profile was created. Stored as metadata on the profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistrationSource {
     /// Source type.
     pub source_type: RegistrationSourceType,

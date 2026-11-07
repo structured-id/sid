@@ -63,4 +63,38 @@ pub trait SignInHistoryStore: Send + Sync {
     /// Used by impossible travel rule to suppress false positives from
     /// roaming/network switching between known locations.
     async fn get_designated_countries(&self, profile_id: Self::Owner) -> Result<Vec<String>>;
+
+    /// Every account's recorded locations, for an instance transfer.
+    async fn export_login_locations(&self) -> Result<Vec<(Self::Owner, LoginLocation)>> {
+        Err(sid_core::Error::Internal(
+            "this sign-in history store does not transfer its records".into(),
+        ))
+    }
+
+    /// Store an exported location of `owner` as it was recorded. The same
+    /// one stored before is `false` with nothing written; another for its
+    /// country is a `Conflict`.
+    async fn import_login_location(
+        &self,
+        _owner: Self::Owner,
+        _location: &LoginLocation,
+        _ctx: sid_core::models::MutationContext,
+    ) -> Result<bool> {
+        Err(sid_core::Error::Internal(
+            "this sign-in history store does not transfer its records".into(),
+        ))
+    }
+}
+
+/// One country an account signed in from: how often, when first and last,
+/// and whether it became a designated location.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LoginLocation {
+    pub country: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub login_count: i64,
+    pub first_seen: chrono::DateTime<chrono::Utc>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub designated: bool,
 }

@@ -8,7 +8,7 @@
 use sid_plugin::SnapshotRules;
 use tracing::info;
 
-use super::{Result, Store};
+use super::{Result, SnapshotError, Store};
 
 /// Result of a verification check.
 #[derive(Debug)]
@@ -122,19 +122,19 @@ pub async fn verify(
     if source_keys.write_cutoff().await? > target_keys.write_cutoff().await? {
         issues.push("history key write cutoff is lower in the target".into());
     }
+    let (source_records, target_records) = (
+        source_keys.export_key_records().await?,
+        target_keys.export_key_records().await?,
+    );
+    // The target's trail continues past the source's with the import's own.
+    if source_records.abandoned != target_records.abandoned
+        || source_records.purged != target_records.purged
+        || !target_records.audit.starts_with(&source_records.audit)
+    {
+        issues.push("history key store fences or audit trail differ".into());
+    }
 
     info!("verifying profiles...");
-    counts.push(CountCheck::of(
-        "profiles",
-        source.count_profiles().await?,
-        target.count_profiles().await?,
-    ));
-    counts.push(CountCheck::of(
-        "projects",
-        source.count_projects().await?,
-        target.count_projects().await?,
-    ));
-
     // Walk the source: equal counts do not prove that the target holds the
     // owners whose retained history and keys must survive the move.
     let installation = organization.as_ref().map(|o| o.id);
@@ -199,6 +199,18 @@ pub async fn verify(
         }
     }
 
+    // Every collection a snapshot carries, read from both sides. Each store
+    // keeps its own system project; the import leaves the target's in place.
+    let own = |mut snapshot: super::Snapshot| {
+        snapshot
+            .projects
+            .retain(|p| p.id != sid_core::models::ProjectId::SYSTEM);
+        snapshot
+    };
+    let moved = own(super::export(source_store, rules).await?);
+    let held = own(super::export(target_store, rules).await?);
+    compare_contents(&moved, &held, &mut counts, &mut issues)?;
+
     let passed = counts.iter().all(|c| c.matches) && issues.is_empty();
     info!(
         passed,
@@ -211,6 +223,82 @@ pub async fn verify(
         integrity_issues: issues,
         passed,
     })
+}
+
+/// Fields compared above with their own rule: the snapshot's identity, the
+/// audit chains and the evaluator's trail, which the import continues, the
+/// installation's authority and key material, and the write cutoffs, which a
+/// target may be past.
+const COMPARED_APART: &[&str] = &[
+    "metadata",
+    "audit_chains",
+    "history_key_records",
+    "organization",
+    "oidc_issuers",
+    "key_versions",
+    "history_key_versions",
+    "opaque_server_setup",
+    "history_write_cutoff",
+    "history_key_write_cutoff",
+];
+
+/// Fields the target holds more of than its source: the import records its
+/// own resume marker among the bound identifiers.
+const CONTINUED: &[&str] = &["operation_resources"];
+
+/// Compare every other field of the source's and the target's snapshots: a
+/// collection as the multiset of its records, whatever order each store
+/// lists them in, anything else as a value.
+fn compare_contents(
+    source: &super::Snapshot,
+    target: &super::Snapshot,
+    counts: &mut Vec<CountCheck>,
+    issues: &mut Vec<String>,
+) -> Result<()> {
+    let encode = |snapshot: &super::Snapshot| {
+        serde_json::to_value(snapshot).map_err(|e| SnapshotError::Invalid(format!("snapshot: {e}")))
+    };
+    let (source, target) = (encode(source)?, encode(target)?);
+    let (Some(source), Some(target)) = (source.as_object(), target.as_object()) else {
+        return Err(SnapshotError::Invalid("a snapshot is not an object".into()));
+    };
+    let records = |value: &serde_json::Value| -> Option<Vec<String>> {
+        let mut all: Vec<String> = value.as_array()?.iter().map(|r| r.to_string()).collect();
+        all.sort_unstable();
+        Some(all)
+    };
+    for (field, moved) in source {
+        if COMPARED_APART.contains(&field.as_str()) {
+            continue;
+        }
+        let held = target.get(field).unwrap_or(&serde_json::Value::Null);
+        match (records(moved), records(held)) {
+            (Some(moved), Some(held)) => {
+                let kept = moved
+                    .iter()
+                    .filter(|r| held.binary_search(r).is_ok())
+                    .count();
+                let complete = if CONTINUED.contains(&field.as_str()) {
+                    kept == moved.len()
+                } else {
+                    moved == held
+                };
+                counts.push(CountCheck::of(
+                    &field.replace('_', " "),
+                    moved.len() as u64,
+                    if complete { moved.len() } else { kept } as u64,
+                ));
+                if !complete {
+                    issues.push(format!("{} differ on target", field.replace('_', " ")));
+                }
+            }
+            _ if moved != held => {
+                issues.push(format!("{} differs on target", field.replace('_', " ")))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for VerifyResult {

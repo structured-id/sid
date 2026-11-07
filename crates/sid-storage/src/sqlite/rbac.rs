@@ -693,6 +693,7 @@ fn row_to_cedar_policy(row: &sqlx::sqlite::SqliteRow) -> SidResult<CedarPolicy> 
 fn row_to_sod_rule(row: &sqlx::sqlite::SqliteRow) -> SidResult<SodConflictRule> {
     let conflicting_roles: String = col(row, "conflicting_roles")?;
     Ok(SodConflictRule {
+        id: super::uuid_col(row, "id")?,
         name: col(row, "name")?,
         description: col(row, "description")?,
         conflicting_roles: conflicting_roles
@@ -1215,6 +1216,36 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         rows.iter().map(row_to_sod_rule).collect()
+    }
+
+    pub(crate) async fn import_sod_rule_impl(
+        &self,
+        rule: &SodConflictRule,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query("SELECT * FROM sod_conflict_rules WHERE id = ?")
+            .bind(rule.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row_to_sod_rule(&row)?, rule, "SoD rule");
+        }
+        sqlx::query(
+            "INSERT INTO sod_conflict_rules (id, name, description, conflicting_roles, severity)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(rule.id)
+        .bind(&rule.name)
+        .bind(&rule.description)
+        .bind(rule.conflicting_roles.join(" "))
+        .bind(rule.severity.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("SoD rule", e))?;
+        Self::commit_mutation(tx, &format!("sod_rule:{}", rule.id), ctx).await?;
+        Ok(true)
     }
 
     // === CedarPolicy ===

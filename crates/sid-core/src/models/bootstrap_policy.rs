@@ -5,7 +5,8 @@
 /// The installation's bootstrap policy, chosen by the installation's
 /// configuration, never inferred from its name, host, edition or an empty
 /// administrator set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BootstrapPolicy {
     /// Its own claim token makes its first administrator.
     SelfManaged,

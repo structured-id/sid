@@ -45,7 +45,10 @@ pub use audit::{AuditLog, VerifyResult};
 pub use auth::{AuthContext, AuthProvider, AuthResult};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
-pub use ceremony_state::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
+pub use ceremony_state::{
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, InProcessCeremonyState,
+    SingleUseAdmissions,
+};
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;
 pub use crypto::{
@@ -71,7 +74,7 @@ pub use operation_result_store::OperationResultStore;
 pub use otp::{Locale, OtpChannel, OtpContext, OtpDeliveryResult, OtpTransport, OtpTransportError};
 pub use principal_store::PrincipalStore;
 pub use sid_keys::KeyVersionParams;
-pub use sign_in_history::SignInHistoryStore;
+pub use sign_in_history::{LoginLocation, SignInHistoryStore};
 pub use snapshot_rules::SnapshotRules;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};

@@ -7,8 +7,9 @@ use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
-use sid_core::models::{ProfileId, Session};
+use sid_core::models::{MutationContext, ProfileId, Session};
 use sid_core::{Error as SidError, Result as SidResult};
+use sid_plugin::LoginLocation;
 
 use super::{CoordinodeBackend, Decision, Params, Statements, get_int, get_text, key, time};
 
@@ -161,4 +162,88 @@ impl CoordinodeBackend {
         })
         .await
     }
+
+    pub(super) async fn export_login_locations(
+        &self,
+    ) -> SidResult<Vec<(ProfileId, LoginLocation)>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                &format!("MATCH (l:SidLoginLocation) RETURN l.profile_id AS profile, {LOCATION}"),
+                Params::default(),
+            )?;
+            let mut all = rows
+                .iter()
+                .map(|row| {
+                    let owner = ProfileId::from_uuid(super::get_uuid(row, "profile")?)
+                        .map_err(|e| SidError::Storage(format!("location owner: {e}")))?;
+                    Ok((owner, location(row)?))
+                })
+                .collect::<SidResult<Vec<_>>>()?;
+            all.sort_by(|a, b| (a.0, &a.1.country).cmp(&(b.0, &b.1.country)));
+            Ok(all)
+        })
+        .await
+    }
+
+    pub(super) async fn import_login_location(
+        &self,
+        profile: ProfileId,
+        l: &LoginLocation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let l = l.clone();
+        self.transaction(move |tx| {
+            let pair = country_key(profile, &l.country)?;
+            let held = tx.run(
+                &format!("MATCH (l:SidLoginLocation) WHERE l.pair = $pair RETURN {LOCATION}"),
+                Params::default().with("pair", pair.clone()),
+            )?;
+            if let Some(row) = held.first() {
+                return crate::transfer_repeat(&location(row)?, &l, "login location")
+                    .map(Decision::Abandon);
+            }
+            super::profile::claim_profile(tx, profile)?;
+            tx.run(
+                "CREATE (l:SidLoginLocation {pair: $pair, profile_id: $profile,
+                    country: $country, latitude: $latitude, longitude: $longitude,
+                    login_count: $count, first_seen: $first, last_seen: $last,
+                    designated: $designated})",
+                Params::default()
+                    .with("pair", pair)
+                    .with("profile", Value::Binary(profile.as_bytes().to_vec()))
+                    .with("country", Value::String(l.country.clone()))
+                    .with("latitude", Value::Float(l.latitude))
+                    .with("longitude", Value::Float(l.longitude))
+                    .with("count", Value::Int(l.login_count))
+                    .with("first", time(l.first_seen))
+                    .with("last", time(l.last_seen))
+                    .with("designated", Value::Bool(l.designated)),
+            )?;
+            super::finalize(tx, &format!("profile:{profile}"), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+}
+
+const LOCATION: &str = "l.country AS country, l.latitude AS latitude, l.longitude AS longitude,
+    l.login_count AS login_count, l.first_seen AS first_seen, l.last_seen AS last_seen,
+    l.designated AS designated";
+
+fn location(row: &super::Row) -> SidResult<LoginLocation> {
+    let float = |name: &str| match row.get(name) {
+        Some(Value::Float(v)) => Ok(*v),
+        other => Err(SidError::Storage(format!(
+            "{name} is not a float: {other:?}"
+        ))),
+    };
+    Ok(LoginLocation {
+        country: get_text(row, "country")?,
+        latitude: float("latitude")?,
+        longitude: float("longitude")?,
+        login_count: get_int(row, "login_count")?,
+        first_seen: super::get_time(row, "first_seen")?,
+        last_seen: super::get_time(row, "last_seen")?,
+        designated: super::get_bool(row, "designated")?,
+    })
 }

@@ -819,6 +819,82 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn import_registration_source(
+        &self,
+        profile: ProfileId,
+        s: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let s = s.clone();
+        self.transaction(move |tx| {
+            let held = tx.run(
+                &format!(
+                    "MATCH (s:SidRegistrationSource) WHERE s.profile_id = $id RETURN {SOURCE}"
+                ),
+                Params::default().with("id", bin(profile.as_bytes())),
+            )?;
+            if let Some(row) = held.first() {
+                return crate::transfer_repeat(&source(row)?, &s, "registration source")
+                    .map(Decision::Abandon);
+            }
+            super::profile::claim_profile(tx, profile)?;
+            insert_source(tx, profile, &s)?;
+            finalize(tx, &format!("profile:{profile}"), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        r: &InviteRedemption,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let r = r.clone();
+        self.transaction(move |tx| {
+            let pair = key(&[id.as_bytes(), r.profile_id.as_bytes()])?;
+            let held = tx.run(
+                "MATCH (r:SidInviteRedemption) WHERE r.pair = $pair
+                 RETURN r.profile_id AS profile_id, r.credential_id AS credential_id,
+                        r.redeemed_at AS redeemed_at",
+                Params::default().with("pair", pair.clone()),
+            )?;
+            if let Some(row) = held.first() {
+                let credential_id = match get_opt_uuid(row, "credential_id")? {
+                    Some(c) if super::credential::exists(tx, CredentialId(c))? => {
+                        Some(CredentialId(c))
+                    }
+                    _ => None,
+                };
+                let stored = InviteRedemption {
+                    profile_id: get_id(row, "profile_id")?,
+                    credential_id,
+                    redeemed_at: get_time(row, "redeemed_at")?,
+                };
+                return crate::transfer_repeat(&stored, &r, "invite redemption")
+                    .map(Decision::Abandon);
+            }
+            super::profile::claim_profile(tx, r.profile_id)?;
+            tx.run(
+                "CREATE (r:SidInviteRedemption {pair: $pair, invite_id: $invite,
+                    profile_id: $profile, credential_id: $credential, redeemed_at: $at})",
+                Params::default()
+                    .with("pair", pair)
+                    .with("invite", uuid(id.as_uuid()))
+                    .with("profile", bin(r.profile_id.as_bytes()))
+                    .with(
+                        "credential",
+                        r.credential_id.map_or(Value::Null, |c| uuid(&c.0)),
+                    )
+                    .with("at", time(r.redeemed_at)),
+            )?;
+            finalize(tx, &format!("invite:{id}"), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
     pub(super) async fn count_registrations_by_source(
         &self,
         since: DateTime<Utc>,

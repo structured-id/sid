@@ -107,6 +107,19 @@ impl CoordinodeBackend {
         self.read(move |tx| get_reset(tx, id)).await
     }
 
+    pub(super) async fn export_reset_sessions(&self) -> SidResult<Vec<PasswordResetSession>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                &format!("MATCH (r:SidResetSession) RETURN {RESET}"),
+                Params::default(),
+            )?;
+            let mut all = rows.iter().map(reset).collect::<SidResult<Vec<_>>>()?;
+            all.sort_by_key(|s| s.id.0);
+            Ok(all)
+        })
+        .await
+    }
+
     pub(super) async fn verify_reset_session(
         &self,
         id: ResetSessionId,

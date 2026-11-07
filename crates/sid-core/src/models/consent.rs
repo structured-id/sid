@@ -223,7 +223,7 @@ impl ClaimRequest {
 }
 
 /// Claim grant — user's decision to share a specific claim with a site.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimGrant {
     pub id: ClaimGrantId,
 
@@ -271,7 +271,7 @@ impl ClaimGrant {
 }
 
 /// Consent record — top-level consent decision for a profile→site relationship.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsentRecord {
     pub id: ConsentId,
 

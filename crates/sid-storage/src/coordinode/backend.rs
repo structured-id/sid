@@ -475,6 +475,19 @@ impl SignInHistoryStore for CoordinodeBackend {
     async fn get_designated_countries(&self, profile_id: ProfileId) -> Result<Vec<String>> {
         CoordinodeBackend::get_designated_countries(self, profile_id).await
     }
+
+    async fn export_login_locations(&self) -> Result<Vec<(ProfileId, sid_plugin::LoginLocation)>> {
+        CoordinodeBackend::export_login_locations(self).await
+    }
+
+    async fn import_login_location(
+        &self,
+        owner: ProfileId,
+        location: &sid_plugin::LoginLocation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_login_location(self, owner, location, ctx).await
+    }
 }
 
 #[async_trait]
@@ -781,6 +794,36 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, DateTime<Utc>)>> {
         CoordinodeBackend::list_ip_allowlist_entries(self).await
+    }
+
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: DateTime<Utc>,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_ip_allowlist_entry(self, cidr, description, created_at, ctx).await
+    }
+
+    async fn import_anomaly_event(
+        &self,
+        event: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_anomaly_event(self, event, ctx).await
+    }
+
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>> {
+        CoordinodeBackend::export_ip_reputation(self).await
+    }
+
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_ip_reputation(self, reputation, ctx).await
     }
 
     // === SESSIONS ===
@@ -1126,6 +1169,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::set_enrollment_policy(self, policy, mode, ctx).await
     }
 
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
+        CoordinodeBackend::login_policy_epoch(self).await
+    }
+
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::import_login_policy_epoch(self, epoch, ctx).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -1418,6 +1469,18 @@ impl StorageBackend for CoordinodeBackend {
     async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>> {
         // No write path stores separation-of-duties rules: none are held.
         Ok(Vec::new())
+    }
+
+    async fn import_sod_rule(
+        &self,
+        _rule: &SodConflictRule,
+        _ctx: MutationContext,
+    ) -> Result<bool> {
+        // This store holds no SoD rules: one it cannot keep is refused, never
+        // dropped.
+        Err(sid_core::Error::Validation(
+            "this store holds no separation-of-duties rules".into(),
+        ))
     }
 
     // === CEDAR POLICIES ===
@@ -1937,6 +2000,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_provisioning_connectors(self, org_id).await
     }
 
+    async fn export_provisioning_connectors(&self) -> Result<Vec<ProvisioningConnector>> {
+        CoordinodeBackend::export_provisioning_connectors(self).await
+    }
+
     async fn create_provisioning_connector(
         &self,
         connector: &ProvisioningConnector,
@@ -2007,6 +2074,14 @@ impl StorageBackend for CoordinodeBackend {
         connector_id: ProvisioningConnectorId,
     ) -> Result<Vec<ProvisioningCredential>> {
         CoordinodeBackend::list_provisioning_credentials(self, connector_id).await
+    }
+
+    async fn import_provisioning_credential(
+        &self,
+        credential: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_provisioning_credential(self, credential, ctx).await
     }
 
     async fn find_provisioning_credential(
@@ -2483,6 +2558,15 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_invite_redemptions(self, id, offset, limit).await
     }
 
+    async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_invite_redemption(self, id, redemption, ctx).await
+    }
+
     async fn try_use_invite(&self, id: InviteId, ctx: MutationContext) -> Result<Option<Invite>> {
         CoordinodeBackend::try_use_invite(self, id, ctx).await
     }
@@ -2496,6 +2580,15 @@ impl StorageBackend for CoordinodeBackend {
         profile_id: ProfileId,
     ) -> Result<Option<RegistrationSource>> {
         CoordinodeBackend::get_registration_source(self, profile_id).await
+    }
+
+    async fn import_registration_source(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_registration_source(self, profile_id, source, ctx).await
     }
 
     async fn count_registrations_by_source(
@@ -2587,6 +2680,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_pending_access_requests(self).await
     }
 
+    async fn export_access_requests(&self) -> Result<Vec<AccessRequest>> {
+        CoordinodeBackend::export_access_requests(self).await
+    }
+
     async fn decide_access_request(
         &self,
         request: &AccessRequest,
@@ -2619,6 +2716,10 @@ impl StorageBackend for CoordinodeBackend {
         id: sid_core::models::ResetSessionId,
     ) -> Result<Option<sid_core::models::PasswordResetSession>> {
         CoordinodeBackend::get_reset_session(self, id).await
+    }
+
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>> {
+        CoordinodeBackend::export_reset_sessions(self).await
     }
 
     async fn verify_reset_session(

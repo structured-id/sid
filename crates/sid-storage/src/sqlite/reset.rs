@@ -78,6 +78,18 @@ impl SqliteBackend {
         row.as_ref().map(row_to_reset_session).transpose()
     }
 
+    pub(crate) async fn export_reset_sessions_impl(&self) -> SidResult<Vec<PasswordResetSession>> {
+        let rows = sqlx::query(
+            "SELECT id, profile_id, email, destination, token_hash, sealed_token, status, \
+                    created_at, expires_at, verified_at, completed_at \
+             FROM password_reset_sessions ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        rows.iter().map(row_to_reset_session).collect()
+    }
+
     pub(crate) async fn verify_reset_session_impl(
         &self,
         id: ResetSessionId,

@@ -5,7 +5,12 @@ use chrono::Utc;
 use sid_plugin::SnapshotRules;
 use tracing::info;
 
-use super::{IssuerSnapshot, Result, Snapshot, Store};
+use super::{IssuerSnapshot, Result, Snapshot, SnapshotError, Store};
+
+/// More anomaly events than a page offset counts.
+fn invalid_count() -> SnapshotError {
+    SnapshotError::Invalid("more anomaly events than an export pages through".into())
+}
 
 /// Read every persistent entity of `store`, every chain of its audit log
 /// and the history evaluator's sealed keys into a snapshot checked by
@@ -39,6 +44,8 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     // A raised cutoff withdraws keys; the target must keep refusing them.
     snapshot.history_write_cutoff = backend.history_write_cutoff().await?;
     snapshot.history_key_write_cutoff = keys.write_cutoff().await?;
+    // Fences keep refusing what they refused; the trail is its record.
+    snapshot.history_key_records = keys.export_key_records().await?;
     snapshot.opaque_server_setup = backend
         .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
         .await?;
@@ -147,6 +154,15 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         if let Some(job) = backend.get_export_job(pid).await? {
             snapshot.export_jobs.push(job);
         }
+        snapshot
+            .consents
+            .extend(backend.list_consents_by_profile(pid).await?);
+        if let Some(preferences) = backend.get_notification_preferences(pid).await? {
+            snapshot.notification_preferences.push(preferences);
+        }
+        if let Some(source) = backend.get_registration_source(pid).await? {
+            snapshot.registration_sources.push((pid, source));
+        }
     }
 
     info!("exporting per-project entities...");
@@ -246,6 +262,14 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
                 .extend(backend.list_outbound_dlq_entries(target.id).await?);
         }
         snapshot.scim_outbound_targets.extend(scim_targets);
+        snapshot
+            .flow_configs
+            .extend(backend.list_flow_configs(proj_id).await?);
+        for flow in sid_core::models::FlowType::all() {
+            snapshot
+                .flow_actions
+                .extend(backend.list_flow_actions(proj_id, *flow, None).await?);
+        }
     }
 
     info!("exporting principals...");
@@ -304,6 +328,70 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     snapshot.operation_periods = backend.export_operation_periods().await?;
     snapshot.operation_results = backend.export_operation_results().await?;
     snapshot.operation_resources = backend.export_operation_resources().await?;
+
+    // Invites in every state, and each one's redemptions.
+    let all = sid_core::models::InviteFilter::default();
+    let mut invite_offset = 0u64;
+    loop {
+        let batch = backend.list_invites(&all, invite_offset, 1000).await?;
+        if batch.is_empty() {
+            break;
+        }
+        invite_offset += batch.len() as u64;
+        for invite in &batch {
+            let mut offset = 0u64;
+            loop {
+                let used = backend
+                    .list_invite_redemptions(invite.id, offset, 1000)
+                    .await?;
+                if used.is_empty() {
+                    break;
+                }
+                offset += used.len() as u64;
+                snapshot
+                    .invite_redemptions
+                    .extend(used.into_iter().map(|r| (invite.id, r)));
+            }
+        }
+        snapshot.invites.extend(batch);
+    }
+    snapshot.access_requests = backend.export_access_requests().await?;
+    snapshot.reset_sessions = backend.export_reset_sessions().await?;
+    // The policies a sign-in or a registration is admitted under.
+    snapshot.enrollment_policy = backend.enrollment_policy().await?;
+    snapshot.bootstrap_policy = backend.bootstrap_policy().await?;
+    snapshot.login_policy_epoch = backend.export_login_policy_epoch().await?;
+    snapshot.ip_allowlist = backend.list_ip_allowlist_entries().await?;
+    // What the sign-in rules learned and fired.
+    snapshot.ip_reputation = backend.export_ip_reputation().await?;
+    let mut event_offset = 0i32;
+    loop {
+        let batch = backend
+            .list_anomaly_events(None, 1000, event_offset)
+            .await?;
+        if batch.is_empty() {
+            break;
+        }
+        event_offset = event_offset
+            .checked_add(i32::try_from(batch.len()).map_err(|_| invalid_count())?)
+            .ok_or_else(invalid_count)?;
+        snapshot.anomaly_events.extend(batch);
+    }
+    snapshot.login_locations = backend.export_login_locations().await?;
+    // Provisioning connectors of every organization, with their credentials
+    // and the roles they hold.
+    snapshot.provisioning_connectors = backend.export_provisioning_connectors().await?;
+    for connector in &snapshot.provisioning_connectors {
+        snapshot
+            .provisioning_credentials
+            .extend(backend.list_provisioning_credentials(connector.id).await?);
+        snapshot.role_assignments.extend(
+            backend
+                .list_role_assignments_for_provisioning_connector(connector.id)
+                .await?,
+        );
+    }
+    snapshot.ceremony = backend.export_ceremony_state().await?;
 
     super::import::validate(&snapshot, rules)?;
     snapshot.metadata.total_entities = snapshot.count_entities();

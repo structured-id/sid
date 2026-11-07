@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::{
     AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryPreparation, KeyArchive, KeyEpoch,
-    KeyEpochs, NewKeyEpoch, WrappedHistoryKey,
+    KeyEpochs, KeyStoreRecords, NewKeyEpoch, WrappedHistoryKey,
 };
 use uuid::Uuid;
 
@@ -147,4 +147,17 @@ pub trait HistoryKeyStore: Send + Sync {
     /// is an idempotent no-op; any difference is a `Conflict`, never a
     /// rollback or merge. Callers quiesce writers for an instance transfer.
     async fn import_keys(&self, archive: &KeyArchive, audit: AuditEntry) -> Result<bool>;
+
+    /// The store's fences and its own audit trail, for the same transfer.
+    async fn export_key_records(&self) -> Result<KeyStoreRecords>;
+
+    /// Install exported fences and audit trail before any other write of the
+    /// transfer. A store that already holds exactly them (its trail may have
+    /// grown past them) is a no-op returning `false`; any other content is a
+    /// `Conflict`, nothing written.
+    async fn import_key_records(
+        &self,
+        records: &KeyStoreRecords,
+        audit: AuditEntry,
+    ) -> Result<bool>;
 }

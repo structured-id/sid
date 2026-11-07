@@ -8,10 +8,11 @@
 
 use async_trait::async_trait;
 use sid_core::models::{
-    AuditEntry, EnrollmentCleanup, HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch,
-    HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf,
-    HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
-    PasswordHistory, ProfileId, WrappedHistoryKey,
+    AbandonedEnrollment, AuditEntry, EnrollmentCleanup, HistoryArchive, HistoryCommit,
+    HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse,
+    HistoryEvidence, HistoryKsf, HistoryPreparation, HistorySuite, KeyArchive, KeyAuditRecord,
+    KeyEpoch, KeyEpochs, KeyLifecycle, KeyStoreRecords, KeyUse, NewKeyEpoch, PasswordHistory,
+    ProfileId, PurgedOwner, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::history_keys::HistoryKeyStore;
@@ -687,9 +688,52 @@ async fn read_key_archive(
     owner_domain: &[u8; 32],
 ) -> SidResult<Option<KeyArchive>> {
     let epochs = owner_key_epochs(conn, owner_domain, true).await?;
-    if epochs.is_empty() {
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM history_key_lifecycle WHERE owner_domain = ?")
+            .bind(owner_domain.as_slice())
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(storage("archive lifecycle"))?;
+    if epochs.is_empty() && revision.is_none() {
         return Ok(None);
     }
+    let lifecycle = match revision {
+        Some(revision) => Some(KeyLifecycle {
+            revision,
+            live: recorded_live(conn, owner_domain)
+                .await?
+                .into_iter()
+                .map(HistoryEpochId)
+                .collect(),
+        }),
+        None => None,
+    };
+    let created_by: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+        "SELECT id, created_by FROM history_key_epochs
+         WHERE owner_domain = ? AND created_by IS NOT NULL ORDER BY id",
+    )
+    .bind(owner_domain.as_slice())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("archive creators"))?;
+    let rows = sqlx::query(
+        "SELECT operation_id, epoch_id, expires_at FROM history_key_uses
+         WHERE owner_domain = ? ORDER BY operation_id, epoch_id",
+    )
+    .bind(owner_domain.as_slice())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("archive uses"))?;
+    let uses = rows
+        .iter()
+        .map(|row| {
+            Ok(KeyUse {
+                operation: uuid_col(row, "operation_id")?,
+                epoch: HistoryEpochId(uuid_col(row, "epoch_id")?),
+                expires_at: dt_col(row, "expires_at")?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
     let mut with_keys = Vec::with_capacity(epochs.len());
     for epoch in epochs {
         let key: Vec<u8> =
@@ -724,9 +768,83 @@ async fn read_key_archive(
         owner_domain: *owner_domain,
         epochs: with_keys,
         replaced,
+        created_by: created_by
+            .into_iter()
+            .map(|(epoch, op)| (HistoryEpochId(epoch), op))
+            .collect(),
+        lifecycle,
+        uses,
     };
     archive.validate()?;
     Ok(Some(archive))
+}
+
+async fn read_key_records(conn: &mut sqlx::SqliteConnection) -> SidResult<KeyStoreRecords> {
+    let rows = sqlx::query(
+        "SELECT operation_id, owner_domain, abandoned_at FROM history_key_abandoned
+         ORDER BY operation_id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("abandoned enrollments"))?;
+    let abandoned = rows
+        .iter()
+        .map(|row| {
+            Ok(AbandonedEnrollment {
+                operation: uuid_col(row, "operation_id")?,
+                owner_domain: domain_col(row)?,
+                at: dt_col(row, "abandoned_at")?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    let rows =
+        sqlx::query("SELECT owner_domain, purged_at FROM history_key_purged ORDER BY owner_domain")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage("purged owners"))?;
+    let purged = rows
+        .iter()
+        .map(|row| {
+            Ok(PurgedOwner {
+                owner_domain: domain_col(row)?,
+                at: dt_col(row, "purged_at")?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    let rows = sqlx::query(
+        "SELECT id, occurred_at, actor_id, actor_type, action, resource, outcome, metadata
+         FROM history_key_audit ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("key audit"))?;
+    let audit = rows
+        .iter()
+        .map(|row| {
+            Ok(KeyAuditRecord {
+                sequence: col(row, "id")?,
+                occurred_at: dt_col(row, "occurred_at")?,
+                actor_id: col(row, "actor_id")?,
+                actor_type: col(row, "actor_type")?,
+                action: col(row, "action")?,
+                resource: col(row, "resource")?,
+                outcome: col(row, "outcome")?,
+                metadata: serde_json::from_str(&col::<String>(row, "metadata")?)
+                    .map_err(|e| SidError::Storage(format!("key audit metadata: {e}")))?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    Ok(KeyStoreRecords {
+        abandoned,
+        purged,
+        audit,
+    })
+}
+
+fn domain_col(row: &sqlx::sqlite::SqliteRow) -> SidResult<[u8; 32]> {
+    col::<Vec<u8>>(row, "owner_domain")?
+        .try_into()
+        .map_err(|_| SidError::Storage("owner domain is not 32 bytes".into()))
 }
 
 #[async_trait]
@@ -1228,7 +1346,36 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             ));
         }
         for epoch in &archive.epochs {
-            insert_key_epoch(&mut tx, epoch, None).await?;
+            let creator = archive
+                .created_by
+                .iter()
+                .find(|(id, _)| *id == epoch.epoch.id)
+                .map(|(_, op)| *op);
+            insert_key_epoch(&mut tx, epoch, creator).await?;
+        }
+        let domain = archive.owner_domain.as_slice();
+        if let Some(lifecycle) = &archive.lifecycle {
+            sqlx::query("INSERT INTO history_key_lifecycle (owner_domain, revision) VALUES (?, ?)")
+                .bind(domain)
+                .bind(lifecycle.revision)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage("archive lifecycle"))?;
+            let live: Vec<uuid::Uuid> = lifecycle.live.iter().map(|e| e.0).collect();
+            record_live(&mut tx, domain, &live).await?;
+        }
+        for u in &archive.uses {
+            sqlx::query(
+                "INSERT INTO history_key_uses (operation_id, epoch_id, owner_domain, expires_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(u.operation)
+            .bind(u.epoch.0)
+            .bind(domain)
+            .bind(fmt_dt(&u.expires_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("archive use"))?;
         }
         for (epoch, revision) in &archive.replaced {
             sqlx::query(
@@ -1241,6 +1388,78 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             .execute(&mut *tx)
             .await
             .map_err(storage("archive replacement"))?;
+        }
+        key_audit(&mut tx, audit).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(true)
+    }
+
+    async fn export_key_records(&self) -> SidResult<KeyStoreRecords> {
+        let mut tx = self.pool.begin().await.map_err(storage("records read"))?;
+        let records = read_key_records(&mut tx).await?;
+        tx.commit().await.map_err(storage("records read"))?;
+        Ok(records)
+    }
+
+    async fn import_key_records(
+        &self,
+        records: &KeyStoreRecords,
+        audit: AuditEntry,
+    ) -> SidResult<bool> {
+        records.validate()?;
+        let mut tx = self.begin_write().await?;
+        let existing = read_key_records(&mut tx).await?;
+        if existing.abandoned == records.abandoned
+            && existing.purged == records.purged
+            && existing.audit.starts_with(&records.audit)
+        {
+            return Ok(false);
+        }
+        if !existing.abandoned.is_empty()
+            || !existing.purged.is_empty()
+            || !existing.audit.is_empty()
+        {
+            return Err(SidError::Conflict(
+                "the history key store already holds other records".into(),
+            ));
+        }
+        for a in &records.abandoned {
+            sqlx::query(
+                "INSERT INTO history_key_abandoned (operation_id, owner_domain, abandoned_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(a.operation)
+            .bind(a.owner_domain.as_slice())
+            .bind(fmt_dt(&a.at))
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("abandoned import"))?;
+        }
+        for p in &records.purged {
+            sqlx::query("INSERT INTO history_key_purged (owner_domain, purged_at) VALUES (?, ?)")
+                .bind(p.owner_domain.as_slice())
+                .bind(fmt_dt(&p.at))
+                .execute(&mut *tx)
+                .await
+                .map_err(storage("purged import"))?;
+        }
+        for r in &records.audit {
+            sqlx::query(
+                "INSERT INTO history_key_audit
+                     (id, occurred_at, actor_id, actor_type, action, resource, outcome, metadata)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(r.sequence)
+            .bind(fmt_dt(&r.occurred_at))
+            .bind(&r.actor_id)
+            .bind(&r.actor_type)
+            .bind(&r.action)
+            .bind(&r.resource)
+            .bind(&r.outcome)
+            .bind(r.metadata.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("key audit import"))?;
         }
         key_audit(&mut tx, audit).await?;
         tx.commit().await.map_err(storage("commit"))?;

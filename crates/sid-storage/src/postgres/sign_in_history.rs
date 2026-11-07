@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use sid_core::models::ProfileId;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::SignInHistoryStore;
+use sid_plugin::{LoginLocation, SignInHistoryStore};
 
 use super::PostgresBackend;
 
@@ -108,5 +108,88 @@ impl SignInHistoryStore for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query designated countries failed: {}", e)))?;
         Ok(rows.into_iter().map(|(c,)| c).collect())
+    }
+
+    async fn export_login_locations(&self) -> SidResult<Vec<(ProfileId, LoginLocation)>> {
+        let rows: Vec<(ProfileId, String, f64, f64, i32, Time, Time, bool)> = sqlx::query_as(
+            "SELECT profile_id, country, latitude, longitude, login_count, first_seen, last_seen,
+                    designated
+             FROM profile_locations ORDER BY profile_id, country",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("export login locations: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(owner, country, lat, lon, count, first, last, designated)| {
+                    (
+                        owner,
+                        location_of((country, lat, lon, count, first, last, designated)),
+                    )
+                },
+            )
+            .collect())
+    }
+
+    async fn import_login_location(
+        &self,
+        owner: ProfileId,
+        location: &LoginLocation,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import login location: {e}"));
+        let count = i32::try_from(location.login_count)
+            .map_err(|_| SidError::Validation("login count is out of range".into()))?;
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held: Option<LocationRow> = sqlx::query_as(
+            "SELECT country, latitude, longitude, login_count, first_seen, last_seen, designated
+             FROM profile_locations WHERE profile_id = $1 AND country = $2",
+        )
+        .bind(owner)
+        .bind(&location.country)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&location_of(row), location, "login location");
+        }
+        sqlx::query(
+            "INSERT INTO profile_locations (profile_id, country, latitude, longitude, login_count,
+                 first_seen, last_seen, designated)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(owner)
+        .bind(&location.country)
+        .bind(location.latitude)
+        .bind(location.longitude)
+        .bind(count)
+        .bind(location.first_seen)
+        .bind(location.last_seen)
+        .bind(location.designated)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("login location", e))?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{owner}"), ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+}
+
+type Time = chrono::DateTime<chrono::Utc>;
+
+/// country, latitude, longitude, login_count, first_seen, last_seen, designated
+type LocationRow = (String, f64, f64, i32, Time, Time, bool);
+
+fn location_of(row: LocationRow) -> LoginLocation {
+    let (country, latitude, longitude, login_count, first_seen, last_seen, designated) = row;
+    LoginLocation {
+        country,
+        latitude,
+        longitude,
+        login_count: i64::from(login_count),
+        first_seen,
+        last_seen,
+        designated,
     }
 }

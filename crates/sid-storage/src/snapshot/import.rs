@@ -360,6 +360,19 @@ pub async fn import(
         "key",
     )?;
 
+    let held = history_keys.export_key_records().await?;
+    let wanted = &snapshot.history_key_records;
+    let empty = held.abandoned.is_empty() && held.purged.is_empty() && held.audit.is_empty();
+    if !empty
+        && !(held.abandoned == wanted.abandoned
+            && held.purged == wanted.purged
+            && held.audit.starts_with(&wanted.audit))
+    {
+        return Err(target(
+            "target password history key store holds other records",
+        ));
+    }
+
     let mut result = ImportResult::default();
 
     // The source's audit chains before any record this import appends to
@@ -369,6 +382,16 @@ pub async fn import(
         if audit_log.import_chain(chain).await? {
             result.audit_chains += 1;
         }
+    }
+    // Likewise the evaluator's own trail and fences, before its first write.
+    if history_keys
+        .import_key_records(
+            wanted,
+            entry("import_history_key_records", "password_history_keys"),
+        )
+        .await?
+    {
+        result.history_keys += 1;
     }
 
     // The import is recorded first: an interruption from here on leaves a
@@ -396,6 +419,66 @@ pub async fn import(
             .await?
         {
             result.oidc_issuers += 1;
+        }
+    }
+
+    // A centrally managed installation is recorded before any assignment:
+    // adoption refuses a store that already has a local administrator.
+    if snapshot.bootstrap_policy == sid_core::models::BootstrapPolicy::CentrallyManaged {
+        use sid_core::models::CentralAdoption;
+        match backend
+            .adopt_central_management(audit("import_bootstrap_policy", "installation"))
+            .await?
+        {
+            CentralAdoption::Adopted => result.policies += 1,
+            CentralAdoption::AlreadyCentral => {}
+            CentralAdoption::LocalAdministrator => {
+                return Err(target("the target has a local administrator"));
+            }
+        }
+    }
+    if let Some(policy) = &snapshot.enrollment_policy {
+        match backend.enrollment_policy().await? {
+            Some(held) if held == *policy => {}
+            Some(_) => return Err(target("the target holds another enrollment policy")),
+            None => {
+                backend
+                    .set_enrollment_policy(
+                        policy,
+                        sid_core::models::ModeWrite::Replace,
+                        audit("import_enrollment_policy", "installation"),
+                    )
+                    .await?;
+                result.policies += 1;
+            }
+        }
+    }
+    if let Some(epoch) = snapshot.login_policy_epoch
+        && backend
+            .import_login_policy_epoch(epoch, audit("import_login_policy_epoch", "installation"))
+            .await?
+    {
+        result.policies += 1;
+    }
+    for (cidr, description, created_at) in &snapshot.ip_allowlist {
+        if backend
+            .import_ip_allowlist_entry(
+                cidr,
+                description,
+                *created_at,
+                audit("import_ip_allowlist_entry", cidr),
+            )
+            .await?
+        {
+            result.policies += 1;
+        }
+    }
+    for rule in &snapshot.sod_rules {
+        if backend
+            .import_sod_rule(rule, audit("import_sod_rule", &rule.id.to_string()))
+            .await?
+        {
+            result.policies += 1;
         }
     }
 
@@ -459,6 +542,127 @@ pub async fn import(
     backend
         .ensure_system_project(audit("ensure_system_project", "system"))
         .await?;
+
+    // Settings and records of the profiles and projects just restored.
+    for config in &snapshot.flow_configs {
+        let subject = format!("{}:{}", config.project_id, config.flow_type);
+        match backend
+            .get_flow_config(config.project_id, config.flow_type)
+            .await?
+        {
+            Some(held) if held == *config => {}
+            Some(_) => return Err(target("the target holds another flow configuration")),
+            None => {
+                backend
+                    .save_flow_config(config, audit("import_flow_config", &subject))
+                    .await?;
+                result.settings += 1;
+            }
+        }
+    }
+    for action in &snapshot.flow_actions {
+        result.settings += created(
+            backend
+                .create_flow_action(action, audit("import_flow_action", &action.id.to_string()))
+                .await,
+            || async { Ok(backend.get_flow_action(action.id).await?.as_ref() == Some(action)) },
+        )
+        .await?;
+    }
+    for consent in &snapshot.consents {
+        result.settings += created(
+            backend
+                .create_consent(consent, audit("import_consent", &consent.id.0.to_string()))
+                .await,
+            || async { Ok(backend.get_consent(consent.id).await?.as_ref() == Some(consent)) },
+        )
+        .await?;
+    }
+    for preferences in &snapshot.notification_preferences {
+        let subject = preferences.profile_id.to_string();
+        match backend
+            .get_notification_preferences(preferences.profile_id)
+            .await?
+        {
+            Some(held) if held == *preferences => {}
+            Some(_) => return Err(target("the target holds other notification preferences")),
+            None => {
+                backend
+                    .save_notification_preferences(
+                        preferences,
+                        audit("import_notification_preferences", &subject),
+                    )
+                    .await?;
+                result.settings += 1;
+            }
+        }
+    }
+    for (profile, source) in &snapshot.registration_sources {
+        if backend
+            .import_registration_source(
+                *profile,
+                source,
+                audit("import_registration_source", &profile.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
+    for (profile, location) in &snapshot.login_locations {
+        if backend
+            .import_login_location(
+                *profile,
+                location,
+                audit("import_login_location", &profile.to_string()),
+            )
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for reputation in &snapshot.ip_reputation {
+        if backend
+            .import_ip_reputation(reputation, audit("import_ip_reputation", &reputation.ip))
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for event in &snapshot.anomaly_events {
+        if backend
+            .import_anomaly_event(event, audit("import_anomaly_event", &event.id.to_string()))
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for session in &snapshot.reset_sessions {
+        result.signals += created(
+            backend
+                .create_reset_session(
+                    session,
+                    audit("import_reset_session", &session.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_reset_session(session.id).await?.as_ref() == Some(session)) },
+        )
+        .await?;
+    }
+    for request in &snapshot.access_requests {
+        result.settings += created(
+            backend
+                .create_access_request(
+                    request,
+                    audit("import_access_request", &request.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_access_request(request.id).await?.as_ref() == Some(request))
+            },
+        )
+        .await?;
+    }
 
     // The write cutoffs precede the epochs they fence: from the first
     // imported key, no write goes under an epoch the source had withdrawn.
@@ -747,6 +951,38 @@ pub async fn import(
         result.group_members += 1;
     }
 
+    // Provisioning connectors before the roles they hold, their credentials
+    // as they were whatever the connector's state.
+    for connector in &snapshot.provisioning_connectors {
+        result.settings += created(
+            backend
+                .create_provisioning_connector(
+                    connector,
+                    audit("import_provisioning_connector", &connector.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_provisioning_connector(connector.id)
+                    .await?
+                    .as_ref()
+                    == Some(connector))
+            },
+        )
+        .await?;
+    }
+    for credential in &snapshot.provisioning_credentials {
+        if backend
+            .import_provisioning_credential(
+                credential,
+                audit("import_provisioning_credential", &credential.id.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
+
     // Role assignments after their roles and principals, a redelegated one
     // after its source. They are restored as recorded, envelope and
     // provenance included: the source installation authorized them.
@@ -910,6 +1146,32 @@ pub async fn import(
         )
         .await?;
     }
+    // Invites after their creators, their redemptions after the profiles and
+    // credentials they name. A redemption leaves the use count as exported.
+    for invite in &snapshot.invites {
+        result.settings += created(
+            backend
+                .create_invites(
+                    std::slice::from_ref(invite),
+                    audit("import_invite", &invite.id.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_invite(invite.id).await?.as_ref() == Some(invite)) },
+        )
+        .await?;
+    }
+    for (invite, redemption) in &snapshot.invite_redemptions {
+        if backend
+            .import_invite_redemption(
+                *invite,
+                redemption,
+                audit("import_invite_redemption", &invite.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
 
     // Owed deliveries and dead letters: stored, not run. The restored
     // installation's workers take them when the host activates it.
@@ -1008,6 +1270,10 @@ pub async fn import(
         )
         .await?;
     }
+
+    // Ceremonies in flight, replay records and attempt counts, with their
+    // deadlines as the source set them.
+    result.signals += backend.import_ceremony_state(&snapshot.ceremony).await?;
 
     info!(total = result.total(), "import complete");
     Ok(result)
@@ -1201,6 +1467,16 @@ pub struct ImportResult {
     pub scim_outbound_records: u64,
     pub outbound_dlq_entries: u64,
     pub branding_configs: u64,
+    /// Installation policies: bootstrap, enrollment, login epoch, IP
+    /// allowlist, SoD rules.
+    pub policies: u64,
+    /// Profile and project settings and records: flows, consents,
+    /// preferences, registration sources, access requests, invites,
+    /// provisioning connectors.
+    pub settings: u64,
+    /// Sign-in signals and ceremonies: locations, IP reputation, anomaly
+    /// events, reset sessions, ceremony state.
+    pub signals: u64,
 }
 
 impl ImportResult {
@@ -1252,6 +1528,9 @@ impl ImportResult {
             self.scim_outbound_records,
             self.outbound_dlq_entries,
             self.branding_configs,
+            self.policies,
+            self.settings,
+            self.signals,
         ]
         .iter()
         .sum()
@@ -1306,6 +1585,9 @@ impl std::fmt::Display for ImportResult {
         writeln!(f, "  SCIM Records:         {}", self.scim_outbound_records)?;
         writeln!(f, "  SCIM DLQ Entries:     {}", self.outbound_dlq_entries)?;
         writeln!(f, "  Branding Configs:     {}", self.branding_configs)?;
+        writeln!(f, "  Policies:             {}", self.policies)?;
+        writeln!(f, "  Settings:             {}", self.settings)?;
+        writeln!(f, "  Sign-in Signals:      {}", self.signals)?;
         writeln!(f, "  Total:                {}", self.total())
     }
 }

@@ -307,6 +307,12 @@ macro_rules! __storage_conformance {
                 test_quarantine_moves_as_stored
                 test_user_handles_move_as_stored
                 test_profile_restores_at_its_revision
+                test_signals_move_as_stored
+                test_login_policy_epoch_moves
+                test_sign_in_records_move_as_stored
+                test_enrollment_records_move_as_stored
+                test_connector_credentials_move_as_stored
+                test_flow_action_restores_at_its_revision
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],upstream:
                 test_upstream_provider_write_contract

@@ -353,3 +353,74 @@ pub async fn concurrent_admissions_succeed_once(store: &dyn CeremonyStateStore) 
         .count();
     assert_eq!(admitted, 1);
 }
+
+/// Live state, admissions and counts are exported with their deadlines and
+/// move as stored: importing what a store holds stores nothing, another
+/// live value under a held key is a conflict that writes nothing, and a new
+/// record holds in the store as it held in its source.
+pub async fn records_move_with_their_deadlines(store: &dyn CeremonyStateStore) {
+    let (ns, state, admitted, counted) = (namespace(), key(), key(), key());
+    store
+        .put_ceremony_state(&ns, &state, b"challenge", LONG)
+        .await
+        .unwrap();
+    assert!(store.admit_once(&ns, &admitted, LONG).await.unwrap());
+    store.count_in_window(&ns, &counted, LONG).await.unwrap();
+    store.count_in_window(&ns, &counted, LONG).await.unwrap();
+    let exported = store.export_ceremony_state().await.unwrap();
+    let ours = crate::CeremonyRecords {
+        states: exported
+            .states
+            .into_iter()
+            .filter(|s| s.namespace == ns)
+            .collect(),
+        counts: exported
+            .counts
+            .into_iter()
+            .filter(|c| c.namespace == ns)
+            .collect(),
+    };
+    assert_eq!(ours.states.len(), 2);
+    assert!(
+        ours.states
+            .iter()
+            .any(|s| s.key == state && s.value == b"challenge")
+    );
+    assert!(
+        ours.states
+            .iter()
+            .any(|s| s.key == admitted && s.value.is_empty())
+    );
+    assert_eq!(ours.counts.len(), 1);
+    assert_eq!(ours.counts[0].count, 2);
+    assert_eq!(store.import_ceremony_state(&ours).await.unwrap(), 0);
+
+    let mut differing = ours.clone();
+    differing.states.retain(|s| s.key == state);
+    differing.states[0].value = b"another".to_vec();
+    differing.counts.clear();
+    assert!(matches!(
+        store.import_ceremony_state(&differing).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        store.read_ceremony_state(&ns, &state).await.unwrap(),
+        Some(b"challenge".to_vec())
+    );
+
+    let moved_ns = namespace();
+    let mut moved = ours.clone();
+    for s in &mut moved.states {
+        s.namespace.clone_from(&moved_ns);
+    }
+    for c in &mut moved.counts {
+        c.namespace.clone_from(&moved_ns);
+    }
+    assert_eq!(store.import_ceremony_state(&moved).await.unwrap(), 3);
+    assert_eq!(
+        store.read_ceremony_state(&moved_ns, &state).await.unwrap(),
+        Some(b"challenge".to_vec())
+    );
+    assert!(!store.admit_once(&moved_ns, &admitted, LONG).await.unwrap());
+    assert_eq!(store.read_count(&moved_ns, &counted).await.unwrap(), 2);
+}

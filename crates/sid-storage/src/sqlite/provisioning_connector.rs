@@ -378,6 +378,35 @@ impl SqliteBackend {
         .collect()
     }
 
+    pub(crate) async fn connector_export(&self) -> SidResult<Vec<ProvisioningConnector>> {
+        sqlx::query("SELECT * FROM provisioning_connectors ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(failed("export connectors"))?
+            .iter()
+            .map(row_to_connector)
+            .collect()
+    }
+
+    pub(crate) async fn connector_import_credential(
+        &self,
+        cred: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query("SELECT * FROM provisioning_credentials WHERE id = ?")
+            .bind(cred.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(failed("read connector credential"))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row_to_credential(&row)?, cred, "connector credential");
+        }
+        insert_credential(&mut tx, cred).await?;
+        Self::commit_mutation(tx, &format!("provisioning_credential:{}", cred.id), ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn connector_find_credential(
         &self,
         verifier: &str,

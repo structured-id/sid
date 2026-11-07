@@ -11,7 +11,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use coordinode_core::graph::types::Value;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::{CeremonyStateStore, SingleUseAdmissions};
+use sid_plugin::{
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
+};
 
 use super::{CoordinodeBackend, Decision, Params, Statements, get_bytes, get_int, slot};
 
@@ -306,4 +308,124 @@ impl CeremonyStateStore for CoordinodeBackend {
         })
         .await
     }
+
+    async fn export_ceremony_state(&self) -> SidResult<CeremonyRecords> {
+        self.read(|tx| {
+            let now = now();
+            let rows = tx.run(
+                "MATCH (c:SidCeremonyState) WHERE c.expires > $now
+                 RETURN c.slot AS slot, c.value AS value, c.expires AS expires",
+                Params::default().with("now", Value::Int(now)),
+            )?;
+            let mut states = rows
+                .iter()
+                .map(|row| {
+                    let (namespace, key) = unslot(&get_bytes(row, "slot")?)?;
+                    Ok(CeremonyEntry {
+                        namespace,
+                        key,
+                        value: get_bytes(row, "value")?,
+                        expires_at: instant(get_int(row, "expires")?)?,
+                    })
+                })
+                .collect::<SidResult<Vec<_>>>()?;
+            states.sort_by(|a, b| (&a.namespace, &a.key).cmp(&(&b.namespace, &b.key)));
+            let rows = tx.run(
+                "MATCH (c:SidCeremonyCount) WHERE c.window_end > $now
+                 RETURN c.slot AS slot, c.count AS count, c.window_end AS window_end",
+                Params::default().with("now", Value::Int(now)),
+            )?;
+            let mut counts = rows
+                .iter()
+                .map(|row| {
+                    let (namespace, key) = unslot(&get_bytes(row, "slot")?)?;
+                    Ok(CeremonyCount {
+                        count: count_of(&key, get_int(row, "count")?)?,
+                        namespace,
+                        key,
+                        window_ends: instant(get_int(row, "window_end")?)?,
+                    })
+                })
+                .collect::<SidResult<Vec<_>>>()?;
+            counts.sort_by(|a, b| (&a.namespace, &a.key).cmp(&(&b.namespace, &b.key)));
+            Ok(CeremonyRecords { states, counts })
+        })
+        .await
+    }
+
+    async fn import_ceremony_state(&self, records: &CeremonyRecords) -> SidResult<u64> {
+        let records = records.clone();
+        self.transaction(move |tx| {
+            let now = now();
+            let mut stored_count = 0u64;
+            for entry in &records.states {
+                let slot = slot(&entry.namespace, &entry.key)?;
+                let wanted = (entry.value.clone(), entry.expires_at.timestamp_micros());
+                let held = stored(tx, &slot)?;
+                match &held {
+                    Some(live) if live.1 > now => {
+                        crate::transfer_repeat(live, &wanted, "ceremony state")?;
+                    }
+                    _ => {
+                        write(tx, &slot, held.is_some(), &wanted.0, wanted.1)?;
+                        stored_count += 1;
+                    }
+                }
+            }
+            for count in &records.counts {
+                let slot = slot(&count.namespace, &count.key)?;
+                let value = i64::try_from(count.count).map_err(|_| {
+                    SidError::Validation(format!("count of {} is too large", count.key))
+                })?;
+                let wanted = (value, count.window_ends.timestamp_micros());
+                let held = counted(tx, &slot)?;
+                match &held {
+                    Some(live) if live.1 > now => {
+                        crate::transfer_repeat(live, &wanted, "ceremony count")?;
+                    }
+                    _ => {
+                        let query = if held.is_some() {
+                            "MATCH (c:SidCeremonyCount) WHERE c.slot = $slot
+                             SET c.count = $count, c.window_end = $window_end"
+                        } else {
+                            "CREATE (c:SidCeremonyCount {slot: $slot, count: $count,
+                                window_end: $window_end})"
+                        };
+                        tx.run(
+                            query,
+                            Params::default()
+                                .with("slot", Value::Binary(slot.clone()))
+                                .with("count", Value::Int(wanted.0))
+                                .with("window_end", Value::Int(wanted.1)),
+                        )?;
+                        stored_count += 1;
+                    }
+                }
+            }
+            Ok(if stored_count == 0 {
+                Decision::Abandon(0)
+            } else {
+                Decision::Commit(stored_count)
+            })
+        })
+        .await
+    }
+}
+
+/// The namespace and key a slot was made of.
+fn unslot(slot: &[u8]) -> SidResult<(String, String)> {
+    let malformed = || SidError::Storage("malformed ceremony slot".into());
+    let (length, rest) = slot.split_first_chunk::<4>().ok_or_else(malformed)?;
+    let length = usize::try_from(u32::from_be_bytes(*length)).map_err(|_| malformed())?;
+    let (namespace, key) = rest.split_at_checked(length).ok_or_else(malformed)?;
+    Ok((
+        String::from_utf8(namespace.to_vec()).map_err(|_| malformed())?,
+        String::from_utf8(key.to_vec()).map_err(|_| malformed())?,
+    ))
+}
+
+/// The instant of a stored microsecond deadline.
+fn instant(micros: i64) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp_micros(micros)
+        .ok_or_else(|| SidError::Storage(format!("ceremony deadline {micros} is out of range")))
 }
