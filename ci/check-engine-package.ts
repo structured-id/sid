@@ -121,16 +121,24 @@ function main(): void {
     const patches = [...sources].map(([name, dir]) => `${name} = { path = ${JSON.stringify(dir)} }`);
     writeFileSync(manifest, `${readFileSync(manifest, "utf8")}\n[patch.crates-io]\n${patches.join("\n")}\n`);
 
-    const graph = run(consumer, env, "cargo", "tree", "-e", "normal,build", "--prefix", "none", "-f", "{p}");
-    const held = new Set(graph.split("\n").filter((line) => line.trim()).map((line) => line.split(" ")[0]));
-    const unexpected = FORBIDDEN.filter((name) => held.has(name));
-    const privateCrates = [...held].filter((name) => name.startsWith("sid-ee") || name.startsWith("sid-saas"));
-    if (unexpected.length > 0 || privateCrates.length > 0) {
-      throw new Error(`the engine closure holds ${[...unexpected, ...privateCrates].join(", ")}`);
+    // Each host store the engine supports, as its own build: a host
+    // selecting CoordiNode receives no SQL driver at all.
+    const stores = [
+      { name: "sqlite", forbidden: FORBIDDEN },
+      { name: "coordinode", forbidden: [...FORBIDDEN, "sqlx", "sqlx-core", "sqlx-sqlite", "libsqlite3-sys"] },
+    ];
+    for (const store of stores) {
+      const features = ["--no-default-features", "--features", store.name];
+      const graph = run(consumer, env, "cargo", "tree", ...features, "-e", "normal,build", "--prefix", "none", "-f", "{p}");
+      const held = new Set(graph.split("\n").filter((line) => line.trim()).map((line) => line.split(" ")[0]));
+      const unexpected = store.forbidden.filter((name) => held.has(name));
+      const privateCrates = [...held].filter((name) => name.startsWith("sid-ee") || name.startsWith("sid-saas"));
+      if (unexpected.length > 0 || privateCrates.length > 0) {
+        throw new Error(`the ${store.name} engine closure holds ${[...unexpected, ...privateCrates].join(", ")}`);
+      }
+      console.log(`verified: the ${store.name} engine closure of ${held.size} packages holds no service, unselected driver, native provider or private crate`);
+      execFileSync("cargo", ["run", ...features, "--", store.name], { cwd: consumer, env, stdio: "inherit" });
     }
-    console.log(`verified: the engine closure of ${held.size} packages holds no service, driver, provider or private crate`);
-
-    execFileSync("cargo", ["run"], { cwd: consumer, env, stdio: "inherit" });
   } catch (error) {
     console.log(`failed package evidence preserved in ${work}`);
     throw error;

@@ -58,7 +58,7 @@ async fn test_revocation_reaches_other_processes() {
         shared.clone(),
     ));
     let b = Arc::new(RevocationCache::new(Duration::from_secs(900), shared));
-    b.listen().await;
+    let _listening = b.listen().await;
 
     a.revoke_session("session-x".to_string()).await.unwrap();
     a.revoke_jti("jti-x".to_string(), Duration::from_secs(60))
@@ -83,7 +83,7 @@ async fn test_revocation_before_start_is_seen() {
         .unwrap();
 
     let late = Arc::new(RevocationCache::new(Duration::from_secs(900), shared));
-    late.listen().await;
+    let _listening = late.listen().await;
 
     assert!(revoked(&late, "any", "session-early").await);
     assert!(revoked(&late, "jti-early", "any").await);
@@ -100,7 +100,7 @@ async fn test_warm_process_answers_locally() {
         Duration::from_millis(20),
         shared.clone(),
     ));
-    cache.listen().await;
+    let _listening = cache.listen().await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     shared
@@ -198,6 +198,23 @@ fn recorded_in(
     Arc::new(RevocationCache::recorded_in(lifetime, shared, store))
 }
 
+/// A stopped listener holds nothing: the cache and the store it read are
+/// released, so a host can close its database after its installation.
+#[tokio::test]
+async fn test_a_stopped_listener_releases_the_store() {
+    let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
+    let cache = recorded_in(
+        &store,
+        Duration::from_secs(900),
+        Arc::new(InMemoryCacheBackend::new()),
+    );
+    let listener = cache.listen().await;
+    listener.stop().await;
+    assert_eq!(Arc::strong_count(&cache), 1, "the cache is released");
+    drop(cache);
+    assert_eq!(Arc::strong_count(&store), 1, "the store is released");
+}
+
 /// An issuer's revocation is committed in its store: replicas that cannot
 /// reach the shared cache start, revoke and refuse revoked tokens, each
 /// confirming a local miss against the store.
@@ -206,8 +223,8 @@ async fn test_store_revocation_holds_without_the_cache() {
     let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
     let a = recorded_in(&store, Duration::from_secs(900), Arc::new(DownCache));
     let b = recorded_in(&store, Duration::from_secs(900), Arc::new(DownCache));
-    a.listen().await;
-    b.listen().await;
+    let _a = a.listen().await;
+    let _b = b.listen().await;
 
     a.revoke_session("session-x".to_string()).await.unwrap();
     a.revoke_jti("jti-x".to_string(), Duration::from_secs(60))
@@ -238,7 +255,7 @@ async fn test_store_revocation_survives_an_empty_cache() {
         Duration::from_secs(900),
         Arc::new(InMemoryCacheBackend::new()),
     );
-    late.listen().await;
+    let _listening = late.listen().await;
     assert!(revoked(&late, "jti-early", "any").await);
 }
 
@@ -252,7 +269,7 @@ async fn test_a_lost_publication_makes_replicas_confirm() {
     // Longer than the heartbeat, as every real token lifetime is.
     let lifetime = HEARTBEAT * 3;
     let warm = recorded_in(&store, lifetime, shared.clone());
-    warm.listen().await;
+    let _listening = warm.listen().await;
     tokio::time::sleep(lifetime + Duration::from_millis(100)).await;
     assert!(!revoked(&warm, "jti-x", "any").await, "warm and clean");
 

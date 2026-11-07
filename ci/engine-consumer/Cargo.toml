@@ -6,6 +6,12 @@ publish = false
 
 [workspace]
 
+# The host's store, one per build: the check runs each.
+[features]
+default = ["sqlite"]
+sqlite = ["sid-storage/storage-sqlite"]
+coordinode = ["sid-storage/storage-coordinode", "dep:coordinode-embed"]
+
 # Every SID crate resolves by version; the check adds a `[patch.crates-io]`
 # section naming the unpacked archives, so nothing is read from the
 # workspace that produced them.
@@ -16,9 +22,11 @@ sid-authz = { version = "0.2", default-features = false }
 sid-core = "0.2"
 sid-plugin = "0.2"
 sid-proto = "0.2"
-sid-storage = { version = "0.2", default-features = false, features = ["storage-sqlite"] }
+sid-storage = { version = "0.2", default-features = false }
 # The host selects pure-Rust primitives and the JWT provider.
 sid-crypto = { version = "0.1", default-features = false, features = ["std", "primitives", "jwt-rustcrypto"] }
+# The host's own CoordiNode database.
+coordinode-embed = { version = "0.9", optional = true }
 async-trait = "0.1"
 chrono = "0.4"
 secrecy = "0.10"

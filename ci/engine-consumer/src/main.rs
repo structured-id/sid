@@ -1,7 +1,8 @@
 //! An application embedding the packaged engine as an external host would:
-//! its own runtime, SQLite store, keys and crypto provider, nothing from the
-//! workspace that built the archives. Each step states what it shows and
-//! fails the process when the engine does otherwise.
+//! its own runtime, store, keys and crypto provider, nothing from the
+//! workspace that built the archives. The host's store is SQLite or its own
+//! CoordiNode database, named by the first argument. Each step states what
+//! it shows and fails the process when the engine does otherwise.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +22,6 @@ use sid_core::models::{
     WorkState,
 };
 use sid_plugin::storage::StorageBackend;
-use sid_storage::sqlite::{SqliteAuditLog, SqliteBackend};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -50,8 +50,8 @@ impl Host {
         Self { dir }
     }
 
-    fn database(&self, name: &str) -> String {
-        self.dir.join(name).to_str().expect("utf-8 path").to_owned()
+    fn database(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
     }
 
     fn master_key(&self) -> PathBuf {
@@ -210,20 +210,35 @@ async fn work_state(
         .state)
 }
 
-struct Stores {
-    backend: Arc<SqliteBackend>,
-    audit: SqliteAuditLog,
+/// The host's database at a path, with the stores a snapshot reads and
+/// writes.
+trait HostStore: Sized {
+    async fn open(path: &Path) -> Result<Self, Failure>;
+    fn backend(&self) -> Arc<dyn StorageBackend>;
+    fn store(&self) -> Store<'_>;
+}
+
+#[cfg(feature = "sqlite")]
+struct SqliteHost {
+    backend: Arc<sid_storage::sqlite::SqliteBackend>,
+    audit: sid_storage::sqlite::SqliteAuditLog,
     keys: sid_storage::sqlite::SqliteHistoryKeyStore,
 }
 
-impl Stores {
-    async fn open(path: &str) -> Result<Self, Failure> {
-        let backend = Arc::new(SqliteBackend::new(path).await?);
+#[cfg(feature = "sqlite")]
+impl HostStore for SqliteHost {
+    async fn open(path: &Path) -> Result<Self, Failure> {
+        let path = path.to_str().ok_or("a UTF-8 database path")?;
+        let backend = Arc::new(sid_storage::sqlite::SqliteBackend::new(path).await?);
         Ok(Self {
-            audit: SqliteAuditLog::new(backend.pool().clone()),
+            audit: sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
             keys: backend.history_keys(),
             backend,
         })
+    }
+
+    fn backend(&self) -> Arc<dyn StorageBackend> {
+        self.backend.clone()
     }
 
     fn store(&self) -> Store<'_> {
@@ -235,16 +250,60 @@ impl Stores {
     }
 }
 
+/// The host's own CoordiNode database in a directory, SID's records in it.
+#[cfg(feature = "coordinode")]
+struct CoordinodeHost {
+    backend: Arc<sid_storage::coordinode::CoordinodeBackend>,
+    keys: sid_storage::coordinode::CoordinodeHistoryKeyStore,
+}
+
+#[cfg(feature = "coordinode")]
+impl HostStore for CoordinodeHost {
+    async fn open(path: &Path) -> Result<Self, Failure> {
+        let path = path.to_path_buf();
+        let db =
+            tokio::task::spawn_blocking(move || coordinode_embed::Database::open(path)).await??;
+        let backend =
+            Arc::new(sid_storage::coordinode::CoordinodeBackend::new(Arc::new(db)).await?);
+        Ok(Self {
+            keys: backend.history_keys(),
+            backend,
+        })
+    }
+
+    fn backend(&self) -> Arc<dyn StorageBackend> {
+        self.backend.clone()
+    }
+
+    fn store(&self) -> Store<'_> {
+        Store {
+            storage: self.backend.as_ref(),
+            audit: self.backend.as_ref(),
+            history_keys: &self.keys,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
     // The host's selection: pure-Rust primitives and JWT provider.
     sid_crypto::jwt::rustcrypto::provider()
         .install_default()
         .map_err(|_| "a JWT provider was installed before the host's")?;
+    match std::env::args().nth(1).as_deref() {
+        #[cfg(feature = "sqlite")]
+        Some("sqlite") => run::<SqliteHost>().await,
+        #[cfg(feature = "coordinode")]
+        Some("coordinode") => run::<CoordinodeHost>().await,
+        other => Err(format!("no host store {other:?} in this build").into()),
+    }
+}
+
+async fn run<S: HostStore>() -> Result<(), Failure> {
     let crypto = sid_crypto::RustCryptoPrimitives::new();
     let host = Host::new();
-    let source = Stores::open(&host.database("source.db")).await?;
-    let storage: Arc<dyn StorageBackend> = source.backend.clone();
+    let source = S::open(&host.database("source")).await?;
+    let storage = source.backend();
 
     // Bootstrap: a fresh installation offers its administrator claim.
     let installation = Installation::open(storage.clone(), settings(&host.master_key())).await?;
@@ -352,15 +411,15 @@ async fn main() -> Result<(), Failure> {
         "the host's runtime stays usable after the drain",
     )?;
 
-    // Restart: the store and the master key reopen the same installation.
+    // Restart: the host closes its database and reopens it; the store and
+    // the master key open the same installation.
     let organization = installation.organization.clone();
     let issuer = installation.issuer.clone();
-    drop((sign_in, admin, authorization, installation));
-    let reopened = Installation::open(
-        Arc::new(SqliteBackend::new(&host.database("source.db")).await?),
-        settings(&host.master_key()),
-    )
-    .await?;
+    drop((sign_in, admin, authorization));
+    installation.close().await;
+    drop((storage, source));
+    let source = S::open(&host.database("source")).await?;
+    let reopened = Installation::open(source.backend(), settings(&host.master_key())).await?;
     check(
         reopened.organization == organization && reopened.issuer == issuer,
         "a restart reopens the same installation",
@@ -371,7 +430,7 @@ async fn main() -> Result<(), Failure> {
     // authority; an initialized store takes no archive.
     let key = ArchiveKey::from_bytes(&[7; 32])?;
     let sealed = sid::snapshot::export(&drained, source.store(), &key, &crypto).await?;
-    let target = Stores::open(&host.database("target.db")).await?;
+    let target = S::open(&host.database("target")).await?;
     sid::snapshot::import(target.store(), &sealed, &key, &crypto).await?;
     check(
         sid::snapshot::verify(source.store(), target.store())
@@ -379,7 +438,7 @@ async fn main() -> Result<(), Failure> {
             .passed,
         "the restored store equals its source",
     )?;
-    let restored = Installation::open(target.backend.clone(), settings(&host.master_key())).await?;
+    let restored = Installation::open(target.backend(), settings(&host.master_key())).await?;
     check(
         restored.organization == organization && restored.issuer == issuer,
         "the restored installation opens as the same authority",

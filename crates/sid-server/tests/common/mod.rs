@@ -1345,6 +1345,10 @@ pub struct TestServices {
     pub event_bus: Arc<dyn sid_plugin::event_bus::EventBus>,
     #[allow(dead_code)]
     pub revocation_cache: Arc<RevocationCache>,
+    /// A replica's subscription to the others' revocations, held as long as
+    /// it serves; none for a single process.
+    #[allow(dead_code)]
+    revocation_listener: Option<Arc<sid_authn::revocation_cache::RevocationListener>>,
     #[allow(dead_code)]
     pub feature_flags: FeatureFlagService,
     /// The installation organization's OIDC issuer, provisioned as a server
@@ -1675,7 +1679,8 @@ impl TestServices {
                 login_policy: None,
             },
         );
-        replica.revocation_cache.listen().await;
+        let mut replica = replica;
+        replica.revocation_listener = Some(Arc::new(replica.revocation_cache.listen().await));
         replica
     }
 
@@ -1886,6 +1891,7 @@ impl TestServices {
             jwt,
             event_bus,
             revocation_cache,
+            revocation_listener: None,
             feature_flags,
             issuer,
             oidc_issuer,

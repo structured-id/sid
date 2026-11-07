@@ -102,6 +102,39 @@ impl std::fmt::Debug for RevocationCache {
     }
 }
 
+/// The tasks receiving other processes' revocations and watching for lost
+/// publications ([`RevocationCache::listen`]). They run while it is held;
+/// dropping it aborts them, [`stop`](Self::stop) also waits until they ended
+/// and released what they hold.
+#[must_use = "dropping the listener stops receiving revocations"]
+#[derive(Debug)]
+pub struct RevocationListener {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl RevocationListener {
+    /// Stop listening; returns once the tasks ended.
+    pub async fn stop(mut self) {
+        for task in std::mem::take(&mut self.tasks) {
+            task.abort();
+            // An aborted task ends as cancelled; only a panic is news.
+            if let Err(e) = task.await
+                && !e.is_cancelled()
+            {
+                tracing::warn!(error = %e, "revocation listener task ended abnormally");
+            }
+        }
+    }
+}
+
+impl Drop for RevocationListener {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 impl RevocationCache {
     /// Create a revocation cache over `shared`; call [`listen`](Self::listen)
     /// to receive the other processes' revocations. Until then every local
@@ -241,8 +274,10 @@ impl RevocationCache {
     /// doing so: when the subscription ends, or cannot be opened at all, a
     /// task subscribes again, and local misses are confirmed until the
     /// subscription has covered a full token lifetime. Store-backed, a
-    /// heartbeat also watches for a lost publication.
-    pub async fn listen(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// heartbeat also watches for a lost publication. The tasks run while the
+    /// returned listener is held; it releases the cache and the store when it
+    /// stops or is dropped.
+    pub async fn listen(self: &Arc<Self>) -> RevocationListener {
         let first = match self.shared.subscribe(REVOCATION_CHANNEL).await {
             Ok(received) => {
                 self.warm_after_lifetime();
@@ -253,10 +288,10 @@ impl RevocationCache {
                 None
             }
         };
-        if let Record::Store(store) = &self.record {
+        let heartbeat = if let Record::Store(store) = &self.record {
             let cache = Arc::downgrade(self);
             let store = Arc::clone(store);
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let mut beat = tokio::time::interval(HEARTBEAT);
                 loop {
                     beat.tick().await;
@@ -271,10 +306,12 @@ impl RevocationCache {
                     );
                     cache.gap.store(gap, Ordering::Release);
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
         let cache = Arc::clone(self);
-        tokio::spawn(async move {
+        let subscription = tokio::spawn(async move {
             let mut received = first;
             loop {
                 if let Some(mut stream) = received.take() {
@@ -296,7 +333,10 @@ impl RevocationCache {
                     Err(e) => tracing::warn!(error = %e, "revocation resubscribe failed"),
                 }
             }
-        })
+        });
+        RevocationListener {
+            tasks: std::iter::once(subscription).chain(heartbeat).collect(),
+        }
     }
 
     /// Local answers become complete one token lifetime from now.
