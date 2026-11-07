@@ -2131,6 +2131,14 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
+    async fn commit_device_enrollment(
+        &self,
+        enrollment: &sid_core::models::DeviceEnrollment,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.commit_device_enrollment_impl(enrollment, ctx).await
+    }
+
     async fn rotate_device_attestation(
         &self,
         device_id: sid_core::models::DeviceId,

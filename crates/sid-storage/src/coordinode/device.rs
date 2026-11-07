@@ -10,10 +10,10 @@
 use chrono::Utc;
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId, DeviceAuthDecision,
-    DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption, DeviceId, DevicePoll,
-    DeviceTrustChange, MutationContext, ProfileId, ProjectId, RefreshToken, ResourceId, Session,
-    SessionId,
+    AttestationStatus, Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId,
+    DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
+    DeviceEnrollment, DeviceId, DevicePoll, DeviceTrustChange, EnrollmentTarget, MutationContext,
+    ProfileId, ProfileStatus, ProjectId, RefreshToken, ResourceId, Session, SessionId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -103,7 +103,93 @@ fn get_device(tx: &Statements<'_>, device_id: DeviceId) -> SidResult<Option<Devi
     rows.first().map(device).transpose()
 }
 
+/// Create device `d`'s node.
+fn insert_device(tx: &Statements<'_>, d: &Device) -> SidResult<()> {
+    tx.run(
+        "CREATE (d:SidDevice {id: $id, profile_id: $profile_id,
+            display_name: $display_name, device_type: $device_type, os_info: $os_info,
+            assurance: $assurance, trusted: $trusted,
+            hardware_attested: $hardware_attested, fingerprint_hash: $fingerprint_hash,
+            last_ip_geo: $last_ip_geo, first_seen_at: $first_seen_at,
+            last_seen_at: $last_seen_at})",
+        Params::default()
+            .with("id", bin(d.id.as_bytes()))
+            .with("profile_id", bin(d.profile_id.as_bytes()))
+            .with("display_name", opt_text(d.display_name.as_deref()))
+            .with("device_type", Value::String(d.device_type.as_str().into()))
+            .with("os_info", opt_text(d.os_info.as_deref()))
+            .with("assurance", Value::String(d.assurance.as_str().into()))
+            .with("trusted", Value::Bool(d.trusted))
+            .with("hardware_attested", Value::Bool(d.hardware_attested))
+            .with("fingerprint_hash", opt_text(d.fingerprint_hash.as_deref()))
+            .with("last_ip_geo", opt_text(d.last_ip_geo.as_deref()))
+            .with("first_seen_at", time(d.first_seen_at))
+            .with("last_seen_at", time(d.last_seen_at)),
+    )?;
+    Ok(())
+}
+
+/// Hold `device` for the commit and check that `owner` still holds it: a
+/// removed device is `NotFound`, another Profile's `Conflict`.
+fn owned_device(tx: &Statements<'_>, device: DeviceId, owner: ProfileId) -> SidResult<()> {
+    let rows = tx.run(
+        "MATCH (d:SidDevice) WHERE d.id = $id RETURN id(d) AS node, d.profile_id AS profile_id",
+        Params::default().with("id", bin(device.as_bytes())),
+    )?;
+    if !hold_first(tx, &rows)? {
+        return Err(SidError::NotFound(format!("device {device}")));
+    }
+    if id(&rows[0], "profile_id", ProfileId::from_slice)? != owner {
+        return Err(SidError::Conflict(format!(
+            "device {device} is another profile's"
+        )));
+    }
+    Ok(())
+}
+
 // === Attestations ===
+
+/// Create attestation `a`'s node.
+fn insert_attestation(tx: &Statements<'_>, a: &DeviceAttestation) -> SidResult<()> {
+    tx.run(
+        "CREATE (a:SidDeviceAttestation {id: $id, device_id: $device_id,
+        profile_id: $profile_id, format: $format, key_storage: $key_storage,
+        status: $status, device_public_key: $device_public_key,
+        attestation_object: $attestation_object,
+        attestation_certificate: $attestation_certificate, aaguid: $aaguid,
+        credential_id: $credential_id, created_at: $created_at,
+        updated_at: $updated_at, revoked_at: $revoked_at})",
+        Params::default()
+            .with("id", uuid(&a.id.0))
+            .with("device_id", bin(a.device_id.as_bytes()))
+            .with("profile_id", bin(a.profile_id.as_bytes()))
+            .with("format", Value::String(a.format.as_str().into()))
+            .with("key_storage", Value::String(a.key_storage.as_str().into()))
+            .with("status", Value::String(a.status.as_str().into()))
+            .with(
+                "device_public_key",
+                Value::Binary(a.device_public_key.clone()),
+            )
+            .with(
+                "attestation_object",
+                a.attestation_object
+                    .clone()
+                    .map_or(Value::Null, Value::Binary),
+            )
+            .with(
+                "attestation_certificate",
+                a.attestation_certificate
+                    .clone()
+                    .map_or(Value::Null, Value::Binary),
+            )
+            .with("aaguid", opt_text(a.aaguid.as_deref()))
+            .with("credential_id", opt_text(a.credential_id.as_deref()))
+            .with("created_at", time(a.created_at))
+            .with("updated_at", time(a.updated_at))
+            .with("revoked_at", opt_time(a.revoked_at)),
+    )?;
+    Ok(())
+}
 
 fn attestation(row: &Row) -> SidResult<DeviceAttestation> {
     Ok(DeviceAttestation {
@@ -220,28 +306,7 @@ impl CoordinodeBackend {
             if get_device(tx, d.id)?.is_some() {
                 return Err(SidError::Conflict("device already exists".into()));
             }
-            tx.run(
-                "CREATE (d:SidDevice {id: $id, profile_id: $profile_id,
-                    display_name: $display_name, device_type: $device_type, os_info: $os_info,
-                    assurance: $assurance, trusted: $trusted,
-                    hardware_attested: $hardware_attested, fingerprint_hash: $fingerprint_hash,
-                    last_ip_geo: $last_ip_geo, first_seen_at: $first_seen_at,
-                    last_seen_at: $last_seen_at})",
-                Params::default()
-                    .with("id", bin(d.id.as_bytes()))
-                    .with("profile_id", bin(d.profile_id.as_bytes()))
-                    .with("display_name", opt_text(d.display_name.as_deref()))
-                    .with("device_type", Value::String(d.device_type.as_str().into()))
-                    .with("os_info", opt_text(d.os_info.as_deref()))
-                    .with("assurance", Value::String(d.assurance.as_str().into()))
-                    .with("trusted", Value::Bool(d.trusted))
-                    .with("hardware_attested", Value::Bool(d.hardware_attested))
-                    .with("fingerprint_hash", opt_text(d.fingerprint_hash.as_deref()))
-                    .with("last_ip_geo", opt_text(d.last_ip_geo.as_deref()))
-                    .with("first_seen_at", time(d.first_seen_at))
-                    .with("last_seen_at", time(d.last_seen_at)),
-            )?;
-            Ok(())
+            insert_device(tx, &d)
         })
         .await
     }
@@ -390,6 +455,121 @@ impl CoordinodeBackend {
     }
 
     // === Attestations ===
+
+    pub(super) async fn commit_device_enrollment(
+        &self,
+        enrollment: &DeviceEnrollment,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        let enrollment = enrollment.clone();
+        let device_id = enrollment.target.device();
+        // A retry of a finish that committed is answered by its outcome
+        // before anything it changed is judged again.
+        let mut ctx = ctx;
+        let operation = ctx.operation.take();
+        self.mutate(format!("device_attestation:{device_id}"), ctx, move |tx| {
+            if let Some(operation) = &operation {
+                super::operation::record(tx, operation)?;
+            }
+            // The owner, held for the commit: it can still sign in, and the
+            // session the ceremony was authorized under is still live.
+            let owner = tx.run(
+                "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node, p.status AS status",
+                Params::default().with("id", bin(enrollment.profile_id.as_bytes())),
+            )?;
+            if !hold_first(tx, &owner)? {
+                return Err(SidError::NotFound("profile".into()));
+            }
+            if get_text(&owner[0], "status")? != ProfileStatus::Active.as_str() {
+                return Err(SidError::Fenced("the owner can no longer sign in".into()));
+            }
+            if let Some(session) = enrollment.session {
+                let live = tx.run(
+                    "MATCH (s:SidSession) WHERE s.id = $id AND s.profile_id = $profile
+                         AND s.expires_at > $now
+                     RETURN id(s) AS node",
+                    Params::default()
+                        .with("id", bin(session.as_bytes()))
+                        .with("profile", bin(enrollment.profile_id.as_bytes()))
+                        .with("now", time(Utc::now())),
+                )?;
+                if !hold_first(tx, &live)? {
+                    return Err(SidError::Fenced("the authorizing session ended".into()));
+                }
+            }
+
+            // The target as the ceremony found it; the binding node is
+            // written below, so a concurrent change of it conflicts.
+            let binding =
+                attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop();
+            let changed =
+                || SidError::Conflict("the device's key changed since the ceremony started".into());
+            match &enrollment.target {
+                EnrollmentTarget::NewDevice(device) => {
+                    if device.profile_id != enrollment.profile_id {
+                        return Err(SidError::Validation("device of another profile".into()));
+                    }
+                    if get_device(tx, device.id)?.is_some() {
+                        return Err(SidError::Conflict("device already exists".into()));
+                    }
+                    insert_device(tx, device)?;
+                }
+                EnrollmentTarget::ExistingDevice { revoked, .. } => {
+                    owned_device(tx, device_id, enrollment.profile_id)?;
+                    let unchanged = match (&binding, revoked) {
+                        (None, None) => true,
+                        (Some(stored), Some(expected)) => {
+                            stored.id == *expected && stored.status.as_str() == "revoked"
+                        }
+                        _ => false,
+                    };
+                    if !unchanged {
+                        return Err(changed());
+                    }
+                }
+                EnrollmentTarget::Rotation {
+                    current,
+                    current_key,
+                    ..
+                } => {
+                    owned_device(tx, device_id, enrollment.profile_id)?;
+                    let unchanged = binding.as_ref().is_some_and(|stored| {
+                        stored.id == *current
+                            && stored.status.as_str() != "revoked"
+                            && &stored.device_public_key == current_key
+                    });
+                    if !unchanged {
+                        return Err(changed());
+                    }
+                }
+            }
+
+            // The new binding over the old one; the device is
+            // hardware-attested only by verified hardware evidence.
+            tx.run(
+                "MATCH (a:SidDeviceAttestation) WHERE a.device_id = $id DETACH DELETE a",
+                Params::default().with("id", bin(device_id.as_bytes())),
+            )?;
+            let mut attestation = enrollment.attestation.clone();
+            attestation.device_id = device_id;
+            attestation.profile_id = enrollment.profile_id;
+            insert_attestation(tx, &attestation)?;
+            tx.run(
+                "MATCH (d:SidDevice) WHERE d.id = $id SET d.hardware_attested = $attested",
+                Params::default()
+                    .with("id", bin(device_id.as_bytes()))
+                    .with(
+                        "attested",
+                        Value::Bool(
+                            attestation.status == AttestationStatus::Verified
+                                && attestation.is_hardware_backed(),
+                        ),
+                    ),
+            )?;
+            Ok(())
+        })
+        .await
+    }
 
     pub(super) async fn create_device_attestation(
         &self,

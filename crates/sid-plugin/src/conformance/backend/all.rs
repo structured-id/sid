@@ -156,6 +156,15 @@ macro_rules! __storage_conformance {
                 test_device_poll_interval
                 test_device_code_redeemed_once
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],device_enrollment:
+                test_a_new_device_is_enrolled_with_its_key
+                test_an_existing_device_is_enrolled_only_as_found
+                test_a_rotation_replaces_only_the_binding_it_found
+                test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it
+                test_an_enrollment_without_current_authority_commits_nothing
+                test_concurrent_finishes_bind_once
+                test_a_retried_finish_is_answered_by_its_outcome
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],directory:
                 test_directory_user_create_stores_everything
                 test_directory_user_create_taken_login_writes_nothing

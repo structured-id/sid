@@ -131,7 +131,7 @@ pub use credential::{
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
     AttestationStatus, DeviceAttestation, DeviceAttestationFormat, DeviceAttestationId,
-    KeyStorageType,
+    DeviceEnrollment, EnrollmentTarget, KeyStorageType,
 };
 pub use device_authorization::{
     DEVICE_CODE_LIFETIME_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DeviceAuthCodeId,

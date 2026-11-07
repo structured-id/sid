@@ -1630,6 +1630,13 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
 
     // === DEVICE ATTESTATION ===
+    async fn commit_device_enrollment(
+        &self,
+        _: &sid_core::models::DeviceEnrollment,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
     async fn create_device_attestation(
         &self,
         _: &sid_core::models::DeviceAttestation,

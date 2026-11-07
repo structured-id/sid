@@ -500,6 +500,44 @@ impl PostgresBackend {
             .map_err(|e| SidError::Storage(format!("commit an allowlist change: {e}")))
     }
 
+    /// Lock device `id` for the commit and check that `owner` still holds it:
+    /// a removed device is `NotFound`, another Profile's `Conflict`.
+    async fn owned_device_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: CoreDeviceId,
+        owner: sid_core::models::ProfileId,
+    ) -> SidResult<()> {
+        let held: Option<sid_core::models::ProfileId> =
+            sqlx::query_scalar("SELECT profile_id FROM devices WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("lock device: {e}")))?;
+        match held {
+            None => Err(SidError::NotFound(format!("device {id}"))),
+            Some(profile) if profile != owner => Err(SidError::Conflict(format!(
+                "device {id} is another profile's"
+            ))),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The key binding of device `id`, locked for the commit: its id, status
+    /// and key.
+    async fn binding_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: CoreDeviceId,
+    ) -> SidResult<Option<(uuid::Uuid, String, Vec<u8>)>> {
+        sqlx::query_as(
+            "SELECT id, status, device_public_key FROM device_attestations
+             WHERE device_id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock device binding: {e}")))
+    }
+
     /// Device `id` as the transaction leaves it.
     async fn device_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -5362,6 +5400,168 @@ impl StorageBackend for PostgresBackend {
     }
 
     // === DEVICE ATTESTATION OPERATIONS ===
+
+    async fn commit_device_enrollment(
+        &self,
+        enrollment: &sid_core::models::DeviceEnrollment,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        use sid_core::models::EnrollmentTarget;
+        let storage = |e: sqlx::Error| SidError::Storage(format!("commit device enrollment: {e}"));
+        let att = &enrollment.attestation;
+        let device_id = enrollment.target.device();
+        let mut ctx = ctx;
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+
+        // A retry of a finish that committed is answered by its outcome
+        // before anything it changed is judged again.
+        if let Some(operation) = ctx.operation.take() {
+            operation::record_in_tx(&mut tx, &operation).await?;
+        }
+
+        // The owner, as it stands now: it can still sign in, and the session
+        // the ceremony was authorized under is still live.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR SHARE")
+                .bind(enrollment.profile_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+        let status = status.ok_or_else(|| SidError::NotFound("profile".into()))?;
+        if !status
+            .parse::<sid_core::models::ProfileStatus>()
+            .is_ok_and(|s| s.can_authenticate())
+        {
+            return Err(SidError::Fenced("the owner can no longer sign in".into()));
+        }
+        if let Some(session) = enrollment.session {
+            let live: Option<bool> = sqlx::query_scalar(
+                "SELECT expires_at > NOW() FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
+            )
+            .bind(session)
+            .bind(enrollment.profile_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+            if live != Some(true) {
+                return Err(SidError::Fenced("the authorizing session ended".into()));
+            }
+        }
+
+        // The target as the ceremony found it, held for the commit.
+        match &enrollment.target {
+            EnrollmentTarget::NewDevice(device) => {
+                if device.profile_id != enrollment.profile_id {
+                    return Err(SidError::Validation("device of another profile".into()));
+                }
+                sqlx::query(
+                    "INSERT INTO devices (id, profile_id, display_name, device_type, os_info,
+                        assurance, trusted, hardware_attested, fingerprint_hash, last_ip_geo,
+                        first_seen_at, last_seen_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(device.id)
+                .bind(device.profile_id)
+                .bind(&device.display_name)
+                .bind(device.device_type.as_str())
+                .bind(&device.os_info)
+                .bind(device.assurance.as_str())
+                .bind(device.trusted)
+                .bind(device.hardware_attested)
+                .bind(&device.fingerprint_hash)
+                .bind(&device.last_ip_geo)
+                .bind(device.first_seen_at)
+                .bind(device.last_seen_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| insert_error("device", e))?;
+            }
+            EnrollmentTarget::ExistingDevice { revoked, .. } => {
+                Self::owned_device_in_tx(&mut tx, device_id, enrollment.profile_id).await?;
+                let binding = Self::binding_in_tx(&mut tx, device_id).await?;
+                let unchanged = match (&binding, revoked) {
+                    (None, None) => true,
+                    (Some((id, status, _)), Some(expected)) => {
+                        *id == expected.0 && status == "revoked"
+                    }
+                    _ => false,
+                };
+                if !unchanged {
+                    return Err(SidError::Conflict(
+                        "the device's key changed since the ceremony started".into(),
+                    ));
+                }
+            }
+            EnrollmentTarget::Rotation {
+                current,
+                current_key,
+                ..
+            } => {
+                Self::owned_device_in_tx(&mut tx, device_id, enrollment.profile_id).await?;
+                let binding = Self::binding_in_tx(&mut tx, device_id).await?;
+                let unchanged = binding.as_ref().is_some_and(|(id, status, key)| {
+                    *id == current.0 && status != "revoked" && key == current_key
+                });
+                if !unchanged {
+                    return Err(SidError::Conflict(
+                        "the device's key changed since the ceremony started".into(),
+                    ));
+                }
+            }
+        }
+
+        // The new binding over the old one (a revoked binding, or the live
+        // one a rotation retires); the device is hardware-attested only by
+        // verified hardware evidence.
+        sqlx::query(
+            "INSERT INTO device_attestations (id, device_id, profile_id, format, key_storage,
+                status, device_public_key, attestation_object, attestation_certificate,
+                aaguid, credential_id, created_at, updated_at, revoked_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (device_id) DO UPDATE SET
+                id = EXCLUDED.id,
+                profile_id = EXCLUDED.profile_id,
+                format = EXCLUDED.format,
+                key_storage = EXCLUDED.key_storage,
+                status = EXCLUDED.status,
+                device_public_key = EXCLUDED.device_public_key,
+                attestation_object = EXCLUDED.attestation_object,
+                attestation_certificate = EXCLUDED.attestation_certificate,
+                aaguid = EXCLUDED.aaguid,
+                credential_id = EXCLUDED.credential_id,
+                created_at = EXCLUDED.created_at,
+                updated_at = EXCLUDED.updated_at,
+                revoked_at = EXCLUDED.revoked_at",
+        )
+        .bind(att.id.0)
+        .bind(device_id)
+        .bind(enrollment.profile_id)
+        .bind(att.format.as_str())
+        .bind(att.key_storage.as_str())
+        .bind(att.status.as_str())
+        .bind(&att.device_public_key)
+        .bind(&att.attestation_object)
+        .bind(&att.attestation_certificate)
+        .bind(&att.aaguid)
+        .bind(&att.credential_id)
+        .bind(att.created_at)
+        .bind(att.updated_at)
+        .bind(att.revoked_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("device attestation", e))?;
+        sqlx::query("UPDATE devices SET hardware_attested = $2 WHERE id = $1")
+            .bind(device_id)
+            .bind(
+                att.status == sid_core::models::AttestationStatus::Verified
+                    && att.is_hardware_backed(),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        Self::audit_in_tx(&mut tx, &format!("device_attestation:{device_id}"), ctx).await?;
+        tx.commit().await.map_err(storage)
+    }
 
     async fn create_device_attestation(
         &self,

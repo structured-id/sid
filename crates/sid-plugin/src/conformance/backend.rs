@@ -25,6 +25,7 @@ pub mod config;
 pub mod consent;
 pub mod device;
 pub mod device_auth;
+pub mod device_enrollment;
 pub mod directory;
 pub mod directory_query;
 pub mod email_policy;

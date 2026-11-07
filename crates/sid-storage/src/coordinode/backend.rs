@@ -1494,6 +1494,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::get_device_by_fingerprint(self, profile_id, fingerprint_hash).await
     }
 
+    async fn commit_device_enrollment(
+        &self,
+        enrollment: &sid_core::models::DeviceEnrollment,
+        ctx: MutationContext,
+    ) -> Result<()> {
+        CoordinodeBackend::commit_device_enrollment(self, enrollment, ctx).await
+    }
+
     async fn create_device_attestation(
         &self,
         attestation: &DeviceAttestation,
