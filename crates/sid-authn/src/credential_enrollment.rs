@@ -219,12 +219,7 @@ pub async fn authorize_binding(
     assurance: AuthLevel,
     passkey_satisfies_mfa: bool,
 ) -> Result<Session, EnrollmentError> {
-    let session = storage
-        .get_session(session)
-        .await
-        .map_err(EnrollmentError::Storage)?
-        .filter(|s| s.profile_id == profile && !s.is_expired())
-        .ok_or(EnrollmentError::SessionInvalid)?;
+    let session = current_session(storage, profile, session).await?;
     let active = active_credentials(storage, profile).await?;
     check_binding(
         &session,
@@ -234,6 +229,52 @@ pub async fn authorize_binding(
         Utc::now(),
     )?;
     Ok(session)
+}
+
+/// `profile`'s sign-in `session` as it stands now: unexpired, and of an
+/// account that can still sign in. A sign-in ended since, or whose account
+/// was suspended or closed, is no authority, for a result already recorded
+/// as much as for a new change.
+pub async fn current_session(
+    storage: &dyn sid_plugin::StorageBackend,
+    profile: ProfileId,
+    session: SessionId,
+) -> Result<Session, EnrollmentError> {
+    let session = storage
+        .get_session(session)
+        .await
+        .map_err(EnrollmentError::Storage)?
+        .filter(|s| s.profile_id == profile && !s.is_expired())
+        .ok_or(EnrollmentError::SessionInvalid)?;
+    let account = storage
+        .get_profile(profile)
+        .await
+        .map_err(EnrollmentError::Storage)?;
+    if !account.is_some_and(|p| p.status.can_authenticate()) {
+        return Err(EnrollmentError::SessionInvalid);
+    }
+    Ok(session)
+}
+
+/// The fence a change made under `session` commits under: the sign-in still
+/// live and its account still able to sign in.
+pub fn sign_in_fence(session: &Session) -> sid_core::models::ActorFence {
+    sid_core::models::ActorFence::Session {
+        session: session.id,
+        profile: session.profile_id,
+        fresh_until: None,
+    }
+}
+
+/// The fence a binding authorized under `session` commits under: as
+/// [`sign_in_fence`], and within the binding freshness window
+/// [`check_binding`] admitted it in.
+pub fn binding_fence(session: &Session) -> sid_core::models::ActorFence {
+    sid_core::models::ActorFence::Session {
+        session: session.id,
+        profile: session.profile_id,
+        fresh_until: Some(session.authenticated_at + chrono::Duration::hours(FULL_TRUST_HOURS)),
+    }
 }
 
 /// Refuse unless `pending` may bind the account's first second factor now,

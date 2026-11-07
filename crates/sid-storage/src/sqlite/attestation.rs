@@ -5,7 +5,7 @@ use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
         AttestationStatus, DeviceAttestation, DeviceAttestationId, DeviceEnrollment, DeviceId,
-        EnrollmentTarget, MutationContext, ProfileId, ProfileStatus,
+        EnrollmentTarget, MutationContext, ProfileId,
     },
 };
 
@@ -102,38 +102,8 @@ impl SqliteBackend {
             super::operation::record_in_tx(&mut tx, &operation).await?;
         }
 
-        // The owner, as it stands now: it can still sign in, and the session
-        // the ceremony was authorized under is still live.
-        let status: Option<String> = sqlx::query_scalar("SELECT status FROM profiles WHERE id = ?")
-            .bind(enrollment.profile_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?;
-        let status = status.ok_or_else(|| SidError::NotFound("profile".into()))?;
-        if !status
-            .parse::<ProfileStatus>()
-            .is_ok_and(|s| s.can_authenticate())
-        {
-            return Err(SidError::Fenced("the owner can no longer sign in".into()));
-        }
-        if let Some(session) = enrollment.session {
-            let row =
-                sqlx::query("SELECT expires_at FROM sessions WHERE id = ? AND profile_id = ?")
-                    .bind(session)
-                    .bind(enrollment.profile_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(storage)?;
-            let live = match &row {
-                Some(row) => dt_col(row, "expires_at")? > chrono::Utc::now(),
-                None => false,
-            };
-            if !live {
-                return Err(SidError::Fenced("the authorizing session ended".into()));
-            }
-        }
-
-        // The target as the ceremony found it.
+        // The acting sign-in (`ctx.fence`) is rechecked when the mutation
+        // commits, in this transaction. The target as the ceremony found it.
         let changed =
             || SidError::Conflict("the device's key changed since the ceremony started".into());
         match &enrollment.target {
@@ -291,7 +261,7 @@ impl SqliteBackend {
         let row = sqlx::query(concat!(
             "SELECT ",
             attestation_columns!(),
-            " FROM device_attestations WHERE device_id = ? AND status != 'revoked'"
+            " FROM device_attestations WHERE device_id = ?"
         ))
         .bind(device_id)
         .fetch_optional(&self.pool)

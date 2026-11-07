@@ -1187,15 +1187,15 @@ pub trait StorageBackend:
 
     // === DEVICE ATTESTATION OPERATIONS ===
 
-    /// Commit a finished device-key ceremony as one transaction: the owner
-    /// can still sign in and its `session`, if named, is live; the target is
-    /// as the ceremony found it (a new device is created, an existing one
+    /// Commit a finished device-key ceremony as one transaction: the target
+    /// is as the ceremony found it (a new device is created, an existing one
     /// is still the owner's and has no live key and no binding other than
     /// the revoked one it had, a rotated one still holds exactly `current`
     /// of `current_key`); the binding is stored, a rotation retiring the old
-    /// one; and `ctx` (normally consuming the ceremony) commits with it.
-    /// A target changed meanwhile is `Conflict`, a removed device or Profile
-    /// `NotFound`, an ended session `Fenced`; nothing commits then.
+    /// one; and `ctx` (its fence, normally the owner's sign-in, and the
+    /// ceremony it consumes) commits with it. A target changed meanwhile is
+    /// `Conflict`, a removed device `NotFound`, a fence that no longer holds
+    /// `Fenced`; nothing commits then.
     async fn commit_device_enrollment(
         &self,
         enrollment: &DeviceEnrollment,
@@ -1216,7 +1216,8 @@ pub trait StorageBackend:
         id: DeviceAttestationId,
     ) -> Result<Option<DeviceAttestation>>;
 
-    /// Get a device attestation by device ID.
+    /// The key binding of a device, live or revoked: a device holds at most
+    /// one, read by its device.
     async fn get_device_attestation_by_device_id(
         &self,
         device_id: DeviceId,

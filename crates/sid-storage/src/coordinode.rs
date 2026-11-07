@@ -149,6 +149,11 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
             login_policy::check_fence(tx, epoch)?
         }
         Some(sid_core::models::ActorFence::Authority(basis)) => rbac::check_authority(tx, &basis)?,
+        Some(sid_core::models::ActorFence::Session {
+            session,
+            profile,
+            fresh_until,
+        }) => session::check_fence(tx, session, profile, fresh_until)?,
         None => {}
     }
     // Then the completion: a keyed command another commit already completed

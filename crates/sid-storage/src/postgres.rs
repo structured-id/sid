@@ -437,6 +437,11 @@ impl PostgresBackend {
             Some(sid_core::models::ActorFence::Authority(basis)) => {
                 Self::check_authority_in_tx(tx, &basis).await?
             }
+            Some(sid_core::models::ActorFence::Session {
+                session,
+                profile,
+                fresh_until,
+            }) => Self::check_session_fence(tx, session, profile, fresh_until).await?,
             None => {}
         }
         // Then the completion: a keyed command another commit already
@@ -498,6 +503,47 @@ impl PostgresBackend {
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit an allowlist change: {e}")))
+    }
+
+    /// Fail with `Fenced` unless `profile` can still sign in and `session` is
+    /// still its live sign-in, fresh until `fresh_until` when given. Both rows
+    /// are share-locked until the transaction ends, so a sign-out or a status
+    /// change either waits for this commit or is seen by it.
+    async fn check_session_fence(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: sid_core::models::SessionId,
+        profile: sid_core::models::ProfileId,
+        fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> SidResult<()> {
+        let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
+        let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR SHARE")
+                .bind(profile)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage)?;
+        if !status.is_some_and(|s| {
+            s.parse::<sid_core::models::ProfileStatus>()
+                .is_ok_and(|s| s.can_authenticate())
+        }) {
+            return Err(fenced("belongs to an account that can no longer sign in"));
+        }
+        let live: Option<bool> = sqlx::query_scalar(
+            "SELECT expires_at > NOW() FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
+        )
+        .bind(session)
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+        if live != Some(true) {
+            return Err(fenced("ended"));
+        }
+        if fresh_until.is_some_and(|until| chrono::Utc::now() >= until) {
+            return Err(fenced("is no longer fresh"));
+        }
+        Ok(())
     }
 
     /// Lock device `id` for the commit and check that `owner` still holds it:
@@ -5419,36 +5465,9 @@ impl StorageBackend for PostgresBackend {
             operation::record_in_tx(&mut tx, &operation).await?;
         }
 
-        // The owner, as it stands now: it can still sign in, and the session
-        // the ceremony was authorized under is still live.
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR SHARE")
-                .bind(enrollment.profile_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?;
-        let status = status.ok_or_else(|| SidError::NotFound("profile".into()))?;
-        if !status
-            .parse::<sid_core::models::ProfileStatus>()
-            .is_ok_and(|s| s.can_authenticate())
-        {
-            return Err(SidError::Fenced("the owner can no longer sign in".into()));
-        }
-        if let Some(session) = enrollment.session {
-            let live: Option<bool> = sqlx::query_scalar(
-                "SELECT expires_at > NOW() FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
-            )
-            .bind(session)
-            .bind(enrollment.profile_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?;
-            if live != Some(true) {
-                return Err(SidError::Fenced("the authorizing session ended".into()));
-            }
-        }
-
-        // The target as the ceremony found it, held for the commit.
+        // The acting sign-in (`ctx.fence`) is rechecked with the audit below,
+        // in this transaction. The target as the ceremony found it, held for
+        // the commit.
         match &enrollment.target {
             EnrollmentTarget::NewDevice(device) => {
                 if device.profile_id != enrollment.profile_id {
@@ -5568,6 +5587,13 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("revoke device attestation: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The device row first, then its binding: the order an enrollment
+        // commit takes them in, so the two never wait on each other.
+        sqlx::query("SELECT 1 FROM devices WHERE id = $1 FOR UPDATE")
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
         let revoked = sqlx::query(
             "UPDATE device_attestations SET status = 'revoked', revoked_at = NOW(),
                 updated_at = NOW()
@@ -5612,7 +5638,7 @@ impl StorageBackend for PostgresBackend {
         device_id: CoreDeviceId,
     ) -> SidResult<Option<sid_core::models::DeviceAttestation>> {
         let row = sqlx::query_as::<_, crate::pg_row::DeviceAttestationRow>(
-            "SELECT * FROM device_attestations WHERE device_id = $1 AND status != 'revoked'",
+            "SELECT * FROM device_attestations WHERE device_id = $1",
         )
         .bind(device_id)
         .fetch_optional(&self.pool)

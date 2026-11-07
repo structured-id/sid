@@ -651,6 +651,139 @@ async fn a_revocation_overtakes_a_pending_ceremony() {
     );
 }
 
+// The embedded path end to end: a sign-in the engine commits issues an access
+// token, the verified token is the caller, and that caller enrolls a key; no
+// session is written by the test.
+#[tokio::test]
+async fn a_signed_in_caller_enrolls_through_the_engine() {
+    use secrecy::ExposeSecret;
+    let storage: Arc<dyn StorageBackend> = storage().await;
+    let sign_in = crate::test_support::sign_in(storage.clone());
+    let profile_id = stored_profile(storage.as_ref(), "bob").await;
+    let profile = storage.get_profile(profile_id).await.unwrap().unwrap();
+    let signed_in = sign_in
+        .sign_in(
+            &profile,
+            sign_in.new_session(profile_id, None),
+            sid_authn::sign_in_delivery::CeremonyClient::Native,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let sid_authn::sign_in_delivery::Delivery::Bearer { token, .. } = signed_in.delivery else {
+        panic!("a native sign-in delivers a bearer token");
+    };
+    let claims = sign_in
+        .jwt()
+        .validate_access_token(token.expose_secret())
+        .unwrap();
+    let caller = KeyCaller::from(&sid_authn::caller::Caller::from_claims(&claims).unwrap());
+    let keys = DeviceKeys::new(storage.clone(), keys());
+    let mut access = TestAccess::default();
+
+    let challenge = keys
+        .start_enrollment(
+            &mut access,
+            &caller,
+            ISSUER,
+            start(DeviceEnrollmentPurpose::Enroll, None),
+        )
+        .await
+        .unwrap();
+    let key = ec_key();
+    let enrolled = keys
+        .finish_enrollment(
+            &mut access,
+            &caller,
+            operation(storage.as_ref(), "k-engine").await,
+            finish(
+                &challenge,
+                proof(&key, &challenge, "enroll", &key.thumbprint()),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(enrolled.profile_id, Some(profile_id.into()));
+}
+
+// A caller obtained before its sign-in ended revokes nothing afterwards: the
+// change is made under the sign-in as it stands, not as the caller recorded
+// it.
+#[tokio::test]
+async fn an_ended_sign_in_revokes_nothing() {
+    let f = fixture().await;
+    f.enroll(&ec_key()).await;
+    f.storage
+        .delete_session(
+            f.caller.session.unwrap(),
+            &sid_core::models::SessionEnd::new(
+                sid_core::models::RevocationReason::UserRequested,
+                "test",
+            ),
+            AuditEntry::system("test", "session").into(),
+        )
+        .await
+        .unwrap();
+
+    let refused = f
+        .keys
+        .revoke_key(
+            &mut TestAccess::default(),
+            &f.caller,
+            operation(f.storage.as_ref(), "k-ended").await,
+            RevokeDeviceKeyRequest {
+                device_id: Some(f.device.into()),
+            },
+        )
+        .await;
+
+    assert!(matches!(refused, Err(DeviceKeyError::Denied)));
+    let live = f.attestation().await.unwrap();
+    assert_ne!(live.status, AttestationStatus::Revoked);
+}
+
+// A completed enrollment's recorded result is answered only to an owner who
+// may still bind: once the account is suspended, its live session retries
+// the finish and gets a refusal, not the result.
+#[tokio::test]
+async fn a_suspended_owner_gets_no_recorded_result() {
+    let f = fixture().await;
+    let mut access = TestAccess::default();
+    let challenge = f
+        .start(&mut access, DeviceEnrollmentPurpose::Enroll, Some(f.device))
+        .await;
+    let key = ec_key();
+    let req = finish(
+        &challenge,
+        proof(&key, &challenge, "enroll", &key.thumbprint()),
+    );
+    let context = operation(f.storage.as_ref(), "k-suspend").await;
+    f.keys
+        .finish_enrollment(&mut access, &f.caller, context.clone(), req.clone())
+        .await
+        .unwrap();
+    let mut profile = f.storage.get_profile(f.profile).await.unwrap().unwrap();
+    profile.status = sid_core::models::ProfileStatus::Suspended;
+    f.storage
+        .update_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+
+    let retried = f
+        .keys
+        .finish_enrollment(&mut access, &f.caller, context, req)
+        .await;
+
+    assert!(
+        matches!(retried, Err(DeviceKeyError::Denied)),
+        "{retried:?}"
+    );
+}
+
 // Only the owner's own interactive sign-in starts a ceremony; an
 // impersonation and a caller without a session are refused.
 #[tokio::test]

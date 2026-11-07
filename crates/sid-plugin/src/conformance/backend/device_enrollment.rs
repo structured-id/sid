@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use sid_core::Error;
 use sid_core::models::{
-    AttestationStatus, CeremonyConsumption, Device, DeviceAttestation, DeviceAttestationFormat,
-    DeviceEnrollment, DeviceType, EnrollmentTarget, KeyStorageType, OperationCompletion,
-    OperationKey, Profile, ProfileStatus, Session,
+    ActorFence, AttestationStatus, CeremonyConsumption, Device, DeviceAttestation,
+    DeviceAttestationFormat, DeviceEnrollment, DeviceType, EnrollmentTarget, KeyStorageType,
+    MutationContext, OperationCompletion, OperationKey, Profile, ProfileStatus, Session,
 };
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -73,10 +73,20 @@ fn enrollment(owner: &Owner, target: EnrollmentTarget, key: &str) -> DeviceEnrol
     };
     DeviceEnrollment {
         profile_id: owner.profile.id,
-        session: Some(owner.session.id),
         attestation: binding(&device, key),
         target,
     }
+}
+
+/// A mutation authorized by `owner`'s sign-in, consuming `ceremony`.
+fn by(owner: &Owner, ceremony: CeremonyConsumption) -> MutationContext {
+    test_audit()
+        .fenced_by(ActorFence::Session {
+            session: owner.session.id,
+            profile: owner.profile.id,
+            fresh_until: None,
+        })
+        .consuming(ceremony)
 }
 
 /// An enrolled device of `owner` with key `key`.
@@ -84,7 +94,7 @@ async fn enrolled(backend: &dyn StorageBackend, owner: &Owner, key: &str) -> Dev
     let device = Device::new(owner.profile.id, DeviceType::Mobile);
     let e = enrollment(owner, EnrollmentTarget::NewDevice(device), key);
     backend
-        .commit_device_enrollment(&e, test_audit().consuming(ceremony(backend).await))
+        .commit_device_enrollment(&e, by(owner, ceremony(backend).await))
         .await
         .unwrap();
     e.attestation
@@ -107,7 +117,7 @@ pub async fn test_a_new_device_is_enrolled_with_its_key(backend: &dyn StorageBac
     let e = enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key-1");
 
     backend
-        .commit_device_enrollment(&e, test_audit().consuming(ceremony.clone()))
+        .commit_device_enrollment(&e, by(&owner, ceremony.clone()))
         .await
         .unwrap();
 
@@ -138,7 +148,7 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
     backend
         .commit_device_enrollment(
             &enrollment(&owner, target(), "key-1"),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .unwrap();
@@ -148,7 +158,7 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
     let refused = backend
         .commit_device_enrollment(
             &enrollment(&owner, target(), "key-2"),
-            test_audit().consuming(again.clone()),
+            by(&owner, again.clone()),
         )
         .await
         .expect_err("an enrollment over a live key");
@@ -177,7 +187,7 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
     };
     let rotated = enrollment(&owner, rotation(), "key-2");
     backend
-        .commit_device_enrollment(&rotated, test_audit().consuming(ceremony(backend).await))
+        .commit_device_enrollment(&rotated, by(&owner, ceremony(backend).await))
         .await
         .unwrap();
     let key = backend
@@ -192,7 +202,7 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
     let stale = backend
         .commit_device_enrollment(
             &enrollment(&owner, rotation(), "key-3"),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("a rotation of a key already rotated");
@@ -211,17 +221,19 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
     let revived = backend
         .commit_device_enrollment(
             &enrollment(&owner, revoked_target, "key-4"),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("a rotation of a revoked key");
     assert!(matches!(revived, Error::Conflict(_)), "{revived:?}");
-    assert!(
-        backend
-            .get_device_attestation_by_device_id(current.device_id)
-            .await
-            .unwrap()
-            .is_none(),
+    let left = backend
+        .get_device_attestation_by_device_id(current.device_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (left.id, left.status),
+        (rotated.attestation.id, AttestationStatus::Revoked),
         "a revoked key was revived"
     );
 }
@@ -248,7 +260,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
                 },
                 "key-2",
             ),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("an enrollment that did not find the revoked binding");
@@ -264,7 +276,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
                 },
                 "key-2",
             ),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .unwrap();
@@ -299,7 +311,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
                 },
                 "key",
             ),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("an enrollment of a removed device");
@@ -318,7 +330,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
                 },
                 "key",
             ),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("an enrollment of another profile's device");
@@ -332,7 +344,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
     let err = backend
         .commit_device_enrollment(
             &enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key"),
-            test_audit().consuming(ceremony(backend).await),
+            by(&owner, ceremony(backend).await),
         )
         .await
         .expect_err("an enrollment under an ended session");
@@ -354,12 +366,102 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
                 EnrollmentTarget::NewDevice(device.clone()),
                 "key",
             ),
-            test_audit().consuming(ceremony(backend).await),
+            by(&suspended, ceremony(backend).await),
         )
         .await
         .expect_err("an enrollment of a suspended owner");
     assert!(matches!(err, Error::Fenced(_)), "{err:?}");
     assert!(backend.get_device(device.id).await.unwrap().is_none());
+}
+
+/// A revocation commits only under the sign-in that authorized it: a sign-in
+/// that is past its freshness or ended since revokes nothing.
+pub async fn test_a_revocation_holds_only_under_a_live_sign_in(backend: &dyn StorageBackend) {
+    let owner = owner(backend).await;
+    let key = enrolled(backend, &owner, "key-1").await;
+    let fence = |fresh_until| ActorFence::Session {
+        session: owner.session.id,
+        profile: owner.profile.id,
+        fresh_until,
+    };
+    let live = || async {
+        backend
+            .get_device_attestation_by_device_id(key.device_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            != AttestationStatus::Revoked
+    };
+
+    let stale = backend
+        .revoke_device_attestation(
+            key.device_id,
+            test_audit().fenced_by(fence(Some(
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+            ))),
+        )
+        .await
+        .expect_err("a revocation past its sign-in's freshness");
+    assert!(matches!(stale, Error::Fenced(_)), "{stale:?}");
+    assert!(live().await);
+
+    backend
+        .delete_session(owner.session.id, &test_session_end(), test_audit())
+        .await
+        .unwrap();
+    let ended = backend
+        .revoke_device_attestation(key.device_id, test_audit().fenced_by(fence(None)))
+        .await
+        .expect_err("a revocation under an ended sign-in");
+    assert!(matches!(ended, Error::Fenced(_)), "{ended:?}");
+    assert!(live().await);
+
+    let current = self::owner(backend).await;
+    let other = enrolled(backend, &current, "key-2").await;
+    assert!(
+        backend
+            .revoke_device_attestation(
+                other.device_id,
+                test_audit().fenced_by(ActorFence::Session {
+                    session: current.session.id,
+                    profile: current.profile.id,
+                    fresh_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                }),
+            )
+            .await
+            .unwrap()
+    );
+}
+
+/// A rotation racing a revocation of the same device ends with one of them
+/// applied: the rotation committed or refused as changed, the revocation
+/// applied or finding nothing live, never a failure of the store.
+pub async fn test_a_rotation_racing_a_revocation_settles(backend: &dyn StorageBackend) {
+    let owner = owner(backend).await;
+    for round in 0..16 {
+        let current = enrolled(backend, &owner, "key-1").await;
+        let rotation = enrollment(
+            &owner,
+            EnrollmentTarget::Rotation {
+                device: current.device_id,
+                current: current.id,
+                current_key: "key-1".into(),
+            },
+            "key-2",
+        );
+        let ceremony = ceremony(backend).await;
+        let (rotated, revoked) = tokio::join!(
+            backend.commit_device_enrollment(&rotation, by(&owner, ceremony)),
+            backend.revoke_device_attestation(current.device_id, test_audit()),
+        );
+        let revoked = revoked.unwrap_or_else(|e| panic!("round {round}: revocation: {e:?}"));
+        match rotated {
+            Ok(()) => {}
+            Err(Error::Conflict(_)) => assert!(revoked, "round {round}"),
+            Err(e) => panic!("round {round}: rotation: {e:?}"),
+        }
+    }
 }
 
 /// Two concurrent finishes of one ceremony bind one key.
@@ -378,8 +480,8 @@ pub async fn test_concurrent_finishes_bind_once(backend: &dyn StorageBackend) {
     );
 
     let (first, second) = tokio::join!(
-        backend.commit_device_enrollment(&a, test_audit().consuming(ceremony.clone())),
-        backend.commit_device_enrollment(&b, test_audit().consuming(ceremony.clone())),
+        backend.commit_device_enrollment(&a, by(&owner, ceremony.clone())),
+        backend.commit_device_enrollment(&b, by(&owner, ceremony.clone())),
     );
 
     assert_eq!(
@@ -408,15 +510,13 @@ pub async fn test_a_retried_finish_is_answered_by_its_outcome(backend: &dyn Stor
     let namespace = format!("profile:{}", owner.profile.id);
     let key = OperationKey::parse(&Uuid::new_v4().to_string()).unwrap();
     let keyed = || {
-        test_audit()
-            .with_operation(OperationCompletion::new(
-                &namespace,
-                key.clone(),
-                "sid.v1.attestation.AttestationService/FinishDeviceEnrollment",
-                b"inputs",
-                b"result".to_vec(),
-            ))
-            .consuming(ceremony.clone())
+        by(&owner, ceremony.clone()).with_operation(OperationCompletion::new(
+            &namespace,
+            key.clone(),
+            "sid.v1.attestation.AttestationService/FinishDeviceEnrollment",
+            b"inputs",
+            b"result".to_vec(),
+        ))
     };
     let e = enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key-1");
     backend.commit_device_enrollment(&e, keyed()).await.unwrap();

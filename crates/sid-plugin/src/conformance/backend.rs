@@ -1437,7 +1437,6 @@ pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
         .commit_device_enrollment(
             &DeviceEnrollment {
                 profile_id: owner.id,
-                session: None,
                 target: EnrollmentTarget::NewDevice(device.clone()),
                 attestation: att.clone(),
             },
@@ -1486,13 +1485,14 @@ pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
             .unwrap(),
         "a revoked key was revoked again"
     );
-    assert!(
+    assert_eq!(
         backend
             .get_device_attestation_by_device_id(device.id)
             .await
             .unwrap()
-            .is_none(),
-        "a revoked key is still found for its device"
+            .map(|a| a.status),
+        Some(AttestationStatus::Revoked),
+        "the device's binding is read revoked"
     );
     let revoked = backend
         .get_device_attestation(att.id)
@@ -1538,7 +1538,6 @@ pub async fn test_revoked_key_clears_hardware_attestation(backend: &dyn StorageB
         .commit_device_enrollment(
             &DeviceEnrollment {
                 profile_id: owner.id,
-                session: None,
                 target: EnrollmentTarget::NewDevice(device.clone()),
                 attestation: att,
             },

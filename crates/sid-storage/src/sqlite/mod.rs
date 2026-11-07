@@ -81,6 +81,46 @@ fn principal_write_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// Fail with `Fenced` unless `profile` can still sign in and `session` is
+/// still its live sign-in, fresh until `fresh_until` when given. The write
+/// transaction holds the database write lock: nothing changes them before the
+/// commit.
+async fn check_session_fence(
+    tx: &mut WriteTx,
+    session: sid_core::models::SessionId,
+    profile: sid_core::models::ProfileId,
+    fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> SidResult<()> {
+    let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
+    let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM profiles WHERE id = ?")
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+    if !status.is_some_and(|s| {
+        s.parse::<sid_core::models::ProfileStatus>()
+            .is_ok_and(|s| s.can_authenticate())
+    }) {
+        return Err(fenced("belongs to an account that can no longer sign in"));
+    }
+    let row = sqlx::query("SELECT expires_at FROM sessions WHERE id = ? AND profile_id = ?")
+        .bind(session)
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+    let now = chrono::Utc::now();
+    match &row {
+        Some(row) if dt_col(row, "expires_at")? > now => {}
+        _ => return Err(fenced("ended")),
+    }
+    if fresh_until.is_some_and(|until| now >= until) {
+        return Err(fenced("is no longer fresh"));
+    }
+    Ok(())
+}
+
 /// SQLite storage backend (sqlx-based).
 ///
 /// Uses WAL mode for concurrent read access. All writes are serialized
@@ -215,6 +255,11 @@ impl SqliteBackend {
             Some(sid_core::models::ActorFence::Authority(basis)) => {
                 rbac::check_authority_in_tx(&mut tx, &basis).await?
             }
+            Some(sid_core::models::ActorFence::Session {
+                session,
+                profile,
+                fresh_until,
+            }) => check_session_fence(&mut tx, session, profile, fresh_until).await?,
             None => {}
         }
         // Then the completion: a keyed command another commit already

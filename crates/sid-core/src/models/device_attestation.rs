@@ -260,14 +260,12 @@ impl DeviceAttestation {
 
 /// What a finished device-key ceremony binds, committed as one transaction
 /// with the ceremony it consumes, its audit, work and outcome
-/// (`StorageBackend::commit_device_enrollment`).
+/// (`StorageBackend::commit_device_enrollment`). The authority it was
+/// authorized under is the mutation's fence.
 #[derive(Debug, Clone)]
 pub struct DeviceEnrollment {
-    /// The Profile that owns the device; it must still be able to sign in.
+    /// The Profile that owns the device.
     pub profile_id: ProfileId,
-    /// The owner's sign-in session the ceremony was authorized under; it
-    /// must still be live at the commit. `None` for authorized bootstrap.
-    pub session: Option<super::SessionId>,
     /// The device the key is bound to and how.
     pub target: EnrollmentTarget,
     /// The new key binding, of `target`'s device and `profile_id`.

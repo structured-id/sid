@@ -30,7 +30,10 @@ use chrono::Utc;
 use prost::Message;
 use sid_authn::caller::{Caller, CallerError, TokenKind};
 use sid_authn::challenge_store::{ChallengeStore, ChallengeStoreError};
-use sid_authn::credential_enrollment::{EnrollmentError, EnrollmentRefusal, authorize_binding};
+use sid_authn::credential_enrollment::{
+    EnrollmentError, EnrollmentRefusal, authorize_binding, binding_fence, current_session,
+    sign_in_fence,
+};
 use sid_authn::device_key_proof::{
     Ceremony, DeviceKeyProofError, ProofPurpose, stored_key_thumbprint, verify_current_key,
     verify_proposed_key,
@@ -40,7 +43,7 @@ use sid_core::models::session::AuthLevel;
 use sid_core::models::{
     AttestationStatus, AuditEntry, Device, DeviceAttestation, DeviceAttestationFormat,
     DeviceAttestationId, DeviceEnrollment, DeviceId, DeviceType, EnrollmentTarget, KeyStorageType,
-    MutationContext, OperationContext, ProfileId, SessionId,
+    MutationContext, OperationContext, ProfileId, Session, SessionId,
 };
 use sid_ids::DeviceEnrollmentId;
 use sid_plugin::storage::StorageBackend;
@@ -285,16 +288,15 @@ impl DeviceKeys {
         &self,
         profile: ProfileId,
         session: SessionId,
-    ) -> Result<(), DeviceKeyError<E>> {
-        authorize_binding(
+    ) -> Result<Session, DeviceKeyError<E>> {
+        Ok(authorize_binding(
             self.storage.as_ref(),
             profile,
             session,
             AuthLevel::Basic,
             false,
         )
-        .await?;
-        Ok(())
+        .await?)
     }
 
     /// The owner's device `device_id`; another Profile's device is not
@@ -315,7 +317,8 @@ impl DeviceKeys {
         Ok(device)
     }
 
-    /// The key binding of `device`, live or revoked.
+    /// The key binding of the owner's `device`, live or revoked, read by
+    /// its device.
     async fn binding<E>(
         &self,
         owner: ProfileId,
@@ -323,21 +326,18 @@ impl DeviceKeys {
     ) -> Result<Option<DeviceAttestation>, DeviceKeyError<E>> {
         Ok(self
             .storage
-            .list_device_attestations_by_profile(owner)
+            .get_device_attestation_by_device_id(device)
             .await?
-            .into_iter()
-            .find(|a| a.device_id == device))
+            .filter(|a| a.profile_id == owner))
     }
 
     /// Device `device_id` for its owner, or for a caller `access` allows the
-    /// call's action on that device; a change also requires the caller's
-    /// own sign-in.
+    /// call's action on that device.
     async fn authorized_device<A: DeviceAccess>(
         &self,
         access: &mut A,
         caller: &KeyCaller,
         device_id: DeviceId,
-        change: bool,
     ) -> Result<Device, DeviceKeyError<A::Error>> {
         let device = self.storage.get_device(device_id).await?;
         match &device {
@@ -354,11 +354,15 @@ impl DeviceKeys {
                 }
             }
         }
-        let device = device.ok_or(DeviceKeyError::DeviceNotFound(device_id))?;
-        if change && !caller.interactive {
-            return Err(DeviceKeyError::Denied);
-        }
-        Ok(device)
+        device.ok_or(DeviceKeyError::DeviceNotFound(device_id))
+    }
+
+    /// The caller's own sign-in as it stands now, which a change of a key is
+    /// made under: not an impersonation or a client's token, still live, and
+    /// of an account that can still sign in.
+    async fn current_sign_in<E>(&self, caller: &KeyCaller) -> Result<Session, DeviceKeyError<E>> {
+        let (profile, session) = caller.own_sign_in()?;
+        Ok(current_session(self.storage.as_ref(), profile, session).await?)
     }
 
     /// Start a device-key ceremony at `issuer`: the enrollment of a new
@@ -478,8 +482,9 @@ impl DeviceKeys {
             &req,
         );
         // The owner's authority as it stands, for a retry too: a recorded
-        // outcome is answered only to a caller who may bind now.
-        self.may_bind(profile, session).await?;
+        // outcome is answered only to a caller who may bind now, and a new
+        // commit holds only while that authority does.
+        let signed_in = self.may_bind(profile, session).await?;
         access.owner().await.map_err(DeviceKeyError::Access)?;
         Ok(command
             .execute(self.storage.as_ref(), || async {
@@ -522,12 +527,12 @@ impl DeviceKeys {
                 let response = attestation_to_proto(&attestation);
                 let ctx = caller
                     .audit("device_key.enroll", &pending.device.to_string())
+                    .fenced_by(binding_fence(&signed_in))
                     .with_operation(command.completion(response.encode_to_vec()))
                     .consuming(consumption);
                 self.commit(
                     &DeviceEnrollment {
                         profile_id: profile,
-                        session: Some(session),
                         target,
                         attestation,
                     },
@@ -564,7 +569,7 @@ impl DeviceKeys {
             operation.ok_or(DeviceKeyError::ContextRequired)?,
             &req,
         );
-        self.may_bind(profile, session).await?;
+        let signed_in = self.may_bind(profile, session).await?;
         access.owner().await.map_err(DeviceKeyError::Access)?;
         Ok(command
             .execute(self.storage.as_ref(), || async {
@@ -607,12 +612,12 @@ impl DeviceKeys {
                 let response = attestation_to_proto(&attestation);
                 let ctx = caller
                     .audit("device_key.rotate", &pending.device.to_string())
+                    .fenced_by(binding_fence(&signed_in))
                     .with_operation(command.completion(response.encode_to_vec()))
                     .consuming(consumption);
                 self.commit(
                     &DeviceEnrollment {
                         profile_id: profile,
-                        session: Some(session),
                         target: EnrollmentTarget::Rotation {
                             device: pending.device,
                             current,
@@ -685,12 +690,12 @@ impl DeviceKeys {
         req: GetDeviceAttestationRequest,
     ) -> Result<v1::DeviceAttestation, DeviceKeyError<A::Error>> {
         let device_id = wire_id(req.device_id.as_ref(), "device_id")?;
-        self.authorized_device(access, caller, device_id, false)
-            .await?;
+        self.authorized_device(access, caller, device_id).await?;
         let att = self
             .storage
             .get_device_attestation_by_device_id(device_id)
             .await?
+            .filter(|a| a.status != AttestationStatus::Revoked)
             .ok_or(DeviceKeyError::NoAttestation(device_id))?;
         Ok(attestation_to_proto(&att))
     }
@@ -707,12 +712,12 @@ impl DeviceKeys {
         req: RevokeDeviceKeyRequest,
     ) -> Result<(), DeviceKeyError<A::Error>> {
         let device_id = wire_id(req.device_id.as_ref(), "device_id")?;
-        self.authorized_device(access, caller, device_id, true)
-            .await?;
-        // A change is made only by a Profile's own sign-in.
-        let profile = caller.profile.ok_or(DeviceKeyError::Denied)?;
+        self.authorized_device(access, caller, device_id).await?;
+        // A change is made only under the caller's own sign-in as it stands
+        // now, for a retry too, and commits only while it still holds.
+        let signed_in = self.current_sign_in(caller).await?;
         let command = KeyedCommand::by_profile::<keyed::RevokeDeviceKey>(
-            profile,
+            signed_in.profile_id,
             operation.ok_or(DeviceKeyError::ContextRequired)?,
             &req,
         );
@@ -720,12 +725,16 @@ impl DeviceKeys {
             .execute(self.storage.as_ref(), || async {
                 let ctx = caller
                     .audit("device_key.revoke", &device_id.to_string())
+                    .fenced_by(sign_in_fence(&signed_in))
                     .with_operation(command.completion(().encode_to_vec()));
                 let revoked = self
                     .storage
                     .revoke_device_attestation(device_id, ctx)
                     .await
-                    .map_err(Effect::Store)?;
+                    .map_err(|e| match e {
+                        sid_core::Error::Fenced(_) => Effect::Refused(DeviceKeyError::Denied),
+                        e => Effect::Store(e),
+                    })?;
                 if !revoked {
                     return Err(Effect::Refused(DeviceKeyError::NoAttestation(device_id)));
                 }

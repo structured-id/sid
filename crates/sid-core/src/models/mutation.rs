@@ -57,6 +57,14 @@ pub enum ActorFence {
     LoginPolicy { epoch: i64 },
     /// The administrative authority that authorized the write.
     Authority(super::AuthorityBasis),
+    /// A Profile's own sign-in: the write holds only while `session` is
+    /// still `profile`'s and unexpired, the Profile can still sign in, and,
+    /// when `fresh_until` is given, the commit happens before it.
+    Session {
+        session: super::SessionId,
+        profile: super::ProfileId,
+        fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+    },
 }
 
 impl MutationContext {

@@ -162,6 +162,8 @@ macro_rules! __storage_conformance {
                 test_a_rotation_replaces_only_the_binding_it_found
                 test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it
                 test_an_enrollment_without_current_authority_commits_nothing
+                test_a_revocation_holds_only_under_a_live_sign_in
+                test_a_rotation_racing_a_revocation_settles
                 test_concurrent_finishes_bind_once
                 test_a_retried_finish_is_answered_by_its_outcome
             );

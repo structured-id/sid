@@ -13,7 +13,7 @@ use sid_core::models::{
     AttestationStatus, Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId,
     DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
     DeviceEnrollment, DeviceId, DevicePoll, DeviceTrustChange, EnrollmentTarget, MutationContext,
-    ProfileId, ProfileStatus, ProjectId, RefreshToken, ResourceId, Session, SessionId,
+    ProfileId, ProjectId, RefreshToken, ResourceId, Session, SessionId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -100,6 +100,23 @@ fn get_device(tx: &Statements<'_>, device_id: DeviceId) -> SidResult<Option<Devi
         Params::default().with("id", bin(device_id.as_bytes())),
     )?;
     rows.first().map(device).transpose()
+}
+
+/// Create device `d` for its owner, claimed: a deletion of the owner that read
+/// its devices before this commit conflicts with it rather than leaving the
+/// device behind.
+fn create(tx: &Statements<'_>, d: &Device) -> SidResult<()> {
+    let owner = tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
+        Params::default().with("id", bin(d.profile_id.as_bytes())),
+    )?;
+    if !claim_first(tx, &owner)? {
+        return Err(SidError::NotFound(format!("profile {}", d.profile_id)));
+    }
+    if get_device(tx, d.id)?.is_some() {
+        return Err(SidError::Conflict("device already exists".into()));
+    }
+    insert_device(tx, d)
 }
 
 /// Create device `d`'s node.
@@ -288,20 +305,8 @@ impl CoordinodeBackend {
 
     pub(super) async fn create_device(&self, d: &Device, ctx: MutationContext) -> SidResult<()> {
         let d = d.clone();
-        self.mutate(format!("device:{}", d.id), ctx, move |tx| {
-            let owner = tx.run(
-                "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
-                Params::default().with("id", bin(d.profile_id.as_bytes())),
-            )?;
-            if !claim_first(tx, &owner)? {
-                return Err(SidError::NotFound(format!("profile {}", d.profile_id)));
-            }
-            if get_device(tx, d.id)?.is_some() {
-                return Err(SidError::Conflict("device already exists".into()));
-            }
-            insert_device(tx, &d)
-        })
-        .await
+        self.mutate(format!("device:{}", d.id), ctx, move |tx| create(tx, &d))
+            .await
     }
 
     pub(super) async fn rename_device(
@@ -464,34 +469,8 @@ impl CoordinodeBackend {
             if let Some(operation) = &operation {
                 super::operation::record(tx, operation)?;
             }
-            // The owner, held for the commit: it can still sign in, and the
-            // session the ceremony was authorized under is still live.
-            let owner = tx.run(
-                "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node, p.status AS status",
-                Params::default().with("id", bin(enrollment.profile_id.as_bytes())),
-            )?;
-            if !hold_first(tx, &owner)? {
-                return Err(SidError::NotFound("profile".into()));
-            }
-            if get_text(&owner[0], "status")? != ProfileStatus::Active.as_str() {
-                return Err(SidError::Fenced("the owner can no longer sign in".into()));
-            }
-            if let Some(session) = enrollment.session {
-                let live = tx.run(
-                    "MATCH (s:SidSession) WHERE s.id = $id AND s.profile_id = $profile
-                         AND s.expires_at > $now
-                     RETURN id(s) AS node",
-                    Params::default()
-                        .with("id", bin(session.as_bytes()))
-                        .with("profile", bin(enrollment.profile_id.as_bytes()))
-                        .with("now", time(Utc::now())),
-                )?;
-                if !hold_first(tx, &live)? {
-                    return Err(SidError::Fenced("the authorizing session ended".into()));
-                }
-            }
-
-            // The target as the ceremony found it; the binding node is
+            // The acting sign-in (`ctx.fence`) is held when the mutation
+            // finalizes. The target as the ceremony found it; the binding node is
             // written below, so a concurrent change of it conflicts.
             let binding =
                 attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop();
@@ -502,10 +481,7 @@ impl CoordinodeBackend {
                     if device.profile_id != enrollment.profile_id {
                         return Err(SidError::Validation("device of another profile".into()));
                     }
-                    if get_device(tx, device.id)?.is_some() {
-                        return Err(SidError::Conflict("device already exists".into()));
-                    }
-                    insert_device(tx, device)?;
+                    create(tx, device)?;
                 }
                 EnrollmentTarget::ExistingDevice { revoked, .. } => {
                     owned_device(tx, device_id, enrollment.profile_id)?;
@@ -606,11 +582,7 @@ impl CoordinodeBackend {
         device_id: DeviceId,
     ) -> SidResult<Option<DeviceAttestation>> {
         self.read(move |tx| {
-            Ok(
-                attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?
-                    .into_iter()
-                    .find(|a| a.status.as_str() != "revoked"),
-            )
+            Ok(attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop())
         })
         .await
     }
