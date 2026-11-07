@@ -1,64 +1,17 @@
 use super::*;
 
+/// An identifier that is no principal is refused on its field, as an
+/// invalid argument.
 #[test]
-fn test_parse_principal_email() {
-    let (pt, normalized) = parse_principal("alice@sid.example.com").unwrap();
-    assert_eq!(pt, PrincipalType::Email);
-    assert_eq!(normalized, "alice@sid.example.com");
-}
-
-#[test]
-fn test_parse_principal_email_uppercase() {
-    let (pt, normalized) = parse_principal("Alice@SID.Example.COM").unwrap();
-    assert_eq!(pt, PrincipalType::Email);
-    assert_eq!(normalized, "alice@sid.example.com");
-}
-
-#[test]
-fn test_parse_principal_phone() {
-    let (pt, normalized) = parse_principal("+12125551234").unwrap();
-    assert_eq!(pt, PrincipalType::Phone);
-    assert_eq!(normalized, "+12125551234");
-}
-
-#[test]
-fn test_parse_principal_username() {
-    let (pt, normalized) = parse_principal("alice").unwrap();
-    assert_eq!(pt, PrincipalType::Username);
-    assert_eq!(normalized, "alice");
-}
-
-#[test]
-fn test_parse_principal_username_uppercase() {
-    let (pt, normalized) = parse_principal("Alice").unwrap();
-    assert_eq!(pt, PrincipalType::Username);
-    assert_eq!(normalized, "alice");
-}
-
-#[test]
-fn test_parse_principal_trimmed() {
-    let (pt, normalized) = parse_principal("  alice@sid.example.com  ").unwrap();
-    assert_eq!(pt, PrincipalType::Email);
-    assert_eq!(normalized, "alice@sid.example.com");
-}
-
-#[test]
-fn test_parse_principal_phone_trimmed() {
-    let (pt, normalized) = parse_principal("  +380501234567  ").unwrap();
-    assert_eq!(pt, PrincipalType::Phone);
-    assert_eq!(normalized, "+380501234567");
-}
-
-#[test]
-fn test_parse_principal_empty_rejected() {
-    let err = parse_principal("").unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-#[test]
-fn test_parse_principal_short_username_rejected() {
-    let err = parse_principal("ab").unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+fn invalid_identifier_is_an_invalid_argument() {
+    for identifier in ["", "ab"] {
+        let refused = sid_authn::normalize::normalize_principal(identifier)
+            .map_err(|e| {
+                sign_in_refusal(sid::sign_in::SignInError::InvalidIdentifier(e.to_string()))
+            })
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+    }
 }
 
 // ── implied_auth_level tests ──────────────────────────────────

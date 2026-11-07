@@ -184,19 +184,10 @@ impl AuthServiceImpl {
         Ok((client, issuer))
     }
 
-    /// Whether `session` may authorize at `now`: not expired, not
-    /// provisional, and used within the installation's idle limit.
+    /// Whether `session` may authorize at `now` (see
+    /// [`sid::sign_in::SignIn::authorizes`]).
     pub(crate) fn authorizes(&self, session: &Session, now: DateTime<Utc>) -> bool {
-        if session.expires_at <= now || session.is_provisional {
-            return false;
-        }
-        match self.security_policy().session.idle_timeout_hours {
-            0 => true,
-            hours => {
-                let last = session.last_activity_at.unwrap_or(session.created_at);
-                now - last <= Duration::hours(i64::from(hours))
-            }
-        }
+        self.sign_ins.authorizes(session, now)
     }
 
     /// The authorization code `session` grants for `request` to `client` at

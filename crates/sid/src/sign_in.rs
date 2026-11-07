@@ -666,6 +666,76 @@ impl SignIn {
         }
     }
 
+    /// Whether the session `session_id` is still valid, as `caller` may ask:
+    /// someone else's session answers exactly like an unknown one; the owner
+    /// and the expiry are told only for a valid session.
+    pub async fn validate_session(
+        &self,
+        caller: &sid_authn::caller::Caller,
+        session_id: SessionId,
+    ) -> Result<sid_proto::sid::v1::ValidateSessionResponse, SignInError> {
+        let invalid = sid_proto::sid::v1::ValidateSessionResponse {
+            valid: false,
+            profile_id: None,
+            scopes: vec![],
+            expires_at: None,
+        };
+        match self.storage.get_session(session_id).await? {
+            Some(session) if caller.require_self_or_admin(session.profile_id).is_ok() => {
+                if session.expires_at <= Utc::now() {
+                    return Ok(invalid);
+                }
+                Ok(sid_proto::sid::v1::ValidateSessionResponse {
+                    valid: true,
+                    profile_id: Some(session.profile_id.into()),
+                    scopes: vec![],
+                    expires_at: Some(crate::wire::to_timestamp(session.expires_at)),
+                })
+            }
+            _ => Ok(invalid),
+        }
+    }
+
+    /// The sign-in methods offered for `principal`. The answer reads no
+    /// account: it is the same for every identifier of a type, so it cannot
+    /// tell whether one has an account (WebAuthn Level 3 §14.6.2); each
+    /// method's own step refuses an unknown account like a wrong secret.
+    /// Password and passkey sign-in are always served (passkeys through the
+    /// discoverable flow); magic links only with `magic_links`, and only to an
+    /// email address.
+    pub fn sign_in_methods(
+        &self,
+        principal: &str,
+        magic_links: bool,
+    ) -> Result<sid_proto::sid::v1::ResolvePrincipalResponse, SignInError> {
+        let handle = sid_authn::normalize::normalize_principal(principal)
+            .map_err(|e| SignInError::InvalidIdentifier(e.to_string()))?;
+        let mut available_methods = vec!["opaque".to_string(), "webauthn".to_string()];
+        if magic_links
+            && handle.principal_type.to_principal_type()
+                == sid_core::models::principal::PrincipalType::Email
+        {
+            available_methods.push("magic_link".to_string());
+        }
+        Ok(sid_proto::sid::v1::ResolvePrincipalResponse { available_methods })
+    }
+
+    /// Whether `session` may authorize an application at `now`: not
+    /// expired, not provisional, and used within the installation's idle
+    /// limit.
+    pub fn authorizes(&self, session: &Session, now: chrono::DateTime<Utc>) -> bool {
+        if session.expires_at <= now || session.is_provisional {
+            return false;
+        }
+        match self.policy.session.idle_timeout_hours {
+            0 => true,
+            hours => {
+                let last = session.last_activity_at.unwrap_or(session.created_at);
+                now - last <= Duration::hours(i64::from(hours))
+            }
+        }
+    }
+
     /// A full session of `profile_id` from `ip_address`, for the
     /// installation's absolute lifetime when it sets one, with the sign-in
     /// scopes; its authentication is the caller's to set.
