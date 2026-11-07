@@ -191,6 +191,26 @@ pub(crate) fn refusal(e: AuthorizationError) -> Status {
         .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why)
         .into(),
         E::NotInThisBuild(what) => not_in_this_build(what),
+        E::ProfileNotFound(id) => {
+            not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
+        }
+        E::AccessRequestNotFound(id) => not_found(
+            ErrorReason::AccessRequestNotFound,
+            "AccessRequest",
+            id.to_string(),
+        ),
+        E::AlreadyDecided(id) => ApiError::new(
+            ErrorReason::InvalidState,
+            "the access request was already decided",
+        )
+        .with_precondition("ACCESS_REQUEST_STATE", id.to_string(), "not pending")
+        .into(),
+        E::RequestedRoleDeleted(key) => ApiError::new(
+            ErrorReason::InvalidState,
+            "the requested role no longer exists",
+        )
+        .with_precondition("REQUESTED_ROLE", key, "deleted")
+        .into(),
     }
 }
 

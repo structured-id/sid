@@ -34,6 +34,7 @@ use tracing::info;
 
 use crate::wire::{FieldError, to_timestamp, wire_id};
 
+mod governance;
 mod view;
 
 use view::{
@@ -280,6 +281,16 @@ pub enum AuthorizationError {
     /// The request needs what this build does not include.
     #[error("{0} is not in this build")]
     NotInThisBuild(&'static str),
+    #[error("profile {0} not found")]
+    ProfileNotFound(sid_core::models::ProfileId),
+    #[error("access request {0} not found")]
+    AccessRequestNotFound(sid_core::models::AccessRequestId),
+    /// The access request is no longer pending.
+    #[error("access request {0} was already decided")]
+    AlreadyDecided(sid_core::models::AccessRequestId),
+    /// The role an access request asked for no longer exists.
+    #[error("the requested role {0} no longer exists")]
+    RequestedRoleDeleted(String),
 }
 
 impl From<AuthorizationError> for Effect<AuthorizationError> {
