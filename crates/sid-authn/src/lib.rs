@@ -86,6 +86,7 @@ pub mod session_revocation;
 #[cfg(feature = "keyed")]
 pub mod sign_in_delivery;
 pub mod sign_in_security;
+pub mod snapshot_rules;
 pub mod step_up;
 pub mod subject;
 pub mod system_integration;

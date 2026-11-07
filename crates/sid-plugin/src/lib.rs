@@ -36,6 +36,7 @@ pub mod operation_result_store;
 pub mod otp;
 pub mod principal_store;
 pub mod sign_in_history;
+pub mod snapshot_rules;
 pub mod storage;
 pub mod upstream;
 pub mod work_store;
@@ -71,6 +72,7 @@ pub use otp::{Locale, OtpChannel, OtpContext, OtpDeliveryResult, OtpTransport, O
 pub use principal_store::PrincipalStore;
 pub use sid_keys::KeyVersionParams;
 pub use sign_in_history::SignInHistoryStore;
+pub use snapshot_rules::SnapshotRules;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};
 pub use work_store::{OWED_WORK_CAPACITY, WorkStore};
