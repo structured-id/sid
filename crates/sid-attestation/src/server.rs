@@ -42,7 +42,15 @@ impl AttestationServer {
             .register_encoded_file_descriptor_set(sid_proto::FILE_DESCRIPTOR_SET)
             .build_v1()?;
 
-        let attestation_svc = AttestationServiceImpl::new(self.storage);
+        let storage: Arc<dyn sid_plugin::StorageBackend> = self.storage;
+        let keys = sid_authn::field_keys::field_key_manager(
+            storage.as_ref(),
+            &self.config.master_key_file,
+            Arc::new(sid_crypto::AwsLcPrimitives::new()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("field keys: {e}"))?;
+        let attestation_svc = AttestationServiceImpl::new(storage, keys);
 
         let drain = sid_serve::shutdown::drain_interval_from_env()?;
         let mut services = sid_serve::Services::new();

@@ -8,31 +8,10 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::{DeviceId, ProfileId};
 
-/// Unique identifier for a device attestation record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DeviceAttestationId(pub Uuid);
-
-impl core::fmt::Display for DeviceAttestationId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl DeviceAttestationId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for DeviceAttestationId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use sid_ids::DeviceAttestationId;
 
 /// Attestation format reported by the device.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -250,7 +229,7 @@ impl DeviceAttestation {
     ) -> Self {
         let now = Utc::now();
         Self {
-            id: DeviceAttestationId::new(),
+            id: DeviceAttestationId::generate(),
             device_id,
             profile_id,
             format,

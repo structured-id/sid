@@ -527,7 +527,7 @@ impl PostgresBackend {
     async fn binding_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         id: CoreDeviceId,
-    ) -> SidResult<Option<(uuid::Uuid, String, String)>> {
+    ) -> SidResult<Option<(sid_core::models::DeviceAttestationId, String, String)>> {
         sqlx::query_as(
             "SELECT id, status, public_jwk FROM device_attestations
              WHERE device_id = $1 FOR UPDATE",
@@ -5482,7 +5482,7 @@ impl StorageBackend for PostgresBackend {
                 let unchanged = match (&binding, revoked) {
                     (None, None) => true,
                     (Some((id, status, _)), Some(expected)) => {
-                        *id == expected.0 && status == "revoked"
+                        id == expected && status == "revoked"
                     }
                     _ => false,
                 };
@@ -5500,7 +5500,7 @@ impl StorageBackend for PostgresBackend {
                 Self::owned_device_in_tx(&mut tx, device_id, enrollment.profile_id).await?;
                 let binding = Self::binding_in_tx(&mut tx, device_id).await?;
                 let unchanged = binding.as_ref().is_some_and(|(id, status, key)| {
-                    *id == current.0 && status != "revoked" && key == current_key
+                    id == current && status != "revoked" && key == current_key
                 });
                 if !unchanged {
                     return Err(SidError::Conflict(
@@ -5532,7 +5532,7 @@ impl StorageBackend for PostgresBackend {
                 updated_at = EXCLUDED.updated_at,
                 revoked_at = EXCLUDED.revoked_at",
         )
-        .bind(att.id.0)
+        .bind(att.id)
         .bind(device_id)
         .bind(enrollment.profile_id)
         .bind(att.format.as_str())
@@ -5600,7 +5600,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::DeviceAttestationRow>(
             "SELECT * FROM device_attestations WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Failed to get device attestation: {}", e)))?;

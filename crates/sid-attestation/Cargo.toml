@@ -19,8 +19,10 @@ path = "src/main.rs"
 # The device key operations this service serves.
 sid = { workspace = true }
 sid-authn = { workspace = true }
-# The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
+# The process's JWT signature provider, installed at startup, and the
+# primitives of the key manager that seals device-key ceremonies.
+sid-crypto = { workspace = true, features = ["jwt", "aws-lc", "tls-aws-lc"] }
+sid-keys = { workspace = true }
 # The shared receiver: calls are admitted with tokens for the installation's
 # account API resource, decided by its issuer.
 sid-auth = { workspace = true, default-features = false }
@@ -55,3 +57,8 @@ sid-serve = { workspace = true, features = ["error-contract"] }
 # A real issuer the receiver asks, over the network.
 sid-test-issuer = { path = "../sid-test-issuer" }
 tokio-stream = "0.1"
+# The device-key proofs a client signs for the enrollment ceremony.
+base64 = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }

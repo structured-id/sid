@@ -122,8 +122,8 @@ fn test_attestation_serde_roundtrip() {
 
 #[test]
 fn test_id_unique() {
-    let id1 = DeviceAttestationId::new();
-    let id2 = DeviceAttestationId::new();
+    let id1 = DeviceAttestationId::generate();
+    let id2 = DeviceAttestationId::generate();
     assert_ne!(id1, id2);
 }
 

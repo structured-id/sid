@@ -1115,7 +1115,7 @@ impl DeviceRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct DeviceAttestationRow {
-    pub id: Uuid,
+    pub id: DeviceAttestationId,
     pub device_id: CoreDeviceId,
     pub profile_id: ProfileId,
     pub format: String,
@@ -1133,7 +1133,7 @@ pub struct DeviceAttestationRow {
 impl DeviceAttestationRow {
     pub fn into_domain(self) -> SidResult<DeviceAttestation> {
         Ok(DeviceAttestation {
-            id: DeviceAttestationId(self.id),
+            id: self.id,
             device_id: self.device_id,
             profile_id: self.profile_id,
             format: self.format.parse().map_err(SidError::Storage)?,

@@ -9,9 +9,7 @@ use sid_core::{
     },
 };
 
-use super::{
-    SqliteBackend, WriteTx, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, uuid_col,
-};
+use super::{SqliteBackend, WriteTx, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error};
 
 /// The columns an attestation is read from.
 macro_rules! attestation_columns {
@@ -43,7 +41,7 @@ async fn owned_device(tx: &mut WriteTx, id: DeviceId, owner: ProfileId) -> SidRe
 async fn binding(
     tx: &mut WriteTx,
     id: DeviceId,
-) -> SidResult<Option<(uuid::Uuid, String, String)>> {
+) -> SidResult<Option<(DeviceAttestationId, String, String)>> {
     let row =
         sqlx::query("SELECT id, status, public_jwk FROM device_attestations WHERE device_id = ?")
             .bind(id)
@@ -52,7 +50,7 @@ async fn binding(
             .map_err(|e| SidError::Storage(format!("read device binding: {e}")))?;
     row.map(|row| {
         Ok((
-            uuid_col(&row, "id")?,
+            col(&row, "id")?,
             col::<String>(&row, "status")?,
             col::<String>(&row, "public_jwk")?,
         ))
@@ -62,7 +60,7 @@ async fn binding(
 
 fn row_to_attestation(row: &sqlx::sqlite::SqliteRow) -> SidResult<DeviceAttestation> {
     Ok(DeviceAttestation {
-        id: DeviceAttestationId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         device_id: col(row, "device_id")?,
         profile_id: col(row, "profile_id")?,
         format: col::<String>(row, "format")?
@@ -170,7 +168,7 @@ impl SqliteBackend {
                 let unchanged = match (binding(&mut tx, device_id).await?, revoked) {
                     (None, None) => true,
                     (Some((id, status, _)), Some(expected)) => {
-                        id == expected.0 && status == "revoked"
+                        id == *expected && status == "revoked"
                     }
                     _ => false,
                 };
@@ -188,7 +186,7 @@ impl SqliteBackend {
                     binding(&mut tx, device_id)
                         .await?
                         .is_some_and(|(id, status, key)| {
-                            id == current.0 && status != "revoked" && &key == current_key
+                            id == *current && status != "revoked" && &key == current_key
                         });
                 if !unchanged {
                     return Err(changed());
@@ -212,7 +210,7 @@ impl SqliteBackend {
                 created_at = excluded.created_at, updated_at = excluded.updated_at, \
                 revoked_at = excluded.revoked_at"
         ))
-        .bind(att.id.0)
+        .bind(att.id)
         .bind(device_id)
         .bind(enrollment.profile_id)
         .bind(att.format.as_str())
@@ -279,7 +277,7 @@ impl SqliteBackend {
             attestation_columns!(),
             " FROM device_attestations WHERE id = ?"
         ))
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;

@@ -22,6 +22,7 @@ fn test_database_url_display_masks_password() {
     let config = AttestationConfig {
         grpc_bind: "127.0.0.1:50061".parse().unwrap(),
         database_url: "postgres://sid:secret_pass@localhost:5432/sid".into(),
+        master_key_file: "/nonexistent/master.key".into(),
         api: test_api(),
     };
     let display = config.database_url_display();
@@ -35,6 +36,7 @@ fn test_database_url_display_no_password() {
     let config = AttestationConfig {
         grpc_bind: "127.0.0.1:50061".parse().unwrap(),
         database_url: "postgres://localhost:5432/sid".into(),
+        master_key_file: "/nonexistent/master.key".into(),
         api: test_api(),
     };
     let display = config.database_url_display();

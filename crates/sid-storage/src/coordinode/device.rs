@@ -158,7 +158,7 @@ fn insert_attestation(tx: &Statements<'_>, a: &DeviceAttestation) -> SidResult<(
         attestation_certificate: $attestation_certificate, aaguid: $aaguid,
         created_at: $created_at, updated_at: $updated_at, revoked_at: $revoked_at})",
         Params::default()
-            .with("id", uuid(&a.id.0))
+            .with("id", bin(a.id.as_bytes()))
             .with("device_id", bin(a.device_id.as_bytes()))
             .with("profile_id", bin(a.profile_id.as_bytes()))
             .with("format", Value::String(a.format.as_str().into()))
@@ -187,7 +187,7 @@ fn insert_attestation(tx: &Statements<'_>, a: &DeviceAttestation) -> SidResult<(
 
 fn attestation(row: &Row) -> SidResult<DeviceAttestation> {
     Ok(DeviceAttestation {
-        id: DeviceAttestationId(get_uuid(row, "id")?),
+        id: id(row, "id", DeviceAttestationId::from_slice)?,
         device_id: id(row, "device_id", DeviceId::from_slice)?,
         profile_id: id(row, "profile_id", ProfileId::from_slice)?,
         format: get_parsed(row, "format")?,
@@ -597,7 +597,7 @@ impl CoordinodeBackend {
         &self,
         id: DeviceAttestationId,
     ) -> SidResult<Option<DeviceAttestation>> {
-        self.read(move |tx| Ok(attestations_where(tx, "a.id = $value", uuid(&id.0))?.pop()))
+        self.read(move |tx| Ok(attestations_where(tx, "a.id = $value", bin(id.as_bytes()))?.pop()))
             .await
     }
 
@@ -624,7 +624,12 @@ impl CoordinodeBackend {
             // Newest first.
             Ok(super::sorted_page(
                 all,
-                |a| (std::cmp::Reverse(a.created_at), std::cmp::Reverse(a.id.0)),
+                |a| {
+                    (
+                        std::cmp::Reverse(a.created_at),
+                        std::cmp::Reverse(*a.id.as_uuid()),
+                    )
+                },
                 0,
                 u64::MAX,
             ))
