@@ -1349,6 +1349,10 @@ pub trait StorageBackend:
     /// Delete expired device authorization codes. Returns count deleted.
     async fn cleanup_expired_device_auth_codes(&self, ctx: MutationContext) -> Result<u64>;
 
+    /// Every device authorization code as stored, decided and redeemed ones
+    /// included, ordered by id.
+    async fn export_device_auth_codes(&self) -> Result<Vec<DeviceAuthorizationCode>>;
+
     // === PROFILE GRANT OPERATIONS ===
 
     /// Get a profile grant by ID.
@@ -1868,6 +1872,10 @@ pub trait StorageBackend:
 
     /// Count active (non-consumed, non-expired) magic link sessions for an email.
     async fn count_active_magic_links_for_email(&self, email: &str) -> Result<u32>;
+
+    /// Every magic link session as stored, consumed ones included, ordered
+    /// by id.
+    async fn export_magic_link_sessions(&self) -> Result<Vec<MagicLinkSession>>;
 
     // === SCIM OUTBOUND PROVISIONING ===
 

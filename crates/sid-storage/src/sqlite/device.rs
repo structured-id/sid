@@ -285,6 +285,18 @@ impl SqliteBackend {
         row.as_ref().map(row_to_device_auth).transpose()
     }
 
+    pub(crate) async fn export_device_auth_codes_impl(
+        &self,
+    ) -> SidResult<Vec<DeviceAuthorizationCode>> {
+        sqlx::query("SELECT * FROM device_authorization_codes ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?
+            .iter()
+            .map(row_to_device_auth)
+            .collect()
+    }
+
     pub(crate) async fn decide_device_auth_impl(
         &self,
         id: DeviceAuthCodeId,

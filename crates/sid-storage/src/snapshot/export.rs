@@ -292,6 +292,10 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
                 .await?,
         );
     }
+    // Sign-ins in flight: a device code awaiting its decision or redeemed,
+    // a magic link sent or consumed.
+    snapshot.device_auth_codes = backend.export_device_auth_codes().await?;
+    snapshot.magic_link_sessions = backend.export_magic_link_sessions().await?;
     // Durable work: owed deliveries and the failed ones kept as dead letters.
     snapshot.durable_work = backend.export_work().await?;
     // Completed keyed commands and the periods they were named with: a retry

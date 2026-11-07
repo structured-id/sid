@@ -60,6 +60,14 @@ pub async fn test_device_auth_create_and_get(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("found by user code");
     assert_eq!(by_user.id, code.id);
+    let exported = backend.export_device_auth_codes().await.unwrap();
+    let held = exported
+        .iter()
+        .find(|c| c.id == code.id)
+        .expect("the export lists the request");
+    assert_eq!(held.user_code, by_device.user_code);
+    assert_eq!(held.device_code_hash, by_device.device_code_hash);
+    assert_eq!(held.status, by_device.status);
 
     let err = backend
         .create_device_auth_code(&code, test_audit())

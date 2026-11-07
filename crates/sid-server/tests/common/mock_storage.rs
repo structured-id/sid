@@ -5895,6 +5895,20 @@ impl StorageBackend for MockStorage {
         inner.magic_links.retain(|_, link| !link.is_expired());
         Ok((before - inner.magic_links.len()) as u64)
     }
+    async fn export_magic_link_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::MagicLinkSession>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn export_device_auth_codes(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::DeviceAuthorizationCode>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
     async fn count_active_magic_links_for_email(&self, email: &str) -> SidResult<u32> {
         let inner = self.inner.lock().unwrap();
         let active = inner

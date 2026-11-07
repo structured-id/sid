@@ -2938,6 +2938,18 @@ impl StorageBackend for SqliteBackend {
         self.delete_expired_magic_link_sessions_impl(audit).await
     }
 
+    async fn export_magic_link_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::MagicLinkSession>> {
+        self.export_magic_link_sessions_impl().await
+    }
+
+    async fn export_device_auth_codes(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::DeviceAuthorizationCode>> {
+        self.export_device_auth_codes_impl().await
+    }
+
     async fn count_active_magic_links_for_email(&self, email: &str) -> SidResult<u32> {
         self.count_active_magic_links_for_email_impl(email).await
     }

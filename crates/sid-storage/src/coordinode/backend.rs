@@ -1631,6 +1631,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::cleanup_expired_device_auth_codes(self, ctx).await
     }
 
+    async fn export_device_auth_codes(&self) -> Result<Vec<DeviceAuthorizationCode>> {
+        CoordinodeBackend::export_device_auth_codes(self).await
+    }
+
     // === PROFILE GRANTS ===
 
     async fn get_profile_grant(&self, id: ProfileGrantId) -> Result<Option<ProfileGrant>> {
@@ -2223,6 +2227,10 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn count_active_magic_links_for_email(&self, email: &str) -> Result<u32> {
         CoordinodeBackend::count_active_magic_links_for_email(self, email).await
+    }
+
+    async fn export_magic_link_sessions(&self) -> Result<Vec<MagicLinkSession>> {
+        CoordinodeBackend::export_magic_link_sessions(self).await
     }
 
     // === SCIM OUTBOUND ===

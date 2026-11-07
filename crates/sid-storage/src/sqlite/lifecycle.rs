@@ -602,6 +602,16 @@ impl SqliteBackend {
         Self::commit_mutation(tx, &format!("magic_link:{}", session.id), audit).await
     }
 
+    pub(crate) async fn export_magic_link_sessions_impl(&self) -> SidResult<Vec<MagicLinkSession>> {
+        sqlx::query("SELECT * FROM magic_link_sessions ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?
+            .iter()
+            .map(row_to_magic_link)
+            .collect()
+    }
+
     pub(crate) async fn get_magic_link_session_impl(
         &self,
         id: uuid::Uuid,

@@ -5839,6 +5839,18 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn export_device_auth_codes(&self) -> SidResult<Vec<CoreDeviceAuth>> {
+        sqlx::query_as::<_, crate::pg_row::DeviceAuthRow>(
+            "SELECT * FROM device_authorization_codes ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect()
+    }
+
     async fn decide_device_auth(
         &self,
         id: DeviceAuthCodeId,
@@ -7702,6 +7714,18 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
         Ok(row.map(|r| r.into_domain()))
+    }
+
+    async fn export_magic_link_sessions(&self) -> SidResult<Vec<MagicLinkSession>> {
+        Ok(sqlx::query_as::<_, crate::pg_row::MagicLinkRow>(
+            "SELECT * FROM magic_link_sessions ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect())
     }
 
     async fn consume_magic_link_session(

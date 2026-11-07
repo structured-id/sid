@@ -2188,6 +2188,14 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn delete_expired_magic_link_sessions(&self, _audit: MutationContext) -> Result<u64> {
         Ok(0)
     }
+    async fn export_magic_link_sessions(&self) -> Result<Vec<sid_core::models::MagicLinkSession>> {
+        unimplemented!()
+    }
+    async fn export_device_auth_codes(
+        &self,
+    ) -> Result<Vec<sid_core::models::DeviceAuthorizationCode>> {
+        unimplemented!()
+    }
     async fn count_active_magic_links_for_email(&self, _: &str) -> Result<u32> {
         Ok(0)
     }

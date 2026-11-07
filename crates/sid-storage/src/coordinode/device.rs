@@ -767,6 +767,22 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn export_device_auth_codes(&self) -> SidResult<Vec<DeviceAuthorizationCode>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (c:SidDeviceAuth) RETURN {AUTH}"),
+                Params::default(),
+            )?;
+            let mut codes = rows
+                .iter()
+                .map(|row| auth(tx, row))
+                .collect::<SidResult<Vec<_>>>()?;
+            codes.sort_by_key(|c| c.id.0);
+            Ok(codes)
+        })
+        .await
+    }
+
     pub(super) async fn decide_device_auth(
         &self,
         id: DeviceAuthCodeId,
