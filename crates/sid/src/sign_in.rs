@@ -337,6 +337,21 @@ impl SignIn {
         &self.anomaly
     }
 
+    /// The store the sign-ins read and commit to.
+    pub(crate) fn storage(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
+    }
+
+    /// The keys that open and seal the stored password files.
+    pub(crate) fn keys(&self) -> &dyn sid_keys::KeyManager {
+        self.keys.as_ref()
+    }
+
+    /// The OPAQUE server the stored password files are proven against.
+    pub(crate) fn opaque(&self) -> &OpaqueRouter {
+        &self.opaque
+    }
+
     /// Which sign-in each CAPTCHA was asked of, and the passes earned.
     pub fn captcha_gate(&self) -> &CaptchaGate {
         &self.captcha_gate
@@ -1164,7 +1179,7 @@ fn attempt<'a>(
     }
 }
 
-fn unavailable(cause: impl std::fmt::Display) -> SignInError {
+pub(crate) fn unavailable(cause: impl std::fmt::Display) -> SignInError {
     SignInRefusal::Unavailable(cause.to_string()).into()
 }
 
