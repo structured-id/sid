@@ -4,16 +4,6 @@
 //! the [`sid::identity`] library's, contact phones and emails
 //! [`sid::account`]'s.
 
-use chrono::{DateTime, Utc};
-
-/// Convert `chrono::DateTime<Utc>` to `prost_types::Timestamp`.
-pub(crate) fn to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: dt.timestamp(),
-        nanos: dt.timestamp_subsec_nanos() as i32,
-    }
-}
-
 /// The identifier a request names in `field`, validated before any lookup:
 /// an absent or malformed one is refused on that field.
 #[allow(clippy::result_large_err)]
