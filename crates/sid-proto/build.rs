@@ -45,6 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // The client and server stubs need the transport; the messages do not.
+        .server_mod_attribute(".", "#[cfg(feature = \"grpc\")]")
+        .client_mod_attribute(".", "#[cfg(feature = \"grpc\")]")
         // Map entries encode in key order, so equal messages encode equally
         // and a retried keyed command keeps its fingerprint.
         .btree_map(".")

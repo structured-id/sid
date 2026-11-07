@@ -195,7 +195,9 @@ async fn a_split_history_evaluator_takes_preparation_internally_only() {
         issuer.issuers.clone(),
         organization.id,
         manager(0x33),
-        PasswordHistoryAuthority::Remote(RemoteHistoryEvaluator::new(lazy(&internal_url))),
+        PasswordHistoryAuthority::Remote(Arc::new(RemoteHistoryEvaluator::new(lazy(
+            &internal_url,
+        )))),
     );
     assert!(
         auth.history_evaluator().is_none(),

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Applications, their client and resource roles, and resource access as the
-//! management API shows them.
+//! Projects, applications with their client and resource roles, resource
+//! access, project roles and initial access tokens as the management API
+//! shows them.
 
 use sid_core::models::{
-    Application, ApplicationType, OAuth2Client, ProtectedResource, ResourceAccess, ResourceState,
-    SubjectType, TokenEndpointAuthMethod,
+    Application, ApplicationType, InitialAccessToken, OAuth2Client, Project, ProtectedResource,
+    ResourceAccess, ResourceState, Role, SubjectType, TokenEndpointAuthMethod,
 };
 use sid_proto::sid::v1 as proto;
 
-use super::convert;
+use crate::wire::to_timestamp;
 
 pub(super) fn application_type_to_proto(kind: ApplicationType) -> proto::ApplicationType {
     match kind {
@@ -52,7 +53,7 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
         allowed_scopes: c.allowed_scopes.clone(),
         grant_types: c.grant_types.clone(),
         active: c.active,
-        created_at: Some(convert::to_timestamp(c.created_at)),
+        created_at: Some(to_timestamp(c.created_at)),
         token_endpoint_auth_method: auth_method_to_proto(c.token_endpoint_auth_method).into(),
         response_types: c.response_types.clone(),
         subject_type: match c.subject_type {
@@ -62,8 +63,8 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
         .into(),
         sector_identifier_uri: c.sector_identifier_uri.clone(),
         contacts: c.contacts.clone(),
-        client_id_issued_at: Some(convert::to_timestamp(c.client_id_issued_at)),
-        client_secret_expires_at: c.client_secret_expires_at.map(convert::to_timestamp),
+        client_id_issued_at: Some(to_timestamp(c.client_id_issued_at)),
+        client_secret_expires_at: c.client_secret_expires_at.map(to_timestamp),
         dynamically_registered: c.registration_iat.is_some(),
         org_id: c.org_id.map(Into::into),
         issuer: issuer.to_owned(),
@@ -84,8 +85,8 @@ pub(super) fn resource_to_proto(r: &ProtectedResource, issuer: &str) -> proto::P
         scopes: r.scopes.clone(),
         state: resource_state_to_proto(r.state).into(),
         revision: r.revision,
-        created_at: Some(convert::to_timestamp(r.created_at)),
-        updated_at: Some(convert::to_timestamp(r.updated_at)),
+        created_at: Some(to_timestamp(r.created_at)),
+        updated_at: Some(to_timestamp(r.updated_at)),
     }
 }
 
@@ -94,7 +95,7 @@ pub(super) fn access_to_proto(a: &ResourceAccess) -> proto::ResourceAccess {
         client_id: a.client_id.clone(),
         resource_id: Some(a.resource_id.into()),
         scopes: a.scopes.clone(),
-        created_at: Some(convert::to_timestamp(a.created_at)),
+        created_at: Some(to_timestamp(a.created_at)),
     }
 }
 
@@ -110,13 +111,53 @@ pub(super) fn application_to_proto(
         client,
         resource,
         revision: app.revision,
-        created_at: Some(convert::to_timestamp(app.created_at)),
-        updated_at: Some(convert::to_timestamp(app.updated_at)),
+        created_at: Some(to_timestamp(app.created_at)),
+        updated_at: Some(to_timestamp(app.updated_at)),
         system_integration: match app.system {
             None => proto::SystemIntegration::Unspecified,
             Some(sid_core::models::SystemIntegration::Account) => proto::SystemIntegration::Account,
         }
         .into(),
+    }
+}
+
+pub(super) fn project_to_proto(p: &Project) -> proto::Project {
+    proto::Project {
+        id: Some(p.id.into()),
+        name: p.name.clone(),
+        description: p.description.clone(),
+        owner_profile_id: p.owner_id.map(Into::into),
+        is_system: p.is_system,
+        created_at: Some(to_timestamp(p.created_at)),
+        updated_at: Some(to_timestamp(p.updated_at)),
+    }
+}
+
+pub(super) fn role_to_proto(r: &Role) -> proto::Role {
+    proto::Role {
+        id: Some(r.id.into()),
+        project_id: Some(r.project_id.into()),
+        name: r.key.clone(),
+        description: r.description.clone(),
+        permissions: r.permissions.clone(),
+        created_at: Some(to_timestamp(r.created_at)),
+        updated_at: Some(to_timestamp(r.updated_at)),
+    }
+}
+
+pub(super) fn iat_to_proto(t: &InitialAccessToken) -> proto::InitialAccessToken {
+    proto::InitialAccessToken {
+        id: Some(t.id.into()),
+        project_id: Some(t.project_id.into()),
+        max_clients: t.max_clients,
+        clients_registered: t.clients_registered,
+        allowed_scopes: t.allowed_scopes.clone(),
+        allowed_grant_types: t.allowed_grant_types.clone(),
+        allowed_redirect_patterns: t.allowed_redirect_patterns.clone(),
+        expires_at: Some(to_timestamp(t.expires_at)),
+        created_at: Some(to_timestamp(t.created_at)),
+        created_by: Some(t.created_by.into()),
+        revoked: t.revoked,
     }
 }
 

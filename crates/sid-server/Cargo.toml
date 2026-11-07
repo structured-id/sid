@@ -28,7 +28,7 @@ sid-authn = { workspace = true, features = ["grpc", "oauth-http", "password-oper
 sid-authz = { workspace = true }
 sid = { workspace = true }
 sid-fed = { workspace = true }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 sid-storage = { workspace = true, default-features = false }
 sid-infra = { workspace = true, features = ["nats", "redis", "issuer-client"] }
 sid-serve = { workspace = true }

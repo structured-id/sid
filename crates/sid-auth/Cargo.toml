@@ -16,7 +16,7 @@ name = "sid_auth"
 path = "src/lib.rs"
 
 [dependencies]
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 # Timestamps of the request confirmation sent to sid-authz.
 prost-types = { workspace = true }
 # Resource indicators, issuer handles and the canonical google.rpc error

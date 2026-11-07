@@ -5,8 +5,6 @@ use pasta_curves::pallas;
 use sid_core::models::{MutationContext, ProfileId};
 use sid_plugin::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
-use tonic::Code;
-use tonic_types::StatusExt;
 
 /// A purpose of the tests' operations: a change, as a host would name it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +199,6 @@ fn a_proof_decodes_to_canonical_instances() {
     })
     .err()
     .expect("a 31-byte instance is refused");
-    assert_eq!(short.code(), Code::InvalidArgument);
     let beyond = decode_proof(PasswordRegistrationProof {
         zkpp_proof: vec![],
         instances: vec![vec![0xff; 32]],
@@ -209,13 +206,35 @@ fn a_proof_decodes_to_canonical_instances() {
     })
     .err()
     .expect("an instance beyond the field is refused");
-    assert_eq!(beyond.code(), Code::InvalidArgument);
     for refused in [short, beyond] {
-        let violation = &refused
-            .get_details_bad_request()
-            .expect("field violations")
-            .field_violations[0];
-        assert_eq!(violation.field, "proof.instances");
+        assert_eq!(invalid_field_of(&refused), "proof.instances");
+    }
+}
+
+/// A host's own refusal of a step, or the operation's.
+#[derive(Debug)]
+enum HostRefusal {
+    NotThisCaller,
+    Operation(PasswordOperationError),
+}
+
+impl From<PasswordOperationError> for HostRefusal {
+    fn from(e: PasswordOperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+/// A host that lets every caller take the step.
+fn allowed(_: &PendingOperation<ProfileId, Change>) -> Result<(), PasswordOperationError> {
+    Ok(())
+}
+
+/// The field an invalid-field refusal names; any other refusal fails the
+/// test.
+fn invalid_field_of(refused: &PasswordOperationError) -> &'static str {
+    match refused {
+        PasswordOperationError::InvalidField { field, .. } => field,
+        other => panic!("not an invalid field: {other:?}"),
     }
 }
 
@@ -244,12 +263,8 @@ fn relayed_proofs_decode_to_their_scalars() {
             ..good.clone()
         },
     ] {
-        let status = relayed_proofs(&[bad]).unwrap_err();
-        assert_eq!(status.code(), Code::InvalidArgument);
-        assert_eq!(
-            status.get_details_bad_request().unwrap().field_violations[0].field,
-            "proof.evaluation_proofs"
-        );
+        let refused = relayed_proofs(&[bad]).unwrap_err();
+        assert_eq!(invalid_field_of(&refused), "proof.evaluation_proofs");
     }
 }
 
@@ -265,10 +280,10 @@ fn excessive_proof_instances_are_refused_before_decoding() {
         ],
         evaluation_proofs: vec![],
     };
-    let status = decode_proof(proof)
+    let refused = decode_proof(proof)
         .err()
         .expect("excessive instances refused");
-    assert_eq!(status.code(), Code::InvalidArgument);
+    assert_eq!(invalid_field_of(&refused), "proof.instances");
 }
 
 /// An aborted RPC must not admit another verifier while its blocking task is
@@ -306,10 +321,13 @@ async fn proof_completion_and_panic_release_capacity() {
     assert_eq!(run_proof(permit, || 7).await.unwrap(), 7);
     assert_eq!(permits.available_permits(), 1);
     let permit = Arc::clone(&permits).try_acquire_owned().unwrap();
-    let status = run_proof(permit, || panic!("test verifier panic"))
+    let refused = run_proof(permit, || panic!("test verifier panic"))
         .await
         .unwrap_err();
-    assert_eq!(status.code(), Code::Internal);
+    assert!(
+        matches!(refused, PasswordOperationError::Internal),
+        "{refused:?}"
+    );
     assert_eq!(permits.available_permits(), 1);
 }
 
@@ -464,14 +482,17 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
                 "change",
                 &record,
                 Some(proof),
-                |_| Ok(()),
+                allowed,
             )
             .await;
-        let status = match refused {
-            Err(status) => status,
+        let refused = match refused {
+            Err(refused) => refused,
             Ok(_) => panic!("an invalid submission must refuse"),
         };
-        assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+        assert!(
+            matches!(refused, PasswordOperationError::InvalidProof),
+            "{refused:?}"
+        );
         assert_eq!(ops.proof_permits.available_permits(), 0);
     };
     // Exact verifier dimensions are checked before admission. Even while
@@ -500,18 +521,23 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
             "change",
             &record,
             Some(proof.clone()),
-            |_| Ok(()),
+            allowed,
         )
         .await;
-    let status = match refused {
-        Err(status) => status,
+    let refused = match refused {
+        Err(refused) => refused,
         Ok(_) => panic!("saturation must refuse"),
     };
-    assert_eq!(status.code(), Code::Unavailable);
-    assert!(status.get_details_retry_info().is_some());
+    assert!(
+        matches!(
+            refused,
+            PasswordOperationError::Unavailable("proof verification capacity")
+        ),
+        "{refused:?}"
+    );
     drop(reservation);
     let result = ops
-        .finish(zkpp, &id, "change", &record, Some(proof), |_| Ok(()))
+        .finish(zkpp, &id, "change", &record, Some(proof), allowed)
         .await
         .unwrap();
     let Finish::Ready(result) = result else {
@@ -536,23 +562,6 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
     assert_eq!(commit.entries[0].0, commit.epochs[0].id);
 }
 
-/// A finish before the operation's OPAQUE start or evaluation is
-/// INVALID_STATE naming the step, so the client knows what to run first.
-#[test]
-fn a_skipped_step_is_invalid_state() {
-    let status = step_missing("the operation was not evaluated");
-    assert_eq!(status.code(), Code::FailedPrecondition);
-    assert_eq!(
-        status.get_details_error_info().unwrap().reason,
-        "INVALID_STATE"
-    );
-    let violation = &status
-        .get_details_precondition_failure()
-        .expect("precondition")
-        .violations[0];
-    assert_eq!(violation.r#type, "PASSWORD_OPERATION_STEP");
-}
-
 /// An operation is kept until the deadline it was prepared with, however
 /// many steps store it again: the terminal abort of a registration is due at
 /// that deadline, so a step must not find the operation after it. Past the
@@ -572,10 +581,16 @@ async fn a_stored_operation_ends_at_its_deadline() {
     ops.store(&op).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     let gone = ops.take(&op.id).await.unwrap_err();
-    assert_eq!(gone.code(), Code::FailedPrecondition, "{}", gone.message());
+    assert!(
+        matches!(gone, PasswordOperationError::NotPending),
+        "{gone:?}"
+    );
 
     let late = ops.store(&op).await.unwrap_err();
-    assert_eq!(late.code(), Code::FailedPrecondition, "{}", late.message());
+    assert!(
+        matches!(late, PasswordOperationError::NotPending),
+        "{late:?}"
+    );
     assert!(ops.take(&op.id).await.is_err(), "stored past its deadline");
 }
 
@@ -636,7 +651,7 @@ async fn a_host_step_amends_the_pending_operation() {
     let amended = ops
         .amend(&op.id, |pending| {
             pending.registration_request = Some(b"staged".to_vec());
-            Ok(7)
+            Ok::<_, PasswordOperationError>(7)
         })
         .await
         .unwrap();
@@ -648,20 +663,22 @@ async fn a_host_step_amends_the_pending_operation() {
                 pending.registration_request.as_deref(),
                 Some(&b"staged"[..])
             );
-            Err::<(), _>(Status::permission_denied("not this caller"))
+            Err::<(), _>(HostRefusal::NotThisCaller)
         })
         .await
         .unwrap_err();
-    assert_eq!(refused.code(), Code::PermissionDenied);
+    assert!(matches!(refused, HostRefusal::NotThisCaller), "{refused:?}");
 
     let kept = ops.take(&op.id).await.unwrap();
     assert_eq!(kept.registration_request.as_deref(), Some(&b"staged"[..]));
     assert_eq!(kept.expires_at, op.expires_at);
 
     assert!(
-        ops.amend(&PasswordOperationId::generate(), |_| Ok(()))
-            .await
-            .is_err()
+        ops.amend(&PasswordOperationId::generate(), |_| {
+            Ok::<(), PasswordOperationError>(())
+        })
+        .await
+        .is_err()
     );
 }
 
@@ -683,15 +700,15 @@ async fn a_refused_finish_keeps_the_operation() {
 
     let refused = match ops
         .finish(zkpp, &op.id, "change", b"", None, |_| {
-            Err(Status::permission_denied("not this caller"))
+            Err(HostRefusal::NotThisCaller)
         })
         .await
     {
-        Err(status) => status,
+        Err(refused) => refused,
         Ok(_) => panic!("a refused caller finishes nothing"),
     };
 
-    assert_eq!(refused.code(), Code::PermissionDenied);
+    assert!(matches!(refused, HostRefusal::NotThisCaller), "{refused:?}");
     let kept = ops.take(&op.id).await.expect("the operation stays pending");
     assert_eq!(kept.expires_at, op.expires_at);
 }
@@ -713,20 +730,23 @@ async fn an_authorized_terminal_failure_ends_the_operation() {
     op.policy_version += 1;
     ops.store(&op).await.unwrap();
 
-    let failed = match ops
-        .finish(zkpp, &op.id, "change", b"", None, |_| Ok(()))
-        .await
-    {
-        Err(status) => status,
+    let failed = match ops.finish(zkpp, &op.id, "change", b"", None, allowed).await {
+        Err(refused) => refused,
         Ok(_) => panic!("a stale policy finishes nothing"),
     };
 
-    assert_eq!(failed.code(), Code::FailedPrecondition);
+    assert!(
+        matches!(failed, PasswordOperationError::PolicyChanged),
+        "{failed:?}"
+    );
     let gone = ops
         .take(&op.id)
         .await
         .expect_err("a terminal failure leaves nothing to retry");
-    assert_eq!(gone.code(), Code::FailedPrecondition);
+    assert!(
+        matches!(gone, PasswordOperationError::NotPending),
+        "{gone:?}"
+    );
 }
 
 /// Replacing the active policy must invalidate a pending operation before
@@ -743,16 +763,15 @@ async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
     let zkpp = Arc::new(zkpp_without_proofs());
     let op = pending(change());
     ops.store(&op).await.unwrap();
-    let result = ops
-        .finish(zkpp, &op.id, "change", b"", None, |_| Ok(()))
-        .await;
-    let status = match result {
-        Err(status) => status,
+    let result = ops.finish(zkpp, &op.id, "change", b"", None, allowed).await;
+    let refused = match result {
+        Err(refused) => refused,
         Ok(_) => panic!("another policy must not finish the old operation"),
     };
-    assert_eq!(status.code(), Code::FailedPrecondition);
-    let details = status.get_details_precondition_failure().unwrap();
-    assert_eq!(details.violations[0].r#type, "PASSWORD_POLICY_VERSION");
+    assert!(
+        matches!(refused, PasswordOperationError::PolicyChanged),
+        "{refused:?}"
+    );
 }
 
 /// A history key the server cannot open (its external wrapping key is lost
@@ -799,16 +818,14 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
     let blinded = (pallas::Point::generator() * pallas::Scalar::from(5u64))
         .to_affine()
         .to_bytes();
-    let status = restored_evaluation
+    let refused = restored_evaluation
         .evaluate(&id, &blinded)
         .await
         .unwrap_err();
-    assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
-    assert_eq!(
-        status.get_details_error_info().unwrap().reason,
-        "PASSWORD_HISTORY_UNAVAILABLE"
+    assert!(
+        matches!(refused, PasswordOperationError::Unavailable(_)),
+        "{refused:?}"
     );
-    assert!(status.get_details_retry_info().is_some());
 
     let after = storage
         .history_keys()
@@ -1082,8 +1099,11 @@ async fn a_new_owner_admission_never_resets_a_history() {
         .await
         .unwrap();
     assert_eq!(first.epochs.len(), 1);
-    let status = prepare().await.map(|_| ()).unwrap_err();
-    assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
+    let refused = prepare().await.map(|_| ()).unwrap_err();
+    assert!(
+        matches!(refused, PasswordOperationError::Unavailable("history keys")),
+        "{refused:?}"
+    );
     assert_eq!(
         storage
             .history_keys()
@@ -1118,12 +1138,10 @@ async fn an_admission_repeats_exactly_or_conflicts() {
     for change in changed {
         let mut other = original.clone();
         change(&mut other);
-        let status = evaluation.prepare(&other).await.unwrap_err();
-        assert_eq!(
-            status.get_details_error_info().unwrap().reason,
-            "OPERATION_KEY_CONFLICT",
-            "{}",
-            status.message()
+        let refused = evaluation.prepare(&other).await.unwrap_err();
+        assert!(
+            matches!(refused, PasswordOperationError::Conflict(_)),
+            "{refused:?}"
         );
     }
     assert_eq!(
@@ -1154,8 +1172,11 @@ async fn an_admission_outside_its_bounds_is_refused() {
     for bound in bounds {
         let mut refused = admission(OwnerKind::New, [6; 32]);
         bound(&mut refused);
-        let status = evaluation.prepare(&refused).await.unwrap_err();
-        assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+        let refused = evaluation.prepare(&refused).await.unwrap_err();
+        assert!(
+            matches!(refused, PasswordOperationError::InvalidField { .. }),
+            "{refused:?}"
+        );
     }
     assert!(
         storage
@@ -1191,8 +1212,8 @@ async fn an_admission_from_a_clock_slightly_ahead_is_admitted() {
 
     let mut beyond = admission(OwnerKind::New, [9; 32]);
     beyond.expires_at = chrono::Utc::now() + ttl + chrono::Duration::seconds(90);
-    let status = evaluation.prepare(&beyond).await.unwrap_err();
-    assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+    let refused = evaluation.prepare(&beyond).await.unwrap_err();
+    assert_eq!(invalid_field_of(&refused), "expires_at");
 }
 
 /// Concurrent admissions for one owner without a key agree on one: both
@@ -1262,14 +1283,10 @@ async fn the_evaluator_applies_the_stored_write_cutoff() {
         .await
         .unwrap();
 
-    let withdrawn = |status: Status| {
-        let violation = &status
-            .get_details_precondition_failure()
-            .expect("precondition")
-            .violations[0];
-        assert_eq!(
-            violation.r#type, "PASSWORD_HISTORY_WRITE_CUTOFF",
-            "{status:?}"
+    let withdrawn = |refused: PasswordOperationError| {
+        assert!(
+            matches!(refused, PasswordOperationError::HistoryKeyWithdrawn),
+            "{refused:?}"
         );
     };
     withdrawn(evaluation.evaluate(&cached.id, &blinded).await.unwrap_err());
@@ -1370,51 +1387,6 @@ fn a_selection_the_history_does_not_require_is_refused() {
         "a history exists"
     );
     assert!(!complete(OwnerKind::New, &[new, d(&old)], &empty));
-}
-
-/// The evaluator's client listener refuses preparation from anyone, since a
-/// caller could otherwise create keys for operations it names; Prepare is
-/// served only on the internal listener the deployment keeps internal.
-#[tokio::test]
-async fn a_client_listener_refuses_preparation() {
-    let (_, evaluation) = split(
-        sqlite().await,
-        sid_core::models::OrgId::generate(),
-        manager(3),
-        manager(3),
-    );
-    let service = PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(ClientListener));
-    let status = service
-        .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
-            operation_id: Some(PasswordOperationId::generate().into()),
-            ..Default::default()
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), Code::PermissionDenied);
-}
-
-/// The internal listener admits preparation: its protection is the
-/// deployment's transport, so the request reaches the evaluator's own
-/// admission checks (here an empty request is refused as malformed, not as
-/// unauthorized).
-#[tokio::test]
-async fn the_internal_listener_admits_preparation() {
-    let (_, evaluation) = split(
-        sqlite().await,
-        sid_core::models::OrgId::generate(),
-        manager(3),
-        manager(3),
-    );
-    let service = PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(InternalTransport));
-    let status = service
-        .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
-            operation_id: Some(PasswordOperationId::generate().into()),
-            ..Default::default()
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), Code::InvalidArgument);
 }
 
 /// A registration start for a held identifier must look like any other to
@@ -1541,10 +1513,10 @@ async fn only_an_admitted_live_operation_is_evaluated() {
     );
     let op = pending(change());
     ops.store(&op).await.unwrap();
-    let status = evaluation.evaluate(&op.id, &[2; 32]).await.unwrap_err();
-    assert_eq!(
-        status.get_details_error_info().unwrap().reason,
-        "OPERATION_EXPIRED"
+    let refused = evaluation.evaluate(&op.id, &[2; 32]).await.unwrap_err();
+    assert!(
+        matches!(refused, PasswordOperationError::NotPending),
+        "{refused:?}"
     );
 
     // A record past its deadline is not even stored.
@@ -1563,17 +1535,17 @@ async fn only_an_admitted_live_operation_is_evaluated() {
         )
         .await
         .unwrap_err();
-    assert_eq!(
-        late.get_details_error_info().unwrap().reason,
-        "OPERATION_EXPIRED"
+    assert!(
+        matches!(late, PasswordOperationError::NotPending),
+        "{late:?}"
     );
-    let status = evaluation
+    let refused = evaluation
         .evaluate(&expired_id, &[2; 32])
         .await
         .unwrap_err();
-    assert_eq!(
-        status.get_details_error_info().unwrap().reason,
-        "OPERATION_EXPIRED"
+    assert!(
+        matches!(refused, PasswordOperationError::NotPending),
+        "{refused:?}"
     );
     assert_eq!(
         evaluation
@@ -1600,17 +1572,15 @@ fn a_charge_key_is_bounded_and_per_actor() {
     assert_ne!(charge_key("a"), charge_key("b"));
 }
 
-/// A step without an operation id is an invalid argument naming the field; a
+/// A step without an operation id is refused as naming no operation; a
 /// well-formed id round-trips through the wire.
 #[test]
 fn an_operation_id_is_required_and_round_trips() {
     let missing = operation_id(None).unwrap_err();
-    assert_eq!(missing.code(), Code::InvalidArgument);
-    let violations = missing
-        .get_details_bad_request()
-        .expect("field violations")
-        .field_violations;
-    assert_eq!(violations[0].field, "operation_id");
+    assert!(
+        matches!(missing, PasswordOperationError::InvalidOperationId(_)),
+        "{missing:?}"
+    );
 
     let id = PasswordOperationId::generate();
     let wire: sid_ids_proto::PasswordOperationId = id.into();
@@ -1657,7 +1627,7 @@ fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
     assert_eq!(mapped.revision, 7);
 
     for unknown in [vec![[9; 32]], vec![domain(&old), domain(&old)]] {
-        let status = live_epochs(
+        let refused = live_epochs(
             &epochs,
             &LiveDomains {
                 domains: unknown,
@@ -1665,7 +1635,13 @@ fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
             },
         )
         .unwrap_err();
-        assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
+        assert!(
+            matches!(
+                refused,
+                PasswordOperationError::Unavailable("history lifecycle")
+            ),
+            "{refused:?}"
+        );
     }
     for unbounded in [
         LiveDomains {
@@ -1677,116 +1653,12 @@ fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
             ..live.clone()
         },
     ] {
-        let status = live_set_bounds(&unbounded).unwrap_err();
-        assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+        let refused = live_set_bounds(&unbounded).unwrap_err();
+        assert!(
+            matches!(refused, PasswordOperationError::InvalidField { .. }),
+            "{refused:?}"
+        );
     }
-}
-
-/// A preparation request is decoded before the evaluator acts on it: an
-/// owner domain or live domain that is not 32 bytes, an unspecified owner
-/// kind, a missing expiry, a malformed settled operation or more entries than
-/// the bounds allow is an invalid argument.
-#[test]
-fn a_malformed_admission_is_an_invalid_argument() {
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
-    let good = PreparePasswordHistoryRequest {
-        operation_id: Some(PasswordOperationId::generate().into()),
-        owner_domain: vec![3; 32],
-        owner_kind: PasswordHistoryOwnerKind::Existing as i32,
-        expires_at: Some(timestamp(expires_at)),
-        charge_key: "charge".into(),
-        live_comparison_domains: vec![vec![2; 32], vec![1; 32]],
-        history_revision: 4,
-        settled_operations: vec![PasswordOperationId::generate().into()],
-    };
-    let admission = admission_of(&good).unwrap();
-    assert_eq!(admission.owner_domain, [3; 32]);
-    assert_eq!(admission.kind, OwnerKind::Existing);
-    assert_eq!(admission.expires_at, expires_at);
-    assert_eq!(admission.live.domains, vec![[1; 32], [2; 32]], "sorted");
-    assert_eq!(admission.live.revision, 4);
-    assert_eq!(admission.live.settled.len(), 1);
-
-    for bad in [
-        PreparePasswordHistoryRequest {
-            owner_domain: vec![3; 31],
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            owner_kind: PasswordHistoryOwnerKind::Unspecified as i32,
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            expires_at: None,
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            live_comparison_domains: vec![vec![1; 31]],
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            live_comparison_domains: vec![vec![1; 32]; MAX_HISTORY_DOMAINS + 1],
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            settled_operations: vec![sid_ids_proto::PasswordOperationId { value: vec![1; 3] }],
-            ..good.clone()
-        },
-        PreparePasswordHistoryRequest {
-            history_revision: u64::MAX,
-            ..good.clone()
-        },
-    ] {
-        let status = admission_of(&bad).unwrap_err();
-        assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
-    }
-}
-
-/// A remote evaluator's answer is accepted only when it describes each
-/// domain it returns: as many epochs as domains, each domain the one its
-/// epoch gives under the shared relation, each description well formed.
-#[test]
-fn a_remote_selection_must_describe_its_domains() {
-    use sid_core::models::HistoryEpochUse;
-    let described = sid_core::models::KeyEpoch {
-        id: HistoryEpochId::generate(),
-        owner_domain: [3; 32],
-        suite: HistorySuite::PallasPoseidonV1,
-        public_key: [5; 32],
-        ksf: HistoryKsf::DEFAULT,
-        ksf_salt: [6; 32],
-        status: HistoryEpochUse::Active,
-        created_at: chrono::Utc::now(),
-    }
-    .descriptor();
-    let good = PreparePasswordHistoryResponse {
-        domains: vec![domain_message(&OperationDomain::of(&described))],
-        epochs: vec![descriptor_message(&described)],
-    };
-    assert_eq!(selection_of(&good), Some(vec![described]));
-    let mut other_salt = good.clone();
-    other_salt.epochs[0].ksf_salt = vec![7; 32];
-    let mut malformed = good.clone();
-    malformed.epochs[0].epoch_id = vec![1; 3];
-    let mut unknown_suite = good.clone();
-    unknown_suite.epochs[0].suite = "pallas-poseidon-v0".into();
-    let mut missing = good.clone();
-    missing.epochs.clear();
-    for refused in [other_salt, malformed, unknown_suite, missing] {
-        assert_eq!(selection_of(&refused), None);
-    }
-}
-
-/// A step whose operation is not pending for it reads as expired, whatever
-/// the cause, so it tells nothing about operations the caller does not own.
-#[test]
-fn a_step_without_its_operation_reads_as_expired() {
-    let status = operation_not_pending();
-    assert_eq!(status.code(), Code::FailedPrecondition);
-    assert_eq!(
-        status.get_details_error_info().unwrap().reason,
-        "OPERATION_EXPIRED"
-    );
 }
 
 /// An installation's organization and the same UUID name one history scope,

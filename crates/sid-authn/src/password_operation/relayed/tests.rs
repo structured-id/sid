@@ -28,7 +28,7 @@ struct Feed {
 /// Every handoff refused, as by a work stream that stays full.
 const ALWAYS: usize = usize::MAX;
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl EventBus for Feed {
     async fn publish(&self, event: Event) -> EventBusResult<()> {
         panic!(

@@ -1456,9 +1456,9 @@ where
     let channel = tonic::transport::Endpoint::from_shared(evaluator.clone())
         .with_context(|| format!("SID_PASSWORD_HISTORY_EVALUATOR: gRPC address {evaluator}"))?
         .connect_lazy();
-    Ok(PasswordHistoryAuthority::Remote(
+    Ok(PasswordHistoryAuthority::Remote(Arc::new(
         RemoteHistoryEvaluator::new(channel),
-    ))
+    )))
 }
 
 /// The cutoff before which password-history epochs are replaced, an RFC 3339
