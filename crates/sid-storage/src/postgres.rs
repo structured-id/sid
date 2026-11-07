@@ -5656,6 +5656,65 @@ impl StorageBackend for PostgresBackend {
         tx.commit().await.map_err(storage)
     }
 
+    async fn import_device_attestation(
+        &self,
+        att: &sid_core::models::DeviceAttestation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import device binding: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The device row first, then its binding: the order every binding
+        // change takes them in.
+        Self::owned_device_in_tx(&mut tx, att.device_id, att.profile_id).await?;
+        let stored = sqlx::query_as::<_, crate::pg_row::DeviceAttestationRow>(
+            "SELECT * FROM device_attestations WHERE device_id = $1 FOR UPDATE",
+        )
+        .bind(att.device_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(stored) = stored {
+            return if stored.into_domain()? == *att {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "device {} has another key binding",
+                    att.device_id
+                )))
+            };
+        }
+        sqlx::query(
+            "INSERT INTO device_attestations (id, device_id, profile_id, format, key_storage,
+                status, public_jwk, attestation_object, attestation_certificate,
+                aaguid, created_at, updated_at, revoked_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(att.id)
+        .bind(att.device_id)
+        .bind(att.profile_id)
+        .bind(att.format.as_str())
+        .bind(att.key_storage.as_str())
+        .bind(att.status.as_str())
+        .bind(&att.public_jwk)
+        .bind(&att.attestation_object)
+        .bind(&att.attestation_certificate)
+        .bind(&att.aaguid)
+        .bind(att.created_at)
+        .bind(att.updated_at)
+        .bind(att.revoked_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("device attestation", e))?;
+        Self::audit_in_tx(
+            &mut tx,
+            &format!("device_attestation:{}", att.device_id),
+            ctx,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     async fn revoke_device_attestation(
         &self,
         device_id: CoreDeviceId,

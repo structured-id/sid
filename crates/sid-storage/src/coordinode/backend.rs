@@ -1515,6 +1515,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::commit_device_enrollment(self, enrollment, ctx).await
     }
 
+    async fn import_device_attestation(
+        &self,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_device_attestation(self, attestation, ctx).await
+    }
+
     async fn revoke_device_attestation(
         &self,
         device_id: DeviceId,

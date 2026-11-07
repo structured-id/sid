@@ -1202,6 +1202,16 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// Restore the key binding `attestation` as the snapshot holds it, live
+    /// or revoked, onto its device, which must exist and be its Profile's.
+    /// Returns `false`, writing nothing, when exactly this binding is already
+    /// stored; another binding of the device is a `Conflict`, never replaced.
+    async fn import_device_attestation(
+        &self,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// Revoke a device's live attestation and, in the same transaction, stop
     /// counting the device as hardware-attested. False when there is none.
     async fn revoke_device_attestation(

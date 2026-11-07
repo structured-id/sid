@@ -464,6 +464,71 @@ pub async fn test_a_rotation_racing_a_revocation_settles(backend: &dyn StorageBa
     }
 }
 
+/// A restored key binding is stored exactly as the snapshot holds it, a
+/// revoked one revoked; restoring it again writes nothing, and a device
+/// that already has another binding, is another Profile's or is missing
+/// refuses it.
+pub async fn test_a_device_binding_is_restored_as_stored(backend: &dyn StorageBackend) {
+    use chrono::SubsecRound;
+    let owner = owner(backend).await;
+    let device = Device::new(owner.profile.id, DeviceType::Mobile);
+    backend.create_device(&device, test_audit()).await.unwrap();
+    let mut restored = binding(&device, "key-restored");
+    restored.status = AttestationStatus::Revoked;
+    restored.created_at = restored.created_at.trunc_subsecs(3);
+    restored.updated_at = restored.created_at;
+    restored.revoked_at = Some(restored.created_at);
+
+    assert!(
+        backend
+            .import_device_attestation(&restored, test_audit())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .import_device_attestation(&restored, test_audit())
+            .await
+            .unwrap(),
+        "an exact repeat writes nothing"
+    );
+    assert_eq!(
+        backend
+            .get_device_attestation_by_device_id(device.id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&restored)
+    );
+
+    let mut other = restored.clone();
+    other.id = sid_core::models::DeviceAttestationId::generate();
+    let replaced = backend
+        .import_device_attestation(&other, test_audit())
+        .await
+        .expect_err("another binding of a bound device");
+    assert!(matches!(replaced, Error::Conflict(_)), "{replaced:?}");
+
+    let stranger = self::owner(backend).await;
+    let mut foreign = restored.clone();
+    foreign.profile_id = stranger.profile.id;
+    let foreign = backend
+        .import_device_attestation(&foreign, test_audit())
+        .await
+        .expect_err("a binding of another profile's device");
+    assert!(matches!(foreign, Error::Conflict(_)), "{foreign:?}");
+
+    let missing = binding(
+        &Device::new(owner.profile.id, DeviceType::Mobile),
+        "key-missing",
+    );
+    let missing = backend
+        .import_device_attestation(&missing, test_audit())
+        .await
+        .expect_err("a binding of a missing device");
+    assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
+}
+
 /// Two concurrent finishes of one ceremony bind one key.
 pub async fn test_concurrent_finishes_bind_once(backend: &dyn StorageBackend) {
     let owner = owner(backend).await;

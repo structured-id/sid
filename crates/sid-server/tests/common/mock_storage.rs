@@ -4812,6 +4812,16 @@ impl StorageBackend for MockStorage {
             "device enrollment is not supported by the mock store".into(),
         ))
     }
+    async fn import_device_attestation(
+        &self,
+        _: &sid_core::models::DeviceAttestation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        // The server tests never restore a snapshot into this mock.
+        Err(sid_core::Error::Storage(
+            "the mock store does not restore device bindings".into(),
+        ))
+    }
     async fn revoke_device_attestation(
         &self,
         _device_id: DeviceId,

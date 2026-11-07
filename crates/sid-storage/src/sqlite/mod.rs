@@ -2188,6 +2188,14 @@ impl StorageBackend for SqliteBackend {
         self.commit_device_enrollment_impl(enrollment, ctx).await
     }
 
+    async fn import_device_attestation(
+        &self,
+        attestation: &sid_core::models::DeviceAttestation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_device_attestation_impl(attestation, ctx).await
+    }
+
     async fn revoke_device_attestation(
         &self,
         device_id: sid_core::models::DeviceId,
