@@ -9,13 +9,12 @@ mod common;
 use common::mock_storage::MockStorage;
 use common::{issue_admin_token, test_jwt, test_key_manager, test_revocation};
 use secrecy::{ExposeSecret, SecretBox};
+use sid::email_provider::{SMTP_PASSWORD_CONTEXT, XOAUTH2_CLIENT_SECRET_CONTEXT};
 use sid_core::models::{AuditEntry, EmailProviderConfig, SmtpAuthMethod, SmtpEncryption};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::admin::realm_service_server::RealmService;
 use sid_proto::sid::v1::admin::{EmailSettings, SmtpAuthType, XoAuth2ProviderType};
-use sid_server::grpc::realm_service::{
-    RealmServiceImpl, SMTP_PASSWORD_CONTEXT, XOAUTH2_CLIENT_SECRET_CONTEXT,
-};
+use sid_server::grpc::realm_service::RealmServiceImpl;
 use std::sync::Arc;
 use tonic::Request;
 

@@ -31,7 +31,8 @@ use sid_plugin::notification::{
 };
 use sid_plugin::storage::StorageBackend;
 
-use crate::grpc::realm_service::{ProviderError, email_channel, stored_email_provider};
+use crate::grpc::realm_service::email_channel;
+use sid::email_provider::ProviderError;
 
 /// The template a sign-in link mail renders with.
 const TEMPLATE: &str = "magic_link";
@@ -69,7 +70,7 @@ impl MailTransport for StoredProvider {
     async fn channel(&self) -> Result<Arc<dyn NotificationChannel>, String> {
         // No provider yet, or one an administrator must correct, leaves the
         // work waiting for it until the link expires.
-        let cfg = stored_email_provider(self.storage.as_ref(), self.keys.as_ref())
+        let cfg = sid::email_provider::stored(self.storage.as_ref(), self.keys.as_ref())
             .await
             .map_err(|e: ProviderError| e.to_string())?
             .ok_or("no email provider is configured")?;

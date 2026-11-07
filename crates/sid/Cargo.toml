@@ -26,6 +26,8 @@ sid-proto = { workspace = true }
 sid-ids-proto = { workspace = true }
 # The identifier kinds of stored references an answer carries.
 sid-ids = { workspace = true, features = ["std"] }
+# The stored form of sealed email provider credentials.
+base64 = { workspace = true }
 # Hex-encoded export checksums.
 hex = { workspace = true }
 prost = { workspace = true }
