@@ -507,7 +507,7 @@ pub async fn import(
     // Profiles before the projects they own, a manager before the profiles
     // it manages.
     info!(count = snapshot.profiles.len(), "importing profiles...");
-    for profile in managers_first(&snapshot.profiles)? {
+    for profile in references_first(&snapshot.profiles, |p| p.id, |p| p.manager_id, "profiles")? {
         match backend
             .create_profile(profile, audit("import_profile", &profile.id.to_string()))
             .await
@@ -816,7 +816,13 @@ pub async fn import(
     }
 
     info!(count = snapshot.sessions.len(), "importing sessions...");
-    for session in &snapshot.sessions {
+    // An application session after the IdP session it was authenticated by.
+    for session in references_first(
+        &snapshot.sessions,
+        |s| s.id,
+        |s| s.authenticated_by,
+        "sessions",
+    )? {
         result.sessions += created(
             backend
                 .create_session(session, audit("import_session", &session.id.to_string()))
@@ -940,7 +946,7 @@ pub async fn import(
         )
         .await?;
     }
-    for group in &snapshot.groups {
+    for group in references_first(&snapshot.groups, |g| g.id, |g| g.parent_group_id, "groups")? {
         result.groups += created(
             backend
                 .create_group(group, audit("import_group", &group.id.to_string()))
@@ -1010,7 +1016,12 @@ pub async fn import(
     // Role assignments after their roles and principals, a redelegated one
     // after its source. They are restored as recorded, envelope and
     // provenance included: the source installation authorized them.
-    for assignment in sources_first(&snapshot.role_assignments)? {
+    for assignment in references_first(
+        &snapshot.role_assignments,
+        |a| a.id,
+        |a| a.provenance.as_ref().and_then(|p| p.depends_on),
+        "role assignments",
+    )? {
         if backend
             .import_role_assignment(
                 assignment,
@@ -1407,65 +1418,44 @@ where
     }
 }
 
-/// `assignments` with every redelegated assignment after the source it
-/// depends on. A source missing from the snapshot must already be stored,
-/// or the store refuses the dependent; a dependency cycle is refused here.
-fn sources_first(
-    assignments: &[sid_core::models::RoleAssignment],
-) -> Result<Vec<&sid_core::models::RoleAssignment>> {
-    let listed: HashSet<_> = assignments.iter().map(|a| a.id).collect();
-    let mut placed = HashSet::with_capacity(assignments.len());
-    let mut ordered = Vec::with_capacity(assignments.len());
-    let mut pending: Vec<_> = assignments.iter().collect();
-    while !pending.is_empty() {
-        let before = pending.len();
-        pending.retain(|a| {
-            let waits = a
-                .provenance
-                .as_ref()
-                .and_then(|p| p.depends_on)
-                .is_some_and(|source| listed.contains(&source) && !placed.contains(&source));
-            if !waits {
-                placed.insert(a.id);
-                ordered.push(*a);
-            }
-            waits
-        });
-        if pending.len() == before {
-            return Err(invalid(format!(
-                "role assignments {:?} depend on each other in a cycle",
-                pending.iter().map(|a| a.id.to_string()).collect::<Vec<_>>()
-            )));
+/// `records` with each one after the record it references (`reference`),
+/// otherwise in their listed order. A reference outside `records`, or to the
+/// record itself, orders nothing: the store holds it or refuses the record.
+/// Records referencing each other in a cycle are refused, named `what`.
+fn references_first<'a, T, K>(
+    records: &'a [T],
+    key: impl Fn(&T) -> K,
+    reference: impl Fn(&T) -> Option<K>,
+    what: &str,
+) -> Result<Vec<&'a T>>
+where
+    K: std::hash::Hash + Eq,
+{
+    let index: HashMap<K, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (key(r), i))
+        .collect();
+    // Each record's dependents, and whether it waits for its reference.
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+    let mut waiting = vec![false; records.len()];
+    for (i, record) in records.iter().enumerate() {
+        if let Some(&referenced) = reference(record).and_then(|k| index.get(&k))
+            && referenced != i
+        {
+            dependents[referenced].push(i);
+            waiting[i] = true;
         }
     }
-    Ok(ordered)
-}
-
-/// `profiles` with every manager before the profiles it manages. A manager
-/// missing from the snapshot must already be stored, or the store refuses
-/// the profile; a management cycle is refused here.
-fn managers_first(
-    profiles: &[sid_core::models::Profile],
-) -> Result<Vec<&sid_core::models::Profile>> {
-    let listed: HashSet<_> = profiles.iter().map(|p| p.id).collect();
-    let mut placed = HashSet::with_capacity(profiles.len());
-    let mut ordered = Vec::with_capacity(profiles.len());
-    let mut pending: Vec<_> = profiles.iter().collect();
-    while !pending.is_empty() {
-        let before = pending.len();
-        pending.retain(|p| {
-            let waits = p
-                .manager_id
-                .is_some_and(|m| m != p.id && listed.contains(&m) && !placed.contains(&m));
-            if !waits {
-                placed.insert(p.id);
-                ordered.push(*p);
-            }
-            waits
-        });
-        if pending.len() == before {
-            return Err(invalid("profiles manage each other in a cycle"));
-        }
+    let mut ordered = Vec::with_capacity(records.len());
+    let mut ready: std::collections::VecDeque<usize> =
+        (0..records.len()).filter(|&i| !waiting[i]).collect();
+    while let Some(i) = ready.pop_front() {
+        ordered.push(&records[i]);
+        ready.extend(dependents[i].iter().copied());
+    }
+    if ordered.len() != records.len() {
+        return Err(invalid(format!("{what} reference each other in a cycle")));
     }
     Ok(ordered)
 }
