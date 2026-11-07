@@ -1,43 +1,72 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! gRPC PatService implementation.
-//!
-//! Manages personal access token lifecycle (create, list, revoke) and
-//! token exchange (opaque -> short-lived JWT) + introspection (RFC 7662).
+//! gRPC PatService implementation: authenticates the caller and answers
+//! through [`sid::pats`] (personal access token lifecycle and exchange).
 
-use sha2::{Digest, Sha256};
+use sid::pats::{PatError, Pats};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::models::{
-    AuditEntry, MutationContext, PatId, PatStatus as DomainPatStatus, PersonalAccessToken,
-    ProfileId,
-    pat::{PAT_MAX_ACTIVE_PER_USER, PAT_MAX_LIFETIME_DAYS},
-};
+use sid_core::models::pat::PAT_MAX_ACTIVE_PER_USER;
 use sid_infra::authn::caller::authenticate;
 use sid_infra::authn::operation::context;
+use sid_infra::grpc_error::refuse::{
+    changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::{
-    self, AdminRevokePatRequest, CreatePatRequest, CreatePatResponse, ExchangePatRequest,
+    AdminRevokePatRequest, CreatePatRequest, CreatePatResponse, ExchangePatRequest,
     ExchangePatResponse, GetPatRequest, ListAllPatsRequest, ListAllPatsResponse, ListPatsRequest,
-    ListPatsResponse, Pat, PatResponse, RevokePatRequest, RevokePatResponse,
+    ListPatsResponse, PatResponse, RevokePatRequest, RevokePatResponse,
     pat_service_server::PatService,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::info;
 
-use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
-
-use super::convert;
-use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
-
-/// Proto `PatStatus` enum alias to avoid collision with domain type.
-type ProtoPatStatus = v1::PatStatus;
+/// The status a personal access token refusal answers with.
+fn refusal(e: PatError) -> Status {
+    match e {
+        PatError::Caller(e) => e.into_status(),
+        PatError::Operation(e) => e.into_status(),
+        PatError::Store(e) => storage_failure(e),
+        PatError::MissingField(field) => missing_field(field),
+        PatError::InvalidField { field, reason } => invalid_field(field, reason),
+        PatError::NotFound(id) => not_found(
+            ErrorReason::CredentialNotFound,
+            "PersonalAccessToken",
+            id.to_string(),
+        ),
+        PatError::Unusable => {
+            ApiError::new(ErrorReason::TokenInvalid, "the token is not valid").into()
+        }
+        PatError::QuotaReached => ApiError::new(
+            ErrorReason::QuotaExceeded,
+            "the limit of active personal access tokens is reached",
+        )
+        .with_quota_violation(
+            "personal_access_tokens",
+            format!("at most {PAT_MAX_ACTIVE_PER_USER} active tokens per user"),
+        )
+        .into(),
+        PatError::NotResourceBound(id) => ApiError::new(
+            ErrorReason::InvalidState,
+            "the token is not bound to a registered resource; replace it",
+        )
+        .with_precondition(
+            "PAT_RESOURCE_BINDING",
+            id.to_string(),
+            "the token names no registered resource",
+        )
+        .into(),
+        PatError::ChangedConcurrently => changed_concurrently(),
+    }
+}
 
 /// gRPC service for personal access token management.
 pub struct PatServiceImpl {
-    storage: Arc<dyn StorageBackend>,
     jwt: Arc<JwtService>,
     revocation_cache: Arc<RevocationCache>,
+    pats: Pats,
 }
 
 impl PatServiceImpl {
@@ -48,407 +77,101 @@ impl PatServiceImpl {
         revocation_cache: Arc<RevocationCache>,
     ) -> Self {
         Self {
-            storage,
             jwt,
             revocation_cache,
+            pats: Pats::new(storage),
         }
     }
 
-    /// The profile of the caller managing its own tokens. Only a user's own
-    /// sign-in session may: a personal access token or an impersonation token
-    /// cannot mint, list or revoke personal access tokens.
-    #[allow(clippy::result_large_err)]
-    async fn token_owner<T>(&self, request: &Request<T>) -> Result<ProfileId, Status> {
-        let caller = authenticate(request, self.jwt.verifier(), &self.revocation_cache).await?;
-        caller.require_interactive().or_status()?;
-        Ok(caller.profile_id)
-    }
-
-    /// The administrator calling: listing every user's tokens and revoking
-    /// another user's token are instance administration.
-    #[allow(clippy::result_large_err)]
-    async fn admin<T>(&self, request: &Request<T>) -> Result<ProfileId, Status> {
-        let caller = authenticate(request, self.jwt.verifier(), &self.revocation_cache).await?;
-        caller.require_admin().or_status()?;
-        Ok(caller.profile_id)
-    }
-}
-
-// ── Helper functions ──
-
-/// Generate a new PAT token: returns `(plaintext, sha256_hash, prefix)`.
-///
-/// Format: `sid_pat_{32 base62 chars}` (40 chars total).
-/// Hash: SHA-256 hex digest of the full plaintext.
-/// Prefix: first 16 chars (`sid_pat_` + 8 random chars) for UI identification.
-fn generate_pat_token() -> (String, String, String) {
-    use rand::TryRng;
-    use rand::rngs::SysRng;
-
-    let mut bytes = [0u8; 32];
-    SysRng
-        .try_fill_bytes(&mut bytes)
-        .expect("the operating system random source is available");
-
-    const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let random: String = bytes
-        .iter()
-        .map(|b| BASE62[(*b as usize) % 62] as char)
-        .collect();
-    let token = format!("sid_pat_{random}");
-    let hash = sha256_hex(token.as_bytes());
-    let prefix = token[..16].to_string(); // "sid_pat_" (8) + 8 chars
-    (token, hash, prefix)
-}
-
-/// SHA-256 hex digest (no `hex` crate dependency).
-fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// CREDENTIAL_NOT_FOUND for a token that does not exist or is not the
-/// caller's: both answer alike, so another user's token is not revealed.
-fn pat_not_found(id: PatId) -> Status {
-    not_found(
-        ErrorReason::CredentialNotFound,
-        "PersonalAccessToken",
-        id.to_string(),
-    )
-}
-
-/// TOKEN_INVALID for a token that cannot be exchanged: unknown, revoked or
-/// expired alike.
-fn pat_unusable() -> Status {
-    ApiError::new(ErrorReason::TokenInvalid, "the token is not valid").into()
-}
-
-/// Convert domain `PersonalAccessToken` to proto `Pat` message.
-///
-/// NEVER includes the plaintext token value.
-fn pat_to_proto(pat: &PersonalAccessToken) -> Pat {
-    let status = match pat.status {
-        DomainPatStatus::Active => ProtoPatStatus::Active,
-        DomainPatStatus::Revoked => ProtoPatStatus::Revoked,
-        DomainPatStatus::Expired => ProtoPatStatus::Expired,
-    };
-
-    Pat {
-        id: Some(pat.id.into()),
-        profile_id: Some(pat.profile_id.into()),
-        name: pat.name.clone(),
-        description: pat.description.clone().unwrap_or_default(),
-        token_prefix: pat.token_prefix.clone(),
-        scopes: pat.scopes.clone(),
-        status: status.into(),
-        created_at: Some(convert::to_timestamp(pat.created_at)),
-        expires_at: pat.expires_at.map(convert::to_timestamp),
-        last_used_at: pat.last_used_at.map(convert::to_timestamp),
-        last_used_ip: pat.last_used_ip.clone().unwrap_or_default(),
-        use_count: pat.use_count,
-        revoked_at: pat.revoked_at.map(convert::to_timestamp),
-        revoked_by: pat.revoked_by.clone().unwrap_or_default(),
+    async fn caller<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
+        authenticate(request, self.jwt.verifier(), &self.revocation_cache).await
     }
 }
 
 #[tonic::async_trait]
 impl PatService for PatServiceImpl {
-    // ── User-facing CRUD ──
-
     async fn create_pat(
         &self,
         request: Request<CreatePatRequest>,
     ) -> Result<Response<CreatePatResponse>, Status> {
-        let profile_id = self.token_owner(&request).await?;
-        let context = context(&request)?;
-        let req = request.into_inner();
-        let command = sid_authn::operation::KeyedCommand::by_profile::<
-            sid_proto::keyed::machine::pat_service::CreatePat,
-        >(profile_id, context, &req);
-        // SID keeps only the token's hash: a retry of a completed creation
-        // answers with the token it created, its value empty, and creates no
-        // second token.
-        if let Some(recorded) = command
-            .replay::<CreatePatResponse>(&*self.storage)
+        let caller = self.caller(&request).await?;
+        // Only a user's own sign-in session mints a token; refused before
+        // the operation context is read.
+        caller.require_interactive().map_err(|e| e.into_status())?;
+        let operation = context(&request)?;
+        self.pats
+            .create(&caller, operation, request.into_inner())
             .await
-            .or_status()?
-        {
-            return Ok(Response::new(recorded));
-        }
-        // A refusal a concurrent attempt of this command caused (the slot its
-        // token took) is that attempt's answer.
-        let answer: Result<CreatePatResponse, Status> = async {
-            // Validate required fields.
-            if req.name.is_empty() {
-                return Err(missing_field("name"));
-            }
-            if req.scopes.is_empty() {
-                return Err(missing_field("scopes"));
-            }
-
-            // Validate expiration: must be provided and within policy limit.
-            let expires_at_ts = req
-                .expires_at
-                .as_ref()
-                .ok_or_else(|| missing_field("expires_at"))?;
-
-            let expires_at =
-                chrono::DateTime::from_timestamp(expires_at_ts.seconds, expires_at_ts.nanos as u32)
-                    .ok_or_else(|| invalid_field("expires_at", "not a representable time"))?;
-
-            let max_expiry =
-                chrono::Utc::now() + chrono::Duration::days(i64::from(PAT_MAX_LIFETIME_DAYS));
-            if expires_at > max_expiry {
-                return Err(invalid_field(
-                    "expires_at",
-                    format!("at most {PAT_MAX_LIFETIME_DAYS} days ahead"),
-                ));
-            }
-            if expires_at <= chrono::Utc::now() {
-                return Err(invalid_field("expires_at", "must be in the future"));
-            }
-
-            // Generate token (plaintext shown once, hash stored).
-            let (plaintext, hash, prefix) = generate_pat_token();
-
-            let mut pat =
-                PersonalAccessToken::new(profile_id, &req.name, &hash, &prefix, req.scopes.clone())
-                    .with_expires_at(expires_at);
-
-            if !req.description.is_empty() {
-                pat.description = Some(req.description.clone());
-            }
-            if !req.ip_allowlist.is_empty() {
-                pat.ip_allowlist = req.ip_allowlist;
-            }
-
-            let mut response = CreatePatResponse {
-                pat_id: Some(pat.id.into()),
-                token: String::new(),
-                token_prefix: prefix,
-                metadata: Some(pat_to_proto(&pat)),
-            };
-            let audit = MutationContext::from(AuditEntry::user(
-                profile_id.to_string(),
-                "pat.create",
-                pat.id.to_string(),
-            ))
-            .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
-
-            // The per-user limit is checked with the insert, so concurrent creates
-            // cannot exceed it.
-            match self
-                .storage
-                .create_pat(&pat, Some(PAT_MAX_ACTIVE_PER_USER as u64), audit)
-                .await
-            {
-                Ok(_) => {}
-                // Another attempt of this command committed first: its token is
-                // the created one.
-                Err(sid_core::Error::OperationCompleted(_)) => {
-                    return Err(sid_infra::grpc_error::refuse::changed_concurrently());
-                }
-                // The limit is counted before the key: the slot may be full with
-                // the token a concurrent attempt of this command made.
-                Err(sid_core::Error::ResourceExhausted(_)) => {
-                    return Err(ApiError::new(
-                        ErrorReason::QuotaExceeded,
-                        "the limit of active personal access tokens is reached",
-                    )
-                    .with_quota_violation(
-                        "personal_access_tokens",
-                        format!("at most {PAT_MAX_ACTIVE_PER_USER} active tokens per user"),
-                    )
-                    .into());
-                }
-                Err(e) => return Err(storage_failure(e)),
-            }
-
-            info!(
-                "Created PAT {} ({}) for profile {}",
-                pat.id, pat.name, pat.profile_id
-            );
-
-            // The value is shown in this answer only.
-            response.token = plaintext;
-            Ok(response)
-        }
-        .await;
-        Ok(Response::new(
-            command.settle(&*self.storage, answer).await.or_status()?,
-        ))
+            .map(Response::new)
+            .map_err(refusal)
     }
 
     async fn list_pats(
         &self,
         request: Request<ListPatsRequest>,
     ) -> Result<Response<ListPatsResponse>, Status> {
-        let profile_id = self.token_owner(&request).await?;
-
-        let pats = self
-            .storage
-            .list_pats_by_profile(profile_id)
+        let caller = self.caller(&request).await?;
+        self.pats
+            .list(&caller)
             .await
-            .map_err(storage_failure)?;
-
-        Ok(Response::new(ListPatsResponse {
-            pats: pats.iter().map(pat_to_proto).collect(),
-        }))
+            .map(Response::new)
+            .map_err(refusal)
     }
 
     async fn get_pat(
         &self,
         request: Request<GetPatRequest>,
     ) -> Result<Response<PatResponse>, Status> {
-        let caller_id = self.token_owner(&request).await?;
-        let req = request.into_inner();
-        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
-
-        let pat = self
-            .storage
-            .get_pat(pat_id)
+        let caller = self.caller(&request).await?;
+        self.pats
+            .get(&caller, request.into_inner())
             .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| pat_not_found(pat_id))?;
-
-        // Ownership check: users can only see their own PATs.
-        if pat.profile_id != caller_id {
-            return Err(pat_not_found(pat_id));
-        }
-
-        Ok(Response::new(PatResponse {
-            pat: Some(pat_to_proto(&pat)),
-        }))
+            .map(Response::new)
+            .map_err(refusal)
     }
 
     async fn revoke_pat(
         &self,
         request: Request<RevokePatRequest>,
     ) -> Result<Response<RevokePatResponse>, Status> {
-        let caller_id = self.token_owner(&request).await?;
-        let req = request.into_inner();
-        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
-
-        // Ownership check: users can only revoke their own PATs.
-        let pat = self
-            .storage
-            .get_pat(pat_id)
+        let caller = self.caller(&request).await?;
+        self.pats
+            .revoke(&caller, request.into_inner())
             .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| pat_not_found(pat_id))?;
-
-        if pat.profile_id != caller_id {
-            return Err(pat_not_found(pat_id));
-        }
-
-        let audit: MutationContext =
-            AuditEntry::user(caller_id.to_string(), "pat.revoke", pat_id.to_string()).into();
-
-        self.storage
-            .revoke_pat(pat_id, &caller_id.to_string(), audit)
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Revoked PAT {} by profile {}", pat_id, caller_id);
-
-        Ok(Response::new(RevokePatResponse {}))
+            .map(|()| Response::new(RevokePatResponse {}))
+            .map_err(refusal)
     }
-
-    // ── Token exchange ──
 
     async fn exchange_pat(
         &self,
         request: Request<ExchangePatRequest>,
     ) -> Result<Response<ExchangePatResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.token.is_empty() {
-            return Err(missing_field("token"));
-        }
-
-        // Hash the incoming opaque token to look up the stored PAT.
-        let token_hash = sha256_hex(req.token.as_bytes());
-
-        let pat = self
-            .storage
-            .get_pat_by_token_hash(&token_hash)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(pat_unusable)?;
-
-        if !pat.is_usable() {
-            return Err(pat_unusable());
-        }
-
-        // A stored token carries no registered resource to bind the issued
-        // token to, so no verifier could accept what it would be exchanged
-        // for. It is inadmissible until replaced by a resource-bound grant;
-        // nothing is issued and no use is recorded.
-        Err(ApiError::new(
-            ErrorReason::InvalidState,
-            "the token is not bound to a registered resource; replace it",
-        )
-        .with_precondition(
-            "PAT_RESOURCE_BINDING",
-            pat.id.to_string(),
-            "the token names no registered resource",
-        )
-        .into())
+        // Nothing is issued: an exchange is refused with its reason.
+        Err(refusal(self.pats.exchange(request.into_inner()).await))
     }
-
-    // ── Admin ──
 
     async fn list_all_pats(
         &self,
         request: Request<ListAllPatsRequest>,
     ) -> Result<Response<ListAllPatsResponse>, Status> {
-        self.admin(&request).await?;
-        let pats = self
-            .storage
-            .list_all_pats()
+        let caller = self.caller(&request).await?;
+        self.pats
+            .list_all(&caller)
             .await
-            .map_err(storage_failure)?;
-
-        Ok(Response::new(ListAllPatsResponse {
-            pats: pats.iter().map(pat_to_proto).collect(),
-        }))
+            .map(Response::new)
+            .map_err(refusal)
     }
 
     async fn admin_revoke_pat(
         &self,
         request: Request<AdminRevokePatRequest>,
     ) -> Result<Response<RevokePatResponse>, Status> {
-        let admin_id = self.admin(&request).await?;
-        let req = request.into_inner();
-        let pat_id = convert::wire_id(req.pat_id.as_ref(), "pat_id")?;
-
-        let audit: MutationContext =
-            AuditEntry::admin(admin_id.to_string(), "pat.admin_revoke", pat_id.to_string()).into();
-
-        let revoked = self
-            .storage
-            .revoke_pat(pat_id, &admin_id.to_string(), audit)
+        let caller = self.caller(&request).await?;
+        self.pats
+            .admin_revoke(&caller, request.into_inner())
             .await
-            .map_err(storage_failure)?;
-        if !revoked {
-            // Revoking a revoked token is a no-op; a token that does not
-            // exist is not found.
-            let exists = self
-                .storage
-                .get_pat(pat_id)
-                .await
-                .map_err(storage_failure)?
-                .is_some();
-            if !exists {
-                return Err(pat_not_found(pat_id));
-            }
-        }
-
-        info!("Admin {} revoked PAT {}", admin_id, pat_id);
-
-        Ok(Response::new(RevokePatResponse {}))
+            .map(|()| Response::new(RevokePatResponse {}))
+            .map_err(refusal)
     }
 }
 

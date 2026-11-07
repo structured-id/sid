@@ -16,6 +16,7 @@ pub mod installation;
 pub mod lifecycle;
 pub mod machines;
 pub mod maintenance;
+pub mod pats;
 pub mod projects;
 pub mod provisioning;
 pub mod security;
