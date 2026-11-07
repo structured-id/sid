@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.24](https://github.com/structured-id/sid/compare/v0.2.23...v0.2.24) - 2026-11-07
+
+### Other
+
+- *(engine)* self-registration in the engine library ([#501](https://github.com/structured-id/sid/pull/501))
+- *(engine)* password sign-in in the engine library ([#499](https://github.com/structured-id/sid/pull/499))
+- *(engine)* sign-in rules and sessions in the engine library ([#497](https://github.com/structured-id/sid/pull/497))
+- *(engine)* OAuth endpoints in the engine library ([#495](https://github.com/structured-id/sid/pull/495))
+- *(engine)* profile administration in the engine library ([#493](https://github.com/structured-id/sid/pull/493))
+- *(engine)* upstream provider administration in the engine library ([#491](https://github.com/structured-id/sid/pull/491))
+- *(engine)* personal access tokens in the engine library ([#489](https://github.com/structured-id/sid/pull/489))
+- *(engine)* sign-in flow configuration in the engine library ([#487](https://github.com/structured-id/sid/pull/487))
+- *(engine)* branding in the engine library ([#485](https://github.com/structured-id/sid/pull/485))
+- *(engine)* provisioning connectors in the engine library ([#483](https://github.com/structured-id/sid/pull/483))
+- *(engine)* security policy in the engine library ([#481](https://github.com/structured-id/sid/pull/481))
+- *(engine)* self-service account in the engine library ([#479](https://github.com/structured-id/sid/pull/479))
+- *(engine)* email provider settings in the engine library ([#477](https://github.com/structured-id/sid/pull/477))
+- *(engine)* enrollment in the engine library ([#475](https://github.com/structured-id/sid/pull/475))
+- *(engine)* profile management and governance in the engine library ([#473](https://github.com/structured-id/sid/pull/473))
+- *(engine)* authorization management in the engine library ([#471](https://github.com/structured-id/sid/pull/471))
+- *(engine)* an embedded installation decides permissions in process ([#466](https://github.com/structured-id/sid/pull/466))
+- *(infra)* shared inbound gRPC adapters, cores without the transport ([#468](https://github.com/structured-id/sid/pull/468))
+- *(engine)* project management in the engine library ([#469](https://github.com/structured-id/sid/pull/469))
+- *(engine)* machine identity operations in the engine library ([#460](https://github.com/structured-id/sid/pull/460))
+- *(engine)* engine library without the gRPC transport ([#462](https://github.com/structured-id/sid/pull/462))
+- *(authn)* authenticate a caller without the gRPC transport ([#457](https://github.com/structured-id/sid/pull/457))
+- *(engine)* the engine library is the sid package ([#449](https://github.com/structured-id/sid/pull/449))
+
 ## [0.2.23](https://github.com/structured-id/sid/compare/v0.2.22...v0.2.23) - 2026-11-06
 
 ### Added
