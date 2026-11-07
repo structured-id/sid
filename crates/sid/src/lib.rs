@@ -15,6 +15,7 @@ pub mod lifecycle;
 pub mod machines;
 pub mod maintenance;
 pub mod projects;
+pub mod provisioning;
 pub mod security;
 mod wire;
 
