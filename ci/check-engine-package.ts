@@ -69,6 +69,8 @@ function run(cwd: string, env: NodeJS.ProcessEnv, ...argv: string[]): string {
 function main(): void {
   const work = mkdtempSync(join(tmpdir(), "sid-engine-package-"));
   const env = { ...process.env, CARGO_TARGET_DIR: join(work, "target") };
+  // The packaged proto sources only, never a directory of this checkout.
+  delete env.SID_PROTO_DIR;
   try {
     // The ZKPP crate lives in its own workspace (the zkpp submodule); the
     // engine resolves it by version, as its consumers will.
@@ -137,6 +139,23 @@ function main(): void {
         throw new Error(`the ${store.name} engine closure holds ${[...unexpected, ...privateCrates].join(", ")}`);
       }
       console.log(`verified: the ${store.name} engine closure of ${held.size} packages holds no service, unselected driver, native provider or private crate`);
+      // Each SID package the build selects is the unpacked archive at its
+      // packaged version: a patch Cargo did not apply would show here.
+      const resolved: Metadata & { packages: { manifest_path: string }[] } = JSON.parse(
+        run(consumer, env, "cargo", "metadata", ...features, "--format-version", "1"),
+      );
+      for (const pkg of resolved.packages) {
+        const owned = pkg.name === "structured-id" || pkg.name.startsWith("sid-");
+        const published = pkg.name === "sid-ids" || pkg.name === "sid-ids-proto";
+        if (!owned || published) {
+          continue;
+        }
+        const archive = sources.get(pkg.name);
+        if (archive === undefined || !pkg.manifest_path.startsWith(`${archive}/`)) {
+          throw new Error(`${pkg.name} ${pkg.version} resolved from ${pkg.manifest_path}, not its archive`);
+        }
+      }
+      console.log(`verified: every SID package of the ${store.name} build is its unpacked archive`);
       execFileSync("cargo", ["run", ...features, "--", store.name], { cwd: consumer, env, stdio: "inherit" });
     }
   } catch (error) {

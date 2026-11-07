@@ -198,6 +198,62 @@ fn recorded_in(
     Arc::new(RevocationCache::recorded_in(lifetime, shared, store))
 }
 
+/// A warm process whose listener stopped, or was dropped, no longer learns of
+/// revocations: from then on a local miss is confirmed in the shared cache,
+/// so a token another process revokes afterwards is refused.
+#[tokio::test]
+async fn test_a_stopped_listener_turns_the_cache_cold() {
+    for stop in [true, false] {
+        let shared: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+        let a = RevocationCache::new(Duration::from_millis(20), shared.clone());
+        let b = Arc::new(RevocationCache::new(Duration::from_millis(20), shared));
+        let listener = b.listen().await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!revoked(&b, "jti-late", "any").await, "warm and clean");
+        if stop {
+            listener.stop().await;
+        } else {
+            drop(listener);
+        }
+        a.revoke_jti("jti-late".to_string(), Duration::from_millis(20))
+            .await
+            .unwrap();
+        assert!(
+            revoked(&b, "jti-late", "any").await,
+            "a revocation after the listener {} is refused",
+            if stop { "stopped" } else { "was dropped" }
+        );
+    }
+}
+
+/// A stop interrupted at its first wait leaves no task running: every task
+/// was aborted before the wait, and the listener still owns the rest.
+#[tokio::test]
+async fn test_an_interrupted_stop_leaves_no_task() {
+    let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
+    let cache = recorded_in(
+        &store,
+        Duration::from_secs(900),
+        Arc::new(InMemoryCacheBackend::new()),
+    );
+    let listener = cache.listen().await;
+    // The stop is polled once, then dropped wherever its wait stood.
+    let mut stop = Box::pin(listener.stop());
+    std::future::poll_fn(|cx| {
+        let polled = stop.as_mut().poll(cx);
+        std::task::Poll::Ready(polled.is_ready())
+    })
+    .await;
+    drop(stop);
+    drop(cache);
+    // The heartbeat holds the store until it ends: it must have been aborted
+    // with the rest, not left for its next beat.
+    assert!(
+        eventually(|| Arc::strong_count(&store) == 1).await,
+        "every task ended and released the store"
+    );
+}
+
 /// A stopped listener holds nothing: the cache and the store it read are
 /// released, so a host can close its database after its installation.
 #[tokio::test]

@@ -25,6 +25,11 @@ sid-proto = "0.2"
 sid-storage = { version = "0.2", default-features = false }
 # The host selects pure-Rust primitives and the JWT provider.
 sid-crypto = { version = "0.1", default-features = false, features = ["std", "primitives", "jwt-rustcrypto"] }
+# The client half of OPAQUE registration and sign-in, as an application's
+# client runs it.
+sid-opaque-ke = "4.2"
+sid-pake-core = "0.1"
+rand = "0.10"
 # The host's own CoordiNode database.
 coordinode-embed = { version = "0.9", optional = true }
 async-trait = "0.1"
