@@ -33,6 +33,9 @@ sid-ids = { workspace = true, features = ["std", "serde"] }
 sid-core = { workspace = true }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
+# The primitives the host supplies to seal a snapshot archive (AES-256-GCM,
+# SHA-256, random nonces); no implementation is selected here.
+sid-crypto = { workspace = true, features = ["std"] }
 
 # SQL — backend layer (features selected per storage backend)
 sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "json", "ipnet"], optional = true }

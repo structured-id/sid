@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Export an installation's database into a snapshot.
+
+use chrono::Utc;
+use sid_plugin::SnapshotRules;
+use sid_plugin::history_keys::HistoryKeyStore;
+use sid_plugin::storage::StorageBackend;
+use tracing::info;
+
+use super::{IssuerSnapshot, Result, Snapshot};
+
+/// Read every persistent entity of `backend`, and the history evaluator's
+/// sealed keys from `keys`, into a snapshot checked by `rules`. The caller
+/// quiesces the installation first: the snapshot is consistent only when
+/// nothing writes while it is read. Expired sessions are left out.
+pub async fn export(
+    backend: &dyn StorageBackend,
+    keys: &dyn HistoryKeyStore,
+    rules: &dyn SnapshotRules,
+) -> Result<Snapshot> {
+    let mut snapshot = Snapshot::new(backend.name());
+    snapshot.organization = backend.instance_organization().await?;
+    snapshot.metadata.installation_org = snapshot.organization.as_ref().map(|o| o.id);
+    for issuer in backend.list_oidc_issuers().await? {
+        let keys = backend.oidc_issuer_signing_keys(issuer.id).await?;
+        snapshot.oidc_issuers.push(IssuerSnapshot { issuer, keys });
+    }
+    snapshot.key_versions = backend.list_key_versions().await?;
+    // The evaluator's keys are sealed under its own custody, which may run
+    // apart from this service and rotate on its own.
+    snapshot.history_key_versions = keys.list_key_versions().await?;
+    // A raised cutoff withdraws keys; the target must keep refusing them.
+    snapshot.history_write_cutoff = backend.history_write_cutoff().await?;
+    snapshot.history_key_write_cutoff = keys.write_cutoff().await?;
+    snapshot.opaque_server_setup = backend
+        .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
+        .await?;
+
+    info!("exporting projects...");
+    let mut offset = 0u64;
+    loop {
+        let batch = backend.list_projects(offset, 1000).await?;
+        if batch.is_empty() {
+            break;
+        }
+        offset += batch.len() as u64;
+        snapshot.projects.extend(batch);
+    }
+
+    info!("exporting profiles...");
+    offset = 0;
+    loop {
+        let batch = backend.list_profiles(offset, 1000).await?;
+        if batch.is_empty() {
+            break;
+        }
+        offset += batch.len() as u64;
+        snapshot.profiles.extend(batch);
+    }
+
+    info!("exporting per-profile entities...");
+    let installation = snapshot.metadata.installation_org;
+    for profile in &snapshot.profiles {
+        let pid = profile.id;
+        snapshot
+            .password_histories
+            .push((pid, backend.export_password_history(pid).await?));
+        // The evaluator keys its store by the owner's history domain, which
+        // the installation authority and the profile define.
+        if let Some(installation) = installation
+            && let Some(archive) = keys
+                .export_keys(&rules.history_owner_domain(installation, pid))
+                .await?
+        {
+            snapshot.history_keys.push(archive);
+        }
+        snapshot
+            .principals
+            .extend(backend.get_principals_by_profile(pid).await?);
+        snapshot
+            .credentials
+            .extend(backend.get_credentials_by_profile(pid, None).await?);
+        let now = Utc::now();
+        snapshot.sessions.extend(
+            backend
+                .list_sessions(&pid)
+                .await?
+                .into_iter()
+                .filter(|s| s.expires_at > now),
+        );
+        snapshot
+            .service_bindings
+            .extend(backend.list_service_bindings(pid).await?);
+        snapshot
+            .profile_metadata
+            .extend(backend.list_profile_metadata(pid).await?);
+        snapshot
+            .devices
+            .extend(backend.list_devices_by_profile(pid).await?);
+        snapshot
+            .device_attestations
+            .extend(backend.list_device_attestations_by_profile(pid).await?);
+        // Memberships of this profile only: each is listed once.
+        for group in backend.list_groups_for_profile(pid).await? {
+            snapshot.group_members.extend(
+                backend
+                    .list_group_members(group.id)
+                    .await?
+                    .into_iter()
+                    .filter(|m| m.profile_id == pid),
+            );
+        }
+        snapshot
+            .role_assignments
+            .extend(backend.list_role_assignments_for_profile(pid).await?);
+        snapshot
+            .profile_grants
+            .extend(backend.list_profile_grants_for_profile(pid).await?);
+        snapshot
+            .upstream_identities
+            .extend(backend.list_upstream_identities_by_profile(pid).await?);
+        snapshot
+            .personal_access_tokens
+            .extend(backend.list_pats_by_profile(pid).await?);
+        if let Some(closure) = backend.get_closure_request(pid).await? {
+            snapshot.closure_requests.push(closure);
+        }
+        if let Some(job) = backend.get_export_job(pid).await? {
+            snapshot.export_jobs.push(job);
+        }
+    }
+
+    info!("exporting per-project entities...");
+    for project in &snapshot.projects {
+        let proj_id = project.id;
+        let mut app_offset = 0u64;
+        loop {
+            let batch = backend
+                .list_applications_by_project(proj_id, app_offset, 1000)
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            app_offset += batch.len() as u64;
+            snapshot.applications.extend(batch);
+        }
+
+        // OAuth2 clients, with the access and roles each holds.
+        let mut client_offset = 0u64;
+        loop {
+            let batch = backend
+                .list_oauth2_clients_by_project(proj_id, client_offset, 1000)
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            client_offset += batch.len() as u64;
+            for client in &batch {
+                snapshot.resource_access.extend(
+                    backend
+                        .list_resource_access_by_client(&client.client_id)
+                        .await?,
+                );
+                snapshot.role_assignments.extend(
+                    backend
+                        .list_role_assignments_for_oauth_client(&client.client_id)
+                        .await?,
+                );
+            }
+            snapshot.oauth2_clients.extend(batch);
+        }
+
+        snapshot.roles.extend(backend.list_roles(proj_id).await?);
+        let groups = backend.list_groups(proj_id).await?;
+        for group in &groups {
+            snapshot
+                .role_assignments
+                .extend(backend.list_role_assignments_for_group(group.id).await?);
+        }
+        snapshot.groups.extend(groups);
+        snapshot.cedar_policies.extend(
+            backend
+                .list_cedar_policies(sid_core::models::PolicyScope::Project(proj_id))
+                .await?,
+        );
+        // Grants already collected per profile are listed once.
+        for grant in backend.list_profile_grants_for_project(proj_id).await? {
+            if !snapshot.profile_grants.iter().any(|g| g.id == grant.id) {
+                snapshot.profile_grants.push(grant);
+            }
+        }
+        snapshot.initial_access_tokens.extend(
+            backend
+                .list_initial_access_tokens_by_project(proj_id)
+                .await?,
+        );
+        let machine_users = backend.list_machine_users_by_project(proj_id).await?;
+        for mu in &machine_users {
+            snapshot
+                .machine_credentials
+                .extend(backend.list_machine_credentials_by_user(mu.id).await?);
+            snapshot
+                .impersonation_grants
+                .extend(backend.list_impersonation_grants(mu.id).await?);
+            snapshot.role_assignments.extend(
+                backend
+                    .list_role_assignments_for_machine_user(mu.id)
+                    .await?,
+            );
+            snapshot.resource_access.extend(
+                backend
+                    .list_resource_access_by_client(&mu.client_id)
+                    .await?,
+            );
+        }
+        snapshot.machine_users.extend(machine_users);
+        snapshot
+            .branding_configs
+            .extend(backend.list_branding_configs(proj_id).await?);
+        let scim_targets = backend.list_scim_outbound_targets(proj_id).await?;
+        for target in &scim_targets {
+            snapshot
+                .outbound_dlq_entries
+                .extend(backend.list_outbound_dlq_entries(target.id).await?);
+        }
+        snapshot.scim_outbound_targets.extend(scim_targets);
+    }
+
+    info!("exporting installation-wide entities...");
+    // Upstream providers, disabled ones included: an import restores them as
+    // they were.
+    snapshot
+        .upstream_providers
+        .extend(backend.list_upstream_providers().await?);
+    snapshot.sod_rules.extend(backend.list_sod_rules().await?);
+    // Protected resources, retired ones included: their indicators stay
+    // reserved in the target.
+    let mut resource_offset = 0u64;
+    loop {
+        let batch = backend
+            .list_protected_resources(resource_offset, 1000)
+            .await?;
+        if batch.is_empty() {
+            break;
+        }
+        resource_offset += batch.len() as u64;
+        snapshot.protected_resources.extend(batch);
+    }
+    // Cedar policies of the installation and of each protected resource.
+    snapshot.cedar_policies.extend(
+        backend
+            .list_cedar_policies(sid_core::models::PolicyScope::Installation)
+            .await?,
+    );
+    for resource in &snapshot.protected_resources {
+        snapshot.cedar_policies.extend(
+            backend
+                .list_cedar_policies(sid_core::models::PolicyScope::Resource(resource.id))
+                .await?,
+        );
+    }
+    // Durable work: owed deliveries and the failed ones kept as dead letters.
+    snapshot.durable_work = backend.export_work().await?;
+    // Completed keyed commands and the periods they were named with: a retry
+    // that arrives after the move must still find its result instead of
+    // executing again, and a retired period stays retired.
+    snapshot.operation_periods = backend.export_operation_periods().await?;
+    snapshot.operation_results = backend.export_operation_results().await?;
+    snapshot.operation_resources = backend.export_operation_resources().await?;
+
+    super::import::validate(&snapshot, rules)?;
+    snapshot.metadata.total_entities = snapshot.count_entities();
+    snapshot.metadata.created_at = Utc::now();
+    info!(total = snapshot.metadata.total_entities, "export complete");
+    Ok(snapshot)
+}

@@ -25,6 +25,9 @@ pub use postgres::{PgHistoryKeyStore, PgOperationStore, PgWorkStore, PostgresBac
 #[cfg(feature = "storage-pg")]
 pub use postgres_blob::PostgresBlobStore;
 
+/// The portable snapshot: over the storage traits, any backend.
+pub mod snapshot;
+
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub mod application_store;
 #[cfg(any(
