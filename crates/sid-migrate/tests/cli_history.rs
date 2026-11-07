@@ -19,6 +19,13 @@ fn ctx() -> MutationContext {
     AuditEntry::system("test", "cli").into()
 }
 
+/// An archive key file of 32 random bytes in `dir`.
+fn key_file(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("archive.key");
+    std::fs::write(&path, rand::random::<[u8; 32]>()).unwrap();
+    path
+}
+
 /// The evaluator's key version the source's history key is sealed under.
 fn history_key_version() -> sid_keys::KeyVersionParams {
     sid_keys::KeyVersionParams::new(1, vec![7; 16], "history-v1")
@@ -130,7 +137,8 @@ async fn cli_refuses_a_schema_for_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let org = Organization::implicit_community("sid.example.com");
     let source = source_with_history(dir.path(), &org).await;
-    let output_path = dir.path().join("snapshot.json");
+    let output_path = dir.path().join("snapshot.sidsnap");
+    let key = key_file(dir.path());
     let exported = run(&[
         "export",
         "--source",
@@ -139,6 +147,8 @@ async fn cli_refuses_a_schema_for_sqlite() {
         "tenant_a",
         "--output",
         output_path.to_str().unwrap(),
+        "--key-file",
+        key.to_str().unwrap(),
     ]);
     assert!(
         !exported.status.success(),
@@ -163,7 +173,11 @@ async fn cli_refuses_a_schema_for_sqlite() {
 async fn cli_refuses_a_bad_target_before_any_io() {
     let dir = tempfile::tempdir().unwrap();
     let target = format!("sqlite://{}", dir.path().join("target.sqlite").display());
-    let missing = dir.path().join("missing.json");
+    let missing = dir.path().join("missing.sidsnap");
+    // Neither the archive nor its key exists: a check after reading either
+    // would report the missing file instead.
+    let no_key = dir.path().join("missing.key");
+    let no_key = no_key.to_str().unwrap();
     let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
     // A URL the backend's own parser refuses (the port is out of range).
     let malformed = "postgres://sid@127.0.0.1:99999/sid";
@@ -181,6 +195,8 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 "tenant_a",
                 "--input",
                 missing.to_str().unwrap(),
+                "--key-file",
+                no_key,
             ],
             sqlite_schema,
         ),
@@ -217,6 +233,8 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 "tenant a",
                 "--input",
                 missing.to_str().unwrap(),
+                "--key-file",
+                no_key,
             ],
             malformed_schema,
         ),
@@ -241,6 +259,8 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 "sqlite:///tmp/keys.db",
                 "--input",
                 missing.to_str().unwrap(),
+                "--key-file",
+                no_key,
             ],
             history_keys_url,
         ),
@@ -263,6 +283,8 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 malformed,
                 "--input",
                 missing.to_str().unwrap(),
+                "--key-file",
+                no_key,
             ],
             malformed_url,
         ),
@@ -279,6 +301,8 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 malformed,
                 "--input",
                 missing.to_str().unwrap(),
+                "--key-file",
+                no_key,
             ],
             malformed_url,
         ),
@@ -303,21 +327,24 @@ async fn cli_refuses_a_bad_target_before_any_io() {
 async fn cli_moves_history_and_protects_the_export() {
     let dir = tempfile::tempdir().unwrap();
     let target_path = dir.path().join("target.sqlite");
-    let output_path = dir.path().join("snapshot.json");
+    let output_path = dir.path().join("snapshot.sidsnap");
     let target_url = format!("sqlite://{}", target_path.display());
-    // The target is an installation of the same authority, as a restore has it.
+    // The target is an uninitialized installation, the only kind a snapshot
+    // is imported into.
     let org = Organization::implicit_community("sid.example.com");
     let source = source_with_history(dir.path(), &org).await;
-    let target = SqliteBackend::new(target_path.to_str().unwrap())
-        .await
-        .unwrap();
-    target
-        .insert_instance_organization(&org, ctx())
-        .await
-        .unwrap();
-    drop(target);
+    let key = key_file(dir.path());
+    let key = key.to_str().unwrap();
     let output = output_path.to_str().unwrap();
-    let exported = run(&["export", "--source", &source.url, "--output", output]);
+    let exported = run(&[
+        "export",
+        "--source",
+        &source.url,
+        "--output",
+        output,
+        "--key-file",
+        key,
+    ]);
     assert!(
         exported.status.success(),
         "{}",
@@ -337,12 +364,50 @@ async fn cli_moves_history_and_protects_the_export() {
     }
     let bytes = std::fs::read(&output_path).unwrap();
     assert!(
-        !run(&["export", "--source", &source.url, "--output", output])
-            .status
-            .success()
+        !run(&[
+            "export",
+            "--source",
+            &source.url,
+            "--output",
+            output,
+            "--key-file",
+            key
+        ])
+        .status
+        .success()
     );
     assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
-    let imported = run(&["import", "--target", &target_url, "--input", output]);
+    // The archive holds the snapshot encrypted.
+    assert!(
+        !bytes
+            .windows(b"cli-history-transfer".len())
+            .any(|w| w == b"cli-history-transfer")
+    );
+    let other_key = dir.path().join("other.key");
+    std::fs::write(&other_key, [1u8; 32]).unwrap();
+    assert!(
+        !run(&[
+            "import",
+            "--target",
+            &target_url,
+            "--input",
+            output,
+            "--key-file",
+            other_key.to_str().unwrap()
+        ])
+        .status
+        .success(),
+        "an archive opened under another key"
+    );
+    let imported = run(&[
+        "import",
+        "--target",
+        &target_url,
+        "--input",
+        output,
+        "--key-file",
+        key,
+    ]);
     assert!(
         imported.status.success(),
         "{}",
@@ -385,9 +450,11 @@ fn database_url() -> String {
 #[tokio::test]
 async fn cli_restores_history_keys_into_the_evaluators_own_database() {
     let dir = tempfile::tempdir().unwrap();
-    let output_path = dir.path().join("snapshot.json");
+    let output_path = dir.path().join("snapshot.sidsnap");
     let org = Organization::implicit_community("sid.example.com");
     let source = source_with_history(dir.path(), &org).await;
+    let key = key_file(dir.path());
+    let key = key.to_str().unwrap();
 
     // Two schemas of the test database stand for the two databases.
     let suffix = uuid::Uuid::now_v7().simple();
@@ -397,10 +464,6 @@ async fn cli_restores_history_keys_into_the_evaluators_own_database() {
         .await
         .expect("PostgreSQL test database at 54399");
     sid_storage::migrator::run_migrations(target.pool(), Some(&storage_schema))
-        .await
-        .unwrap();
-    target
-        .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
     sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -416,7 +479,15 @@ async fn cli_restores_history_keys_into_the_evaluators_own_database() {
     let target_url = database_url();
 
     let output = output_path.to_str().unwrap();
-    let exported = run(&["export", "--source", &source.url, "--output", output]);
+    let exported = run(&[
+        "export",
+        "--source",
+        &source.url,
+        "--output",
+        output,
+        "--key-file",
+        key,
+    ]);
     assert!(
         exported.status.success(),
         "{}",
@@ -432,6 +503,8 @@ async fn cli_restores_history_keys_into_the_evaluators_own_database() {
         &keys_url,
         "--input",
         output,
+        "--key-file",
+        key,
     ]);
     assert!(
         imported.status.success(),

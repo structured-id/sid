@@ -32,8 +32,9 @@ fn ensure(holds: bool, what: &str) -> Result<()> {
 
 /// Check the snapshot as a whole before anything uses it: its format, its
 /// installation identity, its issuers and device bindings, the sealed
-/// OPAQUE setup's public metadata and the password history state.
-pub(super) fn validate(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
+/// OPAQUE setup's public metadata and the password history state. Export
+/// and import both run it; a host may run it on an opened archive first.
+pub fn validate(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
     if snapshot.metadata.version != FORMAT_VERSION {
         return Err(SnapshotError::Format(snapshot.metadata.version));
     }
@@ -1169,3 +1170,6 @@ impl std::fmt::Display for ImportResult {
         writeln!(f, "  Total:                {}", self.total())
     }
 }
+
+#[cfg(test)]
+mod tests;

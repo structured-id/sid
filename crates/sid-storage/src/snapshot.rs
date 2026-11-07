@@ -30,7 +30,7 @@ mod import;
 mod verify;
 
 pub use export::export;
-pub use import::{ImportResult, import};
+pub use import::{ImportResult, import, validate};
 pub use verify::{CountCheck, VerifyResult, verify};
 
 /// Why a snapshot could not be exported, sealed, opened, imported or

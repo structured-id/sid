@@ -1,37 +1,57 @@
-use super::*;
-use crate::export::export_snapshot;
-use sid_core::models::{BindingScope, Profile};
+// SPDX-License-Identifier: AGPL-3.0-only
+//! The portable snapshot between SQLite installations with the
+//! authentication core's rules: what a transfer restores is usable after it
+//! (passwords open, retained history is enforced), and what it may not take
+//! is refused before anything is written.
+
+use sid_authn::snapshot_rules::AuthnSnapshotRules;
+use sid_core::models::{AuditEntry, BindingScope, MutationContext, Profile};
+use sid_plugin::storage::StorageBackend;
 use sid_plugin::{
     ClientResourceRegistry, CredentialStore, InstanceSecretStore, IssuerStore, OperationResultStore,
 };
+use sid_storage::snapshot::{self, ImportResult, Snapshot, SnapshotError, VerifyResult};
 use sid_storage::sqlite::SqliteBackend;
 
 /// Export a standalone SQLite installation: its storage and the history
 /// evaluator's key store in the same database.
-async fn export(source: &SqliteBackend) -> anyhow::Result<crate::snapshot::Snapshot> {
-    export_snapshot(source, &source.history_keys(), "sqlite::memory:", false).await
+async fn export(source: &SqliteBackend) -> Result<Snapshot, SnapshotError> {
+    snapshot::export(source, &source.history_keys(), &AuthnSnapshotRules).await
 }
 
 /// Import into a standalone SQLite installation.
 async fn import(
     target: &SqliteBackend,
-    snapshot: &crate::snapshot::Snapshot,
-) -> anyhow::Result<ImportResult> {
-    import_snapshot(target, &target.history_keys(), snapshot).await
+    snapshot: &Snapshot,
+) -> Result<ImportResult, SnapshotError> {
+    snapshot::import(
+        target,
+        &target.history_keys(),
+        &AuthnSnapshotRules,
+        &sid_crypto::RustCryptoPrimitives::new(),
+        snapshot,
+    )
+    .await
 }
 
 /// Verify one standalone SQLite installation against another.
 async fn verify(
     source: &SqliteBackend,
     target: &SqliteBackend,
-) -> anyhow::Result<crate::verify::VerifyResult> {
-    crate::verify::verify_backends(
+) -> Result<VerifyResult, SnapshotError> {
+    snapshot::verify(
         source,
         &source.history_keys(),
         target,
         &target.history_keys(),
+        &AuthnSnapshotRules,
     )
     .await
+}
+
+/// An uninitialized installation, the only kind a snapshot is imported into.
+async fn uninitialized() -> SqliteBackend {
+    SqliteBackend::new_in_memory().await.unwrap()
 }
 
 /// The history epoch the credential service records for `owner` from the
@@ -53,7 +73,7 @@ fn recorded(
     }
 }
 
-/// A standalone installation of authority `org`, as a restored target has it.
+/// A standalone installation of authority `org`: an initialized source.
 async fn installation(org: &sid_core::models::Organization) -> SqliteBackend {
     let backend = SqliteBackend::new_in_memory().await.unwrap();
     backend
@@ -388,13 +408,13 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     credential = proved;
 
     let snapshot = export(&source).await.unwrap();
-    let snapshot: crate::snapshot::Snapshot =
+    let snapshot: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
     // An archive may not install credentials before resolving missing key
     // metadata, a substituted sealing context or conflicting destination state.
     let mut missing = snapshot.clone();
     missing.opaque_server_setup = None;
-    let blank = installation(&org).await;
+    let blank = uninitialized().await;
     assert!(import(&blank, &missing).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
     missing = snapshot.clone();
@@ -434,8 +454,9 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         .unwrap();
     assert!(import(&blank, &snapshot).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
-    let target = installation(&org).await;
+    let target = uninitialized().await;
     import(&target, &snapshot).await.unwrap();
+    // A second import of the same snapshot resumes it and adds nothing.
     import(&target, &snapshot).await.unwrap();
     assert!(verify(&source, &target).await.unwrap().passed);
     // Matching record counts/history cannot hide a different setup. Model a
@@ -445,7 +466,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
         .await
         .unwrap();
-    let altered = installation(&org).await;
+    let altered = uninitialized().await;
     import(&altered, &mismatched).await.unwrap();
     let comparison = verify(&source, &altered).await.unwrap();
     assert!(comparison.counts.iter().all(|c| c.matches));
@@ -581,8 +602,9 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     assert_eq!(history_after.entries.len(), 1);
     assert_eq!(history_after.revision, history_before.revision + 1);
     let snapshot = export(&target).await.unwrap();
-    let snapshot = serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
-    let restarted = installation(&org).await;
+    let snapshot: Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let restarted = uninitialized().await;
     import(&restarted, &snapshot).await.unwrap();
     let restart_keys = manager([9; 32], restarted.list_key_versions().await.unwrap());
     let setup = server_setup::load_or_create(&restarted, &restart_keys, &PallasOpaque::new())
@@ -945,7 +967,7 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         .unwrap();
     let snapshot = export(&source).await.unwrap();
     let bytes = serde_json::to_vec(&snapshot).unwrap();
-    let snapshot: crate::snapshot::Snapshot = serde_json::from_slice(&bytes).unwrap();
+    let snapshot: Snapshot = serde_json::from_slice(&bytes).unwrap();
     // The evaluator's active epoch is the history's, or a replacement the
     // history does not record yet (a rotation not committed when the
     // snapshot was taken). Another recorded epoch active on the key side is a
@@ -977,7 +999,7 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         vec![(active.epoch.id, 3)],
     );
     assert!(
-        crate::import::validate_history(&diverged).is_err(),
+        snapshot::validate(&diverged, &AuthnSnapshotRules).is_err(),
         "a recorded epoch active only on the key side was accepted"
     );
     let rotated = evaluator.new_epoch(domain, ksf).await.unwrap();
@@ -989,9 +1011,9 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         ],
         vec![(old.epoch.id, 2), (active.epoch.id, 3)],
     );
-    crate::import::validate_history(&rotated)
+    snapshot::validate(&rotated, &AuthnSnapshotRules)
         .expect("a rotation the history does not record yet is a valid state");
-    let target = installation(&org).await;
+    let target = uninitialized().await;
     import(&target, &snapshot).await.unwrap();
     let history = target.get_password_history(profile.id).await.unwrap();
     assert_eq!(history.entries.len(), 2);
@@ -1187,7 +1209,7 @@ async fn password_history_survives_migration() {
     // snapshot is refused before anything is written.
     let mut keyless = snapshot.clone();
     keyless.history_keys.clear();
-    let blank = installation(&org).await;
+    let blank = uninitialized().await;
     assert!(import(&blank, &keyless).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
 
@@ -1195,11 +1217,11 @@ async fn password_history_survives_migration() {
     // it: every later replacement would find the history unavailable.
     let mut retired = snapshot.clone();
     retired.history_keys[0].epochs[0].epoch.status = sid_core::models::HistoryEpochUse::Retired;
-    let blank = installation(&org).await;
+    let blank = uninitialized().await;
     assert!(import(&blank, &retired).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
 
-    let target = installation(&org).await;
+    let target = uninitialized().await;
     import(&target, &snapshot).await.unwrap();
     assert_eq!(
         target.get_password_history(profile.id).await.unwrap(),
@@ -1270,8 +1292,172 @@ async fn history_transfer_refuses_a_different_authority() {
         "other.example.com",
     ))
     .await;
-    assert!(import(&target, &snapshot).await.is_err());
+    assert!(matches!(
+        import(&target, &snapshot).await,
+        Err(SnapshotError::Target(_))
+    ));
     assert_eq!(target.count_profiles().await.unwrap(), 0);
+}
+
+/// An initialized installation of the same authority is not an import
+/// destination: only the interrupted import of this same snapshot is
+/// resumed there. A different snapshot of that authority, or one whose
+/// contents changed under the same id, is refused before anything is
+/// written.
+#[tokio::test]
+async fn only_the_same_snapshot_resumes_into_an_initialized_target() {
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let ctx = || AuditEntry::system("test", "resume").into();
+    source
+        .create_profile(&Profile::new(Some("resume-a")), ctx())
+        .await
+        .unwrap();
+    let first = export(&source).await.unwrap();
+
+    // The same authority, initialized on its own: not a destination.
+    let initialized = installation(&org).await;
+    assert!(matches!(
+        import(&initialized, &first).await,
+        Err(SnapshotError::Target(_))
+    ));
+    assert_eq!(initialized.count_profiles().await.unwrap(), 0);
+
+    let target = uninitialized().await;
+    import(&target, &first).await.unwrap();
+    import(&target, &first)
+        .await
+        .expect("the same snapshot resumes");
+
+    // A later snapshot of the same source is another import.
+    source
+        .create_profile(&Profile::new(Some("resume-b")), ctx())
+        .await
+        .unwrap();
+    let second = export(&source).await.unwrap();
+    assert!(matches!(
+        import(&target, &second).await,
+        Err(SnapshotError::Target(_))
+    ));
+    // The first snapshot's id with changed contents is not its import.
+    let mut changed = first.clone();
+    changed.profiles = second.profiles.clone();
+    changed.password_histories = second.password_histories.clone();
+    assert!(matches!(
+        import(&target, &changed).await,
+        Err(SnapshotError::Target(_))
+    ));
+    assert_eq!(target.count_profiles().await.unwrap(), 1);
+}
+
+/// Import restores the installation organization and the issuer registry
+/// with every sealed signing-key generation and the device key bindings,
+/// live and revoked, exactly as the source held them.
+#[tokio::test]
+async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
+    use chrono::{SubsecRound, Utc};
+    use sid_core::models::*;
+    let org = Organization::implicit_community("sid.example.com");
+    let now = Utc::now().trunc_subsecs(3);
+    let handle = IssuerHandle::generate();
+    let issuer = OidcIssuer {
+        id: IssuerId::generate(),
+        canonical_url: format!("https://sid.example.com/i/{handle}"),
+        handle,
+        authority: IssuerAuthority::Local,
+        recipient_org: org.id,
+        created_at: now,
+    };
+    let source = uninitialized().await;
+    provision_issuer(&source, &org, &issuer).await;
+    let ctx = || AuditEntry::system("test", "registry").into();
+    let profile = Profile::new(Some("device-owner"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let mut bindings = Vec::new();
+    for revoked in [false, true] {
+        let device = Device::new(profile.id, DeviceType::Mobile);
+        source.create_device(&device, ctx()).await.unwrap();
+        let mut binding = DeviceAttestation::new_ce(
+            device.id,
+            profile.id,
+            DeviceAttestationFormat::None,
+            KeyStorageType::Software,
+            format!("{{\"kty\":\"OKP\",\"x\":\"{revoked}\"}}"),
+        );
+        binding.created_at = now;
+        binding.updated_at = now;
+        if revoked {
+            binding.status = AttestationStatus::Revoked;
+            binding.revoked_at = Some(now);
+        }
+        source
+            .import_device_attestation(&binding, ctx())
+            .await
+            .unwrap();
+        bindings.push(binding);
+    }
+
+    let snapshot = export(&source).await.unwrap();
+    assert_eq!(snapshot.organization.as_ref(), Some(&org));
+    assert_eq!(snapshot.oidc_issuers.len(), 1);
+    assert_eq!(snapshot.device_attestations.len(), 2);
+
+    let target = uninitialized().await;
+    let result = import(&target, &snapshot).await.unwrap();
+    assert_eq!((result.organizations, result.oidc_issuers), (1, 1));
+    assert_eq!(result.device_attestations, 2);
+    assert_eq!(target.instance_organization().await.unwrap(), Some(org));
+    assert_eq!(
+        target.oidc_issuer_by_handle(&issuer.handle).await.unwrap(),
+        Some(issuer.clone())
+    );
+    assert_eq!(
+        target.oidc_issuer_signing_keys(issuer.id).await.unwrap(),
+        source.oidc_issuer_signing_keys(issuer.id).await.unwrap()
+    );
+    for binding in &bindings {
+        assert_eq!(
+            target
+                .get_device_attestation_by_device_id(binding.device_id)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(binding)
+        );
+    }
+    assert!(verify(&source, &target).await.unwrap().passed);
+}
+
+/// An archive carries the snapshot encrypted under the operator's key: it
+/// opens into the same snapshot, imports, and does not open under another
+/// key.
+#[tokio::test]
+async fn an_archive_moves_a_snapshot_encrypted() {
+    use sid_storage::snapshot::archive;
+    let crypto = sid_crypto::RustCryptoPrimitives::new();
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    source
+        .create_profile(
+            &Profile::new(Some("archived")),
+            AuditEntry::system("test", "archive").into(),
+        )
+        .await
+        .unwrap();
+    let snapshot = export(&source).await.unwrap();
+    let key = archive::ArchiveKey::from_bytes(&[7; 32]).unwrap();
+    let sealed = archive::seal(&snapshot, &key, &crypto).unwrap();
+    assert!(
+        !sealed.windows(8).any(|w| w == b"archived"),
+        "the archive holds the snapshot encrypted"
+    );
+    let other = archive::ArchiveKey::from_bytes(&[8; 32]).unwrap();
+    assert!(archive::open(&sealed, &other, &crypto).is_err());
+
+    let opened = archive::open(&sealed, &key, &crypto).unwrap();
+    let target = uninitialized().await;
+    import(&target, &opened).await.unwrap();
+    assert!(verify(&source, &target).await.unwrap().passed);
 }
 
 /// The DB archive preserves sealed random key material and public derivation
@@ -1324,8 +1510,8 @@ async fn history_key_restore_requires_the_original_external_key() {
         .unwrap();
     let snapshot = export(&source).await.unwrap();
     let encoded = serde_json::to_vec(&snapshot).unwrap();
-    let restored: crate::snapshot::Snapshot = serde_json::from_slice(&encoded).unwrap();
-    let target = installation(&org).await;
+    let restored: Snapshot = serde_json::from_slice(&encoded).unwrap();
+    let target = uninitialized().await;
     import(&target, &restored).await.unwrap();
     assert_eq!(
         target.history_keys().list_key_versions().await.unwrap(),
@@ -1348,7 +1534,7 @@ async fn history_key_restore_requires_the_original_external_key() {
     assert!(manager([10u8; 32]).decrypt(&field, &context).await.is_err());
     let mut missing_version = restored.clone();
     missing_version.history_key_versions.clear();
-    let blank = installation(&org).await;
+    let blank = uninitialized().await;
     assert!(import(&blank, &missing_version).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
     // A key sealed for another owner's domain is refused.
@@ -1431,11 +1617,11 @@ async fn history_keys_move_with_the_evaluators_own_key_versions() {
 
     let mut without = snapshot.clone();
     without.history_key_versions.clear();
-    let blank = installation(&org).await;
+    let blank = uninitialized().await;
     assert!(import(&blank, &without).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
 
-    let target = installation(&org).await;
+    let target = uninitialized().await;
     import(&target, &snapshot).await.unwrap();
     assert_eq!(
         target.list_key_versions().await.unwrap(),
@@ -1487,7 +1673,7 @@ async fn history_write_cutoffs_move_with_the_snapshot() {
         .unwrap();
 
     let snapshot = export(&source).await.unwrap();
-    let target = installation(&org).await;
+    let target = uninitialized().await;
     import(&target, &snapshot).await.unwrap();
     assert_eq!(
         target.history_write_cutoff().await.unwrap(),
@@ -1502,7 +1688,7 @@ async fn history_write_cutoffs_move_with_the_snapshot() {
     assert!(!behind.passed, "a target without the cutoffs is reported");
 
     let later = at(1_790_000_002_000_000);
-    let ahead = installation(&org).await;
+    let ahead = uninitialized().await;
     ahead
         .raise_history_write_cutoff(later, AuditEntry::system("test", "cutoff").into())
         .await
@@ -1524,7 +1710,10 @@ async fn history_write_cutoffs_move_with_the_snapshot() {
 /// holds: the bindings move with their ids, and a second import is a no-op.
 #[tokio::test]
 async fn service_bindings_survive_migration() {
-    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let source = installation(&sid_core::models::Organization::implicit_community(
+        "sid.example.com",
+    ))
+    .await;
     let profile = Profile::new(Some("migrating"));
     source
         .create_profile(&profile, AuditEntry::system("test", "profile").into())
@@ -1565,7 +1754,10 @@ async fn service_bindings_survive_migration() {
 async fn credentials_with_microsecond_timestamps_resume_their_import() {
     use sid_core::models::{Credential, CredentialType};
 
-    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let source = installation(&sid_core::models::Organization::implicit_community(
+        "sid.example.com",
+    ))
+    .await;
     let profile = Profile::new(Some("microseconds"));
     source
         .create_profile(&profile, AuditEntry::system("test", "profile").into())
@@ -1588,8 +1780,8 @@ async fn credentials_with_microsecond_timestamps_resume_their_import() {
     assert_eq!(stored.created_at, at);
 }
 
-/// Store the same installation organization and issuer in `backend`, as a
-/// restored installation has them.
+/// Store the installation organization and its issuer in `backend`, as an
+/// initialized source has them.
 async fn provision_issuer(
     backend: &SqliteBackend,
     org: &sid_core::models::Organization,
@@ -1740,8 +1932,8 @@ async fn applications_resources_and_access_survive_migration() {
     assert_eq!(snapshot.resource_access.len(), 2);
     assert_eq!(snapshot.role_assignments.len(), 2);
 
-    let target = SqliteBackend::new_in_memory().await.unwrap();
-    provision_issuer(&target, &org, &issuer).await;
+    // The issuer the resources name moves with the snapshot.
+    let target = uninitialized().await;
     let first = import(&target, &snapshot).await.unwrap();
     assert_eq!(first.applications, 2);
     assert_eq!(first.protected_resources, 2);
@@ -1978,7 +2170,10 @@ async fn administrative_assignments_survive_migration() {
         RoleAssignment, RoleAssignmentPrincipal,
     };
 
-    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let source = installation(&sid_core::models::Organization::implicit_community(
+        "sid.example.com",
+    ))
+    .await;
     let ctx = || -> MutationContext { AuditEntry::system("test", "admin").into() };
     source.ensure_system_project(ctx()).await.unwrap();
     let mut working = Role::new(ProjectId::SYSTEM, "editor", "Editor");
@@ -2072,34 +2267,4 @@ async fn administrative_assignments_survive_migration() {
             .unwrap()
             .is_none()
     );
-}
-
-/// A snapshot whose assignments depend on each other in a cycle cannot have
-/// come from a store; it is refused instead of imported in some order.
-#[test]
-fn a_dependency_cycle_is_refused() {
-    use sid_core::models::{AssignmentProvenance, RoleAssignment, RoleAssignmentPrincipal, RoleId};
-    let profile = Profile::new(Some("cycle")).id;
-    let mut first = RoleAssignment::new(
-        RoleAssignmentPrincipal::Profile(profile),
-        RoleId::generate(),
-    );
-    let second = RoleAssignment::new(
-        RoleAssignmentPrincipal::Profile(profile),
-        RoleId::generate(),
-    )
-    .granted(AssignmentProvenance {
-        granted_by: "user:a".into(),
-        basis: Some(first.id),
-        depends_on: Some(first.id),
-        ceiling: None,
-    });
-    first = first.granted(AssignmentProvenance {
-        granted_by: "user:b".into(),
-        basis: Some(second.id),
-        depends_on: Some(second.id),
-        ceiling: None,
-    });
-    let err = sources_first(&[first, second]).expect_err("a cycle");
-    assert!(err.to_string().contains("cycle"), "{err}");
 }

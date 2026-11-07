@@ -1,33 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! sid-migrate — Data migration CLI for StructuredID.
-//!
-//! Supports exporting, importing, migrating, and verifying data
-//! between SQLite and PostgreSQL storage backends.
+//! sid-migrate: offline transfer of an installation's database between
+//! SQLite and PostgreSQL through the portable snapshot of `sid-storage`.
 //!
 //! ```bash
-//! # Export to JSON
-//! sid-migrate export --source "sqlite:///var/lib/sid/auth.db" --output backup.json
+//! # Export into an encrypted archive
+//! sid-migrate export --source "sqlite:///var/lib/sid/auth.db" --output backup.sidsnap --key-file archive.key
 //!
-//! # Import from JSON
-//! sid-migrate import --target "postgres://user:pass@db:5432/sid" --input backup.json
+//! # Import an archive into an uninitialized installation
+//! sid-migrate import --target "postgres://user:pass@db:5432/sid" --input backup.sidsnap --key-file archive.key
 //!
 //! # Direct migration
 //! sid-migrate migrate --source "sqlite:///path" --target "postgres://..."
 //!
-//! # Verify migration
+//! # Verify a migration
 //! sid-migrate verify --source "sqlite:///path" --target "postgres://..."
 //! ```
 
-mod export;
-mod import;
-mod snapshot;
-mod verify;
-
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use sid_authn::snapshot_rules::AuthnSnapshotRules;
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
-use std::path::PathBuf;
+use sid_storage::snapshot::{self, archive};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 #[derive(Parser)]
@@ -47,23 +42,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Export all data from a SID instance to a JSON file.
+    /// Export all data of a stopped SID installation into an encrypted archive.
     Export {
         /// Source database URL (e.g., "sqlite:///var/lib/sid/auth.db" or "postgres://...")
         #[arg(long)]
         source: String,
 
-        /// Output file path
+        /// Output archive path; an existing file is refused
         #[arg(long, short)]
         output: PathBuf,
+
+        /// The archive key: a file of exactly 32 random bytes
+        #[arg(long)]
+        key_file: PathBuf,
 
         /// PostgreSQL schema name (for shared-database deployments)
         #[arg(long)]
         schema: Option<String>,
-
-        /// Include audit log in export (can be very large)
-        #[arg(long, default_value = "false")]
-        include_audit: bool,
 
         /// The password-history evaluator's database, when it is not the
         /// source database (PostgreSQL URL)
@@ -71,15 +66,20 @@ enum Commands {
         history_keys: Option<String>,
     },
 
-    /// Import data from a JSON file into a SID instance.
+    /// Import an archive into an uninitialized SID installation, or resume
+    /// the interrupted import of the same archive into it.
     Import {
         /// Target database URL
         #[arg(long)]
         target: String,
 
-        /// Input file path
+        /// Input archive path
         #[arg(long, short)]
         input: PathBuf,
+
+        /// The archive key the archive was exported under
+        #[arg(long)]
+        key_file: PathBuf,
 
         /// PostgreSQL schema name (for shared-database deployments)
         #[arg(long)]
@@ -108,10 +108,6 @@ enum Commands {
         /// Target PostgreSQL schema name
         #[arg(long)]
         target_schema: Option<String>,
-
-        /// Include audit log in migration
-        #[arg(long, default_value = "false")]
-        include_audit: bool,
 
         /// The source's password-history evaluator database, when separate
         #[arg(long)]
@@ -154,7 +150,6 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -162,52 +157,26 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("another TLS crypto provider is already installed"))?;
     sid_crypto::jwt::install_jwt_provider()?;
+    let crypto = sid_crypto::AwsLcPrimitives::new();
+    let rules = AuthnSnapshotRules;
 
     match cli.command {
         Commands::Export {
             source,
             output,
+            key_file,
             schema,
-            include_audit,
             history_keys,
         } => {
             check_backend(&source, schema.as_deref(), history_keys.as_deref())?;
+            let key = archive_key(&key_file).await?;
             info!(output = %output.display(), "starting export");
             let store =
                 connect_backend(&source, schema.as_deref(), history_keys.as_deref()).await?;
-            let snapshot = export::export_snapshot(
-                store.storage.as_ref(),
-                store.keys.as_ref(),
-                &source,
-                include_audit,
-            )
-            .await?;
-
-            let json =
-                serde_json::to_string_pretty(&snapshot).context("failed to serialize snapshot")?;
-            // Snapshots contain sealed credentials and history keys: create a
-            // new owner-readable file rather than following or truncating a path.
-            let mut options = tokio::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options
-                .open(&output)
-                .await
-                .context("failed to create output file")?;
-            use tokio::io::AsyncWriteExt;
-            file.write_all(json.as_bytes())
-                .await
-                .context("failed to write output file")?;
-            file.sync_all()
-                .await
-                .context("failed to synchronize output file")?;
-
-            info!(
-                entities = snapshot.metadata.total_entities,
-                path = %output.display(),
-                "export complete"
-            );
+            let snapshot =
+                snapshot::export(store.storage.as_ref(), store.keys.as_ref(), &rules).await?;
+            let sealed = archive::seal(&snapshot, &key, &crypto)?;
+            write_new(&output, &sealed).await?;
             println!(
                 "Exported {} entities to {}",
                 snapshot.metadata.total_entities,
@@ -218,29 +187,33 @@ async fn main() -> Result<()> {
         Commands::Import {
             target,
             input,
+            key_file,
             schema,
             history_keys,
         } => {
             check_backend(&target, schema.as_deref(), history_keys.as_deref())?;
+            let key = archive_key(&key_file).await?;
             info!(input = %input.display(), "starting import");
-            let json = tokio::fs::read_to_string(&input)
+            let sealed = tokio::fs::read(&input)
                 .await
-                .context("failed to read input file")?;
-            let snapshot = snapshot::Snapshot::parse(&json)?;
-
+                .context("failed to read the archive")?;
+            let snapshot = archive::open(&sealed, &key, &crypto)?;
             info!(
-                version = snapshot.metadata.version,
+                snapshot = %snapshot.metadata.snapshot_id,
                 source_backend = %snapshot.metadata.source_backend,
                 entities = snapshot.metadata.total_entities,
-                "snapshot loaded"
+                "archive opened"
             );
-
             let store =
                 connect_backend(&target, schema.as_deref(), history_keys.as_deref()).await?;
-            let result =
-                import::import_snapshot(store.storage.as_ref(), store.keys.as_ref(), &snapshot)
-                    .await?;
-
+            let result = snapshot::import(
+                store.storage.as_ref(),
+                store.keys.as_ref(),
+                &rules,
+                &crypto,
+                &snapshot,
+            )
+            .await?;
             println!("{result}");
         }
 
@@ -249,7 +222,6 @@ async fn main() -> Result<()> {
             target,
             source_schema,
             target_schema,
-            include_audit,
             source_history_keys,
             target_history_keys,
         } => {
@@ -276,41 +248,33 @@ async fn main() -> Result<()> {
                 target_history_keys.as_deref(),
             )
             .await?;
-
-            // Export from source
-            let snapshot = export::export_snapshot(
+            let snapshot = snapshot::export(
                 source_store.storage.as_ref(),
                 source_store.keys.as_ref(),
-                &source,
-                include_audit,
+                &rules,
             )
             .await?;
-            info!(
-                entities = snapshot.metadata.total_entities,
-                "source data exported, importing to target..."
-            );
-
-            // Import to target
-            let result = import::import_snapshot(
+            let result = snapshot::import(
                 target_store.storage.as_ref(),
                 target_store.keys.as_ref(),
+                &rules,
+                &crypto,
                 &snapshot,
             )
             .await?;
             println!("{result}");
 
-            // Auto-verify
             info!("running post-migration verification...");
-            let verify_result = verify::verify_backends(
+            let verified = snapshot::verify(
                 source_store.storage.as_ref(),
                 source_store.keys.as_ref(),
                 target_store.storage.as_ref(),
                 target_store.keys.as_ref(),
+                &rules,
             )
             .await?;
-            println!("{verify_result}");
-
-            if !verify_result.passed {
+            println!("{verified}");
+            if !verified.passed {
                 bail!("post-migration verification failed");
             }
         }
@@ -333,7 +297,6 @@ async fn main() -> Result<()> {
                 target_schema.as_deref(),
                 target_history_keys.as_deref(),
             )?;
-            info!("starting verification");
             let source_store = connect_backend(
                 &source,
                 source_schema.as_deref(),
@@ -346,16 +309,15 @@ async fn main() -> Result<()> {
                 target_history_keys.as_deref(),
             )
             .await?;
-
-            let result = verify::verify_backends(
+            let result = snapshot::verify(
                 source_store.storage.as_ref(),
                 source_store.keys.as_ref(),
                 target_store.storage.as_ref(),
                 target_store.keys.as_ref(),
+                &rules,
             )
             .await?;
             println!("{result}");
-
             if !result.passed {
                 std::process::exit(1);
             }
@@ -363,6 +325,34 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The archive key the operator keeps in `path`.
+async fn archive_key(path: &Path) -> Result<archive::ArchiveKey> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .context("failed to read the archive key file")?;
+    Ok(archive::ArchiveKey::from_bytes(&bytes)?)
+}
+
+/// Write `bytes` to a new owner-readable file at `path`, never following or
+/// truncating an existing one: an archive carries sealed credentials.
+async fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .await
+        .context("failed to create the output file")?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(bytes)
+        .await
+        .context("failed to write the output file")?;
+    file.sync_all()
+        .await
+        .context("failed to synchronize the output file")
 }
 
 /// One installation's data: its storage backend and the password-history

@@ -1,53 +1,70 @@
 # sid-migrate
 
-Offline data transfer between SQLite and PostgreSQL. Stop writers before export
-and keep the target offline until import and verification finish. This utility
-does not implement live migration, replication or point-in-time recovery.
+Offline data transfer between SQLite and PostgreSQL through the portable
+snapshot of `sid-storage`. Stop the source's writers and workers before
+export; the snapshot is consistent only when nothing writes while it is read.
+Exporting does not disable the source: an ordinary backup lets the original
+installation continue. This utility does not implement live migration,
+replication or point-in-time recovery.
 
 ```sh
-sid-migrate export --source sqlite:///var/lib/sid/source.db --output snapshot.json
-sid-migrate import --target sqlite:///var/lib/sid/target.db --input snapshot.json
+head -c 32 /dev/urandom > archive.key            # keep it apart from the archive
+sid-migrate export --source sqlite:///var/lib/sid/source.db --output snapshot.sidsnap --key-file archive.key
+sid-migrate import --target sqlite:///var/lib/sid/target.db --input snapshot.sidsnap --key-file archive.key
 sid-migrate verify --source sqlite:///var/lib/sid/source.db --target sqlite:///var/lib/sid/target.db
 ```
 
-Snapshot format 3 requires explicit history state for every profile. It preserves
-history revisions, retained accepted entries, epoch manifests and statuses,
-including retired provenance, and sealed epoch keys. It also carries the public
-field-encryption derivation parameters and sealed OPAQUE server setup. It contains
-neither a plaintext epoch key, unwrapped OPAQUE setup nor the external master key.
-Protect the snapshot as authentication data; export
-creates a new file with mode `0600` on Unix and refuses an existing output path.
+## The archive
 
-Restore the installation's existing organization identity and server key custody
-before importing its data. Import requires the same installation organization ID:
-a new organization is a different password-history input domain. The archive
-restores the original sealed OPAQUE setup before password credentials: starting
-the destination first can generate a conflicting setup, which import refuses.
-Issuer custody remains a separate prerequisite. Restore the exact external
-key-source versions required by sealed fields
-and check that the owning evaluator can open the keys before enabling password
-replacement. Database equality alone does not prove key availability.
+An export is never written unencrypted. The archive holds the snapshot
+encrypted with AES-256-GCM under the 32-byte archive key, behind a manifest
+(format, snapshot id, source backend, installation organization, SHA-256 of
+the snapshot) that is readable without the key and authenticated with the
+contents. Export creates a new file with mode `0600` on Unix and refuses an
+existing output path. The archive key protects this archive only: it is not a
+key-encryption key, opens no sealed field and does not replace recovery of
+the installation's server keys.
 
-Import validates history references and sealed-key owner/epoch context before
-writing. It also checks the setup's sealing context and key-version reference,
-and refuses an OPAQUE credential without its setup. This checks public metadata,
-not decryption: verify external key custody before enabling the destination.
-Each owner's complete history and its audit commit in one transaction,
-before credentials are installed. An exact repeated history is a no-op; an
-existing different history is refused rather than overwritten, rolled back or
-merged. Retired epochs stay retired, including provenance whose eligible key was
-already destroyed. Epochs are ordered by creation time and ID; entries by
-descending sequence and epoch ID. Import refuses noncanonical archives before
-writing. The whole instance import is not one transaction: after an interruption,
-keep it offline and inspect the import result before continuing. The history and
-credential phases support exact retries; this does not establish retry safety
-for every other entity. Repeated credentials are accepted only when their
-complete stored record is identical.
+## What a snapshot carries
 
-Snapshots without complete history must be re-exported. A stale snapshot
-cannot recreate later records; conflicting target history is never treated as
-permission to reset retention.
+The installation organization, the OIDC issuer registry with every signing-key
+generation (sealed as stored), device key bindings live and revoked, accounts,
+credentials, complete password history for every profile with the history
+evaluator's sealed keys and its own key versions, the sealed OPAQUE server
+setup, the public field-encryption derivation parameters, durable work and the
+completions and bindings of keyed commands. It contains neither a plaintext
+key, an unwrapped OPAQUE setup nor any master key.
 
-`verify` compares history contents, sealed OPAQUE setup, sealed history keys and derivation parameters, not
-just record counts. It does not decrypt keys or establish completeness after a
-rollback. Independent key-custody and consistent database backups remain needed.
+## Import
+
+Import checks the archive, the snapshot's identity, schema and references
+before it writes anything to the target. The target is an uninitialized
+installation (no installation organization, issuers or profiles), or one
+holding the interrupted import of this same snapshot, which import then
+resumes. An initialized installation, of the same authority or another, is
+not an import destination; neither is a target holding another snapshot's
+import. Import records its snapshot's id and digest first, so only that
+snapshot resumes it.
+
+Import starts nothing: authentication, issuance and restored work begin only
+when the restored installation is started. Before activating it, the
+deployment stops or fences the superseded installation's writers and workers
+and restores the exact external key versions the sealed fields need. For an
+offline move the source stays stopped after the destination is activated.
+A restored copy of a still-running installation would be a second issuer of
+the same identity; nothing in the database can tell a copy apart, so keeping
+one of them stopped is the deployment's decision.
+
+Each owner's history and its audit commit in one transaction, before
+credentials are installed. An exact repeated record is a no-op; a different
+stored record is refused rather than overwritten, rolled back or merged.
+Retired history epochs stay retired. The whole import is not one transaction:
+after an interruption, keep the target stopped and run the same import again.
+
+## Verify
+
+`verify` compares the installation organization, issuers and their keys,
+the sealed OPAQUE setup, derivation parameters, cutoffs, history contents,
+history keys and device key bindings, not just record counts. It decrypts
+nothing: it does not establish key availability or completeness after a
+rollback.
