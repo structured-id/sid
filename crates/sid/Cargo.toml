@@ -14,7 +14,7 @@ name = "sid"
 [dependencies]
 sid-authn = { workspace = true, features = ["keyed", "password-operation"] }
 # The fixed CE built-in roles; no transport.
-sid-authz = { path = "../sid-authz", default-features = false }
+sid-authz = { path = "../sid-authz", version = "0.2", default-features = false }
 sid-core = { workspace = true }
 # The primitives trait only: the host selects the provider.
 sid-crypto = { workspace = true }
@@ -61,7 +61,7 @@ opentelemetry = { workspace = true, optional = true }
 telemetry = ["dep:opentelemetry"]
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["primitives"] }
+sid-crypto = { workspace = true, features = ["primitives", "jwt"] }
 # The client half of a password sign-in.
 sid-opaque-ke = { workspace = true }
 sid-pake-core = { workspace = true }

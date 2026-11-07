@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Proto sources live in the standalone `proto/` repo. By default we
-    // consume them via the `sid/proto` git submodule (../../proto relative
-    // to this crate). For local development across the standalone proto
-    // repo and the sid workspace, set SID_PROTO_DIR to an absolute path to
-    // override — build.rs re-runs on the override too.
+    // Proto sources live in the standalone `proto/` repo, consumed through
+    // the `sid/proto` submodule. The crate's `proto` entry links to it, so a
+    // packaged crate carries the sources it compiles. For local development
+    // across the standalone proto repo and the sid workspace, set
+    // SID_PROTO_DIR to an absolute path to override; build.rs re-runs on it.
     println!("cargo:rerun-if-env-changed=SID_PROTO_DIR");
     let proto_dir_owned = std::env::var("SID_PROTO_DIR")
-        .ok()
-        .map(std::path::PathBuf::from);
-    let proto_dir: &std::path::Path = proto_dir_owned
-        .as_deref()
-        .unwrap_or_else(|| std::path::Path::new("../../proto"));
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("proto")
+        });
+    let proto_dir: &std::path::Path = &proto_dir_owned;
 
     // Auto-discover all .proto files under sid/v1/.
     // No more manual list — adding a new .proto file just works.

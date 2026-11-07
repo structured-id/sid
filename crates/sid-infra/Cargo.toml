@@ -116,7 +116,7 @@ sid-infra = { path = ".", features = [
 # The shared adapters' tests run the cores over an in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
 sid-keys = { workspace = true }
-sid-crypto = { workspace = true, features = ["primitives"] }
+sid-crypto = { workspace = true, features = ["primitives", "jwt"] }
 sid-proto = { workspace = true }
 secrecy = { workspace = true }
 chrono = { workspace = true }

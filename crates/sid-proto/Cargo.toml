@@ -5,6 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "StructuredID CE API messages and their optional gRPC stubs, generated from the bundled proto sources"
+# The proto sources the build compiles travel with the package.
+include = [
+    "src/**/*",
+    "build.rs",
+    "proto/LICENSE",
+    "proto/google/**/*.proto",
+    "proto/sid/v1/**/*.proto",
+]
 
 [dependencies]
 prost = "0.14"
