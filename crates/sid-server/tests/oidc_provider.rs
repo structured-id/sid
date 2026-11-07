@@ -27,9 +27,6 @@ fn provider_of(svc: &TestServices) -> OidcProviderServiceImpl {
 /// The provider sending a user who must sign in to `login_url`.
 fn provider_signing_in_at(svc: &TestServices, login_url: Option<&str>) -> OidcProviderServiceImpl {
     OidcProviderServiceImpl::new(
-        svc.issuers.clone(),
-        svc.storage.clone(),
-        svc.revocation_cache.clone(),
         svc.auth.clone(),
         svc.project.clone(),
         login_url.map(|url| url::Url::parse(url).unwrap()),

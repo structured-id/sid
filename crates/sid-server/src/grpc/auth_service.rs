@@ -617,6 +617,11 @@ impl AuthServiceImpl {
         self.sign_ins.policy()
     }
 
+    /// The OAuth endpoints of this installation's issuers.
+    pub(crate) fn oauth(&self) -> &sid::oauth::OAuth {
+        &self.oauth
+    }
+
     /// Sign-ins by mailbox over this service's sign-ins.
     fn email_sign_in(&self) -> sid::email_sign_in::EmailSignIn<'_> {
         sid::email_sign_in::EmailSignIn::new(&self.sign_ins, self.oauth.login_policy())

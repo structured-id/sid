@@ -214,14 +214,7 @@ impl Installation {
             revocation.clone(),
             self.issuer.clone(),
         ));
-        let provider = OidcProviderServiceImpl::new(
-            issuers.clone(),
-            storage.clone(),
-            revocation.clone(),
-            auth,
-            project,
-            None,
-        );
+        let provider = OidcProviderServiceImpl::new(auth, project, None);
         let tokens = sid_authn::resource_token::ResourceTokenVerifier::new(
             issuers.clone(),
             self.issuer.clone(),
