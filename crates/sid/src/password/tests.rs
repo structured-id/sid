@@ -255,6 +255,72 @@ async fn reset_sign_in_follows_login_requirements() {
     );
 }
 
+/// An imported-password upgrade for a principal nobody holds answers as a
+/// wrong password and is counted like any failed guess, so the answer tells
+/// nothing about the account.
+#[tokio::test]
+async fn upgrade_of_unknown_principal_fails_like_a_wrong_password() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let sign_in = sign_in(storage.clone());
+    let upgrades = ImportedPasswordUpgrades::new(storage, keys());
+    for _ in 0..5 {
+        assert!(matches!(
+            upgrades
+                .start(
+                    &sign_in,
+                    None,
+                    LegacyMigrateStartRequest {
+                        principal: "nobody@example.com".to_string(),
+                        password: "guess".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .await,
+            Err(PasswordError::AuthenticationFailed)
+        ));
+    }
+    assert!(matches!(
+        sign_in.refuse_if_locked("nobody@example.com").await,
+        Err(SignInError::Rules(SignInRefusal::TooManyAttempts(_)))
+    ));
+}
+
+/// A finish of an upgrade that was never started, or names none, completes
+/// nothing: an unknown one answers as expired, a missing id as invalid.
+#[tokio::test]
+async fn upgrade_finish_needs_a_started_upgrade() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let sign_in = sign_in(storage.clone());
+    let upgrades = ImportedPasswordUpgrades::new(storage, keys());
+    let policy = fixed_policy();
+    let finish = |upgrade_id| {
+        upgrades.finish(
+            &sign_in,
+            &policy,
+            CeremonyClient::Native,
+            None,
+            AttemptContext::default(),
+            LegacyMigrateFinishRequest {
+                upgrade_id,
+                opaque_registration_record: vec![1, 2, 3],
+            },
+        )
+    };
+    assert!(matches!(
+        finish(Some(sid_ids::ImportedPasswordUpgradeId::generate().into())).await,
+        Err(PasswordError::UpgradeExpired)
+    ));
+    assert!(matches!(
+        finish(None).await,
+        Err(PasswordError::InvalidField {
+            field: "upgrade_id",
+            ..
+        })
+    ));
+}
+
 /// The current password's guesses during changes are counted apart from the
 /// account's sign-in budget: a change cannot lock the owner's sign-in, and a
 /// sign-in lockout does not reuse the change's count.

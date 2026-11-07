@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Replacing a password through the installation's password operations: the
+//! Replacing a password: through the installation's password operations, the
 //! caller's change of its own, proving the current password when its session
 //! may no longer change it without, and the reset of a forgotten one under a
-//! verified reset link. The new password, its proof's evidence and the
-//! owner's history are one write over the password read.
+//! verified reset link, where the new password, its proof's evidence and the
+//! owner's history are one write over the password read; and the upgrade of
+//! a password imported as another system's hash to an OPAQUE password.
 
 use std::sync::Arc;
 
 use sid_authn::caller::Caller;
+use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::credential_enrollment::{EnrollmentError, EnrollmentRefusal};
+use sid_authn::login_policy::LoginPolicySource;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::password_operation::{
     CurrentPasswordCheck, OperationOwner, PasswordOperationError, StepError, change_context,
@@ -25,6 +28,7 @@ use sid_core::models::{
 };
 use sid_proto::sid::v1::{
     CompletePasswordResetRequest, ExecutePasswordResetRequest, ExecutePasswordResetResponse,
+    LegacyMigrateFinishRequest, LegacyMigrateStartRequest, LegacyMigrateStartResponse,
     PasswordChangeChallengeRequest, PasswordChangeChallengeResponse, PasswordChangeExecuteRequest,
     PasswordChangeExecuteResponse, PasswordChangeFinishRequest, RequestPasswordResetResponse,
     VerifyPasswordResetRequest, VerifyPasswordResetResponse,
@@ -32,9 +36,8 @@ use sid_proto::sid::v1::{
 use tracing::{info, warn};
 
 use crate::password_operation::{Finish, OperationPurpose, PasswordOperations, PendingOperation};
-use crate::sign_in::{LoginMethod, SignIn, SignInError};
+use crate::sign_in::{AttemptContext, FirstFactorSignedIn, LoginMethod, SignIn, SignInError};
 use crate::wire::{FieldError, wire_id};
-use sid_authn::login_policy::LoginPolicySource;
 
 /// Why a password replacement is refused or failed.
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +73,10 @@ pub enum PasswordError {
     /// The reset link's token does not match its session.
     #[error("the reset link is not valid")]
     ResetTokenInvalid,
+    /// The imported password's upgrade is unknown or expired; it starts
+    /// again.
+    #[error("the password upgrade expired")]
+    UpgradeExpired,
     /// The caller's session may not change the password now.
     #[error(transparent)]
     Enrollment(#[from] EnrollmentError),
@@ -101,6 +108,22 @@ impl From<EnrollmentRefusal> for PasswordError {
 fn internal(operation: &'static str, cause: impl std::fmt::Display) -> PasswordError {
     tracing::error!(operation, error = %cause, "internal failure");
     PasswordError::Internal
+}
+
+/// The OPAQUE password file `data` sealed for `profile_id` under `sign_in`'s
+/// keys, as it is stored.
+async fn seal(
+    sign_in: &SignIn,
+    profile_id: ProfileId,
+    data: &[u8],
+) -> Result<Vec<u8>, PasswordError> {
+    sid_authn::sealed_secret::seal(
+        sign_in.keys(),
+        &sid_authn::sealed_secret::opaque_context(profile_id),
+        data,
+    )
+    .await
+    .map_err(|e| internal("seal OPAQUE envelope", e))
 }
 
 /// The attempt counter of the current-password sign-ins `profile`'s password
@@ -184,18 +207,6 @@ impl<'a> Passwords<'a> {
             return Err(PasswordError::CredentialNotFound(credential.id));
         }
         Ok(credential)
-    }
-
-    /// The OPAQUE password file `data` sealed for `profile_id`, as it is
-    /// stored.
-    async fn seal(&self, profile_id: ProfileId, data: &[u8]) -> Result<Vec<u8>, PasswordError> {
-        sid_authn::sealed_secret::seal(
-            self.sign_in.keys(),
-            &sid_authn::sealed_secret::opaque_context(profile_id),
-            data,
-        )
-        .await
-        .map_err(|e| internal("seal OPAQUE envelope", e))
     }
 
     /// `history` with this installation's age retention: an accepted
@@ -428,7 +439,7 @@ impl<'a> Passwords<'a> {
         // The new password, the evidence its proof gave it, its OPRF key and
         // the history entry are one write: none is ever the old password's.
         let current = credential.data.expose().to_vec();
-        let sealed = self.seal(caller, &done.password_file).await?;
+        let sealed = seal(self.sign_in, caller, &done.password_file).await?;
         let mut new = done.credential(caller, sealed);
         new.id = credential.id;
         new.label = credential.label.clone();
@@ -743,7 +754,7 @@ impl<'a> PasswordResets<'a> {
         // gets here.
         let new_password = done.credential(
             profile_id,
-            self.passwords.seal(profile_id, &done.password_file).await?,
+            seal(self.sign_in(), profile_id, &done.password_file).await?,
         );
         let completed = sid_core::models::event::Event::new(
             format!("profile/{}", profile_id),
@@ -903,6 +914,254 @@ impl<'a> PasswordResets<'a> {
             return Err(PasswordError::ResetUnverified(id.0.to_string()));
         }
         Ok(session)
+    }
+}
+
+/// What an imported password's upgrade keeps between its steps.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UpgradeState {
+    profile_id: ProfileId,
+    /// The OPRF credential identifier of the password being registered.
+    credential_identifier: [u8; 16],
+}
+
+/// How long a started upgrade may be finished.
+const UPGRADE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The upgrade of a password imported as another system's hash: the
+/// password, proven once against that hash like any sign-in, is registered
+/// as an OPAQUE password that replaces the hash, and the account signs in.
+pub struct ImportedPasswordUpgrades {
+    upgrades: ChallengeStore<UpgradeState>,
+}
+
+impl ImportedPasswordUpgrades {
+    /// Upgrades kept in `ceremonies`, sealed by `keys`.
+    pub fn new(
+        ceremonies: Arc<dyn sid_plugin::CeremonyStateStore>,
+        keys: Arc<dyn sid_keys::KeyManager>,
+    ) -> Self {
+        Self {
+            upgrades: ChallengeStore::new(ceremonies, keys, "legacy-migration", UPGRADE_TTL),
+        }
+    }
+
+    /// Prove the password against the account's imported hash and answer the
+    /// OPAQUE registration request of the password that replaces it. A
+    /// guess like any sign-in: refused during a lockout and a wrong one
+    /// counted against `client_ip`. An unknown principal and an account
+    /// without an imported hash are answered like a wrong password, after
+    /// about the same work, so the answer tells nothing about the account.
+    pub async fn start(
+        &self,
+        sign_in: &SignIn,
+        client_ip: Option<std::net::IpAddr>,
+        request: LegacyMigrateStartRequest,
+    ) -> Result<LegacyMigrateStartResponse, PasswordError> {
+        use secrecy::ExposeSecret;
+        use sid_authn::legacy_hash::BuiltinLegacyVerifier;
+        let password = secrecy::SecretBox::new(Box::new(request.password));
+        let profile = sign_in.resolve_profile(&request.principal).await?;
+        let identity = profile
+            .as_ref()
+            .map_or_else(|| request.principal.clone(), |p| p.id.to_string());
+        sign_in.refuse_if_locked(&identity).await?;
+
+        let imported = match &profile {
+            Some(profile) => sign_in
+                .storage()
+                .get_credentials_by_profile(profile.id, Some(CredentialType::LegacyHash))
+                .await?
+                .into_iter()
+                .next(),
+            None => None,
+        };
+        let verified = match (&profile, &imported) {
+            (Some(profile), Some(imported)) => {
+                // The imported hash is stored as UTF-8 text.
+                let hash = std::str::from_utf8(imported.data.expose()).map_err(|e| {
+                    internal(
+                        "read legacy hash",
+                        format!("credential {}: {e}", imported.id.0),
+                    )
+                })?;
+                BuiltinLegacyVerifier::verify(password.expose_secret().as_bytes(), hash)
+                    .map_err(|e| internal("verify legacy hash", e))?
+                    .then_some((profile, imported))
+            }
+            _ => {
+                BuiltinLegacyVerifier::verify_decoy(password.expose_secret().as_bytes());
+                None
+            }
+        };
+        let Some((profile, imported)) = verified else {
+            sign_in.record_failed_login(&identity, client_ip).await?;
+            return Err(PasswordError::AuthenticationFailed);
+        };
+
+        // The new password registers under its own OPRF credential
+        // identifier.
+        let credential_identifier: [u8; 16] = rand::random();
+        let (response, _state) = sign_in
+            .opaque()
+            .registration_start(&request.opaque_registration_request, &credential_identifier)
+            .map_err(|e| {
+                warn!("OPAQUE registration start failed during migration: {}", e);
+                PasswordError::InvalidField {
+                    field: "opaque_registration_request",
+                    reason: "not a valid OPAQUE registration request".to_string(),
+                }
+            })?;
+        let upgrade = sid_ids::ImportedPasswordUpgradeId::generate();
+        self.upgrades
+            .insert(
+                &upgrade.to_string(),
+                &UpgradeState {
+                    profile_id: profile.id,
+                    credential_identifier,
+                },
+            )
+            .await
+            .map_err(SignInError::from)?;
+        info!(
+            "Legacy migration started for profile {} (algorithm: {})",
+            profile.id,
+            imported.legacy_algorithm.as_deref().unwrap_or("unknown")
+        );
+        Ok(LegacyMigrateStartResponse {
+            upgrade_id: Some(upgrade.into()),
+            opaque_registration_response: response,
+        })
+    }
+
+    /// Finish the upgrade: the OPAQUE password replaces the imported hash in
+    /// one transaction, then the account signs in to `client` as a password
+    /// first factor under the login requirements `login_policy` states,
+    /// pending its second factor when one is owed.
+    pub async fn finish(
+        &self,
+        sign_in: &SignIn,
+        login_policy: &dyn LoginPolicySource,
+        client: CeremonyClient,
+        client_ip: Option<std::net::IpAddr>,
+        context: AttemptContext<'_>,
+        request: LegacyMigrateFinishRequest,
+    ) -> Result<FirstFactorSignedIn, PasswordError> {
+        let upgrade = wire_id(request.upgrade_id.as_ref(), "upgrade_id")?;
+        let upgrade = self
+            .upgrades
+            .take(&upgrade.to_string())
+            .await
+            .map_err(SignInError::from)?
+            .ok_or(PasswordError::UpgradeExpired)?;
+        let stored = sign_in
+            .opaque()
+            .registration_finish(&request.opaque_registration_record)
+            .map_err(|e| {
+                warn!("OPAQUE registration finish failed during migration: {}", e);
+                PasswordError::InvalidField {
+                    field: "opaque_registration_record",
+                    reason: "not a valid OPAQUE registration record".to_string(),
+                }
+            })?;
+
+        let mut credential = Credential::new(
+            upgrade.profile_id,
+            CredentialType::Opaque,
+            seal(sign_in, upgrade.profile_id, &stored.data).await?,
+            None,
+        );
+        credential.opaque_curve = Some(stored.curve as u8);
+        credential.opaque_credential_identifier = Some(upgrade.credential_identifier);
+
+        // The OPAQUE password replaces the imported hash in one transaction.
+        let storage = sign_in.storage();
+        storage
+            .replace_credential(
+                &credential,
+                AuditEntry::user(
+                    upgrade.profile_id.to_string(),
+                    "credential.migrated",
+                    credential.id.0.to_string(),
+                )
+                .into(),
+            )
+            .await?;
+
+        // A profile deleted meanwhile signs nobody in.
+        let mut profile = storage
+            .get_profile(upgrade.profile_id)
+            .await?
+            .ok_or(PasswordError::AuthenticationFailed)?;
+        if profile.migration_pending {
+            profile.migration_pending = false;
+            profile.migration_completed_at = Some(chrono::Utc::now());
+            // A profile changed meanwhile keeps the flag; the next sign-in
+            // clears it. The migrated credential is already stored.
+            match storage
+                .update_profile(
+                    &profile,
+                    AuditEntry::user(
+                        upgrade.profile_id.to_string(),
+                        "profile.migration_completed",
+                        upgrade.profile_id.to_string(),
+                    )
+                    .into(),
+                )
+                .await
+            {
+                Ok(true) => profile.revision += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(profile_id = %profile.id, error = %e, "Failed to clear migration flag")
+                }
+            }
+        }
+
+        let method = LoginMethod::Password;
+        let requirements =
+            login_policy
+                .requirements(None)
+                .await
+                .map_err(|e| SignInError::Unavailable {
+                    what: "login policy",
+                    cause: e.to_string(),
+                })?;
+        let admission = sign_in
+            .first_factor(
+                profile.id,
+                client_ip,
+                (
+                    "opaque",
+                    method.auth_level(sign_in.policy().auth.passkey_satisfies_mfa),
+                    &method.amr(),
+                ),
+                context,
+                &requirements,
+            )
+            .await?;
+        let signed_in = sign_in
+            .complete_first_factor(
+                &profile,
+                method,
+                context
+                    .user_agent
+                    .map(sid_authn::sign_in_security::device_id),
+                client_ip,
+                client,
+                None,
+                Some(&CredentialFence {
+                    id: credential.id,
+                    data: credential.data.clone(),
+                }),
+                admission,
+            )
+            .await?;
+        info!(
+            "Legacy migration completed for profile {}",
+            upgrade.profile_id
+        );
+        Ok(signed_in)
     }
 }
 

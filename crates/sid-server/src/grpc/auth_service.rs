@@ -6,7 +6,6 @@
 
 use crate::feature_flags::FeatureFlagService;
 use chrono::{Duration, Utc};
-use secrecy::{ExposeSecret, SecretBox};
 use sid::sign_in::{AttemptContext, FirstFactor, FirstFactorSignedIn, LoginMethod};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
@@ -14,7 +13,6 @@ use sid_authn::device_auth;
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::jwt::JwtService;
-use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
 use sid_authn::oauth2::{OAuth2Server, TokenError};
@@ -306,20 +304,13 @@ fn password_refusal(e: sid::password::PasswordError) -> Status {
         E::ResetTokenInvalid => {
             ApiError::new(ErrorReason::TokenInvalid, "the reset link is not valid").into()
         }
+        E::UpgradeExpired => ceremony_expired("password migration"),
         E::Enrollment(e) => e.into_status(),
         E::Operation(e) => e.into_status(),
         E::SignIn(e) => sign_in_refusal(e),
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
     }
-}
-
-/// Server-side state for legacy password migration flow.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct MigrationState {
-    profile_id: ProfileId,
-    /// The OPRF credential identifier of the password being registered.
-    credential_identifier: [u8; 16],
 }
 
 /// Challenge-store key of a WebAuthn step-up: bound to the session that
@@ -333,7 +324,6 @@ pub struct AuthServiceImpl {
     pub(crate) oauth2: Arc<OAuth2Server>,
     pub(crate) webauthn: Arc<WebAuthnServer>,
     pub(crate) jwt: Arc<JwtService>,
-    pub(crate) opaque_router: Arc<OpaqueRouter>,
     pub(crate) opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     pub(crate) revocation_cache: Arc<RevocationCache>,
     pub(crate) feature_flags: FeatureFlagService,
@@ -348,8 +338,8 @@ pub struct AuthServiceImpl {
     /// WebAuthn ceremony of a pending step-up, keyed by session and step-up
     /// challenge id: only a completion on the same session consumes it.
     step_up_state: ChallengeStore<String>,
-    /// Ephemeral legacy migration state: key → the migrating profile.
-    migration_state: ChallengeStore<MigrationState>,
+    /// Upgrades of imported password hashes between their steps.
+    imported_passwords: sid::password::ImportedPasswordUpgrades,
     /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
@@ -507,7 +497,7 @@ impl AuthServiceImpl {
             geoip,
             captcha_gate,
             captcha_provider,
-            opaque: opaque_router.clone(),
+            opaque: opaque_router,
             keys: key_manager.clone(),
         });
         Self {
@@ -515,7 +505,6 @@ impl AuthServiceImpl {
             oauth2,
             webauthn,
             jwt,
-            opaque_router,
             opaque_zkpp,
             revocation_cache,
             feature_flags,
@@ -533,11 +522,9 @@ impl AuthServiceImpl {
                 "webauthn-step-up",
                 ttl,
             ),
-            migration_state: ChallengeStore::new(
+            imported_passwords: sid::password::ImportedPasswordUpgrades::new(
                 ceremonies.clone(),
                 key_manager.clone(),
-                "legacy-migration",
-                ttl,
             ),
             totp_enrollment: ChallengeStore::new(
                 ceremonies.clone(),
@@ -1252,17 +1239,6 @@ impl AuthServiceImpl {
             }
         }
         Ok(Some((credential, opened.secret)))
-    }
-
-    /// The OPAQUE envelope `data` sealed for `profile_id`, as it is stored.
-    async fn seal_envelope(&self, profile_id: ProfileId, data: &[u8]) -> Result<Vec<u8>, Status> {
-        sid_authn::sealed_secret::seal(
-            self.key_manager.as_ref(),
-            &sid_authn::sealed_secret::opaque_context(profile_id),
-            data,
-        )
-        .await
-        .map_err(|e| internal("seal OPAQUE envelope", e))
     }
 
     /// The authenticated caller of `request`.
@@ -3106,89 +3082,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<LegacyMigrateStartResponse>, Status> {
         self.check_maintenance().await?;
         let client_ip = self.client_ip(&request)?;
-        let req = request.into_inner();
-        let password = SecretBox::new(Box::new(req.password));
-
-        // A password guess like any sign-in: refused during a lockout, and a
-        // wrong one counted. An unknown principal and an account without a
-        // legacy hash are answered like a wrong password, after about the
-        // same work, so the answer tells nothing about the account.
-        let profile = self.resolve_profile_optional(&req.principal).await?;
-        let identity = profile
-            .as_ref()
-            .map_or_else(|| req.principal.clone(), |p| p.id.to_string());
-        self.refuse_if_locked(&identity).await?;
-
-        let legacy_cred = match &profile {
-            Some(profile) => self
-                .storage
-                .get_credentials_by_profile(profile.id, Some(CredentialType::LegacyHash))
-                .await
-                .map_err(storage_failure)?
-                .into_iter()
-                .next(),
-            None => None,
-        };
-        let verified = match (&profile, &legacy_cred) {
-            (Some(profile), Some(legacy_cred)) => {
-                // The legacy hash is stored as UTF-8 text.
-                let hash_str = std::str::from_utf8(legacy_cred.data.expose()).map_err(|e| {
-                    internal(
-                        "read legacy hash",
-                        format!("credential {}: {e}", legacy_cred.id.0),
-                    )
-                })?;
-                BuiltinLegacyVerifier::verify(password.expose_secret().as_bytes(), hash_str)
-                    .map_err(|e| internal("verify legacy hash", e))?
-                    .then_some((profile, legacy_cred))
-            }
-            _ => {
-                BuiltinLegacyVerifier::verify_decoy(password.expose_secret().as_bytes());
-                None
-            }
-        };
-        let Some((profile, legacy_cred)) = verified else {
-            self.record_failed_login(&identity, client_ip).await?;
-            return Err(authentication_failed());
-        };
-
-        // Password verified — proceed with OPAQUE registration start under
-        // the new password's own OPRF credential identifier.
-        let credential_identifier: [u8; 16] = rand::random();
-        let (response_bytes, _state) = self
-            .opaque_router
-            .registration_start(&req.opaque_registration_request, &credential_identifier)
-            .map_err(|e| {
-                warn!("OPAQUE registration start failed during migration: {}", e);
-                invalid_field(
-                    "opaque_registration_request",
-                    "not a valid OPAQUE registration request",
-                )
-            })?;
-
-        // Store migration state
-        let upgrade = sid_ids::ImportedPasswordUpgradeId::generate();
-        self.migration_state
-            .insert(
-                &upgrade.to_string(),
-                &MigrationState {
-                    profile_id: profile.id,
-                    credential_identifier,
-                },
-            )
+        self.imported_passwords
+            .start(&self.sign_ins, client_ip, request.into_inner())
             .await
-            .or_status()?;
-
-        info!(
-            "Legacy migration started for profile {} (algorithm: {})",
-            profile.id,
-            legacy_cred.legacy_algorithm.as_deref().unwrap_or("unknown")
-        );
-
-        Ok(Response::new(LegacyMigrateStartResponse {
-            upgrade_id: Some(upgrade.into()),
-            opaque_registration_response: response_bytes,
-        }))
+            .map(Response::new)
+            .map_err(password_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "legacy_migrate_finish"))]
@@ -3203,133 +3101,26 @@ impl AuthService for AuthServiceImpl {
         let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let req = request.into_inner();
-
-        // Retrieve migration state
-        let upgrade = wire_id(req.upgrade_id.as_ref(), "upgrade_id")?;
-        let migration = self
-            .migration_state
-            .take(&upgrade.to_string())
-            .await
-            .or_status()?
-            .ok_or_else(|| ceremony_expired("password migration"))?;
-
-        // Complete OPAQUE registration
-        let stored = self
-            .opaque_router
-            .registration_finish(&req.opaque_registration_record)
-            .map_err(|e| {
-                warn!("OPAQUE registration finish failed during migration: {}", e);
-                invalid_field(
-                    "opaque_registration_record",
-                    "not a valid OPAQUE registration record",
-                )
-            })?;
-
-        // Create new OPAQUE credential
-        let mut new_credential = Credential::new(
-            migration.profile_id,
-            CredentialType::Opaque,
-            self.seal_envelope(migration.profile_id, &stored.data)
-                .await?,
-            None,
-        );
-        new_credential.opaque_curve = Some(stored.curve as u8);
-        new_credential.opaque_credential_identifier = Some(migration.credential_identifier);
-
-        // The OPAQUE credential replaces the legacy hash in one transaction.
-        self.storage
-            .replace_credential(
-                &new_credential,
-                AuditEntry::user(
-                    migration.profile_id.to_string(),
-                    "credential.migrated",
-                    new_credential.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        // A profile deleted meanwhile signs nobody in.
-        let mut profile = self
-            .storage
-            .get_profile(migration.profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(authentication_failed)?;
-
-        // Mark migration as completed
-        if profile.migration_pending {
-            profile.migration_pending = false;
-            profile.migration_completed_at = Some(chrono::Utc::now());
-            // A profile changed meanwhile keeps the flag; the next sign-in
-            // clears it. The migrated credential is already stored.
-            match self
-                .storage
-                .update_profile(
-                    &profile,
-                    AuditEntry::user(
-                        migration.profile_id.to_string(),
-                        "profile.migration_completed",
-                        migration.profile_id.to_string(),
-                    )
-                    .into(),
-                )
-                .await
-            {
-                Ok(true) => profile.revision += 1,
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(profile_id = %profile.id, error = %e, "Failed to clear migration flag")
-                }
-            }
-        }
-
-        // Evaluate login security (anomaly detection + policy enforcement).
-        let method = LoginMethod::Password;
-        let admission = self
-            .evaluate_first_factor(
-                profile.id,
-                client_ip,
-                "opaque",
-                (
-                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                AttemptContext {
-                    captcha_pass: captcha_pass.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                },
-            )
-            .await?;
-
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
             enrollable_factors,
             browser_csrf,
         } = self
-            .complete_first_factor(
-                &profile,
-                method,
-                user_agent.as_deref().map(compute_device_id),
-                client_ip,
+            .imported_passwords
+            .finish(
+                &self.sign_ins,
+                self.oauth.login_policy(),
                 client,
-                None,
-                Some(&sid_core::models::CredentialFence {
-                    id: new_credential.id,
-                    data: new_credential.data.clone(),
-                }),
-                admission,
+                client_ip,
+                AttemptContext {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
+                request.into_inner(),
             )
-            .await?;
-
-        info!(
-            "Legacy migration completed for profile {}",
-            migration.profile_id
-        );
-
+            .await
+            .map_err(password_refusal)?;
         signed_in.respond(|session_id, expires_in| LegacyMigrateFinishResponse {
             session_id: Some(session_id.into()),
             expires_in,
