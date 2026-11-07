@@ -14,9 +14,8 @@ use std::sync::atomic::AtomicBool;
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, test_key_manager};
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
-use sid_core::grpc_error::DOMAIN_SID;
 use sid_core::models::ProfileId;
+use sid_infra::grpc_error::DOMAIN_SID;
 use sid_proto::sid::v1::account_service_server::AccountServiceServer;
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentServiceServer;
 use sid_proto::sid::v1::admin::provisioning_service_server::ProvisioningServiceServer;
@@ -38,8 +37,9 @@ use sid_proto::sid::v1::scim_service_server::ScimServiceServer;
 use sid_proto::sid::v1::security_service_server::SecurityServiceServer;
 use sid_proto::sid::v1::system_integration_service_server::SystemIntegrationServiceServer;
 use sid_serve::error_contract::{Caller, probe};
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 
-/// The shared vocabulary handlers build (`sid_core::grpc_error::ErrorReason`)
+/// The shared vocabulary handlers build (`sid_infra::grpc_error::ErrorReason`)
 /// and the one clients generate from (`sid.v1.common.ErrorReason`) name the
 /// same reasons: a reason missing on either side is one a client cannot
 /// switch on or a server cannot send.
@@ -55,7 +55,7 @@ fn shared_vocabulary_matches_proto() {
         .map(|value| value.name().to_owned())
         .filter(|name| name != "ERROR_REASON_UNSPECIFIED")
         .collect();
-    let rust: BTreeSet<String> = sid_core::grpc_error::ErrorReason::ALL
+    let rust: BTreeSet<String> = sid_infra::grpc_error::ErrorReason::ALL
         .iter()
         .map(|reason| reason.as_str().to_owned())
         .collect();
@@ -154,7 +154,7 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         .add(SecurityServiceServer::new(security))
         .await
         .add(GovernanceServiceServer::new(
-            sid_authz::governance_grpc::GovernanceServiceImpl::new(
+            sid_server::grpc::governance_service::GovernanceServiceImpl::new(
                 storage.clone(),
                 jwt.clone(),
                 revocation_cache.clone(),

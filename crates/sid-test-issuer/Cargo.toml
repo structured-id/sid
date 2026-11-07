@@ -12,13 +12,14 @@ publish = false
 [dependencies]
 # The SQLite build of the server: the engine this issuer stores in.
 sid-server = { path = "../sid-server", default-features = false, features = ["embedded-dev"] }
-sid-core = { workspace = true, features = ["grpc"] }
+sid-core = { workspace = true }
 sid-keys = { workspace = true }
 sid-crypto = { workspace = true, features = ["std", "primitives"] }
 sid-plugin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc", "password-operation"] }
-# A test client's own credential at the issuer.
-sid-infra = { workspace = true, features = ["issuer-client"] }
+sid-authn = { workspace = true, features = ["password-operation"] }
+# A test client's own credential at the issuer, and the evaluator's RPC
+# adapter.
+sid-infra = { workspace = true, features = ["issuer-client", "password-operation"] }
 sid-authz = { workspace = true }
 sid-proto = { workspace = true, features = ["grpc"] }
 sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }

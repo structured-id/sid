@@ -4,14 +4,14 @@
 
 use sid_authn::client_auth::ClientAuthentication;
 use sid_authn::grant::{AccountClaims, CodeGrant, GrantHost, IdTokenAccount};
-use sid_authn::oauth_http::grant_refusal;
 use sid_authn::oauth2::{OAuth2Server, TokenResponse};
 use sid_authn::target::Target;
-use sid_core::grpc_error::refuse::{internal, storage_failure};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{
     OAuth2Client, OidcIssuer, Profile, ProfileId, ResourceId, RevocationReason, SessionId,
 };
+use sid_infra::grpc_error::refuse::{internal, storage_failure};
+use sid_infra::oauth_http::grant_refusal;
 use sid_plugin::GrantStore;
 use sid_proto::sid::v1::{OAuth2TokenRequest, OAuth2TokenResponse};
 use std::sync::Arc;

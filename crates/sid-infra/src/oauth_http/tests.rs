@@ -1,5 +1,5 @@
 use super::*;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use crate::grpc_error::{ApiError, ErrorReason};
 
 fn body(content_type: &str, data: &str) -> HttpBody {
     HttpBody {

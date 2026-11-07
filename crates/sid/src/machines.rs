@@ -12,7 +12,7 @@ use prost::Message;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use sid_authn::caller::{Caller, CallerError};
-use sid_authn::operation::{Effect, KeyedCommand, OperationError};
+use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{
     AuditEntry, ImpersonationGrant, ImpersonationTargetType as DomainImpersonationTargetType,
@@ -85,6 +85,12 @@ pub enum MachineError {
 impl From<MachineError> for Effect<MachineError> {
     fn from(e: MachineError) -> Self {
         Self::Refused(e)
+    }
+}
+
+impl From<CommandError<MachineError>> for MachineError {
+    fn from(e: CommandError<MachineError>) -> Self {
+        e.refusal()
     }
 }
 
@@ -419,6 +425,7 @@ impl Machines {
                 Ok(response)
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn reactivate_machine_user(
@@ -486,6 +493,7 @@ impl Machines {
                 Ok(response)
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     // ── Credentials ──
@@ -570,7 +578,10 @@ impl Machines {
             Ok(response)
         }
         .await;
-        command.settle(&*self.storage, answer).await
+        command
+            .settle(&*self.storage, answer)
+            .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn revoke_machine_credential(
@@ -727,7 +738,10 @@ impl Machines {
             Ok(response)
         }
         .await;
-        command.settle(&*self.storage, answer).await
+        command
+            .settle(&*self.storage, answer)
+            .await
+            .map_err(CommandError::refusal)
     }
 
     // ── Impersonation ──

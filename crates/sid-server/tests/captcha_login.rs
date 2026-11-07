@@ -85,7 +85,7 @@ async fn sign_in(
 fn challenge_of(refusal: &Status) -> String {
     assert_eq!(refusal.code(), Code::FailedPrecondition, "{refusal:?}");
     let (reason, _, _) =
-        sid_core::grpc_error::extract_error_info(refusal).expect("ErrorInfo detail");
+        sid_infra::grpc_error::extract_error_info(refusal).expect("ErrorInfo detail");
     assert_eq!(reason, "CAPTCHA_REQUIRED", "{refusal:?}");
     assert!(
         !refusal.message().contains("challenge_id"),

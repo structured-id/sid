@@ -18,7 +18,6 @@ use common::{TestServices, test_client, test_profile};
 use sid_auth::receiver::Action;
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, PERMISSION_CHECKER_ROLE, ProjectId, ResourceId, ResourceIndicator,
@@ -33,6 +32,7 @@ use sid_proto::sid::v1::authz::{
     SubjectReference, permission_target, subject_reference,
 };
 use sid_proto::sid::v1::authz_service_server::AuthzService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use tonic::{Code, Request};
 
 fn authz(svc: &TestServices) -> AuthzServiceImpl {

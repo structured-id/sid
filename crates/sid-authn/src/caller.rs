@@ -3,9 +3,10 @@
 //!
 //! [`authenticate_token`] turns a verified access token into a [`Caller`],
 //! the only way to obtain one; the caller's checks decide whether it may act
-//! on a target. The gRPC services reach them through the request's bearer
-//! token (`grpc` feature), an embedding application by presenting the token
-//! itself, so the rules are the same in every service and in process.
+//! on a target. A service reaches them through its transport adapter, which
+//! reads the request's bearer token; an embedding application by presenting
+//! the token itself, so the rules are the same in every service and in
+//! process.
 
 use crate::account_api::AccountApiToken;
 use crate::jwt::{AccessTokenClaims, TokenVerifier, VerifiedAccess};
@@ -13,11 +14,6 @@ use crate::revocation_cache::RevocationCache;
 use sid_core::models::ProfileId;
 
 use crate::account_roles::ADMIN_ROLE_CLAIM;
-
-#[cfg(feature = "grpc")]
-mod grpc;
-#[cfg(feature = "grpc")]
-pub use grpc::{authenticate, bearer_token, verify_factor_request, verify_request};
 
 /// `acr` of a token exchanged from a personal access token. Such a token
 /// carries no resource-bound grant, so it is never an installation caller.

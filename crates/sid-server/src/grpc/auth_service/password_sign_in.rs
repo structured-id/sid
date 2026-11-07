@@ -4,30 +4,13 @@
 
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::opaque::OpaqueRouter;
-use sid_authn::password_sign_in::{
-    OpenedPassword, PasswordSignInError, PasswordSignInHost, PendingSignIn,
-};
-use sid_core::grpc_error::refuse::storage_failure;
+use sid_authn::password_sign_in::{OpenedPassword, PasswordSignInHost, PendingSignIn};
 use sid_core::models::{Credential, Profile, ProfileId};
+use sid_infra::authn::password_sign_in::SignInStatus;
+use sid_infra::grpc_error::refuse::storage_failure;
 use sid_plugin::CredentialStore;
-use tonic::Status;
 
 use super::AuthServiceImpl;
-
-/// A sign-in refusal or failure as this server answers it.
-pub(super) struct SignInStatus(pub(super) Status);
-
-impl From<Status> for SignInStatus {
-    fn from(status: Status) -> Self {
-        Self(status)
-    }
-}
-
-impl From<PasswordSignInError> for SignInStatus {
-    fn from(e: PasswordSignInError) -> Self {
-        Self(e.into())
-    }
-}
 
 /// One password sign-in request of a local Profile.
 pub(super) struct ProfileSignIn<'a> {

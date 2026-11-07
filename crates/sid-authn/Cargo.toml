@@ -97,9 +97,7 @@ structured-email-address = { workspace = true }
 # Phone number validation (E.164)
 phonenumber = { workspace = true }
 
-# gRPC caller authentication (optional)
-tonic = { workspace = true, optional = true }
-# The password operation's wire form (optional)
+# The password operation's wire messages (optional)
 sid-proto = { workspace = true, optional = true }
 # The typed ids of password operations and sign-ins; their wire form
 # (optional).
@@ -108,26 +106,11 @@ sid-ids-proto = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 # A keyed command's recorded response (optional)
 prost = { workspace = true, optional = true }
-# The operation context read at the gRPC boundary (optional)
-http = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
 
 [features]
-# Keyed commands, transport-free: their identity comes from the proto.
+# Keyed commands and sign-in ceremonies, transport-free: their identity
+# comes from the proto.
 keyed = ["dep:sid-proto", "dep:prost"]
-grpc = [
-    "keyed",
-    "sid-proto/grpc",
-    "dep:tonic",
-    "dep:http",
-    "dep:tower",
-    "dep:futures",
-    "dep:prost-types",
-    "sid-core/grpc",
-]
-# The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
-oauth-http = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its
 # history checker, and the history evaluator in process or as its own
 # service.
@@ -154,8 +137,7 @@ pasta_curves = { workspace = true }
 halo2_proofs = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
-# The password operation's tests read rich refusals and store to a file.
-tonic-types = { workspace = true }
+# The password operation's tests store to a file.
 tempfile = "3"
 chrono = { workspace = true }
 criterion = { version = "0.8", features = ["html_reports"] }

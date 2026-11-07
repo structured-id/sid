@@ -10,17 +10,17 @@ use sid_authn::jwt::JwtService;
 use sid_authn::native_session::{self, NativePolicy};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
-use sid_authn::sign_in_refusal::authentication_failed;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::security_policy::SessionPolicy;
 use sid_core::models::{
     ActorFence, AuditEntry, MutationContext, Profile, Session, SessionEnd, SessionId, SignInProof,
 };
+use sid_infra::authn::sign_in_refusal::authentication_failed;
 use sid_plugin::storage::StorageBackend;
 use tonic::Status;
 use tracing::{info, warn};
 
-use sid_core::grpc_error::refuse::{internal, storage_failure};
+use sid_infra::grpc_error::refuse::{internal, storage_failure};
 
 /// The keyed operation a browser sign-in completes, whose result is its
 /// delivery sealed for a lost response: the session commits with that
@@ -72,8 +72,8 @@ pub(crate) struct SignInSessions<'a> {
 
 /// The refusal of a sign-in whose keyed operation already completed.
 fn operation_completed() -> Status {
-    sid_core::grpc_error::ApiError::new(
-        sid_core::grpc_error::ErrorReason::ConcurrentModification,
+    sid_infra::grpc_error::ApiError::new(
+        sid_infra::grpc_error::ErrorReason::ConcurrentModification,
         "the sign-in already completed",
     )
     .into()

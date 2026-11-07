@@ -1,5 +1,5 @@
 use super::*;
-use sid_core::grpc_error::extract_error_info;
+use sid_infra::grpc_error::extract_error_info;
 use tonic::Code;
 
 /// (code, reason, scimType) of a refusal.

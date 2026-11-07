@@ -2,18 +2,19 @@
 //! The gRPC entry to caller authentication: the request's bearer token, and
 //! the canonical status of each refusal.
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
-use tonic::{Request, Status};
-
-use super::{
+use sid_authn::caller::{
     Caller, CallerError, CurrentToken, FactorToken, Verified, authenticate_factor_token,
     authenticate_token,
 };
-use crate::jwt::TokenVerifier;
+use sid_authn::jwt::TokenVerifier;
+use tonic::{Request, Status};
 
-impl From<CallerError> for Status {
-    fn from(e: CallerError) -> Self {
-        match e {
+use crate::grpc_error::refuse::dependency_unavailable;
+use crate::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
+
+impl IntoStatus for CallerError {
+    fn into_status(self) -> Status {
+        match self {
             CallerError::Unauthenticated => {
                 ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
             }
@@ -22,9 +23,7 @@ impl From<CallerError> for Status {
                 "the caller may not perform this operation",
             )
             .into(),
-            CallerError::Unavailable { what, detail } => {
-                sid_core::grpc_error::refuse::dependency_unavailable(what, detail)
-            }
+            CallerError::Unavailable { what, detail } => dependency_unavailable(what, detail),
         }
     }
 }
@@ -36,19 +35,20 @@ impl From<CallerError> for Status {
 /// sender constraint (RFC 9449 §7.1).
 #[allow(clippy::result_large_err)]
 pub fn bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
+    let unauthenticated = || CallerError::Unauthenticated.into_status();
     let header = request
         .metadata()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or(CallerError::Unauthenticated)?;
-    let (scheme, token) = header.split_once(' ').ok_or(CallerError::Unauthenticated)?;
+        .ok_or_else(unauthenticated)?;
+    let (scheme, token) = header.split_once(' ').ok_or_else(unauthenticated)?;
     // RFC 7235 §2.1: the auth-scheme is case-insensitive.
     if !scheme.eq_ignore_ascii_case("Bearer") {
-        return Err(CallerError::Unauthenticated.into());
+        return Err(unauthenticated());
     }
     let token = token.trim();
     if token.is_empty() {
-        return Err(CallerError::Unauthenticated.into());
+        return Err(unauthenticated());
     }
     Ok(token)
 }
@@ -60,7 +60,9 @@ pub async fn verify_request<T>(
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
 ) -> Result<Verified, Status> {
-    Ok(authenticate_token(bearer_token(request)?, verifier, current).await?)
+    authenticate_token(bearer_token(request)?, verifier, current)
+        .await
+        .or_status()
 }
 
 /// Verify the bearer token of a second-factor verification (see
@@ -71,7 +73,9 @@ pub async fn verify_factor_request<T>(
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
 ) -> Result<FactorToken, Status> {
-    Ok(authenticate_factor_token(bearer_token(request)?, verifier, current).await?)
+    authenticate_factor_token(bearer_token(request)?, verifier, current)
+        .await
+        .or_status()
 }
 
 /// Authenticate the caller of `request` from its bearer access token (see
@@ -84,3 +88,6 @@ pub async fn authenticate<T>(
 ) -> Result<Caller, Status> {
     Ok(verify_request(request, verifier, current).await?.caller)
 }
+
+#[cfg(test)]
+mod tests;

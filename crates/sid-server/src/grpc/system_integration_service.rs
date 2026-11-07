@@ -8,8 +8,8 @@ use std::sync::Arc;
 use sid_authn::client_assertion::{AssertionJtiLog, validate_key_proof};
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::system_integration::account_integration;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::IssuerAuthority;
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::system_integration_service_server::SystemIntegrationService;
 use sid_proto::sid::v1::{AccountConnection, GetAccountConnectionRequest};
@@ -76,7 +76,7 @@ impl SystemIntegrationService for SystemIntegrationServiceImpl {
             Ok(()) => {}
             Err(sid_core::Error::Internal(e)) => {
                 // A replay record that cannot be read cannot rule out a replay.
-                return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
                     "proof replay record",
                     e,
                 ));

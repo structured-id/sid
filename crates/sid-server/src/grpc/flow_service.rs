@@ -4,17 +4,17 @@
 //! Runtime configuration for auth flows (step enable/disable, timeouts)
 //! and webhook actions at pipeline hook points. Admin role required.
 
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::ErrorReason;
-use sid_core::grpc_error::refuse::{
-    changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
-};
 use sid_core::models::{
     ActionConfig, ActionOnError, ActionPoint, ActionType, AuditEntry, FlowAction, FlowActionId,
     FlowConfig, FlowType, MutationContext, StepConfig,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::grpc_error::refuse::{
+    changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
+};
+use sid_infra::grpc_error::{ErrorReason, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::flow_action_service_server::FlowActionService;
 use sid_proto::sid::v1::flow_config_service_server::FlowConfigService;
@@ -102,7 +102,7 @@ async fn require_admin<T>(
     req: &Request<T>,
 ) -> Result<String, Status> {
     let caller = authenticate(req, jwt.verifier(), revocation).await?;
-    caller.require_admin()?;
+    caller.require_admin().or_status()?;
     Ok(caller.profile_id.to_string())
 }
 

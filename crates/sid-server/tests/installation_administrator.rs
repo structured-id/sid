@@ -27,7 +27,7 @@ fn bearing<T>(token: &str, message: T) -> Request<T> {
     request
 }
 
-async fn authz(svc: &TestServices) -> sid_authz::grpc::AuthzServiceImpl {
+async fn authz(svc: &TestServices) -> sid_server::grpc::authz_service::AuthzServiceImpl {
     for role in [
         Role::installation_administrator(),
         Role::new(ProjectId::SYSTEM, "editor", "Editor"),
@@ -37,7 +37,7 @@ async fn authz(svc: &TestServices) -> sid_authz::grpc::AuthzServiceImpl {
             .await
             .unwrap();
     }
-    sid_authz::grpc::AuthzServiceImpl::new(
+    sid_server::grpc::authz_service::AuthzServiceImpl::new(
         Arc::new(sid_authz::CeAuthzEngine::new(svc.storage.clone())),
         svc.storage.clone(),
         sid_authz::cedar::CedarService::new(),

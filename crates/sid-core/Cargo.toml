@@ -33,16 +33,6 @@ hkdf = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 aes-gcm = { workspace = true, optional = true }
 
-# gRPC error model (optional): canonical google.rpc.Status with typed details
-tonic = { workspace = true, optional = true }
-tonic-types = { workspace = true, optional = true }
-# Encoding of additional status details no canonical type carries
-prost = { workspace = true, optional = true }
-prost-types = { workspace = true, optional = true }
-# The shared refusals log the internal cause they never send
-tracing = { workspace = true, optional = true }
-
 [features]
 default = ["recovery"]
 recovery = ["dep:pbkdf2", "dep:hkdf", "dep:hmac", "dep:aes-gcm"]
-grpc = ["dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types", "dep:tracing"]

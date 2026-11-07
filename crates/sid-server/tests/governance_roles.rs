@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use common::mock_storage::MockStorage;
 use common::{error_reason, issue_admin_token, issue_token, test_jwt, test_revocation};
-use sid_authz::governance_grpc::GovernanceServiceImpl;
 use sid_core::models::{
     AccessRequestId, AccessRequestStatus, AssignmentProvenance, AuditEntry, Profile, ProjectId,
     Role, RoleAssignmentPrincipal,
@@ -20,6 +19,7 @@ use sid_proto::sid::v1::authz::governance_service_server::GovernanceService;
 use sid_proto::sid::v1::authz::{
     AccessRequestMessage, DecideRequestRequest, GrantTemporaryRoleRequest,
 };
+use sid_server::grpc::governance_service::GovernanceServiceImpl;
 use tonic::{Code, Request};
 
 fn authed<T>(msg: T, token: &str) -> Request<T> {

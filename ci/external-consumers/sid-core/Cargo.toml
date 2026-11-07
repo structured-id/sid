@@ -11,6 +11,5 @@ sid-core = { path = "@SID@/crates/sid-core", default-features = false }
 
 [features]
 recovery = ["sid-core/recovery"]
-grpc = ["sid-core/grpc"]
 
 [workspace]

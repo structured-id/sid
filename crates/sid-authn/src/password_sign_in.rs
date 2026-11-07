@@ -129,21 +129,6 @@ pub struct Started {
     pub login_id: OpaqueLoginId,
 }
 
-/// The login a finish names, or `INVALID_ARGUMENT` before anything is
-/// looked up: absent, of another length, nil, max or not a UUIDv7.
-#[cfg(all(feature = "password-operation", feature = "grpc"))]
-#[allow(clippy::result_large_err)]
-pub fn login_id(
-    field: Option<&sid_ids_proto::OpaqueLoginId>,
-) -> Result<OpaqueLoginId, tonic::Status> {
-    use sid_core::grpc_error::{ApiError, ErrorReason};
-    sid_ids_proto::required(field).map_err(|e| {
-        ApiError::new(ErrorReason::InvalidFieldValue, e.to_string())
-            .with_field_violation("login_id", "an OPAQUE login id")
-            .into()
-    })
-}
-
 /// Keep `pending` for the finish of a new login, under that login's id.
 async fn keep<H: PasswordSignInHost>(
     host: &H,

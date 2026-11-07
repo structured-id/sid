@@ -118,11 +118,11 @@ pub fn client_ip<T>(request: &tonic::Request<T>) -> Result<Option<IpAddr>, tonic
     };
     match client.resolution() {
         Resolution::Peer(ip) | Resolution::Forwarded(ip) => Ok(Some(ip.to_canonical())),
-        Resolution::Invalid(why) => Err(sid_core::grpc_error::refuse::invalid_field(
+        Resolution::Invalid(why) => Err(crate::grpc_error::refuse::invalid_field(
             "x-forwarded-for",
             format!("a trusted proxy's report is {why}"),
         )),
-        _ => Err(sid_core::grpc_error::refuse::internal(
+        _ => Err(crate::grpc_error::refuse::internal(
             "client address",
             "not resolved",
         )),

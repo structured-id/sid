@@ -4,15 +4,16 @@
 //! CE governance: 1-step access requests, temporary roles with auto-expiry.
 //! ListRoleAssignments and CheckSodConflicts are in AuthzService.
 
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AccessRequest, AccessRequestId, AccessRequestStatus as DomainAccessRequestStatus, AuditEntry,
     ProfileId, ProjectId, Role, RoleAssignment, RoleAssignmentPrincipal,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::governance_service_server::GovernanceService;
 use sid_proto::sid::v1::authz::{
@@ -35,7 +36,7 @@ fn to_opt_timestamp(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<prost_t
     dt.map(to_timestamp)
 }
 
-use crate::grpc::wire_id;
+use super::authz_service::wire_id;
 
 fn profile_not_found(id: ProfileId) -> Status {
     not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
@@ -95,11 +96,11 @@ impl GovernanceServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
-        caller.require_admin()?;
-        crate::admin::RoleAdministration::new(self.storage.clone())
+        caller.require_admin().or_status()?;
+        sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .require_installation_administrator(caller.profile_id)
             .await
-            .map_err(crate::grpc::administration_refusal)?;
+            .map_err(super::authz_service::administration_refusal)?;
         Ok(caller)
     }
 
@@ -145,7 +146,7 @@ impl GovernanceService for GovernanceServiceImpl {
 
         let requester_id: ProfileId =
             wire_id(req.requester_profile_id.as_ref(), "requester_profile_id")?;
-        caller.require_self_or_admin(requester_id)?;
+        caller.require_self_or_admin(requester_id).or_status()?;
 
         if req.requested_role.is_empty() {
             return Err(missing_field("requested_role"));
@@ -455,9 +456,9 @@ impl GovernanceService for GovernanceServiceImpl {
 
         let assignment_id = assignment.id;
 
-        crate::admin::RoleAdministration::new(self.storage.clone())
+        sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .assign(
-                &crate::admin::Administrator::Root(sid_core::models::AuthzPrincipal::Profile(
+                &sid_authz::admin::Administrator::Root(sid_core::models::AuthzPrincipal::Profile(
                     caller.profile_id,
                 )),
                 assignment,

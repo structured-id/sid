@@ -6,12 +6,12 @@
 //! - Activity history, linked accounts, app launcher, notification prefs, passwordless — TODO
 
 use prost::Message;
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{AuditEntry, MutationContext, ProfileId};
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{Effect, context, run, run_recorded};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::account::account_service as keyed;
 use sid_proto::sid::v1::account::account_service_server::AccountService;
@@ -20,10 +20,10 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::principal::PrincipalType;
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     invalid_field, missing_field, not_found, not_in_this_build, storage_failure,
 };
 
@@ -545,12 +545,11 @@ impl AccountService for AccountServiceImpl {
         // applies it again over a later decision on the same claim.
         let command =
             KeyedCommand::by_profile::<keyed::UpdateClaimConsent>(profile_id, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                self.decide_claim(profile_id, &command, &req).await?;
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            self.decide_claim(profile_id, &command, &req).await?;
+            Ok(())
+        })
+        .await?;
         Ok(Response::new(()))
     }
 
@@ -568,35 +567,34 @@ impl AccountService for AccountServiceImpl {
         // A retry of a completed disconnect answers as it did.
         let command =
             KeyedCommand::by_profile::<keyed::DisconnectSite>(profile_id, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                let site_id = &req.site_id;
-                let record = self
-                    .storage
-                    .get_consent_by_client(profile_id, site_id)
-                    .await?
-                    .ok_or_else(|| consent_not_found(site_id))?;
-                let event = sid_core::models::event::Event::new(
-                    "sid-account",
-                    sid_core::models::event::event_types::CONSENT_REVOKED,
-                )
-                .with_subject(format!("profile/{}", profile_id))
-                .with_data(serde_json::json!({
-                    "profile_id": profile_id.to_string(),
-                    "site_id": site_id,
-                    "disconnect": true,
-                }));
-                let ctx = own_ctx(profile_id, "consent.site_disconnected", site_id.clone())
-                    .with_work(event.relay())
-                    .with_operation(command.completion(().encode_to_vec()));
-                if !self.storage.delete_consent(record.id, ctx).await? {
-                    // Disconnected meanwhile: that disconnect announced it.
-                    return Err(consent_not_found(site_id).into());
-                }
-                info!("Site {} disconnected for profile {}", site_id, profile_id);
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            let site_id = &req.site_id;
+            let record = self
+                .storage
+                .get_consent_by_client(profile_id, site_id)
+                .await?
+                .ok_or_else(|| consent_not_found(site_id))?;
+            let event = sid_core::models::event::Event::new(
+                "sid-account",
+                sid_core::models::event::event_types::CONSENT_REVOKED,
+            )
+            .with_subject(format!("profile/{}", profile_id))
+            .with_data(serde_json::json!({
+                "profile_id": profile_id.to_string(),
+                "site_id": site_id,
+                "disconnect": true,
+            }));
+            let ctx = own_ctx(profile_id, "consent.site_disconnected", site_id.clone())
+                .with_work(event.relay())
+                .with_operation(command.completion(().encode_to_vec()));
+            if !self.storage.delete_consent(record.id, ctx).await? {
+                // Disconnected meanwhile: that disconnect announced it.
+                return Err(consent_not_found(site_id).into());
+            }
+            info!("Site {} disconnected for profile {}", site_id, profile_id);
+            Ok(())
+        })
+        .await?;
         Ok(Response::new(()))
     }
 
@@ -617,35 +615,34 @@ impl AccountService for AccountServiceImpl {
         // A retry of a completed addition answers with the phone it added and
         // adds no second one.
         let command = KeyedCommand::by_profile::<keyed::AddPhone>(profile_id, operation, &req);
-        let added = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let phone = sid_core::models::ProfilePhone {
-                    id: sid_core::models::profile_phone::ProfilePhoneId::new(),
-                    profile_id,
-                    e164: req.e164,
-                    extension: req.extension,
-                    label: proto_phone_label(req.label),
-                    custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
-                    is_primary: req.is_primary,
-                    can_receive_sms: req.can_receive_sms,
-                    can_receive_fax: req.can_receive_fax,
-                    can_receive_voice: req.can_receive_voice,
-                    verified: false,
-                    verified_at: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                let view = super::convert::phone_to_proto(&phone)?;
-                // A primary phone takes the flag from the current one in the
-                // same write.
-                let ctx = own_ctx(profile_id, "phone.added", phone.id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
-                self.storage.create_profile_phone(&phone, ctx).await?;
-                info!("Phone {} added for profile {}", phone.id.0, profile_id);
-                Ok(view)
-            })
-            .await?;
+        let added = run(&command, &*self.storage, || async {
+            let now = chrono::Utc::now();
+            let phone = sid_core::models::ProfilePhone {
+                id: sid_core::models::profile_phone::ProfilePhoneId::new(),
+                profile_id,
+                e164: req.e164,
+                extension: req.extension,
+                label: proto_phone_label(req.label),
+                custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
+                is_primary: req.is_primary,
+                can_receive_sms: req.can_receive_sms,
+                can_receive_fax: req.can_receive_fax,
+                can_receive_voice: req.can_receive_voice,
+                verified: false,
+                verified_at: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let view = super::convert::phone_to_proto(&phone)?;
+            // A primary phone takes the flag from the current one in the
+            // same write.
+            let ctx = own_ctx(profile_id, "phone.added", phone.id.0.to_string())
+                .with_operation(command.completion(view.encode_to_vec()));
+            self.storage.create_profile_phone(&phone, ctx).await?;
+            info!("Phone {} added for profile {}", phone.id.0, profile_id);
+            Ok(view)
+        })
+        .await?;
         Ok(Response::new(added))
     }
 
@@ -660,17 +657,16 @@ impl AccountService for AccountServiceImpl {
 
         // A retry of a completed removal answers as it did.
         let command = KeyedCommand::by_profile::<keyed::RemovePhone>(profile_id, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                // Another profile's phone is not found, as one that does not
-                // exist.
-                self.owned_phone(profile_id, phone_id).await?;
-                let ctx = own_ctx(profile_id, "phone.removed", phone_id.0.to_string())
-                    .with_operation(command.completion(().encode_to_vec()));
-                self.storage.delete_profile_phone(phone_id, ctx).await?;
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            // Another profile's phone is not found, as one that does not
+            // exist.
+            self.owned_phone(profile_id, phone_id).await?;
+            let ctx = own_ctx(profile_id, "phone.removed", phone_id.0.to_string())
+                .with_operation(command.completion(().encode_to_vec()));
+            self.storage.delete_profile_phone(phone_id, ctx).await?;
+            Ok(())
+        })
+        .await?;
         Ok(Response::new(()))
     }
 
@@ -698,8 +694,8 @@ impl AccountService for AccountServiceImpl {
         // A retry of a completed edit answers with the phone as that edit's
         // commit left it, and never writes it again over a later edit.
         let command = KeyedCommand::by_profile::<keyed::UpdatePhone>(profile_id, operation, &req);
-        let phone: sid_core::models::ProfilePhone = command
-            .run_recorded(&*self.storage, || async {
+        let phone: sid_core::models::ProfilePhone =
+            run_recorded(&command, &*self.storage, || async {
                 let ctx = own_ctx(profile_id, "phone.updated", phone_id.0.to_string())
                     .with_operation(command.effect_completion());
                 if !self
@@ -734,8 +730,8 @@ impl AccountService for AccountServiceImpl {
         // commit left it, and never moves the flag back over a later move.
         let command =
             KeyedCommand::by_profile::<keyed::SetPrimaryPhone>(profile_id, operation, &req);
-        let phone: sid_core::models::ProfilePhone = command
-            .run_recorded(&*self.storage, || async {
+        let phone: sid_core::models::ProfilePhone =
+            run_recorded(&command, &*self.storage, || async {
                 // The flag moves from the current primary in one write.
                 let ctx = own_ctx(profile_id, "phone.primary_set", phone_id.0.to_string())
                     .with_operation(command.effect_completion());
@@ -795,31 +791,30 @@ impl AccountService for AccountServiceImpl {
         // A retry of a completed addition answers with the email it added and
         // adds no second one.
         let command = KeyedCommand::by_profile::<keyed::AddEmail>(profile_id, operation, &req);
-        let added = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let email = sid_core::models::ProfileEmail {
-                    id: sid_core::models::profile_email::ProfileEmailId::new(),
-                    profile_id,
-                    email: address.clone(),
-                    label: proto_email_label(req.label),
-                    custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
-                    is_primary: req.is_primary,
-                    verified: false,
-                    verified_at: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                let view = super::convert::email_to_proto(&email)?;
-                // A primary email takes the flag from the current one in the
-                // same write.
-                let ctx = own_ctx(profile_id, "email.added", email.id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
-                self.storage.create_profile_email(&email, ctx).await?;
-                info!("Email {} added for profile {}", email.id.0, profile_id);
-                Ok(view)
-            })
-            .await?;
+        let added = run(&command, &*self.storage, || async {
+            let now = chrono::Utc::now();
+            let email = sid_core::models::ProfileEmail {
+                id: sid_core::models::profile_email::ProfileEmailId::new(),
+                profile_id,
+                email: address.clone(),
+                label: proto_email_label(req.label),
+                custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
+                is_primary: req.is_primary,
+                verified: false,
+                verified_at: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let view = super::convert::email_to_proto(&email)?;
+            // A primary email takes the flag from the current one in the
+            // same write.
+            let ctx = own_ctx(profile_id, "email.added", email.id.0.to_string())
+                .with_operation(command.completion(view.encode_to_vec()));
+            self.storage.create_profile_email(&email, ctx).await?;
+            info!("Email {} added for profile {}", email.id.0, profile_id);
+            Ok(view)
+        })
+        .await?;
         Ok(Response::new(added))
     }
 
@@ -834,17 +829,16 @@ impl AccountService for AccountServiceImpl {
 
         // A retry of a completed removal answers as it did.
         let command = KeyedCommand::by_profile::<keyed::RemoveEmail>(profile_id, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                // Another profile's email is not found, as one that does not
-                // exist.
-                self.owned_email(profile_id, email_id).await?;
-                let ctx = own_ctx(profile_id, "email.removed", email_id.0.to_string())
-                    .with_operation(command.completion(().encode_to_vec()));
-                self.storage.delete_profile_email(email_id, ctx).await?;
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            // Another profile's email is not found, as one that does not
+            // exist.
+            self.owned_email(profile_id, email_id).await?;
+            let ctx = own_ctx(profile_id, "email.removed", email_id.0.to_string())
+                .with_operation(command.completion(().encode_to_vec()));
+            self.storage.delete_profile_email(email_id, ctx).await?;
+            Ok(())
+        })
+        .await?;
         Ok(Response::new(()))
     }
 
@@ -869,8 +863,8 @@ impl AccountService for AccountServiceImpl {
         // A retry of a completed edit answers with the email as that edit's
         // commit left it, and never writes it again over a later edit.
         let command = KeyedCommand::by_profile::<keyed::UpdateEmail>(profile_id, operation, &req);
-        let email: sid_core::models::ProfileEmail = command
-            .run_recorded(&*self.storage, || async {
+        let email: sid_core::models::ProfileEmail =
+            run_recorded(&command, &*self.storage, || async {
                 let ctx = own_ctx(profile_id, "email.updated", email_id.0.to_string())
                     .with_operation(command.effect_completion());
                 if !self
@@ -905,8 +899,8 @@ impl AccountService for AccountServiceImpl {
         // commit left it, and never moves the flag back over a later move.
         let command =
             KeyedCommand::by_profile::<keyed::SetPrimaryEmail>(profile_id, operation, &req);
-        let email: sid_core::models::ProfileEmail = command
-            .run_recorded(&*self.storage, || async {
+        let email: sid_core::models::ProfileEmail =
+            run_recorded(&command, &*self.storage, || async {
                 // The flag moves from the current primary in one write.
                 let ctx = own_ctx(profile_id, "email.primary_set", email_id.0.to_string())
                     .with_operation(command.effect_completion());

@@ -16,15 +16,15 @@ name = "sid-attestation"
 path = "src/main.rs"
 
 [dependencies]
-sid-authn = { workspace = true, features = ["grpc"] }
+sid-authn = { workspace = true }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 # The shared receiver: calls are admitted with tokens for the installation's
 # account API resource, decided by its issuer.
 sid-auth = { workspace = true, default-features = false }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["authn-grpc"] }
 sid-serve = { workspace = true }
-sid-core = { workspace = true, features = ["grpc"] }
+sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg"] }
 sid-proto = { workspace = true, features = ["grpc"] }

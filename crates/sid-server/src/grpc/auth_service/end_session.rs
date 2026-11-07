@@ -76,7 +76,8 @@ impl AuthServiceImpl {
             let confirmed = self
                 .logout_confirmations
                 .take(confirmation)
-                .await?
+                .await
+                .or_status()?
                 .filter(|confirmed| browser.as_ref().is_some_and(|b| b.id == confirmed.session));
             if let (Some(confirmed), Some(browser)) = (confirmed, &browser) {
                 self.end_browser_session(browser).await?;
@@ -265,7 +266,8 @@ impl AuthServiceImpl {
                     return_to,
                 },
             )
-            .await?;
+            .await
+            .or_status()?;
         Ok(confirmation)
     }
 }

@@ -25,14 +25,14 @@ pub(super) fn policy_changed() -> Status {
 /// Whether `status` asks the user to authenticate further (STEP_UP_REQUIRED),
 /// as opposed to any other refusal of the request.
 fn asks_step_up(status: &Status) -> bool {
-    sid_core::grpc_error::extract_error_info(status)
+    sid_infra::grpc_error::extract_error_info(status)
         .is_some_and(|(reason, _, _)| reason == ErrorReason::StepUpRequired.as_str())
 }
 
 /// The refusal of an `authorization_request` that names no request this
 /// issuer is waiting to complete, the same for every cause.
 fn not_waiting() -> Status {
-    sid_core::grpc_error::refuse::invalid_field(
+    sid_infra::grpc_error::refuse::invalid_field(
         "authorization_request",
         "not an authorization request this issuer is waiting to complete",
     )
@@ -383,7 +383,10 @@ impl AuthServiceImpl {
         rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut bytes)
             .map_err(|_| Status::internal("operating system random source unavailable"))?;
         let reference = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        self.continuations.insert(&reference, pending).await?;
+        self.continuations
+            .insert(&reference, pending)
+            .await
+            .or_status()?;
         Ok(reference)
     }
 
@@ -417,7 +420,7 @@ impl AuthServiceImpl {
         if self.continue_authorization(&reference).await?.is_none() {
             return Err(not_waiting());
         }
-        sid_authn::oauth_http::authorization_response_url(
+        sid_infra::oauth_http::authorization_response_url(
             kept.redirect_uri(),
             &issuer.canonical_url,
             &[("error", "access_denied")],
@@ -452,7 +455,8 @@ impl AuthServiceImpl {
         let kept = self
             .continuations
             .read(reference)
-            .await?
+            .await
+            .or_status()?
             .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle)
             .ok_or_else(refused)?;
         let (client, issuer) = self
@@ -473,6 +477,6 @@ impl AuthServiceImpl {
         &self,
         reference: &str,
     ) -> Result<Option<PendingAuthorization>, Status> {
-        Ok(self.continuations.take(reference).await?)
+        self.continuations.take(reference).await.or_status()
     }
 }

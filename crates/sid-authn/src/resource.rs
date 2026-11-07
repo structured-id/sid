@@ -8,9 +8,6 @@
 //! naming the token in `ath`. Presented any other way it is refused, so a
 //! stolen bound token is useless without the key.
 
-#[cfg(feature = "grpc")]
-use tonic::Request;
-
 use crate::dpop::{DPopError, DPopValidator, VerifiedProof};
 
 /// The authorization scheme a token was presented under.
@@ -105,86 +102,11 @@ pub fn verify_sender(
     }
 }
 
-/// The access token of a gRPC request and its scheme, from the
-/// `authorization` metadata (RFC 7235 §2.1: the scheme is case-insensitive);
-/// `None` when there is none.
-#[cfg(feature = "grpc")]
-pub fn presented<T>(request: &Request<T>) -> Option<(Scheme, &str)> {
-    let header = request.metadata().get("authorization")?.to_str().ok()?;
-    let (scheme, token) = header.split_once(' ')?;
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    if scheme.eq_ignore_ascii_case("Bearer") {
-        Some((Scheme::Bearer, token))
-    } else if scheme.eq_ignore_ascii_case("DPoP") {
-        Some((Scheme::DPoP, token))
-    } else {
-        None
-    }
-}
-
-/// The HTTP request a call was transcoded from, as the transcoder serving
-/// the call in process received it: the method and the path (with any public
-/// prefix or alias). Only that transcoder puts it in a call's extensions; a
-/// gRPC client cannot send it.
-#[cfg(feature = "grpc")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscodedRequest {
-    method: String,
-    path: String,
-}
-
-#[cfg(feature = "grpc")]
-impl TranscodedRequest {
-    pub fn new(method: impl Into<String>, path: impl Into<String>) -> Self {
-        Self {
-            method: method.into(),
-            path: path.into(),
-        }
-    }
-}
-
 /// The method and URI a sender proof on a request must name (RFC 9449 §4.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestTarget {
     pub method: String,
     pub uri: String,
-}
-
-/// The request `request` to the RPC at `rpc` (`/package.Service/Method`) was
-/// received as, for its sender proof, at the service's configured public
-/// `origin` (scheme and authority; never taken from the request): the
-/// transcoded HTTP request when a transcoder served the call, otherwise the
-/// gRPC call itself, a POST to its RPC path (RFC 9449 §4.3).
-#[cfg(feature = "grpc")]
-pub fn request_target<T>(request: &Request<T>, origin: &str, rpc: &str) -> RequestTarget {
-    let origin = origin.trim_end_matches('/');
-    match request.extensions().get::<TranscodedRequest>() {
-        Some(transcoded) => RequestTarget {
-            method: transcoded.method.clone(),
-            uri: format!("{origin}{}", transcoded.path),
-        },
-        None => RequestTarget {
-            method: "POST".into(),
-            uri: format!("{origin}{rpc}"),
-        },
-    }
-}
-
-/// The DPoP proofs a gRPC request carries in its `dpop` metadata, one entry
-/// per value. A value that is not visible ASCII stays in as an empty proof,
-/// which fails validation: dropping it would let two values count as the
-/// single proof RFC 9449 §4.3 step 1 requires.
-#[cfg(feature = "grpc")]
-pub fn proofs<T>(request: &Request<T>) -> Vec<&str> {
-    request
-        .metadata()
-        .get_all("dpop")
-        .iter()
-        .map(|value| value.to_str().unwrap_or(""))
-        .collect()
 }
 
 #[cfg(test)]

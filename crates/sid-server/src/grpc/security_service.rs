@@ -6,10 +6,8 @@
 //! All RPCs require admin role.
 
 use sid_admin::integrity::{IntegrityCheckRequest, IntegrityService, VerificationLayer};
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::security_policy::{
     CE_PASSWORD_MAX_AGE_DAYS, CE_PASSWORD_MIN_DIGITS, CE_PASSWORD_MIN_LENGTH,
@@ -18,6 +16,8 @@ use sid_core::models::security_policy::{
     CE_SESSION_MAX_LIFETIME_HOURS, EnforcementMode, MfaEnforcement, SecurityPolicy,
 };
 use sid_core::models::{AuditEntry, MutationContext};
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{context, run_recorded};
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::security_service as keyed;
@@ -26,9 +26,9 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 
-use sid_core::grpc_error::ErrorReason;
+use sid_infra::grpc_error::{ErrorReason, OrStatus};
 
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, missing_field, not_found, not_in_this_build,
 };
 
@@ -59,9 +59,10 @@ impl SecurityServiceImpl {
 
     #[allow(clippy::result_large_err)]
     async fn require_admin<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        Ok(authenticate(req, self.jwt.verifier(), &self.revocation)
+        authenticate(req, self.jwt.verifier(), &self.revocation)
             .await?
-            .require_admin()?)
+            .require_admin()
+            .or_status()
     }
 }
 
@@ -834,21 +835,20 @@ impl SecurityService for SecurityServiceImpl {
         // left it and never adds back an entry removed since.
         let command =
             KeyedCommand::by_profile::<keyed::AddIpAllowlistEntry>(admin, operation, &req);
-        let left = command
-            .run_recorded(&*self.storage, || async {
-                let ctx = MutationContext::from(AuditEntry::admin(
-                    admin.to_string(),
-                    "ip_allowlist.add",
-                    req.cidr.clone(),
-                ))
-                .with_operation(command.effect_completion());
-                self.storage
-                    .add_ip_allowlist_entry(&req.cidr, &req.description, ctx)
-                    .await?;
-                // The allowlist as this commit left it, whatever changed since.
-                Ok(command.recorded_effect(&*self.storage).await?)
-            })
-            .await?;
+        let left = run_recorded(&command, &*self.storage, || async {
+            let ctx = MutationContext::from(AuditEntry::admin(
+                admin.to_string(),
+                "ip_allowlist.add",
+                req.cidr.clone(),
+            ))
+            .with_operation(command.effect_completion());
+            self.storage
+                .add_ip_allowlist_entry(&req.cidr, &req.description, ctx)
+                .await?;
+            // The allowlist as this commit left it, whatever changed since.
+            Ok(command.recorded_effect(&*self.storage).await?)
+        })
+        .await?;
         Ok(Response::new(allowlist_response(left)))
     }
 
@@ -869,21 +869,20 @@ impl SecurityService for SecurityServiceImpl {
         // left it and never removes an entry added again since.
         let command =
             KeyedCommand::by_profile::<keyed::RemoveIpAllowlistEntry>(admin, operation, &req);
-        let left = command
-            .run_recorded(&*self.storage, || async {
-                let ctx = MutationContext::from(AuditEntry::admin(
-                    admin.to_string(),
-                    "ip_allowlist.remove",
-                    req.cidr.clone(),
-                ))
-                .with_operation(command.effect_completion());
-                self.storage
-                    .remove_ip_allowlist_entry(&req.cidr, ctx)
-                    .await?;
-                // The allowlist as this commit left it, whatever changed since.
-                Ok(command.recorded_effect(&*self.storage).await?)
-            })
-            .await?;
+        let left = run_recorded(&command, &*self.storage, || async {
+            let ctx = MutationContext::from(AuditEntry::admin(
+                admin.to_string(),
+                "ip_allowlist.remove",
+                req.cidr.clone(),
+            ))
+            .with_operation(command.effect_completion());
+            self.storage
+                .remove_ip_allowlist_entry(&req.cidr, ctx)
+                .await?;
+            // The allowlist as this commit left it, whatever changed since.
+            Ok(command.recorded_effect(&*self.storage).await?)
+        })
+        .await?;
         Ok(Response::new(allowlist_response(left)))
     }
 }
@@ -921,7 +920,7 @@ impl SecurityServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, req: &Request<T>) -> Result<sid_core::models::ProfileId, Status> {
         let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller.profile_id)
     }
 }

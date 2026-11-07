@@ -40,9 +40,9 @@ use crate::grpc::{
 };
 use crate::state::AppState;
 
+use crate::grpc::authz_service::AuthzServiceImpl;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 
 /// Audit retention from `SID_AUDIT_RETENTION_DAYS` (default 365, 1 to 36500)
 /// and `SID_AUDIT_RETENTION_ACTION` (`archive`, the default, or `delete`);
@@ -1418,7 +1418,8 @@ where
             Output = anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>>,
         >,
 {
-    use sid_authn::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
+    use sid_authn::password_operation::PasswordHistoryAuthority;
+    use sid_infra::authn::password_operation::RemoteHistoryEvaluator;
     // A setting that is present but unreadable is refused, never read as
     // unset: that would quietly give this server the history keys.
     let optional = |name: &str| setting(name, var(name));

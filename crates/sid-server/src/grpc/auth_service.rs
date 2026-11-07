@@ -19,10 +19,6 @@ use sid_authn::jwt::JwtService;
 use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
-use sid_authn::oauth_http::{
-    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
-    token_error, token_refusal,
-};
 use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
@@ -37,7 +33,6 @@ use sid_authn::webauthn::{
     VerifiedAssertion, WebAuthnServer,
 };
 use sid_core::enrollment::{EnrollmentDecision, evaluate_enrollment};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::WebAuthnUserHandle;
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::event::{Event, event_types};
@@ -51,6 +46,14 @@ use sid_core::models::{
 use sid_core::models::{
     HistoryCommit, MutationContext, OidcIssuer, OperationCompletion, ProfileEmail, ProfilePhone,
     RevocationReason,
+};
+use sid_infra::authn::ceremony::Respond;
+use sid_infra::authn::operation::{context, run};
+use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
+use sid_infra::oauth_http::{
+    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
+    token_error, token_refusal,
 };
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::crypto::StoredCredential;
@@ -67,7 +70,7 @@ use sid_authn::native_session::{NativePolicy, PROOF_METADATA, REFRESH_METADATA};
 use sid_authn::password_operation::{
     CurrentPasswordCheck, OperationOwner, change_context, operation_id,
 };
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
     missing_field, not_configured, not_found, not_in_this_build, storage_failure,
 };
@@ -551,7 +554,7 @@ fn own_change(
 /// The refusal of a password step whose operation is not pending for the
 /// caller, the same whatever the reason.
 fn operation_not_pending() -> Status {
-    sid_authn::password_operation::PasswordOperationError::NotPending.into()
+    sid_authn::password_operation::PasswordOperationError::NotPending.into_status()
 }
 
 /// Server-side state for legacy password migration flow.
@@ -891,7 +894,7 @@ impl AuthServiceImpl {
         &self,
         metadata: &tonic::metadata::MetadataMap,
     ) -> Result<CeremonyClient, Status> {
-        sid_authn::sign_in_delivery::ceremony_client(metadata, self.sign_in_origin.as_ref())
+        sid_infra::authn::ceremony::ceremony_client(metadata, self.sign_in_origin.as_ref())
     }
 
     /// Accept `code` for `secret` once: a wrong code and a code already
@@ -2089,10 +2092,9 @@ impl AuthServiceImpl {
                 return Err(registration_restricted(enrollment_requirement(&reason)));
             }
             Err(e) => {
-                return Err(sid_authn::password_operation::commit_refusal(
-                    e,
-                    storage_failure,
-                ));
+                return Err(
+                    sid_authn::password_operation::commit_refusal(e, storage_failure).into_status(),
+                );
             }
         }
 
@@ -2245,6 +2247,7 @@ impl AuthServiceImpl {
             self.security_policy.auth.passkey_satisfies_mfa,
         )
         .await
+        .or_status()
     }
 
     /// Who binds a second factor in `request`: a sign-in's pending context
@@ -2272,6 +2275,7 @@ impl AuthServiceImpl {
                     self.security_policy.auth.passkey_satisfies_mfa,
                 )
                 .await
+                .or_status()
             }
         }
     }
@@ -2287,7 +2291,8 @@ impl AuthServiceImpl {
         let proof = self
             .first_factor_proofs
             .read(&pending.id.to_string())
-            .await?
+            .await
+            .or_status()?
             .ok_or_else(session_ended)?;
         let Some(proof) = proof else {
             return Ok(None);
@@ -2320,6 +2325,7 @@ impl AuthServiceImpl {
             self.security_policy.password.change_current_password,
         )
         .await
+        .or_status()
     }
 
     /// The OPAQUE password file of `credential`, opened, with its curve, and
@@ -2430,8 +2436,12 @@ impl AuthServiceImpl {
         &self,
         request: &Request<T>,
     ) -> Result<sid_authn::caller::Verified, Status> {
-        sid_authn::caller::verify_request(request, self.jwt.verifier(), &self.revocation_cache)
-            .await
+        sid_infra::authn::caller::verify_request(
+            request,
+            self.jwt.verifier(),
+            &self.revocation_cache,
+        )
+        .await
     }
 
     /// The profile's active TOTP credential and its seed. A seed stored under
@@ -2493,7 +2503,8 @@ impl AuthServiceImpl {
     /// The authenticated caller of `request`.
     #[allow(clippy::result_large_err)]
     async fn caller<T>(&self, request: &Request<T>) -> Result<sid_authn::caller::Caller, Status> {
-        sid_authn::caller::authenticate(request, self.jwt.verifier(), &self.revocation_cache).await
+        sid_infra::authn::caller::authenticate(request, self.jwt.verifier(), &self.revocation_cache)
+            .await
     }
 
     /// Create session and issue tokens (shared logic for login flows).
@@ -2575,7 +2586,7 @@ impl AuthServiceImpl {
             return Ok(FactorCaller::Pending(pending, CeremonyClient::Browser));
         }
         // The pending context's token is accepted here and nowhere else.
-        let (claims, profile_id, pending) = match sid_authn::caller::verify_factor_request(
+        let (claims, profile_id, pending) = match sid_infra::authn::caller::verify_factor_request(
             request,
             self.jwt.verifier(),
             &self.revocation_cache,
@@ -2583,11 +2594,11 @@ impl AuthServiceImpl {
         .await?
         {
             sid_authn::caller::FactorToken::Pending(claims) => {
-                let caller = sid_authn::caller::Caller::from_claims(&claims)?;
+                let caller = sid_authn::caller::Caller::from_claims(&claims).or_status()?;
                 (claims, caller.profile_id, true)
             }
             sid_authn::caller::FactorToken::Session(verified) => {
-                verified.require_installation()?;
+                verified.require_installation().or_status()?;
                 (verified.claims, verified.caller.profile_id, false)
             }
         };
@@ -2736,7 +2747,8 @@ impl AuthServiceImpl {
                         &proved_by.map(FirstFactorProof::of),
                         session.expires_at,
                     )
-                    .await?;
+                    .await
+                    .or_status()?;
                 if !kept {
                     return Err(ceremony_expired("sign-in"));
                 }
@@ -3215,17 +3227,12 @@ impl AuthServiceImpl {
     /// process's credential service prepares in process. An evaluator that
     /// takes Prepare from a remote credential service is a separate
     /// composition of
-    /// [`PasswordHistoryEvaluatorImpl`](sid_authn::password_operation::PasswordHistoryEvaluatorImpl)
+    /// [`PasswordHistoryEvaluatorImpl`](PasswordHistoryEvaluatorImpl)
     /// on an internal listener, with its own database and keys; this server
     /// never serves one.
-    pub fn history_evaluator(
-        &self,
-    ) -> Option<sid_authn::password_operation::PasswordHistoryEvaluatorImpl> {
+    pub fn history_evaluator(&self) -> Option<PasswordHistoryEvaluatorImpl> {
         self.history_evaluation.clone().map(|evaluation| {
-            sid_authn::password_operation::PasswordHistoryEvaluatorImpl::new(
-                evaluation,
-                Arc::new(sid_authn::password_operation::ClientListener),
-            )
+            PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(ClientListener))
         })
     }
 
@@ -3369,7 +3376,7 @@ impl AuthService for AuthServiceImpl {
             "/sid.v1.authn.AuthService/OpaqueLoginFinish",
         )?;
         let req = request.into_inner();
-        let login = sid_authn::password_sign_in::login_id(req.login_id.as_ref())?;
+        let login = sid_infra::authn::password_sign_in::login_id(req.login_id.as_ref())?;
         // The key is bound to this ceremony, checked before it is consumed.
         let native_key = self
             .native_ceremony_key(native.as_ref(), login.as_bytes())
@@ -3529,7 +3536,8 @@ impl AuthService for AuthServiceImpl {
                 format!("registration:{charged}"),
                 Some(req.registration_request),
             )
-            .await?;
+            .await
+            .or_status()?;
 
         Ok(Response::new(OpaqueZkppRegistrationStartResponse {
             registration_response: prepared.registration_response.unwrap_or_default(),
@@ -3552,7 +3560,7 @@ impl AuthService for AuthServiceImpl {
         let zkpp = self.require_zkpp()?;
 
         let req = request.into_inner();
-        let id = operation_id(req.operation_id.as_ref())?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
         let done = match self
             .password_ops
             .finish(
@@ -3566,7 +3574,8 @@ impl AuthService for AuthServiceImpl {
                     _ => Err(operation_not_pending()),
                 },
             )
-            .await?
+            .await
+            .or_status()?
         {
             Finish::Completed(result) => {
                 return Ok(Response::new(Self::recorded_response(&result)?));
@@ -3629,7 +3638,10 @@ impl AuthService for AuthServiceImpl {
         }
         let proves = !req.credential_request.is_empty();
         if required && !proves {
-            return Err(sid_authn::credential_enrollment::current_password_required());
+            return Err(
+                sid_authn::credential_enrollment::EnrollmentRefusal::CurrentPasswordRequired
+                    .into_status(),
+            );
         }
         let guesses = current_password_guesses(caller);
         if proves {
@@ -3674,7 +3686,8 @@ impl AuthService for AuthServiceImpl {
                 // Fixed now; its response is withheld until execute confirms.
                 Some(req.registration_request.clone()),
             )
-            .await?;
+            .await
+            .or_status()?;
 
         let credential_response = if let Some((response, state)) = started {
             // A wrong guess fails on the client at KE2 and need never reach
@@ -3692,7 +3705,8 @@ impl AuthService for AuthServiceImpl {
             }
             self.password_ops
                 .begin_current_password(&id, state, |op| own_change(op, caller, &credential))
-                .await?;
+                .await
+                .or_status()?;
             response
         } else {
             Vec::new()
@@ -3726,7 +3740,7 @@ impl AuthService for AuthServiceImpl {
         let credential = self
             .own_password(req.credential_id.as_ref(), caller)
             .await?;
-        let id = operation_id(req.operation_id.as_ref())?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
         if !req.credential_finalization.is_empty() {
             // As at sign-in: during a lockout a right and a wrong password
             // get the same answer.
@@ -3745,7 +3759,8 @@ impl AuthService for AuthServiceImpl {
                         .is_ok()
                 },
             )
-            .await?;
+            .await
+            .or_status()?;
         match check {
             CurrentPasswordCheck::Failed => {
                 // The guess was charged to the change's own budget when its
@@ -3754,7 +3769,10 @@ impl AuthService for AuthServiceImpl {
                 return Err(authentication_failed());
             }
             CurrentPasswordCheck::NotBegun if required => {
-                return Err(sid_authn::credential_enrollment::current_password_required());
+                return Err(
+                    sid_authn::credential_enrollment::EnrollmentRefusal::CurrentPasswordRequired
+                        .into_status(),
+                );
             }
             CurrentPasswordCheck::NotBegun => {}
             CurrentPasswordCheck::Proven => {
@@ -3770,7 +3788,8 @@ impl AuthService for AuthServiceImpl {
         let registration_response = self
             .password_ops
             .fixed_opaque_start(&zkpp, &id, |op| own_change(op, caller, &credential))
-            .await?;
+            .await
+            .or_status()?;
 
         Ok(Response::new(PasswordChangeExecuteResponse {
             registration_response,
@@ -3800,7 +3819,7 @@ impl AuthService for AuthServiceImpl {
         let credential = self
             .own_password(req.credential_id.as_ref(), caller)
             .await?;
-        let id = operation_id(req.operation_id.as_ref())?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
         let done = match self
             .password_ops
             .finish(
@@ -3812,12 +3831,13 @@ impl AuthService for AuthServiceImpl {
                 |op| {
                     own_change(op, caller, &credential)?;
                     if required && !op.current_password_proven() {
-                        return Err(sid_authn::credential_enrollment::current_password_required());
+                        return Err(sid_authn::credential_enrollment::EnrollmentRefusal::CurrentPasswordRequired.into_status());
                     }
                     Ok(())
                 },
             )
-            .await?
+            .await
+            .or_status()?
         {
             Finish::Completed(_) => return Ok(Response::new(())),
             Finish::Ready(done) => *done,
@@ -3845,7 +3865,9 @@ impl AuthService for AuthServiceImpl {
             .storage
             .change_password(credential.id, &current, &new, history.as_ref(), ctx)
             .await
-            .map_err(|e| sid_authn::password_operation::commit_refusal(e, storage_failure))?;
+            .map_err(|e| {
+                sid_authn::password_operation::commit_refusal(e, storage_failure).into_status()
+            })?;
         if !changed {
             return Err(changed_concurrently());
         }
@@ -3869,7 +3891,8 @@ impl AuthService for AuthServiceImpl {
             &verified.caller,
             self.security_policy.password.change_current_password,
         )
-        .await?;
+        .await
+        .or_status()?;
         // Never negative: the requirement clamps at zero.
         let left = left
             .to_std()
@@ -3968,7 +3991,8 @@ impl AuthService for AuthServiceImpl {
         // Only the profile that started the ceremony may finish it.
         self.webauthn_state
             .insert(&result.state_key, &profile.id)
-            .await?;
+            .await
+            .or_status()?;
 
         Ok(Response::new(WebAuthnRegistrationStartResponse {
             challenge: result.state_key.into_bytes(),
@@ -4000,7 +4024,8 @@ impl AuthService for AuthServiceImpl {
         let started_by = self
             .webauthn_state
             .take(&state_key)
-            .await?
+            .await
+            .or_status()?
             .ok_or_else(expired)?;
         if started_by != profile_id {
             return Err(expired());
@@ -4077,7 +4102,8 @@ impl AuthService for AuthServiceImpl {
             // The ceremony signs in this profile only.
             self.webauthn_state
                 .insert(&r.state_key, &profile.id)
-                .await?;
+                .await
+                .or_status()?;
             r
         } else {
             // Conditional UI: the profile comes from the authenticator's user
@@ -4138,7 +4164,8 @@ impl AuthService for AuthServiceImpl {
             let started_for = self
                 .webauthn_state
                 .take(&state_key)
-                .await?
+                .await
+                .or_status()?
                 .ok_or_else(expired)?;
             if started_for != p.id {
                 return Err(expired());
@@ -4284,7 +4311,7 @@ impl AuthService for AuthServiceImpl {
         // Only the IdP session's own token: an application's session never
         // authorizes codes for other clients.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
+        verified.require_installation().or_status()?;
         let prompt = sid_authn::oauth2::prompt::Prompt::parse(request.get_ref().prompt.as_deref())
             .map_err(authorize_refusal)?;
         let now = Utc::now();
@@ -4321,8 +4348,11 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         let client_ip = self.client_ip(&request)?;
         // The request a DPoP proof must name: as received, over REST or gRPC.
-        let proof_target =
-            sid_authn::resource::request_target(&request, &self.public_origin, OAUTH2_TOKEN_RPC);
+        let proof_target = sid_infra::authn::resource::request_target(
+            &request,
+            &self.public_origin,
+            OAUTH2_TOKEN_RPC,
+        );
         let (metadata, _, mut req) = request.into_parts();
         // RFC 9449 §4.1, §4.3: the proof travels in exactly one `DPoP` HTTP
         // header (gRPC metadata `dpop`), never in the request body.
@@ -4432,7 +4462,10 @@ impl AuthService for AuthServiceImpl {
         if !decision.is_allowed() {
             return Ok(inactive());
         }
-        if sid_authn::caller::check_revocation(&self.revocation_cache, &claims).await? {
+        if sid_authn::caller::check_revocation(&self.revocation_cache, &claims)
+            .await
+            .or_status()?
+        {
             return Ok(inactive());
         }
         // A valid signature says what was true at issuance; the token is
@@ -4843,7 +4876,7 @@ impl AuthService for AuthServiceImpl {
             }
         }
         let (user_code, raw_device_code) = issued.ok_or_else(|| {
-            sid_core::grpc_error::refuse::internal(
+            sid_infra::grpc_error::refuse::internal(
                 "storage",
                 format!("no free device user code after {CODE_ATTEMPTS} attempts"),
             )
@@ -4880,7 +4913,7 @@ impl AuthService for AuthServiceImpl {
         // The user's approval grants another client access: an authorization
         // decision of the IdP session, never of an application's token.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
+        verified.require_installation().or_status()?;
         let profile_id = verified.caller.profile_id;
 
         let req = request.into_inner();
@@ -5069,7 +5102,8 @@ impl AuthService for AuthServiceImpl {
                     credential_identifier,
                 },
             )
-            .await?;
+            .await
+            .or_status()?;
 
         info!(
             "Legacy migration started for profile {} (algorithm: {})",
@@ -5102,7 +5136,8 @@ impl AuthService for AuthServiceImpl {
         let migration = self
             .migration_state
             .take(&upgrade.to_string())
-            .await?
+            .await
+            .or_status()?
             .ok_or_else(|| ceremony_expired("password migration"))?;
 
         // Complete OPAQUE registration
@@ -5307,7 +5342,8 @@ impl AuthService for AuthServiceImpl {
         let enrollment_key = format!("totp:{}", profile_id);
         self.totp_enrollment
             .insert(&enrollment_key, &(profile_id, secret.clone()))
-            .await?;
+            .await
+            .or_status()?;
 
         // The secret and the parameters the codes are checked with; the
         // client presents them (Base32, otpauth URI, QR).
@@ -5339,7 +5375,8 @@ impl AuthService for AuthServiceImpl {
         let secret = self
             .totp_enrollment
             .take(&enrollment_key)
-            .await?
+            .await
+            .or_status()?
             .filter(|(enrolled_pid, _)| *enrolled_pid == profile_id)
             .map(|(_, secret)| secret)
             .ok_or_else(|| ceremony_expired("TOTP enrollment"))?;
@@ -5458,7 +5495,7 @@ impl AuthService for AuthServiceImpl {
         };
         let native_key = match &native {
             Some(_) => {
-                let pending = sid_authn::caller::bearer_token(&request)?.to_owned();
+                let pending = sid_infra::authn::caller::bearer_token(&request)?.to_owned();
                 self.native_ceremony_key(native.as_ref(), pending.as_bytes())
                     .await?
             }
@@ -5607,14 +5644,14 @@ impl AuthService for AuthServiceImpl {
         // New codes step up to Standard, so issuing them is an enrollment.
         self.require_enrollment_authority(&caller, profile_id, CredentialType::Recovery)
             .await?;
-        let context = sid_authn::operation::grpc::context(&request)?;
+        let context = context(&request)?;
         let command = sid_authn::operation::KeyedCommand::by_profile::<
             sid_proto::keyed::authn::auth_service::GenerateRecoveryCodes,
         >(profile_id, context, request.get_ref());
         // SID keeps only the codes' hashes: a retry of a completed generation
         // names the set it issued and issues no other, so the codes already
         // delivered stay valid until a new command replaces them.
-        if let Some(recorded) = command.completed(&*self.storage).await? {
+        if let Some(recorded) = command.completed(&*self.storage).await.or_status()? {
             return Err(recovery_codes_issued(&recorded));
         }
 
@@ -5652,7 +5689,10 @@ impl AuthService for AuthServiceImpl {
             // the issued one.
             Err(sid_core::Error::OperationCompleted(_)) => {
                 return Err(recovery_codes_issued(
-                    &command.committed_elsewhere(&*self.storage).await?,
+                    &command
+                        .committed_elsewhere(&*self.storage)
+                        .await
+                        .or_status()?,
                 ));
             }
             Err(e) => return Err(storage_failure(e)),
@@ -5677,7 +5717,7 @@ impl AuthService for AuthServiceImpl {
         // A second factor authenticates the IdP session, never an
         // application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
+        verified.require_installation().or_status()?;
         let claims = verified.claims;
         let profile_id = verified.caller.profile_id;
 
@@ -6057,8 +6097,8 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Step-up elevates the IdP session, never an application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
-        verified.caller.require_interactive()?;
+        verified.require_installation().or_status()?;
+        verified.caller.require_interactive().or_status()?;
         let claims = verified.claims;
         let req_inner = request.into_inner();
 
@@ -6190,7 +6230,8 @@ impl AuthService for AuthServiceImpl {
                         &step_up_challenge_key(&claims.sid, &challenge_id.to_string()),
                         &result.state_key,
                     )
-                    .await?;
+                    .await
+                    .or_status()?;
 
                 Ok(Response::new(StepUpChallenge {
                     method: req_inner.method,
@@ -6210,7 +6251,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Step-up elevates the IdP session, never an application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
+        verified.require_installation().or_status()?;
         let claims = verified.claims;
         let profile_id = verified.caller.profile_id;
         let session_id = SessionId::parse(&claims.sid)
@@ -6268,7 +6309,8 @@ impl AuthService for AuthServiceImpl {
                         &claims.sid,
                         &challenge_id.to_string(),
                     ))
-                    .await?
+                    .await
+                    .or_status()?
                     .ok_or_else(expired)?;
                 if credential.state_key().ok() != Some(state_key) {
                     return Err(expired());
@@ -6382,7 +6424,7 @@ impl AuthService for AuthServiceImpl {
 
         let profile_id = verified.caller.profile_id;
 
-        let context = sid_authn::operation::grpc::context(&request)?;
+        let context = context(&request)?;
         let req = request.into_inner();
         let credential_id = sid_core::models::CredentialId(
             wire_id(req.credential_id.as_ref(), "credential_id")?.into_uuid(),
@@ -6393,64 +6435,63 @@ impl AuthService for AuthServiceImpl {
         let command = sid_authn::operation::KeyedCommand::by_profile::<
             sid_proto::keyed::authn::auth_service::DeleteMfaCredential,
         >(profile_id, context, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                // Load credential and verify ownership + type.
-                let credentials = self
-                    .storage
-                    .get_credentials_by_profile(profile_id, None)
-                    .await?;
-                let credential = credentials
-                    .iter()
-                    .find(|c| c.id == credential_id)
-                    .ok_or_else(|| credential_not_found(credential_id))?;
+        let response = run(&command, &*self.storage, || async {
+            // Load credential and verify ownership + type.
+            let credentials = self
+                .storage
+                .get_credentials_by_profile(profile_id, None)
+                .await?;
+            let credential = credentials
+                .iter()
+                .find(|c| c.id == credential_id)
+                .ok_or_else(|| credential_not_found(credential_id))?;
 
-                // Only allow deleting MFA credentials (TOTP, WebAuthn, Recovery).
-                let cred_type = match credential.credential_type {
-                    CredentialType::Totp => "totp",
-                    CredentialType::WebAuthn => "webauthn",
-                    CredentialType::Recovery => "recovery",
-                    _ => {
-                        return Err(invalid_field(
-                            "credential_id",
-                            "not a second factor (TOTP, passkey or recovery codes)",
-                        )
-                        .into());
-                    }
-                };
+            // Only allow deleting MFA credentials (TOTP, WebAuthn, Recovery).
+            let cred_type = match credential.credential_type {
+                CredentialType::Totp => "totp",
+                CredentialType::WebAuthn => "webauthn",
+                CredentialType::Recovery => "recovery",
+                _ => {
+                    return Err(invalid_field(
+                        "credential_id",
+                        "not a second factor (TOTP, passkey or recovery codes)",
+                    )
+                    .into());
+                }
+            };
 
-                let response = DeleteMfaCredentialResponse {
-                    deleted: true,
-                    credential_type: cred_type.to_string(),
-                };
-                let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
-                    .with_subject(format!("profile/{}", profile_id))
-                    .with_data(serde_json::json!({
-                        "credential_type": cred_type,
-                        "credential_id": credential_id.0.to_string(),
-                    }));
-                let ctx = MutationContext::from(AuditEntry::user(
-                    profile_id.to_string(),
-                    "credential.mfa_deleted",
-                    credential_id.0.to_string(),
-                ))
-                .with_work(disabled.relay())
-                .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
-                // Revoked, not deleted; a passkey that is the last way to sign
-                // in stays. The event commits only with a revocation that
-                // happened.
-                let outcome = self.storage.revoke_credential(credential_id, ctx).await?;
-                crate::grpc::identity_service::refuse_last_primary(outcome, credential_id)?;
+            let response = DeleteMfaCredentialResponse {
+                deleted: true,
+                credential_type: cred_type.to_string(),
+            };
+            let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
+                .with_subject(format!("profile/{}", profile_id))
+                .with_data(serde_json::json!({
+                    "credential_type": cred_type,
+                    "credential_id": credential_id.0.to_string(),
+                }));
+            let ctx = MutationContext::from(AuditEntry::user(
+                profile_id.to_string(),
+                "credential.mfa_deleted",
+                credential_id.0.to_string(),
+            ))
+            .with_work(disabled.relay())
+            .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
+            // Revoked, not deleted; a passkey that is the last way to sign
+            // in stays. The event commits only with a revocation that
+            // happened.
+            let outcome = self.storage.revoke_credential(credential_id, ctx).await?;
+            crate::grpc::identity_service::refuse_last_primary(outcome, credential_id)?;
 
-                info!(
-                    profile = %profile_id,
-                    credential = %credential_id.0,
-                    r#type = cred_type,
-                    "MFA credential deleted (self-service)"
-                );
-                Ok(response)
-            })
-            .await?;
+            info!(
+                profile = %profile_id,
+                credential = %credential_id.0,
+                r#type = cred_type,
+                "MFA credential deleted (self-service)"
+            );
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -6617,7 +6658,8 @@ impl AuthService for AuthServiceImpl {
                 format!("profile:{}", session.profile_id),
                 None,
             )
-            .await?;
+            .await
+            .or_status()?;
 
         Ok(Response::new(VerifyPasswordResetResponse {
             expires_in: sid_core::models::RESET_SESSION_TTL_SECS as i32,
@@ -6634,7 +6676,7 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<ExecutePasswordResetResponse>, Status> {
         let zkpp = self.require_zkpp()?;
         let req = request.into_inner();
-        let id = operation_id(req.operation_id.as_ref())?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
         let mut reset = None;
         let registration_response = self
             .password_ops
@@ -6647,7 +6689,8 @@ impl AuthService for AuthServiceImpl {
                     _ => Err(operation_not_pending()),
                 }
             })
-            .await?;
+            .await
+            .or_status()?;
         // The operation outlives nothing: a reset that expired or was
         // completed meanwhile does not go on.
         let session = reset.ok_or_else(operation_not_pending)?;
@@ -6673,7 +6716,7 @@ impl AuthService for AuthServiceImpl {
         //    operation, which names the reset. A retry of a completed reset
         //    gets no session: the password was replaced, the client signs in
         //    with it.
-        let id = operation_id(req.operation_id.as_ref())?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
         let mut reset = None;
         let done = match self
             .password_ops
@@ -6691,7 +6734,8 @@ impl AuthService for AuthServiceImpl {
                     _ => Err(operation_not_pending()),
                 },
             )
-            .await?
+            .await
+            .or_status()?
         {
             Finish::Completed(_) => {
                 return Ok(Response::new(CompletePasswordResetResponse::default()));
@@ -6735,7 +6779,9 @@ impl AuthService for AuthServiceImpl {
             .storage
             .complete_password_reset(session.id, &new_cred, history.as_ref(), &end, ctx)
             .await
-            .map_err(|e| sid_authn::password_operation::commit_refusal(e, storage_failure))?
+            .map_err(|e| {
+                sid_authn::password_operation::commit_refusal(e, storage_failure).into_status()
+            })?
             // Completed, or expired, meanwhile: the reset starts again.
             .ok_or_else(|| ceremony_expired("password reset"))?;
 
@@ -6936,7 +6982,7 @@ impl AuthServiceImpl {
             .await?;
 
         let profile_id = code.authorized_by.ok_or_else(|| {
-            sid_core::grpc_error::refuse::internal(
+            sid_infra::grpc_error::refuse::internal(
                 "storage",
                 "an approved device code has no approver",
             )
@@ -7164,7 +7210,7 @@ impl AuthServiceImpl {
                     secret.expose_secret(),
                 )
                 .await
-                .map_err(as_client_error)?
+                .map_err(|e| as_client_error(e.into_status()))?
             }
             // A connector has no key credential and is never a public client.
             _ => {
@@ -7414,7 +7460,7 @@ impl AuthServiceImpl {
         .await
         .map_err(|e| match e {
             unavailable @ sid_authn::caller::CallerError::Unavailable { .. } => {
-                Status::from(unavailable)
+                unavailable.into_status()
             }
             _ => invalid_subject(),
         })?;

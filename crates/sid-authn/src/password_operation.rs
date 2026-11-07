@@ -36,9 +36,9 @@
 //! evaluated elements, so the finish needs no evaluator read. A standalone
 //! installation runs both authorities in one process, so compromising that
 //! process merges them. A split deployment runs the evaluator as its own
-//! service ([`PasswordHistoryEvaluatorImpl`], with the deployment's own
-//! [`PrepareAdmission`]) and the credential service reaches it through
-//! [`RemoteHistoryEvaluator`].
+//! service, whose RPC adapter carries [`HistoryAdmission::request`] and
+//! [`preparation_response`], and the credential service reaches it through
+//! a [`HistoryPreparation`] over that transport.
 //!
 //! Every credential has its own OPRF key (`credential_identifier`, drawn at
 //! prepare and stored with the credential). Before the commit that key has
@@ -57,18 +57,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod enrollment;
-#[cfg(feature = "grpc")]
-mod grpc;
 mod purge;
 pub mod relayed;
 pub use enrollment::{
     EnrollmentHandler, EvaluatorDelivery, abort_event_id, compact_enrollments,
     compact_evaluator_fences,
-};
-#[cfg(feature = "grpc")]
-pub use grpc::{
-    ClientListener, InternalTransport, PasswordHistoryEvaluatorImpl, PrepareAdmission,
-    RemoteHistoryEvaluator,
 };
 pub use purge::{OwnerPurgeHandler, purge_event_id};
 pub use relayed::{
@@ -95,7 +88,8 @@ use sid_plugin::{CredentialStore, OperationResultStore, WorkStore};
 use sid_proto::sid::v1::authn::{
     PasswordHistoryContext, PasswordHistoryDomain, PasswordHistoryEpochDescriptor,
     PasswordHistoryEvaluation, PasswordHistoryEvaluationProof, PasswordHistoryKsf,
-    PasswordHistoryOwnerKind, PasswordRegistrationProof,
+    PasswordHistoryOwnerKind, PasswordRegistrationProof, PreparePasswordHistoryRequest,
+    PreparePasswordHistoryResponse,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
@@ -116,7 +110,9 @@ const OPERATION_TTL: Duration = Duration::from_secs(15 * 60);
 const ADMISSION_CLOCK_SKEW: Duration = Duration::from_secs(60);
 /// History evaluations one subject may be charged per window.
 const EVALUATIONS_PER_WINDOW: u64 = 30;
-const EVALUATION_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// The window those evaluations are counted in: how long a rate-limited
+/// subject waits before retrying.
+pub const EVALUATION_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// How long a finish waits for KSF memory before reporting unavailable.
 const KSF_WAIT: Duration = Duration::from_secs(10);
 /// Concurrent KSF memory one replica admits, MiB.
@@ -417,6 +413,112 @@ pub struct HistoryAdmission {
     pub live: LiveDomains,
 }
 
+impl HistoryAdmission {
+    /// The preparation request asking the evaluator for this admission.
+    pub fn request(&self) -> Result<PreparePasswordHistoryRequest, PasswordOperationError> {
+        let live = &self.live;
+        Ok(PreparePasswordHistoryRequest {
+            operation_id: Some(self.id.into()),
+            owner_domain: self.owner_domain.to_vec(),
+            owner_kind: self.kind.message() as i32,
+            expires_at: Some(timestamp(self.expires_at)),
+            charge_key: self.charge_key.clone(),
+            live_comparison_domains: live.domains.iter().map(|d| d.to_vec()).collect(),
+            history_revision: u64::try_from(live.revision).map_err(internal)?,
+            settled_operations: live
+                .settled
+                .iter()
+                .map(|op| sid_ids_proto::PasswordOperationId {
+                    value: op.as_bytes().to_vec(),
+                })
+                .collect(),
+        })
+    }
+
+    /// The admission a preparation request carries, decoded; the evaluator
+    /// checks each live domain against the owner's epochs.
+    pub fn of_request(req: &PreparePasswordHistoryRequest) -> Result<Self, PasswordOperationError> {
+        if req.live_comparison_domains.len() > MAX_HISTORY_DOMAINS {
+            return Err(invalid_field(
+                "live_comparison_domains",
+                "more domains than an operation holds",
+            ));
+        }
+        if req.settled_operations.len()
+            > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize
+        {
+            return Err(invalid_field(
+                "settled_operations",
+                "more operations than history retains",
+            ));
+        }
+        let mut domains = req
+            .live_comparison_domains
+            .iter()
+            .map(|d| array32(d, "live_comparison_domains"))
+            .collect::<Result<Vec<_>, _>>()?;
+        domains.sort_unstable();
+        let settled = req
+            .settled_operations
+            .iter()
+            .map(|op| operation_id(Some(op)).map(|id| id.into_uuid()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expires_at = req
+            .expires_at
+            .as_ref()
+            .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?))
+            .ok_or_else(|| invalid_field("expires_at", "a valid instant"))?;
+        Ok(Self {
+            id: operation_id(req.operation_id.as_ref())?,
+            owner_domain: array32(&req.owner_domain, "owner_domain")?,
+            kind: OwnerKind::of_message(req.owner_kind)
+                .ok_or_else(|| invalid_field("owner_kind", "a specified owner kind"))?,
+            expires_at,
+            charge_key: req.charge_key.clone(),
+            live: LiveDomains {
+                revision: i64::try_from(req.history_revision)
+                    .map_err(|_| invalid_field("history_revision", "out of range"))?,
+                domains,
+                settled,
+            },
+        })
+    }
+}
+
+/// The evaluator's answer to a preparation selecting `epochs`.
+pub fn preparation_response(epochs: &[HistoryEpochDescriptor]) -> PreparePasswordHistoryResponse {
+    PreparePasswordHistoryResponse {
+        domains: epochs
+            .iter()
+            .map(|e| domain_message(&OperationDomain::of(e)))
+            .collect(),
+        epochs: epochs.iter().map(descriptor_message).collect(),
+    }
+}
+
+/// The selection a preparation answer carries, when it is well formed: as
+/// many epochs as domains, within the bound, each domain the one its epoch
+/// describes under the shared relation.
+pub fn selection_of(
+    response: &PreparePasswordHistoryResponse,
+) -> Option<Vec<HistoryEpochDescriptor>> {
+    if response.epochs.is_empty()
+        || response.epochs.len() > MAX_HISTORY_DOMAINS
+        || response.epochs.len() != response.domains.len()
+    {
+        return None;
+    }
+    response
+        .epochs
+        .iter()
+        .zip(&response.domains)
+        .map(|(epoch, domain)| {
+            let epoch = descriptor_of(epoch)?;
+            (domain_message(&OperationDomain::of(&epoch)) == *domain).then_some(epoch)
+        })
+        .collect()
+}
+
 /// Admits a password operation at the history evaluator and returns its
 /// selected epochs: the evaluator in this process, or as its own service.
 #[async_trait::async_trait]
@@ -480,8 +582,8 @@ fn descriptor_of(m: &PasswordHistoryEpochDescriptor) -> Option<HistoryEpochDescr
     })
 }
 
-/// Why a step of a password operation is refused. Each has one gRPC status
-/// (`grpc` feature): its code, `ErrorInfo` reason and details.
+/// Why a step of a password operation is refused. Each has one answer in
+/// each protocol its adapter serves.
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordOperationError {
     /// A dependency of the history check cannot answer now; retryable.
@@ -575,13 +677,43 @@ fn step_missing(what: &'static str) -> PasswordOperationError {
     PasswordOperationError::StepMissing(what)
 }
 
+/// Why a host step of a password operation was refused: by the operation
+/// itself, or by the host's own check `E`, returned as it is.
+#[derive(Debug)]
+pub enum StepError<E> {
+    Operation(PasswordOperationError),
+    Host(E),
+}
+
+impl<E> From<PasswordOperationError> for StepError<E> {
+    fn from(e: PasswordOperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+impl<E> From<ChallengeStoreError> for StepError<E> {
+    fn from(e: ChallengeStoreError) -> Self {
+        Self::Operation(e.into())
+    }
+}
+
+impl<E: From<PasswordOperationError>> StepError<E> {
+    /// The refusal, in a vocabulary that also names the operation's own.
+    pub fn refusal(self) -> E {
+        match self {
+            Self::Operation(e) => e.into(),
+            Self::Host(e) => e,
+        }
+    }
+}
+
 /// The refusal of a purpose's commit: a write cutoff that won the commit's
 /// serialization is [`PasswordOperationError::HistoryKeyWithdrawn`],
-/// anything else `other`.
-pub fn commit_refusal<E: From<PasswordOperationError>>(
+/// anything else `other`'s.
+pub fn commit_refusal<E>(
     e: sid_core::Error,
     other: impl FnOnce(sid_core::Error) -> E,
-) -> E {
+) -> StepError<E> {
     match e {
         sid_core::Error::Fenced(reason) => {
             warn!("password commit refused by the history write cutoff: {reason}");
@@ -590,7 +722,7 @@ pub fn commit_refusal<E: From<PasswordOperationError>>(
         // The operation is taken exclusively before its commit, so another
         // completion of its key is its terminal abort, which won.
         sid_core::Error::OperationCompleted(_) => expired().into(),
-        e => other(e),
+        e => StepError::Host(other(e)),
     }
 }
 
@@ -985,33 +1117,33 @@ where
     /// step), which is then kept until its deadline whatever `step` decided.
     /// Concurrent steps of one operation are serialized by the exclusive
     /// take: the second one finds the operation taken and is refused.
-    pub async fn amend<T, E: From<PasswordOperationError>>(
+    pub async fn amend<T, E>(
         &self,
         id: &PasswordOperationId,
         step: impl FnOnce(&mut PendingOperation<S::Owner, P>) -> Result<T, E>,
-    ) -> Result<T, E> {
+    ) -> Result<T, StepError<E>> {
         let mut op = self.take(id).await?;
         let result = step(&mut op);
         self.store(&op).await?;
-        result
+        result.map_err(StepError::Host)
     }
 
     /// Begin the change `id`'s sign-in with the current password, when
     /// `authorized` accepts its purpose: `state` is the server side of the
     /// KE2 the challenge answers with. Its KE3 comes in execute.
-    pub async fn begin_current_password<E: From<PasswordOperationError>>(
+    pub async fn begin_current_password<E>(
         &self,
         id: &PasswordOperationId,
         state: LoginState,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<(), E> {
+    ) -> Result<(), StepError<E>> {
         let mut op = self.take(id).await?;
         let result = authorized(&op);
         if result.is_ok() {
             op.current_password = CurrentPassword::Started(state);
         }
         self.store(&op).await?;
-        result
+        result.map_err(StepError::Host)
     }
 
     /// Execute's half of the change `id`'s sign-in with the current
@@ -1019,19 +1151,19 @@ where
     /// state, once, under the change's context over the request the
     /// challenge fixed. A failed check leaves the operation without a proof;
     /// a retry of a proven operation stays proven.
-    pub async fn prove_current_password<E: From<PasswordOperationError>>(
+    pub async fn prove_current_password<E>(
         &self,
         id: &PasswordOperationId,
         finalization: &[u8],
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
         verify: impl FnOnce(&LoginState, &[u8], &[u8]) -> bool,
-    ) -> Result<CurrentPasswordCheck, E> {
+    ) -> Result<CurrentPasswordCheck, StepError<E>> {
         let mut op = self.take(id).await?;
         let context = op
             .registration_request
             .as_deref()
             .map(|request| change_context(&op.id, request));
-        let checked = authorized(&op).and_then(|()| {
+        let checked = authorized(&op).map_err(StepError::Host).and_then(|()| {
             match (
                 std::mem::take(&mut op.current_password),
                 finalization.is_empty(),
@@ -1078,14 +1210,14 @@ where
     /// it already fixed, when `authorized` accepts its purpose: a change
     /// answers execute with the response to the request its challenge fixed,
     /// never a new one.
-    pub async fn fixed_opaque_start<E: From<PasswordOperationError>>(
+    pub async fn fixed_opaque_start<E>(
         &self,
         zkpp: &ZkppOpaqueServer,
         id: &PasswordOperationId,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Vec<u8>, E> {
+    ) -> Result<Vec<u8>, StepError<E>> {
         let mut op = self.take(id).await?;
-        let result = authorized(&op).and_then(|()| {
+        let result = authorized(&op).map_err(StepError::Host).and_then(|()| {
             let request = op
                 .registration_request
                 .clone()
@@ -1098,15 +1230,17 @@ where
 
     /// The OPAQUE start of the operation `id`, when `authorized` accepts its
     /// purpose (see [`Self::start_opaque`]).
-    pub async fn opaque_start<E: From<PasswordOperationError>>(
+    pub async fn opaque_start<E>(
         &self,
         zkpp: &ZkppOpaqueServer,
         id: &PasswordOperationId,
         request: Vec<u8>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Vec<u8>, E> {
+    ) -> Result<Vec<u8>, StepError<E>> {
         let mut op = self.take(id).await?;
-        let result = authorized(&op).and_then(|()| Ok(Self::start_opaque(zkpp, &mut op, request)?));
+        let result = authorized(&op)
+            .map_err(StepError::Host)
+            .and_then(|()| Ok(Self::start_opaque(zkpp, &mut op, request)?));
         self.store(&op).await?;
         result
     }
@@ -1120,7 +1254,7 @@ where
     /// operation for an exact retry; it is not a rejected proof. A finish
     /// whose verification ran past the operation's commit deadline commits
     /// nothing: a first enrollment's cleanup may be recorded from then on.
-    pub async fn finish<E: From<PasswordOperationError>>(
+    pub async fn finish<E>(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
         id: &PasswordOperationId,
@@ -1128,7 +1262,7 @@ where
         record: &[u8],
         proof: Option<PasswordRegistrationProof>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Finish<S::Owner, P>, E> {
+    ) -> Result<Finish<S::Owner, P>, StepError<E>> {
         let finished = self
             .verify_finish(zkpp, id, method, record, proof, authorized)
             .await?;
@@ -1142,7 +1276,7 @@ where
 
     /// The finish up to the host's commit. A refusal of the host's own
     /// `authorized` is returned as it is; every other one is the operation's.
-    async fn verify_finish<E: From<PasswordOperationError>>(
+    async fn verify_finish<E>(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
         id: &PasswordOperationId,
@@ -1150,7 +1284,7 @@ where
         record: &[u8],
         proof: Option<PasswordRegistrationProof>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Finish<S::Owner, P>, E> {
+    ) -> Result<Finish<S::Owner, P>, StepError<E>> {
         let taken = self
             .ops
             .take(&id.to_string())
@@ -1169,7 +1303,7 @@ where
         // operation goes back pending, as at every other step.
         if let Err(refused) = authorized(&op) {
             self.store(&op).await?;
-            return Err(refused);
+            return Err(StepError::Host(refused));
         }
         Ok(self.verify_taken(zkpp, op, method, record, proof).await?)
     }

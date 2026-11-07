@@ -279,7 +279,7 @@ impl TestIssuer {
             .expect("authorization API token verifier"),
         );
         let authz = Arc::new(
-            sid_authz::grpc::AuthzServiceImpl::new(
+            sid_server::grpc::authz_service::AuthzServiceImpl::new(
                 Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
                 storage.clone(),
                 sid_authz::cedar::CedarService::new(),

@@ -18,8 +18,6 @@
 //! about which check failed.
 
 use chrono::Utc;
-use sid_core::grpc_error::refuse::storage_failure;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::provisioning_connector::{
     CONNECTOR_CLIENT_SECRET_PREFIX, SCIM_BEARER_PREFIX,
 };
@@ -28,12 +26,10 @@ use sid_core::models::{
     ProvisioningCredentialId, ProvisioningDirection,
 };
 use sid_plugin::StorageBackend;
-use tonic::{Request, Status};
 
 use crate::bearer_secret;
-use crate::caller::bearer_token;
 use crate::jwt::AccessTokenClaims;
-use crate::resource_token::ResourceTokenVerifier;
+use crate::resource_token::{OwnTokenError, ResourceTokenVerifier};
 
 /// An authenticated inbound connector and the credential it presented.
 #[derive(Debug, Clone)]
@@ -66,10 +62,6 @@ impl ConnectorCaller {
     }
 }
 
-fn unauthenticated() -> Status {
-    ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
-}
-
 /// Whether `credential` of kind `kind` and `connector` can act now: the
 /// credential is the connector's, of that kind and usable, and the connector
 /// is an active inbound one.
@@ -87,16 +79,15 @@ fn usable(
 
 /// The caller when `credential` of kind `kind` and `connector` may act for
 /// `org` now: [`usable`], and the connector is one of `org`.
-#[allow(clippy::result_large_err)]
 fn admit(
     org: OrgId,
     kind: ConnectorCredentialKind,
     credential: ProvisioningCredential,
     connector: ProvisioningConnector,
     scopes: Option<Vec<String>>,
-) -> Result<ConnectorCaller, Status> {
+) -> Result<ConnectorCaller, OwnTokenError> {
     if !usable(kind, &credential, &connector) || connector.org_id != org {
-        return Err(unauthenticated());
+        return Err(OwnTokenError::Unauthenticated);
     }
     Ok(ConnectorCaller {
         connector,
@@ -164,22 +155,21 @@ pub async fn connector_token_state(
     }))
 }
 
-/// The inbound connector of `org` that `request` authenticates, by its SCIM
-/// bearer or, when `tokens` verifies the SCIM resource's access tokens, by
+/// The inbound connector of `org` the `presented` bearer authenticates: its
+/// SCIM bearer or, when `tokens` verifies the SCIM resource's access tokens,
 /// such a token (RFC 7644 §2 leaves authentication to the service provider).
-#[allow(clippy::result_large_err)]
-pub async fn authenticate_connector<T>(
-    request: &Request<T>,
+pub async fn authenticate_connector(
+    presented: &str,
     storage: &dyn StorageBackend,
     org: OrgId,
     tokens: Option<&ResourceTokenVerifier>,
-) -> Result<ConnectorCaller, Status> {
-    let presented = bearer_token(request)?;
+) -> Result<ConnectorCaller, OwnTokenError> {
+    let unauthenticated = || OwnTokenError::Unauthenticated;
     if bearer_secret::has_prefix(presented, SCIM_BEARER_PREFIX) {
         let Some((credential, connector)) = storage
             .find_provisioning_credential(&bearer_secret::verifier_of(presented))
             .await
-            .map_err(storage_failure)?
+            .map_err(OwnTokenError::Storage)?
         else {
             return Err(unauthenticated());
         };
@@ -197,19 +187,10 @@ pub async fn authenticate_connector<T>(
     let Some(tokens) = tokens else {
         return Err(unauthenticated());
     };
-    let claims = match tokens.verify(presented).await {
-        Ok(claims) => claims,
-        Err(sid_core::Error::AuthenticationFailed(_)) => return Err(unauthenticated()),
-        Err(e) => return Err(storage_failure(e)),
-    };
-    // A sender-constrained token needs its proof, which SCIM does not take
-    // (RFC 9449 §7.1); a source ProfileId never rides a connector's token.
-    if claims.cnf.is_some() || claims.pid.is_some() {
-        return Err(unauthenticated());
-    }
+    let claims = tokens.verify_own(presented).await?;
     match connector_token_state(storage, &claims)
         .await
-        .map_err(storage_failure)?
+        .map_err(OwnTokenError::Storage)?
     {
         ConnectorTokenState::Usable(caller) if caller.connector.org_id == org => Ok(caller),
         _ => Err(unauthenticated()),
@@ -221,32 +202,31 @@ pub async fn authenticate_connector<T>(
 /// RFC 6749 §2.3.1). `None` when no connector has this `client_id`, so the
 /// token endpoint tries its other clients; a connector's wrong or unusable
 /// secret is refused.
-#[allow(clippy::result_large_err)]
 pub async fn authenticate_connector_client(
     storage: &dyn StorageBackend,
     org: OrgId,
     client_id: &str,
     secret: &str,
-) -> Result<Option<ConnectorCaller>, Status> {
+) -> Result<Option<ConnectorCaller>, OwnTokenError> {
     let Some(connector) = storage
         .get_provisioning_connector_by_client_id(client_id)
         .await
-        .map_err(storage_failure)?
+        .map_err(OwnTokenError::Storage)?
     else {
         return Ok(None);
     };
     if !bearer_secret::has_prefix(secret, CONNECTOR_CLIENT_SECRET_PREFIX) {
-        return Err(unauthenticated());
+        return Err(OwnTokenError::Unauthenticated);
     }
     let Some((credential, owner)) = storage
         .find_provisioning_credential(&bearer_secret::verifier_of(secret))
         .await
-        .map_err(storage_failure)?
+        .map_err(OwnTokenError::Storage)?
     else {
-        return Err(unauthenticated());
+        return Err(OwnTokenError::Unauthenticated);
     };
     if owner.id != connector.id || !bearer_secret::matches(secret, &credential.verifier) {
-        return Err(unauthenticated());
+        return Err(OwnTokenError::Unauthenticated);
     }
     admit(
         org,

@@ -9,15 +9,15 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use sid_core::grpc_error::refuse::{internal, storage_failure};
-use sid_core::grpc_error::{ApiError, ErrorReason, extract_error_info, extract_retry_delay};
+use crate::grpc_error::refuse::{internal, storage_failure};
+use crate::grpc_error::{ApiError, ErrorReason, extract_error_info, extract_retry_delay};
 use sid_proto::google::api::HttpBody;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Code, Response, Status};
 
-use crate::client_auth::ClientAuthentication;
-use crate::grant::GrantFailure;
-use crate::oauth2::TokenError;
+use sid_authn::client_auth::ClientAuthentication;
+use sid_authn::grant::GrantFailure;
+use sid_authn::oauth2::TokenError;
 
 /// Parameters a request may repeat: `resource` (RFC 8707 §2, RFC 8693
 /// §2.1) and the token exchange `audience` (RFC 8693 §2.1).
@@ -440,7 +440,7 @@ pub fn client_refused() -> Status {
 
 /// A request whose target resource is refused (RFC 8707 §2
 /// `invalid_target`), naming the `resource` parameter.
-pub fn target_refused(refusal: crate::target::TargetRefusal) -> Status {
+pub fn target_refused(refusal: sid_authn::target::TargetRefusal) -> Status {
     token_error(TokenError::InvalidTarget, refusal.to_string())
         .with_field_violation("resource", refusal.to_string())
         .with_metadata("field", "resource")

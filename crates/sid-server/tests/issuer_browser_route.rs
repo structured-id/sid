@@ -15,7 +15,7 @@ use std::time::Duration;
 use common::TestServices;
 use common::mock_storage::MockStorage;
 use sid_authn::issuer::AddressedIssuer;
-use sid_authn::resource::TranscodedRequest;
+use sid_infra::authn::resource::TranscodedRequest;
 use sid_proto::sid::v1::auth_service_server::AuthServiceServer;
 use sid_server::serve::browser_route::{BROWSER_METHODS, BrowserRoute, mark_browser_call};
 use tonic::body::Body;

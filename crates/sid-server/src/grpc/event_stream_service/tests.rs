@@ -228,7 +228,7 @@ async fn test_replay_without_history_is_refused() {
 
 /// `ErrorInfo.reason` of a refusal.
 fn reason(status: &tonic::Status) -> Option<String> {
-    sid_core::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
+    sid_infra::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
 }
 
 /// A bus whose history is `count` events.
@@ -309,7 +309,7 @@ async fn test_replay_window_is_bounded() {
     assert_eq!(last.code(), tonic::Code::ResourceExhausted);
     assert_eq!(reason(&last).as_deref(), Some("QUOTA_EXCEEDED"));
     // Repeating the same window cannot help, so no retry delay is offered.
-    assert!(sid_core::grpc_error::extract_retry_delay(&last).is_none());
+    assert!(sid_infra::grpc_error::extract_retry_delay(&last).is_none());
 }
 
 /// A window within the bound is delivered whole.
@@ -386,7 +386,7 @@ async fn test_streams_per_caller_are_bounded() {
     assert_eq!(err.code(), tonic::Code::ResourceExhausted);
     assert_eq!(reason(&err).as_deref(), Some("QUOTA_EXCEEDED"));
     // Streams end when their clients leave, so a retry later can succeed.
-    assert!(sid_core::grpc_error::extract_retry_delay(&err).is_some());
+    assert!(sid_infra::grpc_error::extract_retry_delay(&err).is_some());
 
     drop(streams.pop());
     // No event arrives: the forwarder notices the closed stream by itself.

@@ -31,7 +31,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use http::HeaderMap;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service, http};
@@ -231,7 +231,7 @@ impl Receiver {
                 Ok(true) => {}
                 Ok(false) => return Err(unauthenticated()),
                 Err(e) => {
-                    return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                    return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
                         "token state",
                         e,
                     ));
@@ -253,7 +253,7 @@ impl Receiver {
             )
             .await
             .map_err(|e| {
-                sid_core::grpc_error::refuse::dependency_unavailable("sender proof admission", e)
+                sid_infra::grpc_error::refuse::dependency_unavailable("sender proof admission", e)
             })? {
                 true => {}
                 false => return Err(unauthenticated()),
@@ -318,7 +318,7 @@ impl Receiver {
         match crate::auth::permission::ask(Some(&self.checker), &self.authz, question)
             .await
             .map_err(|e| {
-                sid_core::grpc_error::refuse::dependency_unavailable("authorization check", e)
+                sid_infra::grpc_error::refuse::dependency_unavailable("authorization check", e)
             })? {
             Permission::Allowed => Ok(()),
             Permission::Denied => Err(denied()),
@@ -353,7 +353,7 @@ impl Receiver {
                 return Err(unauthenticated());
             }
             Err(TokenRefusal::Unavailable(why)) => {
-                return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
                     "issuer registry",
                     why,
                 ));
@@ -367,7 +367,7 @@ impl Receiver {
                     why,
                     "receiver target refused"
                 );
-                return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
                     "protected resource registration",
                     why,
                 ));
@@ -598,7 +598,7 @@ pub fn allow_owner<T>(request: &mut tonic::Request<T>) -> Result<(), Status> {
 }
 
 fn undecided() -> Status {
-    sid_core::grpc_error::refuse::internal(
+    sid_infra::grpc_error::refuse::internal(
         "admit the call",
         "the call's action was not decided for its object",
     )

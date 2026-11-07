@@ -21,7 +21,7 @@ use envoy_types::pb::envoy::service::auth::v3::{
 use envoy_types::pb::envoy::r#type::v3::HttpStatus;
 use envoy_types::pb::google::rpc::Status as RpcStatus;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use tonic::{Request, Response, Status};
 
 use super::decision::{OriginalRequest, Pdp, Verdict};

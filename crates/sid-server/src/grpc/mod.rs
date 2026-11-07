@@ -7,12 +7,14 @@
 pub mod account_service;
 pub mod admin_service;
 pub mod auth_service;
+pub mod authz_service;
 pub mod branding_service;
 mod client_metadata;
 pub(crate) mod convert;
 pub mod enrollment_service;
 pub mod event_stream_service;
 pub mod flow_service;
+pub mod governance_service;
 pub mod identity_service;
 #[allow(dead_code)]
 pub mod machine_user_service;

@@ -20,7 +20,7 @@ use prost::Message;
 use secrecy::{ExposeSecret, SecretBox};
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::dcr;
-use sid_authn::operation::{Effect, KeyedCommand, OperationError};
+use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
     self as model, ApplicationId, ApplicationType, AuditEntry, InitialAccessToken,
@@ -188,6 +188,12 @@ pub enum ProjectError {
 impl From<ProjectError> for Effect<ProjectError> {
     fn from(e: ProjectError) -> Self {
         Self::Refused(e)
+    }
+}
+
+impl From<CommandError<ProjectError>> for ProjectError {
+    fn from(e: CommandError<ProjectError>) -> Self {
+        e.refusal()
     }
 }
 
@@ -629,7 +635,10 @@ impl Projects {
             Ok(response)
         }
         .await;
-        command.settle(&*self.storage, answer).await
+        command
+            .settle(&*self.storage, answer)
+            .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn get_project(
@@ -756,6 +765,7 @@ impl Projects {
                 Ok(())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     // ── Application CRUD ────────────────────────────────────────────
@@ -876,6 +886,7 @@ impl Projects {
                 Ok(view)
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn update_client_role(
@@ -894,6 +905,7 @@ impl Projects {
                 self.edit_client(caller, &command, req.clone())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn delete_application(
@@ -934,6 +946,7 @@ impl Projects {
                 Ok(())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     /// Add a client role to an application; its secret, if one is issued, is
@@ -1036,6 +1049,7 @@ impl Projects {
                 Ok(view)
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn update_resource_role(
@@ -1057,6 +1071,7 @@ impl Projects {
                 self.edit_resource(caller, &command, req.clone())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn set_resource_access(
@@ -1078,6 +1093,7 @@ impl Projects {
                 self.grant_access(caller, &command, req.clone())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn remove_resource_access(
@@ -1119,6 +1135,7 @@ impl Projects {
                 Ok(())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn list_resource_access(
@@ -1198,6 +1215,7 @@ impl Projects {
                 Ok(view)
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     pub async fn remove_role(
@@ -1236,6 +1254,7 @@ impl Projects {
                 Ok(())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     // ── Dynamic Client Registration (RFC 7591) ──────────────────────
@@ -1650,6 +1669,7 @@ impl Projects {
                 Ok(())
             })
             .await
+            .map_err(CommandError::refusal)
     }
 
     // ── The bodies of keyed commands, run once under their keys ─────

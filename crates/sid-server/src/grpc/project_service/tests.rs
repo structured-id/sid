@@ -3,10 +3,10 @@
 //! client acts on.
 
 use super::*;
-use sid_core::grpc_error::extract_error_info;
 use sid_core::models::{
     ApplicationId, InitialAccessTokenId, ProjectId, ResourceId, ResourceIndicator, RoleId,
 };
+use sid_infra::grpc_error::extract_error_info;
 use tonic::Code;
 use tonic_types::StatusExt;
 

@@ -13,11 +13,7 @@ mod compiled;
 pub mod config;
 pub mod decision;
 pub mod engine;
-#[cfg(feature = "grpc")]
-pub mod governance_grpc;
 pub mod group;
-#[cfg(feature = "grpc")]
-pub mod grpc;
 pub mod rbac;
 pub mod request_verifier;
 pub mod simulator;

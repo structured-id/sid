@@ -108,7 +108,7 @@ fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
 /// returns its address, the stop signal and the serving task.
 async fn evaluator_listener(
     evaluation: Arc<sid_authn::password_operation::HistoryEvaluation>,
-    admission: Arc<dyn sid_authn::password_operation::PrepareAdmission>,
+    admission: Arc<dyn sid_infra::authn::password_operation::PrepareAdmission>,
 ) -> (
     String,
     tokio::sync::oneshot::Sender<()>,
@@ -121,7 +121,7 @@ async fn evaluator_listener(
     let serving = tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(PasswordHistoryEvaluatorServiceServer::new(
-                sid_authn::password_operation::PasswordHistoryEvaluatorImpl::new(
+                sid_infra::authn::password_operation::PasswordHistoryEvaluatorImpl::new(
                     evaluation, admission,
                 ),
             ))
@@ -147,9 +147,9 @@ async fn evaluator_listener(
 async fn a_split_history_evaluator_takes_preparation_internally_only() {
     use group::{Curve, Group, GroupEncoding};
     use pasta_curves::pallas;
-    use sid_authn::password_operation::{
-        ClientListener, HistoryEvaluation, InternalTransport, PasswordHistoryAuthority,
-        RemoteHistoryEvaluator,
+    use sid_authn::password_operation::{HistoryEvaluation, PasswordHistoryAuthority};
+    use sid_infra::authn::password_operation::{
+        ClientListener, InternalTransport, RemoteHistoryEvaluator,
     };
     use sid_proto::sid::v1::auth_service_server::AuthService;
     use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;

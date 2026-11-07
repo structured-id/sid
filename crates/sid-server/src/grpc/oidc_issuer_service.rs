@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use sid_authn::issuer::IssuerRegistry;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{ResourceIndicator, ResourceState};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::oidc_issuer_service_server::OidcIssuerService;
 use sid_proto::sid::v1::{
@@ -22,14 +22,14 @@ pub struct OidcIssuerServiceImpl {
     storage: Arc<dyn StorageBackend>,
     /// Establishes an original request's token and admits its proof, as it
     /// does for a request-bound permission question.
-    authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
+    authz: Arc<super::authz_service::AuthzServiceImpl>,
 }
 
 impl OidcIssuerServiceImpl {
     pub fn new(
         issuers: Arc<IssuerRegistry>,
         storage: Arc<dyn StorageBackend>,
-        authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
+        authz: Arc<super::authz_service::AuthzServiceImpl>,
     ) -> Self {
         Self {
             issuers,
