@@ -6,6 +6,7 @@
 //! parts.
 
 pub mod account;
+pub mod admin;
 pub mod authorization;
 pub mod branding;
 pub mod email_provider;
