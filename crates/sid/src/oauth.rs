@@ -39,6 +39,7 @@ use crate::rate_limit::{RateLimitStats, RateLimiter};
 
 pub mod authorization;
 pub mod device_approval;
+pub mod end_session;
 mod grants;
 pub use grants::{ACCESS_TOKEN_TYPE, DEVICE_CODE_GRANT};
 

@@ -8,7 +8,6 @@ use crate::feature_flags::FeatureFlagService;
 use chrono::{Duration, Utc};
 use sid::sign_in::{AttemptContext, FirstFactor, FirstFactorSignedIn, LoginMethod};
 use sid_authn::anomaly::AnomalyDetector;
-use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::jwt::JwtService;
@@ -21,10 +20,10 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
 use sid_authn::webauthn::WebAuthnServer;
+use sid_core::models::OidcIssuer;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::{CredentialId, ProfileId, SessionId};
-use sid_core::models::{OidcIssuer, RevocationReason};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::context;
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
@@ -400,9 +399,6 @@ pub struct AuthServiceImpl {
     /// Whether the login requirements are the host's, not
     /// `security_policy`'s fixed ones.
     host_login_policy: bool,
-    /// The OIDC issuers whose endpoints the OAuth requests arrive at, and
-    /// their signers.
-    issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     /// Issuer URL (e.g., "https://sid.example.com").
     issuer: String,
     /// Its origin (scheme and authority): the prefix of every URI a sender
@@ -414,8 +410,6 @@ pub struct AuthServiceImpl {
     sign_ins: sid::sign_in::SignIn,
     /// Field encryption for credential secrets the server reads back (TOTP seeds).
     key_manager: Arc<dyn sid_keys::KeyManager>,
-    /// Ends a profile's sessions everywhere (tokens, RPs) on a password reset.
-    cascade: Arc<RevocationCascadeService>,
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
@@ -426,9 +420,8 @@ pub struct AuthServiceImpl {
     /// Browser authorization requests kept while the user signs in, by
     /// reference, shared by every replica.
     authorizations: sid::oauth::authorization::Authorizations,
-    /// One-time values of the logout confirmation form, each naming the IdP
-    /// session it ends and where the browser returns, shared by every replica.
-    logout_confirmations: ChallengeStore<end_session::LogoutConfirmation>,
+    /// The end-session endpoint, with the logout confirmations it offered.
+    end_sessions: sid::oauth::end_session::EndSessions,
 }
 
 /// How the sign-in rules judge one sign-in.
@@ -511,11 +504,11 @@ impl AuthServiceImpl {
             storage: storage.clone(),
             oauth2,
             jwt: jwt.clone(),
-            issuers: issuers.clone(),
+            issuers,
             installation_org,
             authz,
             revocation: revocation_cache.clone(),
-            cascade: cascade.clone(),
+            cascade,
             cache: cache_backend,
             login_policy: Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(
                 &SecurityPolicy::ce_default(),
@@ -566,18 +559,15 @@ impl AuthServiceImpl {
                 ceremonies.clone(),
                 key_manager.clone(),
             ),
-            logout_confirmations: ChallengeStore::new(
+            end_sessions: sid::oauth::end_session::EndSessions::new(
                 ceremonies.clone(),
                 key_manager.clone(),
-                "logout-confirmation",
-                end_session::CONFIRMATION_TTL,
             ),
             magic_link,
             otp,
             password_resets: None,
             oauth,
             host_login_policy: false,
-            issuers,
             public_origin: url::Url::parse(&issuer)
                 .expect("the installation URL is validated at start-up")
                 .origin()
@@ -585,7 +575,6 @@ impl AuthServiceImpl {
             issuer,
             sign_ins,
             key_manager,
-            cascade,
             sign_in_origin: None,
             registration,
         }
