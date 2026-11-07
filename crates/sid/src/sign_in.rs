@@ -1,0 +1,868 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Signing a user in once a ceremony verified them: the rules a verified
+//! sign-in passes (anomaly detection over the account's sign-in history and
+//! the client address, the login requirements, the attempt counters behind
+//! the lockout), and storing its session under the installation's
+//! concurrent-session limit with its credential delivered as the ceremony's
+//! client takes it. Every ceremony that signs a user in (password, passkey,
+//! upstream provider) completes through this one path.
+
+use std::net::IpAddr;
+use std::sync::Arc;
+
+use chrono::{Duration, Utc};
+use sid_authn::anomaly::AnomalyDetector;
+use sid_authn::browser_session::{BrowserCookie, BrowserCsrf};
+use sid_authn::captcha::{CaptchaGate, CaptchaProvider};
+use sid_authn::geoip::GeoIpChain;
+use sid_authn::ip_intelligence::IpIntelligenceAggregator;
+use sid_authn::jwt::JwtService;
+use sid_authn::login_policy::LoginRequirements;
+use sid_authn::native_session::{self, NativeError, NativePolicy};
+use sid_authn::revocation_cache::RevocationCache;
+use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
+use sid_authn::sign_in_security::{
+    AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost,
+};
+use sid_core::Error as SidError;
+use sid_core::models::event::{Event, event_types};
+use sid_core::models::security_policy::SecurityPolicy;
+use sid_core::models::session::AuthLevel;
+use sid_core::models::{
+    ActorFence, AuditEntry, CredentialType, MutationContext, OperationCompletion, OperationKey,
+    PrincipalAssignmentFence, Profile, ProfileId, Session, SessionEnd, SessionId, SignInProof,
+};
+use sid_plugin::SignInHistoryStore;
+use sid_plugin::storage::StorageBackend;
+use sid_proto::sid::v1::StepUpMethod;
+use sid_proto::sid::v1::authn::NativeCredentialSet;
+use tracing::{info, warn};
+
+/// Why a sign-in is refused or failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SignInError {
+    /// The sign-in rules refused it, or ask for something first.
+    #[error("sign-in refused: {0:?}")]
+    Rules(SignInRefusal),
+    /// The credential it proved or the login policy it was admitted under
+    /// changed before the session committed, or the pending context it
+    /// completes ended: it completes nothing and is started again.
+    #[error("the sign-in's proof or policy changed")]
+    Fenced,
+    /// The keyed operation it completes already committed its session.
+    #[error("the sign-in already completed")]
+    AlreadyCompleted,
+    /// The native session's refresh generation could not be issued.
+    #[error(transparent)]
+    Native(#[from] NativeError),
+    /// A dependency the sign-in needs cannot answer now; the client retries.
+    #[error("{what} unavailable: {cause}")]
+    Unavailable { what: &'static str, cause: String },
+    /// The store failed.
+    #[error("store: {0}")]
+    Store(#[from] SidError),
+    /// A failure of this installation; its cause is in the log, not the
+    /// refusal.
+    #[error("internal error")]
+    Internal,
+}
+
+impl From<SignInRefusal> for SignInError {
+    fn from(r: SignInRefusal) -> Self {
+        Self::Rules(r)
+    }
+}
+
+fn internal(operation: &'static str, cause: impl std::fmt::Display) -> SignInError {
+    tracing::error!(operation, error = %cause, "internal failure");
+    SignInError::Internal
+}
+
+/// What the rules weigh beside the authentication: the pass earned by
+/// solving the CAPTCHA this sign-in was asked for, and the client's
+/// User-Agent.
+#[derive(Default, Clone, Copy)]
+pub struct AttemptContext<'a> {
+    pub captcha_pass: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+}
+
+/// What the rules decide about a local first-factor sign-in.
+pub enum FirstFactor {
+    /// Admitted: the session commits under this policy fence.
+    Admitted(Option<ActorFence>),
+    /// A second factor is owed, one of `factors` the account has enrolled or,
+    /// with none ever enrolled, one of `enrollable` it enrolls first: the
+    /// sign-in gets its pending context, under this fence.
+    AwaitsSecondFactor {
+        factors: Vec<StepUpMethod>,
+        enrollable: Vec<StepUpMethod>,
+        fence: Option<ActorFence>,
+    },
+}
+
+/// The keyed operation a browser sign-in completes, whose result is its
+/// delivery sealed for a lost response: the session commits with that
+/// completion, and a repeat of the operation finds it instead of a second
+/// session.
+pub struct RetainedSignIn<'a> {
+    pub keys: &'a dyn sid_keys::KeyManager,
+    pub completion_key: OperationKey,
+    /// The sealing context: this operation of this issuer.
+    pub context: String,
+    /// The end of the operation; the delivery is never redelivered after.
+    pub deadline: chrono::DateTime<Utc>,
+    /// The operation's significant inputs: a repeat must present them again.
+    pub inputs: Vec<u8>,
+}
+
+/// The significant inputs of an admitted sign-in committed under
+/// `assignment`: a repeat is the same operation only under the same
+/// assignment, so one retired and linked again never receives the earlier
+/// session.
+pub fn admitted_inputs(assignment: PrincipalAssignmentFence) -> Vec<u8> {
+    format!(
+        "{}:{}:{}",
+        assignment.profile, assignment.principal.0, assignment.revision
+    )
+    .into_bytes()
+}
+
+/// The namespace of admitted sign-ins' completions.
+pub const ADMITTED_NAMESPACE: &str = "admitted-sign-in";
+
+/// The method name an admitted sign-in's completion records.
+pub const ADMITTED_METHOD: &str = "admitted_sign_in";
+
+/// What signing in uses, handed over by the host.
+pub struct SignInParts {
+    pub storage: Arc<dyn StorageBackend>,
+    pub jwt: Arc<JwtService>,
+    pub revocation: Arc<RevocationCache>,
+    /// The issuer whose events announce sessions and security reactions.
+    pub issuer: String,
+    pub anomaly: Arc<AnomalyDetector>,
+    pub ip_intelligence: Arc<IpIntelligenceAggregator>,
+    pub geoip: Arc<GeoIpChain>,
+    /// Which sign-in each CAPTCHA was asked of, and the passes earned.
+    pub captcha_gate: CaptchaGate,
+    pub captcha_provider: Arc<dyn CaptchaProvider>,
+}
+
+/// Signing users in for one authority.
+pub struct SignIn {
+    storage: Arc<dyn StorageBackend>,
+    jwt: Arc<JwtService>,
+    revocation: Arc<RevocationCache>,
+    issuer: String,
+    anomaly: Arc<AnomalyDetector>,
+    ip_intelligence: Arc<IpIntelligenceAggregator>,
+    geoip: Arc<GeoIpChain>,
+    captcha_gate: CaptchaGate,
+    captcha_provider: Arc<dyn CaptchaProvider>,
+    /// The installation's security policy: session lifetime and limit, how
+    /// native sessions renew, whether a passkey satisfies MFA.
+    policy: SecurityPolicy,
+    /// This authority's IdP session cookie, the only one it sets.
+    cookie: BrowserCookie,
+}
+
+impl SignIn {
+    /// Sign-in under the CE default policy with the default cookie.
+    pub fn new(parts: SignInParts) -> Self {
+        Self {
+            storage: parts.storage,
+            jwt: parts.jwt,
+            revocation: parts.revocation,
+            issuer: parts.issuer,
+            anomaly: parts.anomaly,
+            ip_intelligence: parts.ip_intelligence,
+            geoip: parts.geoip,
+            captcha_gate: parts.captcha_gate,
+            captcha_provider: parts.captcha_provider,
+            policy: SecurityPolicy::ce_default(),
+            cookie: BrowserCookie::default(),
+        }
+    }
+
+    /// Apply `policy` to every later sign-in.
+    pub fn set_policy(&mut self, policy: SecurityPolicy) {
+        self.policy = policy;
+    }
+
+    /// The security policy sign-ins follow.
+    pub fn policy(&self) -> &SecurityPolicy {
+        &self.policy
+    }
+
+    /// Name this authority's IdP session cookie `cookie`.
+    pub fn set_cookie(&mut self, cookie: BrowserCookie) {
+        self.cookie = cookie;
+    }
+
+    /// This authority's IdP session cookie.
+    pub fn cookie(&self) -> &BrowserCookie {
+        &self.cookie
+    }
+
+    /// The attempt counters and lockout.
+    pub fn anomaly(&self) -> &AnomalyDetector {
+        &self.anomaly
+    }
+
+    /// Which sign-in each CAPTCHA was asked of, and the passes earned.
+    pub fn captcha_gate(&self) -> &CaptchaGate {
+        &self.captcha_gate
+    }
+
+    /// The CAPTCHA provider the rules ask challenges of.
+    pub fn captcha_provider(&self) -> &dyn CaptchaProvider {
+        self.captcha_provider.as_ref()
+    }
+
+    /// Run the rules for `profile_id`'s verified sign-in under
+    /// `requirements` and record it, once admitted, as evidence for later
+    /// sign-ins.
+    pub async fn evaluate(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<IpAddr>,
+        (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
+        requirements: &LoginRequirements,
+    ) -> Result<(), SignInError> {
+        let attempt = attempt(client_ip, authentication, context);
+        Ok(
+            sid_authn::sign_in_security::evaluate(&Rules(self), &profile_id, attempt, requirements)
+                .await?,
+        )
+    }
+
+    /// The same rules for a repeat of a sign-in already admitted and
+    /// recorded from `admitted_from`: judged on its own request, recorded as
+    /// no further sign-in.
+    pub async fn check(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<IpAddr>,
+        (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
+        requirements: &LoginRequirements,
+        admitted_from: Option<IpAddr>,
+    ) -> Result<(), SignInError> {
+        let attempt = attempt(client_ip, authentication, context);
+        Ok(sid_authn::sign_in_security::check(
+            &Rules(self),
+            &profile_id,
+            attempt,
+            requirements,
+            admitted_from,
+        )
+        .await?)
+    }
+
+    /// The same rules for a local sign-in that proved its first factor with
+    /// `method` at `assurance` with `amr`, under `requirements`: admitted,
+    /// or, when it owes the requirements or an anomaly rule's step-up and a
+    /// second factor the account has enrolled (or may enroll first) answers
+    /// that, awaiting the factor.
+    pub async fn first_factor(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<IpAddr>,
+        (method, assurance, amr): (&str, AuthLevel, &[String]),
+        context: AttemptContext<'_>,
+        requirements: &LoginRequirements,
+    ) -> Result<FirstFactor, SignInError> {
+        let authentication = AttemptAuthentication::Local {
+            method,
+            assurance,
+            amr,
+        };
+        let owed = match self
+            .evaluate(
+                profile_id,
+                client_ip,
+                (authentication, context),
+                requirements,
+            )
+            .await
+        {
+            Ok(()) => return Ok(FirstFactor::Admitted(requirements.fence)),
+            Err(
+                owed @ SignInError::Rules(
+                    SignInRefusal::StepUp(_) | SignInRefusal::StepUpAfterAnomaly(_),
+                ),
+            ) => owed,
+            Err(refused) => return Err(refused),
+        };
+        let now = Utc::now();
+        let first = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
+        let factors = self
+            .second_factors(profile_id, requirements, &first, now)
+            .await?;
+        let enrollable = if factors.is_empty() {
+            self.enrollable_factors(profile_id, requirements, &first, now)
+                .await?
+        } else {
+            Vec::new()
+        };
+        if factors.is_empty() && enrollable.is_empty() {
+            return Err(owed);
+        }
+        Ok(FirstFactor::AwaitsSecondFactor {
+            factors,
+            enrollable,
+            fence: requirements.fence,
+        })
+    }
+
+    /// The second factors `profile_id` has enrolled that complete `first`
+    /// under `requirements`.
+    async fn second_factors(
+        &self,
+        profile_id: ProfileId,
+        requirements: &LoginRequirements,
+        first: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<StepUpMethod>, SignInError> {
+        let mut factors = Vec::new();
+        if requirements.met_with(first, AuthLevel::Standard, "otp", now)
+            && self
+                .storage
+                .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
+                .await?
+                .iter()
+                .any(|c| c.status.is_active())
+        {
+            factors.push(StepUpMethod::Totp);
+        }
+        Ok(factors)
+    }
+
+    /// The factors `profile_id` may enroll first to complete `first` under
+    /// `requirements`: none on an account with established protection, whose
+    /// lost factor goes through recovery.
+    async fn enrollable_factors(
+        &self,
+        profile_id: ProfileId,
+        requirements: &LoginRequirements,
+        first: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<StepUpMethod>, SignInError> {
+        if !requirements.met_with(first, AuthLevel::Standard, "otp", now) {
+            return Ok(Vec::new());
+        }
+        let active: Vec<_> = self
+            .storage
+            .get_credentials_by_profile(profile_id, None)
+            .await?
+            .into_iter()
+            .filter(|c| c.status.is_active())
+            .collect();
+        let established = sid_authn::credential_enrollment::established_assurance(
+            &active,
+            self.policy.auth.passkey_satisfies_mfa,
+        );
+        Ok(if established == AuthLevel::Basic {
+            vec![StepUpMethod::Totp]
+        } else {
+            Vec::new()
+        })
+    }
+
+    /// Record `profile_id`'s sign-in completed from `client_ip`, the address
+    /// the rules judged at its first factor, as evidence for later sign-ins.
+    pub async fn record_completed(&self, profile_id: ProfileId, client_ip: Option<IpAddr>) {
+        sid_authn::sign_in_security::record_completed_sign_in(&Rules(self), &profile_id, client_ip)
+            .await;
+    }
+
+    /// Refuse a sign-in attempt while `identity` is locked out. Checked before
+    /// any password work and for known and unknown identities alike, so a
+    /// lockout neither lets guessing continue nor confirms a guess.
+    pub async fn refuse_if_locked(&self, identity: &str) -> Result<(), SignInError> {
+        let locked = self
+            .anomaly
+            .lockout_active(identity)
+            .await
+            .map_err(unavailable)?;
+        if locked {
+            return Err(SignInRefusal::TooManyAttempts(self.anomaly.lockout_duration()).into());
+        }
+        Ok(())
+    }
+
+    /// Count a failed sign-in attempt (brute force and stuffing limits). An
+    /// attempt that cannot be counted refuses the request: an uncounted
+    /// guess would never reach the lockout.
+    pub async fn record_failed_login(
+        &self,
+        identity: &str,
+        client_ip: Option<IpAddr>,
+    ) -> Result<(), SignInError> {
+        self.anomaly
+            .record_failed_attempt(identity)
+            .await
+            .map_err(unavailable)?;
+        self.record_failed_from(client_ip).await
+    }
+
+    /// Count a failed attempt against its source address only: the stuffing
+    /// limit and the address's reputation, not any account's sign-in budget.
+    pub async fn record_failed_from(&self, client_ip: Option<IpAddr>) -> Result<(), SignInError> {
+        self.record_ip_attempt(client_ip).await?;
+        if let Some(ip) = client_ip
+            && let Err(e) = self
+                .storage
+                .record_ip_reputation_event(&ip.to_string(), false)
+                .await
+        {
+            // Reputation is advisory evidence for later scoring, not a limit.
+            warn!(error = %e, "failed to record IP reputation event");
+        }
+        Ok(())
+    }
+
+    /// Count an attempt from `client_ip` against the stuffing limit.
+    pub async fn record_ip_attempt(&self, client_ip: Option<IpAddr>) -> Result<(), SignInError> {
+        match client_ip {
+            Some(ip) => self
+                .anomaly
+                .record_ip_attempt(ip)
+                .await
+                .map_err(unavailable),
+            None => Ok(()),
+        }
+    }
+
+    /// Publish a security event for an anomaly rule's reaction, and keep it
+    /// for the dashboard (best effort).
+    async fn security_event(
+        &self,
+        profile_id: &str,
+        rule: &str,
+        reaction: &str,
+        reason: &str,
+        client_ip: Option<IpAddr>,
+    ) {
+        let event_type = match rule {
+            "brute_force" | "brute_force_lockout" => event_types::SECURITY_BRUTE_FORCE,
+            "country_restriction" => event_types::SECURITY_COUNTRY_BLOCKED,
+            "tor_exit" => event_types::SECURITY_TOR_BLOCKED,
+            "datacenter_ip" => event_types::SECURITY_DATACENTER_IP,
+            "location_switch" => event_types::SECURITY_LOCATION_SWITCH,
+            _ => event_types::SECURITY_SUSPICIOUS_LOGIN,
+        };
+        let event = Event::new(&self.issuer, event_type)
+            .with_subject(format!("profile/{}", profile_id))
+            .with_data(serde_json::json!({
+                "rule": rule,
+                "reaction": reaction,
+                "reason": reason,
+                "ip": client_ip.map(|ip| ip.to_string()),
+            }));
+        // No state change carries a refused attempt, so its event is relayed
+        // as work of its own; a full backlog drops it with a warning, the
+        // anomaly record below still keeps the attempt.
+        if let Err(e) = sid_authn::event_relay::relay_observed(&*self.storage, &event).await {
+            warn!("Failed to relay security event: {}", e);
+        }
+        let risk_score = match rule {
+            "brute_force" | "brute_force_lockout" => 95,
+            "credential_stuffing" => 90,
+            "country_restriction" => 50,
+            "tor_exit" => 80,
+            "datacenter_ip" => 60,
+            "new_device_ip" => 30,
+            _ => 50,
+        };
+        let record = sid_core::models::AnomalyEventRecord::new(
+            rule, profile_id, client_ip, reason, risk_score, reaction,
+        );
+        if let Err(e) = self.storage.save_anomaly_event(&record).await {
+            warn!("Failed to persist anomaly event: {}", e);
+        }
+    }
+
+    /// A full session of `profile_id` from `ip_address`, for the
+    /// installation's absolute lifetime when it sets one, with the sign-in
+    /// scopes; its authentication is the caller's to set.
+    pub fn new_session(&self, profile_id: ProfileId, ip_address: Option<IpAddr>) -> Session {
+        let mut session =
+            Session::new(profile_id, ip_address, Utc::now() + self.session_lifetime());
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        session
+    }
+
+    /// How long a full session lives: the policy's absolute lifetime, a day
+    /// when it sets none.
+    pub fn session_lifetime(&self) -> Duration {
+        match self.policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
+        }
+    }
+
+    /// Store `session` and deliver its credential to `client`: the browser
+    /// sign-in page gets the IdP session cookie, a fresh secret whose hash
+    /// the session stores, and no access token; a native client gets the
+    /// session's access token. `proved_by` is what the sign-in proved (a
+    /// credential, or the principal assignment its evidence resolved), which
+    /// must still hold when the session commits, and `policy` the login
+    /// policy it was admitted under, which must too.
+    /// A browser sign-in completing `retained` commits with that operation's
+    /// completion, its sealed delivery. A native client whose ceremony
+    /// proved the application key `native_key` (its JWK thumbprint) also
+    /// gets the session's first refresh generation, bound to that key.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sign_in(
+        &self,
+        profile: &Profile,
+        session: Session,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+        proved_by: Option<SignInProof<'_>>,
+        policy: Option<ActorFence>,
+        retained: Option<RetainedSignIn<'_>>,
+    ) -> Result<SignedIn, SignInError> {
+        let limit = self.policy.session.max_concurrent_sessions;
+        self.deliver(
+            profile, session, client, native_key, proved_by, policy, limit, None, retained,
+        )
+        .await
+        .map(|(signed_in, _)| signed_in)
+    }
+
+    /// Sign `profile` in as [`Self::sign_in`] does with `session`, the
+    /// completion of the pending second-factor context `pending`: the
+    /// context ends (owing what its end names) in the session's own commit,
+    /// which applies only while the context exists. Its access tokens stop
+    /// at once in every process.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_pending(
+        &self,
+        profile: &Profile,
+        pending: (SessionId, &SessionEnd),
+        session: Session,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+        proved_by: Option<SignInProof<'_>>,
+        policy: Option<ActorFence>,
+    ) -> Result<SignedIn, SignInError> {
+        let limit = self.policy.session.max_concurrent_sessions;
+        let (signed_in, _) = self
+            .deliver(
+                profile,
+                session,
+                client,
+                native_key,
+                proved_by,
+                policy,
+                limit,
+                Some(pending),
+                None,
+            )
+            .await?;
+        self.revocation
+            .revoke_session(pending.0.to_string())
+            .await
+            .map_err(|e| SignInError::Unavailable {
+                what: "session revocation",
+                cause: e.to_string(),
+            })?;
+        Ok(signed_in)
+    }
+
+    /// Store a sign-in's pending second-factor context and deliver its
+    /// credential as [`Self::sign_in`] does, with the CSRF token a browser
+    /// completes it with. It takes no place under the session limit: the
+    /// session it completes into does. A pending context is never renewable:
+    /// it gets no refresh generation, the session completing it does.
+    pub async fn sign_in_pending(
+        &self,
+        profile: &Profile,
+        session: Session,
+        client: CeremonyClient,
+        proved_by: Option<SignInProof<'_>>,
+        policy: Option<ActorFence>,
+    ) -> Result<(SignedIn, Option<String>), SignInError> {
+        self.deliver(
+            profile, session, client, None, proved_by, policy, 0, None, None,
+        )
+        .await
+    }
+
+    /// Store `session` under `limit` (completing `pending` when given, with
+    /// `retained`'s completion when given) and deliver its credential, with
+    /// the browser's encoded CSRF token for a browser and the refresh
+    /// generation bound to `native_key` for a native client that proved one.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver(
+        &self,
+        profile: &Profile,
+        mut session: Session,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+        proved_by: Option<SignInProof<'_>>,
+        policy: Option<ActorFence>,
+        limit: u32,
+        pending: Option<(SessionId, &SessionEnd)>,
+        retained: Option<RetainedSignIn<'_>>,
+    ) -> Result<(SignedIn, Option<String>), SignInError> {
+        match client {
+            CeremonyClient::Browser => {
+                let credential = BrowserCredential::bind(&mut session);
+                let csrf = session.browser_csrf.as_ref().map(BrowserCsrf::encode);
+                let completion = match retained {
+                    Some(retained) => {
+                        let sealed = credential
+                            .retain(
+                                retained.keys,
+                                &retained.context,
+                                &session,
+                                retained.deadline,
+                            )
+                            .await
+                            .map_err(|e| internal("seal the sign-in delivery", e))?;
+                        // Kept no longer than it can be delivered again.
+                        Some(
+                            OperationCompletion::new(
+                                ADMITTED_NAMESPACE,
+                                retained.completion_key,
+                                ADMITTED_METHOD,
+                                &retained.inputs,
+                                sealed,
+                            )
+                            .retained_until(retained.deadline),
+                        )
+                    }
+                    None => None,
+                };
+                self.persist(
+                    profile, &session, proved_by, policy, limit, pending, completion,
+                )
+                .await?;
+                Ok((credential.signed_in(&self.cookie, &session), csrf))
+            }
+            CeremonyClient::Native => {
+                // Checked before anything commits: a policy that cannot shape
+                // a generation creates no session.
+                let native = native_key
+                    .map(|key| {
+                        NativePolicy::from_session_policy(&self.policy.session)
+                            .map(|policy| (key, policy))
+                            .map_err(|e| internal("read the native session policy", e))
+                    })
+                    .transpose()?;
+                self.persist(profile, &session, proved_by, policy, limit, pending, None)
+                    .await?;
+                // The generation commits after the session it renews, which it
+                // checks is still live. A failure between the two leaves a
+                // session nothing was delivered for, as a lost response does;
+                // it ends with its lifetime.
+                let refresh = match native {
+                    Some((key, policy)) => Some(
+                        native_session::issue(self.storage.as_ref(), &session, key, policy).await?,
+                    ),
+                    None => None,
+                };
+                Ok((self.native_access(profile, &session, refresh).await?, None))
+            }
+        }
+    }
+
+    /// A native client's access token for the stored `session` of `profile`,
+    /// with `refresh`, the session's refresh generation, beside it when the
+    /// client renews the session with one.
+    pub async fn native_access(
+        &self,
+        profile: &Profile,
+        session: &Session,
+        refresh: Option<NativeCredentialSet>,
+    ) -> Result<SignedIn, SignInError> {
+        let sub = profile.id.to_string();
+        let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), profile)
+            .await
+            .map_err(|e| internal("read the account's roles", e))?;
+        let access_token = self
+            .jwt
+            .issue_access_token(
+                &sub,
+                Some(&sub),
+                &roles,
+                session,
+                &session.scopes,
+                None,
+                None,
+            )
+            .map_err(|e| internal("issue access token", e))?;
+        // The token expires with the session when the session is shorter.
+        let expires_in = self
+            .jwt
+            .access_token_ttl_secs()
+            .min((session.expires_at - Utc::now()).num_seconds());
+        Ok(SignedIn {
+            session_id: session.id,
+            expires_in,
+            delivery: Delivery::Bearer {
+                token: access_token.into(),
+                refresh,
+            },
+        })
+    }
+
+    /// Store `session` under the concurrent-session `limit` (0: none) and
+    /// announce it, while `policy` still holds; with `pending`, as the
+    /// completion of that pending context, which ends in the same commit;
+    /// with `completion`, committing that keyed operation's completion.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist(
+        &self,
+        profile: &Profile,
+        session: &Session,
+        proved_by: Option<SignInProof<'_>>,
+        policy: Option<ActorFence>,
+        limit: u32,
+        pending: Option<(SessionId, &SessionEnd)>,
+        completion: Option<OperationCompletion>,
+    ) -> Result<(), SignInError> {
+        // The storage counts, evicts and inserts in one serialized step, and
+        // owes each evicted session's client a logout; the same commit owes
+        // the session.created event.
+        #[cfg(feature = "telemetry")]
+        let audit_start = std::time::Instant::now();
+        let created = Event::new(&self.issuer, event_types::SESSION_CREATED)
+            .with_subject(format!("session/{}", session.id))
+            .with_data(serde_json::json!({
+                "profile_id": profile.id.to_string(),
+                "session_id": session.id.to_string(),
+            }));
+        let mut ctx = MutationContext::from(AuditEntry::user(
+            profile.id.to_string(),
+            "session.create",
+            session.id.to_string(),
+        ))
+        .with_work(created.relay());
+        if let Some(fence) = policy {
+            ctx = ctx.fenced_by(fence);
+        }
+        if let Some(completion) = completion {
+            ctx = ctx.with_operation(completion);
+        }
+        let stored = match pending {
+            Some((pending, end)) => {
+                self.storage
+                    .complete_pending_session(pending, end, session, limit, proved_by, ctx)
+                    .await
+            }
+            None => {
+                self.storage
+                    .create_session_atomic(session, limit, proved_by, ctx)
+                    .await
+            }
+        };
+        let evicted = match stored {
+            Ok(evicted) => evicted,
+            Err(SidError::Fenced(_)) => return Err(SignInError::Fenced),
+            Err(SidError::OperationCompleted(_)) => return Err(SignInError::AlreadyCompleted),
+            Err(e) => return Err(e.into()),
+        };
+        if !evicted.is_empty() {
+            info!(
+                profile_id = %profile.id,
+                evicted_count = evicted.len(),
+                "Session limit enforced: evicted oldest sessions"
+            );
+        }
+        // An evicted session's access tokens stop at once in every process.
+        // Its revocation committed as owed work with the eviction: one not
+        // published now is published by the work runner, and the committed
+        // sign-in stands either way (refusing it would revoke nothing).
+        for ended in &evicted {
+            if let Err(e) = self.revocation.revoke_session(ended.to_string()).await {
+                warn!(session_id = %ended, error = %e, "evicted session revocation left to its owed work");
+            }
+        }
+        #[cfg(feature = "telemetry")]
+        {
+            use opentelemetry::{KeyValue, global};
+            global::meter("sid")
+                .f64_histogram("sid_audit_write_seconds")
+                .build()
+                .record(
+                    audit_start.elapsed().as_secs_f64(),
+                    &[KeyValue::new("chain_scope", "session")],
+                );
+        }
+        Ok(())
+    }
+}
+
+/// One verified sign-in as the rules see it.
+fn attempt<'a>(
+    client_ip: Option<IpAddr>,
+    authentication: AttemptAuthentication<'a>,
+    context: AttemptContext<'a>,
+) -> SignInAttempt<'a> {
+    SignInAttempt {
+        client_ip,
+        authentication,
+        captcha_pass: context.captcha_pass,
+        user_agent: context.user_agent,
+    }
+}
+
+fn unavailable(cause: impl std::fmt::Display) -> SignInError {
+    SignInRefusal::Unavailable(cause.to_string()).into()
+}
+
+/// The rules' view of a sign-in of a local Profile.
+struct Rules<'a>(&'a SignIn);
+
+#[async_trait::async_trait]
+impl SignInSecurityHost for Rules<'_> {
+    type Owner = ProfileId;
+    type Error = SignInRefusal;
+
+    fn history(&self) -> &dyn SignInHistoryStore<Owner = ProfileId> {
+        self.0.storage.as_ref()
+    }
+    fn anomaly(&self) -> &AnomalyDetector {
+        &self.0.anomaly
+    }
+    fn ip_intelligence(&self) -> &IpIntelligenceAggregator {
+        &self.0.ip_intelligence
+    }
+    fn geoip(&self) -> &GeoIpChain {
+        &self.0.geoip
+    }
+    fn captcha_gate(&self) -> &CaptchaGate {
+        &self.0.captcha_gate
+    }
+    fn captcha_provider(&self) -> &dyn CaptchaProvider {
+        self.0.captcha_provider.as_ref()
+    }
+
+    async fn security_event(
+        &self,
+        account: &str,
+        rule: &str,
+        reaction: &str,
+        reason: &str,
+        client_ip: Option<IpAddr>,
+    ) {
+        self.0
+            .security_event(account, rule, reaction, reason, client_ip)
+            .await;
+    }
+
+    async fn record_ip_reputation(&self, ip: &str) -> sid_core::Result<()> {
+        self.0.storage.record_ip_reputation_event(ip, true).await
+    }
+}
+
+#[cfg(test)]
+mod tests;

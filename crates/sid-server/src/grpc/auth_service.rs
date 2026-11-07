@@ -7,6 +7,7 @@
 use crate::feature_flags::FeatureFlagService;
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretBox};
+use sid::sign_in::{AttemptContext, FirstFactor};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::device_auth;
@@ -81,21 +82,7 @@ use refusal::{
     step_up_required, too_many_attempts,
 };
 use sid_authn::sign_in_security::{device_id as compute_device_id, implied_auth_level};
-use sign_in_security::{ProfileSecurity, SecurityStatus};
-
-/// What the sign-in rules decide about a local first-factor sign-in.
-enum FirstFactor {
-    /// Admitted: the session commits under this policy fence.
-    Admitted(Option<sid_core::models::ActorFence>),
-    /// A second factor is owed, one of `factors` the account has enrolled or,
-    /// with none ever enrolled, one of `enrollable` it enrolls first: the
-    /// sign-in gets its pending context, under this fence.
-    AwaitsSecondFactor {
-        factors: Vec<StepUpMethod>,
-        enrollable: Vec<StepUpMethod>,
-        fence: Option<sid_core::models::ActorFence>,
-    },
-}
+use sign_in_security::sign_in_refusal;
 
 /// A completed first-factor sign-in: its credential, and when it is a
 /// pending context the second factors that complete it or may be enrolled
@@ -538,18 +525,10 @@ pub struct AuthServiceImpl {
     /// Its origin (scheme and authority): the prefix of every URI a sender
     /// proof names, never taken from a request.
     public_origin: String,
-    /// CE anomaly detection engine (brute force, country, Tor, etc.).
-    anomaly_detector: Arc<AnomalyDetector>,
-    /// IP intelligence aggregator (Tor exit, datacenter, blocklist detection).
-    ip_intelligence: Arc<IpIntelligenceAggregator>,
-    /// GeoIP resolution chain (country, lat/lon for anomaly rules).
-    geoip: Arc<GeoIpChain>,
-    /// CE hardcoded security policy (not configurable via UI in CE).
-    security_policy: SecurityPolicy,
-    /// CAPTCHA provider for RequireCaptcha anomaly reaction.
-    captcha_provider: Arc<dyn sid_authn::captcha::CaptchaProvider>,
-    /// Which sign-in each CAPTCHA was asked of, and the single-use passes earned.
-    captcha_gate: sid_authn::captcha::CaptchaGate,
+    /// Signing users in once a ceremony verified them: the sign-in rules,
+    /// attempt counters, the security policy, the IdP session cookie and
+    /// session delivery.
+    sign_ins: sid::sign_in::SignIn,
     /// Field encryption for credential secrets the server reads back (TOTP seeds).
     key_manager: Arc<dyn sid_keys::KeyManager>,
     /// TOTP codes already accepted, shared by every replica.
@@ -559,9 +538,6 @@ pub struct AuthServiceImpl {
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
-    /// This authority's IdP session cookie, the only one it sets, reads and
-    /// clears.
-    browser_cookie: sid_authn::browser_session::BrowserCookie,
     /// The enrollment mode the deployment pins over the stored one.
     enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     /// Browser authorization requests kept while the user signs in, by
@@ -570,14 +546,6 @@ pub struct AuthServiceImpl {
     /// One-time values of the logout confirmation form, each naming the IdP
     /// session it ends and where the browser returns, shared by every replica.
     logout_confirmations: ChallengeStore<end_session::LogoutConfirmation>,
-}
-
-/// Extra parameters for login security evaluation (avoids too_many_arguments).
-#[derive(Default)]
-struct LoginSecurityExtras<'a> {
-    /// Pass earned by solving the CAPTCHA this sign-in was asked for.
-    captcha_pass: Option<&'a str>,
-    user_agent: Option<&'a str>,
 }
 
 /// How the sign-in rules judge one sign-in.
@@ -672,6 +640,17 @@ impl AuthServiceImpl {
             )),
             installation_url: issuer.clone(),
         });
+        let sign_ins = sid::sign_in::SignIn::new(sid::sign_in::SignInParts {
+            storage: storage.clone(),
+            jwt: jwt.clone(),
+            revocation: revocation_cache.clone(),
+            issuer: issuer.clone(),
+            anomaly: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
+            ip_intelligence,
+            geoip,
+            captcha_gate,
+            captcha_provider,
+        });
         Self {
             storage,
             oauth2,
@@ -743,16 +722,10 @@ impl AuthServiceImpl {
                 .ascii_serialization(),
             issuer,
             totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
-            anomaly_detector: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
-            ip_intelligence,
-            geoip,
-            security_policy: SecurityPolicy::ce_default(),
-            captcha_provider,
-            captcha_gate,
+            sign_ins,
             key_manager,
             cascade,
             sign_in_origin: None,
-            browser_cookie: sid_authn::browser_session::BrowserCookie::default(),
             enrollment_pin: None,
         }
     }
@@ -780,13 +753,18 @@ impl AuthServiceImpl {
         mut self,
         cookie: sid_authn::browser_session::BrowserCookie,
     ) -> Self {
-        self.browser_cookie = cookie;
+        self.sign_ins.set_cookie(cookie);
         self
     }
 
     /// This authority's IdP session cookie.
     pub fn browser_cookie(&self) -> &sid_authn::browser_session::BrowserCookie {
-        &self.browser_cookie
+        self.sign_ins.cookie()
+    }
+
+    /// The security policy sign-ins follow.
+    fn security_policy(&self) -> &SecurityPolicy {
+        self.sign_ins.policy()
     }
 
     /// Apply `mode` to self-registration whatever mode is stored: the
@@ -845,7 +823,7 @@ impl AuthServiceImpl {
                     &policy,
                 )));
         }
-        self.security_policy = policy;
+        self.sign_ins.set_policy(policy);
         self
     }
 
@@ -896,7 +874,7 @@ impl AuthServiceImpl {
         client_ip: Option<std::net::IpAddr>,
         auth_method: &str,
         (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
-        extras: LoginSecurityExtras<'_>,
+        extras: AttemptContext<'_>,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         self.evaluate_sign_in(
             profile_id,
@@ -939,7 +917,7 @@ impl AuthServiceImpl {
         profile_id: ProfileId,
         client_ip: Option<std::net::IpAddr>,
         authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
-        extras: LoginSecurityExtras<'_>,
+        extras: AttemptContext<'_>,
         client_id: Option<&str>,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         self.client_sign_in_rules(
@@ -961,7 +939,7 @@ impl AuthServiceImpl {
         client_ip: Option<std::net::IpAddr>,
         attempt: (
             sid_authn::sign_in_security::AttemptAuthentication<'_>,
-            LoginSecurityExtras<'_>,
+            AttemptContext<'_>,
         ),
         client_id: Option<&str>,
         admitted_from: Option<std::net::IpAddr>,
@@ -985,15 +963,25 @@ impl AuthServiceImpl {
         client_ip: Option<std::net::IpAddr>,
         attempt: (
             sid_authn::sign_in_security::AttemptAuthentication<'_>,
-            LoginSecurityExtras<'_>,
+            AttemptContext<'_>,
         ),
         client_id: Option<&str>,
         judging: Judging,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         let requirements = self.login_requirements(client_id).await?;
-        self.sign_in_rules(profile_id, client_ip, attempt, &requirements, judging)
-            .await
-            .map_err(SecurityStatus::into_status)?;
+        match judging {
+            Judging::Record => {
+                self.sign_ins
+                    .evaluate(profile_id, client_ip, attempt, &requirements)
+                    .await
+            }
+            Judging::Repeat { admitted_from } => {
+                self.sign_ins
+                    .check(profile_id, client_ip, attempt, &requirements, admitted_from)
+                    .await
+            }
+        }
+        .map_err(sign_in_refusal)?;
         Ok(requirements.fence)
     }
 
@@ -1007,148 +995,19 @@ impl AuthServiceImpl {
         client_ip: Option<std::net::IpAddr>,
         auth_method: &str,
         (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
-        extras: LoginSecurityExtras<'_>,
+        extras: AttemptContext<'_>,
     ) -> Result<FirstFactor, Status> {
         let requirements = self.login_requirements(None).await?;
-        let authentication = sid_authn::sign_in_security::AttemptAuthentication::Local {
-            method: auth_method,
-            assurance,
-            amr,
-        };
-        match self
-            .sign_in_rules(
+        self.sign_ins
+            .first_factor(
                 profile_id,
                 client_ip,
-                (authentication, extras),
+                (auth_method, assurance, amr),
+                extras,
                 &requirements,
-                Judging::Record,
             )
             .await
-        {
-            Ok(()) => Ok(FirstFactor::Admitted(requirements.fence)),
-            Err(SecurityStatus::Refused(status)) => Err(status),
-            Err(owed) => {
-                let now = Utc::now();
-                let first =
-                    sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
-                let factors = self
-                    .second_factors(profile_id, &requirements, &first, now)
-                    .await?;
-                let enrollable = if factors.is_empty() {
-                    self.enrollable_factors(profile_id, &requirements, &first, now)
-                        .await?
-                } else {
-                    Vec::new()
-                };
-                if factors.is_empty() && enrollable.is_empty() {
-                    return Err(owed.into_status());
-                }
-                Ok(FirstFactor::AwaitsSecondFactor {
-                    factors,
-                    enrollable,
-                    fence: requirements.fence,
-                })
-            }
-        }
-    }
-
-    /// The factors `profile_id` may enroll first to complete `first` under
-    /// `requirements`: none on an account with established protection, whose
-    /// lost factor goes through recovery.
-    async fn enrollable_factors(
-        &self,
-        profile_id: ProfileId,
-        requirements: &sid_authn::login_policy::LoginRequirements,
-        first: &Session,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Vec<StepUpMethod>, Status> {
-        use sid_core::models::session::AuthLevel;
-        if !requirements.met_with(first, AuthLevel::Standard, "otp", now) {
-            return Ok(Vec::new());
-        }
-        let active: Vec<Credential> = self
-            .storage
-            .get_credentials_by_profile(profile_id, None)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .filter(|c| c.status.is_active())
-            .collect();
-        let established = sid_authn::credential_enrollment::established_assurance(
-            &active,
-            self.security_policy.auth.passkey_satisfies_mfa,
-        );
-        Ok(if established == AuthLevel::Basic {
-            vec![StepUpMethod::Totp]
-        } else {
-            Vec::new()
-        })
-    }
-
-    /// The second factors `profile_id` has enrolled that complete `first`
-    /// under `requirements`.
-    async fn second_factors(
-        &self,
-        profile_id: ProfileId,
-        requirements: &sid_authn::login_policy::LoginRequirements,
-        first: &Session,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Vec<StepUpMethod>, Status> {
-        let mut factors = Vec::new();
-        if requirements.met_with(
-            first,
-            sid_core::models::session::AuthLevel::Standard,
-            "otp",
-            now,
-        ) && self
-            .storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
-            .await
-            .map_err(storage_failure)?
-            .iter()
-            .any(|c| c.status.is_active())
-        {
-            factors.push(StepUpMethod::Totp);
-        }
-        Ok(factors)
-    }
-
-    /// The anomaly rules and the login `requirements` for one sign-in,
-    /// judged as `judging` says.
-    async fn sign_in_rules(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        (authentication, extras): (
-            sid_authn::sign_in_security::AttemptAuthentication<'_>,
-            LoginSecurityExtras<'_>,
-        ),
-        requirements: &sid_authn::login_policy::LoginRequirements,
-        judging: Judging,
-    ) -> Result<(), SecurityStatus> {
-        let attempt = sid_authn::sign_in_security::SignInAttempt {
-            client_ip,
-            authentication,
-            captcha_pass: extras.captcha_pass,
-            user_agent: extras.user_agent,
-        };
-        let host = ProfileSecurity { service: self };
-        match judging {
-            Judging::Record => {
-                sid_authn::sign_in_security::evaluate(&host, &profile_id, attempt, requirements)
-                    .await
-            }
-            Judging::Repeat { admitted_from } => {
-                sid_authn::sign_in_security::check(
-                    &host,
-                    &profile_id,
-                    attempt,
-                    requirements,
-                    admitted_from,
-                )
-                .await
-            }
-        }
+            .map_err(sign_in_refusal)
     }
 
     /// Record an authentication on the active session `id`: `authenticate`
@@ -1262,108 +1121,39 @@ impl AuthServiceImpl {
     /// any password work and for known and unknown identities alike, so a
     /// lockout neither lets guessing continue nor confirms a guess.
     async fn refuse_if_locked(&self, identity: &str) -> Result<(), Status> {
-        let locked = self
-            .anomaly_detector
-            .lockout_active(identity)
+        self.sign_ins
+            .refuse_if_locked(identity)
             .await
-            .map_err(anomaly_unavailable)?;
-        if locked {
-            return Err(too_many_attempts(self.anomaly_detector.lockout_duration()));
-        }
-        Ok(())
+            .map_err(sign_in_refusal)
     }
 
-    /// Count a failed login attempt (brute force and stuffing limits). An
-    /// attempt that cannot be counted refuses the request: an uncounted
-    /// guess would never reach the lockout.
+    /// Count a failed login attempt (brute force and stuffing limits); one
+    /// that cannot be counted refuses the request.
     async fn record_failed_login(
         &self,
         identity: &str,
         client_ip: Option<std::net::IpAddr>,
     ) -> Result<(), Status> {
-        self.anomaly_detector
-            .record_failed_attempt(identity)
+        self.sign_ins
+            .record_failed_login(identity, client_ip)
             .await
-            .map_err(anomaly_unavailable)?;
-        self.record_failed_from(client_ip).await
+            .map_err(sign_in_refusal)
     }
 
-    /// Count a failed attempt against its source address only: the stuffing
-    /// limit and the address's reputation, not any account's sign-in budget.
+    /// Count a failed attempt against its source address only.
     async fn record_failed_from(&self, client_ip: Option<std::net::IpAddr>) -> Result<(), Status> {
-        self.record_ip_attempt(client_ip).await?;
-        if let Some(ip) = client_ip
-            && let Err(e) = self
-                .storage
-                .record_ip_reputation_event(&ip.to_string(), false)
-                .await
-        {
-            // Reputation is advisory evidence for later scoring, not a limit.
-            warn!(error = %e, "failed to record IP reputation event");
-        }
-        Ok(())
+        self.sign_ins
+            .record_failed_from(client_ip)
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// Count an attempt from `client_ip` against the stuffing limit.
     async fn record_ip_attempt(&self, client_ip: Option<std::net::IpAddr>) -> Result<(), Status> {
-        match client_ip {
-            Some(ip) => self
-                .anomaly_detector
-                .record_ip_attempt(ip)
-                .await
-                .map_err(anomaly_unavailable),
-            None => Ok(()),
-        }
-    }
-
-    /// Publish a security event for anomaly rule matches.
-    async fn publish_security_event(
-        &self,
-        profile_id: &str,
-        rule: &str,
-        reaction: &str,
-        reason: &str,
-        client_ip: Option<std::net::IpAddr>,
-    ) {
-        let event_type = match rule {
-            "brute_force" | "brute_force_lockout" => event_types::SECURITY_BRUTE_FORCE,
-            "country_restriction" => event_types::SECURITY_COUNTRY_BLOCKED,
-            "tor_exit" => event_types::SECURITY_TOR_BLOCKED,
-            "datacenter_ip" => event_types::SECURITY_DATACENTER_IP,
-            "location_switch" => event_types::SECURITY_LOCATION_SWITCH,
-            _ => event_types::SECURITY_SUSPICIOUS_LOGIN,
-        };
-        let event = Event::new(&self.issuer, event_type)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "rule": rule,
-                "reaction": reaction,
-                "reason": reason,
-                "ip": client_ip.map(|ip| ip.to_string()),
-            }));
-        // No state change carries a refused attempt, so its event is relayed
-        // as work of its own; a full backlog drops it with a warning, the
-        // anomaly record below still keeps the attempt.
-        if let Err(e) = sid_authn::event_relay::relay_observed(&*self.storage, &event).await {
-            warn!("Failed to relay security event: {}", e);
-        }
-
-        // Persist anomaly event for admin dashboard queries.
-        let risk_score = match rule {
-            "brute_force" | "brute_force_lockout" => 95,
-            "credential_stuffing" => 90,
-            "country_restriction" => 50,
-            "tor_exit" => 80,
-            "datacenter_ip" => 60,
-            "new_device_ip" => 30,
-            _ => 50,
-        };
-        let record = sid_core::models::AnomalyEventRecord::new(
-            rule, profile_id, client_ip, reason, risk_score, reaction,
-        );
-        if let Err(e) = self.storage.save_anomaly_event(&record).await {
-            warn!("Failed to persist anomaly event: {}", e);
-        }
+        self.sign_ins
+            .record_ip_attempt(client_ip)
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// The installation's public origin, which every URI a sender proof
@@ -1780,7 +1570,7 @@ impl AuthServiceImpl {
             self.storage.as_ref(),
             caller,
             credential_type,
-            self.security_policy.auth.passkey_satisfies_mfa,
+            self.security_policy().auth.passkey_satisfies_mfa,
         )
         .await
         .or_status()
@@ -1808,7 +1598,7 @@ impl AuthServiceImpl {
                 sid_authn::credential_enrollment::authorize_sign_in(
                     self.storage.as_ref(),
                     pending,
-                    self.security_policy.auth.passkey_satisfies_mfa,
+                    self.security_policy().auth.passkey_satisfies_mfa,
                 )
                 .await
                 .or_status()
@@ -1857,8 +1647,8 @@ impl AuthServiceImpl {
         sid_authn::credential_enrollment::password_change_authority(
             self.storage.as_ref(),
             caller,
-            self.security_policy.auth.passkey_satisfies_mfa,
-            self.security_policy.password.change_current_password,
+            self.security_policy().auth.passkey_satisfies_mfa,
+            self.security_policy().password.change_current_password,
         )
         .await
         .or_status()
@@ -2064,7 +1854,7 @@ impl AuthServiceImpl {
         let mut session = self.new_session(profile.id, client_ip);
         session.device_id = device_id;
         session.assurance_level =
-            method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
+            method.auth_level(self.security_policy().auth.passkey_satisfies_mfa);
         session.amr = method.amr();
         let proved_by = proved_by.map(sid_core::models::SignInProof::Credential);
         self.sign_in(
@@ -2077,17 +1867,7 @@ impl AuthServiceImpl {
     /// installation's absolute lifetime when it sets one, with the sign-in
     /// scopes; its authentication is the caller's to set.
     fn new_session(&self, profile_id: ProfileId, ip_address: Option<std::net::IpAddr>) -> Session {
-        let lifetime = match self.security_policy.session.max_lifetime_hours {
-            0 => Duration::hours(24),
-            hours => Duration::hours(i64::from(hours)),
-        };
-        let mut session = Session::new(profile_id, ip_address, Utc::now() + lifetime);
-        session.scopes = vec![
-            "openid".to_string(),
-            "profile".to_string(),
-            "email".to_string(),
-        ];
-        session
+        self.sign_ins.new_session(profile_id, ip_address)
     }
 
     /// Who verifies a second factor in `request`: a sign-in's pending
@@ -2199,7 +1979,7 @@ impl AuthServiceImpl {
         // The pending context ends in the session's own commit: of concurrent
         // completions one signs in, and one ended meanwhile completes nothing.
         let signed_in = self
-            .sign_in_sessions()
+            .sign_ins
             .complete_pending(
                 &profile,
                 (
@@ -2217,19 +1997,12 @@ impl AuthServiceImpl {
                     .map(sid_core::models::SignInProof::Credential),
                 requirements.fence,
             )
-            .await?;
-        // Its access tokens stop at once in every process.
-        self.revocation_cache
-            .revoke_session(pending.id.to_string())
             .await
-            .map_err(|e| dependency_unavailable("session revocation", e))?;
+            .map_err(sign_in_refusal)?;
         // Recorded from the address the rules judged at the first factor.
-        sid_authn::sign_in_security::record_completed_sign_in(
-            &ProfileSecurity { service: self },
-            &profile.id,
-            pending.ip_address,
-        )
-        .await;
+        self.sign_ins
+            .record_completed(profile.id, pending.ip_address)
+            .await;
         Ok(signed_in)
     }
 
@@ -2270,7 +2043,7 @@ impl AuthServiceImpl {
                 let mut session = Session::new_awaiting_second_factor(
                     profile.id,
                     client_ip,
-                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
                     method.amr(),
                 );
                 session.device_id = device_id;
@@ -2289,7 +2062,7 @@ impl AuthServiceImpl {
                     return Err(ceremony_expired("sign-in"));
                 }
                 let (signed_in, browser_csrf) = self
-                    .sign_in_sessions()
+                    .sign_ins
                     .sign_in_pending(
                         profile,
                         session,
@@ -2297,7 +2070,8 @@ impl AuthServiceImpl {
                         proved_by.map(sid_core::models::SignInProof::Credential),
                         fence,
                     )
-                    .await?;
+                    .await
+                    .map_err(sign_in_refusal)?;
                 info!(profile = %profile.id, ?factors, ?enrollable, "Sign-in awaits its second factor");
                 Ok(FirstFactorSignedIn {
                     signed_in,
@@ -2346,25 +2120,14 @@ impl AuthServiceImpl {
         native_key: Option<&str>,
         proved_by: Option<sid_core::models::SignInProof<'_>>,
         policy: Option<sid_core::models::ActorFence>,
-        retained: Option<super::sign_in_session::RetainedSignIn<'_>>,
+        retained: Option<sid::sign_in::RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
-        self.sign_in_sessions()
+        self.sign_ins
             .sign_in(
                 profile, session, client, native_key, proved_by, policy, retained,
             )
             .await
-    }
-
-    /// Where this service's sign-ins complete.
-    fn sign_in_sessions(&self) -> super::sign_in_session::SignInSessions<'_> {
-        super::sign_in_session::SignInSessions {
-            storage: self.storage.as_ref(),
-            jwt: &self.jwt,
-            revocation: &self.revocation_cache,
-            issuer: &self.issuer,
-            cookie: &self.browser_cookie,
-            policy: &self.security_policy.session,
-        }
+            .map_err(sign_in_refusal)
     }
 
     /// Who completes the upstream sign-in `request`: its client (a browser
@@ -2402,13 +2165,13 @@ impl AuthServiceImpl {
                 ceremony.client_ip,
                 "upstream",
                 (sid_core::models::session::AuthLevel::Basic, &[]),
-                LoginSecurityExtras {
+                AttemptContext {
                     captcha_pass: ceremony.captcha_pass.as_deref(),
                     user_agent: ceremony.user_agent.as_deref(),
                 },
             )
             .await?;
-        let lifetime = match self.security_policy.session.max_lifetime_hours {
+        let lifetime = match self.security_policy().session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
         };
@@ -2474,7 +2237,7 @@ impl AuthServiceImpl {
         let captcha_pass = extract_captcha_pass(request.metadata());
         let attempt =
             || sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication);
-        let extras = || LoginSecurityExtras {
+        let extras = || AttemptContext {
             captcha_pass: captcha_pass.as_deref(),
             user_agent,
         };
@@ -2500,7 +2263,7 @@ impl AuthServiceImpl {
         let policy = self
             .evaluate_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
             .await?;
-        let lifetime = match self.security_policy.session.max_lifetime_hours {
+        let lifetime = match self.security_policy().session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
         };
@@ -2531,12 +2294,12 @@ impl AuthServiceImpl {
         };
         // The delivery lives no longer than the operation, nor than the
         // session it delivers.
-        let retained = super::sign_in_session::RetainedSignIn {
+        let retained = sid::sign_in::RetainedSignIn {
             keys: self.key_manager.as_ref(),
             completion_key: completion.key()?,
             context: self.admitted_context(&completion),
             deadline: completion.deadline.min(session.expires_at),
-            inputs: super::sign_in_session::admitted_inputs(assignment),
+            inputs: sid::sign_in::admitted_inputs(assignment),
         };
         match self
             .sign_in(
@@ -2607,18 +2370,15 @@ impl AuthServiceImpl {
     > {
         let Some(record) = self
             .storage
-            .get_operation_result(
-                super::sign_in_session::ADMITTED_NAMESPACE,
-                &completion.key()?,
-            )
+            .get_operation_result(sid::sign_in::ADMITTED_NAMESPACE, &completion.key()?)
             .await
             .map_err(storage_failure)?
         else {
             return Ok(None);
         };
         if !record.matches(
-            super::sign_in_session::ADMITTED_METHOD,
-            &super::sign_in_session::admitted_inputs(assignment),
+            sid::sign_in::ADMITTED_METHOD,
+            &sid::sign_in::admitted_inputs(assignment),
             // The sign-in ceremony's own record, under no period.
             None,
         ) {
@@ -2685,7 +2445,7 @@ impl AuthServiceImpl {
             return Err(step_up_required(&unmet).into());
         }
         delivery
-            .signed_in(&self.browser_cookie, session)
+            .signed_in(self.browser_cookie(), session)
             .ok_or_else(authentication_failed)
     }
 
@@ -2780,7 +2540,7 @@ impl AuthServiceImpl {
         history: Option<sid_core::models::HistoryCommit>,
     ) -> Option<sid_core::models::HistoryCommit> {
         history.map(|mut commit| {
-            commit.max_age_days = self.security_policy.password.history_max_age_days;
+            commit.max_age_days = self.security_policy().password.history_max_age_days;
             commit
         })
     }
@@ -2935,10 +2695,10 @@ impl AuthService for AuthServiceImpl {
                 client_ip,
                 "opaque",
                 (
-                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
                     &method.amr(),
                 ),
-                LoginSecurityExtras {
+                AttemptContext {
                     captcha_pass: captcha_pass.as_deref(),
                     user_agent: user_agent.as_deref(),
                 },
@@ -2997,7 +2757,7 @@ impl AuthService for AuthServiceImpl {
         let req = request.into_inner();
         let exchange = sid_core::models::NativeExchange::from_bytes(&req.exchange)
             .ok_or_else(|| invalid_field("exchange", "must be 16 bytes"))?;
-        let policy = NativePolicy::from_session_policy(&self.security_policy.session)
+        let policy = NativePolicy::from_session_policy(&self.security_policy().session)
             .map_err(|e| internal("read the native session policy", e))?;
 
         let refreshed = sid_authn::native_session::refresh(
@@ -3025,9 +2785,10 @@ impl AuthService for AuthServiceImpl {
             .map_err(storage_failure)?
             .filter(|p| p.status.can_authenticate())
             .ok_or_else(session_ended)?;
-        self.sign_in_sessions()
+        self.sign_ins
             .native_access(&profile, &refreshed.session, Some(refreshed.set))
-            .await?
+            .await
+            .map_err(sign_in_refusal)?
             .respond(|session_id, expires_in| RefreshNativeSessionResponse {
                 session_id: Some(session_id.into()),
                 expires_in,
@@ -3232,12 +2993,15 @@ impl AuthService for AuthServiceImpl {
             // the password through changes, and the account's sign-in budget
             // is untouched. A challenge refused earlier taught nothing.
             if !self
-                .anomaly_detector
+                .sign_ins
+                .anomaly()
                 .count_attempt(&guesses)
                 .await
                 .map_err(anomaly_unavailable)?
             {
-                return Err(too_many_attempts(self.anomaly_detector.lockout_duration()));
+                return Err(too_many_attempts(
+                    self.sign_ins.anomaly().lockout_duration(),
+                ));
             }
             self.password_ops
                 .begin_current_password(&id, state, |op| own_change(op, caller, &credential))
@@ -3315,7 +3079,8 @@ impl AuthService for AuthServiceImpl {
                 // The budget limits guesses, not the owner: the right
                 // password clears it, while abandoned and wrong guesses stay
                 // charged until one is proven.
-                self.anomaly_detector
+                self.sign_ins
+                    .anomaly()
                     .clear_lockout(&current_password_guesses(caller))
                     .await
                     .map_err(anomaly_unavailable)?;
@@ -3425,7 +3190,7 @@ impl AuthService for AuthServiceImpl {
         let left = sid_authn::credential_enrollment::password_change_requirement(
             self.storage.as_ref(),
             &verified.caller,
-            self.security_policy.password.change_current_password,
+            self.security_policy().password.change_current_password,
         )
         .await
         .or_status()?;
@@ -3769,10 +3534,10 @@ impl AuthService for AuthServiceImpl {
                 client_ip,
                 "webauthn",
                 (
-                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
                     &method.amr(),
                 ),
-                LoginSecurityExtras {
+                AttemptContext {
                     captcha_pass: captcha_pass.as_deref(),
                     user_agent: user_agent.as_deref(),
                 },
@@ -4059,7 +3824,7 @@ impl AuthService for AuthServiceImpl {
                             sid_core::models::session::AuthLevel::Basic,
                             &["mca".to_string()],
                         ),
-                        LoginSecurityExtras {
+                        AttemptContext {
                             captcha_pass: captcha_pass.as_deref(),
                             user_agent: user_agent.as_deref(),
                         },
@@ -4512,10 +4277,10 @@ impl AuthService for AuthServiceImpl {
                 client_ip,
                 "opaque",
                 (
-                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
                     &method.amr(),
                 ),
-                LoginSecurityExtras {
+                AttemptContext {
                     captcha_pass: captcha_pass.as_deref(),
                     user_agent: user_agent.as_deref(),
                 },
@@ -5152,7 +4917,7 @@ impl AuthService for AuthServiceImpl {
                             sid_core::models::session::AuthLevel::Basic,
                             &["mca".to_string()],
                         ),
-                        LoginSecurityExtras {
+                        AttemptContext {
                             captcha_pass: captcha_pass.as_deref(),
                             user_agent: user_agent.as_deref(),
                         },
@@ -5327,7 +5092,8 @@ impl AuthService for AuthServiceImpl {
         // The provider's own error text stays in the log.
         let rejected = || invalid_field("token", "the CAPTCHA solution was not accepted");
         let result = self
-            .captcha_provider
+            .sign_ins
+            .captcha_provider()
             .verify(&req.challenge_id, &req.token, remote_ip.as_ref())
             .await
             .map_err(|e| match e {
@@ -5351,7 +5117,8 @@ impl AuthService for AuthServiceImpl {
         // The solution counts once, and only for a challenge a sign-in was
         // asked; the pass answers that sign-in's retry.
         let bypass_token = self
-            .captcha_gate
+            .sign_ins
+            .captcha_gate()
             .solved(&req.challenge_id)
             .await
             .map_err(anomaly_unavailable)?
@@ -6107,7 +5874,7 @@ impl AuthService for AuthServiceImpl {
             .collect();
         let established = sid_authn::credential_enrollment::established_assurance(
             &active,
-            self.security_policy.auth.passkey_satisfies_mfa,
+            self.security_policy().auth.passkey_satisfies_mfa,
         );
         if established > sid_core::models::session::AuthLevel::Basic {
             info!(
@@ -6127,7 +5894,7 @@ impl AuthService for AuthServiceImpl {
         let policy = match self
             .admit_by_requirements(
                 profile_id,
-                method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
                 &method.amr(),
             )
             .await

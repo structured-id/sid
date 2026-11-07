@@ -110,6 +110,7 @@ telemetry = [
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
     "dep:prometheus",
+    "sid/telemetry",
 ]
 
 # Developer embedded mode: SQLite + OAuth2 + MFA + RBAC + audit-local.

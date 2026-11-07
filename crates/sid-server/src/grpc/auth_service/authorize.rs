@@ -190,7 +190,7 @@ impl AuthServiceImpl {
         if session.expires_at <= now || session.is_provisional {
             return false;
         }
-        match self.security_policy.session.idle_timeout_hours {
+        match self.security_policy().session.idle_timeout_hours {
             0 => true,
             hours => {
                 let last = session.last_activity_at.unwrap_or(session.created_at);

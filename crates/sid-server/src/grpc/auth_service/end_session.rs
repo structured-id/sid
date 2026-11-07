@@ -152,7 +152,7 @@ impl AuthServiceImpl {
             .get_all("cookie")
             .iter()
             .filter_map(|value| value.to_str().ok());
-        let Some(secret) = self.browser_cookie.secret(cookies) else {
+        let Some(secret) = self.browser_cookie().secret(cookies) else {
             return Ok(None);
         };
         self.storage
