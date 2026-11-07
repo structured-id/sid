@@ -66,7 +66,7 @@ fn test_parse_principal_short_username_rejected() {
 #[test]
 fn test_implied_auth_level_opaque_is_basic() {
     assert_eq!(
-        super::implied_auth_level("opaque", true, false),
+        sid_authn::sign_in_security::implied_auth_level("opaque", true, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -74,7 +74,7 @@ fn test_implied_auth_level_opaque_is_basic() {
 #[test]
 fn test_implied_auth_level_opaque_basic_regardless_of_config() {
     assert_eq!(
-        super::implied_auth_level("opaque", false, false),
+        sid_authn::sign_in_security::implied_auth_level("opaque", false, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -83,7 +83,7 @@ fn test_implied_auth_level_opaque_basic_regardless_of_config() {
 fn test_implied_auth_level_webauthn_standard_when_satisfies_mfa_and_user_verified() {
     // Both passkey_satisfies_mfa AND user_verified must be true for Standard.
     assert_eq!(
-        super::implied_auth_level("webauthn", true, true),
+        sid_authn::sign_in_security::implied_auth_level("webauthn", true, true),
         sid_core::models::session::AuthLevel::Standard,
     );
 }
@@ -93,7 +93,7 @@ fn test_implied_auth_level_webauthn_basic_when_not_user_verified() {
     // passkey_satisfies_mfa=true but user_verified=false → Basic.
     // Per NIST: without user verification, passkey = single factor (possession only).
     assert_eq!(
-        super::implied_auth_level("webauthn", true, false),
+        sid_authn::sign_in_security::implied_auth_level("webauthn", true, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -102,7 +102,7 @@ fn test_implied_auth_level_webauthn_basic_when_not_user_verified() {
 fn test_implied_auth_level_webauthn_basic_when_passkey_not_satisfies_mfa() {
     // passkey_satisfies_mfa=false → Basic regardless of user_verified.
     assert_eq!(
-        super::implied_auth_level("webauthn", false, true),
+        sid_authn::sign_in_security::implied_auth_level("webauthn", false, true),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -110,7 +110,7 @@ fn test_implied_auth_level_webauthn_basic_when_passkey_not_satisfies_mfa() {
 #[test]
 fn test_implied_auth_level_webauthn_basic_when_both_false() {
     assert_eq!(
-        super::implied_auth_level("webauthn", false, false),
+        sid_authn::sign_in_security::implied_auth_level("webauthn", false, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -118,7 +118,7 @@ fn test_implied_auth_level_webauthn_basic_when_both_false() {
 #[test]
 fn test_implied_auth_level_magic_link_is_basic() {
     assert_eq!(
-        super::implied_auth_level("magic_link", true, false),
+        sid_authn::sign_in_security::implied_auth_level("magic_link", true, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -126,7 +126,7 @@ fn test_implied_auth_level_magic_link_is_basic() {
 #[test]
 fn test_implied_auth_level_unknown_is_basic() {
     assert_eq!(
-        super::implied_auth_level("unknown_method", true, false),
+        sid_authn::sign_in_security::implied_auth_level("unknown_method", true, false),
         sid_core::models::session::AuthLevel::Basic,
     );
 }
@@ -283,7 +283,11 @@ async fn test_brute_force_detection_after_failures() {
 #[test]
 fn test_ce_default_policy_allows_basic_auth() {
     let policy = SecurityPolicy::ce_default();
-    let implied = super::implied_auth_level("opaque", policy.auth.passkey_satisfies_mfa, false);
+    let implied = sid_authn::sign_in_security::implied_auth_level(
+        "opaque",
+        policy.auth.passkey_satisfies_mfa,
+        false,
+    );
     // CE default min_acr should be Basic, so single-factor login passes.
     assert!(
         implied >= policy.auth.min_acr,
@@ -297,7 +301,11 @@ fn test_ce_default_policy_allows_basic_auth() {
 fn test_ce_default_policy_allows_webauthn_with_uv() {
     let policy = SecurityPolicy::ce_default();
     // user_verified=true required for Standard assurance with passkey.
-    let implied = super::implied_auth_level("webauthn", policy.auth.passkey_satisfies_mfa, true);
+    let implied = sid_authn::sign_in_security::implied_auth_level(
+        "webauthn",
+        policy.auth.passkey_satisfies_mfa,
+        true,
+    );
     assert!(
         implied >= policy.auth.min_acr,
         "CE default policy should allow Standard auth (webauthn+UV). min_acr={:?}, implied={:?}",
@@ -318,7 +326,7 @@ fn test_ce_default_passkey_satisfies_mfa_is_true() {
 #[test]
 fn test_passkey_not_satisfies_mfa_webauthn_is_basic() {
     // When passkey_satisfies_mfa is false, webauthn should only grant Basic.
-    let implied = super::implied_auth_level("webauthn", false, true);
+    let implied = sid_authn::sign_in_security::implied_auth_level("webauthn", false, true);
     assert_eq!(
         implied,
         sid_core::models::session::AuthLevel::Basic,

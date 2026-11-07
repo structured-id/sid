@@ -3,13 +3,13 @@
 
 use sid::sign_in::SignInError;
 use sid_authn::sign_in_security::SignInRefusal;
-use sid_infra::grpc_error::refuse::{dependency_unavailable, storage_failure};
-use sid_infra::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::refuse::{dependency_unavailable, invalid_field, storage_failure};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus};
 use tonic::Status;
 
 use super::refusal::{
-    anomaly_unavailable, authentication_failed, captcha_required, sign_in_refused,
-    step_up_after_anomaly, step_up_required, too_many_attempts,
+    anomaly_unavailable, authentication_failed, captcha_required, ceremony_expired, session_ended,
+    sign_in_refused, step_up_after_anomaly, step_up_required, too_many_attempts,
 };
 
 /// The answer to a refused or failed sign-in: the rules' refusal with what
@@ -26,6 +26,11 @@ pub(crate) fn sign_in_refusal(e: SignInError) -> Status {
         )
         .into(),
         SignInError::Native(e) => super::super::native_session::refusal(e),
+        SignInError::Password(e) => e.into_status(),
+        SignInError::InvalidIdentifier(detail) => invalid_field("identifier", detail),
+        SignInError::SessionEnded => session_ended(),
+        SignInError::Expired => ceremony_expired("sign-in"),
+        SignInError::Ceremony(e) => e.into_status(),
         SignInError::Unavailable { what, cause } => dependency_unavailable(what, cause),
         SignInError::Store(e) => storage_failure(e),
         SignInError::Internal => ApiError::internal().into(),

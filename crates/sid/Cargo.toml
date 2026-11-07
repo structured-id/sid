@@ -41,6 +41,8 @@ argon2 = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
+# The kept state of a sign-in between its steps.
+serde = { workspace = true }
 sha2 = { workspace = true }
 serde_json = { workspace = true }
 # Constant-time comparison of registration access tokens.
@@ -58,6 +60,9 @@ telemetry = ["dep:opentelemetry"]
 
 [dev-dependencies]
 sid-crypto = { workspace = true, features = ["primitives"] }
+# The client half of a password sign-in.
+sid-opaque-ke = { workspace = true }
+sid-pake-core = { workspace = true }
 # A real passkey ceremony for the stored-passkey conversions.
 sid-authn = { workspace = true, features = ["keyed", "password-operation", "soft-authenticator"] }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }

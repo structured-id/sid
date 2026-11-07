@@ -7,7 +7,7 @@
 use crate::feature_flags::FeatureFlagService;
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretBox};
-use sid::sign_in::{AttemptContext, FirstFactor};
+use sid::sign_in::{AttemptContext, FirstFactor, FirstFactorSignedIn, LoginMethod};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::device_auth;
@@ -21,7 +21,6 @@ use sid_authn::oauth2::{OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
-use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
@@ -70,29 +69,17 @@ use sid_infra::grpc_error::refuse::{
 
 mod authorize;
 mod end_session;
-mod password_sign_in;
 mod refusal;
 mod sign_in_security;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
-use password_sign_in::ProfileSignIn;
 use refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, enrollment_requirement,
     mfa_not_enrolled, registration_restricted, session_ended, session_provisional,
     step_up_required, too_many_attempts,
 };
-use sid_authn::sign_in_security::{device_id as compute_device_id, implied_auth_level};
+use sid_authn::sign_in_security::device_id as compute_device_id;
 use sign_in_security::sign_in_refusal;
-
-/// A completed first-factor sign-in: its credential, and when it is a
-/// pending context the second factors that complete it or may be enrolled
-/// first (`StepUpMethod` values) with a browser's CSRF token.
-struct FirstFactorSignedIn {
-    signed_in: SignedIn,
-    second_factors: Vec<i32>,
-    enrollable_factors: Vec<i32>,
-    browser_csrf: Option<String>,
-}
 
 /// Who binds a second factor: an interactive session, or a sign-in's pending
 /// context owing its first.
@@ -110,31 +97,6 @@ impl Enroller {
     }
 }
 
-/// The credential a pending second-factor context's first factor proved: its
-/// id and the SHA-256 of the data it held then.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct FirstFactorProof {
-    credential: uuid::Uuid,
-    digest: [u8; 32],
-}
-
-impl FirstFactorProof {
-    fn of(fence: &sid_core::models::CredentialFence) -> Self {
-        use sha2::Digest;
-        Self {
-            credential: fence.id.0,
-            digest: sha2::Sha256::digest(fence.data.expose()).into(),
-        }
-    }
-
-    /// Whether `credential` is the one proved, holding the same data.
-    fn proves(&self, credential: &Credential) -> bool {
-        use sha2::Digest;
-        let digest: [u8; 32] = sha2::Sha256::digest(credential.data.expose()).into();
-        credential.id.0 == self.credential && digest == self.digest
-    }
-}
-
 /// Who verifies a second factor.
 enum FactorCaller {
     /// A sign-in's pending context, completed into its session for `client`.
@@ -142,46 +104,6 @@ enum FactorCaller {
     /// An installation session stepping up.
     StepUp(Session),
 }
-
-/// How a full sign-in authenticated.
-#[derive(Clone, Copy)]
-enum LoginMethod {
-    Password,
-    /// A passkey assertion: whether the authenticator verified the user, and
-    /// the RFC 8176 method of the key that asserted (`hwk` / `swk`).
-    Passkey {
-        user_verified: bool,
-        key_amr: &'static str,
-    },
-}
-
-impl LoginMethod {
-    /// The assurance this sign-in establishes.
-    fn auth_level(self, passkey_satisfies_mfa: bool) -> sid_core::models::session::AuthLevel {
-        match self {
-            Self::Password => implied_auth_level("opaque", passkey_satisfies_mfa, false),
-            Self::Passkey { user_verified, .. } => {
-                implied_auth_level("webauthn", passkey_satisfies_mfa, user_verified)
-            }
-        }
-    }
-
-    /// The `amr` values (RFC 8176 §2) the session records for this sign-in.
-    fn amr(self) -> Vec<String> {
-        match self {
-            Self::Password => vec!["pwd".to_string()],
-            Self::Passkey {
-                user_verified,
-                key_amr,
-            } => passkey_amr(key_amr, user_verified)
-                .iter()
-                .map(|m| m.to_string())
-                .collect(),
-        }
-    }
-}
-
-use sid_authn::webauthn::passkey_amr;
 
 /// Parse space-separated acr_values string into the highest requested AuthLevel.
 ///
@@ -481,8 +403,6 @@ pub struct AuthServiceImpl {
     pub(crate) opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     pub(crate) revocation_cache: Arc<RevocationCache>,
     pub(crate) feature_flags: FeatureFlagService,
-    /// OPAQUE login state between start and finish.
-    login_state: ChallengeStore<PendingSignIn<ProfileId>>,
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
@@ -498,10 +418,6 @@ pub struct AuthServiceImpl {
     migration_state: ChallengeStore<MigrationState>,
     /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
-    /// The credential each pending second-factor context's first factor
-    /// proved, keyed by the context: its completion commits only while that
-    /// credential is unchanged.
-    first_factor_proofs: ChallengeStore<Option<FirstFactorProof>>,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -650,6 +566,8 @@ impl AuthServiceImpl {
             geoip,
             captcha_gate,
             captcha_provider,
+            opaque: opaque_router.clone(),
+            keys: key_manager.clone(),
         });
         Self {
             storage,
@@ -660,12 +578,6 @@ impl AuthServiceImpl {
             opaque_zkpp,
             revocation_cache,
             feature_flags,
-            login_state: ChallengeStore::new(
-                ceremonies.clone(),
-                key_manager.clone(),
-                "opaque-login",
-                ttl,
-            ),
             password_ops,
             history_evaluation,
             webauthn_state: ChallengeStore::new(
@@ -690,12 +602,6 @@ impl AuthServiceImpl {
                 ceremonies.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
-                ttl,
-            ),
-            first_factor_proofs: ChallengeStore::new(
-                ceremonies.clone(),
-                key_manager.clone(),
-                "first-factor-proof",
                 ttl,
             ),
             continuations: ChallengeStore::new(
@@ -1213,11 +1119,10 @@ impl AuthServiceImpl {
         &self,
         identifier: &str,
     ) -> Result<Option<sid_core::models::Profile>, Status> {
-        match self.resolve_profile(identifier).await {
-            Ok(p) => Ok(Some(p)),
-            Err(s) if s.code() == tonic::Code::Unauthenticated => Ok(None),
-            Err(s) => Err(s),
-        }
+        self.sign_ins
+            .resolve_profile(identifier)
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// The mailbox login mail for the email key `key` goes to on `profile`,
@@ -1614,27 +1519,10 @@ impl AuthServiceImpl {
         &self,
         pending: &Session,
     ) -> Result<Option<sid_core::models::CredentialFence>, Status> {
-        let proof = self
-            .first_factor_proofs
-            .read(&pending.id.to_string())
+        self.sign_ins
+            .first_factor_fence(pending)
             .await
-            .or_status()?
-            .ok_or_else(session_ended)?;
-        let Some(proof) = proof else {
-            return Ok(None);
-        };
-        let credential = self
-            .storage
-            .get_credentials_by_profile(pending.profile_id, None)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|c| c.status.is_active() && proof.proves(c))
-            .ok_or_else(authentication_failed)?;
-        Ok(Some(sid_core::models::CredentialFence {
-            id: credential.id,
-            data: credential.data,
-        }))
+            .map_err(sign_in_refusal)
     }
 
     /// Refuse unless the caller may change its own password now; answer
@@ -1660,20 +1548,10 @@ impl AuthServiceImpl {
         &self,
         credential: &Credential,
     ) -> Result<(StoredCredential, sid_core::models::CredentialData), Status> {
-        use sid_authn::sealed_secret::StoredPasswordError;
-        sid_authn::sealed_secret::stored_password(
-            self.key_manager.as_ref(),
-            self.storage.as_ref(),
-            credential,
-        )
-        .await
-        .map_err(|e| match e {
-            StoredPasswordError::Storage(e) => storage_failure(e),
-            e @ (StoredPasswordError::NoCurve(_) | StoredPasswordError::UnknownCurve { .. }) => {
-                internal("read OPAQUE curve", e)
-            }
-            StoredPasswordError::Sealed(e) => internal("open OPAQUE envelope", e),
-        })
+        self.sign_ins
+            .stored_password(credential)
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// The profile's passkeys that may still sign in (revoked ones never do).
@@ -1724,35 +1602,12 @@ impl AuthServiceImpl {
         }
     }
 
+    /// The active account `identifier` signs in to, or the same refusal as a
+    /// wrong password whatever keeps it from resolving.
     async fn resolve_profile(&self, identifier: &str) -> Result<sid_core::models::Profile, Status> {
-        let handle = parse_handle(identifier)?;
-        let principal_type = handle.principal_type.to_principal_type();
-
-        // The explicit assignment is the only route: other claims and the age
-        // of the proof neither select nor block a subject, and an email key
-        // of another policy revision (one whose address is not established
-        // under the current rules) routes nobody. Every refusal reads the
-        // same, so the answer does not reveal the state of the address.
-        //
-        // Sign-in resolves principals only; a profile's stored user name or
-        // email is not a second route to it.
-        let profile_id = self
-            .storage
-            .resolve_sign_in_principal(principal_type, &handle.normalized, handle.key_revision())
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(authentication_failed)?;
-        match self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-        {
-            Some(profile) if profile.status == sid_core::models::ProfileStatus::Active => {
-                Ok(profile)
-            }
-            _ => Err(authentication_failed()),
-        }
+        self.resolve_profile_optional(identifier)
+            .await?
+            .ok_or_else(authentication_failed)
     }
 
     /// The caller's verified access token and the caller it stands for
@@ -1851,16 +1706,12 @@ impl AuthServiceImpl {
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
-        let mut session = self.new_session(profile.id, client_ip);
-        session.device_id = device_id;
-        session.assurance_level =
-            method.auth_level(self.security_policy().auth.passkey_satisfies_mfa);
-        session.amr = method.amr();
-        let proved_by = proved_by.map(sid_core::models::SignInProof::Credential);
-        self.sign_in(
-            profile, session, client, native_key, proved_by, policy, None,
-        )
-        .await
+        self.sign_ins
+            .sign_in_by(
+                profile, method, device_id, client_ip, client, native_key, proved_by, policy,
+            )
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// A full session of `profile_id` from `ip_address`, for the
@@ -2023,64 +1874,12 @@ impl AuthServiceImpl {
         proved_by: Option<&sid_core::models::CredentialFence>,
         admission: FirstFactor,
     ) -> Result<FirstFactorSignedIn, Status> {
-        match admission {
-            FirstFactor::Admitted(policy) => Ok(FirstFactorSignedIn {
-                signed_in: self
-                    .create_session_and_issue_tokens(
-                        profile, method, device_id, client_ip, client, native_key, proved_by,
-                        policy,
-                    )
-                    .await?,
-                second_factors: Vec::new(),
-                enrollable_factors: Vec::new(),
-                browser_csrf: None,
-            }),
-            FirstFactor::AwaitsSecondFactor {
-                factors,
-                enrollable,
-                fence,
-            } => {
-                let mut session = Session::new_awaiting_second_factor(
-                    profile.id,
-                    client_ip,
-                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
-                    method.amr(),
-                );
-                session.device_id = device_id;
-                // Kept for as long as the context lives; a completion that
-                // finds none completes nothing.
-                let kept = self
-                    .first_factor_proofs
-                    .insert_until(
-                        &session.id.to_string(),
-                        &proved_by.map(FirstFactorProof::of),
-                        session.expires_at,
-                    )
-                    .await
-                    .or_status()?;
-                if !kept {
-                    return Err(ceremony_expired("sign-in"));
-                }
-                let (signed_in, browser_csrf) = self
-                    .sign_ins
-                    .sign_in_pending(
-                        profile,
-                        session,
-                        client,
-                        proved_by.map(sid_core::models::SignInProof::Credential),
-                        fence,
-                    )
-                    .await
-                    .map_err(sign_in_refusal)?;
-                info!(profile = %profile.id, ?factors, ?enrollable, "Sign-in awaits its second factor");
-                Ok(FirstFactorSignedIn {
-                    signed_in,
-                    second_factors: factors.into_iter().map(i32::from).collect(),
-                    enrollable_factors: enrollable.into_iter().map(i32::from).collect(),
-                    browser_csrf,
-                })
-            }
-        }
+        self.sign_ins
+            .complete_first_factor(
+                profile, method, device_id, client_ip, client, native_key, proved_by, admission,
+            )
+            .await
+            .map_err(sign_in_refusal)
     }
 
     /// Provisional session for a weak-possession login (email OTP, magic link):
@@ -2638,15 +2437,13 @@ impl AuthService for AuthServiceImpl {
         request: Request<OpaqueLoginStartRequest>,
     ) -> Result<Response<OpaqueLoginStartResponse>, Status> {
         self.check_maintenance().await?;
-        let host = ProfileSignIn {
-            service: self,
-            client_ip: self.client_ip(&request)?,
-        };
+        let client_ip = self.client_ip(&request)?;
         let req = request.into_inner();
-        let started =
-            sid_authn::password_sign_in::start(&host, &req.principal, &req.credential_request)
-                .await
-                .map_err(|e| e.0)?;
+        let started = self
+            .sign_ins
+            .password_start(&req.principal, &req.credential_request, client_ip)
+            .await
+            .map_err(sign_in_refusal)?;
         Ok(Response::new(OpaqueLoginStartResponse {
             credential_response: started.credential_response,
             login_id: Some(started.login_id.into()),
@@ -2678,14 +2475,11 @@ impl AuthService for AuthServiceImpl {
             .native_ceremony_key(native.as_ref(), login.as_bytes())
             .await?;
 
-        let host = ProfileSignIn {
-            service: self,
-            client_ip,
-        };
-        let verified =
-            sid_authn::password_sign_in::finish(&host, &login, &req.credential_finalization)
-                .await
-                .map_err(|e| e.0)?;
+        let verified = self
+            .sign_ins
+            .password_finish(&login, &req.credential_finalization, client_ip)
+            .await
+            .map_err(sign_in_refusal)?;
         let profile = verified.account;
         // Evaluate login security (anomaly detection + policy enforcement).
         let method = LoginMethod::Password;
@@ -5398,7 +5192,10 @@ impl AuthService for AuthServiceImpl {
                     sid_core::models::session::AuthLevel::Standard
                 };
 
-                (passkey_amr(key_amr, verified.user_verified), target)
+                (
+                    sid_authn::webauthn::passkey_amr(key_amr, verified.user_verified),
+                    target,
+                )
             }
 
             StepUpMethod::Unspecified => return Err(missing_field("method")),
