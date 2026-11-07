@@ -770,6 +770,13 @@ async fn test_audit_chains_are_independent() {
 }
 
 #[tokio::test]
+async fn test_audit_chain_moves_as_stored() {
+    let backend = setup().await;
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chain_moves_as_stored(&log).await;
+}
+
+#[tokio::test]
 async fn test_mutations_leave_their_audit_chain() {
     let backend = setup().await;
     let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());

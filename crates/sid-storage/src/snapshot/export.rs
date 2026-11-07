@@ -3,22 +3,29 @@
 
 use chrono::Utc;
 use sid_plugin::SnapshotRules;
-use sid_plugin::history_keys::HistoryKeyStore;
-use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
-use super::{IssuerSnapshot, Result, Snapshot};
+use super::{IssuerSnapshot, Result, Snapshot, Store};
 
-/// Read every persistent entity of `backend`, and the history evaluator's
-/// sealed keys from `keys`, into a snapshot checked by `rules`. The caller
-/// quiesces the installation first: the snapshot is consistent only when
-/// nothing writes while it is read. Expired sessions are left out.
-pub async fn export(
-    backend: &dyn StorageBackend,
-    keys: &dyn HistoryKeyStore,
-    rules: &dyn SnapshotRules,
-) -> Result<Snapshot> {
+/// Read every persistent entity of `store`, every chain of its audit log
+/// and the history evaluator's sealed keys into a snapshot checked by
+/// `rules`. The caller quiesces the installation first: the snapshot is
+/// consistent only when nothing writes while it is read. Expired sessions
+/// are left out.
+pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snapshot> {
+    let Store {
+        storage: backend,
+        audit,
+        history_keys: keys,
+    } = store;
     let mut snapshot = Snapshot::new(backend.name());
+    let mut chains = audit.list_chain_ids().await?;
+    chains.sort();
+    for chain in chains {
+        snapshot
+            .audit_chains
+            .push(audit.export_chain(&chain).await?);
+    }
     snapshot.organization = backend.instance_organization().await?;
     snapshot.metadata.installation_org = snapshot.organization.as_ref().map(|o| o.id);
     for issuer in backend.list_oidc_issuers().await? {

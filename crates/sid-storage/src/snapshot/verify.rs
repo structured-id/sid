@@ -6,11 +6,9 @@
 //! rollback.
 
 use sid_plugin::SnapshotRules;
-use sid_plugin::history_keys::HistoryKeyStore;
-use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
-use super::Result;
+use super::{Result, Store};
 
 /// Result of a verification check.
 #[derive(Debug)]
@@ -43,20 +41,37 @@ impl CountCheck {
     }
 }
 
-/// Verify that `target` holds what `source` held: the same installation
+/// Verify that `target` holds what `source` held: every audit chain, the
+/// same installation
 /// organization and issuer registry with every sealed key generation, OPAQUE
 /// setup, derivation parameters and cutoffs, each source profile with its
 /// password history, history keys and device key bindings, and matching
 /// counts.
 pub async fn verify(
-    source: &dyn StorageBackend,
-    source_keys: &dyn HistoryKeyStore,
-    target: &dyn StorageBackend,
-    target_keys: &dyn HistoryKeyStore,
+    source_store: Store<'_>,
+    target_store: Store<'_>,
     rules: &dyn SnapshotRules,
 ) -> Result<VerifyResult> {
+    let (source, source_keys) = (source_store.storage, source_store.history_keys);
+    let (target, target_keys) = (target_store.storage, target_store.history_keys);
     let mut counts = Vec::new();
     let mut issues = Vec::new();
+    // Every source chain is held by the target, continued at most by
+    // records the import appended.
+    for chain in source_store.audit.list_chain_ids().await? {
+        let held = source_store.audit.export_chain(&chain).await?;
+        match target_store.audit.export_chain(&chain).await {
+            Ok(moved) if moved.holds(&held) => {}
+            Ok(_) => issues.push(format!("audit chain {chain} differs")),
+            Err(sid_core::models::audit::AuditError::ChainNotFound(_)) => {
+                issues.push(format!("audit chain {chain} is missing on target"));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if !target_store.audit.verify_chain(&chain).await?.valid {
+            issues.push(format!("audit chain {chain} does not verify on target"));
+        }
+    }
     let setup = sid_core::models::InstanceSecret::OpaqueServerSetup;
     if source.get_instance_secret(setup).await? != target.get_instance_secret(setup).await? {
         issues.push("OPAQUE server setup differs".into());

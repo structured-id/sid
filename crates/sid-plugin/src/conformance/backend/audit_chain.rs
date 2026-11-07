@@ -51,6 +51,82 @@ pub async fn test_audit_chain_links_records(log: &dyn AuditLog) {
     assert_eq!(verified.records_verified, 2);
 }
 
+/// `chain` as another chain's: the same records hashed under `id`.
+fn rechained(
+    chain: &sid_core::models::audit::AuditChain,
+    id: &str,
+) -> sid_core::models::audit::AuditChain {
+    let mut moved = chain.clone();
+    let mut prev = "genesis".to_owned();
+    for record in &mut moved.records {
+        record.id = Uuid::now_v7().to_string();
+        record.chain_id = id.to_owned();
+        record.prev_hash = prev.clone();
+        record.hash = compute_record_hash(record);
+        prev.clone_from(&record.hash);
+    }
+    let last = moved.records.last().expect("a chain with records");
+    moved.head = sid_core::models::audit::ChainHead {
+        chain_id: id.to_owned(),
+        last_record_id: last.id.clone(),
+        last_hash: last.hash.clone(),
+        sequence: last.sequence,
+    };
+    moved
+}
+
+/// A chain is exported as stored and restores exactly: into a log without
+/// it every record is written as given and verifies, a repeat writes
+/// nothing, so does the chain once continued by later records, a chain of
+/// the same id that is not it is a conflict, and a chain that does not
+/// verify is refused before anything is written.
+pub async fn test_audit_chain_moves_as_stored(log: &dyn AuditLog) {
+    use sid_core::models::audit::AuditError;
+    let source = chain("export");
+    for action in ["created", "updated", "deleted"] {
+        log.log(&source, AuditEntry::system(action, &source))
+            .await
+            .unwrap();
+    }
+    let held = log.export_chain(&source).await.unwrap();
+    assert_eq!(held.records.len(), 3);
+    held.check().expect("an exported chain verifies");
+    assert!(
+        !log.import_chain(&held).await.unwrap(),
+        "a repeat writes nothing"
+    );
+
+    let id = chain("moved");
+    let moved = rechained(&held, &id);
+    assert!(log.import_chain(&moved).await.unwrap());
+    assert_eq!(log.export_chain(&id).await.unwrap(), moved);
+    assert!(log.verify_chain(&id).await.unwrap().valid);
+
+    // Continued after the import, it still holds the chain moved in.
+    log.log(&id, AuditEntry::system("after", &id))
+        .await
+        .unwrap();
+    assert!(!log.import_chain(&moved).await.unwrap());
+
+    let other = rechained(&held, &id);
+    assert!(matches!(
+        log.import_chain(&other).await,
+        Err(AuditError::Conflict(_))
+    ));
+
+    let tampered_id = chain("tampered");
+    let mut tampered = rechained(&held, &tampered_id);
+    tampered.records[1].action = "rewritten".into();
+    assert!(matches!(
+        log.import_chain(&tampered).await,
+        Err(AuditError::IntegrityViolation { .. })
+    ));
+    assert!(matches!(
+        log.export_chain(&tampered_id).await,
+        Err(AuditError::ChainNotFound(_))
+    ));
+}
+
 /// A new chain starts at its own genesis, whatever other chains hold.
 pub async fn test_audit_chains_are_independent(log: &dyn AuditLog) {
     let (a, b) = (chain("a"), chain("b"));

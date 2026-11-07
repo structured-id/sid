@@ -19,6 +19,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use sid_authn::snapshot_rules::AuthnSnapshotRules;
+use sid_plugin::audit::AuditLog;
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::snapshot::{self, archive};
@@ -173,8 +174,7 @@ async fn main() -> Result<()> {
             info!(output = %output.display(), "starting export");
             let store =
                 connect_backend(&source, schema.as_deref(), history_keys.as_deref()).await?;
-            let snapshot =
-                snapshot::export(store.storage.as_ref(), store.keys.as_ref(), &rules).await?;
+            let snapshot = snapshot::export(store.store(), &rules).await?;
             let sealed = archive::seal(&snapshot, &key, &crypto)?;
             write_new(&output, &sealed).await?;
             println!(
@@ -206,14 +206,7 @@ async fn main() -> Result<()> {
             );
             let store =
                 connect_backend(&target, schema.as_deref(), history_keys.as_deref()).await?;
-            let result = snapshot::import(
-                store.storage.as_ref(),
-                store.keys.as_ref(),
-                &rules,
-                &crypto,
-                &snapshot,
-            )
-            .await?;
+            let result = snapshot::import(store.store(), &rules, &crypto, &snapshot).await?;
             println!("{result}");
         }
 
@@ -248,31 +241,13 @@ async fn main() -> Result<()> {
                 target_history_keys.as_deref(),
             )
             .await?;
-            let snapshot = snapshot::export(
-                source_store.storage.as_ref(),
-                source_store.keys.as_ref(),
-                &rules,
-            )
-            .await?;
-            let result = snapshot::import(
-                target_store.storage.as_ref(),
-                target_store.keys.as_ref(),
-                &rules,
-                &crypto,
-                &snapshot,
-            )
-            .await?;
+            let snapshot = snapshot::export(source_store.store(), &rules).await?;
+            let result = snapshot::import(target_store.store(), &rules, &crypto, &snapshot).await?;
             println!("{result}");
 
             info!("running post-migration verification...");
-            let verified = snapshot::verify(
-                source_store.storage.as_ref(),
-                source_store.keys.as_ref(),
-                target_store.storage.as_ref(),
-                target_store.keys.as_ref(),
-                &rules,
-            )
-            .await?;
+            let verified =
+                snapshot::verify(source_store.store(), target_store.store(), &rules).await?;
             println!("{verified}");
             if !verified.passed {
                 bail!("post-migration verification failed");
@@ -309,14 +284,8 @@ async fn main() -> Result<()> {
                 target_history_keys.as_deref(),
             )
             .await?;
-            let result = snapshot::verify(
-                source_store.storage.as_ref(),
-                source_store.keys.as_ref(),
-                target_store.storage.as_ref(),
-                target_store.keys.as_ref(),
-                &rules,
-            )
-            .await?;
+            let result =
+                snapshot::verify(source_store.store(), target_store.store(), &rules).await?;
             println!("{result}");
             if !result.passed {
                 std::process::exit(1);
@@ -355,12 +324,24 @@ async fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
         .context("failed to synchronize the output file")
 }
 
-/// One installation's data: its storage backend and the password-history
-/// evaluator's key store, which a standalone installation keeps in the same
-/// database under its own tables and a split one in the evaluator's own.
-struct Store {
+/// One installation's data: its storage backend, the audit log over it and
+/// the password-history evaluator's key store, which a standalone
+/// installation keeps in the same database under its own tables and a split
+/// one in the evaluator's own.
+struct Connected {
     storage: Box<dyn StorageBackend>,
+    audit: Box<dyn AuditLog>,
     keys: Box<dyn HistoryKeyStore>,
+}
+
+impl Connected {
+    fn store(&self) -> snapshot::Store<'_> {
+        snapshot::Store {
+            storage: self.storage.as_ref(),
+            audit: self.audit.as_ref(),
+            history_keys: self.keys.as_ref(),
+        }
+    }
 }
 
 /// Connect to a storage backend and its history key store based on URL
@@ -370,7 +351,7 @@ async fn connect_backend(
     url: &str,
     schema: Option<&str>,
     history_keys: Option<&str>,
-) -> Result<Store> {
+) -> Result<Connected> {
     check_backend(url, schema, history_keys)?;
     if url.starts_with("sqlite:") {
         #[cfg(feature = "storage-sqlite")]
@@ -379,8 +360,11 @@ async fn connect_backend(
             let backend = sid_storage::sqlite::SqliteBackend::new(path)
                 .await
                 .context("failed to connect to SQLite")?;
-            Ok(Store {
+            Ok(Connected {
                 keys: Box::new(backend.history_keys()),
+                audit: Box::new(sid_storage::sqlite::SqliteAuditLog::new(
+                    backend.pool().clone(),
+                )),
                 storage: Box::new(backend),
             })
         }
@@ -401,8 +385,11 @@ async fn connect_backend(
             keys.migrate()
                 .await
                 .context("history key store migrations")?;
-            Ok(Store {
+            Ok(Connected {
                 keys: Box::new(keys),
+                audit: Box::new(sid_storage::audit_log::PostgresAuditLog::new(
+                    backend.pool().clone(),
+                )),
                 storage: Box::new(backend),
             })
         }

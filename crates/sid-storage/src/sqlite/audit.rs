@@ -3,7 +3,8 @@
 
 use async_trait::async_trait;
 use sid_core::models::audit::{
-    ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, compute_record_hash,
+    ActorType, AuditChain, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainCheckpoint,
+    ChainHead, compute_record_hash,
 };
 use sid_plugin::audit::{AuditLog, VerifyResult};
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -207,6 +208,150 @@ impl AuditLog for SqliteAuditLog {
             .map_err(|e| AuditError::Other(e.to_string()))?;
         Ok(rows.iter().map(|r| r.get("chain_id")).collect())
     }
+
+    async fn export_chain(&self, chain_id: &str) -> Result<AuditChain, AuditError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| AuditError::Other(e.to_string()))?;
+        stored_chain(&mut conn, chain_id)
+            .await?
+            .ok_or_else(|| AuditError::ChainNotFound(chain_id.to_owned()))
+    }
+
+    async fn import_chain(&self, chain: &AuditChain) -> Result<bool, AuditError> {
+        chain.check()?;
+        let write = |e: sqlx::Error| AuditError::WriteFailed(e.to_string());
+        let mut conn = self.pool.acquire().await.map_err(write)?;
+        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
+            .await
+            .map_err(write)?;
+        if let Some(held) = stored_chain(&mut tx, &chain.head.chain_id).await? {
+            return if held.holds(chain) {
+                Ok(false)
+            } else {
+                Err(AuditError::Conflict(format!(
+                    "another chain {} is stored",
+                    chain.head.chain_id
+                )))
+            };
+        }
+        for record in &chain.records {
+            sqlx::query(
+                "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id,
+                    actor_type, action, resource, outcome, metadata, ip_address, device_id,
+                    prev_hash, hash)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&record.id)
+            // At the precision the record was taken: its hash covers it.
+            .bind(
+                record
+                    .timestamp
+                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            )
+            .bind(&record.chain_id)
+            .bind(sequence_value(record.sequence)?)
+            .bind(&record.actor_id)
+            .bind(record.actor_type.to_string())
+            .bind(&record.action)
+            .bind(&record.resource)
+            .bind(record.outcome.to_string())
+            .bind(
+                serde_json::to_string(&record.metadata)
+                    .map_err(|e| AuditError::Other(e.to_string()))?,
+            )
+            .bind(record.ip_address.map(super::ip_to_bytes))
+            .bind(&record.device_id)
+            .bind(&record.prev_hash)
+            .bind(&record.hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(write)?;
+        }
+        sqlx::query(
+            "INSERT INTO audit_chain_heads (chain_id, last_record_id, last_hash, sequence)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&chain.head.chain_id)
+        .bind(&chain.head.last_record_id)
+        .bind(&chain.head.last_hash)
+        .bind(sequence_value(chain.head.sequence)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(write)?;
+        if let Some(checkpoint) = &chain.checkpoint {
+            sqlx::query(
+                "INSERT INTO audit_chain_checkpoints (chain_id, sequence, hash, cut_before)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&chain.head.chain_id)
+            .bind(sequence_value(checkpoint.sequence)?)
+            .bind(&checkpoint.hash)
+            .bind(super::fmt_dt(&checkpoint.cut_before))
+            .execute(&mut *tx)
+            .await
+            .map_err(write)?;
+        }
+        tx.commit().await.map_err(write)?;
+        Ok(true)
+    }
+}
+
+fn sequence_value(sequence: u64) -> Result<i64, AuditError> {
+    i64::try_from(sequence).map_err(|_| AuditError::Other(format!("sequence {sequence}")))
+}
+
+/// Chain `chain_id` as stored, read on `conn`; `None` when it has no head.
+async fn stored_chain(
+    conn: &mut SqliteConnection,
+    chain_id: &str,
+) -> Result<Option<AuditChain>, AuditError> {
+    let read = |e: sqlx::Error| AuditError::Other(e.to_string());
+    let Some(head) = sqlx::query("SELECT * FROM audit_chain_heads WHERE chain_id = ?")
+        .bind(chain_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(read)?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = sqlx::query("SELECT * FROM audit_chain_checkpoints WHERE chain_id = ?")
+        .bind(chain_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(read)?
+        .map(|row| {
+            Ok::<_, AuditError>(ChainCheckpoint {
+                sequence: row.get::<i64, _>("sequence") as u64,
+                hash: row.get("hash"),
+                cut_before: chrono::DateTime::parse_from_rfc3339(
+                    &row.get::<String, _>("cut_before"),
+                )
+                .map_err(|e| AuditError::Other(format!("cut_before: {e}")))?
+                .with_timezone(&chrono::Utc),
+            })
+        })
+        .transpose()?;
+    let records = sqlx::query("SELECT * FROM audit_records WHERE chain_id = ? ORDER BY sequence")
+        .bind(chain_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(read)?
+        .iter()
+        .map(row_to_audit_record)
+        .collect();
+    Ok(Some(AuditChain {
+        head: ChainHead {
+            chain_id: head.get("chain_id"),
+            last_record_id: head.get("last_record_id"),
+            last_hash: head.get("last_hash"),
+            sequence: head.get::<i64, _>("sequence") as u64,
+        },
+        checkpoint,
+        records,
+    }))
 }
 
 fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> AuditRecord {

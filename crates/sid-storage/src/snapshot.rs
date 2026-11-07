@@ -54,10 +54,23 @@ pub enum SnapshotError {
     /// The store failed or refused a write.
     #[error(transparent)]
     Store(#[from] sid_core::Error),
+    /// The audit log failed, refused a chain or holds another one.
+    #[error(transparent)]
+    Audit(#[from] sid_core::models::audit::AuditError),
 }
 
 /// The result of snapshot operations.
 pub type Result<T> = std::result::Result<T, SnapshotError>;
+
+/// An installation's stores a snapshot is read from or written to: its
+/// storage, the audit log over it and the password history evaluator's key
+/// store.
+#[derive(Clone, Copy)]
+pub struct Store<'a> {
+    pub storage: &'a dyn sid_plugin::storage::StorageBackend,
+    pub audit: &'a dyn sid_plugin::audit::AuditLog,
+    pub history_keys: &'a dyn sid_plugin::history_keys::HistoryKeyStore,
+}
 
 /// An OIDC issuer with every generation of its signing key, sealed as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +87,10 @@ pub struct IssuerSnapshot {
 pub struct Snapshot {
     /// Snapshot metadata.
     pub metadata: SnapshotMetadata,
+
+    /// Every audit chain as stored: the importer restores them before
+    /// anything it writes appends to them.
+    pub audit_chains: Vec<sid_core::models::audit::AuditChain>,
 
     /// The installation's own organization, the authority its issuers,
     /// clients and history domains belong to. None for a source that was
@@ -290,7 +307,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -329,6 +346,7 @@ impl Snapshot {
                 source_backend: source_backend.to_string(),
                 total_entities: 0,
             },
+            audit_chains: Vec::new(),
             organization: None,
             oidc_issuers: Vec::new(),
             projects: Vec::new(),
@@ -392,6 +410,10 @@ impl Snapshot {
     /// Count total entities in the snapshot.
     pub fn count_entities(&self) -> u64 {
         let sizes = [
+            self.audit_chains
+                .iter()
+                .map(|c| c.records.len() as u64)
+                .sum(),
             u64::from(self.organization.is_some()),
             self.oidc_issuers.len() as u64,
             self.oidc_issuers.iter().map(|i| i.keys.len() as u64).sum(),

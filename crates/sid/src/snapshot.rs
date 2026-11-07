@@ -17,25 +17,21 @@
 
 use sid_authn::snapshot_rules::AuthnSnapshotRules;
 use sid_crypto::CryptoPrimitives;
-use sid_plugin::history_keys::HistoryKeyStore;
-use sid_plugin::storage::StorageBackend;
 
 pub use sid_storage::snapshot::archive::{ArchiveKey, Manifest};
 use sid_storage::snapshot::{self, archive};
-pub use sid_storage::snapshot::{ImportResult, Snapshot, SnapshotError, VerifyResult};
+pub use sid_storage::snapshot::{ImportResult, Snapshot, SnapshotError, Store, VerifyResult};
 
 use crate::lifecycle::Drained;
 
-/// The installation on `storage`, with the history evaluator's keys in
-/// `history_keys`, as an archive sealed under `key`.
+/// The installation in `store` as an archive sealed under `key`.
 pub async fn export(
     _drained: &Drained,
-    storage: &dyn StorageBackend,
-    history_keys: &dyn HistoryKeyStore,
+    store: Store<'_>,
     key: &ArchiveKey,
     crypto: &dyn CryptoPrimitives,
 ) -> Result<Vec<u8>, SnapshotError> {
-    let snapshot = snapshot::export(storage, history_keys, &AuthnSnapshotRules).await?;
+    let snapshot = snapshot::export(store, &AuthnSnapshotRules).await?;
     archive::seal(&snapshot, key, crypto)
 }
 
@@ -45,41 +41,20 @@ pub fn manifest(sealed: &[u8]) -> Result<Manifest, SnapshotError> {
 }
 
 /// Import the archive `sealed`, opened under `key`, into the uninitialized
-/// store `storage` and the evaluator's key store `history_keys`, or resume
-/// its interrupted import there.
+/// `store`, or resume its interrupted import there.
 pub async fn import(
-    storage: &dyn StorageBackend,
-    history_keys: &dyn HistoryKeyStore,
+    store: Store<'_>,
     sealed: &[u8],
     key: &ArchiveKey,
     crypto: &dyn CryptoPrimitives,
 ) -> Result<ImportResult, SnapshotError> {
     let snapshot = archive::open(sealed, key, crypto)?;
-    snapshot::import(
-        storage,
-        history_keys,
-        &AuthnSnapshotRules,
-        crypto,
-        &snapshot,
-    )
-    .await
+    snapshot::import(store, &AuthnSnapshotRules, crypto, &snapshot).await
 }
 
 /// Compare the restored `target` with its `source`.
-pub async fn verify(
-    source: &dyn StorageBackend,
-    source_keys: &dyn HistoryKeyStore,
-    target: &dyn StorageBackend,
-    target_keys: &dyn HistoryKeyStore,
-) -> Result<VerifyResult, SnapshotError> {
-    snapshot::verify(
-        source,
-        source_keys,
-        target,
-        target_keys,
-        &AuthnSnapshotRules,
-    )
-    .await
+pub async fn verify(source: Store<'_>, target: Store<'_>) -> Result<VerifyResult, SnapshotError> {
+    snapshot::verify(source, target, &AuthnSnapshotRules).await
 }
 
 #[cfg(test)]

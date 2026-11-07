@@ -13,10 +13,35 @@ use sid_plugin::{
 use sid_storage::snapshot::{self, ImportResult, Snapshot, SnapshotError, VerifyResult};
 use sid_storage::sqlite::SqliteBackend;
 
-/// Export a standalone SQLite installation: its storage and the history
-/// evaluator's key store in the same database.
+/// A standalone SQLite installation's stores: the backend, its audit log
+/// and the history evaluator's key store, all in the same database.
+struct Stores<'a> {
+    backend: &'a SqliteBackend,
+    audit: sid_storage::sqlite::SqliteAuditLog,
+    keys: sid_storage::sqlite::SqliteHistoryKeyStore,
+}
+
+impl<'a> Stores<'a> {
+    fn of(backend: &'a SqliteBackend) -> Self {
+        Self {
+            backend,
+            audit: sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
+            keys: backend.history_keys(),
+        }
+    }
+
+    fn store(&self) -> snapshot::Store<'_> {
+        snapshot::Store {
+            storage: self.backend,
+            audit: &self.audit,
+            history_keys: &self.keys,
+        }
+    }
+}
+
+/// Export a standalone SQLite installation.
 async fn export(source: &SqliteBackend) -> Result<Snapshot, SnapshotError> {
-    snapshot::export(source, &source.history_keys(), &AuthnSnapshotRules).await
+    snapshot::export(Stores::of(source).store(), &AuthnSnapshotRules).await
 }
 
 /// Import into a standalone SQLite installation.
@@ -25,8 +50,7 @@ async fn import(
     snapshot: &Snapshot,
 ) -> Result<ImportResult, SnapshotError> {
     snapshot::import(
-        target,
-        &target.history_keys(),
+        Stores::of(target).store(),
         &AuthnSnapshotRules,
         &sid_crypto::RustCryptoPrimitives::new(),
         snapshot,
@@ -40,10 +64,8 @@ async fn verify(
     target: &SqliteBackend,
 ) -> Result<VerifyResult, SnapshotError> {
     snapshot::verify(
-        source,
-        &source.history_keys(),
-        target,
-        &target.history_keys(),
+        Stores::of(source).store(),
+        Stores::of(target).store(),
         &AuthnSnapshotRules,
     )
     .await
@@ -1701,8 +1723,8 @@ async fn history_keys_move_with_the_evaluators_own_key_versions() {
 
 /// A raised history write cutoff moves with the snapshot: both the credential
 /// service's and the evaluator's, so the restored installation keeps refusing
-/// writes under a withdrawn key. A target whose cutoff is already later keeps
-/// its own: a cutoff is never lowered.
+/// writes under a withdrawn key. A store that raised a cutoff of its own has
+/// a history of its own and is refused before anything is written.
 #[tokio::test]
 async fn history_write_cutoffs_move_with_the_snapshot() {
     use sid_core::models::*;
@@ -1740,6 +1762,9 @@ async fn history_write_cutoffs_move_with_the_snapshot() {
     let behind = verify(&source, &installation(&org).await).await.unwrap();
     assert!(!behind.passed, "a target without the cutoffs is reported");
 
+    // A store that raised its own cutoffs has a history of its own: its
+    // audit chain of the cutoff is another one, and it is no destination.
+    // Nothing is written to it.
     let later = at(1_790_000_002_000_000);
     let ahead = uninitialized().await;
     ahead
@@ -1751,7 +1776,10 @@ async fn history_write_cutoffs_move_with_the_snapshot() {
         .raise_write_cutoff(later, AuditEntry::system("test", "cutoff"))
         .await
         .unwrap();
-    import(&ahead, &snapshot).await.unwrap();
+    assert!(matches!(
+        import(&ahead, &snapshot).await,
+        Err(SnapshotError::Target(_))
+    ));
     assert_eq!(ahead.history_write_cutoff().await.unwrap(), Some(later));
     assert_eq!(
         ahead.history_keys().write_cutoff().await.unwrap(),

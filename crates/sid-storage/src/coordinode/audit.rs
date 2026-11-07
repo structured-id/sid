@@ -14,7 +14,10 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use coordinode_core::graph::types::Value;
-use sid_core::models::audit::{AuditEntry, AuditError, AuditRecord, compute_record_hash};
+use sid_core::models::audit::{
+    AuditChain, AuditEntry, AuditError, AuditRecord, ChainCheckpoint, ChainHead,
+    compute_record_hash,
+};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::audit::{AuditLog, VerifyResult};
 use uuid::Uuid;
@@ -321,4 +324,150 @@ impl AuditLog for CoordinodeBackend {
         .await
         .map_err(audit_error)
     }
+
+    async fn export_chain(&self, chain_id: &str) -> Result<AuditChain, AuditError> {
+        let chain = chain_id.to_owned();
+        self.read(move |tx| stored_chain(tx, &chain))
+            .await
+            .map_err(audit_error)?
+            .ok_or_else(|| AuditError::ChainNotFound(chain_id.to_owned()))
+    }
+
+    async fn import_chain(&self, chain: &AuditChain) -> Result<bool, AuditError> {
+        chain.check()?;
+        /// What the store held of the chain.
+        enum Found {
+            Written,
+            Held,
+            Other,
+        }
+        let given = chain.clone();
+        let outcome = self
+            .transaction(move |tx| {
+                if let Some(held) = stored_chain(tx, &given.head.chain_id)? {
+                    return Ok(Decision::Abandon(if held.holds(&given) {
+                        Found::Held
+                    } else {
+                        Found::Other
+                    }));
+                }
+                let chain_value = || Value::String(given.head.chain_id.clone());
+                for record in &given.records {
+                    let id = Uuid::parse_str(&record.id)
+                        .map_err(|e| SidError::Validation(format!("audit record id: {e}")))?;
+                    tx.run(
+                        "CREATE (r:SidAuditRecord {id: $id, at: $at, chain: $chain,
+                            sequence: $sequence, actor_id: $actor_id, actor_type: $actor_type,
+                            action: $action, resource: $resource, outcome: $outcome,
+                            metadata: $metadata, ip: $ip, device_id: $device_id,
+                            prev_hash: $prev_hash, hash: $hash})",
+                        Params::default()
+                            .with("id", Value::Binary(id.as_bytes().to_vec()))
+                            .with("at", time(record.timestamp))
+                            .with("chain", chain_value())
+                            .with("sequence", Value::Int(sequence_value(record.sequence)?))
+                            .with("actor_id", Value::String(record.actor_id.clone()))
+                            .with("actor_type", Value::String(record.actor_type.to_string()))
+                            .with("action", Value::String(record.action.clone()))
+                            .with("resource", Value::String(record.resource.clone()))
+                            .with("outcome", Value::String(record.outcome.to_string()))
+                            .with(
+                                "metadata",
+                                super::document(&record.metadata, "audit metadata")?,
+                            )
+                            .with("ip", record.ip_address.map_or(Value::Null, ip_value))
+                            .with("device_id", opt_text(record.device_id.as_deref()))
+                            .with("prev_hash", Value::String(record.prev_hash.clone()))
+                            .with("hash", Value::String(record.hash.clone())),
+                    )?;
+                }
+                // Concurrent first appenders and importers meet on the
+                // head's unique chain.
+                tx.run(
+                    "CREATE (h:SidAuditHead {chain: $chain, last_hash: $hash, sequence: $sequence})",
+                    Params::default()
+                        .with("chain", chain_value())
+                        .with("hash", Value::String(given.head.last_hash.clone()))
+                        .with("sequence", Value::Int(sequence_value(given.head.sequence)?)),
+                )?;
+                if let Some(c) = &given.checkpoint {
+                    tx.run(
+                        "CREATE (c:SidAuditCheckpoint {chain: $chain, sequence: $sequence,
+                            hash: $hash, cut_before: $cut_before})",
+                        Params::default()
+                            .with("chain", chain_value())
+                            .with("sequence", Value::Int(sequence_value(c.sequence)?))
+                            .with("hash", Value::String(c.hash.clone()))
+                            .with("cut_before", time(c.cut_before)),
+                    )?;
+                }
+                Ok(Decision::Commit(Found::Written))
+            })
+            .await
+            .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
+        match outcome {
+            Found::Written => Ok(true),
+            Found::Held => Ok(false),
+            Found::Other => Err(AuditError::Conflict(format!(
+                "another chain {} is stored",
+                chain.head.chain_id
+            ))),
+        }
+    }
+}
+
+fn sequence_value(sequence: u64) -> SidResult<i64> {
+    i64::try_from(sequence).map_err(|_| SidError::Validation(format!("sequence {sequence}")))
+}
+
+/// Chain `chain` as stored, read in `tx`; `None` when it has no head.
+fn stored_chain(tx: &Statements<'_>, chain: &str) -> SidResult<Option<AuditChain>> {
+    let params = || Params::default().with("chain", Value::String(chain.to_owned()));
+    let head = tx.run(
+        "MATCH (h:SidAuditHead) WHERE h.chain = $chain
+         RETURN h.last_hash AS last_hash, h.sequence AS sequence",
+        params(),
+    )?;
+    let Some(head) = head.first() else {
+        return Ok(None);
+    };
+    let checkpoint = tx
+        .run(
+            "MATCH (c:SidAuditCheckpoint) WHERE c.chain = $chain
+             RETURN c.sequence AS sequence, c.hash AS hash, c.cut_before AS cut_before",
+            params(),
+        )?
+        .first()
+        .map(|row| {
+            Ok::<_, SidError>(ChainCheckpoint {
+                sequence: u64::try_from(get_int(row, "sequence")?)
+                    .map_err(|_| SidError::Storage("checkpoint sequence".into()))?,
+                hash: get_text(row, "hash")?,
+                cut_before: get_time(row, "cut_before")?,
+            })
+        })
+        .transpose()?;
+    let records = tx
+        .run(
+            &format!(
+                "MATCH (r:SidAuditRecord) WHERE r.chain = $chain RETURN {FIELDS} ORDER BY r.sequence"
+            ),
+            params(),
+        )?
+        .iter()
+        .map(record)
+        .collect::<SidResult<Vec<_>>>()?;
+    Ok(Some(AuditChain {
+        head: ChainHead {
+            chain_id: chain.to_owned(),
+            // The head keeps its hash and sequence; the record is the last
+            // one the chain still holds.
+            last_record_id: records.last().map(|r| r.id.clone()).unwrap_or_default(),
+            last_hash: get_text(head, "last_hash")?,
+            sequence: u64::try_from(get_int(head, "sequence")?)
+                .map_err(|_| SidError::Storage("head sequence".into()))?,
+        },
+        checkpoint,
+        records,
+    }))
 }

@@ -944,6 +944,11 @@ mod audit_chain {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_audit_chain_moves_as_stored() {
+        backend::audit_chain::test_audit_chain_moves_as_stored(&setup().await).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_chain_concurrent_appends() {
         backend::test_audit_chain_concurrent_appends(Arc::new(setup().await)).await;
     }

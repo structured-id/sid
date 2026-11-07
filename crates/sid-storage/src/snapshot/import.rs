@@ -4,11 +4,10 @@
 use sid_core::models::{AuditEntry, MutationContext, OperationKey, OperationResourceBinding};
 use sid_crypto::CryptoPrimitives;
 use sid_plugin::SnapshotRules;
-use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
-use super::{FORMAT_VERSION, Result, Snapshot, SnapshotError};
+use super::{FORMAT_VERSION, Result, Snapshot, SnapshotError, Store};
 
 /// The namespace the import of a snapshot is recorded in, keyed by the
 /// snapshot's id.
@@ -39,8 +38,24 @@ pub fn validate(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
         return Err(SnapshotError::Format(snapshot.metadata.version));
     }
     validate_identity(snapshot)?;
+    validate_audit(snapshot)?;
     validate_opaque_setup(snapshot, rules)?;
     validate_history(snapshot, rules)
+}
+
+/// Every audit chain verifies on its own, and each chain appears once.
+fn validate_audit(snapshot: &Snapshot) -> Result<()> {
+    let mut chains = std::collections::BTreeSet::new();
+    for chain in &snapshot.audit_chains {
+        ensure(
+            chains.insert(chain.head.chain_id.as_str()),
+            "duplicate audit chain in snapshot",
+        )?;
+        chain
+            .check()
+            .map_err(|e| invalid(format!("audit chain {}: {e}", chain.head.chain_id)))?;
+    }
+    Ok(())
 }
 
 /// The installation identity: the organization the metadata names, the one
@@ -283,15 +298,34 @@ async fn admit_target(
 /// written in dependency order, each with an audit entry; nothing is served,
 /// issued or run: the host activates the restored installation afterwards.
 pub async fn import(
-    backend: &dyn StorageBackend,
-    history_keys: &dyn HistoryKeyStore,
+    store: Store<'_>,
     rules: &dyn SnapshotRules,
     crypto: &dyn CryptoPrimitives,
     snapshot: &Snapshot,
 ) -> Result<ImportResult> {
+    let Store {
+        storage: backend,
+        audit: audit_log,
+        history_keys,
+    } = store;
     validate(snapshot, rules)?;
     let record = import_record(snapshot, crypto)?;
     let fresh = admit_target(backend, snapshot, &record).await?;
+    // A target whose audit holds another history of a chain is not this
+    // installation's, whatever else it lacks: refused before any write.
+    for chain in &snapshot.audit_chains {
+        match audit_log.export_chain(&chain.head.chain_id).await {
+            Ok(held) if held.holds(chain) => {}
+            Ok(_) => {
+                return Err(SnapshotError::Target(format!(
+                    "the target's audit chain {} holds another history",
+                    chain.head.chain_id
+                )));
+            }
+            Err(sid_core::models::audit::AuditError::ChainNotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     let setup_kind = sid_core::models::InstanceSecret::OpaqueServerSetup;
     let target = |what: &str| SnapshotError::Target(what.to_owned());
     let current_setup = backend.get_instance_secret(setup_kind).await?;
@@ -327,6 +361,15 @@ pub async fn import(
     )?;
 
     let mut result = ImportResult::default();
+
+    // The source's audit chains before any record this import appends to
+    // them: each write below continues its chain after the source's last
+    // record. A resumed import finds them held, continued by its own.
+    for chain in &snapshot.audit_chains {
+        if audit_log.import_chain(chain).await? {
+            result.audit_chains += 1;
+        }
+    }
 
     // The import is recorded first: an interruption from here on leaves a
     // target that only this same snapshot's import resumes.
@@ -1079,6 +1122,7 @@ fn audit(action: &str, resource: &str) -> MutationContext {
 /// Result of an import operation with per-entity counts.
 #[derive(Debug, Default)]
 pub struct ImportResult {
+    pub audit_chains: u64,
     pub organizations: u64,
     pub oidc_issuers: u64,
     pub key_versions: u64,
@@ -1131,6 +1175,7 @@ impl ImportResult {
     /// Total imported entities.
     pub fn total(&self) -> u64 {
         [
+            self.audit_chains,
             self.organizations,
             self.oidc_issuers,
             self.key_versions,
@@ -1184,6 +1229,7 @@ impl ImportResult {
 impl std::fmt::Display for ImportResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Import Summary:")?;
+        writeln!(f, "  Audit Chains:         {}", self.audit_chains)?;
         writeln!(f, "  Organization:         {}", self.organizations)?;
         writeln!(f, "  OIDC Issuers:         {}", self.oidc_issuers)?;
         writeln!(f, "  Key Versions:         {}", self.key_versions)?;
