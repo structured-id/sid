@@ -24,6 +24,10 @@ sid-plugin = { workspace = true }
 # data, the same for every entry point.
 sid-proto = { workspace = true }
 sid-ids-proto = { workspace = true }
+# The identifier kinds of stored references an answer carries.
+sid-ids = { workspace = true, features = ["std"] }
+# Hex-encoded export checksums.
+hex = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 # Hashes of issued client secrets.
@@ -44,6 +48,8 @@ uuid = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 sid-crypto = { workspace = true, features = ["primitives"] }
+# A real passkey ceremony for the stored-passkey conversions.
+sid-authn = { workspace = true, features = ["keyed", "password-operation", "soft-authenticator"] }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

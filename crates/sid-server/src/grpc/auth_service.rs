@@ -464,35 +464,6 @@ fn credential_not_found(id: CredentialId) -> Status {
     )
 }
 
-/// The signup identifier for a parsed `value` of `principal_type`; an email
-/// carries its validated handle (address and key revision) beside the key.
-#[allow(clippy::result_large_err)]
-pub(crate) fn signup_identifier<'a>(
-    principal_type: PrincipalType,
-    value: &'a str,
-    email: Option<&'a sid_authn::email::EmailHandle>,
-) -> Result<sid_core::models::SignupIdentifier<'a>, tonic::Status> {
-    use sid_core::models::SignupIdentifier;
-    match principal_type {
-        PrincipalType::Email => {
-            let email = email.ok_or_else(|| internal("sign up", "an email without its address"))?;
-            Ok(SignupIdentifier::Email {
-                key: value,
-                address: &email.delivery,
-                revision: email.revision,
-            })
-        }
-        PrincipalType::Phone => Ok(SignupIdentifier::Phone(value)),
-        PrincipalType::Username => Ok(SignupIdentifier::Username(value)),
-        PrincipalType::FaceEmbedding | PrincipalType::NfcTag | PrincipalType::FederatedSubject => {
-            Err(invalid_field(
-                "identifier",
-                "a new account starts from an email, phone or username",
-            ))
-        }
-    }
-}
-
 /// Build the records a self-registration commits: the profile, its single signup
 /// principal, the contact row it came from, the first credential and, when the
 /// enrollment policy tracks it (`track_source`), the self-signup source.
@@ -504,7 +475,8 @@ fn new_self_registration(
     credential: Credential,
     track_source: bool,
 ) -> Result<NewRegistration, tonic::Status> {
-    let identifier = signup_identifier(principal_type, value, email)?;
+    let identifier = sid::identity::signup_identifier(principal_type, value, email)
+        .map_err(super::identity_service::refusal)?;
     let username = matches!(principal_type, PrincipalType::Username).then_some(value);
     let mut profile = Profile::new(username);
     profile.id = profile_id;

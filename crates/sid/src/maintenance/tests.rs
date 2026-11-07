@@ -179,3 +179,58 @@ async fn a_lock_taken_after_a_drain_starts_no_run() {
     );
     assert!(freed.load(Ordering::SeqCst), "the late lock stayed held");
 }
+
+/// Deleting a profile owes its history keys' purge in the deletion's
+/// transaction, under the profile's domain in this installation.
+#[tokio::test]
+async fn a_profile_deletion_owes_its_purge() {
+    use sid_core::models::{AuditEntry, MutationContext, Organization, WorkState};
+    use sid_plugin::WorkStore;
+    let storage = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .unwrap();
+    let org = Organization::implicit_community("sid.example.com");
+    storage
+        .insert_instance_organization(&org, AuditEntry::system("test", "org").into())
+        .await
+        .unwrap();
+    let profile = Profile::new(Some("purged-owner"));
+    storage
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+
+    let purge = owner_purge(&storage, profile.id)
+        .await
+        .unwrap()
+        .expect("an installation with an authority owes the purge");
+    let expected = OwnerPurge {
+        owner_domain: sid_authn::password_history::owner_domain(org.id.as_bytes(), profile.id),
+    }
+    .work();
+    assert_eq!(purge.id, expected.id);
+    storage
+        .delete_profile(
+            profile.id,
+            MutationContext::from(AuditEntry::system("test", "delete")).with_work(purge.clone()),
+        )
+        .await
+        .unwrap();
+    let owed = storage.get_work(purge.id).await.unwrap().unwrap();
+    assert_eq!(owed.state, WorkState::Pending);
+}
+
+/// Before the installation has an authority there is no history domain, so
+/// no key, and nothing is owed.
+#[tokio::test]
+async fn nothing_is_owed_without_an_authority() {
+    let storage = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .unwrap();
+    assert!(
+        owner_purge(&storage, ProfileId::generate())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
