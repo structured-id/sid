@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! How a sign-in ceremony hands its session's credential to the client:
 //! the configured browser sign-in page gets the HttpOnly session cookie, a
-//! native client the access token in response metadata, never the message.
+//! native client the access token in a response header, never the message.
 
 use chrono::{DateTime, Utc};
 use prost::Message;
 use secrecy::ExposeSecret;
-use sid_core::grpc_error::refuse::internal;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::Session;
 use sid_proto::sid::v1::authn::NativeCredentialSet;
-use tonic::metadata::{MetadataMap, MetadataValue};
-use tonic::{Response, Status};
 
 use crate::browser_session::{BrowserCookie, BrowserCsrf, BrowserSecret, origin_is};
 use crate::sealed_secret::{self, SealedSecretError};
@@ -28,7 +24,13 @@ pub enum CeremonyClient {
     Native,
 }
 
-/// Who completes a sign-in ceremony sent with `metadata`, and so how its
+/// A browser request from anywhere but the configured sign-in page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a browser signs in only on the configured sign-in page")]
+pub struct NotSignInPage;
+
+/// Who completes a sign-in ceremony whose request sent the `Origin` values
+/// `origins` (`None` for a value that is not text), and so how its
 /// credential is delivered: a request without `Origin` is a native client;
 /// a browser sends `Origin` on every such request (Fetch §3.1), and only the
 /// sign-in page at `sign_in_origin` may complete one, by exactly one `Origin`
@@ -36,32 +38,25 @@ pub enum CeremonyClient {
 /// repeated `Origin` or one with no sign-in page configured, is refused
 /// rather than answered as a native client: it is the login-CSRF defence of
 /// the cookie and keeps the token out of page scripts.
-#[allow(clippy::result_large_err)]
-pub fn ceremony_client(
-    metadata: &MetadataMap,
+pub fn ceremony_client<'a>(
+    origins: impl IntoIterator<Item = Option<&'a str>>,
     sign_in_origin: Option<&url::Origin>,
-) -> Result<CeremonyClient, Status> {
-    let mut origins = metadata.get_all("origin").iter();
+) -> Result<CeremonyClient, NotSignInPage> {
+    let mut origins = origins.into_iter();
     let Some(origin) = origins.next() else {
         return Ok(CeremonyClient::Native);
     };
     let sign_in_page = origins.next().is_none()
-        && sign_in_origin.is_some_and(|allowed| {
-            origin
-                .to_str()
-                .is_ok_and(|origin| origin_is(origin, allowed))
-        });
+        && sign_in_origin
+            .is_some_and(|allowed| origin.is_some_and(|origin| origin_is(origin, allowed)));
     if !sign_in_page {
-        return Err(ApiError::new(
-            ErrorReason::SignInRefused,
-            "a browser signs in only on the configured sign-in page",
-        )
-        .into());
+        return Err(NotSignInPage);
     }
     Ok(CeremonyClient::Browser)
 }
 
-/// How a session's credential reaches its client, never in the message.
+/// How a session's credential reaches its client, never in the message:
+/// the adapter of the client's protocol puts it in the response headers.
 pub enum Delivery {
     /// The `Set-Cookie` value of the browser's session cookie.
     Cookie(String),
@@ -82,29 +77,19 @@ impl Delivery {
         }
     }
 
-    /// Put the credential into `metadata`.
-    #[allow(clippy::result_large_err)]
-    pub fn deliver(self, metadata: &mut MetadataMap) -> Result<(), Status> {
-        let (name, value, refresh) = match self {
+    /// The response header that carries the credential and its value, and
+    /// the encoded refresh generation for
+    /// [`crate::native_session::CREDENTIALS_METADATA`] when there is one.
+    /// Both are live secrets.
+    pub fn header(self) -> (&'static str, String, Option<Vec<u8>>) {
+        match self {
             Self::Cookie(cookie) => ("set-cookie", cookie, None),
             Self::Bearer { token, refresh } => (
                 "authorization",
                 format!("Bearer {}", token.expose_secret()),
-                refresh,
+                refresh.map(|refresh| refresh.encode_to_vec()),
             ),
-        };
-        let mut value: MetadataValue<_> = value
-            .parse()
-            .map_err(|e| internal("encode session credential", e))?;
-        // A live credential: kept out of debug output and HPACK indexing.
-        value.set_sensitive(true);
-        metadata.insert(name, value);
-        if let Some(refresh) = refresh {
-            let mut value = MetadataValue::from_bytes(&refresh.encode_to_vec());
-            value.set_sensitive(true);
-            metadata.insert_bin(crate::native_session::CREDENTIALS_METADATA, value);
         }
-        Ok(())
     }
 }
 
@@ -114,20 +99,6 @@ pub struct SignedIn {
     pub session_id: sid_ids::SessionId,
     pub expires_in: i64,
     pub delivery: Delivery,
-}
-
-impl SignedIn {
-    /// The ceremony's answer `message` builds from the session id and the
-    /// credential's lifetime, its credential in the response metadata.
-    #[allow(clippy::result_large_err)]
-    pub fn respond<T>(
-        self,
-        message: impl FnOnce(sid_ids::SessionId, i64) -> T,
-    ) -> Result<Response<T>, Status> {
-        let mut response = Response::new(message(self.session_id, self.expires_in));
-        self.delivery.deliver(response.metadata_mut())?;
-        Ok(response)
-    }
 }
 
 /// A browser sign-in's secret, bound to its session before the session is

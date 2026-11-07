@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Keyed commands over gRPC: the operation context of a call, read once at
-//! the transport boundary from its metadata, and the status each
-//! [`OperationError`] answers with.
+//! the transport boundary from its metadata, a command run for a method
+//! refusing with a status, and the status each [`OperationError`] answers
+//! with. The command's semantics are [`sid_authn::operation`]'s.
 
 use std::task::{Context, Poll};
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_authn::operation::{CommandError, KeyedCommand, OperationError};
 use sid_core::models::{OperationContext, OperationKey, OperationPeriod};
 use tonic::Status;
 use tonic::metadata::MetadataMap;
 
-use super::OperationError;
+use crate::grpc_error::refuse::{
+    OPERATION_PERIOD_FIELD, operation_period_refused, storage_failure,
+};
+use crate::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 
 /// The metadata carrying the operation key: the `Idempotency-Key` header of
 /// draft-ietf-httpapi-idempotency-key-header-08 §2.1, a Structured Field
@@ -19,65 +23,109 @@ pub const OPERATION_KEY_HEADER: &str = "idempotency-key";
 
 /// The metadata carrying the period the command was named with
 /// (`SID-Operation-Period` in HTTP): one canonical unsigned decimal.
-pub const OPERATION_PERIOD_HEADER: &str = sid_core::grpc_error::refuse::OPERATION_PERIOD_FIELD;
+pub const OPERATION_PERIOD_HEADER: &str = OPERATION_PERIOD_FIELD;
 
-/// A keyed command's effect that did not commit, refused with a status.
-pub type Effect = super::Effect<Status>;
-
-impl super::KeyedCommand {
-    /// [`super::KeyedCommand::execute`] for a method refusing with a status.
-    pub async fn run<T, F, Fut>(
-        &self,
-        storage: &(impl sid_plugin::OperationResultStore + ?Sized),
-        effect: F,
-    ) -> Result<T, Status>
-    where
-        T: prost::Message + Default,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<T, Effect>>,
-    {
-        self.execute(storage, effect).await
-    }
-
-    /// [`super::KeyedCommand::execute_recorded`] for a method refusing with
-    /// a status.
-    pub async fn run_recorded<T, F, Fut>(
-        &self,
-        storage: &(impl sid_plugin::OperationResultStore + ?Sized),
-        effect: F,
-    ) -> Result<T, Status>
-    where
-        T: serde::de::DeserializeOwned,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<T, Effect>>,
-    {
-        self.execute_recorded(storage, effect).await
-    }
+/// Why a keyed command's effect did not commit, for a method refusing with
+/// a status: [`sid_authn::operation::Effect`] whose refusal a handler gives
+/// as it answers, with `?` on its status.
+#[derive(Debug)]
+pub enum Effect {
+    Refused(Status),
+    Operation(OperationError),
+    Store(sid_core::Error),
 }
 
-impl From<Status> for super::Effect<Status> {
+impl From<Status> for Effect {
     fn from(status: Status) -> Self {
         Self::Refused(status)
     }
 }
 
-impl From<OperationError> for super::Effect<Status> {
-    fn from(e: OperationError) -> Self {
-        Self::Refused(e.into())
+impl From<sid_core::Error> for Effect {
+    fn from(e: sid_core::Error) -> Self {
+        Self::Store(e)
     }
 }
 
-impl From<OperationError> for Status {
+impl From<OperationError> for Effect {
     fn from(e: OperationError) -> Self {
-        match e {
+        Self::Operation(e)
+    }
+}
+
+/// A refusal of the authentication core inside an effect, answered with its
+/// status.
+macro_rules! refused_by {
+    ($($core:ty),*) => {$(
+        impl From<$core> for Effect {
+            fn from(e: $core) -> Self {
+                Self::Refused(e.into_status())
+            }
+        }
+    )*};
+}
+
+refused_by!(
+    sid_authn::caller::CallerError,
+    sid_authn::challenge_store::ChallengeStoreError,
+    sid_authn::credential_enrollment::EnrollmentError
+);
+
+impl From<Effect> for sid_authn::operation::Effect<Status> {
+    fn from(effect: Effect) -> Self {
+        match effect {
+            Effect::Refused(status) => Self::Refused(status),
+            Effect::Operation(e) => Self::Operation(e),
+            Effect::Store(e) => Self::Store(e),
+        }
+    }
+}
+
+/// [`KeyedCommand::execute`] for a method refusing with a status.
+#[allow(clippy::result_large_err)]
+pub async fn run<T, F, Fut>(
+    command: &KeyedCommand,
+    storage: &(impl sid_plugin::OperationResultStore + ?Sized),
+    effect: F,
+) -> Result<T, Status>
+where
+    T: prost::Message + Default,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Effect>>,
+{
+    command
+        .execute(storage, || async { effect().await.map_err(Into::into) })
+        .await
+        .or_status()
+}
+
+/// [`KeyedCommand::execute_recorded`] for a method refusing with a status.
+#[allow(clippy::result_large_err)]
+pub async fn run_recorded<T, F, Fut>(
+    command: &KeyedCommand,
+    storage: &(impl sid_plugin::OperationResultStore + ?Sized),
+    effect: F,
+) -> Result<T, Status>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Effect>>,
+{
+    command
+        .execute_recorded(storage, || async { effect().await.map_err(Into::into) })
+        .await
+        .or_status()
+}
+
+impl IntoStatus for OperationError {
+    fn into_status(self) -> Status {
+        match self {
             OperationError::KeyConflict => ApiError::new(
                 ErrorReason::OperationKeyConflict,
                 "the operation key already names another command",
             )
             .into(),
-            OperationError::PeriodRefused(refusal) => {
-                sid_core::grpc_error::refuse::operation_period_refused(refusal)
-            }
+            OperationError::PeriodRefused(refusal) => operation_period_refused(refusal),
             OperationError::OutcomeUnknown => ApiError::new(
                 ErrorReason::OperationOutcomeUnknown,
                 "retry the operation with the same key",
@@ -88,6 +136,15 @@ impl From<OperationError> for Status {
                 ApiError::internal().into()
             }
             OperationError::ResultUnreadable => ApiError::internal().into(),
+        }
+    }
+}
+
+impl<E: IntoStatus> IntoStatus for CommandError<E> {
+    fn into_status(self) -> Status {
+        match self {
+            CommandError::Refused(e) => e.into_status(),
+            CommandError::Operation(e) => e.into_status(),
         }
     }
 }
@@ -219,7 +276,6 @@ impl sid_proto::sid::v1::operation_service_server::OperationService for Operatio
         &self,
         _: tonic::Request<sid_proto::sid::v1::GetOperationPeriodRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::OperationPeriod>, Status> {
-        use sid_core::grpc_error::refuse::storage_failure;
         let policy = self
             .store
             .operation_period_policy()

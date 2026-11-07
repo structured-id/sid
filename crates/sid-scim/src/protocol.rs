@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use sid_core::grpc_error::{extract_error_info, extract_retry_delay};
+use sid_infra::grpc_error::{extract_error_info, extract_retry_delay};
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1 as proto;
 use sid_proto::sid::v1::scim_protocol_service_server::ScimProtocolService;

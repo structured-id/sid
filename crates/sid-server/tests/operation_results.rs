@@ -6,8 +6,8 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token};
-use sid_core::grpc_error::extract_error_info;
 use sid_core::models::ProfileId;
+use sid_infra::grpc_error::extract_error_info;
 use sid_proto::sid::v1::project_service_server::ProjectService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request};
@@ -108,7 +108,7 @@ async fn test_create_project_without_key_is_refused() {
 /// `msg` from the bearer of `token` named by `key` under `period`.
 fn in_period<T>(msg: T, token: &str, key: &str, period: u64) -> Request<T> {
     let mut req = keyed(msg, token, None);
-    sid_authn::operation::grpc::insert_context(
+    sid_infra::authn::operation::insert_context(
         req.metadata_mut(),
         &sid_core::models::OperationContext::new(
             sid_core::models::OperationKey::parse(key).unwrap(),

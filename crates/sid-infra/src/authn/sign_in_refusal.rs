@@ -5,12 +5,13 @@
 
 use std::time::Duration;
 
-use sid_core::grpc_error::refuse::storage_failure;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_authn::challenge_store::ChallengeStoreError;
+use sid_authn::password_sign_in::PasswordSignInError;
 use tonic::Status;
-use tracing::warn;
+use tracing::{error, warn};
 
-use crate::password_sign_in::PasswordSignInError;
+use crate::grpc_error::refuse::storage_failure;
+use crate::grpc_error::{ApiError, ErrorReason, IntoStatus};
 
 /// How long a client waits before retrying a sign-in whose anomaly state
 /// could not be read.
@@ -56,9 +57,17 @@ pub fn anomaly_unavailable(e: impl std::fmt::Display) -> Status {
     .into()
 }
 
-impl From<PasswordSignInError> for Status {
-    fn from(e: PasswordSignInError) -> Self {
-        match e {
+/// An internal error to the client; the cause stays in the log.
+impl IntoStatus for ChallengeStoreError {
+    fn into_status(self) -> Status {
+        error!(error = %self, "ceremony state store failed");
+        ApiError::internal().into()
+    }
+}
+
+impl IntoStatus for PasswordSignInError {
+    fn into_status(self) -> Status {
+        match self {
             PasswordSignInError::AuthenticationFailed => authentication_failed(),
             PasswordSignInError::MigrationRequired => ApiError::new(
                 ErrorReason::LegacyMigrationRequired,
@@ -72,7 +81,7 @@ impl From<PasswordSignInError> for Status {
             .into(),
             PasswordSignInError::Expired => ceremony_expired("sign-in"),
             PasswordSignInError::Storage(e) => storage_failure(e),
-            PasswordSignInError::State(e) => e.into(),
+            PasswordSignInError::State(e) => e.into_status(),
         }
     }
 }

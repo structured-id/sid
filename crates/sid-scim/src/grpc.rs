@@ -6,12 +6,10 @@
 
 use std::sync::Arc;
 
-use sid_authn::connector_auth::{ConnectorCaller, authenticate_connector};
+use sid_authn::connector_auth::ConnectorCaller;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
-use sid_core::grpc_error::refuse::{dependency_unavailable, storage_failure};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode, Group, GroupId,
     GroupMember, MutationContext, OrgId, Principal, PrincipalType, ProfileId, ProfileMetadata,
@@ -20,6 +18,9 @@ use sid_core::models::{
     SCIM_USER_DEACTIVATE, SCIM_USER_READ, SCIM_USER_UPDATE, SessionEnd,
     event::{Event, event_types},
 };
+use sid_infra::authn::own_token::authenticate_connector;
+use sid_infra::grpc_error::refuse::{dependency_unavailable, storage_failure};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1 as proto;
 use sid_proto::sid::v1::scim_service_server::ScimService;

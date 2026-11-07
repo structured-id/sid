@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use sid_authn::issuer::{AddressedIssuer, IssuerRegistry};
-use sid_authn::resource::TranscodedRequest;
-use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
+use sid_infra::authn::resource::TranscodedRequest;
+use sid_infra::grpc_error::{ApiError, ErrorReason, refuse};
 use sid_infra::route::api_method;
 use tonic::Status;
 use tonic::body::Body;

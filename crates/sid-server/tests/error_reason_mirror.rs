@@ -1,11 +1,11 @@
-//! `sid_core::grpc_error::ErrorReason` mirrors `sid.v1.common.ErrorReason`:
+//! `sid_infra::grpc_error::ErrorReason` mirrors `sid.v1.common.ErrorReason`:
 //! a reason the proto adds without the mirror could never be returned, and a
 //! mirror reason missing from the proto would reach clients as a string they
 //! cannot decode.
 
 use std::collections::BTreeSet;
 
-use sid_core::grpc_error::ErrorReason;
+use sid_infra::grpc_error::ErrorReason;
 use sid_proto::sid::v1::common::ErrorReason as ProtoReason;
 
 /// Every proto reason name, read from the generated enum.

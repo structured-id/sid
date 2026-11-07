@@ -15,8 +15,9 @@ use sid_authn::dpop::DPopValidator;
 use sid_authn::issuer::IssuerRegistry;
 use sid_authn::resource::{self, Scheme};
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{OidcIssuer, SessionId};
+use sid_infra::authn::resource as presented_request;
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::auth_service_server::AuthService;
@@ -37,7 +38,7 @@ use super::auth_service::{
 };
 use super::client_metadata;
 use super::project_service::ProjectServiceImpl;
-use sid_authn::oauth_http::{self, Form};
+use sid_infra::oauth_http::{self, Form};
 
 /// How long HTTP caches may keep a key set, and serve a stale one while
 /// fetching the next: a new signing generation is published well before it
@@ -221,7 +222,7 @@ impl OidcProviderServiceImpl {
                 answer.metadata_mut().insert(
                     "set-cookie",
                     self.auth.browser_cookie().clear().parse().map_err(|e| {
-                        sid_core::grpc_error::refuse::internal("encode session cookie", e)
+                        sid_infra::grpc_error::refuse::internal("encode session cookie", e)
                     })?,
                 );
                 answer
@@ -330,9 +331,9 @@ impl OidcProviderServiceImpl {
         rpc: &str,
     ) -> Result<Response<UserInfo>, Status> {
         let proof_target =
-            sid_authn::resource::request_target(&request, self.auth.public_origin(), rpc);
+            presented_request::request_target(&request, self.auth.public_origin(), rpc);
         let issuer = self.issuer(&request.get_ref().issuer_handle).await?;
-        let Some((scheme, token)) = resource::presented(&request) else {
+        let Some((scheme, token)) = presented_request::presented(&request) else {
             return Err(no_token());
         };
         let verifier = self.issuers.verifier(&issuer).await.map_err(internal)?;
@@ -347,7 +348,7 @@ impl OidcProviderServiceImpl {
             Ok(false) => {}
             Ok(true) => return Err(invalid_token(scheme)),
             Err(e) => {
-                return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
                     "token revocation state",
                     e,
                 ));
@@ -360,7 +361,7 @@ impl OidcProviderServiceImpl {
             scheme,
             token,
             claims.cnf.as_ref().map(|cnf| cnf.jkt.as_str()),
-            &resource::proofs(&request),
+            &presented_request::proofs(&request),
             &proof_target.method,
             Some(&proof_target.uri),
         )
@@ -369,7 +370,7 @@ impl OidcProviderServiceImpl {
             // An unreachable replay record cannot rule out a replay; the
             // client retries the same request with a new proof.
             resource::SenderError::Proof(sid_authn::dpop::DPopError::ReplayStoreUnavailable) => {
-                sid_core::grpc_error::refuse::dependency_unavailable(
+                sid_infra::grpc_error::refuse::dependency_unavailable(
                     "DPoP replay record",
                     "replay store unreachable",
                 )

@@ -278,7 +278,7 @@ fn call<T>(inner: T) -> tonic::Request<T> {
 
 /// `ErrorInfo.reason` of a refusal.
 fn reason(status: &tonic::Status) -> Option<String> {
-    sid_core::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
+    sid_infra::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
 }
 
 #[tokio::test]
@@ -937,7 +937,7 @@ async fn test_test_sends_are_refused_with_their_reasons() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unavailable);
     assert_eq!(reason(&err).as_deref(), Some("DEPENDENCY_UNAVAILABLE"));
-    assert!(sid_core::grpc_error::extract_retry_delay(&err).is_some());
+    assert!(sid_infra::grpc_error::extract_retry_delay(&err).is_some());
     // security_alert has no SMS template (email-only default).
     let err = unreachable
         .send_test_notification(bearer(
@@ -962,7 +962,7 @@ async fn test_test_sends_are_refused_with_their_reasons() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert_eq!(reason(&err).as_deref(), Some("FEATURE_NOT_CONFIGURED"));
-    let (_, _, metadata) = sid_core::grpc_error::extract_error_info(&err).unwrap();
+    let (_, _, metadata) = sid_infra::grpc_error::extract_error_info(&err).unwrap();
     assert_eq!(metadata.get("feature").map(String::as_str), Some("email"));
 }
 
@@ -987,7 +987,7 @@ async fn test_every_refusal_carries_error_info() {
         routes,
         health.names(),
         &[sid_proto::FILE_DESCRIPTOR_SET],
-        &[sid_core::grpc_error::DOMAIN_SID],
+        &[sid_infra::grpc_error::DOMAIN_SID],
         &[
             sid_serve::error_contract::Caller::anonymous("anonymous"),
             sid_serve::error_contract::Caller::bearer("admin", &token),

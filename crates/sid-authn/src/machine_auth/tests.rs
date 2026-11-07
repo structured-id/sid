@@ -10,7 +10,6 @@ use sid_core::models::{
     MutationContext, OidcIssuer, ProjectId, ResourceIndicator,
 };
 use sid_storage::sqlite::SqliteBackend;
-use tonic::Code;
 
 const RESOURCE: &str = "https://resources.sid.example.com/tenants";
 
@@ -124,18 +123,8 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn check(&self, token: &str) -> Result<MachineCaller, Status> {
-        let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        authenticate_machine(
-            &request,
-            self.storage.as_ref(),
-            &self.tokens,
-            &self.revocation,
-        )
-        .await
+    async fn check(&self, token: &str) -> Result<MachineCaller, OwnTokenError> {
+        authenticate_machine(token, self.storage.as_ref(), &self.tokens, &self.revocation).await
     }
 
     /// The stored state behind `grant` once the issuer signed it.
@@ -148,7 +137,10 @@ impl Fixture {
 
     async fn refused(&self, token: &str, case: &str) {
         let err = self.check(token).await.unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated, "{case}: {err:?}");
+        assert!(
+            matches!(err, OwnTokenError::Unauthenticated),
+            "{case}: {err:?}"
+        );
     }
 }
 

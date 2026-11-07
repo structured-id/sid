@@ -199,7 +199,9 @@ async fn a_rest_refresh_names_its_route() {
     );
     wrong
         .extensions_mut()
-        .insert(sid_authn::resource::TranscodedRequest::new("POST", route));
+        .insert(sid_infra::authn::resource::TranscodedRequest::new(
+            "POST", route,
+        ));
     let refused = svc.auth.refresh_native_session(wrong).await.unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument);
 
@@ -210,7 +212,9 @@ async fn a_rest_refresh_names_its_route() {
     );
     right
         .extensions_mut()
-        .insert(sid_authn::resource::TranscodedRequest::new("POST", route));
+        .insert(sid_infra::authn::resource::TranscodedRequest::new(
+            "POST", route,
+        ));
     let refreshed = svc.auth.refresh_native_session(right).await.unwrap();
     assert!(generation(&refreshed).is_some());
 }

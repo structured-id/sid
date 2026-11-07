@@ -12,7 +12,6 @@ use sid_core::models::{
 };
 use sid_plugin::ClientResourceRegistry;
 use sid_storage::sqlite::SqliteBackend;
-use tonic::Code;
 
 fn audit() -> MutationContext {
     AuditEntry::system("test", "service").into()
@@ -155,24 +154,18 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn check(&self, token: &str) -> Result<ServiceCaller, Status> {
-        let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        authenticate_service(
-            &request,
-            self.storage.as_ref(),
-            &self.tokens,
-            &self.revocation,
-        )
-        .await
-        .map(|service| service.caller)
+    async fn check(&self, token: &str) -> Result<ServiceCaller, OwnTokenError> {
+        authenticate_service(token, self.storage.as_ref(), &self.tokens, &self.revocation)
+            .await
+            .map(|service| service.caller)
     }
 
     async fn refused(&self, token: &str, case: &str) {
         let err = self.check(token).await.unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated, "{case}: {err:?}");
+        assert!(
+            matches!(err, OwnTokenError::Unauthenticated),
+            "{case}: {err:?}"
+        );
     }
 }
 

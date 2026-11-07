@@ -2,8 +2,8 @@
 //! always answered with: its code and its `ErrorInfo` reason.
 
 use super::*;
-use sid_core::grpc_error::extract_error_info;
 use sid_core::models::MachineUserId;
+use sid_infra::grpc_error::extract_error_info;
 use tonic::Code;
 
 fn reason(status: &Status) -> String {

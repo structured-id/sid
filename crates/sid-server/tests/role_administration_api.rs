@@ -11,7 +11,6 @@ mod common;
 use common::{issue_admin_token, issue_token, test_jwt};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{AuditEntry, Profile, ProfileId, ProjectId, Role};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
@@ -21,6 +20,7 @@ use sid_proto::sid::v1::authz::{
     RoleAssignment,
 };
 use sid_proto::sid::v1::authz_service_server::AuthzService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tonic::{Code, Request};

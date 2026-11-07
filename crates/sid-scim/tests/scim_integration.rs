@@ -378,7 +378,7 @@ async fn test_create_user_duplicate_username_rejected() {
 
     // RFC 7644 §3.3: a taken userName is 409 with scimType `uniqueness`.
     assert_eq!(err.code(), tonic::Code::AlreadyExists);
-    let (reason, _, metadata) = sid_core::grpc_error::extract_error_info(&err).unwrap();
+    let (reason, _, metadata) = sid_infra::grpc_error::extract_error_info(&err).unwrap();
     assert_eq!(reason, "USERNAME_ALREADY_TAKEN");
     assert_eq!(
         metadata.get("scimType").map(String::as_str),
@@ -484,7 +484,7 @@ async fn test_get_user_not_found() {
         .expect_err("should return not found");
 
     assert_eq!(err.code(), tonic::Code::NotFound);
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).unwrap();
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).unwrap();
     assert_eq!(reason, "PROFILE_NOT_FOUND");
 }
 

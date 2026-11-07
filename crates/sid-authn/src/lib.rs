@@ -24,7 +24,7 @@ pub mod bff_session;
 pub mod browser_session;
 pub mod caller;
 pub mod captcha;
-#[cfg(feature = "grpc")]
+#[cfg(feature = "keyed")]
 pub mod ceremony_context;
 pub mod challenge_store;
 pub mod claim_mapping;
@@ -32,7 +32,6 @@ pub mod client_assertion;
 pub mod client_auth;
 pub mod client_connection;
 pub mod client_key;
-#[cfg(feature = "grpc")]
 pub mod connector_auth;
 pub mod credential_enrollment;
 pub mod data_export;
@@ -54,7 +53,6 @@ pub mod issuer_state;
 pub mod jwt;
 pub mod legacy_hash;
 pub mod login_policy;
-#[cfg(feature = "grpc")]
 pub mod machine_auth;
 pub mod magic_link;
 pub mod migration;
@@ -62,8 +60,6 @@ pub mod migration;
 pub mod native_session;
 pub mod normalize;
 pub mod oauth2;
-#[cfg(feature = "oauth-http")]
-pub mod oauth_http;
 pub mod opaque;
 pub mod opaque_zkpp;
 #[cfg(feature = "keyed")]
@@ -83,14 +79,11 @@ pub mod resource_token;
 pub mod revocation_cache;
 pub mod revocation_cascade;
 pub mod sealed_secret;
-#[cfg(feature = "grpc")]
 pub mod service_auth;
 pub mod session_limit;
 pub mod session_revocation;
-#[cfg(feature = "grpc")]
+#[cfg(feature = "keyed")]
 pub mod sign_in_delivery;
-#[cfg(feature = "grpc")]
-pub mod sign_in_refusal;
 pub mod sign_in_security;
 pub mod step_up;
 pub mod subject;
@@ -98,7 +91,6 @@ pub mod system_integration;
 pub mod target;
 #[cfg(test)]
 mod test_support;
-#[cfg(feature = "grpc")]
 pub mod token_state;
 pub(crate) mod totp;
 pub mod upstream;

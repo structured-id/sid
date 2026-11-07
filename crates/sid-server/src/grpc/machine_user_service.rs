@@ -7,14 +7,14 @@
 use std::sync::Arc;
 
 use sid::machines::{MachineError, Machines};
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
 };
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::{
     AddMachineCredentialRequest, AddMachineCredentialResponse, CreateMachineUserRequest,
@@ -56,7 +56,7 @@ impl MachineUserServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn caller<T>(&self, request: &Request<T>) -> Result<sid_authn::caller::Caller, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller)
     }
 }
@@ -64,8 +64,8 @@ impl MachineUserServiceImpl {
 /// The status of a machine operation's refusal.
 fn refusal(e: MachineError) -> Status {
     match e {
-        MachineError::Caller(e) => e.into(),
-        MachineError::Operation(e) => e.into(),
+        MachineError::Caller(e) => e.into_status(),
+        MachineError::Operation(e) => e.into_status(),
         MachineError::Store(e) => storage_failure(e),
         MachineError::MissingField(field) => missing_field(field),
         MachineError::InvalidField { field, reason } => invalid_field(field, reason),

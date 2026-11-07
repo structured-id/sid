@@ -2,12 +2,10 @@
 
 use std::time::Duration;
 
-use sid_core::grpc_error::{extract_error_info, extract_retry_delay};
 use tonic::Code;
 
 use super::*;
-use crate::challenge_store::ChallengeStoreError;
-use crate::password_sign_in::PasswordSignInError;
+use crate::grpc_error::{extract_error_info, extract_retry_delay};
 
 fn reason(status: &tonic::Status) -> String {
     extract_error_info(status).expect("ErrorInfo is set").0
@@ -54,19 +52,19 @@ fn unreadable_anomaly_state_is_unavailable() {
 /// Each engine outcome is answered as its refusal.
 #[test]
 fn engine_errors_map_to_their_refusals() {
-    let failed = tonic::Status::from(PasswordSignInError::AuthenticationFailed);
+    let failed = PasswordSignInError::AuthenticationFailed.into_status();
     assert_eq!(reason(&failed), "AUTHENTICATION_FAILED");
-    let expired = tonic::Status::from(PasswordSignInError::Expired);
+    let expired = PasswordSignInError::Expired.into_status();
     assert_eq!(reason(&expired), "INVALID_STATE");
-    let migrate = tonic::Status::from(PasswordSignInError::MigrationRequired);
+    let migrate = PasswordSignInError::MigrationRequired.into_status();
     assert_eq!(migrate.code(), Code::FailedPrecondition);
     assert_eq!(reason(&migrate), "LEGACY_MIGRATION_REQUIRED");
-    let storage = tonic::Status::from(PasswordSignInError::Storage(sid_core::Error::Storage(
-        "down".into(),
-    )));
+    let storage =
+        PasswordSignInError::Storage(sid_core::Error::Storage("down".into())).into_status();
     assert_ne!(reason(&storage), "AUTHENTICATION_FAILED");
-    let state = tonic::Status::from(PasswordSignInError::State(ChallengeStoreError::Encoding(
+    let state = PasswordSignInError::State(ChallengeStoreError::Encoding(
         serde_json::from_str::<u8>("x").unwrap_err(),
-    )));
+    ))
+    .into_status();
     assert_ne!(reason(&state), "AUTHENTICATION_FAILED");
 }

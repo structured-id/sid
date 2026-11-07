@@ -19,8 +19,8 @@ use crate::template_store::TemplateStore;
 use sid_auth::receiver::Receiver;
 use sid_authn::event_relay::{EventDeliveryHandler, EventFanoutHandler, EventRelayHandler};
 use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
-use sid_core::grpc_error::ErrorReason;
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::ErrorReason;
+use sid_infra::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, missing_field, not_configured, not_found,
     storage_failure,
 };

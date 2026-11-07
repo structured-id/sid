@@ -16,13 +16,13 @@ name = "sid-notify"
 path = "src/main.rs"
 
 [dependencies]
-sid-core = { workspace = true, features = ["grpc"] }
+sid-core = { workspace = true }
 sid-plugin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc"] }
+sid-authn = { workspace = true }
 # The shared receiver: calls are admitted with tokens for the installation's
 # account API resource, decided by its issuer.
 sid-auth = { workspace = true, default-features = false }
-sid-infra = { workspace = true, features = ["nats"] }
+sid-infra = { workspace = true, features = ["nats", "authn-grpc"] }
 sid-serve = { workspace = true }
 # Durable job store in this service's own PostgreSQL database.
 sid-storage = { workspace = true, features = ["storage-pg"] }

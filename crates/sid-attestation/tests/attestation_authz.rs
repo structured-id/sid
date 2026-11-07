@@ -120,7 +120,7 @@ fn with_token<T>(msg: T, token: &str) -> Request<T> {
 
 /// `ErrorInfo.reason` of a refusal.
 fn reason(status: &tonic::Status) -> Option<String> {
-    sid_core::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
+    sid_infra::grpc_error::extract_error_info(status).map(|(reason, _, _)| reason)
 }
 
 fn register(device: &Device) -> RegisterDeviceKeyRequest {
@@ -163,7 +163,7 @@ async fn test_every_refusal_carries_error_info() {
         routes,
         health.names(),
         &[sid_proto::FILE_DESCRIPTOR_SET],
-        &[sid_core::grpc_error::DOMAIN_SID],
+        &[sid_infra::grpc_error::DOMAIN_SID],
         &[
             Caller::anonymous("anonymous"),
             Caller::bearer("owner", &token),

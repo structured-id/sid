@@ -10,18 +10,18 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use secrecy::{ExposeSecret, SecretBox};
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{
-    dependency_unavailable, internal, invalid_field, not_configured, not_in_this_build,
-    storage_failure,
-};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, EmailProviderConfig, MutationContext, SmtpAuthMethod, SmtpEncryption,
     XOAuth2Config, XOAuth2Provider,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::grpc_error::refuse::{
+    dependency_unavailable, internal, invalid_field, not_configured, not_in_this_build,
+    storage_failure,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_notify::channels::{
     EmailAuthMethod, SmtpChannel, SmtpConfig, SmtpTlsMode, channel_from_email_config,
 };
@@ -117,7 +117,7 @@ impl RealmServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn require_admin<T>(&self, req: &Request<T>) -> Result<String, Status> {
         let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller.profile_id.to_string())
     }
 }

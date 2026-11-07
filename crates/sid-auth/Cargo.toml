@@ -19,16 +19,17 @@ path = "src/lib.rs"
 sid-proto = { workspace = true, features = ["grpc"] }
 # Timestamps of the request confirmation sent to sid-authz.
 prost-types = { workspace = true }
-# Resource indicators, issuer handles and the canonical google.rpc error
-# model of the forward-auth RPC.
-sid-core = { workspace = true, features = ["grpc"] }
+# Resource indicators and issuer handles.
+sid-core = { workspace = true }
 # The shared cache carrying revocations.
 sid-plugin = { workspace = true }
-sid-infra = { workspace = true, features = ["redis", "issuer-client"] }
+# The canonical google.rpc error model of the forward-auth RPC and the
+# shared caller adapters.
+sid-infra = { workspace = true, features = ["redis", "issuer-client", "authn-grpc"] }
 # Health on shutdown, bounded drain, the shutdown signal.
 sid-serve = { workspace = true }
 # Issuer directory and verification, revocation view and DPoP proof checks.
-sid-authn = { workspace = true, features = ["grpc"] }
+sid-authn = { workspace = true }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 

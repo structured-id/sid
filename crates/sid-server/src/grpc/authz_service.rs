@@ -6,23 +6,16 @@
 //! check_permission/batch_check delegate to `CeAuthzEngine`.
 //! evaluate_policy/validate_policy use CedarService.
 
-use crate::cedar::{CedarError, CedarService};
-use crate::decision::AuthzCheckRequest;
-use crate::engine::CeAuthzEngine;
 use prost::Message;
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::grpc::metadata_context;
 use sid_authn::operation::{KeyedCommand, OperationError};
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::service_auth::authenticate_service;
 use sid_authn::token_state::{TokenState, current_state};
-use sid_core::grpc_error::refuse::{
-    changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
-    missing_field, not_found, not_in_this_build, storage_failure,
-};
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_authz::cedar::{CedarError, CedarService};
+use sid_authz::decision::AuthzCheckRequest;
+use sid_authz::engine::CeAuthzEngine;
 use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, AuditEntry, CedarPolicy, CedarPolicyId, ConnectorState, Group, GroupId,
@@ -30,6 +23,14 @@ use sid_core::models::{
     ResourceId, ResourceState, Role, RoleAssignment, RoleAssignmentPrincipal, RoleId,
     TOKEN_INTROSPECT,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{Effect, metadata_context, run_recorded};
+use sid_infra::authn::own_token::authenticate_service;
+use sid_infra::grpc_error::refuse::{
+    changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
+    missing_field, not_found, not_in_this_build, storage_failure,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
 use sid_proto::KeyedMethod;
@@ -101,8 +102,8 @@ fn checker_denied() -> Status {
 /// A failure evaluating a permission question: a malformed subject or
 /// resource is the caller's mistake, an unreachable store is an outage that
 /// never becomes an answer, anything else is internal.
-fn query_refusal(operation: &'static str, e: crate::decision::AuthzError) -> Status {
-    use crate::decision::AuthzError;
+fn query_refusal(operation: &'static str, e: sid_authz::decision::AuthzError) -> Status {
+    use sid_authz::decision::AuthzError;
     match e {
         AuthzError::InvalidSubject(_) => invalid_field("evaluation", "not a subject reference"),
         AuthzError::InvalidResource(_) => invalid_field("target", "not a target reference"),
@@ -168,7 +169,7 @@ fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status
         .map(Response::new)
         .map_err(|e| {
             tracing::warn!(error = %e, "recorded AssignRole answer unreadable");
-            Status::from(sid_core::grpc_error::ApiError::internal())
+            Status::from(sid_infra::grpc_error::ApiError::internal())
         })
 }
 
@@ -201,7 +202,7 @@ fn settled<T>(
         Ok(()) => Ok(Response::new(answer)),
         Err(sid_core::Error::OperationCompleted(_)) => Err(changed_concurrently()),
         Err(sid_core::Error::OperationPeriodRefused(refusal)) => {
-            Err(OperationError::PeriodRefused(refusal).into())
+            Err(OperationError::PeriodRefused(refusal).into_status())
         }
         Err(e) => Err(refuse(e)),
     }
@@ -221,7 +222,8 @@ async fn resolved<T: prost::Message + Default>(
         Err(refusal) => command
             .settle(storage, Err::<T, _>(refusal))
             .await
-            .map(Response::new),
+            .map(Response::new)
+            .or_status(),
     }
 }
 
@@ -475,7 +477,7 @@ pub struct AuthzServiceImpl {
     service_tokens: Option<Arc<ResourceTokenVerifier>>,
     /// Services the deployment trusts to confirm checks of an original
     /// request; nobody unless configured.
-    request_verifiers: crate::request_verifier::RequestVerifiers,
+    request_verifiers: sid_authz::request_verifier::RequestVerifiers,
     /// Where denied permission questions are recorded.
     audit: Arc<dyn AuditLog>,
 }
@@ -723,8 +725,8 @@ impl Asker {
     /// installation's administrator is the root of its scope, anyone else
     /// administers only through its own administrative assignments.
     #[allow(clippy::result_large_err)]
-    fn administrator(&self) -> Result<crate::admin::Administrator, Status> {
-        use crate::admin::Administrator;
+    fn administrator(&self) -> Result<sid_authz::admin::Administrator, Status> {
+        use sid_authz::admin::Administrator;
         use sid_core::models::AuthzPrincipal;
         Ok(match self {
             Self::Profile(caller) if caller.is_admin() => {
@@ -808,7 +810,7 @@ fn revocation_refusal(error: sid_core::Error) -> Status {
 
 /// an authority that changed before the commit, or an invalid change.
 pub(crate) fn administration_refusal(error: sid_core::Error) -> Status {
-    use sid_core::grpc_error::refuse::authority_changed;
+    use sid_infra::grpc_error::refuse::authority_changed;
     match error {
         sid_core::Error::AuthorizationDenied(_) => ApiError::new(
             ErrorReason::InsufficientPermissions,
@@ -856,7 +858,7 @@ impl AuthzServiceImpl {
     /// to their resources (D054 receiver-side verifier trust).
     pub fn with_request_verifiers(
         mut self,
-        verifiers: crate::request_verifier::RequestVerifiers,
+        verifiers: sid_authz::request_verifier::RequestVerifiers,
     ) -> Self {
         self.request_verifiers = verifiers;
         self
@@ -896,7 +898,7 @@ impl AuthzServiceImpl {
         };
         match self.request_evidence(&asker, resource, &evaluation).await {
             Ok(_) => Ok(()),
-            Err(status) if refuses_evidence(&status) => Err(sid_core::grpc_error::ApiError::new(
+            Err(status) if refuses_evidence(&status) => Err(sid_infra::grpc_error::ApiError::new(
                 ErrorReason::TokenInvalid,
                 "the request's token or proof is not usable for this request",
             )
@@ -1185,7 +1187,7 @@ impl AuthzServiceImpl {
     ) -> Result<(), Status> {
         match (asker, resource) {
             (Asker::Profile(caller), _) if caller.is_admin() => {
-                crate::admin::RoleAdministration::new(self.storage.clone())
+                sid_authz::admin::RoleAdministration::new(self.storage.clone())
                     .require_installation_administrator(caller.profile_id)
                     .await
                     .map_err(administration_refusal)
@@ -1305,7 +1307,7 @@ impl AuthzServiceImpl {
             None => claims.cnf.is_some(),
             Some(confirmation) => {
                 let profile = match SenderProofProfile::try_from(confirmation.profile) {
-                    Ok(SenderProofProfile::Dpop) => crate::request_verifier::ProofProfile::Dpop,
+                    Ok(SenderProofProfile::Dpop) => sid_authz::request_verifier::ProofProfile::Dpop,
                     _ => {
                         return Err(confirmation_unfit(
                             "request.confirmation.profile",
@@ -1397,8 +1399,8 @@ impl AuthzServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
-        caller.require_admin()?;
-        crate::admin::RoleAdministration::new(self.storage.clone())
+        caller.require_admin().or_status()?;
+        sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .require_installation_administrator(caller.profile_id)
             .await
             .map_err(administration_refusal)?;
@@ -1413,7 +1415,7 @@ impl AuthzServiceImpl {
         operation: sid_core::models::PolicyOperation,
         scope: sid_core::models::PolicyScope,
     ) -> Result<sid_core::models::ActorFence, Status> {
-        crate::admin::RoleAdministration::new(self.storage.clone())
+        sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .policy_authority(&asker.administrator()?, operation, scope)
             .await
             .map_err(administration_refusal)
@@ -1435,8 +1437,8 @@ impl AuthzServiceImpl {
             .map_err(storage_failure)?
         else {
             return Err(match administrator {
-                crate::admin::Administrator::Root(_) => policy_not_found(id),
-                crate::admin::Administrator::Holder(_) => {
+                sid_authz::admin::Administrator::Root(_) => policy_not_found(id),
+                sid_authz::admin::Administrator::Holder(_) => {
                     administration_refusal(sid_core::Error::AuthorizationDenied(String::new()))
                 }
             });
@@ -1681,7 +1683,7 @@ impl AuthzService for AuthzServiceImpl {
         // not "name taken" by that very role.
         let command =
             command::<keyed::CreateRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1767,7 +1769,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed edit answers with the role as that edit left
         // it, and never writes it over a later edit.
         let command = command::<keyed::UpdateRole>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1783,8 +1785,8 @@ impl AuthzService for AuthzServiceImpl {
                 Some(role) => role,
                 None => {
                     return Err(match administrator {
-                        crate::admin::Administrator::Root(_) => role_not_found(role_id),
-                        crate::admin::Administrator::Holder(_) => administration_refusal(
+                        sid_authz::admin::Administrator::Root(_) => role_not_found(role_id),
+                        sid_authz::admin::Administrator::Holder(_) => administration_refusal(
                             sid_core::Error::AuthorizationDenied(String::new()),
                         ),
                     });
@@ -1804,7 +1806,7 @@ impl AuthzService for AuthzServiceImpl {
             };
             let audit = MutationContext::from(asker.audit("role.update", role.id.to_string()))
                 .with_operation(command.completion(answer.encode_to_vec()));
-            let committed = match crate::admin::RoleAdministration::new(self.storage.clone())
+            let committed = match sid_authz::admin::RoleAdministration::new(self.storage.clone())
                 .edit_role(&administrator, &role, audit)
                 .await
             {
@@ -1832,7 +1834,7 @@ impl AuthzService for AuthzServiceImpl {
         // found" for the role it deleted.
         let command =
             command::<keyed::DeleteRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1901,7 +1903,7 @@ impl AuthzService for AuthzServiceImpl {
         // made, whether or not it is still in force, and never a second one.
         let (metadata, _, req) = request.into_parts();
         let command = command::<keyed::AssignRole>(&metadata, administrator.subject(), &req)?;
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return decode_assigned(&result);
         }
         let answer = async {
@@ -1918,8 +1920,8 @@ impl AuthzService for AuthzServiceImpl {
                 Some(role) => role,
                 None => {
                     return Err(match administrator {
-                        crate::admin::Administrator::Root(_) => role_not_found(role_id),
-                        crate::admin::Administrator::Holder(_) => administration_refusal(
+                        sid_authz::admin::Administrator::Root(_) => role_not_found(role_id),
+                        sid_authz::admin::Administrator::Holder(_) => administration_refusal(
                             sid_core::Error::AuthorizationDenied(String::new()),
                         ),
                     });
@@ -1985,7 +1987,7 @@ impl AuthzService for AuthzServiceImpl {
             }
 
             let audit = asker.audit("role.assign", assignment.id.to_string()).into();
-            let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
+            let assigned = sid_authz::admin::RoleAdministration::new(self.storage.clone())
                 .assign_recording(&administrator, assignment, audit, |stored| {
                     Some(
                         command.completion(
@@ -2026,7 +2028,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed revocation answers as the first, not "not
         // found" for the assignment it removed.
         let command = command::<keyed::RevokeRole>(&metadata, administrator.subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2036,7 +2038,7 @@ impl AuthzService for AuthzServiceImpl {
             let audit =
                 MutationContext::from(asker.audit("role.revoke", assignment_id.to_string()))
                     .with_operation(command.completion(answer.encode_to_vec()));
-            let committed = crate::admin::RoleAdministration::new(self.storage.clone())
+            let committed = sid_authz::admin::RoleAdministration::new(self.storage.clone())
                 .revoke(&administrator, assignment_id, audit)
                 .await
                 // `false`: no such assignment to revoke, answered as revoked.
@@ -2092,7 +2094,7 @@ impl AuthzService for AuthzServiceImpl {
             None => return Err(missing_field("filter")),
         };
 
-        let assignments = crate::admin::RoleAdministration::new(self.storage.clone())
+        let assignments = sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .administered(&administrator, assignments.map_err(storage_failure)?)
             .await
             .map_err(administration_refusal)?;
@@ -2116,7 +2118,7 @@ impl AuthzService for AuthzServiceImpl {
         // not "name taken" by that very group.
         let command =
             command::<keyed::CreateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2216,38 +2218,34 @@ impl AuthzService for AuthzServiceImpl {
         let group: Group = match req.description.as_deref() {
             // Without a description nothing is written: the group as it is,
             // recorded as this command's outcome so its retry answers the same.
-            None => {
-                command
-                    .unchanged_recorded(&*self.storage, audit(), || async {
-                        self.storage
-                            .get_group(group_id)
-                            .await
-                            .map_err(storage_failure)?
-                            .ok_or_else(|| group_not_found(group_id.to_string()))
-                    })
-                    .await?
-            }
+            None => command
+                .unchanged_recorded(&*self.storage, audit(), || async {
+                    self.storage
+                        .get_group(group_id)
+                        .await
+                        .map_err(storage_failure)?
+                        .ok_or_else(|| group_not_found(group_id.to_string()))
+                })
+                .await
+                .or_status()?,
             // Only the description is written, so a concurrent directory sync
             // of the name is never reverted and a deleted group is never
             // recreated; the group as that write left it is the answer.
             Some(desc) => {
-                command
-                    .run_recorded(&*self.storage, || async {
-                        let ctx = MutationContext::from(audit())
-                            .with_operation(command.effect_completion());
-                        match self
-                            .storage
-                            .set_group_description(group_id, Some(desc), ctx)
-                            .await
-                        {
-                            Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
-                            Ok(false) => Err(sid_authn::operation::grpc::Effect::Refused(
-                                group_not_found(group_id.to_string()),
-                            )),
-                            Err(e) => Err(sid_authn::operation::grpc::Effect::Store(e)),
-                        }
-                    })
-                    .await?
+                run_recorded(&command, &*self.storage, || async {
+                    let ctx =
+                        MutationContext::from(audit()).with_operation(command.effect_completion());
+                    match self
+                        .storage
+                        .set_group_description(group_id, Some(desc), ctx)
+                        .await
+                    {
+                        Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
+                        Ok(false) => Err(Effect::Refused(group_not_found(group_id.to_string()))),
+                        Err(e) => Err(Effect::Store(e)),
+                    }
+                })
+                .await?
             }
         };
         Ok(Response::new(UpdateGroupResponse {
@@ -2267,7 +2265,7 @@ impl AuthzService for AuthzServiceImpl {
         // found" for the group it deleted.
         let command =
             command::<keyed::DeleteGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2331,7 +2329,7 @@ impl AuthzService for AuthzServiceImpl {
         // adds the member back after a later removal.
         let command =
             command::<keyed::AddToGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2386,7 +2384,7 @@ impl AuthzService for AuthzServiceImpl {
             format!("user:{}", caller.profile_id),
             &req,
         )?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2446,7 +2444,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed creation answers with the policy it created,
         // not "name taken" by that very policy.
         let command = command::<keyed::CreatePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2520,7 +2518,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed edit answers with the policy as that edit
         // left it, and never writes it over a later edit.
         let command = command::<keyed::UpdatePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2575,7 +2573,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed deletion answers as the first, not "not
         // found" for the policy it deleted.
         let command = command::<keyed::DeletePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2682,10 +2680,10 @@ impl AuthzService for AuthzServiceImpl {
                     policy_id: Some(id.into()),
                     policy_name: String::new(),
                     effect: match m.effect {
-                        crate::cedar::CedarEffect::Permit => {
+                        sid_authz::cedar::CedarEffect::Permit => {
                             sid_proto::sid::v1::PolicyEffect::Permit.into()
                         }
-                        crate::cedar::CedarEffect::Forbid => {
+                        sid_authz::cedar::CedarEffect::Forbid => {
                             sid_proto::sid::v1::PolicyEffect::Forbid.into()
                         }
                     },
@@ -2737,7 +2735,7 @@ impl AuthzService for AuthzServiceImpl {
             .await
             .map_err(storage_failure)?;
 
-        let sod_service = crate::sod::SodService::new(sod_rules);
+        let sod_service = sid_authz::sod::SodService::new(sod_rules);
         let conflicts = sod_service.check_conflicts(&req.existing_roles, &req.proposed_role);
 
         let proto_conflicts: Vec<sid_proto::sid::v1::SodConflict> = conflicts
@@ -2776,7 +2774,7 @@ impl AuthzService for AuthzServiceImpl {
         for pc in &req.proposed_changes {
             let change = match &pc.change {
                 Some(sid_proto::sid::v1::policy_change::Change::CreatePolicy(cp)) => {
-                    crate::simulator::ProposedChange::CreatePolicy {
+                    sid_authz::simulator::ProposedChange::CreatePolicy {
                         name: cp.name.clone(),
                         policy_text: cp.policy_text.clone(),
                         effect: match cp.effect {
@@ -2789,7 +2787,7 @@ impl AuthzService for AuthzServiceImpl {
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::UpdatePolicy(up)) => {
                     let id = wire_id(up.id.as_ref(), "proposed_changes.update_policy.id")?;
-                    crate::simulator::ProposedChange::UpdatePolicy {
+                    sid_authz::simulator::ProposedChange::UpdatePolicy {
                         id,
                         policy_text: up.policy_text.clone(),
                         effect: up.effect.map(|e| {
@@ -2804,7 +2802,7 @@ impl AuthzService for AuthzServiceImpl {
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::DeletePolicyId(id)) => {
                     let policy_id = wire_id(Some(id), "proposed_changes.delete_policy_id")?;
-                    crate::simulator::ProposedChange::DeletePolicy { id: policy_id }
+                    sid_authz::simulator::ProposedChange::DeletePolicy { id: policy_id }
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::AssignRole(_))
                 | Some(sid_proto::sid::v1::policy_change::Change::RevokeAssignmentId(_)) => {
@@ -2845,11 +2843,11 @@ impl AuthzService for AuthzServiceImpl {
             .resource
             .unwrap_or_else(|| format!("project:{project_id}"));
 
-        let simulator = crate::simulator::PolicySimulator::new(self.storage.clone());
+        let simulator = sid_authz::simulator::PolicySimulator::new(self.storage.clone());
         let result = simulator
             .simulate(project_id, &changes, &subjects, &actions, &resource)
             .await
-            .map_err(|e| sid_core::grpc_error::refuse::internal("simulate", e))?;
+            .map_err(|e| sid_infra::grpc_error::refuse::internal("simulate", e))?;
 
         info!(
             project_id = %project_id,
@@ -2870,13 +2868,13 @@ impl AuthzService for AuthzServiceImpl {
                 current_allowed: i.current_allowed,
                 proposed_allowed: i.proposed_allowed,
                 impact_type: match i.impact_type {
-                    crate::simulator::ImpactType::Gained => {
+                    sid_authz::simulator::ImpactType::Gained => {
                         sid_proto::sid::v1::SimulationImpactType::Gained as i32
                     }
-                    crate::simulator::ImpactType::Lost => {
+                    sid_authz::simulator::ImpactType::Lost => {
                         sid_proto::sid::v1::SimulationImpactType::Lost as i32
                     }
-                    crate::simulator::ImpactType::Unchanged => {
+                    sid_authz::simulator::ImpactType::Unchanged => {
                         sid_proto::sid::v1::SimulationImpactType::Unchanged as i32
                     }
                 },

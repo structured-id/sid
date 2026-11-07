@@ -11,15 +11,11 @@
 //! Every refusal is the same `unauthenticated`, so a caller learns nothing
 //! about which check failed.
 
-use sid_core::grpc_error::refuse::storage_failure;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::MachineUserId;
 use sid_plugin::StorageBackend;
-use tonic::{Request, Status};
 
-use crate::caller::bearer_token;
-use crate::machine_auth::{MachineTokenState, machine_token_state};
-use crate::resource_token::ResourceTokenVerifier;
+use crate::machine_auth::{MachineTokenState, machine_token_state, revoked};
+use crate::resource_token::{OwnTokenError, ResourceTokenVerifier};
 use crate::revocation_cache::RevocationCache;
 
 /// An authenticated service.
@@ -59,33 +55,19 @@ impl AuthenticatedService {
     }
 }
 
-fn unauthenticated() -> Status {
-    ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
-}
-
-/// The service `request`'s bearer token authenticates at the API `tokens`
+/// The service the `presented` token authenticates at the API `tokens`
 /// verifies.
-#[allow(clippy::result_large_err)]
-pub async fn authenticate_service<T>(
-    request: &Request<T>,
+pub async fn authenticate_service(
+    presented: &str,
     storage: &dyn StorageBackend,
     tokens: &ResourceTokenVerifier,
     revocation: &RevocationCache,
-) -> Result<AuthenticatedService, Status> {
-    let presented = bearer_token(request)?;
-    let claims = match tokens.verify(presented).await {
-        Ok(claims) => claims,
-        Err(sid_core::Error::AuthenticationFailed(_)) => return Err(unauthenticated()),
-        Err(e) => return Err(storage_failure(e)),
-    };
-    // A sender-constrained token needs its proof, which a service call does
-    // not carry (RFC 9449 §7.1); a ProfileId never rides a service's token.
-    if claims.cnf.is_some() || claims.pid.is_some() {
-        return Err(unauthenticated());
-    }
+) -> Result<AuthenticatedService, OwnTokenError> {
+    let unauthenticated = || OwnTokenError::Unauthenticated;
+    let claims = tokens.verify_own(presented).await?;
     let caller = match machine_token_state(storage, &claims)
         .await
-        .map_err(storage_failure)?
+        .map_err(OwnTokenError::Storage)?
     {
         MachineTokenState::Usable {
             machine,
@@ -105,7 +87,7 @@ pub async fn authenticate_service<T>(
             let client = storage
                 .get_oauth2_client(client_id)
                 .await
-                .map_err(storage_failure)?
+                .map_err(OwnTokenError::Storage)?
                 .ok_or_else(unauthenticated)?;
             if !client.active || client.is_public() {
                 return Err(unauthenticated());
@@ -115,12 +97,7 @@ pub async fn authenticate_service<T>(
             }
         }
     };
-    // Revocation reaches every replica through the shared cache.
-    if revocation
-        .is_revoked(&claims.jti, &claims.sid)
-        .await
-        .map_err(|e| storage_failure(sid_core::Error::Storage(e.to_string())))?
-    {
+    if revoked(revocation, &claims).await? {
         return Err(unauthenticated());
     }
     Ok(AuthenticatedService {

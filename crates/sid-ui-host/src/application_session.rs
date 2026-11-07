@@ -23,7 +23,7 @@ use sid_authn::bff_session::{
 use sid_authn::issuer_directory::{IssuedTokenRefusal, IssuerDirectory};
 use sid_authn::relying_party::Connection;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
+use sid_infra::grpc_error::{ApiError, ErrorReason, refuse};
 use sid_infra::issuer_client::{RpClient, RpClientError};
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionService;
@@ -605,7 +605,7 @@ impl ApplicationSessions {
             } else {
                 "The sign-in was refused."
             };
-            return sid_authn::oauth_http::link_page(
+            return sid_infra::oauth_http::link_page(
                 403,
                 text,
                 "Sign in again",

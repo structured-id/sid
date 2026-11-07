@@ -10,16 +10,11 @@ use chrono::Utc;
 use prost::Message;
 use secrecy::ExposeSecret;
 use sid_authn::bearer_secret;
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::Error as SidError;
-use sid_core::grpc_error::refuse::{
-    changed_concurrently, invalid_field, not_found, storage_failure,
-};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::provisioning_connector::rotation_grace;
 use sid_core::models::{
@@ -27,6 +22,12 @@ use sid_core::models::{
     ProtectedResource, ProvisioningConnector, ProvisioningConnectorId, ProvisioningCredential,
     ProvisioningCredentialId, ProvisioningDirection,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
+use sid_infra::grpc_error::refuse::{
+    changed_concurrently, invalid_field, not_found, storage_failure,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::StorageBackend;
 use sid_proto::keyed::admin::provisioning_service as keyed;
 use sid_proto::sid::v1::admin::{self as pb, provisioning_service_server::ProvisioningService};
@@ -77,7 +78,7 @@ impl ProvisioningServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller)
     }
 
@@ -119,7 +120,8 @@ impl ProvisioningServiceImpl {
             .unchanged(&*self.storage, audit, || async {
                 Ok::<_, Status>(connector_to_proto(connector))
             })
-            .await?;
+            .await
+            .or_status()?;
         Ok(Response::new(response))
     }
 
@@ -364,7 +366,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
             operation,
             &req,
         );
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return Ok(Response::new(replayed_connector(&result)?));
         }
 
@@ -390,7 +392,9 @@ impl ProvisioningService for ProvisioningServiceImpl {
             Err(SidError::OperationCompleted(_)) => Err(changed_concurrently()),
             Err(e) => Err(storage_failure(e)),
         };
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn get_provisioning_connector(
@@ -457,7 +461,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
             operation,
             &req,
         );
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return Ok(Response::new(replayed_connector(&result)?));
         }
         let id = connector_id(req.connector_id.as_ref())?;
@@ -513,7 +517,10 @@ impl ProvisioningService for ProvisioningServiceImpl {
             }
             // A concurrent attempt of this command committed first.
             Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
+                let result = command
+                    .committed_elsewhere(&*self.storage)
+                    .await
+                    .or_status()?;
                 Ok(Response::new(replayed_connector(&result)?))
             }
             Err(e) => Err(storage_failure(e)),
@@ -574,7 +581,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
             operation,
             &req,
         );
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return Ok(Response::new(replayed_issue(&result)?));
         }
         // A refusal a concurrent attempt of this command caused (the slot its
@@ -616,7 +623,9 @@ impl ProvisioningService for ProvisioningServiceImpl {
             })
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn rotate_connector_credential(
@@ -634,7 +643,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
             operation,
             &req,
         );
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return Ok(Response::new(replayed_issue(&result)?));
         }
         // A refusal a concurrent attempt of this command caused (the
@@ -702,7 +711,9 @@ impl ProvisioningService for ProvisioningServiceImpl {
             })
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn revoke_connector_credential(

@@ -13,7 +13,6 @@ use common::TestServices;
 use common::mock_storage::MockStorage;
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{
     AuditEntry, ConnectorState, OrgId, ProjectId, ProvisioningConnector, ProvisioningConnectorId,
     ProvisioningDirection, ResourceId, SCIM_PROVISIONER_ROLE, SCIM_USER_CREATE, TOKEN_INTROSPECT,
@@ -23,6 +22,7 @@ use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
 use sid_proto::sid::v1::authz::role_assignment;
 use sid_proto::sid::v1::authz::{AssignRoleRequest, ListRoleAssignmentsRequest};
 use sid_proto::sid::v1::authz_service_server::AuthzService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use tonic::{Code, Request};
 
 fn authz(svc: &TestServices) -> AuthzServiceImpl {

@@ -8,8 +8,8 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, authenticated_session, stored_session_token};
-use sid_core::grpc_error::extract_error_info;
 use sid_core::models::{AuditEntry, AuthLevel, Credential, CredentialType, Profile, Session};
+use sid_infra::grpc_error::extract_error_info;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request, Status};

@@ -124,4 +124,31 @@ impl ResourceTokenVerifier {
         self.keys.store(Arc::new(keys));
         Ok(())
     }
+
+    /// The claims of `token` when it is a token its holder obtained for
+    /// itself: verified for this resource, not sender-constrained (a service
+    /// call carries no proof, RFC 9449 §7.1) and naming no ProfileId.
+    pub async fn verify_own(&self, token: &str) -> Result<AccessTokenClaims, OwnTokenError> {
+        let claims = match self.verify(token).await {
+            Ok(claims) => claims,
+            Err(SidError::AuthenticationFailed(_)) => return Err(OwnTokenError::Unauthenticated),
+            Err(e) => return Err(OwnTokenError::Storage(e)),
+        };
+        if claims.cnf.is_some() || claims.pid.is_some() {
+            return Err(OwnTokenError::Unauthenticated);
+        }
+        Ok(claims)
+    }
+}
+
+/// Why a machine user, a service or a connector presenting a token of its
+/// own was not admitted. Every failed check is the same `Unauthenticated`,
+/// so a caller learns nothing about which.
+#[derive(Debug, thiserror::Error)]
+pub enum OwnTokenError {
+    #[error("authentication required")]
+    Unauthenticated,
+    /// The records the decision reads could not be read.
+    #[error("storage: {0}")]
+    Storage(SidError),
 }

@@ -7,15 +7,15 @@
 //! stream serves administrators only.
 
 use dashmap::DashMap;
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{
-    dependency_unavailable, internal, invalid_field, missing_field, not_configured,
-};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::ProfileId;
 use sid_core::models::event::{Event, EventFilter};
+use sid_infra::authn::caller::authenticate;
+use sid_infra::grpc_error::refuse::{
+    dependency_unavailable, internal, invalid_field, missing_field, not_configured,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::event_bus::{EventBus, EventBusError};
 use sid_proto::sid::v1::events::event_stream_service_server::EventStreamService;
 use sid_proto::sid::v1::events::*;
@@ -81,7 +81,7 @@ impl EventStreamServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn open_stream<T>(&self, request: &Request<T>) -> Result<StreamSlot, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         let permit = self
             .streams
             .clone()

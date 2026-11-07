@@ -168,7 +168,7 @@ async fn other_browser_requests_are_refused() {
             .await
             .expect_err("a foreign browser request signs nobody in");
         assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{origins:?}");
-        let (reason, _, _) = sid_core::grpc_error::extract_error_info(&refused).unwrap();
+        let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&refused).unwrap();
         assert_eq!(reason, "SIGN_IN_REFUSED", "{origins:?}");
 
         let native = finish_with_origins(server, finish, &[])

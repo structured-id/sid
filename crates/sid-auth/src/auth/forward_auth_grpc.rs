@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use http::{HeaderMap, Method};
-use sid_core::grpc_error::refuse::dependency_unavailable;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::refuse::dependency_unavailable;
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::authz::VerifyRequest;
 use sid_proto::sid::v1::authz::forward_auth_service_server::ForwardAuthService;

@@ -7,13 +7,13 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{issue_admin_token, issue_token, test_jwt, test_revocation};
-use sid_authz::governance_grpc::GovernanceServiceImpl;
 use sid_core::models::Profile;
 use sid_proto::sid::v1::authz::governance_service_server::GovernanceService;
 use sid_proto::sid::v1::authz::{
     AccessRequestMessage, DecideRequestRequest, GrantTemporaryRoleRequest,
     ListPendingRequestsRequest,
 };
+use sid_server::grpc::governance_service::GovernanceServiceImpl;
 use std::sync::Arc;
 use tonic::{Code, Request};
 

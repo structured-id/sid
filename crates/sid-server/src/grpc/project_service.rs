@@ -9,14 +9,15 @@
 use crate::feature_flags::FeatureFlagService;
 use secrecy::ExposeSecret;
 use sid::projects::{Issued, ProjectError, Projects, RegistrationCheck};
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{
+use sid_infra::authn::caller::{authenticate, bearer_token};
+use sid_infra::authn::operation::context;
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, invalid_field, maintenance, missing_field, not_found, storage_failure,
 };
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::project_service_server::ProjectService;
 use sid_proto::sid::v1::*;
@@ -53,7 +54,7 @@ impl ProjectServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn caller<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller)
     }
 
@@ -70,7 +71,7 @@ impl ProjectServiceImpl {
 /// as a bearer credential.
 #[allow(clippy::result_large_err)]
 fn bearer<T>(request: &Request<T>) -> Result<String, Status> {
-    sid_authn::caller::bearer_token(request).map(str::to_string)
+    bearer_token(request).map(str::to_string)
 }
 
 /// A refusal of client metadata the issuer does not support: OAuth
@@ -91,8 +92,8 @@ fn metadata_refusal(field: &'static str, message: String) -> Status {
 /// access token is UNAUTHENTICATED.
 fn refusal(e: ProjectError) -> Status {
     match e {
-        ProjectError::Caller(e) => e.into(),
-        ProjectError::Operation(e) => e.into(),
+        ProjectError::Caller(e) => e.into_status(),
+        ProjectError::Operation(e) => e.into_status(),
         ProjectError::Store(e) => storage_failure(e),
         ProjectError::Internal => ApiError::internal().into(),
         ProjectError::MissingField(field) => missing_field(field),

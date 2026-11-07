@@ -44,7 +44,9 @@ fn over_rest_as(
 ) -> Request<OAuth2TokenRequest> {
     let path = token_endpoint(svc).strip_prefix(ORIGIN).unwrap().to_owned();
     req.extensions_mut()
-        .insert(sid_authn::resource::TranscodedRequest::new(method, path));
+        .insert(sid_infra::authn::resource::TranscodedRequest::new(
+            method, path,
+        ));
     req
 }
 

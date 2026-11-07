@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
-use sid_core::grpc_error::refuse;
 use sid_infra::deadline::IssuerChannel;
+use sid_infra::grpc_error::refuse;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionServiceServer;
 use structured_proxy::hooks::{ExtraRoute, ExtraRouteHandler, RouteRequest, RouteResponse};
 use tonic::metadata::MetadataMap;

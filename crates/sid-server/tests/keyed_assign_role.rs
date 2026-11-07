@@ -15,9 +15,8 @@ use std::sync::atomic::AtomicBool;
 use common::test_jwt;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
-use sid_core::grpc_error::extract_error_info;
 use sid_core::models::{AuditEntry, Profile, ProfileId, ProjectId, Role, RoleAssignmentId};
+use sid_infra::grpc_error::extract_error_info;
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
@@ -26,6 +25,7 @@ use sid_proto::sid::v1::authz::{
     ListRoleAssignmentsRequest, RemoveFromGroupRequest, RevokeRoleRequest,
 };
 use sid_proto::sid::v1::authz_service_server::AuthzService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use tonic::{Code, Request};
 
 struct Harness {

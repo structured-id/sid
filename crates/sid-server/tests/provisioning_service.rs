@@ -16,7 +16,6 @@ use std::sync::atomic::AtomicBool;
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_token, test_profile};
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{ProjectId, ProtectedResource, SCIM_PROVISIONER_ROLE};
 use sid_proto::sid::v1::ScimListUsersRequest;
 use sid_proto::sid::v1::admin as pb;
@@ -28,6 +27,7 @@ use sid_proto::sid::v1::authz_service_server::AuthzService;
 use sid_proto::sid::v1::ids;
 use sid_proto::sid::v1::scim_service_server::ScimService;
 use sid_scim::grpc::{ScimDirectory, ScimServiceImpl};
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use sid_server::grpc::provisioning_service::ProvisioningServiceImpl;
 use tonic::{Code, Request};
 

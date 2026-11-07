@@ -191,7 +191,7 @@ pub(crate) fn wire_id<W: sid_ids_proto::WireId>(
     field: &'static str,
 ) -> Result<W::Domain, tonic::Status> {
     sid_ids_proto::required(value)
-        .map_err(|e| sid_core::grpc_error::refuse::invalid_field(field, format!("{field}: {e}")))
+        .map_err(|e| sid_infra::grpc_error::refuse::invalid_field(field, format!("{field}: {e}")))
 }
 
 /// A stored reference as an answer carries it. A stored value that is not a
@@ -204,7 +204,7 @@ where
 {
     D::try_from(id)
         .map(|d| Some(W::from(d)))
-        .map_err(|e| sid_core::grpc_error::refuse::internal("stored identifier", e))
+        .map_err(|e| sid_infra::grpc_error::refuse::internal("stored identifier", e))
 }
 
 /// Display-safe WebAuthn credential info from a stored passkey record. A
@@ -261,13 +261,13 @@ pub(crate) fn opaque_curve(
     c: &sid_core::models::Credential,
 ) -> Result<sid_plugin::crypto::CurveId, tonic::Status> {
     let Some(raw) = c.opaque_curve else {
-        return Err(sid_core::grpc_error::refuse::internal(
+        return Err(sid_infra::grpc_error::refuse::internal(
             "read OPAQUE curve",
             format!("credential {} has no recorded configuration", c.id.0),
         ));
     };
     sid_plugin::crypto::CurveId::try_from(raw).map_err(|_| {
-        sid_core::grpc_error::refuse::internal(
+        sid_infra::grpc_error::refuse::internal(
             "read OPAQUE curve",
             format!("credential {} has curve {raw}", c.id.0),
         )
@@ -288,7 +288,7 @@ pub(crate) fn credential_info(
     match c.credential_type {
         CredentialType::WebAuthn => extract_webauthn_info(c.data.expose())
             .map(Some)
-            .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e)),
+            .map_err(|e| sid_infra::grpc_error::refuse::internal("read stored passkey", e)),
         CredentialType::Opaque => {
             let suite = match opaque_curve(c)? {
                 CurveId::Pallas => OpaqueSuite::PallasV1,
