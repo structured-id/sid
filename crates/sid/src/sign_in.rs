@@ -1377,8 +1377,17 @@ fn attempt<'a>(
 pub async fn organization_requirements(
     login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
 ) -> Result<LoginRequirements, SignInError> {
+    requirements_for(login_policy, None).await
+}
+
+/// The login requirements of an authentication for `client_id` (none: the
+/// organization's) as `login_policy` states them.
+pub async fn requirements_for(
+    login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+    client_id: Option<&str>,
+) -> Result<LoginRequirements, SignInError> {
     login_policy
-        .requirements(None)
+        .requirements(client_id)
         .await
         .map_err(|e| SignInError::Unavailable {
             what: "login policy",
@@ -1495,6 +1504,8 @@ impl PasswordSignInHost for Passwords<'_> {
         Ok(self.sign_in.storage.get_profile(*owner).await?)
     }
 }
+
+pub mod completions;
 
 #[cfg(test)]
 mod tests;

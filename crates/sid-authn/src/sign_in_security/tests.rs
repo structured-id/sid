@@ -461,3 +461,30 @@ async fn a_lockout_holds_whatever_the_evidence() {
         Err(Refused(SignInRefusal::TooManyAttempts(_)))
     ));
 }
+
+// ── Device fingerprint ──────────
+
+#[test]
+fn test_compute_device_id_deterministic() {
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120";
+    let id1 = super::device_id(ua);
+    let id2 = super::device_id(ua);
+    assert_eq!(id1, id2, "Same UA should produce same device_id");
+}
+
+#[test]
+fn test_compute_device_id_different_ua() {
+    let id1 = super::device_id("Chrome/120 on Mac");
+    let id2 = super::device_id("Firefox/115 on Windows");
+    assert_ne!(
+        id1, id2,
+        "Different UAs should produce different device_ids"
+    );
+}
+
+#[test]
+fn test_compute_device_id_valid_uuid() {
+    let id = super::device_id("test-agent");
+    // Should be a valid UUID v4 format
+    assert_eq!(id.get_version(), Some(uuid::Version::Random));
+}
