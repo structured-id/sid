@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The authorization endpoint's core, shared by the typed RPC, where a bearer
-//! token names the session, and the browser endpoint, where the IdP session
-//! cookie does. A browser request the user must first sign in for is kept
-//! server-side and continued by an opaque reference, never rebuilt from the
-//! URL the sign-in page returns to.
+//! The authorization endpoint's answers: the engine's authorization
+//! ([`sid::oauth::authorization`]) for the typed RPC and the browser
+//! endpoint, its refusals as statuses.
 
-use base64::Engine;
-use chrono::{DateTime, Utc};
-use sid_authn::oauth2::prompt::Prompt;
-use sid_core::models::{OAuth2Client, Session};
+use sid::oauth::authorization::AuthorizationError;
+use sid_core::models::OAuth2Client;
 use tonic::metadata::MetadataMap;
+
+pub(crate) use sid::oauth::authorization::{
+    BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX,
+};
 
 use super::*;
 
@@ -22,347 +22,61 @@ pub(super) fn policy_changed() -> Status {
     ))
 }
 
-/// Whether `status` asks the user to authenticate further (STEP_UP_REQUIRED),
-/// as opposed to any other refusal of the request.
-fn asks_step_up(status: &Status) -> bool {
-    sid_infra::grpc_error::extract_error_info(status)
-        .is_some_and(|(reason, _, _)| reason == ErrorReason::StepUpRequired.as_str())
-}
-
-/// The refusal of an `authorization_request` that names no request this
-/// issuer is waiting to complete, the same for every cause.
-fn not_waiting() -> Status {
-    sid_infra::grpc_error::refuse::invalid_field(
-        "authorization_request",
-        "not an authorization request this issuer is waiting to complete",
-    )
-}
-
-/// Prefix of the `request_uri` that continues a kept request, the form of
-/// RFC 9126 §2.2.
-pub(crate) const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
-
-/// How long a kept authorization request waits for the user to sign in.
-pub(super) const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// An authorization request the browser endpoint keeps while the user signs
-/// in, or while a cross-site POST continues on the issuer host.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PendingAuthorization {
-    client_id: String,
-    redirect_uri: String,
-    response_type: String,
-    scope: Option<String>,
-    state: Option<String>,
-    code_challenge: Option<String>,
-    code_challenge_method: Option<String>,
-    nonce: Option<String>,
-    acr_values: Option<String>,
-    issuer_handle: String,
-    resource: Vec<String>,
-    prompt: Option<String>,
-    max_age: Option<u32>,
-    /// When the request arrived: `prompt=login` and `max_age` count from it.
-    arrived_at: DateTime<Utc>,
-    /// The interaction `prompt` asked for (account selection, consent) has
-    /// been offered on the sign-in page.
-    interacted: bool,
-}
-
-impl PendingAuthorization {
-    /// `request` as it arrives now.
-    pub(crate) fn arrived(request: OAuth2AuthorizeRequest) -> Self {
-        Self {
-            client_id: request.client_id,
-            redirect_uri: request.redirect_uri,
-            response_type: request.response_type,
-            scope: request.scope,
-            state: request.state,
-            code_challenge: request.code_challenge,
-            code_challenge_method: request.code_challenge_method,
-            nonce: request.nonce,
-            acr_values: request.acr_values,
-            issuer_handle: request.issuer_handle,
-            resource: request.resource,
-            prompt: request.prompt,
-            max_age: request.max_age,
-            arrived_at: Utc::now(),
-            interacted: false,
-        }
+/// The answer to a refused or failed authorization request. An unknown
+/// client and an unregistered redirect URI are marked with their field, so
+/// the front channel shows them instead of redirecting (RFC 6749 §4.1.2.1).
+pub(super) fn authorization_refusal(e: AuthorizationError) -> Status {
+    use AuthorizationError as E;
+    match e {
+        E::UnknownClient => Status::from(
+            ApiError::new(ErrorReason::ApplicationNotFound, "unknown client")
+                .with_metadata("field", "client_id"),
+        ),
+        E::Request(e) => authorize_refusal(e),
+        E::StepUp(unmet) => super::step_up_required(&unmet).into(),
+        E::PolicyChanged => policy_changed(),
+        E::SessionEnded => session_ended(),
+        E::NotWaiting => sid_infra::grpc_error::refuse::invalid_field(
+            "authorization_request",
+            "not an authorization request this issuer is waiting to complete",
+        ),
+        E::Caller(e) => e.into_status(),
+        E::OAuth(e) => oauth_refusal(e),
+        E::Ceremony(e) => e.into_status(),
+        E::RandomUnavailable => Status::internal("operating system random source unavailable"),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
     }
-
-    pub(crate) fn client_id(&self) -> &str {
-        &self.client_id
-    }
-
-    pub(crate) fn issuer_handle(&self) -> &str {
-        &self.issuer_handle
-    }
-
-    pub(crate) fn redirect_uri(&self) -> &str {
-        &self.redirect_uri
-    }
-
-    pub(crate) fn state(&self) -> Option<&str> {
-        self.state.as_deref()
-    }
-
-    /// The request as the typed RPC carries it.
-    pub(crate) fn request(&self) -> OAuth2AuthorizeRequest {
-        OAuth2AuthorizeRequest {
-            client_id: self.client_id.clone(),
-            redirect_uri: self.redirect_uri.clone(),
-            response_type: self.response_type.clone(),
-            scope: self.scope.clone(),
-            state: self.state.clone(),
-            code_challenge: self.code_challenge.clone(),
-            code_challenge_method: self.code_challenge_method.clone(),
-            nonce: self.nonce.clone(),
-            acr_values: self.acr_values.clone(),
-            issuer_handle: self.issuer_handle.clone(),
-            resource: self.resource.clone(),
-            prompt: self.prompt.clone(),
-            max_age: self.max_age,
-            request_uri: None,
-        }
-    }
-}
-
-/// What the browser endpoint answers an authorization request with.
-pub(crate) enum BrowserAuthorization {
-    /// The authorization response for the client.
-    Answer(OAuth2AuthorizeResponse),
-    /// The user signs in (or interacts) first; the request is kept under
-    /// `reference` for the sign-in page to return to.
-    SignIn { reference: String },
-    /// `prompt=none` asked for no interaction and one is needed: the OIDC
-    /// error for the client (OpenID Connect Core §3.1.2.6).
-    NoInteraction(&'static str),
 }
 
 impl AuthServiceImpl {
-    /// The active client `request` names and the issuer serving it, and its
-    /// exact redirect URI. Established before anything else, the caller
-    /// included: every later error is reported by redirecting there, which
-    /// RFC 6749 §4.1.2.1 forbids for an unknown client or an unregistered URI.
-    /// Those two errors are marked so the front channel shows them instead of
-    /// redirecting. A client of another issuer than the one whose endpoint
-    /// this is counts as unknown, as does a request naming another issuer
-    /// than the one a call `addressed` by its path.
+    /// The active client `request` names and the issuer serving it (see
+    /// [`sid::oauth::OAuth::authorize_client`]).
     pub(crate) async fn authorize_client(
         &self,
         request: &OAuth2AuthorizeRequest,
         addressed: Option<&sid_authn::issuer::AddressedIssuer>,
     ) -> Result<(OAuth2Client, OidcIssuer), Status> {
-        let unknown_client = || {
-            Status::from(
-                ApiError::new(ErrorReason::ApplicationNotFound, "unknown client")
-                    .with_metadata("field", "client_id"),
-            )
-        };
-        if addressed
-            .is_some_and(|addressed| addressed.0.handle.to_string() != request.issuer_handle)
-        {
-            return Err(unknown_client());
-        }
-        let client = self
-            .storage
-            .get_oauth2_client(&request.client_id)
+        self.oauth
+            .authorize_client(request, addressed)
             .await
-            .map_err(storage_failure)?
-            .filter(|client| client.active)
-            .ok_or_else(unknown_client)?;
-        let issuer = self
-            .issuer_serving(&request.issuer_handle, client.org_id)
-            .await?
-            .ok_or_else(unknown_client)?;
-        if !client.is_redirect_uri_allowed(&request.redirect_uri) {
-            return Err(authorize_refusal(
-                sid_authn::oauth2::AuthorizeError::UnregisteredRedirectUri,
-            ));
-        }
-        Ok((client, issuer))
-    }
-
-    /// Whether `session` may authorize at `now` (see
-    /// [`sid::sign_in::SignIn::authorizes`]).
-    pub(crate) fn authorizes(&self, session: &Session, now: DateTime<Utc>) -> bool {
-        self.sign_ins.authorizes(session, now)
-    }
-
-    /// The authorization code `session` grants for `request` to `client` at
-    /// `issuer`: the client's and the request's assurance judged against the
-    /// session, the request validated, the code bound to its resource and
-    /// carrying the session's authentication.
-    pub(crate) async fn authorize_with(
-        &self,
-        client: &OAuth2Client,
-        issuer: &OidcIssuer,
-        session: &Session,
-        req: OAuth2AuthorizeRequest,
-    ) -> Result<OAuth2AuthorizeResponse, Status> {
-        let profile_id = session.profile_id;
-
-        // ── Login requirements of this application ──
-        // Every authorization is judged, over an existing session too: the
-        // requirements the policy states for this client now, with the
-        // client's own and the level the relying party asks for (OpenID
-        // Connect Core 1.0 §3.1.2.1 `acr_values`), each only strengthening.
-        let requested_acr = req.acr_values.as_deref().and_then(parse_acr_values);
-        let requirements = self
-            .login_requirements(Some(&req.client_id))
-            .await?
-            .with_client(client, requested_acr);
-        match requirements.decide(session, Utc::now()) {
-            sid_authn::login_policy::LoginDecision::Allow { audited } => {
-                if !audited.is_empty() {
-                    info!(
-                        client = %req.client_id,
-                        unmet = ?audited,
-                        "Login requirements unmet, allowed by audit enforcement"
-                    );
-                }
-            }
-            sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
-                info!(
-                    client = %req.client_id,
-                    session_acr = ?session.assurance_at(Utc::now()),
-                    session_amr = ?session.amr,
-                    ?unmet,
-                    "Authorize: step-up required"
-                );
-                return Err(super::step_up_required(&unmet).into());
-            }
-        }
-
-        let auth_req = sid_authn::oauth2::AuthorizeRequest {
-            client_id: req.client_id,
-            redirect_uri: req.redirect_uri,
-            response_type: req.response_type,
-            scope: req.scope,
-            state: req.state,
-            code_challenge: req.code_challenge,
-            code_challenge_method: req.code_challenge_method,
-            nonce: req.nonce,
-        };
-        let validated = self
-            .oauth2
-            .validate_authorize_request(client, &auth_req)
-            .map_err(authorize_refusal)?;
-        // The code is bound to the resource its tokens will be for.
-        let target = self.select_target(issuer, client, &req.resource).await?;
-
-        let (raw_code, auth_code) = self
-            .oauth2
-            .generate_auth_code(
-                profile_id,
-                &validated,
-                target.resource_id(),
-                session.grant_authentication(),
-            )
-            .map_err(|e| internal("generate authorization code", e))?;
-
-        // The code commits only while the policy it was judged under holds:
-        // a change since asks for the authorization again.
-        let mut ctx: sid_core::models::MutationContext = AuditEntry::user(
-            profile_id.to_string(),
-            "auth_code.create",
-            auth_code.client_id.clone(),
-        )
-        .into();
-        if let Some(fence) = requirements.fence {
-            ctx = ctx.fenced_by(fence);
-        }
-        match self.storage.create_auth_code(&auth_code, ctx).await {
-            Ok(()) => {}
-            Err(sid_core::Error::Fenced(_)) => return Err(policy_changed()),
-            // The authorizing session ended (a logout) before the code was
-            // stored: the user is signed out, not facing a server failure.
-            Err(sid_core::Error::NotFound(_)) => return Err(session_ended()),
-            Err(e) => return Err(storage_failure(e)),
-        }
-
-        info!(
-            "Issued auth code for profile {} → client {}",
-            profile_id, auth_code.client_id
-        );
-
-        Ok(OAuth2AuthorizeResponse {
-            state: validated.state,
-            result: Some(o_auth2_authorize_response::Result::AuthorizationCode(
-                raw_code,
-            )),
-        })
+            .map_err(authorization_refusal)
     }
 
     /// The browser endpoint's answer to `pending`, the browser's IdP session
-    /// read from the `cookie` headers of `metadata`. The client is
-    /// established first; then the session must authorize, be fresh enough
-    /// for `prompt=login` / `max_age`, and have had any interaction `prompt`
-    /// asks for. Otherwise the user signs in and the request is kept, unless
-    /// `prompt=none` forbids it.
+    /// read from the `cookie` headers of `metadata` (see
+    /// [`sid::oauth::authorization::Authorizations::browser`]).
     pub(crate) async fn browser_authorize(
         &self,
         metadata: &MetadataMap,
         pending: PendingAuthorization,
     ) -> Result<BrowserAuthorization, Status> {
         self.check_maintenance().await?;
-        let request = pending.request();
-        // The endpoint's own path named the issuer the request was kept for.
-        let (client, issuer) = self.authorize_client(&request, None).await?;
-        let prompt = Prompt::parse(pending.prompt.as_deref()).map_err(authorize_refusal)?;
-        let now = Utc::now();
-
         let session = self.browser_session(metadata).await?;
-        let after = prompt.authenticated_after(pending.max_age, pending.arrived_at);
-        let session = session.filter(|session| {
-            self.authorizes(session, now)
-                && after.is_none_or(|after| session.authenticated_at >= after)
-        });
-        let interaction_owed = prompt.asks_interaction() && !pending.interacted;
-
-        match session {
-            Some(session) if !interaction_owed => {
-                match self
-                    .authorize_with(&client, &issuer, &session, request)
-                    .await
-                {
-                    Ok(answer) => {
-                        // Only an accepted use counts as activity.
-                        self.storage
-                            .touch_session(session.id, now)
-                            .await
-                            .map_err(storage_failure)?;
-                        Ok(BrowserAuthorization::Answer(answer))
-                    }
-                    // Below the level or methods the client requires: the
-                    // user authenticates further (OIDC Core 1.0 §3.1.2.3).
-                    Err(status) if asks_step_up(&status) => {
-                        self.sign_in_first(prompt, pending).await
-                    }
-                    Err(status) => Err(status),
-                }
-            }
-            _ => self.sign_in_first(prompt, pending).await,
-        }
-    }
-
-    /// Keep `pending` for the sign-in page to return to, or, under
-    /// `prompt=none`, the error that says an interaction is needed.
-    async fn sign_in_first(
-        &self,
-        prompt: Prompt,
-        mut pending: PendingAuthorization,
-    ) -> Result<BrowserAuthorization, Status> {
-        if prompt.none() {
-            return Ok(BrowserAuthorization::NoInteraction("login_required"));
-        }
-        // The sign-in page offers account selection and consent; the
-        // continued request does not ask for them again.
-        pending.interacted |= prompt.asks_interaction();
-        Ok(BrowserAuthorization::SignIn {
-            reference: self.keep_authorization(&pending).await?,
-        })
+        self.authorizations
+            .browser(&self.oauth, &self.sign_ins, session, pending)
+            .await
+            .map_err(authorization_refusal)
     }
 
     /// Keep `pending` under a fresh random reference.
@@ -370,97 +84,43 @@ impl AuthServiceImpl {
         &self,
         pending: &PendingAuthorization,
     ) -> Result<String, Status> {
-        let mut bytes = [0u8; 32];
-        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut bytes)
-            .map_err(|_| Status::internal("operating system random source unavailable"))?;
-        let reference = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        self.continuations
-            .insert(&reference, pending)
+        self.authorizations
+            .keep(pending)
             .await
-            .or_status()?;
-        Ok(reference)
+            .map_err(authorization_refusal)
     }
 
-    /// The context of the kept request `authorization_request` continues
-    /// (`<issuer>/oauth2/authorize?client_id=..&request_uri=..`): its issuer
-    /// and its client's name. The kept request is read, not taken, and must
-    /// belong to that issuer, at its canonical URL, and to that client, which
-    /// must be active with the request's redirect URI registered; a call
-    /// `addressed` to an issuer by its path must name the same one. Anything
-    /// else is an invalid `authorization_request`, the same for every cause.
+    /// The context of the kept request `authorization_request` continues (see
+    /// [`sid::oauth::authorization::Authorizations::sign_in_context`]).
     pub(crate) async fn sign_in_context(
         &self,
         authorization_request: &str,
         addressed: Option<&sid_authn::issuer::AddressedIssuer>,
     ) -> Result<SignInContext, Status> {
-        let (_, _, client, issuer) = self.kept(authorization_request, addressed).await?;
-        Ok(SignInContext {
-            issuer: issuer.canonical_url,
-            client_name: client.client_name,
-        })
+        self.authorizations
+            .sign_in_context(&self.oauth, authorization_request, addressed)
+            .await
+            .map_err(authorization_refusal)
     }
 
     /// The authorization response telling the client of the kept request
     /// `authorization_request` continues that the user declined to sign in
     /// for it: `access_denied` at its registered redirect URI, with the
-    /// request's `state` and the issuer (RFC 6749 §4.1.2.1, RFC 9207 §2). The
-    /// request is checked as [`Self::sign_in_context`] checks it, and taken:
-    /// it continues no further, and a repeat is refused.
+    /// request's `state` and the issuer (RFC 6749 §4.1.2.1, RFC 9207 §2). A
+    /// repeat is refused.
     pub async fn declined_sign_in(&self, authorization_request: &str) -> Result<url::Url, Status> {
-        let (reference, kept, _, issuer) = self.kept(authorization_request, None).await?;
-        if self.continue_authorization(&reference).await?.is_none() {
-            return Err(not_waiting());
-        }
+        let declined = self
+            .authorizations
+            .decline(&self.oauth, authorization_request)
+            .await
+            .map_err(authorization_refusal)?;
         sid_infra::oauth_http::authorization_response_url(
-            kept.redirect_uri(),
-            &issuer.canonical_url,
+            &declined.redirect_uri,
+            &declined.issuer,
             &[("error", "access_denied")],
-            kept.state(),
+            declined.state.as_deref(),
         )
-        .ok_or_else(not_waiting)
-    }
-
-    /// The kept request `authorization_request` continues, read, with its
-    /// reference, established client and issuer; see [`Self::sign_in_context`].
-    async fn kept(
-        &self,
-        authorization_request: &str,
-        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
-    ) -> Result<(String, PendingAuthorization, OAuth2Client, OidcIssuer), Status> {
-        let refused = not_waiting;
-        let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
-        let handle = url
-            .path()
-            .strip_prefix("/i/")
-            .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
-            .ok_or_else(refused)?;
-        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-        let (Some(client_id), Some(request_uri)) =
-            (query.get("client_id"), query.get("request_uri"))
-        else {
-            return Err(refused());
-        };
-        let reference = request_uri
-            .strip_prefix(REQUEST_URI_PREFIX)
-            .ok_or_else(refused)?;
-        let kept = self
-            .continuations
-            .read(reference)
-            .await
-            .or_status()?
-            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle)
-            .ok_or_else(refused)?;
-        let (client, issuer) = self
-            .authorize_client(&kept.request(), addressed)
-            .await
-            .map_err(|_| refused())?;
-        // The request must be at the issuer's own canonical URL, not the same
-        // path on another host.
-        let at = format!("{}/oauth2/authorize", issuer.canonical_url);
-        if authorization_request.split('?').next() != Some(at.as_str()) {
-            return Err(refused());
-        }
-        Ok((reference.to_owned(), kept, client, issuer))
+        .ok_or_else(|| authorization_refusal(AuthorizationError::NotWaiting))
     }
 
     /// The request kept under `reference`, taken: a reference continues once.
@@ -468,6 +128,9 @@ impl AuthServiceImpl {
         &self,
         reference: &str,
     ) -> Result<Option<PendingAuthorization>, Status> {
-        self.continuations.take(reference).await.or_status()
+        self.authorizations
+            .take(reference)
+            .await
+            .map_err(authorization_refusal)
     }
 }
