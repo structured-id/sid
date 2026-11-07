@@ -428,6 +428,23 @@ pub async fn import(
         }
     }
 
+    // Profiles before the projects they own, a manager before the profiles
+    // it manages.
+    info!(count = snapshot.profiles.len(), "importing profiles...");
+    for profile in managers_first(&snapshot.profiles)? {
+        match backend
+            .create_profile(profile, audit("import_profile", &profile.id.to_string()))
+            .await
+        {
+            Ok(()) => result.profiles += 1,
+            // Imported before: a repeated import adds nothing. Another
+            // profile holding the user name is a real conflict.
+            Err(sid_core::Error::Conflict(_))
+                if backend.get_profile(profile.id).await?.is_some() => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
     info!(count = snapshot.projects.len(), "importing projects...");
     for project in &snapshot.projects {
         // Already in the store (the system project, or an earlier import): kept as stored.
@@ -442,21 +459,6 @@ pub async fn import(
     backend
         .ensure_system_project(audit("ensure_system_project", "system"))
         .await?;
-
-    info!(count = snapshot.profiles.len(), "importing profiles...");
-    for profile in &snapshot.profiles {
-        match backend
-            .create_profile(profile, audit("import_profile", &profile.id.to_string()))
-            .await
-        {
-            Ok(()) => result.profiles += 1,
-            // Imported before: a repeated import adds nothing. Another
-            // profile holding the user name is a real conflict.
-            Err(sid_core::Error::Conflict(_))
-                if backend.get_profile(profile.id).await?.is_some() => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
 
     // The write cutoffs precede the epochs they fence: from the first
     // imported key, no write goes under an epoch the source had withdrawn.
@@ -1104,6 +1106,36 @@ fn sources_first(
                 "role assignments {:?} depend on each other in a cycle",
                 pending.iter().map(|a| a.id.to_string()).collect::<Vec<_>>()
             )));
+        }
+    }
+    Ok(ordered)
+}
+
+/// `profiles` with every manager before the profiles it manages. A manager
+/// missing from the snapshot must already be stored, or the store refuses
+/// the profile; a management cycle is refused here.
+fn managers_first(
+    profiles: &[sid_core::models::Profile],
+) -> Result<Vec<&sid_core::models::Profile>> {
+    use std::collections::HashSet;
+    let listed: HashSet<_> = profiles.iter().map(|p| p.id).collect();
+    let mut placed = HashSet::with_capacity(profiles.len());
+    let mut ordered = Vec::with_capacity(profiles.len());
+    let mut pending: Vec<_> = profiles.iter().collect();
+    while !pending.is_empty() {
+        let before = pending.len();
+        pending.retain(|p| {
+            let waits = p
+                .manager_id
+                .is_some_and(|m| m != p.id && listed.contains(&m) && !placed.contains(&m));
+            if !waits {
+                placed.insert(p.id);
+                ordered.push(*p);
+            }
+            waits
+        });
+        if pending.len() == before {
+            return Err(invalid("profiles manage each other in a cycle"));
         }
     }
     Ok(ordered)

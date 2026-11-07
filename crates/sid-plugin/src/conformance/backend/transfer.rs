@@ -175,6 +175,23 @@ pub async fn test_quarantine_moves_as_stored(backend: &dyn StorageBackend) {
     );
 }
 
+/// A restored profile keeps the revision it was exported at: a copy read
+/// before the move still writes only at that revision.
+pub async fn test_profile_restores_at_its_revision(backend: &dyn StorageBackend) {
+    let mut profile = create_test_profile("revision_move");
+    profile.revision = 3;
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let stored = backend.get_profile(profile.id).await.unwrap().unwrap();
+    assert_eq!(stored.revision, 3);
+    let mut stale = stored.clone();
+    stale.revision = 2;
+    assert!(!backend.update_profile(&stale, test_audit()).await.unwrap());
+    assert!(backend.update_profile(&stored, test_audit()).await.unwrap());
+}
+
 /// A user handle is exported as stored and restores exactly, for its own
 /// Profile only.
 pub async fn test_user_handles_move_as_stored(backend: &dyn StorageBackend) {

@@ -20,8 +20,8 @@ fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
 macro_rules! profile_insert {
     ($tail:literal) => {
         concat!(
-            "INSERT INTO profiles (id, username, given_name, family_name, middle_name, honorific_prefix, honorific_suffix, profile_type, status, visibility, roles, max_assurance, manager_id, migration_pending, migration_started_at, migration_completed_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO profiles (id, username, given_name, family_name, middle_name, honorific_prefix, honorific_suffix, profile_type, status, visibility, roles, max_assurance, manager_id, migration_pending, migration_started_at, migration_completed_at, created_at, updated_at, revision)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             $tail
         )
     };
@@ -30,6 +30,7 @@ macro_rules! profile_insert {
 async fn write_profile(
     tx: &mut WriteTx,
     profile: &Profile,
+    revision: i64,
     sql: &'static str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(sql)
@@ -51,6 +52,9 @@ async fn write_profile(
         .bind(fmt_dt_opt(profile.migration_completed_at))
         .bind(fmt_dt(&profile.created_at))
         .bind(fmt_dt(&profile.updated_at))
+        // As given: a restored profile keeps the revision stale copies of it
+        // are checked against.
+        .bind(revision)
         .execute(&mut **tx)
         .await
         .map(|_| ())
@@ -58,7 +62,9 @@ async fn write_profile(
 
 /// Insert `profile`; an existing id or user name is `Conflict`.
 pub(super) async fn insert_profile(tx: &mut WriteTx, profile: &Profile) -> SidResult<()> {
-    write_profile(tx, profile, profile_insert!(""))
+    let revision = i64::try_from(profile.revision)
+        .map_err(|e| SidError::Validation(format!("profile revision: {e}")))?;
+    write_profile(tx, profile, revision, profile_insert!(""))
         .await
         .map_err(|e| insert_error("profile", e))
 }

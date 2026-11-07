@@ -306,6 +306,7 @@ macro_rules! __storage_conformance {
                 test_email_policy_activation_moves
                 test_quarantine_moves_as_stored
                 test_user_handles_move_as_stored
+                test_profile_restores_at_its_revision
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],upstream:
                 test_upstream_provider_write_contract
