@@ -97,11 +97,17 @@ pub struct Running {
     jobs: Vec<JoinHandle<()>>,
 }
 
+/// Proof that an engine's work stopped: its runner and maintenance ended
+/// and nothing they started is still in flight. What needs a quiesced
+/// engine, a snapshot export among it, takes this.
+#[derive(Debug)]
+pub struct Drained(());
+
 impl Running {
     /// Stop claiming work and starting job runs; attempts and runs in flight
     /// finish and record their outcome before this returns. Work still
     /// pending stays stored for the next start.
-    pub async fn drain(self) -> Result<(), EngineError> {
+    pub async fn drain(self) -> Result<Drained, EngineError> {
         // Stored even when every task already ended and dropped its receiver.
         self.stop.send_replace(true);
         let mut failure = None;
@@ -119,7 +125,7 @@ impl Running {
                 });
             }
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or(Ok(Drained(())), Err)
     }
 }
 

@@ -20,6 +20,8 @@ sid-core = { workspace = true }
 sid-crypto = { workspace = true }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
+# The snapshot format, import rules and archive; no backend is selected here.
+sid-storage = { workspace = true }
 # The management operations' requests and answers: the API's messages as
 # data, the same for every entry point.
 sid-proto = { workspace = true }

@@ -31,6 +31,7 @@ pub mod registration;
 pub mod second_factor;
 pub mod security;
 pub mod sign_in;
+pub mod snapshot;
 pub mod upstream;
 mod wire;
 
@@ -38,5 +39,5 @@ mod wire;
 mod test_support;
 
 pub use installation::{Installation, InstallationError, InstallationSettings, Management};
-pub use lifecycle::{Engine, EngineError, EngineParts, Running};
+pub use lifecycle::{Drained, Engine, EngineError, EngineParts, Running};
 pub use maintenance::{AuditRetention, CeMaintenance, Maintenance, RetentionAction};
