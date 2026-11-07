@@ -52,17 +52,17 @@ async fn ceremony(backend: &dyn StorageBackend) -> CeremonyConsumption {
     }
 }
 
-fn binding(device: &Device, key: &[u8]) -> DeviceAttestation {
+fn binding(device: &Device, key: &str) -> DeviceAttestation {
     DeviceAttestation::new_ce(
         device.id,
         device.profile_id,
         DeviceAttestationFormat::None,
         KeyStorageType::SecureEnclave,
-        key.to_vec(),
+        key.to_owned(),
     )
 }
 
-fn enrollment(owner: &Owner, target: EnrollmentTarget, key: &[u8]) -> DeviceEnrollment {
+fn enrollment(owner: &Owner, target: EnrollmentTarget, key: &str) -> DeviceEnrollment {
     let device = match &target {
         EnrollmentTarget::NewDevice(device) => device.clone(),
         _ => {
@@ -80,7 +80,7 @@ fn enrollment(owner: &Owner, target: EnrollmentTarget, key: &[u8]) -> DeviceEnro
 }
 
 /// An enrolled device of `owner` with key `key`.
-async fn enrolled(backend: &dyn StorageBackend, owner: &Owner, key: &[u8]) -> DeviceAttestation {
+async fn enrolled(backend: &dyn StorageBackend, owner: &Owner, key: &str) -> DeviceAttestation {
     let device = Device::new(owner.profile.id, DeviceType::Mobile);
     let e = enrollment(owner, EnrollmentTarget::NewDevice(device), key);
     backend
@@ -104,11 +104,7 @@ pub async fn test_a_new_device_is_enrolled_with_its_key(backend: &dyn StorageBac
     let owner = owner(backend).await;
     let device = Device::new(owner.profile.id, DeviceType::Mobile);
     let ceremony = ceremony(backend).await;
-    let e = enrollment(
-        &owner,
-        EnrollmentTarget::NewDevice(device.clone()),
-        b"key-1",
-    );
+    let e = enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key-1");
 
     backend
         .commit_device_enrollment(&e, test_audit().consuming(ceremony.clone()))
@@ -124,7 +120,7 @@ pub async fn test_a_new_device_is_enrolled_with_its_key(backend: &dyn StorageBac
         .unwrap()
         .unwrap();
     assert_eq!(key.id, e.attestation.id);
-    assert_eq!(key.device_public_key, b"key-1");
+    assert_eq!(key.public_jwk, "key-1");
     assert_eq!(key.status, AttestationStatus::Unverified);
     assert!(!pending(backend, &ceremony).await);
 }
@@ -141,7 +137,7 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
     };
     backend
         .commit_device_enrollment(
-            &enrollment(&owner, target(), b"key-1"),
+            &enrollment(&owner, target(), "key-1"),
             test_audit().consuming(ceremony(backend).await),
         )
         .await
@@ -151,7 +147,7 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
     let again = ceremony(backend).await;
     let refused = backend
         .commit_device_enrollment(
-            &enrollment(&owner, target(), b"key-2"),
+            &enrollment(&owner, target(), "key-2"),
             test_audit().consuming(again.clone()),
         )
         .await
@@ -162,7 +158,7 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(key.device_public_key, b"key-1");
+    assert_eq!(key.public_jwk, "key-1");
     assert!(
         pending(backend, &again).await,
         "a refused commit consumed its ceremony"
@@ -173,13 +169,13 @@ pub async fn test_an_existing_device_is_enrolled_only_as_found(backend: &dyn Sto
 /// meanwhile is never replaced or revived.
 pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn StorageBackend) {
     let owner = owner(backend).await;
-    let current = enrolled(backend, &owner, b"key-1").await;
+    let current = enrolled(backend, &owner, "key-1").await;
     let rotation = || EnrollmentTarget::Rotation {
         device: current.device_id,
         current: current.id,
-        current_key: b"key-1".to_vec(),
+        current_key: "key-1".into(),
     };
-    let rotated = enrollment(&owner, rotation(), b"key-2");
+    let rotated = enrollment(&owner, rotation(), "key-2");
     backend
         .commit_device_enrollment(&rotated, test_audit().consuming(ceremony(backend).await))
         .await
@@ -190,12 +186,12 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
         .unwrap()
         .unwrap();
     assert_eq!(key.id, rotated.attestation.id);
-    assert_eq!(key.device_public_key, b"key-2");
+    assert_eq!(key.public_jwk, "key-2");
 
     // The same rotation again found key-1: it is gone.
     let stale = backend
         .commit_device_enrollment(
-            &enrollment(&owner, rotation(), b"key-3"),
+            &enrollment(&owner, rotation(), "key-3"),
             test_audit().consuming(ceremony(backend).await),
         )
         .await
@@ -206,7 +202,7 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
     let revoked_target = EnrollmentTarget::Rotation {
         device: current.device_id,
         current: rotated.attestation.id,
-        current_key: b"key-2".to_vec(),
+        current_key: "key-2".into(),
     };
     backend
         .revoke_device_attestation(current.device_id, test_audit())
@@ -214,7 +210,7 @@ pub async fn test_a_rotation_replaces_only_the_binding_it_found(backend: &dyn St
         .unwrap();
     let revived = backend
         .commit_device_enrollment(
-            &enrollment(&owner, revoked_target, b"key-4"),
+            &enrollment(&owner, revoked_target, "key-4"),
             test_audit().consuming(ceremony(backend).await),
         )
         .await
@@ -236,7 +232,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
     backend: &dyn StorageBackend,
 ) {
     let owner = owner(backend).await;
-    let first = enrolled(backend, &owner, b"key-1").await;
+    let first = enrolled(backend, &owner, "key-1").await;
     backend
         .revoke_device_attestation(first.device_id, test_audit())
         .await
@@ -250,7 +246,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
                     device: first.device_id,
                     revoked: None,
                 },
-                b"key-2",
+                "key-2",
             ),
             test_audit().consuming(ceremony(backend).await),
         )
@@ -266,7 +262,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
                     device: first.device_id,
                     revoked: Some(first.id),
                 },
-                b"key-2",
+                "key-2",
             ),
             test_audit().consuming(ceremony(backend).await),
         )
@@ -277,7 +273,7 @@ pub async fn test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(key.device_public_key, b"key-2");
+    assert_eq!(key.public_jwk, "key-2");
 }
 
 /// A removed device, another Profile's device, an ended session or an owner
@@ -301,7 +297,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
                     device: removed.id,
                     revoked: None,
                 },
-                b"key",
+                "key",
             ),
             test_audit().consuming(ceremony(backend).await),
         )
@@ -320,7 +316,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
                     device: foreign.id,
                     revoked: None,
                 },
-                b"key",
+                "key",
             ),
             test_audit().consuming(ceremony(backend).await),
         )
@@ -335,7 +331,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
     let device = Device::new(owner.profile.id, DeviceType::Mobile);
     let err = backend
         .commit_device_enrollment(
-            &enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), b"key"),
+            &enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key"),
             test_audit().consuming(ceremony(backend).await),
         )
         .await
@@ -356,7 +352,7 @@ pub async fn test_an_enrollment_without_current_authority_commits_nothing(
             &enrollment(
                 &suspended,
                 EnrollmentTarget::NewDevice(device.clone()),
-                b"key",
+                "key",
             ),
             test_audit().consuming(ceremony(backend).await),
         )
@@ -377,8 +373,8 @@ pub async fn test_concurrent_finishes_bind_once(backend: &dyn StorageBackend) {
         revoked: None,
     };
     let (a, b) = (
-        enrollment(&owner, target(), b"key-a"),
-        enrollment(&owner, target(), b"key-b"),
+        enrollment(&owner, target(), "key-a"),
+        enrollment(&owner, target(), "key-b"),
     );
 
     let (first, second) = tokio::join!(
@@ -422,11 +418,7 @@ pub async fn test_a_retried_finish_is_answered_by_its_outcome(backend: &dyn Stor
             ))
             .consuming(ceremony.clone())
     };
-    let e = enrollment(
-        &owner,
-        EnrollmentTarget::NewDevice(device.clone()),
-        b"key-1",
-    );
+    let e = enrollment(&owner, EnrollmentTarget::NewDevice(device.clone()), "key-1");
     backend.commit_device_enrollment(&e, keyed()).await.unwrap();
 
     let retry = backend

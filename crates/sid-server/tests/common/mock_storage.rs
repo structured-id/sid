@@ -4796,23 +4796,6 @@ impl StorageBackend for MockStorage {
             "device enrollment is not supported by the mock store".into(),
         ))
     }
-    async fn create_device_attestation(
-        &self,
-        _att: &sid_core::models::DeviceAttestation,
-        _audit: MutationContext,
-    ) -> SidResult<()> {
-        Ok(())
-    }
-    async fn rotate_device_attestation(
-        &self,
-        _device_id: DeviceId,
-        _device_public_key: &[u8],
-        _attestation_object: Option<&[u8]>,
-        _attestation_certificate: Option<&[u8]>,
-        _audit: MutationContext,
-    ) -> SidResult<bool> {
-        Ok(false)
-    }
     async fn revoke_device_attestation(
         &self,
         _device_id: DeviceId,

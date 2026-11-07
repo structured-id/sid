@@ -218,8 +218,10 @@ pub struct DeviceAttestation {
     /// Verification status.
     pub status: AttestationStatus,
 
-    /// Device public key (DER-encoded).
-    pub device_public_key: Vec<u8>,
+    /// The device's public key as a JSON Web Key holding only its RFC 7638
+    /// required members, in their canonical form: what its possession proof
+    /// was signed with.
+    pub public_jwk: String,
 
     /// Raw attestation blob (platform-specific, opaque to CE).
     pub attestation_object: Option<Vec<u8>>,
@@ -229,9 +231,6 @@ pub struct DeviceAttestation {
 
     /// Authenticator Attestation GUID (WebAuthn AAGUID).
     pub aaguid: Option<String>,
-
-    /// Bound credential ID (links to WebAuthn/OPAQUE credential).
-    pub credential_id: Option<String>,
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -247,7 +246,7 @@ impl DeviceAttestation {
         profile_id: ProfileId,
         format: DeviceAttestationFormat,
         key_storage: KeyStorageType,
-        device_public_key: Vec<u8>,
+        public_jwk: String,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -257,24 +256,14 @@ impl DeviceAttestation {
             format,
             key_storage,
             status: AttestationStatus::Unverified,
-            device_public_key,
+            public_jwk,
             attestation_object: None,
             attestation_certificate: None,
             aaguid: None,
-            credential_id: None,
             created_at: now,
             updated_at: now,
             revoked_at: None,
         }
-    }
-
-    /// Rotate the device key. Resets status to Unverified.
-    pub fn rotate_key(&mut self, new_public_key: Vec<u8>) {
-        self.device_public_key = new_public_key;
-        self.attestation_object = None;
-        self.attestation_certificate = None;
-        self.status = AttestationStatus::Unverified;
-        self.updated_at = Utc::now();
     }
 
     /// Revoke this attestation (device removed or compromised).
@@ -319,11 +308,11 @@ pub enum EnrollmentTarget {
         revoked: Option<DeviceAttestationId>,
     },
     /// The owner's enrolled device whose live binding `current`, of key
-    /// `current_key`, is retired by the new one.
+    /// `current_key` (its public JWK), is retired by the new one.
     Rotation {
         device: DeviceId,
         current: DeviceAttestationId,
-        current_key: Vec<u8>,
+        current_key: String,
     },
 }
 

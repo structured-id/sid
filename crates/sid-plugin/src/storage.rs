@@ -1202,26 +1202,6 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// Store a device's attestation. It replaces only a revoked one (a new
-    /// enrollment after revocation); a device with a live attestation is
-    /// `Conflict`.
-    async fn create_device_attestation(
-        &self,
-        attestation: &DeviceAttestation,
-        ctx: MutationContext,
-    ) -> Result<()>;
-
-    /// Replace the key of a device's live attestation, leaving it unverified.
-    /// False when there is none: a revoked key is never replaced.
-    async fn rotate_device_attestation(
-        &self,
-        device_id: DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        ctx: MutationContext,
-    ) -> Result<bool>;
-
     /// Revoke a device's live attestation and, in the same transaction, stop
     /// counting the device as hardware-attested. False when there is none.
     async fn revoke_device_attestation(

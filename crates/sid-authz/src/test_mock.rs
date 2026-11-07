@@ -1637,23 +1637,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn create_device_attestation(
-        &self,
-        _: &sid_core::models::DeviceAttestation,
-        _: MutationContext,
-    ) -> Result<()> {
-        unimplemented!()
-    }
-    async fn rotate_device_attestation(
-        &self,
-        _: DeviceId,
-        _: &[u8],
-        _: Option<&[u8]>,
-        _: Option<&[u8]>,
-        _: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
     async fn revoke_device_attestation(&self, _: DeviceId, _: MutationContext) -> Result<bool> {
         unimplemented!()
     }

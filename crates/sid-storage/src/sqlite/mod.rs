@@ -2122,39 +2122,12 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
-    async fn create_device_attestation(
-        &self,
-        attestation: &sid_core::models::DeviceAttestation,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        self.create_device_attestation_impl(attestation, audit)
-            .await
-    }
-
     async fn commit_device_enrollment(
         &self,
         enrollment: &sid_core::models::DeviceEnrollment,
         ctx: MutationContext,
     ) -> SidResult<()> {
         self.commit_device_enrollment_impl(enrollment, ctx).await
-    }
-
-    async fn rotate_device_attestation(
-        &self,
-        device_id: sid_core::models::DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.rotate_device_attestation_impl(
-            device_id,
-            device_public_key,
-            attestation_object,
-            attestation_certificate,
-            audit,
-        )
-        .await
     }
 
     async fn revoke_device_attestation(

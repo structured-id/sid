@@ -16,8 +16,8 @@ use super::{
 /// The columns an attestation is read from.
 macro_rules! attestation_columns {
     () => {
-        "id, device_id, profile_id, format, key_storage, status, device_public_key, \
-         attestation_object, attestation_certificate, aaguid, credential_id, \
+        "id, device_id, profile_id, format, key_storage, status, public_jwk, \
+         attestation_object, attestation_certificate, aaguid, \
          created_at, updated_at, revoked_at"
     };
 }
@@ -43,19 +43,18 @@ async fn owned_device(tx: &mut WriteTx, id: DeviceId, owner: ProfileId) -> SidRe
 async fn binding(
     tx: &mut WriteTx,
     id: DeviceId,
-) -> SidResult<Option<(uuid::Uuid, String, Vec<u8>)>> {
-    let row = sqlx::query(
-        "SELECT id, status, device_public_key FROM device_attestations WHERE device_id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| SidError::Storage(format!("read device binding: {e}")))?;
+) -> SidResult<Option<(uuid::Uuid, String, String)>> {
+    let row =
+        sqlx::query("SELECT id, status, public_jwk FROM device_attestations WHERE device_id = ?")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read device binding: {e}")))?;
     row.map(|row| {
         Ok((
             uuid_col(&row, "id")?,
             col::<String>(&row, "status")?,
-            col::<Vec<u8>>(&row, "device_public_key")?,
+            col::<String>(&row, "public_jwk")?,
         ))
     })
     .transpose()
@@ -75,11 +74,10 @@ fn row_to_attestation(row: &sqlx::sqlite::SqliteRow) -> SidResult<DeviceAttestat
         status: col::<String>(row, "status")?
             .parse()
             .map_err(SidError::Storage)?,
-        device_public_key: col(row, "device_public_key")?,
+        public_jwk: col(row, "public_jwk")?,
         attestation_object: col(row, "attestation_object")?,
         attestation_certificate: col(row, "attestation_certificate")?,
         aaguid: col(row, "aaguid")?,
-        credential_id: col(row, "credential_id")?,
         created_at: dt_col(row, "created_at")?,
         updated_at: dt_col(row, "updated_at")?,
         revoked_at: dt_col_opt(row, "revoked_at")?,
@@ -138,6 +136,8 @@ impl SqliteBackend {
         }
 
         // The target as the ceremony found it.
+        let changed =
+            || SidError::Conflict("the device's key changed since the ceremony started".into());
         match &enrollment.target {
             EnrollmentTarget::NewDevice(device) => {
                 if device.profile_id != enrollment.profile_id {
@@ -175,9 +175,7 @@ impl SqliteBackend {
                     _ => false,
                 };
                 if !unchanged {
-                    return Err(SidError::Conflict(
-                        "the device's key changed since the ceremony started".into(),
-                    ));
+                    return Err(changed());
                 }
             }
             EnrollmentTarget::Rotation {
@@ -193,9 +191,7 @@ impl SqliteBackend {
                             id == current.0 && status != "revoked" && &key == current_key
                         });
                 if !unchanged {
-                    return Err(SidError::Conflict(
-                        "the device's key changed since the ceremony started".into(),
-                    ));
+                    return Err(changed());
                 }
             }
         }
@@ -205,14 +201,14 @@ impl SqliteBackend {
         sqlx::query(concat!(
             "INSERT INTO device_attestations (",
             attestation_columns!(),
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(device_id) DO UPDATE SET \
                 id = excluded.id, profile_id = excluded.profile_id, \
                 format = excluded.format, key_storage = excluded.key_storage, \
-                status = excluded.status, device_public_key = excluded.device_public_key, \
+                status = excluded.status, public_jwk = excluded.public_jwk, \
                 attestation_object = excluded.attestation_object, \
                 attestation_certificate = excluded.attestation_certificate, \
-                aaguid = excluded.aaguid, credential_id = excluded.credential_id, \
+                aaguid = excluded.aaguid, \
                 created_at = excluded.created_at, updated_at = excluded.updated_at, \
                 revoked_at = excluded.revoked_at"
         ))
@@ -222,11 +218,10 @@ impl SqliteBackend {
         .bind(att.format.as_str())
         .bind(att.key_storage.as_str())
         .bind(att.status.as_str())
-        .bind(&att.device_public_key)
+        .bind(&att.public_jwk)
         .bind(&att.attestation_object)
         .bind(&att.attestation_certificate)
         .bind(&att.aaguid)
-        .bind(&att.credential_id)
         .bind(fmt_dt(&att.created_at))
         .bind(fmt_dt(&att.updated_at))
         .bind(fmt_dt_opt(att.revoked_at))
@@ -240,88 +235,6 @@ impl SqliteBackend {
             .await
             .map_err(storage)?;
         Self::commit_mutation(tx, &format!("device_attestation:{device_id}"), ctx).await
-    }
-
-    pub(crate) async fn create_device_attestation_impl(
-        &self,
-        att: &DeviceAttestation,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        let mut tx = self.begin_write().await?;
-        // One attestation per device: a revoked one is replaced by the new
-        // enrollment; a live one makes the insert apply nothing.
-        let stored = sqlx::query(concat!(
-            "INSERT INTO device_attestations (",
-            attestation_columns!(),
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(device_id) DO UPDATE SET \
-                id = excluded.id, profile_id = excluded.profile_id, \
-                format = excluded.format, key_storage = excluded.key_storage, \
-                status = excluded.status, device_public_key = excluded.device_public_key, \
-                attestation_object = excluded.attestation_object, \
-                attestation_certificate = excluded.attestation_certificate, \
-                aaguid = excluded.aaguid, credential_id = excluded.credential_id, \
-                created_at = excluded.created_at, updated_at = excluded.updated_at, \
-                revoked_at = excluded.revoked_at \
-             WHERE device_attestations.status = 'revoked'"
-        ))
-        .bind(att.id.0)
-        .bind(att.device_id)
-        .bind(att.profile_id)
-        .bind(att.format.as_str())
-        .bind(att.key_storage.as_str())
-        .bind(att.status.as_str())
-        .bind(&att.device_public_key)
-        .bind(&att.attestation_object)
-        .bind(&att.attestation_certificate)
-        .bind(&att.aaguid)
-        .bind(&att.credential_id)
-        .bind(fmt_dt(&att.created_at))
-        .bind(fmt_dt(&att.updated_at))
-        .bind(fmt_dt_opt(att.revoked_at))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("device attestation", e))?
-        .rows_affected()
-            == 1;
-        if !stored {
-            return Err(SidError::Conflict(
-                "device already has a live attestation".into(),
-            ));
-        }
-        Self::commit_mutation(tx, &format!("device_attestation:{}", att.device_id), audit).await
-    }
-
-    pub(crate) async fn rotate_device_attestation_impl(
-        &self,
-        device_id: DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut tx = self.begin_write().await?;
-        let rotated = sqlx::query(
-            "UPDATE device_attestations SET device_public_key = ?, attestation_object = ?,
-                attestation_certificate = ?, status = ?, updated_at = ?
-             WHERE device_id = ? AND status != 'revoked'",
-        )
-        .bind(device_public_key)
-        .bind(attestation_object)
-        .bind(attestation_certificate)
-        .bind(AttestationStatus::Unverified.as_str())
-        .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("rotate device attestation: {e}")))?
-        .rows_affected()
-            == 1;
-        if !rotated {
-            return Ok(false);
-        }
-        Self::commit_mutation(tx, &format!("device_attestation:{device_id}"), audit).await?;
-        Ok(true)
     }
 
     pub(crate) async fn revoke_device_attestation_impl(
