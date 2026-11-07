@@ -409,6 +409,32 @@ async fn owed_work(storage: &dyn StorageBackend) -> Result<usize, Failure> {
         .count())
 }
 
+/// The installation's CE work (every kind but the host's own), each with
+/// the state it ended in; refused when any piece ended otherwise than
+/// completed. The kinds of the completed pieces.
+async fn ce_work_completed(
+    storage: &dyn StorageBackend,
+) -> Result<std::collections::BTreeSet<String>, Failure> {
+    let mut completed = std::collections::BTreeSet::new();
+    for work in storage.export_work().await? {
+        if work.record.kind.as_str() == WORK_KIND {
+            continue;
+        }
+        if work.record.state != WorkState::Completed {
+            return Err(format!(
+                "CE work {} ({}) ended {:?}: {:?}",
+                work.record.id,
+                work.record.kind.as_str(),
+                work.record.state,
+                work.record.last_error
+            )
+            .into());
+        }
+        completed.insert(work.record.kind.as_str().to_owned());
+    }
+    Ok(completed)
+}
+
 async fn work_state(storage: &dyn StorageBackend, work: &NewWork) -> Result<WorkState, Failure> {
     Ok(storage
         .get_work(work.id)
@@ -619,8 +645,15 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     })
     .await
     .map_err(|_| "the CE handlers settle the CE work")?;
-    println!("verified: the CE handlers settle the CE work the installation owes");
     running.drain().await?;
+    let completed = ce_work_completed(storage.as_ref()).await?;
+    check(
+        completed.contains(sid_core::models::event::EVENT_RELAY_KIND)
+            && completed.contains(sid_core::models::SESSION_REVOCATION_KIND),
+        &format!(
+            "the CE handlers complete every piece of CE work the installation owes: {completed:?}"
+        ),
+    )?;
     check(
         work_state(storage.as_ref(), &work).await? == WorkState::Pending,
         "a drain keeps pending work",
@@ -694,6 +727,8 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         owed_work(target_storage.as_ref()).await? == 0,
         "the restored installation owes no work",
     )?;
+    ce_work_completed(target_storage.as_ref()).await?;
+    println!("verified: every piece of CE work of the restored installation completed");
     let administrator = restored.administrator(PASSWORD).await?;
     let again = restored
         .authorization
