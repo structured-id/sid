@@ -6,6 +6,7 @@
 //! parts.
 
 pub mod authorization;
+pub mod enrollment;
 pub mod identity;
 pub mod installation;
 pub mod lifecycle;

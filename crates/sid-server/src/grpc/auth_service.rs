@@ -1998,7 +1998,7 @@ impl AuthServiceImpl {
         // tracking setting.
         let track_source = match instance_claim {
             Some(_) => {
-                crate::enrollment::stored_or_default(self.storage.as_ref())
+                sid::enrollment::stored_or_default(self.storage.as_ref())
                     .await
                     .map_err(storage_failure)?
                     .track_source
@@ -2170,7 +2170,7 @@ impl AuthServiceImpl {
         if !self.feature_flags.is_registration_enabled().await {
             return Err(not_configured("registration"));
         }
-        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+        let policy = sid::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
             .await
             .map_err(storage_failure)?;
         let email = matches!(principal_type, PrincipalType::Email).then_some(value);
@@ -3137,7 +3137,7 @@ impl AuthServiceImpl {
         if !self.feature_flags.is_registration_enabled().await {
             return Err(not_configured("registration"));
         }
-        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+        let policy = sid::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
             .await
             .map_err(storage_failure)?;
         let email = claims
