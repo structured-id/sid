@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
-use sid_authn::otp::{CodeDelivery, CodeDestination};
-use sid_plugin::notification::{ChannelHealth, DeliveryReceipt, RenderedMessage};
-use sid_plugin::{StorageBackend, WorkStore};
+use chrono::Utc;
+use secrecy::SecretString;
+use sid_plugin::notification::{ChannelHealth, DeliveryError, DeliveryReceipt, RenderedMessage};
 
-/// Records every mail instead of sending it.
+/// Records every mail instead of sending it, or refuses each.
 #[derive(Default)]
 struct Recorded {
+    refuse: Option<&'static str>,
     sent: std::sync::Mutex<Vec<(String, RenderedMessage)>>,
 }
 
@@ -21,6 +22,9 @@ impl NotificationChannel for Recorded {
         recipient: &Recipient,
         message: &RenderedMessage,
     ) -> Result<DeliveryReceipt, DeliveryError> {
+        if let Some(reason) = self.refuse {
+            return Err(DeliveryError::Rejected(reason.into()));
+        }
         self.sent
             .lock()
             .unwrap()
@@ -34,7 +38,7 @@ impl NotificationChannel for Recorded {
     }
 
     async fn health(&self) -> Result<ChannelHealth, DeliveryError> {
-        unreachable!("the mail handler never probes its channel")
+        unreachable!("the mail delivery never probes its channel")
     }
 }
 
@@ -51,372 +55,56 @@ impl MailTransport for Transport {
     }
 }
 
-fn keys() -> Arc<dyn sid_keys::KeyManager> {
-    Arc::new(
-        sid_keys::SoftwareKeyManager::new(
-            secrecy::SecretBox::new(Box::new([0x5Au8; 32])),
-            vec![sid_keys::KeyVersionParams::new(1, vec![0x01; 32], "key-v1")],
-            Arc::new(sid_crypto::RustCryptoPrimitives::new()),
-        )
-        .unwrap(),
-    )
+fn mail(message: AuthMessage, secret: &str) -> OwedMail {
+    OwedMail {
+        message,
+        destination: "Key@sid.example.com".into(),
+        secret: SecretString::from(secret.to_owned()),
+        expires_minutes: 10,
+    }
 }
 
-/// Codes over one in-memory installation, and the store holding their work.
-async fn codes() -> (Arc<OtpService>, Arc<sid_storage::sqlite::SqliteBackend>) {
-    let store = Arc::new(
-        sid_storage::sqlite::SqliteBackend::new_in_memory()
-            .await
-            .unwrap(),
-    );
-    let codes = Arc::new(OtpService::new(
-        store.clone(),
-        CodeDelivery {
-            keys: keys(),
-            work: store.clone(),
-            capacity: 100,
-        },
-    ));
-    (codes, store)
-}
-
-/// The code mails `store` owes now, claimed.
-async fn owed(store: &sid_storage::sqlite::SqliteBackend) -> Vec<ClaimedWork> {
-    store
-        .claim_work(
-            &[WorkKind::new(OTP_EMAIL_KIND).unwrap()],
-            "test",
-            10,
-            std::time::Duration::from_secs(60),
-        )
-        .await
-        .unwrap()
-}
-
-/// The code mail goes to the mailbox bound at the request with the code,
-/// the same on every attempt.
+/// Each authentication message renders its secret into the mail sent to
+/// the bound mailbox: the code also into its subject, a link into its body.
 #[tokio::test]
-async fn code_mail_sends_the_bound_code() {
-    let (codes, store) = codes().await;
-    let (_, code) = codes
-        .request_otp(
-            "key@sid.example.com",
-            CodeDestination::Email("Key@sid.example.com"),
-        )
-        .await
-        .unwrap();
-    let work = owed(&store).await.remove(0);
+async fn each_message_renders_its_secret() {
     let recorded = Arc::new(Recorded::default());
-    let mail = CodeMail::new(codes, Arc::new(Transport(Some(recorded.clone()))));
-
-    for _ in 0..2 {
-        let outcome = mail.handle(&work).await;
-        assert!(matches!(outcome, WorkOutcome::Done(Some(_))), "{outcome:?}");
+    let delivery = TemplatedMail::new(Arc::new(Transport(Some(recorded.clone()))));
+    let link = "https://id.sid.example.com/account/verify?session=s&token=t";
+    for (message, secret) in [
+        (AuthMessage::SignInCode, "123456"),
+        (AuthMessage::MagicLink, link),
+        (AuthMessage::PasswordReset, link),
+    ] {
+        delivery.deliver(&mail(message, secret)).await.unwrap();
     }
 
     let sent = recorded.sent.lock().unwrap();
-    assert_eq!(sent.len(), 2);
-    for (to, message) in sent.iter() {
-        assert_eq!(to, "Key@sid.example.com");
-        assert!(message.body.contains(&code), "{}", message.body);
-        assert!(message.subject.as_deref().unwrap().contains(&code));
-    }
-}
-
-/// The mail of a replaced code sends nothing; the replacement's own mail
-/// sends the new code.
-#[tokio::test]
-async fn replaced_code_mail_sends_nothing() {
-    let (codes, store) = codes().await;
-    let (pending, _) = codes
-        .request_otp(
-            "r@sid.example.com",
-            CodeDestination::Email("r@sid.example.com"),
-        )
-        .await
-        .unwrap();
-    let first = owed(&store).await.remove(0);
-    let (_, resent) = codes
-        .resend_otp(&pending.session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let second = owed(&store).await.remove(0);
-    let recorded = Arc::new(Recorded::default());
-    let mail = CodeMail::new(codes, Arc::new(Transport(Some(recorded.clone()))));
-
-    assert!(matches!(mail.handle(&first).await, WorkOutcome::Done(_)));
-    assert!(recorded.sent.lock().unwrap().is_empty());
-    assert!(matches!(
-        mail.handle(&second).await,
-        WorkOutcome::Done(Some(_))
-    ));
-    assert!(recorded.sent.lock().unwrap()[0].1.body.contains(&resent));
-}
-
-/// Without a usable email provider the code's mail is tried again.
-#[tokio::test]
-async fn code_mail_waits_for_a_provider() {
-    let (codes, store) = codes().await;
-    codes
-        .request_otp(
-            "w@sid.example.com",
-            CodeDestination::Email("w@sid.example.com"),
-        )
-        .await
-        .unwrap();
-    let work = owed(&store).await.remove(0);
-    let mail = CodeMail::new(codes, Arc::new(Transport(None)));
-
-    assert!(matches!(mail.handle(&work).await, WorkOutcome::Retry(_)));
-}
-
-/// Ended mail records go after their retention; open mails and recent
-/// records stay, and other kinds of work are untouched.
-#[tokio::test]
-async fn ended_mail_records_are_dropped_after_retention() {
-    let (codes, store) = codes().await;
-    codes
-        .request_otp(
-            "p@sid.example.com",
-            CodeDestination::Email("p@sid.example.com"),
-        )
-        .await
-        .unwrap();
-    let ended = owed(&store).await.remove(0);
-    store
-        .complete_work(ended.id, ended.generation, None)
-        .await
-        .unwrap();
-    codes
-        .request_otp(
-            "q@sid.example.com",
-            CodeDestination::Email("q@sid.example.com"),
-        )
-        .await
-        .unwrap();
-    let other = NewWork::new(WorkKind::new("test.other").unwrap(), vec![]);
-    store.enqueue_work(&other, 10).await.unwrap();
-
-    assert_eq!(
-        purge_ended_mail(store.as_ref(), Utc::now()).await.unwrap(),
-        0
-    );
-    let later = Utc::now() + MAIL_RECORD_RETENTION + chrono::Duration::minutes(1);
-    assert_eq!(purge_ended_mail(store.as_ref(), later).await.unwrap(), 1);
-
-    assert!(store.get_work(ended.id).await.unwrap().is_none());
-    assert_eq!(owed(&store).await.len(), 1, "an open mail was dropped");
-    assert!(store.get_work(other.id).await.unwrap().is_some());
-}
-
-/// Work that does not name a code fails for good.
-#[tokio::test]
-async fn code_mail_refuses_malformed_work() {
-    let (codes, _) = codes().await;
-    let mail = CodeMail::new(codes, Arc::new(Transport(None)));
-    let work = ClaimedWork {
-        id: sid_core::models::WorkId::new(),
-        kind: WorkKind::new(OTP_EMAIL_KIND).unwrap(),
-        payload: vec![1, 2, 3],
-        attempt: 1,
-        max_attempts: 8,
-        generation: 1,
-        expires_at: None,
-    };
-
-    assert!(matches!(
-        mail.handle(&work).await,
-        WorkOutcome::Permanent(_)
-    ));
-}
-
-/// Resets over one in-memory installation with an account to reset, and
-/// the store holding their work.
-async fn resets() -> (
-    Arc<PasswordResetService>,
-    Arc<sid_storage::sqlite::SqliteBackend>,
-    sid_core::models::ProfileId,
-) {
-    let store = Arc::new(
-        sid_storage::sqlite::SqliteBackend::new_in_memory()
-            .await
-            .unwrap(),
-    );
-    let profile = sid_core::models::Profile::new(Some("reset"));
-    store
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("test", "profile").into(),
-        )
-        .await
-        .unwrap();
-    let resets = Arc::new(PasswordResetService::new(store.clone(), keys()));
-    (resets, store, profile.id)
-}
-
-/// The reset mails `store` owes now, claimed.
-async fn owed_resets(store: &sid_storage::sqlite::SqliteBackend) -> Vec<ClaimedWork> {
-    store
-        .claim_work(
-            &[WorkKind::new(PASSWORD_RESET_EMAIL_KIND).unwrap()],
-            "test",
-            10,
-            std::time::Duration::from_secs(60),
-        )
-        .await
-        .unwrap()
-}
-
-fn reset_page() -> url::Url {
-    url::Url::parse("https://id.sid.example.com/account/reset/new").unwrap()
-}
-
-/// The token a mailed reset link carries.
-fn link_token(body: &str) -> String {
-    let start = body.find("https://").unwrap();
-    let end = body[start..]
-        .find(|c: char| c.is_whitespace() || c == '"')
-        .map_or(body.len(), |n| start + n);
-    let link = url::Url::parse(&body[start..end]).unwrap();
-    assert_eq!(link.path(), "/account/reset/new");
-    link.query_pairs()
-        .find(|(k, _)| k == "token")
-        .unwrap()
-        .1
-        .into_owned()
-}
-
-/// A requested reset owes one mail whose work names only its session; the
-/// mail goes to the mailbox bound at the request with a link that verifies
-/// against the stored hash, the same link on every attempt.
-#[tokio::test]
-async fn reset_mail_sends_the_bound_link() {
-    let (resets, store, profile) = resets().await;
-    let session = resets
-        .request(profile, "key@sid.example.com", "Key@sid.example.com")
-        .await
-        .unwrap();
-    let work = owed_resets(&store).await.remove(0);
-    assert_eq!(work.payload, session.0.as_bytes().to_vec());
-    let recorded = Arc::new(Recorded::default());
-    let mail = ResetMail::new(
-        resets,
-        reset_page(),
-        Arc::new(Transport(Some(recorded.clone()))),
-    );
-
-    for _ in 0..2 {
-        let outcome = mail.handle(&work).await;
-        assert!(matches!(outcome, WorkOutcome::Done(Some(_))), "{outcome:?}");
-    }
-
-    let stored = store.get_reset_session(session).await.unwrap().unwrap();
-    let sent = recorded.sent.lock().unwrap();
-    assert_eq!(sent.len(), 2);
-    let tokens: Vec<String> = sent.iter().map(|(_, m)| link_token(&m.body)).collect();
+    assert_eq!(sent.len(), 3);
     for (to, _) in sent.iter() {
         assert_eq!(to, "Key@sid.example.com");
     }
-    assert_eq!(tokens[0], tokens[1], "a retry sent another link");
-    assert_eq!(
-        sid_authn::password_reset::token_hash(&tokens[0]),
-        stored.token_hash
-    );
+    assert!(sent[0].1.body.contains("123456"), "{}", sent[0].1.body);
+    assert!(sent[0].1.subject.as_deref().unwrap().contains("123456"));
+    assert!(sent[1].1.body.contains(link), "{}", sent[1].1.body);
+    assert!(sent[2].1.body.contains(link), "{}", sent[2].1.body);
 }
 
-/// A verified reset's mail sends nothing: the link was already used.
+/// Without a usable email provider the mail is unavailable, not failed; a
+/// provider's refusal is passed on for the engine to settle.
 #[tokio::test]
-async fn verified_reset_mail_sends_nothing() {
-    let (resets, store, profile) = resets().await;
-    let session = resets
-        .request(profile, "v@sid.example.com", "v@sid.example.com")
-        .await
-        .unwrap();
-    let work = owed_resets(&store).await.remove(0);
-    assert!(
-        store
-            .verify_reset_session(
-                session,
-                sid_core::models::AuditEntry::system("test", "verify").into()
-            )
-            .await
-            .unwrap()
-    );
-    let recorded = Arc::new(Recorded::default());
-    let mail = ResetMail::new(
-        resets,
-        reset_page(),
-        Arc::new(Transport(Some(recorded.clone()))),
-    );
-
-    assert!(matches!(mail.handle(&work).await, WorkOutcome::Done(_)));
-    assert!(recorded.sent.lock().unwrap().is_empty());
-}
-
-/// An expired reset's link is never mailed.
-#[tokio::test]
-async fn expired_reset_is_not_delivered() {
-    let (resets, store, profile) = resets().await;
-    let session = resets
-        .request(profile, "e@sid.example.com", "e@sid.example.com")
-        .await
-        .unwrap();
-    let expires_at = store
-        .get_reset_session(session)
-        .await
-        .unwrap()
-        .unwrap()
-        .expires_at;
-
-    assert!(
-        resets
-            .pending_delivery(session, expires_at)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        resets
-            .pending_delivery(session, expires_at - chrono::Duration::seconds(1))
-            .await
-            .unwrap()
-            .is_some()
-    );
-}
-
-/// The link names its session and carries the token as query parameters of
-/// the configured page, keeping the page's own path.
-#[test]
-fn link_carries_session_and_token_on_the_page() {
-    let page = url::Url::parse("https://id.sid.example.com/account/verify").unwrap();
-    let id = uuid::Uuid::now_v7();
-    let link = link(&page, id, "t+/=");
-
-    assert_eq!(link.path(), "/account/verify");
-    let query: std::collections::HashMap<_, _> = link.query_pairs().into_owned().collect();
-    assert_eq!(query["session"], id.to_string());
-    assert_eq!(query["token"], "t+/=");
-}
-
-/// A refusal is final, an unknown result is ambiguous, a transport failure
-/// is tried again.
-#[test]
-fn delivery_errors_map_to_their_outcomes() {
+async fn provider_answers_are_passed_on() {
+    let waiting = TemplatedMail::new(Arc::new(Transport(None)));
     assert!(matches!(
-        outcome_of(DeliveryError::Rejected("550".into())),
-        WorkOutcome::Permanent(_)
+        waiting.deliver(&mail(AuthMessage::SignInCode, "1")).await,
+        Err(MailError::Unavailable(_))
     ));
+    let refusing = TemplatedMail::new(Arc::new(Transport(Some(Arc::new(Recorded {
+        refuse: Some("550"),
+        ..Recorded::default()
+    })))));
     assert!(matches!(
-        outcome_of(DeliveryError::InvalidRecipient("x".into())),
-        WorkOutcome::Permanent(_)
-    ));
-    assert!(matches!(
-        outcome_of(DeliveryError::Ambiguous("timeout".into())),
-        WorkOutcome::Ambiguous(_)
-    ));
-    assert!(matches!(
-        outcome_of(DeliveryError::Failed("refused".into())),
-        WorkOutcome::Retry(_)
+        refusing.deliver(&mail(AuthMessage::SignInCode, "1")).await,
+        Err(MailError::Delivery(DeliveryError::Rejected(_)))
     ));
 }

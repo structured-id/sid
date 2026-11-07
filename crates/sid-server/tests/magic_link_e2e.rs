@@ -313,12 +313,18 @@ async fn test_magic_link_token_uniqueness() {
 
 // ── Delivery of the link ────────────────────────────────────────────────────
 
+use sid::auth_mail::{AuthMailDelivery, MagicLinkMail};
 use sid_authn::work_runner::{WorkHandler, WorkOutcome};
 use sid_core::models::{ClaimedWork, MAGIC_LINK_EMAIL_KIND, WorkKind};
 use sid_plugin::notification::{
     ChannelHealth, DeliveryError, DeliveryReceipt, NotificationChannel, Recipient, RenderedMessage,
 };
-use sid_server::auth_mail::{MagicLinkMail, MailTransport};
+use sid_server::auth_mail::{MailTransport, TemplatedMail};
+
+/// The server's templated mail over `transport`.
+fn templated(transport: Transport) -> Arc<dyn AuthMailDelivery> {
+    Arc::new(TemplatedMail::new(Arc::new(transport)))
+}
 
 /// The account UI page links open in these tests.
 fn page() -> url::Url {
@@ -460,7 +466,7 @@ async fn test_link_mail_sends_the_same_link_on_every_attempt() {
     let mail = MagicLinkMail::new(
         service.clone(),
         page(),
-        Arc::new(Transport(Some(recorded.clone()))),
+        templated(Transport(Some(recorded.clone()))),
     );
 
     for _ in 0..2 {
@@ -503,7 +509,7 @@ async fn test_link_mail_sends_nothing_once_consumed() {
     let mail = MagicLinkMail::new(
         service.clone(),
         page(),
-        Arc::new(Transport(Some(recorded.clone()))),
+        templated(Transport(Some(recorded.clone()))),
     );
 
     let outcome = mail.handle(&delivery_of(result.session_id)).await;
@@ -539,7 +545,11 @@ async fn test_link_mail_sends_nothing_once_expired() {
         .await
         .unwrap();
     let recorded = Arc::new(Recorded::default());
-    let mail = MagicLinkMail::new(service, page(), Arc::new(Transport(Some(recorded.clone()))));
+    let mail = MagicLinkMail::new(
+        service,
+        page(),
+        templated(Transport(Some(recorded.clone()))),
+    );
 
     let outcome = mail.handle(&delivery_of(expired.id)).await;
 
@@ -557,7 +567,7 @@ async fn test_link_mail_waits_for_a_provider() {
         .request_own(&unique_email("liam-ml-provider"))
         .await
         .unwrap();
-    let mail = MagicLinkMail::new(service.clone(), page(), Arc::new(Transport(None)));
+    let mail = MagicLinkMail::new(service.clone(), page(), templated(Transport(None)));
 
     let outcome = mail.handle(&delivery_of(result.session_id)).await;
 
@@ -592,7 +602,11 @@ async fn test_link_mail_refuses_a_token_sealed_to_another_session() {
         .await
         .unwrap();
     let recorded = Arc::new(Recorded::default());
-    let mail = MagicLinkMail::new(service, page(), Arc::new(Transport(Some(recorded.clone()))));
+    let mail = MagicLinkMail::new(
+        service,
+        page(),
+        templated(Transport(Some(recorded.clone()))),
+    );
 
     let outcome = mail.handle(&delivery_of(session.id)).await;
 

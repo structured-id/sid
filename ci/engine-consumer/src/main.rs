@@ -10,13 +10,15 @@ use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
 use sid::admin::Admin;
+use sid::auth_mail::{AuthMailDelivery, MailError, OwedMail};
 use sid::authorization::{Authorization, InstallationAdministrator};
 use sid::lifecycle::{Drained, Engine, EngineParts};
 use sid::registration::{PendingRegistration, Registration};
 use sid::sign_in::completions::Completer;
 use sid::sign_in::{AttemptContext, SignIn, SignInParts};
 use sid::snapshot::{ArchiveKey, Store};
-use sid::{Installation, InstallationSettings, Maintenance};
+use sid::work::{CeMail, CeWork, CeWorkParts};
+use sid::{Installation, InstallationSettings};
 use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::opaque::OpaqueRouter;
@@ -321,9 +323,70 @@ impl WorkHandler for Probe {
     }
 }
 
-fn engine(storage: &Arc<dyn StorageBackend>, handlers: Vec<Arc<dyn WorkHandler>>) -> Engine {
-    Engine::new(EngineParts {
+/// The host's mail: it records what the engine owes instead of sending it.
+#[derive(Default)]
+struct HostMail {
+    sent: std::sync::Mutex<Vec<(sid::auth_mail::AuthMessage, String)>>,
+}
+
+#[async_trait::async_trait]
+impl AuthMailDelivery for HostMail {
+    async fn deliver(&self, mail: &OwedMail) -> Result<String, MailError> {
+        self.sent
+            .lock()
+            .expect("the mail record")
+            .push((mail.message, mail.destination.clone()));
+        Ok(uuid::Uuid::now_v7().to_string())
+    }
+}
+
+/// The installation's engine: the CE work it owes, assembled by the
+/// engine library, and the host's own `extra` handlers.
+fn engine(installation: &Installation, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
+    let storage = installation.storage.clone();
+    let mail: Arc<dyn AuthMailDelivery> = Arc::new(HostMail::default());
+    let codes = Arc::new(sid_authn::otp::OtpService::new(
+        storage.clone(),
+        sid_authn::otp::CodeDelivery {
+            keys: installation.key_manager.clone(),
+            work: storage.clone(),
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
+        },
+    ));
+    let cascade = Arc::new(
+        sid_authn::revocation_cascade::RevocationCascadeService::new(
+            storage.clone(),
+            installation.revocation_cache.clone(),
+        ),
+    );
+    let CeWork {
+        mut handlers,
+        maintenance,
+    } = CeWork::assemble(CeWorkParts {
         storage: storage.clone(),
+        issuers: installation.issuers.clone(),
+        revocation: installation.revocation_cache.clone(),
+        event_bus: Arc::new(sid_plugin::event_bus::InProcessEventBus::new()),
+        required_receivers: Vec::new(),
+        history_evaluation: None,
+        issuer: ISSUER.to_owned(),
+        closures: Arc::new(sid_authn::account_closure::AccountClosureService::new(
+            storage.clone(),
+            cascade,
+        )),
+        mail: CeMail {
+            codes: Arc::new(sid::auth_mail::CodeMail::new(codes, mail)),
+            magic_links: None,
+            resets: None,
+        },
+        audit_retention: sid::AuditRetention::default(),
+        migration_deadline_days: sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
+        source: "engine-package-consumer".into(),
+    })
+    .expect("the CE work assembles");
+    handlers.extend(extra);
+    Engine::new(EngineParts {
+        storage,
         worker: format!("host-{}", uuid::Uuid::now_v7()),
         handlers,
         runner: RunnerConfig {
@@ -331,9 +394,19 @@ fn engine(storage: &Arc<dyn StorageBackend>, handlers: Vec<Arc<dyn WorkHandler>>
             lease: Duration::from_secs(30),
             scan_interval: Duration::from_millis(10),
         },
-        maintenance: Maintenance::default(),
+        maintenance,
     })
     .expect("the engine takes its handlers")
+}
+
+/// Whether any work of the installation is still owed (pending or claimed).
+async fn owed_work(storage: &dyn StorageBackend) -> Result<usize, Failure> {
+    Ok(storage
+        .export_work()
+        .await?
+        .iter()
+        .filter(|w| matches!(w.record.state, WorkState::Pending | WorkState::Claimed))
+        .count())
 }
 
 async fn work_state(storage: &dyn StorageBackend, work: &NewWork) -> Result<WorkState, Failure> {
@@ -420,10 +493,13 @@ impl HostStore for CoordinodeHost {
 
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
-    // The host's selection: pure-Rust primitives and JWT provider.
+    // The host's selection: pure-Rust primitives, JWT and TLS providers.
     sid_crypto::jwt::rustcrypto::provider()
         .install_default()
         .map_err(|_| "a JWT provider was installed before the host's")?;
+    sid_crypto::tls::rustcrypto::provider()
+        .install_default()
+        .map_err(|_| "a TLS provider was installed before the host's")?;
     match std::env::args().nth(1).as_deref() {
         #[cfg(feature = "sqlite")]
         Some("sqlite") => run::<SqliteHost>().await,
@@ -524,11 +600,27 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "a revoked session's token is refused",
     )?;
 
-    // Durable work committed while no handler runs: a drain keeps it.
+    // The CE work the installation committed so far (event relays of the
+    // registrations, the guest's session revocation) is settled by the CE
+    // handlers the engine assembles; the host's own work, which no handler
+    // of this run takes, stays pending through the drain.
     let kind = WorkKind::new(WORK_KIND)?;
     let work = NewWork::new(kind.clone(), vec![]);
     storage.enqueue_work(&work, 100).await?;
-    engine(&storage, vec![]).start().drain().await?;
+    check(
+        owed_work(storage.as_ref()).await? > 1,
+        "the installation owes CE work besides the host's",
+    )?;
+    let running = engine(&served.installation, vec![]).start();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while owed_work(storage.as_ref()).await.ok() != Some(1) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the CE handlers settle the CE work")?;
+    println!("verified: the CE handlers settle the CE work the installation owes");
+    running.drain().await?;
     check(
         work_state(storage.as_ref(), &work).await? == WorkState::Pending,
         "a drain keeps pending work",
@@ -554,7 +646,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         work_state(source.backend().as_ref(), &work).await? == WorkState::Pending,
         "pending work survives the restart",
     )?;
-    let drained: Drained = engine(&source.backend(), vec![]).start().drain().await?;
+    let drained: Drained = engine(&reopened, vec![]).start().drain().await?;
 
     // Snapshot: exported from the drained engine, imported into an
     // uninitialized store without serving, verified and opened as the same
@@ -588,7 +680,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // starts, its administrator signs in with the same password, and a keyed
     // command repeated there answers with what the source recorded.
     let target_storage = target.backend();
-    let running = engine(&target_storage, vec![Arc::new(Probe(kind))]).start();
+    let running = engine(&restored.installation, vec![Arc::new(Probe(kind))]).start();
     tokio::time::timeout(Duration::from_secs(10), async {
         while work_state(target_storage.as_ref(), &work).await.ok() != Some(WorkState::Completed) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -598,6 +690,10 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     .map_err(|_| "the restored engine completes the work the source left pending")?;
     println!("verified: the restored engine completes the work the source left pending");
     running.drain().await?;
+    check(
+        owed_work(target_storage.as_ref()).await? == 0,
+        "the restored installation owes no work",
+    )?;
     let administrator = restored.administrator(PASSWORD).await?;
     let again = restored
         .authorization

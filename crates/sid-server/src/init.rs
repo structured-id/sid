@@ -9,9 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use sid_authn::account_closure::AccountClosureService;
-use sid_authn::backchannel_logout::BackChannelLogoutHandler;
 use sid_authn::data_export::DataExportService;
-use sid_authn::event_relay::EventRelayHandler;
 use sid_authn::geoip::build_geoip_chain_from_env;
 use sid_authn::ip_intelligence::{
     AllowlistProvider, CloudRangeProvider, FireholProvider, IpIntelligenceAggregator,
@@ -25,7 +23,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::webauthn::WebAuthnServer;
-use sid_authn::work_runner::{RunnerConfig, WorkHandler};
+use sid_authn::work_runner::RunnerConfig;
 use sid_core::models::AuditEntry;
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::event_bus::EventBus;
@@ -127,11 +125,11 @@ pub struct CeComponents {
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
     /// Emails requested sign-in links, when magic links are enabled.
-    pub magic_link_mail: Option<Arc<crate::auth_mail::MagicLinkMail>>,
+    pub magic_link_mail: Option<Arc<sid::auth_mail::MagicLinkMail>>,
     /// Emails requested sign-in codes.
-    pub code_mail: Arc<crate::auth_mail::CodeMail>,
+    pub code_mail: Arc<sid::auth_mail::CodeMail>,
     /// Emails requested password reset links, when an account UI opens them.
-    pub reset_mail: Option<Arc<crate::auth_mail::ResetMail>>,
+    pub reset_mail: Option<Arc<sid::auth_mail::ResetMail>>,
     /// The directory the SCIM endpoint serves.
     #[cfg(feature = "scim")]
     pub scim_directory: sid_scim::grpc::ScimDirectory,
@@ -191,7 +189,7 @@ pub fn magic_link_mail(
     account: Option<&sid_authn::system_integration::AccountSettings>,
     storage: &Arc<dyn StorageBackend>,
     keys: &Arc<dyn sid_keys::KeyManager>,
-) -> anyhow::Result<Option<Arc<crate::auth_mail::MagicLinkMail>>> {
+) -> anyhow::Result<Option<Arc<sid::auth_mail::MagicLinkMail>>> {
     let Some(links) = links else {
         return Ok(None);
     };
@@ -200,14 +198,22 @@ pub fn magic_link_mail(
             "SID_MAGIC_LINKS_ENABLED needs the account UI that opens the links: set SID_ACCOUNT_URL"
         );
     };
-    Ok(Some(Arc::new(crate::auth_mail::MagicLinkMail::new(
+    Ok(Some(Arc::new(sid::auth_mail::MagicLinkMail::new(
         links.clone(),
         account.magic_link_page(),
-        Arc::new(crate::auth_mail::StoredProvider::new(
-            storage.clone(),
-            keys.clone(),
-        )),
+        stored_mail(storage, keys),
     ))))
+}
+
+/// Authentication mail rendered with the CE templates and sent through the
+/// installation's stored email provider.
+pub fn stored_mail(
+    storage: &Arc<dyn StorageBackend>,
+    keys: &Arc<dyn sid_keys::KeyManager>,
+) -> Arc<dyn sid::auth_mail::AuthMailDelivery> {
+    Arc::new(crate::auth_mail::TemplatedMail::new(Arc::new(
+        crate::auth_mail::StoredProvider::new(storage.clone(), keys.clone()),
+    )))
 }
 
 /// Password resets and the mail of their links, when an account UI
@@ -219,20 +225,17 @@ pub fn password_resets(
     keys: &Arc<dyn sid_keys::KeyManager>,
 ) -> Option<(
     Arc<sid_authn::password_reset::PasswordResetService>,
-    Arc<crate::auth_mail::ResetMail>,
+    Arc<sid::auth_mail::ResetMail>,
 )> {
     let account = account?;
     let resets = Arc::new(sid_authn::password_reset::PasswordResetService::new(
         storage.clone(),
         keys.clone(),
     ));
-    let mail = Arc::new(crate::auth_mail::ResetMail::new(
+    let mail = Arc::new(sid::auth_mail::ResetMail::new(
         resets.clone(),
         account.password_reset_page(),
-        Arc::new(crate::auth_mail::StoredProvider::new(
-            storage.clone(),
-            keys.clone(),
-        )),
+        stored_mail(storage, keys),
     ));
     Some((resets, mail))
 }
@@ -711,12 +714,9 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
-    let code_mail = Arc::new(crate::auth_mail::CodeMail::new(
+    let code_mail = Arc::new(sid::auth_mail::CodeMail::new(
         otp_service.clone(),
-        Arc::new(crate::auth_mail::StoredProvider::new(
-            storage.clone(),
-            key_manager.clone(),
-        )),
+        stored_mail(&storage, &key_manager),
     ));
 
     // ── IP Intelligence: configurable provider chain ──
@@ -1128,88 +1128,42 @@ pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> 
         .with_context(|| format!("write key file {path}"))
 }
 
-/// The work and maintenance engine of these components: the CE handlers and
-/// those this server owes on top (authentication mail), and the CE
-/// maintenance with the purge of ended authentication mail. Facts are owed
-/// to the deployment's required receivers and to `also_required`
-/// (receivers this server runs). Every replica runs one; leases keep an
-/// attempt on a single replica, job locks a maintenance run on one instance.
+/// The work and maintenance engine of these components: the CE work the
+/// engine assembles ([`sid::work::CeWork`]) over this server's parts and
+/// mail delivery. Facts are owed to the deployment's required receivers and
+/// to `also_required` (receivers this server runs). Every replica runs one;
+/// leases keep an attempt on a single replica, job locks a maintenance run on
+/// one instance.
 pub fn engine(
     c: &CeComponents,
     also_required: &[sid_core::models::RequiredReceiver],
 ) -> anyhow::Result<sid::Engine> {
-    let receivers = c
-        .required_receivers
-        .iter()
-        .chain(also_required)
-        .cloned()
-        .collect();
-    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
-        Arc::new(BackChannelLogoutHandler::new(
-            c.issuers.clone(),
-            c.storage.clone(),
-        )?),
-        Arc::new(EventRelayHandler::new(
-            c.storage.clone(),
-            receivers,
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
-            c.event_bus.clone(),
-            c.storage.clone(),
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
-            c.event_bus.clone(),
-        )),
-        Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
-            c.storage.clone(),
-        )),
-        Arc::new(
-            sid_authn::session_revocation::SessionRevocationHandler::new(
-                c.revocation_cache.clone(),
-            ),
-        ),
-        c.auth_svc.enrollment_handler(),
-        c.auth_svc.owner_purge_handler(),
-        c.code_mail.clone(),
-    ];
-    if let Some(mail) = &c.magic_link_mail {
-        handlers.push(mail.clone());
-    }
-    if let Some(mail) = &c.reset_mail {
-        handlers.push(mail.clone());
-    }
-    let mail_purge = {
-        // Ended authentication mail records. Idempotent, so no job lock.
-        let storage = c.storage.clone();
-        sid::maintenance::Job::shared(
-            "authentication_mail_purge",
-            std::time::Duration::from_secs(3600),
-            sid::maintenance::FirstRun::AfterInterval,
-            Arc::new(move || {
-                let storage = storage.clone();
-                Box::pin(async move {
-                    match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now())
-                        .await
-                    {
-                        Ok(0) => {}
-                        Ok(n) => info!("Dropped {} ended authentication mail records", n),
-                        Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
-                    }
-                })
-            }),
-        )
-    };
-    let maintenance = sid::Maintenance::ce(sid::CeMaintenance {
+    let sid::work::CeWork {
+        handlers,
+        maintenance,
+    } = sid::work::CeWork::assemble(sid::work::CeWorkParts {
         storage: c.storage.clone(),
-        closures: c.closure_service.clone(),
+        issuers: c.issuers.clone(),
+        revocation: c.revocation_cache.clone(),
+        event_bus: c.event_bus.clone(),
+        required_receivers: c
+            .required_receivers
+            .iter()
+            .chain(also_required)
+            .cloned()
+            .collect(),
         history_evaluation: c.auth_svc.history_evaluation(),
+        issuer: c.issuer.clone(),
+        closures: c.closure_service.clone(),
+        mail: sid::work::CeMail {
+            codes: c.code_mail.clone(),
+            magic_links: c.magic_link_mail.clone(),
+            resets: c.reset_mail.clone(),
+        },
         audit_retention: c.audit_retention,
         migration_deadline_days: c.migration_deadline_days,
         source: "sid-server".into(),
-    })
-    .with(mail_purge);
+    })?;
     sid::Engine::new(sid::EngineParts {
         storage: c.storage.clone(),
         worker: format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7()),

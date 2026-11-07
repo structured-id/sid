@@ -24,7 +24,7 @@ sid-plugin = "0.2"
 sid-proto = "0.2"
 sid-storage = { version = "0.2", default-features = false }
 # The host selects pure-Rust primitives and the JWT provider.
-sid-crypto = { version = "0.1", default-features = false, features = ["std", "primitives", "jwt-rustcrypto"] }
+sid-crypto = { version = "0.1", default-features = false, features = ["std", "primitives", "jwt-rustcrypto", "tls-rustcrypto"] }
 # The client half of OPAQUE registration and sign-in, as an application's
 # client runs it.
 sid-opaque-ke = "4.2"

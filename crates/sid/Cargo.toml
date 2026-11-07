@@ -61,7 +61,7 @@ opentelemetry = { workspace = true, optional = true }
 telemetry = ["dep:opentelemetry"]
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["primitives", "jwt"] }
+sid-crypto = { workspace = true, features = ["primitives", "jwt", "tls-aws-lc"] }
 # The client half of a password sign-in.
 sid-opaque-ke = { workspace = true }
 sid-pake-core = { workspace = true }
