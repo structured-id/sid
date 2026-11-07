@@ -50,7 +50,7 @@ pub struct SecurityServiceImpl {
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
     audit_log: Arc<dyn AuditLog>,
-    rate_limit_stats: crate::rate_limit::RateLimitStats,
+    rate_limit_stats: sid::rate_limit::RateLimitStats,
     security: Security,
 }
 
@@ -68,7 +68,7 @@ impl SecurityServiceImpl {
             jwt,
             revocation,
             audit_log,
-            rate_limit_stats: crate::rate_limit::RateLimitStats::new(cache),
+            rate_limit_stats: sid::rate_limit::RateLimitStats::new(cache),
         }
     }
 
