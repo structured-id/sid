@@ -2309,6 +2309,10 @@ impl StorageBackend for SqliteBackend {
         self.list_enabled_upstream_providers_impl().await
     }
 
+    async fn list_upstream_providers(&self) -> SidResult<Vec<sid_core::models::UpstreamProvider>> {
+        self.list_upstream_providers_impl().await
+    }
+
     // Upstream identity operations — see grants.rs
     async fn get_upstream_identity_by_provider_subject(
         &self,

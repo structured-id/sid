@@ -5009,6 +5009,9 @@ impl StorageBackend for MockStorage {
     async fn list_enabled_upstream_providers(&self) -> SidResult<Vec<UpstreamProvider>> {
         Ok(vec![])
     }
+    async fn list_upstream_providers(&self) -> SidResult<Vec<UpstreamProvider>> {
+        Ok(vec![])
+    }
 
     // === UPSTREAM IDENTITY — stubs ===
     async fn get_upstream_identity_by_provider_subject(

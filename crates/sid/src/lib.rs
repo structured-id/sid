@@ -20,6 +20,7 @@ pub mod pats;
 pub mod projects;
 pub mod provisioning;
 pub mod security;
+pub mod upstream;
 mod wire;
 
 pub use installation::{Installation, InstallationError, InstallationSettings, Management};

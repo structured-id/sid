@@ -1751,6 +1751,9 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn list_enabled_upstream_providers(&self) -> Result<Vec<UpstreamProvider>> {
         unimplemented!()
     }
+    async fn list_upstream_providers(&self) -> Result<Vec<UpstreamProvider>> {
+        unimplemented!()
+    }
 
     // === UPSTREAM IDENTITY ===
     async fn get_upstream_identity_by_provider_subject(
