@@ -1500,10 +1500,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         *assignments = kept;
         Ok(expired)
     }
-    async fn list_sod_rules(&self) -> Result<Vec<sid_core::models::SodConflictRule>> {
-        Ok(vec![])
-    }
-
     // === CEDAR POLICY ===
     async fn get_cedar_policy(&self, id: CedarPolicyId) -> Result<Option<CedarPolicy>> {
         Ok(self
@@ -2226,13 +2222,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn import_sod_rule(
-        &self,
-        _: &sid_core::models::SodConflictRule,
-        _: MutationContext,
-    ) -> Result<bool> {
         unimplemented!()
     }
     async fn export_provisioning_connectors(

@@ -42,6 +42,7 @@ fn settings(master: &MasterKey, management: Option<Management>) -> InstallationS
         cache: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         access_token_ttl: AccessTokenTtl::default(),
         management,
+        sod_warnings: Vec::new(),
     }
 }
 

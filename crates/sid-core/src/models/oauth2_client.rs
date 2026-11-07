@@ -171,7 +171,7 @@ pub use sid_ids::InitialAccessTokenId;
 ///
 /// Created by admins, used as bearer token in `POST /oauth2/register`.
 /// Constrains what the registering client can request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitialAccessToken {
     pub id: InitialAccessTokenId,
     /// SHA-256 of the token value; the token is looked up by it.

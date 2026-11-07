@@ -28,8 +28,8 @@ use sid_core::models::{
     ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken,
     RegistrationSource, RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
-    SessionEnd, SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
-    UpstreamProvider, UpstreamProviderId,
+    SessionEnd, SessionId, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin, UpstreamProvider,
+    UpstreamProviderId,
 };
 use uuid::Uuid;
 
@@ -1175,16 +1175,6 @@ pub trait StorageBackend:
         &self,
         ctx: MutationContext,
     ) -> Result<Vec<RoleAssignment>>;
-
-    // === SOD (SEPARATION OF DUTIES) ===
-
-    /// List all SoD conflict rules.
-    async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>>;
-
-    /// Store an exported SoD conflict rule as it was defined. The same rule
-    /// stored before is `false` with nothing written; another one under its
-    /// id is a `Conflict`.
-    async fn import_sod_rule(&self, rule: &SodConflictRule, ctx: MutationContext) -> Result<bool>;
 
     // === CEDAR POLICY OPERATIONS ===
 

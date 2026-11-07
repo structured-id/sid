@@ -59,7 +59,7 @@ impl std::fmt::Display for PatStatus {
 }
 
 /// Personal Access Token — stored representation (no plaintext).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersonalAccessToken {
     pub id: PatId,
 

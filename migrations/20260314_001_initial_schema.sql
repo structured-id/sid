@@ -87,7 +87,15 @@ BEGIN
                 OR NEW.value IS DISTINCT FROM OLD.value
                 OR NEW.email_policy_revision IS DISTINCT FROM OLD.email_policy_revision)
            AND NEW.email_policy_revision IS DISTINCT FROM
-               (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
+               (SELECT revision FROM email_policy_activations WHERE scope = 'installation')
+           -- A key the policy transition quarantined is restored at the
+           -- revision it was written under, with its quarantine record.
+           AND NOT (TG_OP = 'INSERT' AND EXISTS (
+               SELECT 1 FROM email_policy_dispositions d
+               WHERE d.principal_id = NEW.id AND d.disposition = 'quarantined'
+                 AND d.from_revision = NEW.email_policy_revision
+                 AND d.to_revision =
+                     (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))))
     THEN
         RAISE EXCEPTION 'email key written under policy revision %, not the active one',
             NEW.email_policy_revision
@@ -641,7 +649,7 @@ CREATE TABLE email_policy_dispositions (
     recorded_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT email_policy_dispositions_disposition_check CHECK ((disposition = ANY (ARRAY['migrated'::text, 'quarantined'::text]))),
     CONSTRAINT email_policy_dispositions_pkey PRIMARY KEY (principal_id),
-    CONSTRAINT email_policy_dispositions_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+    CONSTRAINT email_policy_dispositions_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE export_jobs (

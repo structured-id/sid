@@ -393,6 +393,18 @@ pub async fn records_move_with_their_deadlines(store: &dyn CeremonyStateStore) {
     );
     assert_eq!(ours.counts.len(), 1);
     assert_eq!(ours.counts[0].count, 2);
+    // Deadlines move at the precision every store keeps, milliseconds, so a
+    // record moved between engines compares equal on both sides.
+    let whole_ms =
+        |t: &chrono::DateTime<chrono::Utc>| t.timestamp_subsec_nanos().is_multiple_of(1_000_000);
+    assert!(
+        ours.states.iter().all(|s| whole_ms(&s.expires_at)),
+        "{ours:?}"
+    );
+    assert!(
+        ours.counts.iter().all(|c| whole_ms(&c.window_ends)),
+        "{ours:?}"
+    );
     assert_eq!(store.import_ceremony_state(&ours).await.unwrap(), 0);
 
     let mut differing = ours.clone();

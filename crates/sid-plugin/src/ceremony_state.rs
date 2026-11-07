@@ -311,6 +311,10 @@ impl CeremonyStateStore for InProcessCeremonyState {
             chrono::Duration::from_std(deadline - now)
                 .ok()
                 .and_then(|left| wall.checked_add_signed(left))
+                // Milliseconds, the precision every store keeps a deadline at.
+                .and_then(|t| {
+                    chrono::DurationRound::duration_trunc(t, chrono::Duration::milliseconds(1)).ok()
+                })
                 .ok_or_else(|| sid_core::Error::Internal("ceremony deadline out of range".into()))
         };
         let mut states = Vec::new();

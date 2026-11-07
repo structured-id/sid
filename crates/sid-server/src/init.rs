@@ -473,6 +473,11 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             cache: cache_backend.clone(),
             access_token_ttl,
             management: management_setting(env_setting("SID_INSTALLATION_MANAGEMENT")?.as_deref())?,
+            sod_warnings: crate::config::installation_config(
+                env_setting("SID_CONFIG_FILE")?.as_deref(),
+            )?
+            .governance
+            .sod_warnings,
         },
     )
     .await
@@ -494,6 +499,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         opaque_router,
         revocation_cache,
         captcha_pow_key,
+        sod_warnings,
         ..
     } = installation;
 
@@ -940,7 +946,8 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             audit_log.clone(),
         )
         .with_service_tokens(checker_tokens)
-        .with_request_verifiers(request_verifiers),
+        .with_request_verifiers(request_verifiers)
+        .with_sod_warnings(sod_warnings),
     );
 
     let admin_svc = Arc::new(AdminServiceImpl::new(

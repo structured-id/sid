@@ -436,11 +436,23 @@ fn decode_assigned(result: &[u8]) -> Result<AssignRoleResponse, AuthorizationErr
 pub struct Authorization {
     storage: Arc<dyn StorageBackend>,
     cedar: CedarService,
+    sod_warnings: Arc<sid_authz::sod::SodService>,
 }
 
 impl Authorization {
+    /// Management with no separation-of-duties warnings configured.
     pub fn new(storage: Arc<dyn StorageBackend>, cedar: CedarService) -> Self {
-        Self { storage, cedar }
+        Self {
+            storage,
+            cedar,
+            sod_warnings: Arc::new(sid_authz::sod::SodService::ce_default()),
+        }
+    }
+
+    /// Warn of the conflicts the installation configuration defines.
+    pub fn with_sod_warnings(mut self, warnings: Arc<sid_authz::sod::SodService>) -> Self {
+        self.sod_warnings = warnings;
+        self
     }
 
     fn administration(&self) -> RoleAdministration {
@@ -1542,8 +1554,9 @@ impl Authorization {
         if req.proposed_role.is_empty() {
             return Err(AuthorizationError::MissingField("proposed_role"));
         }
-        let sod_rules = self.storage.list_sod_rules().await?;
-        let conflicts = sid_authz::sod::SodService::new(sod_rules)
+        // A warning only: the assignment itself is decided elsewhere.
+        let conflicts = self
+            .sod_warnings
             .check_conflicts(&req.existing_roles, &req.proposed_role);
         let conflicts: Vec<sid_proto::sid::v1::SodConflict> = conflicts
             .into_iter()

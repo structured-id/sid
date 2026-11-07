@@ -39,6 +39,7 @@ fn settings(master: PathBuf) -> InstallationSettings {
         cache: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         access_token_ttl: AccessTokenTtl::default(),
         management: None,
+        sod_warnings: Vec::new(),
     }
 }
 

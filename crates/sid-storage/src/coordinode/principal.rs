@@ -708,12 +708,13 @@ impl CoordinodeBackend {
                     "another principal holds the same value".into(),
                 ));
             }
-            if e.email_policy_revision.is_some()
-                && e.email_policy_revision != Some(active_email_revision(tx)?)
+            if let Some(revision) = e.email_policy_revision
+                && !given.restores_under(active_email_revision(tx)?)
             {
-                return Err(SidError::Conflict(
-                    "the email key was written under another policy revision".into(),
-                ));
+                return Err(SidError::Conflict(format!(
+                    "the email key was written under policy revision {revision} \
+                     and carries no quarantine from it"
+                )));
             }
             tx.run(
                 "CREATE (p:SidPrincipal {id: $id, type_value: $key, principal_type: $type,

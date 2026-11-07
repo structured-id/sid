@@ -475,6 +475,13 @@ impl AuthzServiceImpl {
         }
     }
 
+    /// Warn of the separation-of-duties conflicts the installation
+    /// configuration defines.
+    pub fn with_sod_warnings(mut self, warnings: Arc<sid_authz::sod::SodService>) -> Self {
+        self.authorization = self.authorization.with_sod_warnings(warnings);
+        self
+    }
+
     /// Trust the configured services to confirm checks of original requests
     /// to their resources (D054 receiver-side verifier trust).
     pub fn with_request_verifiers(

@@ -4,7 +4,6 @@ use sid_core::models::authz::SodSeverity;
 fn test_rules() -> Vec<SodConflictRule> {
     vec![
         SodConflictRule {
-            id: uuid::Uuid::now_v7(),
             name: "payment_segregation".to_string(),
             description: Some("Payment creator cannot also approve".to_string()),
             conflicting_roles: vec![
@@ -14,7 +13,6 @@ fn test_rules() -> Vec<SodConflictRule> {
             severity: SodSeverity::Warning,
         },
         SodConflictRule {
-            id: uuid::Uuid::now_v7(),
             name: "admin_audit_segregation".to_string(),
             description: Some("User admin should not view audit logs".to_string()),
             conflicting_roles: vec!["user_admin".to_string(), "audit_viewer".to_string()],

@@ -364,7 +364,8 @@ impl CeremonyStateStore for CoordinodeBackend {
                 let held = stored(tx, &slot)?;
                 match &held {
                     Some(live) if live.1 > now => {
-                        crate::transfer_repeat(live, &wanted, "ceremony state")?;
+                        let held = (live.0.clone(), whole_ms(live.1));
+                        crate::transfer_repeat(&held, &wanted, "ceremony state")?;
                     }
                     _ => {
                         write(tx, &slot, held.is_some(), &wanted.0, wanted.1)?;
@@ -381,7 +382,11 @@ impl CeremonyStateStore for CoordinodeBackend {
                 let held = counted(tx, &slot)?;
                 match &held {
                     Some(live) if live.1 > now => {
-                        crate::transfer_repeat(live, &wanted, "ceremony count")?;
+                        crate::transfer_repeat(
+                            &(live.0, whole_ms(live.1)),
+                            &wanted,
+                            "ceremony count",
+                        )?;
                     }
                     _ => {
                         let query = if held.is_some() {
@@ -424,8 +429,14 @@ fn unslot(slot: &[u8]) -> SidResult<(String, String)> {
     ))
 }
 
-/// The instant of a stored microsecond deadline.
+/// A stored microsecond deadline at millisecond precision, the precision
+/// every store keeps a deadline at; truncated, so it never lasts longer.
+fn whole_ms(micros: i64) -> i64 {
+    micros - micros.rem_euclid(1000)
+}
+
+/// The instant of a stored microsecond deadline, at millisecond precision.
 fn instant(micros: i64) -> SidResult<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::from_timestamp_micros(micros)
+    chrono::DateTime::from_timestamp_micros(whole_ms(micros))
         .ok_or_else(|| SidError::Storage(format!("ceremony deadline {micros} is out of range")))
 }

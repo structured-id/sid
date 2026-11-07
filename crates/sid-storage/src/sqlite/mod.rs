@@ -2114,18 +2114,6 @@ impl StorageBackend for SqliteBackend {
         self.cleanup_expired_role_assignments_impl(audit).await
     }
 
-    async fn list_sod_rules(&self) -> SidResult<Vec<sid_core::models::SodConflictRule>> {
-        self.list_sod_rules_impl().await
-    }
-
-    async fn import_sod_rule(
-        &self,
-        rule: &sid_core::models::SodConflictRule,
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        self.import_sod_rule_impl(rule, ctx).await
-    }
-
     // Cedar policy operations — see rbac.rs
     async fn get_cedar_policy(
         &self,

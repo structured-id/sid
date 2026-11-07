@@ -107,6 +107,24 @@ async fn stored(
 
 async fn insert(tx: &mut WriteTx, principal: &StoredPrincipal) -> SidResult<()> {
     let e = &principal.entity;
+    // A quarantined key's record first: the fence admits a key at an earlier
+    // revision only with it, and its reference to the key is checked at commit.
+    if let Some(d) = &principal.disposition {
+        sqlx::query(
+            "INSERT INTO email_policy_dispositions (principal_id, from_revision, to_revision,
+                disposition, reason, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(e.id.0)
+        .bind(d.from_revision)
+        .bind(d.to_revision)
+        .bind(outcome_text(d.outcome))
+        .bind(&d.reason)
+        .bind(fmt_dt(&d.recorded_at))
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| insert_error("email key disposition", err))?;
+    }
     sqlx::query(
         "INSERT INTO principals (id, principal_type, value, verified, verified_at,
             verification_expires, assigned_profile_id, assignment_revision,
@@ -127,9 +145,14 @@ async fn insert(tx: &mut WriteTx, principal: &StoredPrincipal) -> SidResult<()> 
     .execute(&mut **tx)
     .await
     .map_err(|err| match &err {
-        // The email key fence: the revision is not the active one.
+        // The email key fence: the revision is not the active one and the key
+        // carries no quarantine from it.
         sqlx::Error::Database(db) if db.message().contains("email policy fence") => {
-            SidError::Conflict("the email key was written under another policy revision".into())
+            SidError::Conflict(format!(
+                "the email key was written under policy revision {} \
+                 and carries no quarantine from it",
+                e.email_policy_revision.unwrap_or_default()
+            ))
         }
         _ => insert_error("principal", err),
     })?;
@@ -150,22 +173,6 @@ async fn insert(tx: &mut WriteTx, principal: &StoredPrincipal) -> SidResult<()> 
         .execute(&mut **tx)
         .await
         .map_err(|err| insert_error("principal binding", err))?;
-    }
-    if let Some(d) = &principal.disposition {
-        sqlx::query(
-            "INSERT INTO email_policy_dispositions (principal_id, from_revision, to_revision,
-                disposition, reason, recorded_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(e.id.0)
-        .bind(d.from_revision)
-        .bind(d.to_revision)
-        .bind(outcome_text(d.outcome))
-        .bind(&d.reason)
-        .bind(fmt_dt(&d.recorded_at))
-        .execute(&mut **tx)
-        .await
-        .map_err(|err| insert_error("email key disposition", err))?;
     }
     Ok(())
 }

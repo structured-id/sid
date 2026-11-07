@@ -313,14 +313,17 @@ impl CeremonyStateStore for PostgresBackend {
             .await
             .map_err(failure("export ceremony state"))?;
         let states: Vec<(String, String, Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT namespace, state_key, value, expires_at FROM ceremony_states
-                 WHERE expires_at > clock_timestamp() ORDER BY namespace, state_key",
+            // Milliseconds: the precision every store keeps a deadline at.
+            "SELECT namespace, state_key, value, date_trunc('milliseconds', expires_at)
+             FROM ceremony_states
+             WHERE expires_at > clock_timestamp() ORDER BY namespace, state_key",
         )
         .fetch_all(&mut *tx)
         .await
         .map_err(failure("export ceremony state"))?;
         let counts: Vec<(String, String, i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT namespace, count_key, count, window_ends FROM ceremony_counts
+            "SELECT namespace, count_key, count, date_trunc('milliseconds', window_ends)
+             FROM ceremony_counts
              WHERE window_ends > clock_timestamp() ORDER BY namespace, count_key",
         )
         .fetch_all(&mut *tx)
@@ -364,7 +367,7 @@ impl CeremonyStateStore for PostgresBackend {
         for entry in &records.states {
             // The row lock orders this with a concurrent writer of the key.
             let held: Option<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-                "SELECT value, expires_at FROM ceremony_states
+                "SELECT value, date_trunc('milliseconds', expires_at) FROM ceremony_states
                  WHERE namespace = $1 AND state_key = $2 AND expires_at > clock_timestamp()
                  FOR UPDATE",
             )
@@ -401,7 +404,7 @@ impl CeremonyStateStore for PostgresBackend {
                 SidError::Validation(format!("count of {} is too large", count.key))
             })?;
             let held: Option<(i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-                "SELECT count, window_ends FROM ceremony_counts
+                "SELECT count, date_trunc('milliseconds', window_ends) FROM ceremony_counts
                  WHERE namespace = $1 AND count_key = $2 AND window_ends > clock_timestamp()
                  FOR UPDATE",
             )

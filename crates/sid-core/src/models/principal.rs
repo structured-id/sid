@@ -374,6 +374,23 @@ pub struct StoredPrincipal {
     pub disposition: Option<EmailKeyDisposition>,
 }
 
+impl StoredPrincipal {
+    /// Whether a store whose active email policy is `active` may take this
+    /// principal as it is: a key written under the active revision, or one
+    /// quarantined from its own revision to the active one.
+    pub fn restores_under(&self, active: i64) -> bool {
+        let Some(revision) = self.entity.email_policy_revision else {
+            return true;
+        };
+        revision == active
+            || self.disposition.as_ref().is_some_and(|d| {
+                d.outcome == EmailKeyOutcome::Quarantined
+                    && d.from_revision == revision
+                    && d.to_revision == active
+            })
+    }
+}
+
 /// The email policy revision active for the installation: email keys are
 /// written only under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

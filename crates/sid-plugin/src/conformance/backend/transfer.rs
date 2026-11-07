@@ -102,6 +102,74 @@ pub async fn test_principals_move_as_stored(backend: &dyn StorageBackend) {
     );
 }
 
+/// A key the policy transition quarantined keeps the revision it was written
+/// under until it is repaired: restored with its quarantine record, it stays
+/// at that revision. Without that record a key at another revision is still
+/// refused, as is one whose record says it migrated.
+pub async fn test_quarantined_key_restores_at_its_revision(backend: &dyn StorageBackend) {
+    let registration = new_email_registration(&address("stale"));
+    backend
+        .register_profile(&registration, test_audit())
+        .await
+        .unwrap();
+    let held = exported(backend, registration.principal.id)
+        .await
+        .expect("exported");
+    let active = backend.email_policy_activation().await.unwrap().revision;
+    let stale = active + 1;
+    let at_stale = |outcome: Option<sid_core::models::EmailKeyOutcome>| {
+        let mut moved = held.clone();
+        moved.entity.id = PrincipalId::new();
+        moved.entity.value = address("stale-moved");
+        moved.entity.email_policy_revision = Some(stale);
+        for claim in &mut moved.claims {
+            claim.id = PrincipalBindingId::new();
+            claim.principal_id = moved.entity.id;
+        }
+        moved.disposition = outcome.map(|outcome| sid_core::models::EmailKeyDisposition {
+            from_revision: stale,
+            to_revision: active,
+            outcome,
+            reason: "no_source_evidence".into(),
+            recorded_at: instant(),
+        });
+        moved
+    };
+
+    let bare = at_stale(None);
+    let refused = backend.import_principal(&bare, test_audit()).await;
+    assert!(
+        refused.is_err(),
+        "a key at another revision alone: {refused:?}"
+    );
+    assert_eq!(exported(backend, bare.entity.id).await, None);
+    let migrated = at_stale(Some(sid_core::models::EmailKeyOutcome::Migrated));
+    let refused = backend.import_principal(&migrated, test_audit()).await;
+    assert!(
+        refused.is_err(),
+        "a migrated key at another revision: {refused:?}"
+    );
+    assert_eq!(exported(backend, migrated.entity.id).await, None);
+
+    let quarantined = at_stale(Some(sid_core::models::EmailKeyOutcome::Quarantined));
+    assert!(
+        backend
+            .import_principal(&quarantined, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        exported(backend, quarantined.entity.id).await.as_ref(),
+        Some(&quarantined)
+    );
+    assert!(
+        !backend
+            .import_principal(&quarantined, test_audit())
+            .await
+            .unwrap()
+    );
+}
+
 /// The active revision is exported; importing it again writes nothing, and
 /// another revision is refused once an email key is stored.
 pub async fn test_email_policy_activation_moves(backend: &dyn StorageBackend) {

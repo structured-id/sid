@@ -28,8 +28,8 @@ use sid_core::models::{
     OperationRecord, OperationResourceBinding, Organization, OutboundDlqEntry, PersonalAccessToken,
     Profile, ProfileEmail, ProfileGrant, ProfileMetadata, ProfilePhone, Project, ProtectedResource,
     QuarantinedPrincipal, ResourceAccess, Role, RoleAssignment, ScimOutboundRecord,
-    ScimOutboundTarget, ServiceBinding, Session, SessionGrants, SodConflictRule, StoredPrincipal,
-    StoredUserHandle, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
+    ScimOutboundTarget, ServiceBinding, Session, SessionGrants, StoredPrincipal, StoredUserHandle,
+    UpstreamIdentity, UpstreamProvider, WorkSnapshot,
 };
 
 pub mod archive;
@@ -174,7 +174,7 @@ pub struct Snapshot {
     /// and its own audit trail where it keeps one apart from the audit chains.
     pub history_key_records: sid_core::models::KeyStoreRecords,
 
-    /// Active sessions (expired sessions are excluded).
+    /// Sessions, expired ones included: the records that name them move too.
     pub sessions: Vec<Session>,
 
     /// Pairwise service bindings: their ids are the `sub` every pairwise
@@ -213,9 +213,6 @@ pub struct Snapshot {
 
     /// Role assignments (profile→role and group→role).
     pub role_assignments: Vec<RoleAssignment>,
-
-    /// SoD conflict rules.
-    pub sod_rules: Vec<SodConflictRule>,
 
     /// Cedar policies (ABAC).
     pub cedar_policies: Vec<CedarPolicy>,
@@ -445,7 +442,6 @@ impl Snapshot {
             groups: Vec::new(),
             group_members: Vec::new(),
             role_assignments: Vec::new(),
-            sod_rules: Vec::new(),
             cedar_policies: Vec::new(),
             profile_metadata: Vec::new(),
             devices: Vec::new(),
@@ -543,7 +539,6 @@ impl Snapshot {
             self.groups.len() as u64,
             self.group_members.len() as u64,
             self.role_assignments.len() as u64,
-            self.sod_rules.len() as u64,
             self.cedar_policies.len() as u64,
             self.profile_metadata.len() as u64,
             self.devices.len() as u64,

@@ -473,15 +473,6 @@ pub async fn import(
             result.policies += 1;
         }
     }
-    for rule in &snapshot.sod_rules {
-        if backend
-            .import_sod_rule(rule, audit("import_sod_rule", &rule.id.to_string()))
-            .await?
-        {
-            result.policies += 1;
-        }
-    }
-
     for params in &snapshot.key_versions {
         if backend
             .insert_key_version(
@@ -815,10 +806,13 @@ pub async fn import(
 
     info!(count = snapshot.sessions.len(), "importing sessions...");
     for session in &snapshot.sessions {
-        backend
-            .create_session(session, audit("import_session", &session.id.to_string()))
-            .await?;
-        result.sessions += 1;
+        result.sessions += created(
+            backend
+                .create_session(session, audit("import_session", &session.id.to_string()))
+                .await,
+            || async { Ok(backend.get_session(session.id).await?.as_ref() == Some(session)) },
+        )
+        .await?;
     }
 
     // Service bindings: the pairwise `sub` of every client.
@@ -917,10 +911,13 @@ pub async fn import(
     }
 
     for iat in &snapshot.initial_access_tokens {
-        backend
-            .create_initial_access_token(iat, audit("import_iat", &iat.id.to_string()))
-            .await?;
-        result.initial_access_tokens += 1;
+        result.initial_access_tokens += created(
+            backend
+                .create_initial_access_token(iat, audit("import_iat", &iat.id.to_string()))
+                .await,
+            || async { Ok(backend.get_initial_access_token(iat.id).await?.as_ref() == Some(iat)) },
+        )
+        .await?;
     }
 
     for role in &snapshot.roles {
@@ -933,12 +930,22 @@ pub async fn import(
         .await?;
     }
     for group in &snapshot.groups {
-        backend
-            .create_group(group, audit("import_group", &group.id.to_string()))
-            .await?;
-        result.groups += 1;
+        result.groups += created(
+            backend
+                .create_group(group, audit("import_group", &group.id.to_string()))
+                .await,
+            || async { Ok(backend.get_group(group.id).await?.as_ref() == Some(group)) },
+        )
+        .await?;
     }
     for member in &snapshot.group_members {
+        if backend
+            .list_group_members(member.group_id)
+            .await?
+            .contains(member)
+        {
+            continue;
+        }
         backend
             .add_to_group(
                 member,
@@ -1005,12 +1012,23 @@ pub async fn import(
     }
 
     for policy in &snapshot.cedar_policies {
-        backend
-            .create_cedar_policy(policy, audit("import_cedar_policy", &policy.id.to_string()))
-            .await?;
-        result.cedar_policies += 1;
+        result.cedar_policies += created(
+            backend
+                .create_cedar_policy(policy, audit("import_cedar_policy", &policy.id.to_string()))
+                .await,
+            || async { Ok(backend.get_cedar_policy(policy.id).await?.as_ref() == Some(policy)) },
+        )
+        .await?;
     }
     for meta in &snapshot.profile_metadata {
+        if backend
+            .get_profile_metadata(meta.profile_id, &meta.key)
+            .await?
+            .as_ref()
+            == Some(meta)
+        {
+            continue;
+        }
         backend
             .set_profile_metadata(
                 meta,
@@ -1046,10 +1064,22 @@ pub async fn import(
         }
     }
     for code in &snapshot.device_auth_codes {
-        backend
-            .create_device_auth_code(code, audit("import_device_auth_code", &code.id.to_string()))
-            .await?;
-        result.device_auth_codes += 1;
+        result.device_auth_codes += created(
+            backend
+                .create_device_auth_code(
+                    code,
+                    audit("import_device_auth_code", &code.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_device_auth_by_device_code_hash(&code.device_code_hash)
+                    .await?
+                    .as_ref()
+                    == Some(code))
+            },
+        )
+        .await?;
     }
 
     for grant in &snapshot.profile_grants {
@@ -1094,10 +1124,13 @@ pub async fn import(
         .await?;
     }
     for pat in &snapshot.personal_access_tokens {
-        backend
-            .create_pat(pat, None, audit("import_pat", &pat.id.to_string()))
-            .await?;
-        result.personal_access_tokens += 1;
+        result.personal_access_tokens += created(
+            backend
+                .create_pat(pat, None, audit("import_pat", &pat.id.to_string()))
+                .await,
+            || async { Ok(backend.get_pat(pat.id).await?.as_ref() == Some(pat)) },
+        )
+        .await?;
     }
     for cred in &snapshot.machine_credentials {
         result.machine_credentials += created(
@@ -1114,6 +1147,13 @@ pub async fn import(
         .await?;
     }
     for grant in &snapshot.impersonation_grants {
+        if backend
+            .list_impersonation_grants(grant.machine_user_id)
+            .await?
+            .contains(grant)
+        {
+            continue;
+        }
         backend
             .save_impersonation_grant(
                 grant,
@@ -1198,10 +1238,18 @@ pub async fn import(
     }
 
     for session in &snapshot.magic_link_sessions {
-        backend
-            .create_magic_link_session(session, audit("import_magic_link", &session.id.to_string()))
-            .await?;
-        result.magic_link_sessions += 1;
+        result.magic_link_sessions += created(
+            backend
+                .create_magic_link_session(
+                    session,
+                    audit("import_magic_link", &session.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_magic_link_session(session.id).await?.as_ref() == Some(session))
+            },
+        )
+        .await?;
     }
     for target in &snapshot.scim_outbound_targets {
         result.scim_outbound_targets += created(
@@ -1468,7 +1516,7 @@ pub struct ImportResult {
     pub outbound_dlq_entries: u64,
     pub branding_configs: u64,
     /// Installation policies: bootstrap, enrollment, login epoch, IP
-    /// allowlist, SoD rules.
+    /// allowlist.
     pub policies: u64,
     /// Profile and project settings and records: flows, consents,
     /// preferences, registration sources, access requests, invites,

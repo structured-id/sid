@@ -22,8 +22,8 @@ use sid_core::{
         ProjectId, RefreshToken, RegistrationSource, RegistrationSourceType, RevocationReason,
         Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
         ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session,
-        SessionAuthentication, SessionEnd, SessionId, SodConflictRule, UpstreamIdentity,
-        UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
+        SessionAuthentication, SessionEnd, SessionId, UpstreamIdentity, UpstreamIdentityId,
+        UpstreamLogin, UpstreamProvider, UpstreamProviderId,
     },
 };
 use sid_plugin::storage::StorageBackend;
@@ -5035,24 +5035,6 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(expired)
-    }
-
-    async fn list_sod_rules(&self) -> SidResult<Vec<SodConflictRule>> {
-        // CE: SoD rules stored in config (sid.yaml) or admin API.
-        // DB table for SoD rules will be added with governance feature.
-        Ok(vec![])
-    }
-
-    async fn import_sod_rule(
-        &self,
-        _rule: &SodConflictRule,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
-        // This store holds no SoD rules: one it cannot keep is refused, never
-        // dropped.
-        Err(SidError::Validation(
-            "this store holds no separation-of-duties rules".into(),
-        ))
     }
 
     // === CEDAR POLICY OPERATIONS ===

@@ -4587,10 +4587,6 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<Vec<RoleAssignment>> {
         Ok(vec![])
     }
-    async fn list_sod_rules(&self) -> SidResult<Vec<SodConflictRule>> {
-        Ok(vec![])
-    }
-
     // === CEDAR POLICY OPERATIONS ===
     async fn get_cedar_policy(&self, id: CedarPolicyId) -> SidResult<Option<CedarPolicy>> {
         let inner = self.inner.lock().unwrap();
@@ -5951,13 +5947,6 @@ impl StorageBackend for MockStorage {
         unimplemented!("instance transfer is tested against the real backends")
     }
     async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> SidResult<bool> {
-        unimplemented!("instance transfer is tested against the real backends")
-    }
-    async fn import_sod_rule(
-        &self,
-        _: &sid_core::models::SodConflictRule,
-        _: MutationContext,
-    ) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
     }
     async fn export_provisioning_connectors(

@@ -256,7 +256,7 @@ pub use sid_ids::GroupId;
 ///
 /// Scoped to a project — each project defines its own groups.
 /// Groups are flat (parent_group_id always None).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: GroupId,
     pub project_id: ProjectId,
@@ -289,7 +289,7 @@ impl Group {
 }
 
 /// Group membership record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupMember {
     pub group_id: GroupId,
     pub profile_id: ProfileId,
@@ -639,7 +639,7 @@ impl PolicyScope {
 ///
 /// Policies are validated on write (Cedar compile check).
 /// CE evaluates policies via embedded cedar-policy crate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CedarPolicy {
     pub id: CedarPolicyId,
     /// What the policy applies to; fixed at creation.
@@ -794,17 +794,18 @@ impl SodSeverity {
 
 parse_stored!(SodSeverity, "sod severity", [Warning, Block]);
 
-/// A separation of duties conflict rule.
+/// A separation of duties conflict rule, as the installation configuration
+/// defines it.
 ///
 /// Defines pairs of roles that should not be assigned to the same principal.
 /// Conflicts produce warnings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SodConflictRule {
-    /// The rule's stored identity.
-    pub id: uuid::Uuid,
     /// Rule name (e.g., "payment_segregation").
     pub name: String,
     /// Human-readable description.
+    #[serde(default)]
     pub description: Option<String>,
     /// Roles that conflict with each other.
     pub conflicting_roles: Vec<String>,

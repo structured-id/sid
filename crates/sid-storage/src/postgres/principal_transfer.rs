@@ -130,11 +130,30 @@ async fn insert(tx: &mut Tx<'_>, principal: &StoredPrincipal) -> SidResult<()> {
         .fetch_one(&mut **tx)
         .await
         .map_err(storage)?;
-        if revision != active {
-            return Err(SidError::Conflict(
-                "the email key was written under another policy revision".into(),
-            ));
+        if !principal.restores_under(active) {
+            return Err(SidError::Conflict(format!(
+                "the email key was written under policy revision {revision} \
+                 and carries no quarantine from it"
+            )));
         }
+    }
+    // A quarantined key's record first: the fence admits a key at an earlier
+    // revision only with it, and its reference to the key is checked at commit.
+    if let Some(d) = &principal.disposition {
+        sqlx::query(
+            "INSERT INTO email_policy_dispositions (principal_id, from_revision, to_revision,
+                disposition, reason, recorded_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(e.id.0)
+        .bind(d.from_revision)
+        .bind(d.to_revision)
+        .bind(outcome_text(d.outcome))
+        .bind(&d.reason)
+        .bind(d.recorded_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| super::insert_error("email key disposition", err))?;
     }
     sqlx::query(
         "INSERT INTO principals (id, principal_type, value, verified, verified_at,
@@ -173,22 +192,6 @@ async fn insert(tx: &mut Tx<'_>, principal: &StoredPrincipal) -> SidResult<()> {
         .execute(&mut **tx)
         .await
         .map_err(|err| super::insert_error("principal binding", err))?;
-    }
-    if let Some(d) = &principal.disposition {
-        sqlx::query(
-            "INSERT INTO email_policy_dispositions (principal_id, from_revision, to_revision,
-                disposition, reason, recorded_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(e.id.0)
-        .bind(d.from_revision)
-        .bind(d.to_revision)
-        .bind(outcome_text(d.outcome))
-        .bind(&d.reason)
-        .bind(d.recorded_at)
-        .execute(&mut **tx)
-        .await
-        .map_err(|err| super::insert_error("email key disposition", err))?;
     }
     Ok(())
 }

@@ -440,7 +440,7 @@ impl std::fmt::Display for ImpersonationTargetType {
 /// has created an `ImpersonationGrant`. The impersonated token carries
 /// an `act` claim (RFC 8693 §4.1) and is capped at
 /// `IMPERSONATION_MAX_LIFETIME_SECONDS`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImpersonationGrant {
     /// Machine user that is allowed to impersonate.
     pub machine_user_id: MachineUserId,

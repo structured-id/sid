@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::ProfileId;
 
 /// A single metadata entry on a profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileMetadata {
     pub profile_id: ProfileId,
     pub key: String,

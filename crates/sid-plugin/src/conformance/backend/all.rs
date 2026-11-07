@@ -303,6 +303,7 @@ macro_rules! __storage_conformance {
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],transfer:
                 test_principals_move_as_stored
+                test_quarantined_key_restores_at_its_revision
                 test_email_policy_activation_moves
                 test_quarantine_moves_as_stored
                 test_user_handles_move_as_stored

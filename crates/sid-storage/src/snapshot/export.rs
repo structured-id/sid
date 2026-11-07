@@ -15,8 +15,7 @@ fn invalid_count() -> SnapshotError {
 /// Read every persistent entity of `store`, every chain of its audit log
 /// and the history evaluator's sealed keys into a snapshot checked by
 /// `rules`. The caller quiesces the installation first: the snapshot is
-/// consistent only when nothing writes while it is read. Expired sessions
-/// are left out.
+/// consistent only when nothing writes while it is read.
 pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snapshot> {
     let Store {
         storage: backend,
@@ -100,11 +99,9 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         snapshot
             .credentials
             .extend(backend.get_credentials_by_profile(pid, None).await?);
-        let now = Utc::now();
+        // Expired sessions too: a redeemed device code or a revoked grant
+        // still names its session.
         for session in backend.list_sessions(&pid).await? {
-            if session.expires_at <= now {
-                continue;
-            }
             let grants = backend.export_session_grants(session.id).await?;
             if !(grants.refresh_tokens.is_empty()
                 && grants.authorization_codes.is_empty()
@@ -289,7 +286,6 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     snapshot
         .upstream_providers
         .extend(backend.list_upstream_providers().await?);
-    snapshot.sod_rules.extend(backend.list_sod_rules().await?);
     // Protected resources, retired ones included: their indicators stay
     // reserved in the target.
     let mut resource_offset = 0u64;

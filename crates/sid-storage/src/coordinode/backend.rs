@@ -29,8 +29,8 @@ use sid_core::models::{
     ProtectedResource, RefreshToken, RegistrationSource, RegistrationSourceType, ResourceAccess,
     ResourceId, ResourceIndicator, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
-    SessionEnd, SessionId, SignInProof, SodConflictRule, UpstreamIdentity, UpstreamIdentityId,
-    UpstreamLogin, UpstreamProvider, UpstreamProviderId,
+    SessionEnd, SessionId, SignInProof, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
+    UpstreamProvider, UpstreamProviderId,
 };
 use sid_core::{Error as SidError, Result};
 use sid_plugin::storage::{JobLock, StorageBackend};
@@ -1464,23 +1464,6 @@ impl StorageBackend for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<Vec<RoleAssignment>> {
         CoordinodeBackend::cleanup_expired_role_assignments(self, ctx).await
-    }
-
-    async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>> {
-        // No write path stores separation-of-duties rules: none are held.
-        Ok(Vec::new())
-    }
-
-    async fn import_sod_rule(
-        &self,
-        _rule: &SodConflictRule,
-        _ctx: MutationContext,
-    ) -> Result<bool> {
-        // This store holds no SoD rules: one it cannot keep is refused, never
-        // dropped.
-        Err(sid_core::Error::Validation(
-            "this store holds no separation-of-duties rules".into(),
-        ))
     }
 
     // === CEDAR POLICIES ===

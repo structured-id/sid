@@ -765,6 +765,26 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
         )
         .await
         .unwrap();
+    // A code redeemed into a session that has expired since: the code names
+    // the session, so the session moves with it.
+    let ended = Session::new(profile.id, None, now - Duration::hours(1));
+    source.create_session(&ended, ctx()).await.unwrap();
+    let mut redeemed = DeviceAuthorizationCode::new(
+        installation.client.client_id.clone(),
+        Uuid::now_v7().as_bytes().to_vec(),
+        "QWER-TYUP".to_string(),
+        Some("openid".to_string()),
+        installation.resource.id,
+        ProjectId::SYSTEM,
+    );
+    redeemed.status = DeviceAuthStatus::Redeemed;
+    redeemed.authorized_by = Some(profile.id);
+    redeemed.authorized_at = Some(now - Duration::hours(2));
+    redeemed.redeemed_session_id = Some(ended.id);
+    source
+        .create_device_auth_code(&redeemed, ctx())
+        .await
+        .unwrap();
     let mut link = MagicLinkSession::new(
         "registered@sid.example.com",
         "registered@sid.example.com",
@@ -788,8 +808,9 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
 /// pending access request, a reset session, an allowlist entry, learned IP
 /// reputation, an anomaly event, a sign-in location, a provisioning
 /// connector with its credential, an advanced login policy epoch, central
-/// management, ceremony state and an attempt count. A SoD rule and an email
-/// key disposition have no writer of their own and are stored directly.
+/// management, ceremony state and an attempt count. An email key disposition
+/// is stored directly: the policy transition that writes one is not part of
+/// this build.
 async fn activity(source: &SqliteBackend, installation: &Installation, profile: &Profile) {
     use sid_plugin::{CeremonyStateStore, SignInHistoryStore};
     let now = Utc::now();
@@ -979,14 +1000,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
         )
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO sod_conflict_rules (id, name, description, conflicting_roles, severity)
-         VALUES (?, 'segregation', 'creator is not approver', 'creator approver', 'warning')",
-    )
-    .bind(Uuid::now_v7())
-    .execute(source.pool())
-    .await
-    .unwrap();
     sqlx::query(
         "INSERT INTO email_policy_dispositions
              (principal_id, from_revision, to_revision, disposition, reason)
@@ -1208,6 +1221,17 @@ async fn every_table_moves_with_the_snapshot() {
     )
     .await
     .unwrap();
+    // An import interrupted anywhere resumes: importing the same archive
+    // again finds every record already restored and adds nothing.
+    let repeated = snapshot::import(
+        target_store,
+        &AuthnSnapshotRules,
+        &sid_crypto::RustCryptoPrimitives::new(),
+        &snapshot,
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated.total(), 0, "{repeated}");
     let verified = snapshot::verify(source_store, target_store, &AuthnSnapshotRules)
         .await
         .unwrap();

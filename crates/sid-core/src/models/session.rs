@@ -280,7 +280,7 @@ pub use sid_ids::SessionId;
 
 /// Session represents an active user session. `O` is how the serving
 /// authority represents its stable user: a local Profile by default.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session<O = ProfileId> {
     pub id: SessionId,
     pub profile_id: O,

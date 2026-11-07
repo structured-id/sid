@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! RBAC operations: Role, Group, GroupMember, RoleAssignment, SoD, CedarPolicy.
+//! RBAC operations: Role, Group, GroupMember, RoleAssignment, CedarPolicy.
 
 use super::{SqliteBackend, col, dt_col, fmt_dt, fmt_dt_opt};
 use sid_core::{
@@ -7,7 +7,6 @@ use sid_core::{
     models::{
         CedarPolicy, CedarPolicyId, Group, GroupId, GroupMember, MutationContext, ProfileId,
         ProjectId, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
-        SodConflictRule,
     },
 };
 
@@ -688,22 +687,6 @@ fn row_to_cedar_policy(row: &sqlx::sqlite::SqliteRow) -> SidResult<CedarPolicy> 
     })
 }
 
-/// An unknown severity is an error: read as a warning, a blocking rule would
-/// stop blocking.
-fn row_to_sod_rule(row: &sqlx::sqlite::SqliteRow) -> SidResult<SodConflictRule> {
-    let conflicting_roles: String = col(row, "conflicting_roles")?;
-    Ok(SodConflictRule {
-        id: super::uuid_col(row, "id")?,
-        name: col(row, "name")?,
-        description: col(row, "description")?,
-        conflicting_roles: conflicting_roles
-            .split_whitespace()
-            .map(String::from)
-            .collect(),
-        severity: super::parsed_col(row, "severity")?,
-    })
-}
-
 impl SqliteBackend {
     // === Role ===
 
@@ -1206,46 +1189,6 @@ impl SqliteBackend {
         let removed = u64::try_from(expired.len()).expect("a row count fits in u64");
         Self::commit_bulk(tx, removed, "role_assignments:cleanup", audit).await?;
         Ok(expired)
-    }
-
-    // === SoD ===
-
-    pub(crate) async fn list_sod_rules_impl(&self) -> SidResult<Vec<SodConflictRule>> {
-        let rows = sqlx::query("SELECT * FROM sod_conflict_rules")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        rows.iter().map(row_to_sod_rule).collect()
-    }
-
-    pub(crate) async fn import_sod_rule_impl(
-        &self,
-        rule: &SodConflictRule,
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let mut tx = self.begin_write().await?;
-        let held = sqlx::query("SELECT * FROM sod_conflict_rules WHERE id = ?")
-            .bind(rule.id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        if let Some(row) = held {
-            return crate::transfer_repeat(&row_to_sod_rule(&row)?, rule, "SoD rule");
-        }
-        sqlx::query(
-            "INSERT INTO sod_conflict_rules (id, name, description, conflicting_roles, severity)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(rule.id)
-        .bind(&rule.name)
-        .bind(&rule.description)
-        .bind(rule.conflicting_roles.join(" "))
-        .bind(rule.severity.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| super::insert_error("SoD rule", e))?;
-        Self::commit_mutation(tx, &format!("sod_rule:{}", rule.id), ctx).await?;
-        Ok(true)
     }
 
     // === CedarPolicy ===

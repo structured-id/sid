@@ -7,7 +7,7 @@ use sid_core::models::authz::{SodConflict, SodConflictRule};
 
 /// CE SoD service — checks role assignments against conflict rules.
 ///
-/// Rules are provided at construction (from config or hardcoded defaults).
+/// Rules come from the installation configuration at construction.
 /// CE produces warnings only — no blocking.
 pub struct SodService {
     rules: Vec<SodConflictRule>,
@@ -21,7 +21,7 @@ impl SodService {
 
     /// Create with CE default rules (empty — no built-in conflicts).
     ///
-    /// Operators configure SoD rules via `sid.yaml` or admin API.
+    /// Operators configure SoD rules in the installation configuration.
     pub fn ce_default() -> Self {
         Self::new(Vec::new())
     }
