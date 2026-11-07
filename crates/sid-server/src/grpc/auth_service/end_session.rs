@@ -152,13 +152,10 @@ impl AuthServiceImpl {
             .get_all("cookie")
             .iter()
             .filter_map(|value| value.to_str().ok());
-        let Some(secret) = self.browser_cookie().secret(cookies) else {
-            return Ok(None);
-        };
-        self.storage
-            .get_session_by_browser_secret(&secret.hash())
+        self.sign_ins
+            .browser_session(cookies)
             .await
-            .map_err(storage_failure)
+            .map_err(sign_in_refusal)
     }
 
     /// The claims of a valid `id_token_hint` of `issuer`: an ID token of this

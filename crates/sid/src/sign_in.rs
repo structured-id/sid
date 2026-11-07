@@ -666,6 +666,22 @@ impl SignIn {
         }
     }
 
+    /// The browser's IdP session, by the secret this authority's session
+    /// cookie carries among `cookies` (the `Cookie` header values); `None`
+    /// without one, or for a secret no session holds.
+    pub async fn browser_session<'c>(
+        &self,
+        cookies: impl IntoIterator<Item = &'c str>,
+    ) -> Result<Option<Session>, SignInError> {
+        let Some(secret) = self.cookie.secret(cookies) else {
+            return Ok(None);
+        };
+        Ok(self
+            .storage
+            .get_session_by_browser_secret(&secret.hash())
+            .await?)
+    }
+
     /// Whether the session `session_id` is still valid, as `caller` may ask:
     /// someone else's session answers exactly like an unknown one; the owner
     /// and the expiry are told only for a valid session.
