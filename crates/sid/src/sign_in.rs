@@ -1505,6 +1505,7 @@ impl PasswordSignInHost for Passwords<'_> {
     }
 }
 
+pub mod captcha;
 pub mod completions;
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use super::native_session::NativeProof;
 use sid_authn::native_session::{PROOF_METADATA, REFRESH_METADATA};
@@ -188,6 +188,18 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::Identity(e) => super::identity_service::refusal(e),
         E::Operation(e) => e.into_status(),
         E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
+/// The answer to a CAPTCHA solution that earned no pass.
+fn captcha_refusal(e: sid::sign_in::captcha::CaptchaSolveError) -> Status {
+    use sid::sign_in::captcha::CaptchaSolveError as E;
+    match e {
+        E::Rejected => invalid_field("token", "the CAPTCHA solution was not accepted"),
+        E::Expired => ceremony_expired("CAPTCHA"),
+        E::ProviderUnavailable(cause) => dependency_unavailable("CAPTCHA provider", cause),
+        E::GateUnavailable(cause) => anomaly_unavailable(cause),
         E::Internal => ApiError::internal().into(),
     }
 }
@@ -1970,42 +1982,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<VerifyCaptchaResponse>, Status> {
         let remote_ip = self.client_ip(&request)?;
         let req = request.into_inner();
-
-        // The provider's own error text stays in the log.
-        let rejected = || invalid_field("token", "the CAPTCHA solution was not accepted");
-        let result = self
-            .sign_ins
-            .captcha_provider()
-            .verify(&req.challenge_id, &req.token, remote_ip.as_ref())
-            .await
-            .map_err(|e| match e {
-                sid_authn::captcha::CaptchaError::Expired => ceremony_expired("CAPTCHA"),
-                sid_authn::captcha::CaptchaError::ProviderError(e) => {
-                    dependency_unavailable("CAPTCHA provider", e)
-                }
-                sid_authn::captcha::CaptchaError::NotConfigured => {
-                    internal("verify CAPTCHA", "provider not configured")
-                }
-                e => {
-                    warn!(error = %e, "CAPTCHA solution rejected");
-                    rejected()
-                }
-            })?;
-
-        if !result.success {
-            return Err(rejected());
-        }
-
-        // The solution counts once, and only for a challenge a sign-in was
-        // asked; the pass answers that sign-in's retry.
         let bypass_token = self
             .sign_ins
-            .captcha_gate()
-            .solved(&req.challenge_id)
+            .solve_captcha(&req.challenge_id, &req.token, remote_ip)
             .await
-            .map_err(anomaly_unavailable)?
-            .ok_or_else(|| ceremony_expired("CAPTCHA"))?;
-
+            .map_err(captcha_refusal)?;
         Ok(Response::new(VerifyCaptchaResponse {
             verified: true,
             redirect_to: None,
