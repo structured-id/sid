@@ -9,7 +9,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sid_authn::normalize::normalize_principal;
-use sid_authn::password_operation::PasswordOperationError;
+use sid_authn::opaque_zkpp::ZkppOpaqueServer;
+use sid_authn::password_operation::{OperationOwner, PasswordOperationError, StepError};
+use sid_proto::sid::v1::{
+    OpaqueZkppRegistrationFinishRequest, OpaqueZkppRegistrationFinishResponse,
+    OpaqueZkppRegistrationStartResponse,
+};
+
+use crate::password_operation::{Finish, OperationPurpose, PasswordOperations};
 use sid_core::Error as SidError;
 use sid_core::enrollment::{EnrollmentDecision, EnrollmentDenialReason, evaluate_enrollment};
 use sid_core::models::event::{Event, event_types};
@@ -314,6 +321,106 @@ impl Registration {
         }
         info!("Self-registration committed for profile {}", profile_id);
         Ok((profile_id, credential_id))
+    }
+
+    /// Start a registration of `principal` through `operations`: the
+    /// operation is prepared for the new account (or as a decoy for a held
+    /// identifier) and the client's OPAQUE request answered under the new
+    /// password's own OPRF key. The proof arrives at the finish.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start(
+        &self,
+        operations: &PasswordOperations,
+        zkpp: &ZkppOpaqueServer,
+        principal: &str,
+        claim_token: Option<&str>,
+        invite_code: Option<&str>,
+        registration_request: Vec<u8>,
+        enabled: bool,
+    ) -> Result<OpaqueZkppRegistrationStartResponse, RegistrationError> {
+        let charged = normalize_principal(principal)
+            .map_err(|e| RegistrationError::InvalidIdentifier(e.to_string()))?
+            .normalized;
+        let pending = self
+            .begin(principal, claim_token, invite_code, enabled)
+            .await?;
+        let owner = match &pending {
+            PendingRegistration::NewAccount { profile_id, .. } => OperationOwner::New(*profile_id),
+            PendingRegistration::ExistingAccount { .. } => {
+                OperationOwner::Decoy(ProfileId::generate())
+            }
+        };
+        let prepared = operations
+            .prepare(
+                zkpp,
+                OperationPurpose::Registration { pending },
+                owner,
+                format!("registration:{charged}"),
+                Some(registration_request),
+            )
+            .await?;
+        Ok(OpaqueZkppRegistrationStartResponse {
+            registration_response: prepared.registration_response.unwrap_or_default(),
+            history: Some(prepared.context),
+        })
+    }
+
+    /// Finish a registration: verify the proof and the history over the
+    /// final record, then commit the account, its first credential with the
+    /// proof's evidence and its first history entry (dropping entries older
+    /// than `history_max_age_days`) together. A held identifier's decoy is
+    /// verified like any other and refused here; a repeat of a committed
+    /// finish gets the answer it recorded.
+    pub async fn finish(
+        &self,
+        operations: &PasswordOperations,
+        zkpp: Arc<ZkppOpaqueServer>,
+        request: OpaqueZkppRegistrationFinishRequest,
+        history_max_age_days: u32,
+        enabled: bool,
+    ) -> Result<OpaqueZkppRegistrationFinishResponse, RegistrationError> {
+        let id = sid_authn::password_operation::operation_id(request.operation_id.as_ref())?;
+        let done = match operations
+            .finish(
+                zkpp,
+                &id,
+                "registration",
+                &request.registration_record,
+                request.proof,
+                |op| match op.purpose {
+                    OperationPurpose::Registration { .. } => Ok(()),
+                    _ => Err(RegistrationError::from(PasswordOperationError::NotPending)),
+                },
+            )
+            .await
+            .map_err(StepError::refusal)?
+        {
+            Finish::Completed(result) => {
+                return prost::Message::decode(result.as_slice())
+                    .map_err(|e| internal("decode recorded password operation result", e));
+            }
+            Finish::Ready(done) => *done,
+        };
+        let OperationPurpose::Registration { pending } = &done.operation.purpose else {
+            return Err(PasswordOperationError::NotPending.into());
+        };
+        let pending = pending.clone();
+        let PendingRegistration::NewAccount { profile_id, .. } = pending else {
+            return Err(self.refuse_held(&pending, enabled).await);
+        };
+        let credential = done.credential(profile_id, done.password_file.clone());
+        let response = OpaqueZkppRegistrationFinishResponse {
+            credential_id: crate::wire::stored_id::<sid_ids::CredentialId, _>(credential.id.0)
+                .map_err(|e| internal("encode the credential id", e))?,
+        };
+        let completion = done.completion(prost::Message::encode_to_vec(&response));
+        let history = done.history.map(|mut commit| {
+            commit.max_age_days = history_max_age_days;
+            commit
+        });
+        self.commit(pending, credential, history, Some(completion), enabled)
+            .await?;
+        Ok(response)
     }
 
     /// The refusal of a held identifier's registration finish: the one a new

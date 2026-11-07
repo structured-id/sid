@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod machines;
 pub mod maintenance;
 pub mod oauth;
+pub mod password_operation;
 pub mod pats;
 pub mod projects;
 pub mod provisioning;

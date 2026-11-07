@@ -36,9 +36,7 @@ use sid_core::models::{
     AuditEntry, Credential, CredentialData, CredentialId, CredentialType, ProfileId, ProfileType,
     Session, SessionId,
 };
-use sid_core::models::{
-    HistoryCommit, MutationContext, OidcIssuer, OperationCompletion, RevocationReason,
-};
+use sid_core::models::{MutationContext, OidcIssuer, RevocationReason};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::{context, run};
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
@@ -56,7 +54,7 @@ use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
 
 use super::native_session::NativeProof;
-use super::password_operation::{Finish, OperationPurpose, PendingOperation};
+use sid::password_operation::{Finish, OperationPurpose, PendingOperation};
 use sid_authn::native_session::{NativePolicy, PROOF_METADATA, REFRESH_METADATA};
 use sid_authn::password_operation::{
     CurrentPasswordCheck, OperationOwner, change_context, operation_id,
@@ -168,8 +166,6 @@ fn parse_principal(identifier: &str) -> Result<(PrincipalType, String), tonic::S
 fn parse_handle(identifier: &str) -> Result<NormalizedPrincipal, tonic::Status> {
     normalize_principal(identifier).map_err(|e| invalid_field("identifier", e.to_string()))
 }
-
-pub(crate) use sid::registration::PendingRegistration;
 
 /// `ALREADY_EXISTS` with the error-model reason for the identifier kind.
 fn already_registered(principal_type: PrincipalType) -> tonic::Status {
@@ -356,7 +352,7 @@ pub struct AuthServiceImpl {
     pub(crate) feature_flags: FeatureFlagService,
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
-    pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
+    pub(crate) password_ops: Arc<sid::password_operation::PasswordOperations>,
     /// The history evaluator, when it runs in this process.
     history_evaluation: Option<Arc<sid_authn::password_operation::HistoryEvaluation>>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
@@ -486,7 +482,7 @@ impl AuthServiceImpl {
         let captcha_gate =
             sid_authn::captcha::CaptchaGate::new(ceremonies.clone(), key_manager.clone());
         let (password_ops, history_evaluation) =
-            super::password_operation::PasswordOperations::with_authority(
+            sid::password_operation::PasswordOperations::with_authority(
                 storage.clone(),
                 ceremonies.clone(),
                 key_manager.clone(),
@@ -1115,44 +1111,6 @@ impl AuthServiceImpl {
             .map(|email| email.email))
     }
 
-    /// Decide what a registration started for `principal` may commit. The
-    /// server decides new registration versus existing account; a client
-    /// cannot claim an identifier that already belongs to someone. A held
-    /// identifier's start is answered like a new one but can never be
-    /// committed to.
-    async fn begin_registration(
-        &self,
-        principal: &str,
-        claim_token: Option<&str>,
-        invite_code: Option<&str>,
-    ) -> Result<PendingRegistration, Status> {
-        let enabled = self.feature_flags.is_registration_enabled().await;
-        self.registration
-            .begin(principal, claim_token, invite_code, enabled)
-            .await
-            .map_err(registration_refusal)
-    }
-
-    /// Commit a pending registration with its first credential, atomically. A taken
-    /// identifier answers `ALREADY_EXISTS` and nothing is written: the holder is not
-    /// contacted, and the registrant must use another identifier and claim this one
-    /// from their own account. `history` is the first password's accepted
-    /// history; `completion` the durable result of the operation that installs
-    /// it.
-    async fn commit_registration(
-        &self,
-        pending: PendingRegistration,
-        credential: Credential,
-        history: Option<HistoryCommit>,
-        completion: Option<OperationCompletion>,
-    ) -> Result<(ProfileId, CredentialId), Status> {
-        let enabled = self.feature_flags.is_registration_enabled().await;
-        self.registration
-            .commit(pending, credential, history, completion, enabled)
-            .await
-            .map_err(registration_refusal)
-    }
-
     /// A password credential the caller owns; anything else reads as not found, so a
     /// foreign credential id reveals nothing.
     #[allow(clippy::result_large_err)]
@@ -1164,13 +1122,6 @@ impl AuthServiceImpl {
             return Err(credential_not_found(credential.id));
         }
         Ok(())
-    }
-
-    /// The refusal of a held identifier's registration finish
-    /// ([`sid::registration::Registration::refuse_held`]).
-    async fn refuse_held(&self, pending: &PendingRegistration) -> Status {
-        let enabled = self.feature_flags.is_registration_enabled().await;
-        registration_refusal(self.registration.refuse_held(pending, enabled).await)
     }
 
     /// Refuse unless the caller's own interactive session may bind a new
@@ -2114,12 +2065,6 @@ impl AuthServiceImpl {
         response.encode_to_vec()
     }
 
-    /// The response a recorded finish result decodes to.
-    #[allow(clippy::result_large_err)]
-    fn recorded_response<T: prost::Message + Default>(result: &[u8]) -> Result<T, Status> {
-        T::decode(result).map_err(|e| internal("decode recorded password operation result", e))
-    }
-
     /// The reset session `id` while it is verified and unexpired.
     async fn verified_reset_session(
         &self,
@@ -2323,36 +2268,20 @@ impl AuthService for AuthServiceImpl {
         let zkpp = self.require_zkpp()?;
 
         let req = request.into_inner();
-        let (_, charged) = parse_principal(&req.principal)?;
-        let pending = self
-            .begin_registration(
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        self.registration
+            .start(
+                &self.password_ops,
+                &zkpp,
                 &req.principal,
                 req.claim_token.as_deref(),
                 req.invite_code.as_deref(),
-            )
-            .await?;
-        let owner = match &pending {
-            PendingRegistration::NewAccount { profile_id, .. } => OperationOwner::New(*profile_id),
-            PendingRegistration::ExistingAccount { .. } => {
-                OperationOwner::Decoy(ProfileId::generate())
-            }
-        };
-        let prepared = self
-            .password_ops
-            .prepare(
-                &zkpp,
-                OperationPurpose::Registration { pending },
-                owner,
-                format!("registration:{charged}"),
-                Some(req.registration_request),
+                req.registration_request,
+                enabled,
             )
             .await
-            .or_status()?;
-
-        Ok(Response::new(OpaqueZkppRegistrationStartResponse {
-            registration_response: prepared.registration_response.unwrap_or_default(),
-            history: Some(prepared.context),
-        }))
+            .map(Response::new)
+            .map_err(registration_refusal)
     }
 
     /// Finish a registration: verify the proof and the history over the
@@ -2369,53 +2298,18 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         let zkpp = self.require_zkpp()?;
 
-        let req = request.into_inner();
-        let id = operation_id(req.operation_id.as_ref()).or_status()?;
-        let done = match self
-            .password_ops
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        self.registration
             .finish(
+                &self.password_ops,
                 zkpp,
-                &id,
-                "registration",
-                &req.registration_record,
-                req.proof,
-                |op| match op.purpose {
-                    OperationPurpose::Registration { .. } => Ok(()),
-                    _ => Err(operation_not_pending()),
-                },
+                request.into_inner(),
+                self.security_policy().password.history_max_age_days,
+                enabled,
             )
             .await
-            .or_status()?
-        {
-            Finish::Completed(result) => {
-                return Ok(Response::new(Self::recorded_response(&result)?));
-            }
-            Finish::Ready(done) => *done,
-        };
-        let OperationPurpose::Registration { pending } = &done.operation.purpose else {
-            return Err(operation_not_pending());
-        };
-        let pending = pending.clone();
-        let profile_id = match &pending {
-            PendingRegistration::NewAccount { profile_id, .. } => *profile_id,
-            held @ PendingRegistration::ExistingAccount { .. } => {
-                return Err(self.refuse_held(held).await);
-            }
-        };
-        let credential = done.credential(profile_id, done.password_file.clone());
-        let response = OpaqueZkppRegistrationFinishResponse {
-            credential_id: credential_wire(credential.id)?,
-        };
-        let completion = done.completion(Self::finish_result(&response));
-        self.commit_registration(
-            pending,
-            credential,
-            self.with_history_age(done.history),
-            Some(completion),
-        )
-        .await?;
-
-        Ok(Response::new(response))
+            .map(Response::new)
+            .map_err(registration_refusal)
     }
 
     // ── Password Change (ZKPP) ──
