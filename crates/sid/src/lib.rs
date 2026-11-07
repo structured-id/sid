@@ -5,6 +5,7 @@
 //! store: a service binary and an embedding application hand it the same
 //! parts.
 
+pub mod account;
 pub mod authorization;
 pub mod email_provider;
 pub mod enrollment;
