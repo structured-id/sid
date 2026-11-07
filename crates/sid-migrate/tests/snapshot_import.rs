@@ -2439,3 +2439,59 @@ async fn a_resumed_import_refuses_a_changed_target_record() {
     assert_eq!(target.get_device(device.id).await.unwrap(), trusted);
     assert_ne!(trusted.as_ref(), Some(&device));
 }
+
+/// A store lists sessions and groups in no dependency order: an application
+/// session can precede the IdP session it was authenticated by, a child
+/// group its parent. The import restores each after what it references.
+#[tokio::test]
+async fn dependents_listed_first_restore_after_their_references() {
+    use sid_core::models::{Group, ProjectId, Session};
+    use sid_plugin::GrantStore;
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let ctx = || AuditEntry::system("test", "order").into();
+    let profile = Profile::new(Some("ordered"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+    let idp = Session::new(profile.id, None, expires);
+    source.create_session(&idp, ctx()).await.unwrap();
+    let mut application = Session::new(profile.id, None, expires);
+    application.authenticated_by = Some(idp.id);
+    source.create_session(&application, ctx()).await.unwrap();
+    source.ensure_system_project(ctx()).await.unwrap();
+    let parent = Group::new(ProjectId::SYSTEM, "parent");
+    source.create_group(&parent, ctx()).await.unwrap();
+    let mut child = Group::new(ProjectId::SYSTEM, "child");
+    child.parent_group_id = Some(parent.id);
+    source.create_group(&child, ctx()).await.unwrap();
+
+    let mut snapshot = export(&source).await.unwrap();
+    // Each dependent ahead of what it references, whatever the store listed.
+    snapshot
+        .sessions
+        .sort_by_key(|s| s.authenticated_by.is_none());
+    snapshot.groups.sort_by_key(|g| g.parent_group_id.is_none());
+    assert_eq!(snapshot.sessions[0].id, application.id);
+    assert_eq!(snapshot.groups[0].id, child.id);
+
+    let target = uninitialized().await;
+    let restored = import(&target, &snapshot).await.unwrap();
+    assert_eq!(restored.sessions, 2);
+    assert_eq!(restored.groups, 2);
+    assert_eq!(
+        target
+            .get_session(application.id)
+            .await
+            .unwrap()
+            .and_then(|s| s.authenticated_by),
+        Some(idp.id)
+    );
+    assert_eq!(
+        target
+            .get_group(child.id)
+            .await
+            .unwrap()
+            .and_then(|g| g.parent_group_id),
+        Some(parent.id)
+    );
+}
