@@ -9,17 +9,14 @@ use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretBox};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
-use sid_authn::claim_mapping::resolve_claims;
-use sid_authn::client_auth::ClientAuthentication;
 use sid_authn::device_auth;
-use sid_authn::dpop::DPopValidator;
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::jwt::JwtService;
 use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
-use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
+use sid_authn::oauth2::{OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
@@ -27,33 +24,28 @@ use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
-use sid_authn::subject::{SubjectRule, resolve_subject};
 use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
     VerifiedAssertion, WebAuthnServer,
 };
 use sid_core::enrollment::{EnrollmentDecision, evaluate_enrollment};
 use sid_core::models::WebAuthnUserHandle;
-use sid_core::models::dpop::DPopBinding;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::{
-    AuditEntry, Credential, CredentialData, CredentialId, CredentialType,
-    DEVICE_CODE_LIFETIME_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, NewRegistration, Profile, ProfileId,
-    ProfileType, Session, SessionId,
+    AuditEntry, Credential, CredentialData, CredentialId, CredentialType, NewRegistration, Profile,
+    ProfileId, ProfileType, Session, SessionId,
 };
 use sid_core::models::{
-    HistoryCommit, MutationContext, OidcIssuer, OperationCompletion, ProfileEmail, ProfilePhone,
-    RevocationReason,
+    HistoryCommit, MutationContext, OidcIssuer, OperationCompletion, RevocationReason,
 };
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::{context, run};
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
 use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_infra::oauth_http::{
-    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
-    token_error, token_refusal,
+    client_refused, dpop_refusal, missing_parameter, target_refused, token_error, token_refusal,
 };
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::crypto::StoredCredential;
@@ -80,7 +72,6 @@ mod end_session;
 mod password_sign_in;
 mod refusal;
 mod sign_in_security;
-mod token_grant;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use password_sign_in::ProfileSignIn;
@@ -222,55 +213,6 @@ fn parse_acr_values(acr_values: &str) -> Option<sid_core::models::session::AuthL
         }
     }
     highest
-}
-
-/// Check if an IP address matches a CIDR entry or exact IP.
-///
-/// Supports: exact IPs ("10.0.0.1"), IPv4 CIDRs ("10.0.0.0/24"),
-/// and IPv6 CIDRs ("::1/128").
-fn ip_matches(entry: &str, addr: &std::net::IpAddr) -> bool {
-    if let Some((network, prefix)) = entry.split_once('/') {
-        let Ok(network_addr): Result<std::net::IpAddr, _> = network.parse() else {
-            return false;
-        };
-        let Ok(prefix_len): Result<u32, _> = prefix.parse() else {
-            return false;
-        };
-        match (network_addr, addr) {
-            (std::net::IpAddr::V4(net), std::net::IpAddr::V4(ip)) => {
-                if prefix_len > 32 {
-                    return false;
-                }
-                if prefix_len == 0 {
-                    return true;
-                }
-                let mask = u32::MAX << (32 - prefix_len);
-                (u32::from(*ip) & mask) == (u32::from(net) & mask)
-            }
-            (std::net::IpAddr::V6(net), std::net::IpAddr::V6(ip)) => {
-                if prefix_len > 128 {
-                    return false;
-                }
-                if prefix_len == 0 {
-                    return true;
-                }
-                let net_bits = u128::from(net);
-                let ip_bits = u128::from(*ip);
-                let mask = u128::MAX << (128 - prefix_len);
-                (ip_bits & mask) == (net_bits & mask)
-            }
-            _ => false, // Mixed v4/v6
-        }
-    } else {
-        // Exact IP match.
-        entry.parse::<std::net::IpAddr>() == Ok(*addr)
-    }
-}
-
-/// A token's claims could not be read: the grant fails instead of issuing
-/// tokens without them.
-fn claims_unavailable(e: sid_core::Error) -> Status {
-    internal("token claims", e)
 }
 
 /// Extract User-Agent from gRPC metadata.
@@ -581,25 +523,21 @@ pub struct AuthServiceImpl {
     /// Password resets by emailed link; `None` without the account UI page
     /// the links open.
     password_resets: Option<Arc<sid_authn::password_reset::PasswordResetService>>,
-    /// DPoP proof validator (RFC 9449).
-    pub(crate) dpop_validator: DPopValidator,
+    /// The OAuth endpoints of this installation's issuers, and what sign-in
+    /// shares with them: issuers, client authentication, targets, signers,
+    /// sender proofs and the login requirements.
+    oauth: sid::oauth::OAuth,
+    /// Whether the login requirements are the host's, not
+    /// `security_policy`'s fixed ones.
+    host_login_policy: bool,
     /// The OIDC issuers whose endpoints the OAuth requests arrive at, and
     /// their signers.
     issuers: Arc<sid_authn::issuer::IssuerRegistry>,
-    /// The installation's organization: machine users, which belong to the
-    /// installation rather than to an application, are served by its issuer.
-    installation_org: sid_core::models::OrgId,
     /// Issuer URL (e.g., "https://sid.example.com").
     issuer: String,
     /// Its origin (scheme and authority): the prefix of every URI a sender
     /// proof names, never taken from a request.
     public_origin: String,
-    /// RFC 7523: assertion JTI replay prevention cache.
-    assertion_jti_log: Arc<sid_authn::client_assertion::AssertionJtiLog>,
-    /// Per-client rate limiter for machine user requests.
-    rate_limiter: Arc<crate::rate_limit::RateLimiter>,
-    /// Distributed rate limit stats for admin dashboard.
-    rate_limit_stats: Arc<crate::rate_limit::RateLimitStats>,
     /// CE anomaly detection engine (brute force, country, Tor, etc.).
     anomaly_detector: Arc<AnomalyDetector>,
     /// IP intelligence aggregator (Tor exit, datacenter, blocklist detection).
@@ -608,9 +546,6 @@ pub struct AuthServiceImpl {
     geoip: Arc<GeoIpChain>,
     /// CE hardcoded security policy (not configurable via UI in CE).
     security_policy: SecurityPolicy,
-    /// Where the login requirements come from: the host's policy source, or
-    /// none for `security_policy`'s fixed ones.
-    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     /// CAPTCHA provider for RequireCaptcha anomaly reaction.
     captcha_provider: Arc<dyn sid_authn::captcha::CaptchaProvider>,
     /// Which sign-in each CAPTCHA was asked of, and the single-use passes earned.
@@ -621,10 +556,6 @@ pub struct AuthServiceImpl {
     totp_replay: sid_authn::TotpReplayGuard,
     /// Ends a profile's sessions everywhere (tokens, RPs) on a password reset.
     cascade: Arc<RevocationCascadeService>,
-    /// Proxies whose forwarding headers name the client; none by default.
-    /// The shared authorization evaluator: decides who may inspect the
-    /// tokens of a protected resource.
-    authz: Arc<sid_authz::CeAuthzEngine<dyn StorageBackend>>,
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
@@ -726,6 +657,21 @@ impl AuthServiceImpl {
                 password_history,
             );
         let password_ops = Arc::new(password_ops);
+        let oauth = sid::oauth::OAuth::new(sid::oauth::OAuthParts {
+            storage: storage.clone(),
+            oauth2: oauth2.clone(),
+            jwt: jwt.clone(),
+            issuers: issuers.clone(),
+            installation_org,
+            authz,
+            revocation: revocation_cache.clone(),
+            cascade: cascade.clone(),
+            cache: cache_backend,
+            login_policy: Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(
+                &SecurityPolicy::ce_default(),
+            )),
+            installation_url: issuer.clone(),
+        });
         Self {
             storage,
             oauth2,
@@ -788,32 +734,23 @@ impl AuthServiceImpl {
             magic_link,
             otp,
             password_resets: None,
-            dpop_validator: DPopValidator::new(ceremonies.clone()),
+            oauth,
+            host_login_policy: false,
             issuers,
-            installation_org,
             public_origin: url::Url::parse(&issuer)
                 .expect("the installation URL is validated at start-up")
                 .origin()
                 .ascii_serialization(),
             issuer,
-            assertion_jti_log: Arc::new(sid_authn::client_assertion::AssertionJtiLog::new(
-                ceremonies.clone(),
-            )),
-            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new(cache_backend.clone())),
-            rate_limit_stats: Arc::new(crate::rate_limit::RateLimitStats::new(
-                cache_backend.clone(),
-            )),
             totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
             anomaly_detector: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
             ip_intelligence,
             geoip,
             security_policy: SecurityPolicy::ce_default(),
-            login_policy: None,
             captcha_provider,
             captcha_gate,
             key_manager,
             cascade,
-            authz,
             sign_in_origin: None,
             browser_cookie: sid_authn::browser_session::BrowserCookie::default(),
             enrollment_pin: None,
@@ -890,26 +827,6 @@ impl AuthServiceImpl {
         }
     }
 
-    /// The `sub` a token `issuer` gives `client` carries for `profile_id`,
-    /// under the rule of that hop.
-    async fn subject_for(
-        &self,
-        issuer: &sid_core::models::OidcIssuer,
-        profile_id: ProfileId,
-        client: &sid_core::models::OAuth2Client,
-    ) -> Result<String, Status> {
-        let rule = SubjectRule::for_hop(issuer, client).map_err(|e| {
-            tracing::error!(error = %e, client = %client.client_id, "no subject rule for this hop");
-            Status::from(ApiError::internal())
-        })?;
-        resolve_subject(self.storage.as_ref(), profile_id, client, rule)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, client = %client.client_id, "subject not resolved");
-                Status::from(ApiError::internal())
-            })
-    }
-
     /// The client address of `request`; a call whose address did not resolve
     /// is refused before anything counts it.
     fn client_ip<T>(&self, request: &Request<T>) -> Result<Option<std::net::IpAddr>, Status> {
@@ -919,8 +836,15 @@ impl AuthServiceImpl {
         Ok(request.remote_addr().map(|addr| addr.ip()))
     }
 
-    /// Override the security policy (useful for testing conditional access wiring).
+    /// Override the security policy (useful for testing conditional access
+    /// wiring); its login requirements apply unless the host states its own.
     pub fn with_security_policy(mut self, policy: SecurityPolicy) -> Self {
+        if !self.host_login_policy {
+            self.oauth
+                .set_login_policy(Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(
+                    &policy,
+                )));
+        }
         self.security_policy = policy;
         self
     }
@@ -932,7 +856,8 @@ impl AuthServiceImpl {
         mut self,
         source: Arc<dyn sid_authn::login_policy::LoginPolicySource>,
     ) -> Self {
-        self.login_policy = Some(source);
+        self.oauth.set_login_policy(source);
+        self.host_login_policy = true;
         self
     }
 
@@ -943,17 +868,10 @@ impl AuthServiceImpl {
         &self,
         client_id: Option<&str>,
     ) -> Result<sid_authn::login_policy::LoginRequirements, Status> {
-        use sid_authn::login_policy::LoginPolicySource as _;
-        match &self.login_policy {
-            Some(source) => source
-                .requirements(client_id)
-                .await
-                .map_err(|e| dependency_unavailable("login policy", e)),
-            None => sid_authn::login_policy::FixedLoginPolicy::of(&self.security_policy)
-                .requirements(client_id)
-                .await
-                .map_err(|e| dependency_unavailable("login policy", e)),
-        }
+        self.oauth
+            .login_requirements(client_id)
+            .await
+            .map_err(oauth_refusal)
     }
 
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
@@ -964,24 +882,6 @@ impl AuthServiceImpl {
         self.magic_link
             .as_deref()
             .ok_or_else(|| not_configured("magic_links"))
-    }
-
-    /// A profile's primary email and phone for token claims.
-    async fn primary_contacts(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<(Option<ProfileEmail>, Option<ProfilePhone>), Status> {
-        let email = self
-            .storage
-            .get_primary_profile_email(profile_id)
-            .await
-            .map_err(claims_unavailable)?;
-        let phone = self
-            .storage
-            .get_primary_profile_phone(profile_id)
-            .await
-            .map_err(claims_unavailable)?;
-        Ok((email, phone))
     }
 
     /// Evaluate login security: anomaly detection, then the organization's
@@ -1481,373 +1381,37 @@ impl AuthServiceImpl {
     ) -> Result<Option<String>, Status> {
         match proof {
             Some(proof) => Ok(Some(
-                proof.ceremony_key(&self.dpop_validator, reference).await?,
+                proof.ceremony_key(self.oauth.dpop(), reference).await?,
             )),
             None => Ok(None),
         }
     }
 
-    /// Validate DPoP proof from an OAuth2 token request, if present, against
-    /// `target`, the request as it was received (RFC 9449 §4.3).
-    /// Returns `Some(DPopBinding)` if proof is valid, `None` if no proof provided.
-    async fn validate_dpop_proof(
-        &self,
-        dpop_proof: &Option<String>,
-        target: &sid_authn::resource::RequestTarget,
-    ) -> Result<Option<DPopBinding>, Status> {
-        let proof_jwt = match dpop_proof.as_deref() {
-            Some(p) if !p.is_empty() => p,
-            _ => return Ok(None),
-        };
-
-        let validated = self
-            .dpop_validator
-            .validate(proof_jwt, &target.method, &target.uri)
-            .await
-            .map_err(|e| match e {
-                // An unreachable replay record cannot rule out a replay; the
-                // client retries the same request.
-                sid_authn::dpop::DPopError::ReplayStoreUnavailable => {
-                    dependency_unavailable("DPoP replay record", "replay store unreachable")
-                }
-                other => {
-                    warn!("DPoP proof validation failed: {}", other);
-                    dpop_refusal(other)
-                }
-            })?;
-
-        Ok(Some(validated))
-    }
-
     /// The issuer a request's path names, when it serves clients of
-    /// `client_org`. An unknown handle and a client of another issuer both
-    /// yield `None`: to the caller the client is unknown at this endpoint, and
-    /// no other issuer stands in.
+    /// `client_org` ([`sid::oauth::OAuth::issuer_serving`]).
     async fn issuer_serving(
         &self,
         handle: &str,
         client_org: Option<sid_core::models::OrgId>,
     ) -> Result<Option<OidcIssuer>, Status> {
-        let issuer = self.issuers.by_handle(handle).await.map_err(|e| {
-            warn!(error = %e, "reading the request's OIDC issuer");
-            Status::from(ApiError::internal())
-        })?;
-        Ok(issuer.filter(|issuer| issuer.serves(client_org)))
-    }
-
-    /// The client a request to the endpoint of issuer `issuer_handle`
-    /// authenticates as (RFC 6749 §2.3), with that issuer.
-    async fn authenticated_client(
-        &self,
-        issuer_handle: &str,
-        auth: &ClientAuthentication,
-    ) -> Result<(sid_core::models::OAuth2Client, OidcIssuer), Status> {
-        let client = self
-            .storage
-            .get_oauth2_client(auth.client_id())
+        self.oauth
+            .issuer_serving(handle, client_org)
             .await
-            .map_err(storage_failure)?
-            .ok_or_else(client_refused)?;
-        let issuer = self.client_issuer(issuer_handle, &client).await?;
-        self.check_client_authentication(&client, &issuer, auth)
-            .await?;
-        Ok((client, issuer))
+            .map_err(oauth_refusal)
     }
 
-    /// The issuer `issuer_handle` names, when it serves the active `client`.
-    /// A client this issuer does not serve is refused exactly like one that
-    /// does not exist (RFC 6749 §5.2 `invalid_client`).
-    async fn client_issuer(
-        &self,
-        issuer_handle: &str,
-        client: &sid_core::models::OAuth2Client,
-    ) -> Result<OidcIssuer, Status> {
-        let issuer = self
-            .issuer_serving(issuer_handle, client.org_id)
-            .await?
-            .ok_or_else(client_refused)?;
-        if !client.active {
-            return Err(client_refused());
-        }
-        Ok(issuer)
-    }
-
-    /// Check the credential a request to `issuer` presents for `client`. A
-    /// public client presents none; a confidential one proves itself by the
-    /// method it registered (OIDC Dynamic Client Registration 1.0 §2
-    /// `token_endpoint_auth_method`), so a secret registered for Basic is not
-    /// accepted from the request body, and a `private_key_jwt` client signs an
-    /// assertion for this issuer's token endpoint with a registered key
-    /// (RFC 7523 §3).
-    async fn check_client_authentication(
-        &self,
-        client: &sid_core::models::OAuth2Client,
-        issuer: &OidcIssuer,
-        auth: &ClientAuthentication,
-    ) -> Result<(), Status> {
-        auth.verify(
-            client,
-            &issuer.canonical_url,
-            &self.oauth2,
-            &self.assertion_jti_log,
-        )
-        .await
-        .map_err(|refusal| match refusal {
-            sid_authn::client_auth::ClientRefusal::Refused => client_refused(),
-            sid_authn::client_auth::ClientRefusal::ReplayRecordUnavailable(e) => {
-                dependency_unavailable("client assertion replay record", e)
-            }
-        })
-    }
-
-    /// The machine user a token request authenticates as, the `kid` of the
-    /// credential it used and the issuer its request reached: machine users
-    /// belong to the installation, so only the installation organization's
-    /// issuer serves them; any other endpoint knows no such client.
-    async fn authenticate_machine_user(
-        &self,
-        issuer_handle: &str,
-        auth: &ClientAuthentication,
-    ) -> Result<(sid_core::models::MachineUser, String, OidcIssuer), Status> {
-        use sid_core::models::{CredentialStatus, MachineCredentialType};
-
-        let issuer = self
-            .issuer_serving(issuer_handle, Some(self.installation_org))
-            .await?
-            .ok_or_else(client_refused)?;
-        let mu = self
-            .storage
-            .get_machine_user_by_client_id(auth.client_id())
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(client_refused)?;
-        if !mu.can_authenticate() {
-            warn!(client_id = %mu.client_id, "inactive machine user tried to authenticate");
-            return Err(client_refused());
-        }
-
-        let credentials = self
-            .storage
-            .list_machine_credentials_by_user(mu.id)
-            .await
-            .map_err(storage_failure)?;
-        let usable = |c: &&sid_core::models::MachineUserCredential, kind: MachineCredentialType| {
-            c.credential_type == kind
-                && matches!(
-                    c.status,
-                    CredentialStatus::Active | CredentialStatus::GracePeriod
-                )
-                && !c.is_expired()
-        };
-
-        let used = match auth {
-            ClientAuthentication::Basic { secret, .. }
-            | ClientAuthentication::Post { secret, .. } => credentials
-                .iter()
-                .filter(|c| usable(c, MachineCredentialType::ClientSecret))
-                .find(|c| {
-                    sid_authn::bearer_secret::matches(secret.expose_secret(), &c.credential_data)
-                })
-                .map(|c| c.kid.clone()),
-            ClientAuthentication::Assertion { assertion, .. } => {
-                // The assertion's audience is the token endpoint of the issuer
-                // the request reached, so one made for another issuer is
-                // refused (RFC 7523 §3).
-                let audience = token_endpoint(&issuer);
-                let mut valid = None;
-                for cred in credentials
-                    .iter()
-                    .filter(|c| usable(c, MachineCredentialType::PrivateKeyJwt))
-                {
-                    let Some(alg) = cred.algorithm.as_deref() else {
-                        continue;
-                    };
-                    match sid_authn::client_assertion::validate_client_assertion(
-                        assertion,
-                        &mu.client_id,
-                        &audience,
-                        &cred.credential_data,
-                        alg,
-                        &self.assertion_jti_log,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            valid = Some(cred.kid.clone());
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(client_id = %mu.client_id, error = %e, "client assertion refused");
-                        }
-                    }
-                }
-                valid
-            }
-            ClientAuthentication::None { .. } => None,
-        };
-        let Some(kid) = used else {
-            return Err(client_refused());
-        };
-        Ok((mu, kid, issuer))
-    }
-
-    /// An access token for a client acting for itself (`client_credentials`):
-    /// `sub` is the client's own principal and `sid` the credential it used
-    /// (see [`ClientActor`]), `aud` the `target` resource, signed by `issuer`,
-    /// bound to the request's DPoP key when it sent a proof.
-    async fn client_token(
-        &self,
-        issuer: &OidcIssuer,
-        actor: ClientActor<'_>,
-        target: &sid_authn::target::Target,
-        scopes: Vec<String>,
-        req: &OAuth2TokenRequest,
-        proof_target: &sid_authn::resource::RequestTarget,
-    ) -> Result<Response<OAuth2TokenResponse>, Status> {
-        let dpop_binding = self
-            .validate_dpop_proof(&req.dpop_proof, proof_target)
-            .await?;
-        let signer = self.issuer_signer(issuer).await?;
-        let client_id = actor.client_id;
-        let access_token = self
-            .jwt
-            .client_access_token_signed_by(
-                signer.as_ref(),
-                &sid_authn::jwt::ClientGrant {
-                    resource: target.audience().as_str(),
-                    client_id,
-                    subject: actor.subject,
-                    credential: actor.credential,
-                    scopes: &scopes,
-                    dpop: dpop_binding.as_ref(),
-                    max_lifetime: actor.max_lifetime,
-                },
-            )
-            .map_err(|e| {
-                warn!("Token issuance failed: {}", e);
-                Status::from(ApiError::internal())
-            })?;
-        let token_type = if dpop_binding.is_some() {
-            "DPoP"
-        } else {
-            "Bearer"
-        };
-        info!("Issued client_credentials token for {}", client_id);
-        // RFC 6749 §5.1: the lifetime the token actually has.
-        let lifetime = self.jwt.access_token_ttl_secs();
-        let expires_in = actor
-            .max_lifetime
-            .map_or(lifetime, |cap| cap.num_seconds().min(lifetime));
-        Ok(Response::new(OAuth2TokenResponse {
-            access_token,
-            token_type: token_type.to_string(),
-            expires_in,
-            refresh_token: None,
-            id_token: None,
-            scope: Some(scopes.join(" ")),
-            issued_token_type: None,
-        }))
-    }
-}
-
-/// A client acting for itself, as its token names it.
-#[derive(Clone, Copy)]
-struct ClientActor<'a> {
-    client_id: &'a str,
-    /// Its own principal: a machine user's ID, else the OAuth client's id.
-    subject: &'a str,
-    /// The credential it authenticated with, checked again by the resource.
-    credential: &'a str,
-    /// Its own token lifetime cap.
-    max_lifetime: Option<Duration>,
-}
-
-impl AuthServiceImpl {
-    /// The authenticated inspector at `issuer_handle`, as its authorization
-    /// subject, with the issuer: a confidential OAuth client, or else a
-    /// machine user, resolved as the token endpoint resolves a client id. A
-    /// machine user's credentials resolve to that machine user under its
-    /// restrictions, never to an OAuth client.
-    async fn inspector(
-        &self,
-        issuer_handle: &str,
-        auth: &ClientAuthentication,
-        client_ip: Option<std::net::IpAddr>,
-    ) -> Result<(String, OidcIssuer), Status> {
-        let client = self
-            .storage
-            .get_oauth2_client(auth.client_id())
-            .await
-            .map_err(storage_failure)?;
-        if let Some(client) = client {
-            // A public client has no credential to authenticate with.
-            if client.is_public() {
-                return Err(client_refused());
-            }
-            let issuer = self.client_issuer(issuer_handle, &client).await?;
-            self.check_client_authentication(&client, &issuer, auth)
-                .await?;
-            return Ok((format!("oauth_client:{}", client.client_id), issuer));
-        }
-        let (machine, _, issuer) = self.authenticate_machine_user(issuer_handle, auth).await?;
-        self.enforce_machine_restrictions(&machine, client_ip)
-            .await?;
-        Ok((format!("machine:{}", machine.id), issuer))
-    }
-
-    /// The resource a new grant of `requester` under `issuer` is for: the one
-    /// the request's `resource` values name, or the requester's default
-    /// (RFC 8707 §2). Any refusal is `invalid_target`.
+    /// The resource a new grant of `requester` under `issuer` is for
+    /// ([`sid::oauth::OAuth::select_target`]).
     async fn select_target<'r>(
         &self,
         issuer: &OidcIssuer,
         requester: impl Into<sid_authn::target::Requester<'r>>,
         resource: &[String],
     ) -> Result<sid_authn::target::Target, Status> {
-        let requested = sid_authn::target::requested_indicator(resource).map_err(target_refused)?;
-        sid_authn::target::select_target(
-            self.storage.as_ref(),
-            issuer.id,
-            requester,
-            requested.as_ref(),
-        )
-        .await
-        .map_err(storage_failure)?
-        .map_err(target_refused)
-    }
-
-    /// The resource an existing grant bound to `bound` is redeemed for: the
-    /// request may only repeat it, and it must still accept tokens for
-    /// `client` (RFC 8707 §2.2).
-    async fn resume_target<'r>(
-        &self,
-        issuer: &OidcIssuer,
-        client: impl Into<sid_authn::target::Requester<'r>>,
-        bound: sid_core::models::ResourceId,
-        resource: &[String],
-    ) -> Result<sid_authn::target::Target, Status> {
-        let requested = sid_authn::target::requested_indicator(resource).map_err(target_refused)?;
-        sid_authn::target::resume_target(
-            self.storage.as_ref(),
-            issuer.id,
-            client,
-            bound,
-            requested.as_ref(),
-        )
-        .await
-        .map_err(storage_failure)?
-        .map_err(target_refused)
-    }
-
-    /// The signer of `issuer`; a key that cannot be opened fails the request.
-    async fn issuer_signer(
-        &self,
-        issuer: &OidcIssuer,
-    ) -> Result<Arc<sid_authn::issuer::IssuerSigner>, Status> {
-        self.issuers.signer(issuer).await.map_err(|e| {
-            warn!(error = %e, issuer = %issuer.canonical_url, "issuer signing key unavailable");
-            Status::from(ApiError::internal())
-        })
+        self.oauth
+            .select_target(issuer, requester, resource)
+            .await
+            .map_err(oauth_refusal)
     }
 
     /// Resolve a profile by principal (email, phone, or username).
@@ -3439,7 +3003,7 @@ impl AuthService for AuthServiceImpl {
         let refreshed = sid_authn::native_session::refresh(
             self.storage.as_ref(),
             self.key_manager.as_ref(),
-            &self.dpop_validator,
+            self.oauth.dpop(),
             &self.revocation_cache,
             sid_authn::native_session::RefreshRequest {
                 proof: proof.proof(),
@@ -4340,38 +3904,11 @@ impl AuthService for AuthServiceImpl {
             (Some(_), Some(_)) => return Err(dpop_refusal("more than one DPoP header")),
         };
 
-        let client = || {
-            client_authentication(
-                &metadata,
-                req.client_id.as_deref(),
-                req.client_secret.as_deref(),
-                req.client_assertion.as_deref(),
-                req.client_assertion_type.as_deref(),
-            )
-        };
-        match req.grant_type.as_str() {
-            "authorization_code" => {
-                self.handle_authorization_code_grant(&req, &client()?, &proof_target)
-                    .await
-            }
-            "refresh_token" => {
-                self.handle_refresh_token_grant(&req, &client()?, &proof_target)
-                    .await
-            }
-            "client_credentials" => {
-                self.handle_client_credentials_grant(&req, &client()?, client_ip, &proof_target)
-                    .await
-            }
-            "urn:ietf:params:oauth:grant-type:token-exchange" => {
-                self.handle_token_exchange_grant(&req, &client()?, client_ip)
-                    .await
-            }
-            DEVICE_CODE_GRANT => self.handle_device_code_grant(&req, &client()?).await,
-            _ => Err(token_refusal(
-                TokenError::UnsupportedGrantType,
-                "unsupported grant_type",
-            )),
-        }
+        self.oauth
+            .token(&req, authorization(&metadata), client_ip, &proof_target)
+            .await
+            .map(Response::new)
+            .map_err(oauth_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "o_auth2_introspect"))]
@@ -4382,83 +3919,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<OAuth2IntrospectResponse>, Status> {
         let client_ip = self.client_ip(&request)?;
         let (metadata, _, req) = request.into_parts();
-
-        // RFC 7662 §2.1, §4: only an authenticated service identity of this
-        // issuer may introspect, so tokens cannot be probed.
-        let auth = client_authentication(
-            &metadata,
-            req.client_id.as_deref(),
-            req.client_secret.as_deref(),
-            req.client_assertion.as_deref(),
-            req.client_assertion_type.as_deref(),
-        )?;
-        let (inspector, issuer) = self.inspector(&req.issuer_handle, &auth, client_ip).await?;
-
-        let inactive = || Response::new(OAuth2IntrospectResponse::default());
-        let verifier = self
-            .issuers
-            .verifier(&issuer)
+        self.oauth
+            .introspect(&req, authorization(&metadata), client_ip)
             .await
-            .map_err(|e| internal("read issuer keys for introspection", e))?;
-        // Only this issuer's access tokens are active here (RFC 7662 §2.2).
-        let Ok(claims) = verifier.validate_access_token(&req.token) else {
-            return Ok(inactive());
-        };
-        // The token's target is the registered resource its one audience
-        // names; the inspector must hold the inspection permission on it.
-        let target = match claims.aud.as_slice() {
-            [audience] => match sid_core::models::ResourceIndicator::parse(audience) {
-                Ok(indicator) => self
-                    .storage
-                    .protected_resource_by_indicator(issuer.id, &indicator)
-                    .await
-                    .map_err(storage_failure)?,
-                Err(_) => None,
-            },
-            _ => None,
-        };
-        let Some(target) = target else {
-            return Ok(inactive());
-        };
-        let decision = self
-            .authz
-            .check(&sid_authz::AuthzCheckRequest {
-                subject: inspector,
-                action: sid_core::models::TOKEN_INTROSPECT.to_string(),
-                resource: format!("oauth_resource:{}", target.id),
-                context: Default::default(),
-            })
-            .await
-            // Never disclose claims without a decision.
-            .map_err(|e| dependency_unavailable("inspection permission", e))?;
-        if !decision.is_allowed() {
-            return Ok(inactive());
-        }
-        if sid_authn::caller::check_revocation(&self.revocation_cache, &claims)
-            .await
-            .or_status()?
-        {
-            return Ok(inactive());
-        }
-        // A valid signature says what was true at issuance; the token is
-        // active only while the actor it stands for can act now. An
-        // unreadable state is an error, never a guess (RFC 7662 §2.2).
-        if sid_authn::token_state::current_state(self.storage.as_ref(), &claims)
-            .await
-            .map_err(|e| dependency_unavailable("token state", e))?
-            == sid_authn::token_state::TokenState::Inactive
-        {
-            return Ok(inactive());
-        }
-        Ok(Response::new(OAuth2IntrospectResponse {
-            active: true,
-            scope: Some(claims.scope),
-            client_id: claims.client_id,
-            username: None,
-            exp: Some(claims.exp),
-            iat: Some(claims.iat),
-            sub: Some(claims.sub),
-        }))
+            .map(Response::new)
+            .map_err(oauth_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "o_auth2_revoke"))]
@@ -4468,76 +3933,11 @@ impl AuthService for AuthServiceImpl {
         request: Request<OAuth2RevokeRequest>,
     ) -> Result<Response<OAuth2RevokeResponse>, Status> {
         let (metadata, _, req) = request.into_parts();
-
-        // RFC 7009 §2.1: the client authenticates as at the token endpoint (a
-        // public one only names itself), and only a token issued to it is
-        // revoked; another client's token is refused.
-        let auth = client_authentication(
-            &metadata,
-            req.client_id.as_deref(),
-            req.client_secret.as_deref(),
-            req.client_assertion.as_deref(),
-            req.client_assertion_type.as_deref(),
-        )?;
-        let (client, issuer) = self.authenticated_client(&req.issuer_handle, &auth).await?;
-        let not_its_own = || {
-            token_refusal(
-                TokenError::UnauthorizedClient,
-                "the token was issued to another client",
-            )
-        };
-        let verifier = self
-            .issuers
-            .verifier(&issuer)
+        self.oauth
+            .revoke(&req, authorization(&metadata))
             .await
-            .map_err(|e| internal("read issuer keys for revocation", e))?;
-
-        // Only this issuer's tokens are revoked here; a token of another
-        // issuer is left alone and the answer is still success (RFC 7009 §2.2).
-        if let Ok(claims) = verifier.validate_access_token(&req.token) {
-            if claims.client_id.as_deref() != Some(client.client_id.as_str()) {
-                return Err(not_its_own());
-            }
-            let now = chrono::Utc::now().timestamp();
-            let remaining = claims.exp - now;
-            if remaining > 0 {
-                self.revocation_cache
-                    .revoke_jti(
-                        claims.jti.clone(),
-                        std::time::Duration::from_secs(remaining as u64),
-                    )
-                    .await
-                    .map_err(|e| dependency_unavailable("token revocation", e))?;
-            }
-            return Ok(Response::new(OAuth2RevokeResponse {}));
-        }
-
-        // Revoke as a refresh token, found by its value: the whole grant ends
-        // with it, the token it replaced still inside its rotation grace
-        // window included (RFC 7009 §2.1). An unknown value is not an error
-        // (§2.2), a storage fault is. The authenticated client is this
-        // issuer's, so a refresh token of its own is too.
-        let token_hash = OAuth2Server::hash_token(&req.token);
-        let stored = self
-            .storage
-            .get_refresh_token_by_hash(&token_hash)
-            .await
-            .map_err(storage_failure)?;
-        if let Some(refresh) = stored {
-            if refresh.client_id != client.client_id {
-                return Err(not_its_own());
-            }
-            self.storage
-                .revoke_refresh_tokens_by_family(
-                    refresh.family_id,
-                    AuditEntry::system("token.revoke", refresh.id.to_string()).into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-        }
-
-        // RFC 7009: always return 200 OK
-        Ok(Response::new(OAuth2RevokeResponse {}))
+            .map(|()| Response::new(OAuth2RevokeResponse {}))
+            .map_err(oauth_refusal)
     }
 
     // ── Magic Link (passwordless) ──
@@ -4787,91 +4187,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<DeviceAuthorizationResponse>, Status> {
         self.check_maintenance().await?;
         let (metadata, _, req) = request.into_parts();
-        // The client authenticates as at the token endpoint (RFC 8628 §3.1).
-        let auth = client_authentication(
-            &metadata,
-            req.client_id.as_deref(),
-            req.client_secret.as_deref(),
-            req.client_assertion.as_deref(),
-            req.client_assertion_type.as_deref(),
-        )?;
-        let (client, issuer) = self.authenticated_client(&req.issuer_handle, &auth).await?;
-        // Only a client registered for the device grant starts it (RFC 7591
-        // §2 `grant_types`).
-        if !client.is_grant_type_allowed(DEVICE_CODE_GRANT) {
-            return Err(token_refusal(
-                TokenError::UnauthorizedClient,
-                "the client may not use the device authorization grant",
-            ));
-        }
-        // The transaction is bound to the resource its tokens will be for.
-        let target = self.select_target(&issuer, &client, &req.resource).await?;
-
-        // Only scopes the client may have are recorded, as for an
-        // authorization request; the token response says what was granted
-        // (RFC 6749 §3.3).
-        let scope = req.scope.as_deref().map(|requested| {
-            let requested: Vec<String> = requested.split_whitespace().map(String::from).collect();
-            client.filter_scopes(&requested).join(" ")
-        });
-
-        // The user sees "WDJB-MJHT"; it is stored as looked up, normalized. A
-        // taken code (one in 20^8) is drawn again.
-        const CODE_ATTEMPTS: usize = 3;
-        let mut issued = None;
-        for _ in 0..CODE_ATTEMPTS {
-            let user_code = device_auth::generate_user_code();
-            let (raw_device_code, device_code_hash) = device_auth::generate_device_code();
-            let auth_code = sid_core::models::DeviceAuthorizationCode::new(
-                client.client_id.clone(),
-                device_code_hash,
-                device_auth::normalize_user_code(&user_code),
-                scope.clone(),
-                target.resource_id(),
-                client.project_id,
-            );
-            let audit = sid_core::models::AuditEntry::system(
-                "device_authorization.start",
-                format!("client_id={}", client.client_id),
-            );
-            match self
-                .storage
-                .create_device_auth_code(&auth_code, audit.into())
-                .await
-            {
-                Ok(()) => {
-                    issued = Some((user_code, raw_device_code));
-                    break;
-                }
-                Err(sid_core::Error::Conflict(_)) => continue,
-                Err(e) => return Err(storage_failure(e)),
-            }
-        }
-        let (user_code, raw_device_code) = issued.ok_or_else(|| {
-            sid_infra::grpc_error::refuse::internal(
-                "storage",
-                format!("no free device user code after {CODE_ATTEMPTS} attempts"),
-            )
-        })?;
-
-        // Build verification URIs
-        let verification_uri = format!("{}/device", self.issuer);
-        let verification_uri_complete =
-            device_auth::build_verification_uri_complete(&verification_uri, &user_code);
-
-        info!(
-            "Device authorization started for client={}",
-            client.client_id
-        );
-
-        Ok(Response::new(DeviceAuthorizationResponse {
-            device_code: raw_device_code,
-            user_code,
-            verification_uri,
-            verification_uri_complete,
-            expires_in: DEVICE_CODE_LIFETIME_SECS as i32,
-            interval: DEVICE_CODE_POLL_INTERVAL_SECS,
-        }))
+        self.oauth
+            .start_device_authorization(&req, authorization(&metadata))
+            .await
+            .map(Response::new)
+            .map_err(oauth_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "submit_device_user_code"))]
@@ -6856,742 +6176,51 @@ impl AuthService for AuthServiceImpl {
     }
 }
 
-// ── OAuth2 grant type handlers ──
-
-impl AuthServiceImpl {
-    /// The device_code grant (RFC 8628 §3.4): a device's poll, answered with
-    /// tokens once, after the user approved, or with the state of the request
-    /// as an RFC 8628 §3.5 error.
-    async fn handle_device_code_grant(
-        &self,
-        req: &OAuth2TokenRequest,
-        auth: &ClientAuthentication,
-    ) -> Result<Response<OAuth2TokenResponse>, Status> {
-        let raw_code = req
-            .device_code
-            .as_deref()
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| missing_parameter("device_code"))?;
-        let (client, issuer) = self.authenticated_client(&req.issuer_handle, auth).await?;
-        if !client.is_grant_type_allowed(DEVICE_CODE_GRANT) {
-            return Err(token_refusal(
-                TokenError::UnauthorizedClient,
-                "the client may not use the device authorization grant",
-            ));
-        }
-
-        let code_hash = device_auth::hash_device_code(raw_code);
-        let unknown = || token_refusal(TokenError::InvalidGrant, "unknown device code");
-        let code = self
-            .storage
-            .get_device_auth_by_device_code_hash(&code_hash)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(unknown)?;
-        // A code issued to another client is unknown to this one (RFC 6749
-        // §5.2 `invalid_grant`), and takes no effect here.
-        if code.client_id != client.client_id {
-            return Err(unknown());
-        }
-
-        // A device code grants once, like an authorization code (RFC 6749
-        // §4.1.2): a code already exchanged gets nothing, whatever its pace,
-        // and the session its first exchange opened is ended.
-        if code.status == sid_core::models::DeviceAuthStatus::Redeemed {
-            self.revoke_compromised_session(code.redeemed_session_id, "device_code.reuse")
-                .await?;
-            return Err(token_refusal(
-                TokenError::InvalidGrant,
-                "device code already used",
-            ));
-        }
-
-        // slow_down (RFC 8628 §3.5): the check and the recorded poll are one
-        // step, so concurrent polls cannot both pass.
-        let pace = self
-            .storage
-            .record_device_poll(
-                code.id,
-                AuditEntry::system("device_auth.poll", code.id.0.to_string()).into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if pace == sid_core::models::DevicePoll::SlowDown {
-            return Err(slow_down(code.interval));
-        }
-
-        match device_auth::validate_poll(&code) {
-            Ok(()) => {}
-            Err(device_auth::DeviceAuthError::AuthorizationPending) => {
-                return Err(token_refusal(
-                    TokenError::AuthorizationPending,
-                    "the user has not decided yet",
-                ));
-            }
-            Err(device_auth::DeviceAuthError::SlowDown) => {
-                return Err(slow_down(code.interval));
-            }
-            Err(device_auth::DeviceAuthError::ExpiredToken) => {
-                return Err(token_refusal(
-                    TokenError::ExpiredToken,
-                    "the device code expired",
-                ));
-            }
-            Err(device_auth::DeviceAuthError::AccessDenied) => {
-                return Err(token_refusal(
-                    TokenError::AccessDenied,
-                    "the user denied the request",
-                ));
-            }
-            Err(e) => {
-                warn!(error = %e, "device poll in an unexpected state");
-                return Err(ApiError::internal().into());
-            }
-        }
-        // The tokens are for the resource the device transaction is bound to.
-        let target = self
-            .resume_target(&issuer, &client, code.resource, &req.resource)
-            .await?;
-
-        let profile_id = code.authorized_by.ok_or_else(|| {
-            sid_infra::grpc_error::refuse::internal(
-                "storage",
-                "an approved device code has no approver",
-            )
-        })?;
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| {
-                token_refusal(
-                    TokenError::InvalidGrant,
-                    "the approving account no longer exists",
-                )
-            })?;
-
-        // The approval was judged under the application's requirements; the
-        // tokens are issued only while those can still be read, and commit
-        // under their fence.
-        let fence = self
-            .login_requirements(Some(&client.client_id))
-            .await?
-            .fence;
-
-        let mut session =
-            sid_core::models::Session::new(profile.id, None, Utc::now() + Duration::hours(24));
-        session.client_id = Some(client.client_id.clone());
-        session.scopes = code
-            .scope
-            .as_deref()
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(String::from)
-            .collect();
-
-        let sub = self.subject_for(&issuer, profile.id, &client).await?;
-        let (primary_email, primary_phone) = self.primary_contacts(profile.id).await?;
-        let signer = self.issuer_signer(&issuer).await?;
-        let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), &profile)
-            .await
-            .map_err(storage_failure)?;
-        let (response, refresh_model) = self
-            .oauth2
-            .issue_tokens(
-                &signer,
-                &sub,
-                &roles,
-                &session,
-                &client,
-                &target,
-                &session.scopes,
-                None,
-                None,
-                None,
-                Some(IdTokenSource {
-                    profile: &profile,
-                    email: primary_email.as_ref(),
-                    phone: primary_phone.as_ref(),
-                }),
-            )
-            .map_err(|e| internal("issue tokens", e))?;
-
-        // The code, the session and the refresh token are committed together:
-        // of concurrent polls exactly one gets tokens.
-        let mut ctx: sid_core::models::MutationContext = AuditEntry::user(
-            profile.id.to_string(),
-            "device_code.exchange",
-            session.id.to_string(),
-        )
-        .into();
-        if let Some(fence) = fence {
-            ctx = ctx.fenced_by(fence);
-        }
-        let redemption = match self
-            .storage
-            .redeem_device_code(&code_hash, &session, &refresh_model, ctx)
-            .await
-        {
-            Ok(redemption) => redemption,
-            Err(sid_core::Error::Fenced(_)) => return Err(authorize::policy_changed()),
-            Err(e) => return Err(storage_failure(e)),
-        };
-        match redemption {
-            sid_core::models::DeviceCodeRedemption::Redeemed => {}
-            sid_core::models::DeviceCodeRedemption::AlreadyRedeemed { session_id } => {
-                self.revoke_compromised_session(session_id, "device_code.reuse")
-                    .await?;
-                return Err(token_refusal(
-                    TokenError::InvalidGrant,
-                    "device code already used",
-                ));
-            }
-            // Expired or decided otherwise between the read and the exchange.
-            sid_core::models::DeviceCodeRedemption::NotAuthorized => {
-                return Err(token_refusal(
-                    TokenError::InvalidGrant,
-                    "device code is not authorized",
-                ));
-            }
-        }
-
-        info!(
-            "Device authorization completed for client={}, profile={}",
-            client.client_id, profile.id
-        );
-        Ok(Response::new(OAuth2TokenResponse {
-            access_token: response.access_token,
-            token_type: response.token_type,
-            expires_in: response.expires_in,
-            refresh_token: response.refresh_token,
-            id_token: response.id_token,
-            scope: response.scope,
-            issued_token_type: None,
-        }))
-    }
-
-    /// A client acting for itself (RFC 6749 §4.4): a registered confidential
-    /// client, or else a machine user of the installation.
-    async fn handle_client_credentials_grant(
-        &self,
-        req: &OAuth2TokenRequest,
-        auth: &ClientAuthentication,
-        client_ip: Option<std::net::IpAddr>,
-        proof_target: &sid_authn::resource::RequestTarget,
-    ) -> Result<Response<OAuth2TokenResponse>, Status> {
-        let client = self
-            .storage
-            .get_oauth2_client(auth.client_id())
-            .await
-            .map_err(storage_failure)?;
-
-        let Some(client) = client else {
-            if let Some(response) = self.connector_client_credentials(req, auth).await? {
-                return Ok(response);
-            }
-            let (mu, kid, issuer) = self
-                .authenticate_machine_user(&req.issuer_handle, auth)
-                .await?;
-            self.enforce_machine_restrictions(&mu, client_ip).await?;
-            let target = self.select_target(&issuer, &mu, &req.resource).await?;
-            // Without a requested scope, everything the target grants that
-            // the machine user may have (RFC 6749 §3.3).
-            let wanted = match req.scope.as_deref() {
-                Some(_) => machine_scopes(&mu, req.scope.as_deref()),
-                None => target
-                    .scopes()
-                    .into_iter()
-                    .filter(|s| mu.scopes.is_empty() || mu.scopes.contains(s))
-                    .collect(),
-            };
-            let scopes = target.granted_scopes(&wanted);
-            let subject = mu.id.to_string();
-            let actor = ClientActor {
-                client_id: &mu.client_id,
-                subject: &subject,
-                credential: &kid,
-                max_lifetime: mu
-                    .max_token_lifetime
-                    .map(|seconds| Duration::seconds(i64::from(seconds))),
-            };
-            return self
-                .client_token(&issuer, actor, &target, scopes, req, proof_target)
-                .await;
-        };
-
-        let issuer = self.client_issuer(&req.issuer_handle, &client).await?;
-        self.check_client_authentication(&client, &issuer, auth)
-            .await?;
-        // RFC 6749 §4.4: only a confidential client may use this grant.
-        if client.is_public() || !client.is_grant_type_allowed("client_credentials") {
-            return Err(token_refusal(
-                TokenError::UnauthorizedClient,
-                "the client may not use the client_credentials grant",
-            ));
-        }
-        let target = self.select_target(&issuer, &client, &req.resource).await?;
-        // The requested scopes the client may have, or all of them when none
-        // are requested (RFC 6749 §3.3), limited to what the target grants.
-        let requested = match req.scope.as_deref() {
-            Some(scope) => {
-                let asked: Vec<String> = scope.split_whitespace().map(String::from).collect();
-                client.filter_scopes(&asked)
-            }
-            None => client.allowed_scopes.clone(),
-        };
-        let scopes = target.granted_scopes(&requested);
-        // An OAuth client has one registered credential; its client_id names
-        // both the principal and that authentication.
-        let actor = ClientActor {
-            client_id: &client.client_id,
-            subject: &client.client_id,
-            credential: &client.client_id,
-            max_lifetime: None,
-        };
-        self.client_token(&issuer, actor, &target, scopes, req, proof_target)
-            .await
-    }
-
-    /// `client_credentials` for a provisioning connector: `None` when the
-    /// client_id names no connector. A connector authenticates with a client
-    /// secret of its own (client_secret_basic or client_secret_post) and gets
-    /// a token for its SCIM directory resource only, with the provisioning
-    /// scopes it asked for that its grants allow now. The token's `sub` is the
-    /// connector, `client_id` its client_id and `sid` the credential it used,
-    /// so the resource checks all three again on every request.
-    async fn connector_client_credentials(
-        &self,
-        req: &OAuth2TokenRequest,
-        auth: &ClientAuthentication,
-    ) -> Result<Option<Response<OAuth2TokenResponse>>, Status> {
-        let as_client_error = |e: Status| {
-            if e.code() == Code::Unauthenticated {
-                client_refused()
-            } else {
-                e
-            }
-        };
-        let caller = match auth {
-            ClientAuthentication::Basic { secret, .. }
-            | ClientAuthentication::Post { secret, .. } => {
-                sid_authn::connector_auth::authenticate_connector_client(
-                    self.storage.as_ref(),
-                    self.installation_org,
-                    auth.client_id(),
-                    secret.expose_secret(),
-                )
-                .await
-                .map_err(|e| as_client_error(e.into_status()))?
-            }
-            // A connector has no key credential and is never a public client.
-            _ => {
-                return if self
-                    .storage
-                    .get_provisioning_connector_by_client_id(auth.client_id())
-                    .await
-                    .map_err(storage_failure)?
-                    .is_some()
-                {
-                    Err(client_refused())
-                } else {
-                    Ok(None)
-                };
-            }
-        };
-        let Some(caller) = caller else {
-            return Ok(None);
-        };
-        let issuer = self
-            .issuer_serving(&req.issuer_handle, Some(self.installation_org))
-            .await?
-            .ok_or_else(client_refused)?;
-        // The SCIM resource takes no DPoP proof, so a sender-constrained
-        // token would be unusable there (RFC 9449 §7.1).
-        if req.dpop_proof.as_deref().is_some_and(|p| !p.is_empty()) {
-            return Err(token_refusal(
-                TokenError::InvalidRequest,
-                "a provisioning connector's token is a bearer token",
-            ));
-        }
-        let directory = sid_core::models::ResourceIndicator::parse(
-            &sid_authn::issuer::scim_endpoint(&issuer.canonical_url),
-        )
-        .map_err(|e| internal("SCIM resource indicator", e))?;
-        let requested =
-            sid_authn::target::requested_indicator(&req.resource).map_err(target_refused)?;
-        let resource = sid_authn::target::connector_target(
-            self.storage.as_ref(),
-            issuer.id,
-            &directory,
-            requested.as_ref(),
-        )
-        .await
-        .map_err(storage_failure)?
-        .map_err(target_refused)?;
-
-        // Without a requested scope, every provisioning scope (RFC 6749
-        // §3.3); in any case only those its grants allow now.
-        let wanted: Vec<String> = match req.scope.as_deref() {
-            Some(scope) => scope.split_whitespace().map(String::from).collect(),
-            None => resource.scopes.clone(),
-        };
-        let mut scopes = Vec::new();
-        for scope in wanted {
-            if !resource.scopes.contains(&scope) || scopes.contains(&scope) {
-                continue;
-            }
-            let decision = self
-                .authz
-                .check(&sid_authz::AuthzCheckRequest {
-                    subject: format!("provisioning_connector:{}", caller.connector.id),
-                    action: scope.clone(),
-                    resource: format!("oauth_resource:{}", resource.id),
-                    context: Default::default(),
-                })
-                .await
-                .map_err(|e| dependency_unavailable("provisioning authorization", e))?;
-            if decision.is_allowed() {
-                scopes.push(scope);
-            }
-        }
-        if scopes.is_empty() {
-            return Err(token_refusal(
-                TokenError::InvalidScope,
-                "the connector is granted none of the requested scopes",
-            ));
-        }
-
-        let signer = self.issuer_signer(&issuer).await?;
-        let access_token = self
-            .jwt
-            .client_access_token_signed_by(
-                signer.as_ref(),
-                &sid_authn::jwt::ClientGrant {
-                    resource: resource.indicator.as_str(),
-                    client_id: caller.connector.client_id.as_str(),
-                    subject: &caller.connector.id.to_string(),
-                    credential: &caller.credential_id.to_string(),
-                    scopes: &scopes,
-                    dpop: None,
-                    max_lifetime: None,
-                },
-            )
-            .map_err(|e| internal("connector token", e))?;
-        info!(connector = %caller.connector.id, "Issued client_credentials token for a provisioning connector");
-        Ok(Some(Response::new(OAuth2TokenResponse {
-            access_token,
-            token_type: "Bearer".to_string(),
-            expires_in: self.jwt.access_token_ttl_secs(),
-            refresh_token: None,
-            id_token: None,
-            scope: Some(scopes.join(" ")),
-            issued_token_type: None,
-        })))
-    }
-
-    /// Enforce MachineUser restrictions (IP allowlist + rate limiting).
-    ///
-    /// Called after authentication, before token issuance.
-    async fn enforce_machine_restrictions(
-        &self,
-        mu: &sid_core::models::MachineUser,
-        client_ip: Option<std::net::IpAddr>,
-    ) -> Result<(), Status> {
-        // IP allowlist check: a request from elsewhere is a client this
-        // endpoint does not authorize (RFC 6749 §5.2 `unauthorized_client`).
-        let not_allowed = || {
-            token_refusal(
-                TokenError::UnauthorizedClient,
-                "the client may not request tokens from this address",
-            )
-        };
-        if !mu.restrictions.ip_allowlist.is_empty() {
-            let addr = client_ip.ok_or_else(not_allowed)?;
-
-            let allowed = mu
-                .restrictions
-                .ip_allowlist
-                .iter()
-                .any(|entry| ip_matches(entry, &addr));
-
-            if !allowed {
-                warn!(
-                    "Machine user {} request from {} denied by IP allowlist",
-                    mu.client_id, addr
-                );
-                return Err(not_allowed());
-            }
-        }
-
-        // Rate limiting.
-        if mu.restrictions.rate_limit_rpm > 0
-            && !self
-                .rate_limiter
-                .check_and_record(&mu.client_id, mu.restrictions.rate_limit_rpm)
-                .await
-                .map_err(|e| dependency_unavailable("machine user rate limit", e))?
-        {
-            warn!(
-                "Machine user {} rate limited ({}rpm)",
-                mu.client_id, mu.restrictions.rate_limit_rpm
-            );
-            let stats = self.rate_limit_stats.clone();
-            tokio::spawn(async move {
-                stats.record_block(None, "machine_user_token").await;
-            });
-            return Err(
-                ApiError::new(ErrorReason::RateLimitExceeded, "rate limit exceeded")
-                    .with_quota_violation(
-                        "machine_user_token_requests",
-                        format!(
-                            "{} token requests per minute",
-                            mu.restrictions.rate_limit_rpm
-                        ),
-                    )
-                    .with_retry_after(std::time::Duration::from_secs(60))
-                    .into(),
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Handle RFC 8693 Token Exchange (impersonation grant).
-    ///
-    /// Machine user authenticates via client_credentials (secret or assertion),
-    /// provides a `subject_token` identifying the target user, and receives
-    /// a short-lived impersonation token with `act` claim.
-    async fn handle_token_exchange_grant(
-        &self,
-        req: &OAuth2TokenRequest,
-        auth: &ClientAuthentication,
-        client_ip: Option<std::net::IpAddr>,
-    ) -> Result<Response<OAuth2TokenResponse>, Status> {
-        use sid_core::models::machine_user::IMPERSONATION_MAX_LIFETIME_SECONDS;
-
-        let (mu, _, _issuer) = self
-            .authenticate_machine_user(&req.issuer_handle, auth)
-            .await?;
-
-        // Enforce restrictions (IP allowlist + rate limiting).
-        self.enforce_machine_restrictions(&mu, client_ip).await?;
-
-        // Validate subject_token fields. RFC 8693 §2.2.2: an invalid or
-        // unacceptable request, subject token included, is `invalid_request`.
-        let subject_token = req
-            .subject_token
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| missing_parameter("subject_token"))?;
-        let subject_token_type = req
-            .subject_token_type
-            .as_deref()
-            .unwrap_or(ACCESS_TOKEN_TYPE);
-        if subject_token_type != ACCESS_TOKEN_TYPE {
-            return Err(token_refusal(
-                TokenError::InvalidRequest,
-                "only subject_token_type=urn:ietf:params:oauth:token-type:access_token is supported",
-            ));
-        }
-        // RFC 8693 §2.1, §2.2.2: only an access token is issued; another
-        // requested type is refused, never answered with an access token.
-        if req
-            .requested_token_type
-            .as_deref()
-            .is_some_and(|wanted| wanted != ACCESS_TOKEN_TYPE)
-        {
-            return Err(token_refusal(
-                TokenError::InvalidRequest,
-                "only requested_token_type=urn:ietf:params:oauth:token-type:access_token is supported",
-            ));
-        }
-        // The exchange issues the installation's own impersonation token. A
-        // target named by `resource` or `audience` (RFC 8693 §2.1) is refused
-        // rather than ignored, so no token is issued for another audience
-        // than the client asked for.
-        if sid_authn::target::exchange_indicator(&req.resource, &req.audience)
-            .map_err(target_refused)?
-            .is_some()
-        {
-            return Err(target_refused(
-                sid_authn::target::TargetRefusal::NotExchangeable,
-            ));
-        }
-
-        // The subject token is the target user's own sign-in: verified like any
-        // bearer token (revocation included). A PAT-derived or impersonation
-        // token is refused, so an impersonation cannot be renewed by
-        // exchanging its own token.
-        let invalid_subject = || token_refusal(TokenError::InvalidRequest, "invalid subject_token");
-        let target_claims = sid_authn::caller::verify_token(
-            subject_token,
-            self.jwt.verifier(),
-            &self.revocation_cache,
-        )
-        .await
-        .map_err(|e| match e {
-            unavailable @ sid_authn::caller::CallerError::Unavailable { .. } => {
-                unavailable.into_status()
-            }
-            _ => invalid_subject(),
-        })?;
-        let subject = sid_authn::caller::Caller::from_claims(&target_claims)
-            .map_err(|_| invalid_subject())?;
-        if subject.kind() != sid_authn::caller::TokenKind::Interactive {
-            return Err(invalid_subject());
-        }
-        let profile_id = subject.profile_id;
-        let target_profile_id = profile_id.to_string();
-
-        let target_profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(invalid_subject)?;
-        // A suspended, closing or closed account cannot be acted for.
-        if !target_profile.status.can_authenticate() {
-            return Err(invalid_subject());
-        }
-
-        // Check that an ImpersonationGrant exists for this machine user → target.
-        let grants = self
-            .storage
-            .list_impersonation_grants(mu.id)
-            .await
-            .map_err(storage_failure)?;
-
-        let matching_grant = grants.iter().find(|g| match g.target_type {
-            sid_core::models::ImpersonationTargetType::User => g.target == target_profile_id,
-            sid_core::models::ImpersonationTargetType::Role => {
-                target_profile.roles.iter().any(|r| r == &g.target)
-            }
-        });
-
-        // A subject the client may not act for is unacceptable by policy:
-        // `invalid_request` (RFC 8693 §2.2.2).
-        let grant = matching_grant.ok_or_else(|| {
-            token_refusal(
-                TokenError::InvalidRequest,
-                "the client may not act for this subject",
-            )
-        })?;
-
-        let scopes = self.resolve_impersonation_scopes(req, grant, &mu, &target_claims.scope)?;
-
-        // The impersonation is a session of the target: it shows in the
-        // target's sessions, and revoking it or the target's access ends the
-        // token. It is recorded together with its audit entry, which cannot
-        // be skipped.
-        let lifetime = chrono::Duration::seconds(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
-        let mut session =
-            sid_core::models::Session::new(profile_id, client_ip, Utc::now() + lifetime);
-        session.client_id = Some(mu.client_id.clone());
-        session.scopes = scopes.clone();
-        session.amr = vec!["token_exchange".to_string()];
-        let audit = AuditEntry::machine(
-            mu.id.to_string(),
-            "sid.token.impersonation.v1",
-            format!("profile:{profile_id}"),
-        )
-        .with_ip(client_ip)
-        .with_metadata(serde_json::json!({
-            "actor": { "type": "machine", "id": mu.id.to_string(), "client_id": mu.client_id },
-            "target": { "type": "user", "id": target_profile_id },
-            "session_id": session.id.to_string(),
-            "scopes": scopes,
-        }));
-        self.storage
-            .create_session(&session, audit.into())
-            .await
-            .map_err(storage_failure)?;
-
-        // sub = target, act.sub = machine user.
-        let access_token = self
-            .jwt
-            .issue_impersonation_token(&target_profile_id, &session, &mu.client_id, &scopes)
-            .map_err(|e| internal("issue impersonation token", e))?;
-
-        Ok(Response::new(OAuth2TokenResponse {
-            access_token,
-            token_type: "Bearer".to_string(),
-            expires_in: lifetime.num_seconds(),
-            refresh_token: None,
-            id_token: None,
-            scope: Some(scopes.join(" ")),
-            // RFC 8693 §2.2.1: required in a token exchange response.
-            issued_token_type: Some(ACCESS_TOKEN_TYPE.to_string()),
-        }))
-    }
-
-    /// Resolve scopes for impersonation: requested ∩ mu.scopes ∩
-    /// grant.allowed_scopes ∩ `target_scopes` (the target's token scope).
-    fn resolve_impersonation_scopes(
-        &self,
-        req: &OAuth2TokenRequest,
-        grant: &sid_core::models::ImpersonationGrant,
-        mu: &sid_core::models::MachineUser,
-        target_scopes: &str,
-    ) -> Result<Vec<String>, Status> {
-        // Filter what the machine user may have by grant.allowed_scopes
-        // (unless wildcard), then by what the target user's own token holds:
-        // impersonation never exceeds the user.
-        let final_scopes: Vec<String> = machine_scopes(mu, req.scope.as_deref())
-            .into_iter()
-            .filter(|s| grant.allows_all_scopes() || grant.allows_scope(s))
-            .filter(|s| target_scopes.split_whitespace().any(|t| t == s))
-            .collect();
-
-        if final_scopes.is_empty() {
-            return Err(token_refusal(
-                TokenError::InvalidScope,
-                "no scopes available for impersonation after intersection",
-            ));
-        }
-
-        Ok(final_scopes)
-    }
-}
-
-/// The token endpoint of `issuer`, as its discovery document advertises it:
-/// the `htu` of a DPoP proof sent there (RFC 9449 §4.3) and the audience of a
-/// client assertion (RFC 7523 §3).
-fn token_endpoint(issuer: &OidcIssuer) -> String {
-    sid_authn::issuer::token_endpoint(&issuer.canonical_url)
-}
-
-/// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
-const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-
 /// The token endpoint's RPC, as a native gRPC client calls it.
 const OAUTH2_TOKEN_RPC: &str = "/sid.v1.authn.AuthService/OAuth2Token";
 
-/// The token type identifier of an access token (RFC 8693 §3).
-const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-
-/// A device polling faster than its `interval` seconds (RFC 8628 §3.5
-/// `slow_down`): the interval grows by five seconds, which RetryInfo tells
-/// the device.
-fn slow_down(interval: i32) -> Status {
-    // Set only from DEVICE_CODE_POLL_INTERVAL_SECS, which is positive.
-    let wait = u64::try_from(interval).expect("a device poll interval is never negative") + 5;
-    token_error(TokenError::SlowDown, "poll less often")
-        .with_retry_after(std::time::Duration::from_secs(wait))
-        .into()
+/// The request's `Authorization` value (HTTP Basic client authentication);
+/// a value that is not ASCII is no credential.
+fn authorization(metadata: &tonic::metadata::MetadataMap) -> Option<&str> {
+    metadata
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
 }
 
-/// The scopes a machine user's token carries: the requested ones it may
-/// have, or all of its own when none are requested. A machine user with no
-/// scope list is unrestricted.
-fn machine_scopes(mu: &sid_core::models::MachineUser, requested: Option<&str>) -> Vec<String> {
-    match requested {
-        Some(requested) => requested
-            .split_whitespace()
-            .filter(|s| mu.scopes.is_empty() || mu.scopes.iter().any(|a| a == s))
-            .map(String::from)
-            .collect(),
-        None => mu.scopes.clone(),
+/// The status an OAuth endpoint refusal answers with: each carries its
+/// RFC 6749 (RFC 8628, RFC 9449) error for the HTTP form of the endpoint.
+pub(crate) fn oauth_refusal(e: sid::oauth::OAuthError) -> Status {
+    use sid::oauth::OAuthError as E;
+    match e {
+        E::Token { error, message } => token_refusal(error, message),
+        // The interval grows by five seconds, which RetryInfo tells the
+        // device. It is set only from DEVICE_CODE_POLL_INTERVAL_SECS, which
+        // is positive.
+        E::SlowDown { interval } => {
+            let wait =
+                u64::try_from(interval).expect("a device poll interval is never negative") + 5;
+            token_error(TokenError::SlowDown, "poll less often")
+                .with_retry_after(std::time::Duration::from_secs(wait))
+                .into()
+        }
+        E::ClientRefused => client_refused(),
+        E::Target(refusal) => target_refused(refusal),
+        E::MissingParameter(field) => missing_parameter(field),
+        E::Dpop(detail) => dpop_refusal(detail),
+        E::Unavailable { what, cause } => dependency_unavailable(what, cause),
+        E::Caller(e) => e.into_status(),
+        E::RateLimited { rpm } => {
+            ApiError::new(ErrorReason::RateLimitExceeded, "rate limit exceeded")
+                .with_quota_violation(
+                    "machine_user_token_requests",
+                    format!("{rpm} token requests per minute"),
+                )
+                .with_retry_after(std::time::Duration::from_secs(60))
+                .into()
+        }
+        E::PolicyChanged => authorize::policy_changed(),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
     }
 }
 
