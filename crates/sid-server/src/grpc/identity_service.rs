@@ -11,7 +11,7 @@ use sid_authn::data_export::DataExportService;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_core::models::{CredentialId, OperationContext, PrincipalType};
+use sid_core::models::{OperationContext, PrincipalType};
 use sid_infra::authn::caller::authenticate;
 use sid_infra::authn::operation::context;
 use sid_infra::grpc_error::refuse::{
@@ -150,16 +150,6 @@ fn taken(principal_type: PrincipalType) -> Status {
     )
     .with_resource("Principal", field)
     .into()
-}
-
-/// A revocation refused because the credential is the profile's last way to
-/// sign in (see [`sid::identity::last_primary`]), as a status.
-#[allow(clippy::result_large_err)]
-pub(crate) fn refuse_last_primary(
-    outcome: sid_core::models::CredentialRevocation,
-    credential: CredentialId,
-) -> Result<(), Status> {
-    sid::identity::last_primary(outcome, credential).map_err(refusal)
 }
 
 /// The answer of a management operation.

@@ -79,6 +79,9 @@ pub enum SignInError {
     /// The sign-in's kept state is gone; it is started again.
     #[error("the sign-in expired")]
     Expired,
+    /// The account no longer signs in; one answer whatever the reason.
+    #[error("authentication failed")]
+    AuthenticationFailed,
     /// The sign-in's kept state could not be read or written.
     #[error(transparent)]
     Ceremony(#[from] ChallengeStoreError),
@@ -335,6 +338,11 @@ impl SignIn {
     /// The attempt counters and lockout.
     pub fn anomaly(&self) -> &AnomalyDetector {
         &self.anomaly
+    }
+
+    /// The tokens a sign-in's credential is issued with.
+    pub(crate) fn jwt(&self) -> &JwtService {
+        &self.jwt
     }
 
     /// The store the sign-ins read and commit to.
@@ -949,6 +957,71 @@ impl SignIn {
                 what: "session revocation",
                 cause: e.to_string(),
             })?;
+        Ok(signed_in)
+    }
+
+    /// Complete `pending` with the verified second factor `method` (RFC
+    /// 8176): the login requirements `login_policy` states now are met by
+    /// the completed authentication, the first factor's credential still
+    /// holds, the pending context ends exactly once and the account gets its
+    /// session with a new credential, delivered to `client` (with the
+    /// refresh generation bound to `native_key` when it proved one).
+    pub async fn complete_second_factor(
+        &self,
+        login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        pending: Session,
+        method: &str,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+    ) -> Result<SignedIn, SignInError> {
+        let profile = self
+            .storage
+            .get_profile(pending.profile_id)
+            .await?
+            .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
+            .ok_or(SignInError::AuthenticationFailed)?;
+        let now = Utc::now();
+        let requirements = organization_requirements(login_policy).await?;
+        if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
+            let mut completed = pending.clone();
+            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
+            completed.amr.push(method.to_string());
+            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
+        }
+
+        let proved_by = self.first_factor_fence(&pending).await?;
+
+        let mut session = self.new_session(profile.id, pending.ip_address);
+        session.device_id = pending.device_id;
+        session.user_agent = pending.user_agent.clone();
+        session.assurance_level = pending.assurance_level.max(AuthLevel::Standard);
+        session.amr = pending.amr.clone();
+        if !session.amr.iter().any(|m| m == method) {
+            session.amr.push(method.to_string());
+        }
+        // The authentication began with the first factor.
+        session.authenticated_at = pending.authenticated_at;
+        // The pending context ends in the session's own commit: of concurrent
+        // completions one signs in, and one ended meanwhile completes nothing.
+        let signed_in = self
+            .complete_pending(
+                &profile,
+                (
+                    pending.id,
+                    &SessionEnd::new(
+                        sid_core::models::RevocationReason::SignInCompleted,
+                        pending.profile_id.to_string(),
+                    ),
+                ),
+                session,
+                client,
+                native_key,
+                proved_by.as_ref().map(SignInProof::Credential),
+                requirements.fence,
+            )
+            .await?;
+        // Recorded from the address the rules judged at the first factor.
+        self.record_completed(profile.id, pending.ip_address).await;
         Ok(signed_in)
     }
 

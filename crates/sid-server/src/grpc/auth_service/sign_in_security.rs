@@ -30,6 +30,7 @@ pub(crate) fn sign_in_refusal(e: SignInError) -> Status {
         SignInError::InvalidIdentifier(detail) => invalid_field("identifier", detail),
         SignInError::SessionEnded => session_ended(),
         SignInError::Expired => ceremony_expired("sign-in"),
+        SignInError::AuthenticationFailed => authentication_failed(),
         SignInError::Ceremony(e) => e.into_status(),
         SignInError::Unavailable { what, cause } => dependency_unavailable(what, cause),
         SignInError::Store(e) => storage_failure(e),
