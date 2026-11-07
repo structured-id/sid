@@ -51,7 +51,24 @@ fn sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
         geoip: Arc::new(GeoIpChain::empty(cache)),
         captcha_gate: CaptchaGate::new(ceremonies, keys()),
         captcha_provider: Arc::new(sid_authn::captcha::SidPowProvider::new([0u8; 32], 4, 300)),
+        opaque: opaque(),
+        keys: keys(),
     })
+}
+
+fn opaque() -> Arc<OpaqueRouter> {
+    use sid_plugin::crypto::OpaqueOperations;
+    let primary = Box::new(sid_authn::opaque::PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let mut verifiers: std::collections::HashMap<
+        sid_plugin::crypto::CurveId,
+        Box<dyn OpaqueOperations>,
+    > = std::collections::HashMap::new();
+    verifiers.insert(
+        sid_plugin::crypto::CurveId::Pallas,
+        Box::new(sid_authn::opaque::PallasOpaque::new()),
+    );
+    Arc::new(OpaqueRouter::new(primary, verifiers, setup))
 }
 
 async fn requirements() -> LoginRequirements {
@@ -238,6 +255,171 @@ async fn first_factor_admitted_under_default_requirements() {
         .await
         .unwrap();
     assert!(matches!(decision, FirstFactor::Admitted(fence) if fence == requirements.fence));
+}
+
+/// A password sign-in of a principal nobody holds is started like any other
+/// and refused at its finish like a wrong password, each refusal counted
+/// against the principal until the lockout refuses the next start.
+#[tokio::test]
+async fn unknown_principal_password_sign_in_is_refused_and_counted() {
+    let sign_in = sign_in(storage().await);
+    for _ in 0..5 {
+        let started = sign_in
+            .password_start("nobody@example.com", &credential_request(), None)
+            .await
+            .unwrap();
+        assert!(!started.credential_response.is_empty());
+        assert!(matches!(
+            sign_in
+                .password_finish(&started.login_id, b"not a finalization", None)
+                .await,
+            Err(SignInError::Password(
+                PasswordSignInError::AuthenticationFailed
+            ))
+        ));
+    }
+    assert!(matches!(
+        sign_in
+            .password_start("nobody@example.com", &credential_request(), None)
+            .await,
+        Err(SignInError::Rules(SignInRefusal::TooManyAttempts(_)))
+    ));
+}
+
+/// A client's OPAQUE credential request (KE1) for some password.
+fn credential_request() -> Vec<u8> {
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+    sid_opaque_ke::ClientLogin::<sid_pake_core::pallas_opaque::PallasCipherSuite>::start(
+        &mut rng,
+        b"correct-horse-battery-staple",
+    )
+    .unwrap()
+    .message
+    .serialize()
+    .to_vec()
+}
+
+/// A finish of a login that was never started is refused as expired.
+#[tokio::test]
+async fn unknown_login_finish_is_expired() {
+    let sign_in = sign_in(storage().await);
+    assert!(matches!(
+        sign_in
+            .password_finish(&OpaqueLoginId::generate(), b"finalization", None)
+            .await,
+        Err(SignInError::Password(PasswordSignInError::Expired))
+    ));
+}
+
+/// An identifier that is no principal is refused as invalid, not answered
+/// as an unknown account.
+#[tokio::test]
+async fn invalid_identifier_is_refused() {
+    let sign_in = sign_in(storage().await);
+    assert!(matches!(
+        sign_in.resolve_profile("").await,
+        Err(SignInError::InvalidIdentifier(_))
+    ));
+    assert!(
+        sign_in
+            .resolve_profile("nobody@example.com")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A first factor that owes a second keeps the credential it proved for the
+/// pending context: the completion finds it while it holds, a replaced one
+/// is fenced, and a context without a kept proof has ended.
+#[tokio::test]
+async fn pending_context_keeps_first_factor_proof() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    let credential = Credential::new(
+        profile.id,
+        CredentialType::Totp,
+        CredentialData::new(b"first".to_vec()),
+        None,
+    );
+    storage
+        .create_credential(&credential, AuditEntry::system("test", "credential").into())
+        .await
+        .unwrap();
+    let fence = CredentialFence {
+        id: credential.id,
+        data: CredentialData::new(b"first".to_vec()),
+    };
+    let signed = sign_in
+        .complete_first_factor(
+            &profile,
+            LoginMethod::Password,
+            None,
+            None,
+            CeremonyClient::Native,
+            None,
+            Some(&fence),
+            FirstFactor::AwaitsSecondFactor {
+                factors: vec![StepUpMethod::Totp],
+                enrollable: Vec::new(),
+                fence: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(signed.second_factors, [i32::from(StepUpMethod::Totp)]);
+    let pending = storage
+        .get_session(signed.signed_in.session_id)
+        .await
+        .unwrap()
+        .expect("the pending context is stored");
+    assert!(pending.awaits_second_factor());
+    let kept = sign_in.first_factor_fence(&pending).await.unwrap().unwrap();
+    assert_eq!(kept.id, credential.id);
+    storage
+        .replace_credential_data(
+            credential.id,
+            b"first",
+            b"second",
+            AuditEntry::system("test", "credential").into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        sign_in.first_factor_fence(&pending).await,
+        Err(SignInError::Fenced)
+    ));
+    let other = Session::new_awaiting_second_factor(
+        profile.id,
+        None,
+        AuthLevel::Basic,
+        vec!["pwd".to_string()],
+    );
+    assert!(matches!(
+        sign_in.first_factor_fence(&other).await,
+        Err(SignInError::SessionEnded)
+    ));
+}
+
+/// A password sign-in records the password level and `pwd`; a passkey with
+/// user verification reaches the multi-factor level when the policy lets a
+/// passkey satisfy MFA, and one without stays at the basic level.
+#[test]
+fn login_method_assurance() {
+    assert_eq!(LoginMethod::Password.auth_level(true), AuthLevel::Basic);
+    assert_eq!(LoginMethod::Password.amr(), ["pwd"]);
+    let verified = LoginMethod::Passkey {
+        user_verified: true,
+        key_amr: "hwk",
+    };
+    assert_eq!(verified.auth_level(true), AuthLevel::Standard);
+    assert_eq!(verified.auth_level(false), AuthLevel::Basic);
+    let unverified = LoginMethod::Passkey {
+        user_verified: false,
+        key_amr: "hwk",
+    };
+    assert_eq!(unverified.auth_level(true), AuthLevel::Basic);
 }
 
 /// An admitted sign-in's inputs name its principal assignment and revision,

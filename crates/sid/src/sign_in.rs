@@ -14,25 +14,34 @@ use chrono::{Duration, Utc};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::browser_session::{BrowserCookie, BrowserCsrf};
 use sid_authn::captcha::{CaptchaGate, CaptchaProvider};
+use sid_authn::challenge_store::{ChallengeStore, ChallengeStoreError};
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::jwt::JwtService;
 use sid_authn::login_policy::LoginRequirements;
 use sid_authn::native_session::{self, NativeError, NativePolicy};
+use sid_authn::opaque::OpaqueRouter;
+use sid_authn::password_sign_in::{
+    OpenedPassword, PasswordSignInError, PasswordSignInHost, PendingSignIn, Started, Verified,
+};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::sign_in_security::{
-    AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost,
+    AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost, implied_auth_level,
 };
 use sid_core::Error as SidError;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
-    ActorFence, AuditEntry, CredentialType, MutationContext, OperationCompletion, OperationKey,
-    PrincipalAssignmentFence, Profile, ProfileId, Session, SessionEnd, SessionId, SignInProof,
+    ActorFence, AuditEntry, Credential, CredentialData, CredentialFence, CredentialType,
+    MutationContext, OperationCompletion, OperationKey, PrincipalAssignmentFence, Profile,
+    ProfileId, Session, SessionEnd, SessionId, SignInProof,
 };
+use sid_ids::OpaqueLoginId;
+use sid_plugin::CredentialStore;
 use sid_plugin::SignInHistoryStore;
+use sid_plugin::crypto::StoredCredential;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::StepUpMethod;
 use sid_proto::sid::v1::authn::NativeCredentialSet;
@@ -58,6 +67,21 @@ pub enum SignInError {
     /// A dependency the sign-in needs cannot answer now; the client retries.
     #[error("{what} unavailable: {cause}")]
     Unavailable { what: &'static str, cause: String },
+    /// The password sign-in refused or failed.
+    #[error(transparent)]
+    Password(#[from] PasswordSignInError),
+    /// The identifier is not a valid principal.
+    #[error("invalid identifier: {0}")]
+    InvalidIdentifier(String),
+    /// The pending second-factor context the call continues has ended.
+    #[error("the sign-in has ended")]
+    SessionEnded,
+    /// The sign-in's kept state is gone; it is started again.
+    #[error("the sign-in expired")]
+    Expired,
+    /// The sign-in's kept state could not be read or written.
+    #[error(transparent)]
+    Ceremony(#[from] ChallengeStoreError),
     /// The store failed.
     #[error("store: {0}")]
     Store(#[from] SidError),
@@ -99,6 +123,79 @@ pub enum FirstFactor {
         enrollable: Vec<StepUpMethod>,
         fence: Option<ActorFence>,
     },
+}
+
+/// How a full sign-in authenticated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginMethod {
+    Password,
+    /// A passkey assertion: whether the authenticator verified the user, and
+    /// the RFC 8176 method of the key that asserted (`hwk` / `swk`).
+    Passkey {
+        user_verified: bool,
+        key_amr: &'static str,
+    },
+}
+
+impl LoginMethod {
+    /// The assurance this sign-in establishes.
+    pub fn auth_level(self, passkey_satisfies_mfa: bool) -> AuthLevel {
+        match self {
+            Self::Password => implied_auth_level("opaque", passkey_satisfies_mfa, false),
+            Self::Passkey { user_verified, .. } => {
+                implied_auth_level("webauthn", passkey_satisfies_mfa, user_verified)
+            }
+        }
+    }
+
+    /// The `amr` values (RFC 8176 §2) the session records for this sign-in.
+    pub fn amr(self) -> Vec<String> {
+        match self {
+            Self::Password => vec!["pwd".to_string()],
+            Self::Passkey {
+                user_verified,
+                key_amr,
+            } => sid_authn::webauthn::passkey_amr(key_amr, user_verified)
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// The credential a pending second-factor context's first factor proved: its
+/// id and the SHA-256 of the data it held then.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FirstFactorProof {
+    credential: uuid::Uuid,
+    digest: [u8; 32],
+}
+
+impl FirstFactorProof {
+    fn of(fence: &CredentialFence) -> Self {
+        use sha2::Digest;
+        Self {
+            credential: fence.id.0,
+            digest: sha2::Sha256::digest(fence.data.expose()).into(),
+        }
+    }
+
+    /// Whether `credential` is the one proved, holding the same data.
+    fn proves(&self, credential: &Credential) -> bool {
+        use sha2::Digest;
+        let digest: [u8; 32] = sha2::Sha256::digest(credential.data.expose()).into();
+        credential.id.0 == self.credential && digest == self.digest
+    }
+}
+
+/// A completed first-factor sign-in: its credential, and when it is a
+/// pending context the second factors that complete it or may be enrolled
+/// first (`StepUpMethod` values) with a browser's CSRF token.
+pub struct FirstFactorSignedIn {
+    pub signed_in: SignedIn,
+    pub second_factors: Vec<i32>,
+    pub enrollable_factors: Vec<i32>,
+    pub browser_csrf: Option<String>,
 }
 
 /// The keyed operation a browser sign-in completes, whose result is its
@@ -147,7 +244,14 @@ pub struct SignInParts {
     /// Which sign-in each CAPTCHA was asked of, and the passes earned.
     pub captcha_gate: CaptchaGate,
     pub captcha_provider: Arc<dyn CaptchaProvider>,
+    /// Runs the OPAQUE sign-ins against the stored password files.
+    pub opaque: Arc<OpaqueRouter>,
+    /// Opens the sealed password files and seals the kept sign-in state.
+    pub keys: Arc<dyn sid_keys::KeyManager>,
 }
+
+/// How long a started password sign-in may be finished.
+const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Signing users in for one authority.
 pub struct SignIn {
@@ -165,12 +269,35 @@ pub struct SignIn {
     policy: SecurityPolicy,
     /// This authority's IdP session cookie, the only one it sets.
     cookie: BrowserCookie,
+    opaque: Arc<OpaqueRouter>,
+    keys: Arc<dyn sid_keys::KeyManager>,
+    /// Password sign-ins between start and finish.
+    logins: ChallengeStore<PendingSignIn<ProfileId>>,
+    /// The credential each pending second-factor context's first factor
+    /// proved, keyed by the context: its completion commits only while that
+    /// credential is unchanged.
+    first_factor_proofs: ChallengeStore<Option<FirstFactorProof>>,
 }
 
 impl SignIn {
     /// Sign-in under the CE default policy with the default cookie.
     pub fn new(parts: SignInParts) -> Self {
+        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = parts.storage.clone();
         Self {
+            logins: ChallengeStore::new(
+                ceremonies.clone(),
+                parts.keys.clone(),
+                "opaque-login",
+                LOGIN_TTL,
+            ),
+            first_factor_proofs: ChallengeStore::new(
+                ceremonies,
+                parts.keys.clone(),
+                "first-factor-proof",
+                LOGIN_TTL,
+            ),
+            opaque: parts.opaque,
+            keys: parts.keys,
             storage: parts.storage,
             jwt: parts.jwt,
             revocation: parts.revocation,
@@ -495,6 +622,219 @@ impl SignIn {
             "email".to_string(),
         ];
         session
+    }
+
+    /// The active account `identifier` (email, phone or username) signs in
+    /// to: only through the principal's explicit assignment, and only under
+    /// the current email key revision; `None` when none may, whatever the
+    /// reason, so the answer does not reveal the state of the address.
+    pub async fn resolve_profile(&self, identifier: &str) -> Result<Option<Profile>, SignInError> {
+        let handle = sid_authn::normalize::normalize_principal(identifier)
+            .map_err(|e| SignInError::InvalidIdentifier(e.to_string()))?;
+        let principal_type = handle.principal_type.to_principal_type();
+        let Some(profile_id) = self
+            .storage
+            .resolve_sign_in_principal(principal_type, &handle.normalized, handle.key_revision())
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .storage
+            .get_profile(profile_id)
+            .await?
+            .filter(|p| p.status == sid_core::models::ProfileStatus::Active))
+    }
+
+    /// The OPAQUE password file of `credential`, opened, with its curve, and
+    /// the credential's data as the store holds it afterwards.
+    pub async fn stored_password(
+        &self,
+        credential: &Credential,
+    ) -> Result<(StoredCredential, CredentialData), SignInError> {
+        use sid_authn::sealed_secret::StoredPasswordError;
+        sid_authn::sealed_secret::stored_password(
+            self.keys.as_ref(),
+            self.storage.as_ref(),
+            credential,
+        )
+        .await
+        .map_err(|e| match e {
+            StoredPasswordError::Storage(e) => SignInError::Store(e),
+            e @ (StoredPasswordError::NoCurve(_) | StoredPasswordError::UnknownCurve { .. }) => {
+                internal("read OPAQUE curve", e)
+            }
+            StoredPasswordError::Sealed(e) => internal("open OPAQUE envelope", e),
+        })
+    }
+
+    /// Start a password sign-in of `principal` from `client_ip` with the
+    /// client's OPAQUE credential request. A principal nobody holds, or one
+    /// without a password, is answered alike (RFC 9807 §10.9).
+    pub async fn password_start(
+        &self,
+        principal: &str,
+        credential_request: &[u8],
+        client_ip: Option<IpAddr>,
+    ) -> Result<Started, SignInError> {
+        let host = Passwords {
+            sign_in: self,
+            client_ip,
+        };
+        sid_authn::password_sign_in::start(&host, principal, credential_request).await
+    }
+
+    /// Finish the password sign-in `login` with the client's credential
+    /// finalization: the active account whose password it proved, or one
+    /// refusal for a wrong password and an unknown account alike, counted
+    /// against the lockout.
+    pub async fn password_finish(
+        &self,
+        login: &OpaqueLoginId,
+        credential_finalization: &[u8],
+        client_ip: Option<IpAddr>,
+    ) -> Result<Verified<Profile>, SignInError> {
+        let host = Passwords {
+            sign_in: self,
+            client_ip,
+        };
+        sid_authn::password_sign_in::finish(&host, login, credential_finalization).await
+    }
+
+    /// Complete a local first-factor sign-in of `profile` by `method` as
+    /// `admission` decided: the session, or its pending context with the
+    /// second factors that complete it and, for a browser, the CSRF token the
+    /// completion sends. A session of a native client that proved the
+    /// application key `native_key` gets its refresh generation; a pending
+    /// context gets none.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_first_factor(
+        &self,
+        profile: &Profile,
+        method: LoginMethod,
+        device_id: Option<uuid::Uuid>,
+        client_ip: Option<IpAddr>,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+        proved_by: Option<&CredentialFence>,
+        admission: FirstFactor,
+    ) -> Result<FirstFactorSignedIn, SignInError> {
+        match admission {
+            FirstFactor::Admitted(policy) => Ok(FirstFactorSignedIn {
+                signed_in: self
+                    .sign_in_by(
+                        profile, method, device_id, client_ip, client, native_key, proved_by,
+                        policy,
+                    )
+                    .await?,
+                second_factors: Vec::new(),
+                enrollable_factors: Vec::new(),
+                browser_csrf: None,
+            }),
+            FirstFactor::AwaitsSecondFactor {
+                factors,
+                enrollable,
+                fence,
+            } => {
+                let mut session = Session::new_awaiting_second_factor(
+                    profile.id,
+                    client_ip,
+                    method.auth_level(self.policy.auth.passkey_satisfies_mfa),
+                    method.amr(),
+                );
+                session.device_id = device_id;
+                // Kept for as long as the context lives; a completion that
+                // finds none completes nothing.
+                let kept = self
+                    .first_factor_proofs
+                    .insert_until(
+                        &session.id.to_string(),
+                        &proved_by.map(FirstFactorProof::of),
+                        session.expires_at,
+                    )
+                    .await?;
+                if !kept {
+                    return Err(SignInError::Expired);
+                }
+                let (signed_in, browser_csrf) = self
+                    .sign_in_pending(
+                        profile,
+                        session,
+                        client,
+                        proved_by.map(SignInProof::Credential),
+                        fence,
+                    )
+                    .await?;
+                info!(profile = %profile.id, ?factors, ?enrollable, "Sign-in awaits its second factor");
+                Ok(FirstFactorSignedIn {
+                    signed_in,
+                    second_factors: factors.into_iter().map(i32::from).collect(),
+                    enrollable_factors: enrollable.into_iter().map(i32::from).collect(),
+                    browser_csrf,
+                })
+            }
+        }
+    }
+
+    /// Sign `profile` in with a full session authenticated by `method`, at
+    /// the level and with the `amr` it establishes, recording the client's
+    /// address and device: the history the new-device rule compares later
+    /// sign-ins with.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sign_in_by(
+        &self,
+        profile: &Profile,
+        method: LoginMethod,
+        device_id: Option<uuid::Uuid>,
+        client_ip: Option<IpAddr>,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+        proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
+    ) -> Result<SignedIn, SignInError> {
+        let mut session = self.new_session(profile.id, client_ip);
+        session.device_id = device_id;
+        session.assurance_level = method.auth_level(self.policy.auth.passkey_satisfies_mfa);
+        session.amr = method.amr();
+        self.sign_in(
+            profile,
+            session,
+            client,
+            native_key,
+            proved_by.map(SignInProof::Credential),
+            policy,
+            None,
+        )
+        .await
+    }
+
+    /// The credential `pending`'s first factor proved, while it still holds:
+    /// it commits with what the context completes, as in a sign-in that needs
+    /// no second factor. One replaced or revoked since completes nothing
+    /// (`Fenced`), and a context whose proof is gone has ended.
+    pub async fn first_factor_fence(
+        &self,
+        pending: &Session,
+    ) -> Result<Option<CredentialFence>, SignInError> {
+        let proof = self
+            .first_factor_proofs
+            .read(&pending.id.to_string())
+            .await?
+            .ok_or(SignInError::SessionEnded)?;
+        let Some(proof) = proof else {
+            return Ok(None);
+        };
+        let credential = self
+            .storage
+            .get_credentials_by_profile(pending.profile_id, None)
+            .await?
+            .into_iter()
+            .find(|c| c.status.is_active() && proof.proves(c))
+            .ok_or(SignInError::Fenced)?;
+        Ok(Some(CredentialFence {
+            id: credential.id,
+            data: credential.data,
+        }))
     }
 
     /// How long a full session lives: the policy's absolute lifetime, a day
@@ -861,6 +1201,67 @@ impl SignInSecurityHost for Rules<'_> {
 
     async fn record_ip_reputation(&self, ip: &str) -> sid_core::Result<()> {
         self.0.storage.record_ip_reputation_event(ip, true).await
+    }
+}
+
+/// One password sign-in request of a local Profile from `client_ip`.
+struct Passwords<'a> {
+    sign_in: &'a SignIn,
+    client_ip: Option<IpAddr>,
+}
+
+#[async_trait::async_trait]
+impl PasswordSignInHost for Passwords<'_> {
+    type Owner = ProfileId;
+    type Account = Profile;
+    type Error = SignInError;
+
+    fn credentials(&self) -> &dyn CredentialStore<Owner = ProfileId> {
+        self.sign_in.storage.as_ref()
+    }
+
+    fn opaque(&self) -> &OpaqueRouter {
+        &self.sign_in.opaque
+    }
+
+    fn pending(&self) -> &ChallengeStore<PendingSignIn<ProfileId>> {
+        &self.sign_in.logins
+    }
+
+    async fn resolve(&self, principal: &str) -> Result<Option<ProfileId>, SignInError> {
+        Ok(self.sign_in.resolve_profile(principal).await?.map(|p| p.id))
+    }
+
+    async fn refuse_if_locked(&self, identity: &str) -> Result<(), SignInError> {
+        self.sign_in.refuse_if_locked(identity).await
+    }
+
+    /// CE counts the attempt for the lockout; it keeps no per-account
+    /// activity, so the account is not needed here.
+    async fn record_failure(
+        &self,
+        identity: &str,
+        _owner: Option<&ProfileId>,
+    ) -> Result<(), SignInError> {
+        self.sign_in
+            .record_failed_login(identity, self.client_ip)
+            .await
+    }
+
+    async fn stored_password(
+        &self,
+        credential: &Credential<ProfileId>,
+    ) -> Result<OpenedPassword, SignInError> {
+        let (record, stored) = self.sign_in.stored_password(credential).await?;
+        Ok(OpenedPassword { record, stored })
+    }
+
+    fn opaque_credential_identifier(&self, credential: &Credential<ProfileId>) -> [u8; 16] {
+        credential.opaque_credential_identifier()
+    }
+
+    async fn account(&self, owner: &ProfileId) -> Result<Option<Profile>, SignInError> {
+        Ok(self.sign_in.storage.get_profile(*owner).await?)
     }
 }
 
