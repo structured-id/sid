@@ -1,9 +1,16 @@
 # sid-attestation
 
-Device key attestation for StructuredID: registering, rotating, revoking and
+Device key attestation for StructuredID: enrolling, rotating, revoking and
 reading the key a device holds for its Profile
 (`sid.v1.attestation.AttestationService`). CE stores the attestation without
 verifying its chain, so a device is never marked hardware-attested by it.
+
+A key is bound only by its ceremony: `StartDeviceEnrollment` issues a
+single-use challenge to the owner's own sufficient sign-in, and
+`FinishDeviceEnrollment` (or `RotateDeviceKey` for a rotation) carries the
+device-key proofs over it. The finish commits the device, its key, the
+consumed ceremony and the outcome together; a retry with the same operation
+key (`Idempotency-Key` and `SID-Operation-Period`) gets the recorded answer.
 
 ## Running it as its own process
 
@@ -26,7 +33,7 @@ resource. A call is admitted with an access token for that resource:
 | Method | Action |
 |---|---|
 | `GetDeviceAttestation` | `attestation.device.read` |
-| `RegisterDeviceKey`, `RotateDeviceKey`, `RevokeDeviceKey` | `attestation.device.change` |
+| `StartDeviceEnrollment`, `FinishDeviceEnrollment`, `RotateDeviceKey`, `RevokeDeviceKey` | `attestation.device.change` |
 | `ListDeviceAttestations` | `attestation.profile.read` |
 
 No shared cache is involved: an ended sign-in is refused at the next call, by
@@ -44,6 +51,7 @@ every replica, including one started afterwards.
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | The installation's database, where devices, sign-ins and attestations live |
+| `SID_MASTER_KEY_FILE` | The installation's master key file, mounted as for the issuer: it seals the pending ceremonies every replica reads |
 | `SID_GRPC_UPSTREAM` | The installation's gRPC address |
 | `SID_ISSUER_URL` | The installation's public URL |
 | `SID_RECEIVER_RESOURCE` | The account API resource indicator |
