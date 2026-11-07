@@ -1119,14 +1119,7 @@ impl ImportedPasswordUpgrades {
         }
 
         let method = LoginMethod::Password;
-        let requirements =
-            login_policy
-                .requirements(None)
-                .await
-                .map_err(|e| SignInError::Unavailable {
-                    what: "login policy",
-                    cause: e.to_string(),
-                })?;
+        let requirements = crate::sign_in::organization_requirements(login_policy).await?;
         let admission = sign_in
             .first_factor(
                 profile.id,

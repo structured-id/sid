@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod machines;
 pub mod maintenance;
 pub mod oauth;
+pub mod passkey;
 pub mod password;
 pub mod password_operation;
 pub mod pats;
@@ -29,6 +30,9 @@ pub mod security;
 pub mod sign_in;
 pub mod upstream;
 mod wire;
+
+#[cfg(test)]
+mod test_support;
 
 pub use installation::{Installation, InstallationError, InstallationSettings, Management};
 pub use lifecycle::{Engine, EngineError, EngineParts, Running};
