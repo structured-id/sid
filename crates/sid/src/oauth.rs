@@ -184,6 +184,11 @@ impl OAuth {
         self.login_policy = source;
     }
 
+    /// Where the login requirements are read from.
+    pub fn login_policy(&self) -> &dyn LoginPolicySource {
+        self.login_policy.as_ref()
+    }
+
     /// The DPoP validator, whose replay record every endpoint shares.
     pub fn dpop(&self) -> &DPopValidator {
         &self.dpop

@@ -9832,6 +9832,54 @@ async fn test_verify_password_reset_correct_token() {
     assert!(inner.expires_in > 0);
 }
 
+/// While the password proof keys are still being generated a reset link is
+/// refused as retryable and not consumed: the same link verifies once the
+/// server can prepare the new password, instead of reading as already used.
+#[tokio::test]
+async fn test_verify_password_reset_before_keys_keeps_the_link() {
+    use sha2::{Digest, Sha256};
+    use sid_plugin::StorageBackend;
+    let profile = test_profile();
+    let storage = MockStorage::new().with_profile(profile.clone());
+    let token = "reset_token_before_keys";
+    let token_hash: String = Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let session = sid_core::models::PasswordResetSession::new(
+        profile.id,
+        "alice@sid.example.com".into(),
+        "alice@sid.example.com".into(),
+        token_hash,
+    );
+    let session_id = session.id;
+    storage
+        .create_reset_session(&session, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let storage = Arc::new(storage);
+
+    let auth = common::auth_service_before_keys(storage.clone());
+    let err = auth
+        .verify_password_reset(Request::new(VerifyPasswordResetRequest {
+            reset_session_id: common::reset_wire(session_id),
+            token: token.to_string(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unavailable);
+    let kept = storage
+        .get_reset_session(session_id)
+        .await
+        .unwrap()
+        .expect("the reset session");
+    assert_eq!(
+        kept.status,
+        sid_core::models::ResetSessionStatus::Pending,
+        "the link is not consumed"
+    );
+}
+
 #[tokio::test]
 async fn test_verify_password_reset_already_consumed() {
     let profile = test_profile();
