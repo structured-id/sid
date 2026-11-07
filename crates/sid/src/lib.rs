@@ -7,6 +7,7 @@
 
 pub mod account;
 pub mod authorization;
+pub mod branding;
 pub mod email_provider;
 pub mod enrollment;
 pub mod identity;
