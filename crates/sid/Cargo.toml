@@ -50,6 +50,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+# The session store's write latency histogram.
+opentelemetry = { workspace = true, optional = true }
+
+[features]
+telemetry = ["dep:opentelemetry"]
 
 [dev-dependencies]
 sid-crypto = { workspace = true, features = ["primitives"] }

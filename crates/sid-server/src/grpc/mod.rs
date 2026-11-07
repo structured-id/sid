@@ -29,7 +29,6 @@ pub mod project_service;
 pub mod provisioning_service;
 pub mod realm_service;
 pub mod security_service;
-mod sign_in_session;
 pub mod system_integration_service;
 pub mod trace_context;
 pub mod upstream_service;
