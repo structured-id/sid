@@ -7,6 +7,7 @@
 
 pub mod installation;
 pub mod lifecycle;
+pub mod machines;
 pub mod maintenance;
 
 pub use installation::{Installation, InstallationError, InstallationSettings, Management};
