@@ -1,114 +1,7 @@
 use super::*;
-use sid_core::models::RoleAssignmentId;
-
-// ── Conversion tests ────────────────────────────────────────────
-
-#[test]
-fn test_role_to_proto() {
-    let project_id = ProjectId::generate();
-    let mut role = Role::new(project_id, "admin", "Administrator");
-    role.description = Some("Full access".to_string());
-    role.permissions = vec!["profiles:read".into(), "profiles:write".into()];
-
-    let proto = role_to_proto(&role);
-    assert_eq!(proto.name, "admin");
-    assert_eq!(proto.id, Some(role.id.into()));
-    assert_eq!(proto.project_id, Some(project_id.into()));
-    assert_eq!(proto.description, Some("Full access".to_string()));
-    assert_eq!(proto.permissions, vec!["profiles:read", "profiles:write"]);
-}
-
-#[test]
-fn test_group_to_proto() {
-    let project_id = ProjectId::generate();
-    let mut group = Group::new(project_id, "engineering");
-    group.description = Some("Engineers".to_string());
-
-    let proto = group_to_proto(&group);
-    assert_eq!(proto.name, "engineering");
-    assert_eq!(proto.description, Some("Engineers".to_string()));
-    assert!(proto.created_at.is_some());
-}
-
-#[test]
-fn test_assignment_to_proto_profile() {
-    let profile_id = ProfileId::generate();
-    let role_id = RoleId::generate();
-    let assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role_id);
-
-    let proto = assignment_to_proto(&assignment);
-    assert_eq!(proto.role_id, Some(role_id.into()));
-    match proto.principal {
-        Some(role_assignment::Principal::ProfileId(pid)) => {
-            assert_eq!(pid, profile_id.into());
-        }
-        _ => panic!("expected ProfileId principal"),
-    }
-}
-
-#[test]
-fn test_assignment_to_proto_group() {
-    let group_id = GroupId::generate();
-    let role_id = RoleId::generate();
-    let assignment = RoleAssignment::new(RoleAssignmentPrincipal::Group(group_id), role_id);
-
-    let proto = assignment_to_proto(&assignment);
-    match proto.principal {
-        Some(role_assignment::Principal::GroupId(gid)) => {
-            assert_eq!(gid, group_id.into());
-        }
-        _ => panic!("expected GroupId principal"),
-    }
-}
-
-#[test]
-fn test_assignment_to_proto_with_scope_and_expiry() {
-    let profile_id = ProfileId::generate();
-    let role_id = RoleId::generate();
-    let mut assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role_id);
-    assignment.scope = Some("project:abc".to_string());
-    assignment.expires_at = Some(chrono::Utc::now());
-
-    let proto = assignment_to_proto(&assignment);
-    assert_eq!(proto.scope, Some("project:abc".to_string()));
-    assert!(proto.expires_at.is_some());
-}
-
-#[test]
-fn test_policy_to_proto_permit() {
-    let project_id = ProjectId::generate();
-    let policy = CedarPolicy::new(
-        sid_core::models::PolicyScope::Project(project_id),
-        "allow-read",
-        "permit(principal, action, resource);",
-        sid_core::models::PolicyEffect::Permit,
-    );
-
-    let proto = policy_to_proto(&policy);
-    assert_eq!(proto.name, "allow-read");
-    assert_eq!(
-        proto.effect,
-        i32::from(sid_proto::sid::v1::PolicyEffect::Permit)
-    );
-    assert!(proto.enabled);
-}
-
-#[test]
-fn test_policy_to_proto_forbid() {
-    let project_id = ProjectId::generate();
-    let policy = CedarPolicy::new(
-        sid_core::models::PolicyScope::Project(project_id),
-        "deny-delete",
-        "forbid(principal, action == Action::\"delete\", resource);",
-        sid_core::models::PolicyEffect::Forbid,
-    );
-
-    let proto = policy_to_proto(&policy);
-    assert_eq!(
-        proto.effect,
-        i32::from(sid_proto::sid::v1::PolicyEffect::Forbid)
-    );
-}
+use sid_core::models::{CedarPolicyId, GroupId, ProvisioningConnectorId, Role, RoleAssignmentId};
+use sid_infra::grpc_error::extract_error_info;
+use tonic::Code;
 
 // ── Request identifiers ─────────────────────────────────────────
 
@@ -165,7 +58,7 @@ fn test_wire_id_refuses_on_its_field() {
         (short, "group_id"),
         (wrong_version, "id"),
     ] {
-        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.code(), Code::InvalidArgument);
         let violations = tonic_types::StatusExt::get_details_bad_request(&refused)
             .expect("a BadRequest detail")
             .field_violations;
@@ -173,22 +66,146 @@ fn test_wire_id_refuses_on_its_field() {
     }
 }
 
-// ── PolicyEffect conversion tests ───────────────────────────────
+// ── Management refusals ─────────────────────────────────────────
 
-#[test]
-fn test_proto_to_policy_effect_permit() {
-    let result = proto_to_policy_effect(sid_proto::sid::v1::PolicyEffect::Permit.into());
-    assert_eq!(result, sid_core::models::PolicyEffect::Permit);
+fn reason(status: &Status) -> String {
+    extract_error_info(status).expect("ErrorInfo").0
 }
 
+/// Every management refusal answers with the code and reason clients branch
+/// on; the move of the operations into the library changed none of them.
 #[test]
-fn test_proto_to_policy_effect_forbid() {
-    let result = proto_to_policy_effect(sid_proto::sid::v1::PolicyEffect::Forbid.into());
-    assert_eq!(result, sid_core::models::PolicyEffect::Forbid);
+fn test_refusals_keep_their_status() {
+    use AuthorizationError as E;
+    let resource = ResourceId::generate();
+    let connector = ProvisioningConnectorId::generate();
+    for (refused, code, expected) in [
+        (
+            E::RoleNotFound("r".into()),
+            Code::NotFound,
+            "ROLE_NOT_FOUND",
+        ),
+        (
+            E::GroupNotFound(GroupId::generate().to_string()),
+            Code::NotFound,
+            "GROUP_NOT_FOUND",
+        ),
+        (
+            E::PolicyNotFound(CedarPolicyId::generate()),
+            Code::NotFound,
+            "POLICY_NOT_FOUND",
+        ),
+        (
+            E::ProjectNotFound(ProjectId::generate()),
+            Code::NotFound,
+            "PROJECT_NOT_FOUND",
+        ),
+        (
+            E::ScopeResourceNotFound(resource),
+            Code::NotFound,
+            "RESOURCE_NOT_FOUND",
+        ),
+        (
+            E::ResourceNotFound(resource),
+            Code::NotFound,
+            "RESOURCE_NOT_FOUND",
+        ),
+        (
+            E::ConnectorNotFound(connector),
+            Code::NotFound,
+            "PROVISIONING_CONNECTOR_NOT_FOUND",
+        ),
+        (
+            E::ClientNotFound("c".into()),
+            Code::NotFound,
+            "APPLICATION_NOT_FOUND",
+        ),
+        (
+            E::RoleTaken("r".into()),
+            Code::AlreadyExists,
+            "ROLE_ALREADY_EXISTS",
+        ),
+        (
+            E::GroupTaken("g".into()),
+            Code::AlreadyExists,
+            "GROUP_ALREADY_EXISTS",
+        ),
+        (
+            E::PolicyTaken("p".into()),
+            Code::AlreadyExists,
+            "POLICY_ALREADY_EXISTS",
+        ),
+        (
+            E::Denied,
+            Code::PermissionDenied,
+            "INSUFFICIENT_PERMISSIONS",
+        ),
+        (
+            E::PublicClient,
+            Code::InvalidArgument,
+            "INVALID_FIELD_VALUE",
+        ),
+        (
+            E::Assignment(AssignmentRule::ServicePrincipal),
+            Code::InvalidArgument,
+            "INVALID_FIELD_VALUE",
+        ),
+        (
+            E::CeilingExceeded("why".into()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            E::LastAdministrator("why".into()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            E::GrantorOutsideGroup("why".into()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            E::ResourceRetired(resource),
+            Code::FailedPrecondition,
+            "RESOURCE_RETIRED",
+        ),
+        (
+            E::ConnectorRetired(connector),
+            Code::FailedPrecondition,
+            "RESOURCE_RETIRED",
+        ),
+    ] {
+        let status = refusal(refused);
+        assert_eq!(status.code(), code, "{status:?}");
+        assert_eq!(reason(&status), expected);
+    }
 }
 
+/// A refused assignment shape and an invalid field name the field the
+/// caller sent; a missing one is named as missing.
 #[test]
-fn test_proto_to_policy_effect_default() {
-    let result = proto_to_policy_effect(0); // Unspecified
-    assert_eq!(result, sid_core::models::PolicyEffect::Permit);
+fn test_field_refusals_name_their_field() {
+    for (refused, field) in [
+        (
+            AuthorizationError::Assignment(AssignmentRule::InstallationScope),
+            "scope",
+        ),
+        (
+            AuthorizationError::Assignment(AssignmentRule::AdministratorToProfile),
+            "principal",
+        ),
+        (AuthorizationError::PublicClient, "oauth_client_id"),
+        (
+            AuthorizationError::InvalidAssignment("why".into()),
+            "assignment",
+        ),
+        (AuthorizationError::MissingField("principal"), "principal"),
+    ] {
+        let status = refusal(refused);
+        let violations = tonic_types::StatusExt::get_details_bad_request(&status)
+            .expect("a BadRequest detail")
+            .field_violations;
+        assert_eq!(violations[0].field, field);
+    }
 }
