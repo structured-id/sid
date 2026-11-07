@@ -4494,6 +4494,14 @@ impl StorageBackend for MockStorage {
         inner.role_assignments.push(a.clone());
         Ok(())
     }
+
+    async fn import_role_assignment(
+        &self,
+        _: &RoleAssignment,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,

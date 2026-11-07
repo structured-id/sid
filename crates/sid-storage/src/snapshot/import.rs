@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Import a snapshot into a target installation's database.
 
+use std::collections::{HashMap, HashSet};
+
 use sid_core::models::{AuditEntry, MutationContext, OperationKey, OperationResourceBinding};
 use sid_crypto::CryptoPrimitives;
 use sid_plugin::SnapshotRules;
@@ -514,19 +516,28 @@ pub async fn import(
             // Imported before: a repeated import adds nothing. Another
             // profile holding the user name is a real conflict.
             Err(sid_core::Error::Conflict(_))
-                if backend.get_profile(profile.id).await?.is_some() => {}
+                if backend.get_profile(profile.id).await?.as_ref() == Some(profile) => {}
             Err(e) => return Err(e.into()),
         }
     }
 
     info!(count = snapshot.projects.len(), "importing projects...");
     for project in &snapshot.projects {
-        // Already in the store (the system project, or an earlier import): kept as stored.
+        // The system project is the target's own, created with the store: it
+        // is kept as stored. Any other project must be the archive's.
+        let own = project.id == sid_core::models::ProjectId::SYSTEM;
         result.projects += created(
             backend
                 .create_project(project, audit("import_project", &project.id.to_string()))
                 .await,
-            || async { Ok(backend.get_project(project.id).await?.is_some()) },
+            || async {
+                let held = backend.get_project(project.id).await?;
+                Ok(if own {
+                    held.is_some()
+                } else {
+                    held.as_ref() == Some(project)
+                })
+            },
         )
         .await?;
     }
@@ -835,7 +846,7 @@ pub async fn import(
             backend
                 .create_machine_user(mu, audit("import_machine_user", &mu.id.to_string()))
                 .await,
-            || async { Ok(backend.get_machine_user(mu.id).await?.is_some()) },
+            || async { Ok(backend.get_machine_user(mu.id).await?.as_ref() == Some(mu)) },
         )
         .await?;
     }
@@ -853,7 +864,7 @@ pub async fn import(
                     audit("import_application", &app.id.to_string()),
                 )
                 .await,
-            || async { Ok(backend.get_application(app.id).await?.is_some()) },
+            || async { Ok(backend.get_application(app.id).await?.as_ref() == Some(app)) },
         )
         .await?;
     }
@@ -874,26 +885,26 @@ pub async fn import(
                 .create_oauth2_client(client, audit("import_oauth2_client", &client.client_id))
                 .await,
             || async {
-                Ok(backend
-                    .get_oauth2_client(&client.client_id)
-                    .await?
-                    .is_some())
+                Ok(backend.get_oauth2_client(&client.client_id).await?.as_ref() == Some(client))
             },
         )
         .await?;
     }
     for access in &snapshot.resource_access {
-        // Setting access is idempotent: a repeated import keeps it as stored.
-        if backend
+        // A repeated import finds the same access; other access is a conflict.
+        match backend
             .resource_access(&access.client_id, access.resource_id)
             .await?
-            .is_none()
         {
-            let subject = format!("{}:{}", access.client_id, access.resource_id);
-            backend
-                .set_resource_access(access, audit("import_resource_access", &subject))
-                .await?;
-            result.resource_access += 1;
+            Some(held) if held == *access => {}
+            Some(_) => return Err(target("the target holds other resource access")),
+            None => {
+                let subject = format!("{}:{}", access.client_id, access.resource_id);
+                backend
+                    .set_resource_access(access, audit("import_resource_access", &subject))
+                    .await?;
+                result.resource_access += 1;
+            }
         }
     }
 
@@ -925,7 +936,7 @@ pub async fn import(
             backend
                 .create_role(role, audit("import_role", &role.id.to_string()))
                 .await,
-            || async { Ok(backend.get_role(role.id).await?.is_some()) },
+            || async { Ok(backend.get_role(role.id).await?.as_ref() == Some(role)) },
         )
         .await?;
     }
@@ -938,13 +949,19 @@ pub async fn import(
         )
         .await?;
     }
+    // Each group's stored members are read once, keyed by profile.
+    let mut listed = HashSet::new();
+    let mut members = HashMap::new();
     for member in &snapshot.group_members {
-        if backend
-            .list_group_members(member.group_id)
-            .await?
-            .contains(member)
-        {
-            continue;
+        if listed.insert(member.group_id) {
+            for held in backend.list_group_members(member.group_id).await? {
+                members.insert((held.group_id, held.profile_id), held);
+            }
+        }
+        match members.get(&(member.group_id, member.profile_id)) {
+            Some(held) if held == member => continue,
+            Some(_) => return Err(target("the target holds another group membership")),
+            None => {}
         }
         backend
             .add_to_group(
@@ -994,21 +1011,15 @@ pub async fn import(
     // after its source. They are restored as recorded, envelope and
     // provenance included: the source installation authorized them.
     for assignment in sources_first(&snapshot.role_assignments)? {
-        result.role_assignments += created(
-            backend
-                .create_role_assignment(
-                    assignment,
-                    audit("import_role_assignment", &assignment.id.to_string()),
-                )
-                .await,
-            || async {
-                Ok(assignments_of(backend, &assignment.principal)
-                    .await?
-                    .iter()
-                    .any(|a| a.id == assignment.id))
-            },
-        )
-        .await?;
+        if backend
+            .import_role_assignment(
+                assignment,
+                audit("import_role_assignment", &assignment.id.to_string()),
+            )
+            .await?
+        {
+            result.role_assignments += 1;
+        }
     }
 
     for policy in &snapshot.cedar_policies {
@@ -1021,13 +1032,13 @@ pub async fn import(
         .await?;
     }
     for meta in &snapshot.profile_metadata {
-        if backend
+        match backend
             .get_profile_metadata(meta.profile_id, &meta.key)
             .await?
-            .as_ref()
-            == Some(meta)
         {
-            continue;
+            Some(held) if held == *meta => continue,
+            Some(_) => return Err(target("the target holds another profile metadata entry")),
+            None => {}
         }
         backend
             .set_profile_metadata(
@@ -1047,7 +1058,7 @@ pub async fn import(
             backend
                 .create_device(device, audit("import_device", &device.id.to_string()))
                 .await,
-            || async { Ok(backend.get_device(device.id).await?.is_some()) },
+            || async { Ok(backend.get_device(device.id).await?.as_ref() == Some(device)) },
         )
         .await?;
     }
@@ -1087,7 +1098,7 @@ pub async fn import(
             backend
                 .create_profile_grant(grant, audit("import_profile_grant", &grant.id.to_string()))
                 .await,
-            || async { Ok(backend.get_profile_grant(grant.id).await?.is_some()) },
+            || async { Ok(backend.get_profile_grant(grant.id).await?.as_ref() == Some(grant)) },
         )
         .await?;
     }
@@ -1099,7 +1110,9 @@ pub async fn import(
                     audit("import_upstream_provider", &provider.id.to_string()),
                 )
                 .await,
-            || async { Ok(backend.get_upstream_provider(provider.id).await?.is_some()) },
+            || async {
+                Ok(backend.get_upstream_provider(provider.id).await?.as_ref() == Some(provider))
+            },
         )
         .await?;
     }
@@ -1118,7 +1131,8 @@ pub async fn import(
                         &identity.upstream_subject,
                     )
                     .await?
-                    .is_some_and(|stored| stored.id == identity.id))
+                    .as_ref()
+                    == Some(identity))
             },
         )
         .await?;
@@ -1141,18 +1155,36 @@ pub async fn import(
                 Ok(backend
                     .get_machine_credential_by_kid(&cred.kid)
                     .await?
-                    .is_some())
+                    .as_ref()
+                    == Some(cred))
             },
         )
         .await?;
     }
+    // Each machine user's stored grants are read once, keyed by target.
+    let mut listed = HashSet::new();
+    let mut grants = HashMap::new();
     for grant in &snapshot.impersonation_grants {
-        if backend
-            .list_impersonation_grants(grant.machine_user_id)
-            .await?
-            .contains(grant)
-        {
-            continue;
+        if listed.insert(grant.machine_user_id) {
+            for held in backend
+                .list_impersonation_grants(grant.machine_user_id)
+                .await?
+            {
+                grants.insert(
+                    (held.machine_user_id, held.target_type, held.target.clone()),
+                    held,
+                );
+            }
+        }
+        let key = (
+            grant.machine_user_id,
+            grant.target_type,
+            grant.target.clone(),
+        );
+        match grants.get(&key) {
+            Some(held) if held == grant => continue,
+            Some(_) => return Err(target("the target holds another impersonation grant")),
+            None => {}
         }
         backend
             .save_impersonation_grant(
@@ -1173,7 +1205,9 @@ pub async fn import(
                     audit("import_closure_request", &req.profile_id.to_string()),
                 )
                 .await,
-            || async { Ok(backend.get_closure_request(req.profile_id).await?.is_some()) },
+            || async {
+                Ok(backend.get_closure_request(req.profile_id).await?.as_ref() == Some(req))
+            },
         )
         .await?;
     }
@@ -1182,7 +1216,7 @@ pub async fn import(
             backend
                 .create_export_job(job, audit("import_export_job", &job.id.to_string()))
                 .await,
-            || async { Ok(backend.get_export_job_by_id(job.id).await?.is_some()) },
+            || async { Ok(backend.get_export_job_by_id(job.id).await?.as_ref() == Some(job)) },
         )
         .await?;
     }
@@ -1259,7 +1293,9 @@ pub async fn import(
                     audit("import_scim_outbound_target", &target.id.to_string()),
                 )
                 .await,
-            || async { Ok(backend.get_scim_outbound_target(target.id).await?.is_some()) },
+            || async {
+                Ok(backend.get_scim_outbound_target(target.id).await?.as_ref() == Some(target))
+            },
         )
         .await?;
     }
@@ -1283,7 +1319,8 @@ pub async fn import(
                         record.entity_type,
                     )
                     .await?
-                    .is_some())
+                    .as_ref()
+                    == Some(record))
             },
         )
         .await?;
@@ -1296,7 +1333,7 @@ pub async fn import(
                     audit("import_branding_config", &config.id.to_string()),
                 )
                 .await,
-            || async { Ok(backend.get_branding_config(config.id).await?.is_some()) },
+            || async { Ok(backend.get_branding_config(config.id).await?.as_ref() == Some(config)) },
         )
         .await?;
     }
@@ -1312,8 +1349,7 @@ pub async fn import(
                 Ok(backend
                     .list_outbound_dlq_entries(entry.target_id)
                     .await?
-                    .iter()
-                    .any(|stored| stored.id == entry.id))
+                    .contains(entry))
             },
         )
         .await?;
@@ -1371,32 +1407,12 @@ where
     }
 }
 
-/// The stored role assignments of `principal`.
-async fn assignments_of(
-    backend: &dyn StorageBackend,
-    principal: &sid_core::models::RoleAssignmentPrincipal,
-) -> sid_core::Result<Vec<sid_core::models::RoleAssignment>> {
-    use sid_core::models::RoleAssignmentPrincipal as P;
-    match principal {
-        P::Profile(id) => backend.list_role_assignments_for_profile(*id).await,
-        P::Group(id) => backend.list_role_assignments_for_group(*id).await,
-        P::MachineUser(id) => backend.list_role_assignments_for_machine_user(*id).await,
-        P::OAuthClient(id) => backend.list_role_assignments_for_oauth_client(id).await,
-        P::ProvisioningConnector(id) => {
-            backend
-                .list_role_assignments_for_provisioning_connector(*id)
-                .await
-        }
-    }
-}
-
 /// `assignments` with every redelegated assignment after the source it
 /// depends on. A source missing from the snapshot must already be stored,
 /// or the store refuses the dependent; a dependency cycle is refused here.
 fn sources_first(
     assignments: &[sid_core::models::RoleAssignment],
 ) -> Result<Vec<&sid_core::models::RoleAssignment>> {
-    use std::collections::HashSet;
     let listed: HashSet<_> = assignments.iter().map(|a| a.id).collect();
     let mut placed = HashSet::with_capacity(assignments.len());
     let mut ordered = Vec::with_capacity(assignments.len());
@@ -1431,7 +1447,6 @@ fn sources_first(
 fn managers_first(
     profiles: &[sid_core::models::Profile],
 ) -> Result<Vec<&sid_core::models::Profile>> {
-    use std::collections::HashSet;
     let listed: HashSet<_> = profiles.iter().map(|p| p.id).collect();
     let mut placed = HashSet::with_capacity(profiles.len());
     let mut ordered = Vec::with_capacity(profiles.len());

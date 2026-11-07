@@ -33,7 +33,7 @@ impl std::fmt::Display for ScimOutboundTargetId {
 }
 
 /// SCIM outbound target — a downstream app that receives provisioned users/groups.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScimOutboundTarget {
     pub id: ScimOutboundTargetId,
     /// OAuth2 client_id of the downstream app (links to OAuth2Client).
@@ -59,7 +59,7 @@ pub struct ScimOutboundTarget {
 }
 
 /// Authentication for downstream SCIM API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundAuthConfig {
     /// Static bearer token.
@@ -79,13 +79,13 @@ pub enum OutboundAuthConfig {
 ///
 /// Keys are SCIM attribute paths (e.g., "userName", "name.givenName", "emails").
 /// Values are mapping expressions that resolve against SID profile data.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AttributeMapping {
     pub mappings: Vec<AttributeMappingEntry>,
 }
 
 /// Single attribute mapping entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttributeMappingEntry {
     /// SCIM attribute path (e.g., "userName", "name.givenName", "emails[0].value").
     pub scim_path: String,
@@ -94,7 +94,7 @@ pub struct AttributeMappingEntry {
 }
 
 /// Source expression for attribute mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MappingSource {
     /// Direct field path: "profile.login", "profile.email", "metadata.employee_id".
@@ -106,7 +106,7 @@ pub enum MappingSource {
 }
 
 /// Group push configuration for outbound provisioning.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GroupPushConfig {
     /// Whether group push is enabled for this target.
     pub enabled: bool,
@@ -116,7 +116,7 @@ pub struct GroupPushConfig {
 }
 
 /// Single group mapping entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupMappingEntry {
     /// SID group display name.
     pub sid_group: String,
@@ -125,7 +125,7 @@ pub struct GroupMappingEntry {
 }
 
 /// Sync and retry configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutboundSyncConfig {
     /// Maximum retry attempts before sending to DLQ.
     pub max_retry_attempts: u32,
@@ -202,7 +202,7 @@ impl std::fmt::Display for OutboundEntityType {
 }
 
 /// Dead letter queue entry for failed outbound deliveries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutboundDlqEntry {
     pub id: Uuid,
     pub target_id: ScimOutboundTargetId,

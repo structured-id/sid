@@ -972,6 +972,20 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             .await
             .unwrap()
     );
+    // A role the connector holds: its revision counts the grant, and the
+    // restored connector keeps that revision.
+    let provisioner = Role::new(ProjectId::SYSTEM, "provisioner", "Provisioner");
+    source.create_role(&provisioner, ctx()).await.unwrap();
+    source
+        .create_role_assignment(
+            &RoleAssignment::new(
+                RoleAssignmentPrincipal::ProvisioningConnector(connector.id),
+                provisioner.id,
+            ),
+            ctx(),
+        )
+        .await
+        .unwrap();
     let mut tx = SqliteBackend::begin_write_on(source.pool()).await.unwrap();
     SqliteBackend::advance_login_policy_epoch(&mut tx)
         .await

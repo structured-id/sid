@@ -99,9 +99,23 @@ fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssign
     })
 }
 
-/// Insert `assignment` in `tx`; an existing id is a `Conflict`, a missing role
-/// or principal an error.
+/// Insert `assignment` in `tx`, advancing its connector's revision when a
+/// provisioning connector holds it; an existing id is a `Conflict`, a missing
+/// role or principal an error.
 pub(crate) async fn insert_role_assignment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    assignment: &RoleAssignment,
+) -> SidResult<()> {
+    insert_role_assignment_row(tx, assignment).await?;
+    if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = assignment.principal {
+        super::provisioning_connector::bump_connector_revision(tx, connector).await?;
+    }
+    Ok(())
+}
+
+/// Insert `assignment` in `tx` as recorded, leaving its holder unchanged: a
+/// restored connector's revision already counts its assignments.
+pub(crate) async fn insert_role_assignment_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     assignment: &RoleAssignment,
 ) -> SidResult<()> {
@@ -161,9 +175,6 @@ pub(crate) async fn insert_role_assignment(
             .await
             .map_err(|e| super::insert_error("approved ceiling", e))?;
         }
-    }
-    if let Some(connector) = connector_id {
-        super::provisioning_connector::bump_connector_revision(tx, connector).await?;
     }
     Ok(())
 }
@@ -986,6 +997,31 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         insert_role_assignment(&mut tx, assignment).await?;
         Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id), audit).await
+    }
+
+    pub(crate) async fn import_role_assignment_impl(
+        &self,
+        assignment: &RoleAssignment,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        match insert_role_assignment_row(&mut tx, assignment).await {
+            Ok(()) => {}
+            // The id is taken: the same assignment imported before, or another.
+            Err(SidError::Conflict(_)) => {
+                drop(tx);
+                let held = self.get_role_assignment_impl(assignment.id).await?;
+                return match held {
+                    Some(held) => crate::transfer_repeat(&held, assignment, "role assignment"),
+                    None => Err(SidError::Conflict(
+                        "the role assignment conflicts with a stored record".into(),
+                    )),
+                };
+            }
+            Err(e) => return Err(e),
+        }
+        Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id), audit).await?;
+        Ok(true)
     }
 
     pub(crate) async fn get_role_assignment_impl(

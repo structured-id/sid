@@ -594,6 +594,24 @@ pub(super) fn insert_assignment(
     a: &RoleAssignment,
     created: Option<ProfileId>,
 ) -> SidResult<()> {
+    store_assignment(tx, a, created, ConnectorRevision::Advance)
+}
+
+/// What storing an assignment does to the connector holding it.
+#[derive(Clone, Copy)]
+enum ConnectorRevision {
+    /// Its grants changed: the revision moves on.
+    Advance,
+    /// A restored connector's revision already counts the assignment.
+    AsRecorded,
+}
+
+fn store_assignment(
+    tx: &Statements<'_>,
+    a: &RoleAssignment,
+    created: Option<ProfileId>,
+    holder: ConnectorRevision,
+) -> SidResult<()> {
     if get_assignment(tx, a.id)?.is_some() {
         return Err(SidError::Conflict("role assignment already exists".into()));
     }
@@ -623,7 +641,12 @@ pub(super) fn insert_assignment(
         }
         RoleAssignmentPrincipal::ProvisioningConnector(c) => {
             connector = Some(c);
-            bump_connector(tx, *c)?
+            match holder {
+                ConnectorRevision::Advance => bump_connector(tx, *c)?,
+                ConnectorRevision::AsRecorded => {
+                    claim(tx, "SidProvisioningConnector", "id", bin(c.as_bytes()))?
+                }
+            }
         }
     };
     if !present {
@@ -1350,6 +1373,23 @@ impl CoordinodeBackend {
         let a = a.clone();
         self.mutate(format!("role_assignment:{}", a.id), ctx, move |tx| {
             insert_assignment(tx, &a, None)
+        })
+        .await
+    }
+
+    pub(super) async fn import_role_assignment(
+        &self,
+        a: &RoleAssignment,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let a = a.clone();
+        self.transaction(move |tx| {
+            if let Some(held) = get_assignment(tx, a.id)? {
+                return crate::transfer_repeat(&held, &a, "role assignment").map(Decision::Abandon);
+            }
+            store_assignment(tx, &a, None, ConnectorRevision::AsRecorded)?;
+            finalize(tx, &format!("role_assignment:{}", a.id), ctx.clone())?;
+            Ok(Decision::Commit(true))
         })
         .await
     }

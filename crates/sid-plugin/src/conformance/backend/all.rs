@@ -271,6 +271,7 @@ macro_rules! __storage_conformance {
                 test_update_role_is_compare_and_swap
                 test_oauth_client_role_assignment
                 test_connector_role_assignment
+                test_imported_assignment_keeps_its_connector_revision
                 test_roles_by_project_and_name
                 test_role_assignments_by_principal
                 test_held_role_assignments_and_roles

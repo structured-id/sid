@@ -1097,6 +1097,15 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// Store an exported role assignment as recorded, its holder unchanged (a
+    /// restored connector's revision already counts it). The same one stored
+    /// before is `false` with nothing written; another is a `Conflict`.
+    async fn import_role_assignment(
+        &self,
+        assignment: &RoleAssignment,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The role assignment `id`, with its envelope and provenance.
     async fn get_role_assignment(&self, id: RoleAssignmentId) -> Result<Option<RoleAssignment>>;
 

@@ -1375,6 +1375,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::create_role_assignment(self, assignment, ctx).await
     }
 
+    async fn import_role_assignment(
+        &self,
+        assignment: &RoleAssignment,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_role_assignment(self, assignment, ctx).await
+    }
+
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,

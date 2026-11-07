@@ -30,7 +30,7 @@ pub use sid_ids::RoleId;
 /// Scoped to a project — each project defines its own role set.
 /// `key` is the stable machine identifier (used in Cedar policies, tokens).
 /// `name` is the human-readable display name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Role {
     pub id: RoleId,
     pub project_id: ProjectId,
@@ -392,7 +392,7 @@ impl std::fmt::Display for ScopeType {
 pub const ROLE_EXPIRY_ALERT_HOURS: &[i64] = &[72, 24, 1];
 
 /// Role assignment — binds a role to a principal within an optional scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleAssignment {
     pub id: RoleAssignmentId,
     pub principal: RoleAssignmentPrincipal,
@@ -708,7 +708,7 @@ impl Default for ProfileGrantId {
 /// Unlike RoleAssignment (which is a single role→principal binding),
 /// ProfileGrant bundles all roles a profile has in a specific project.
 /// This is the "application access" entity shown in admin UIs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileGrant {
     pub id: ProfileGrantId,
     /// Project scope of this grant.

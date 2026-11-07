@@ -232,6 +232,16 @@ impl Installation {
         })
     }
 
+    /// Authorization management of this installation, warning of the
+    /// separation-of-duties conflicts its settings configure.
+    pub fn authorization(
+        &self,
+        cedar: sid_authz::cedar::CedarService,
+    ) -> crate::authorization::Authorization {
+        crate::authorization::Authorization::new(self.storage.clone(), cedar)
+            .with_sod_warnings(self.sod_warnings.clone())
+    }
+
     /// The administrator claim token while the claim is open, for the host
     /// to hand to its operator.
     pub async fn admin_claim(&self) -> Result<Option<SecretString>, InstallationError> {

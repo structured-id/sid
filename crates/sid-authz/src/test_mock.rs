@@ -1333,6 +1333,9 @@ impl sid_plugin::StorageBackend for MockStorage {
         assignments.push(assignment.clone());
         Ok(())
     }
+    async fn import_role_assignment(&self, _: &RoleAssignment, _: MutationContext) -> Result<bool> {
+        unimplemented!()
+    }
     async fn get_role_assignment(&self, id: RoleAssignmentId) -> Result<Option<RoleAssignment>> {
         Ok(self
             .role_assignments

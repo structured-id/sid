@@ -242,7 +242,7 @@ impl std::fmt::Display for ApplicationType {
 }
 
 /// OAuth2 client (relying party).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuth2Client {
     /// Client identifier (opaque string, not UUID).
     pub client_id: String,

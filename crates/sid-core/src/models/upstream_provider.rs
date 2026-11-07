@@ -101,7 +101,7 @@ impl std::fmt::Display for ProviderTrustCategory {
 ///
 /// Stores OAuth2/OIDC credentials, endpoints, and display settings.
 /// The `client_secret` is encrypted via `KeyManager` with context binding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamProvider {
     pub id: UpstreamProviderId,
 

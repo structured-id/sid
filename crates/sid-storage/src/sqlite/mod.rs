@@ -2011,6 +2011,14 @@ impl StorageBackend for SqliteBackend {
         self.create_role_assignment_impl(assignment, audit).await
     }
 
+    async fn import_role_assignment(
+        &self,
+        assignment: &sid_core::models::RoleAssignment,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_role_assignment_impl(assignment, audit).await
+    }
+
     async fn delete_role_assignment(
         &self,
         id: sid_core::models::RoleAssignmentId,

@@ -114,6 +114,14 @@ pub struct CeremonyRecords {
     pub counts: Vec<CeremonyCount>,
 }
 
+impl CeremonyRecords {
+    /// Keep only the records still live at `at`.
+    pub fn retain_live_at(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.states.retain(|s| s.expires_at > at);
+        self.counts.retain(|c| c.window_ends > at);
+    }
+}
+
 /// A state or admission under `(namespace, key)` until `expires_at`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CeremonyEntry {

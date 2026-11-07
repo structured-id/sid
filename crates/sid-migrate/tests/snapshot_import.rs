@@ -2355,3 +2355,87 @@ async fn administrative_assignments_survive_migration() {
             .is_none()
     );
 }
+
+/// Resuming an import compares each stored record with the archive's: a
+/// record changed in the target since the first pass is refused and kept as
+/// the target holds it, never overwritten from the archive or counted as
+/// restored. Covers an upserting store path (metadata, impersonation grants)
+/// and a record whose create found it only by its id (a device).
+#[tokio::test]
+async fn a_resumed_import_refuses_a_changed_target_record() {
+    use sid_core::models::{
+        Device, DeviceType, ImpersonationGrant, ImpersonationTargetType, MachineOwner, MachineUser,
+        ProfileMetadata, ProjectId,
+    };
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let ctx = || AuditEntry::system("test", "changed").into();
+    let profile = Profile::new(Some("changed-owner"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let meta = ProfileMetadata::new(profile.id, "team", serde_json::json!("core"));
+    source.set_profile_metadata(&meta, ctx()).await.unwrap();
+    let device = Device::new(profile.id, DeviceType::Mobile);
+    source.create_device(&device, ctx()).await.unwrap();
+    source.ensure_system_project(ctx()).await.unwrap();
+    let ci = MachineUser::new(ProjectId::SYSTEM, "ci", "CI", MachineOwner::System);
+    source.create_machine_user(&ci, ctx()).await.unwrap();
+    let grant = ImpersonationGrant::new(
+        ci.id,
+        ImpersonationTargetType::User,
+        profile.id.to_string(),
+        vec!["openid".into()],
+    );
+    source
+        .save_impersonation_grant(&grant, ctx())
+        .await
+        .unwrap();
+    let snapshot = export(&source).await.unwrap();
+
+    // Metadata changed in the target after the first pass.
+    let target = uninitialized().await;
+    import(&target, &snapshot).await.unwrap();
+    let changed = ProfileMetadata::new(profile.id, "team", serde_json::json!("edge"));
+    target.set_profile_metadata(&changed, ctx()).await.unwrap();
+    import(&target, &snapshot)
+        .await
+        .expect_err("changed metadata is refused");
+    assert_eq!(
+        target
+            .get_profile_metadata(profile.id, "team")
+            .await
+            .unwrap()
+            .map(|m| m.value),
+        Some(changed.value)
+    );
+
+    // An impersonation grant widened in the target.
+    let target = uninitialized().await;
+    import(&target, &snapshot).await.unwrap();
+    let mut widened = grant.clone();
+    widened.allowed_scopes = vec!["*".into()];
+    target
+        .save_impersonation_grant(&widened, ctx())
+        .await
+        .unwrap();
+    import(&target, &snapshot)
+        .await
+        .expect_err("a widened grant is refused");
+    assert_eq!(
+        target.list_impersonation_grants(ci.id).await.unwrap()[0].allowed_scopes,
+        widened.allowed_scopes
+    );
+
+    // A device trusted in the target: same id, other contents.
+    let target = uninitialized().await;
+    import(&target, &snapshot).await.unwrap();
+    target
+        .set_device_trust(device.id, true, 10, ctx())
+        .await
+        .unwrap();
+    let trusted = target.get_device(device.id).await.unwrap();
+    import(&target, &snapshot)
+        .await
+        .expect_err("a changed device is refused");
+    assert_eq!(target.get_device(device.id).await.unwrap(), trusted);
+    assert_ne!(trusted.as_ref(), Some(&device));
+}

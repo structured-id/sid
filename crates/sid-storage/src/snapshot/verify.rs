@@ -207,8 +207,14 @@ pub async fn verify(
             .retain(|p| p.id != sid_core::models::ProjectId::SYSTEM);
         snapshot
     };
-    let moved = own(super::export(source_store, rules).await?);
-    let held = own(super::export(target_store, rules).await?);
+    let mut moved = own(super::export(source_store, rules).await?);
+    let mut held = own(super::export(target_store, rules).await?);
+    // Each export drops the ceremony records expired at its own moment: both
+    // sides are compared at one later cutoff, so a deadline passing between
+    // the two exports is no difference.
+    let cutoff = chrono::Utc::now();
+    moved.ceremony.retain_live_at(cutoff);
+    held.ceremony.retain_live_at(cutoff);
     compare_contents(&moved, &held, &mut counts, &mut issues)?;
 
     let passed = counts.iter().all(|c| c.matches) && issues.is_empty();

@@ -201,7 +201,7 @@ impl MachineOwner {
 }
 
 /// Network and rate restrictions for a machine user.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MachineRestrictions {
     /// Allowed source IPs/CIDRs. Empty = no restriction.
     pub ip_allowlist: Vec<String>,
@@ -210,7 +210,7 @@ pub struct MachineRestrictions {
 }
 
 /// Machine user: non-human identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineUser {
     pub id: MachineUserId,
 
@@ -345,7 +345,7 @@ impl CredentialStatus {
 /// A single credential attached to a machine user.
 ///
 /// Machine users can have up to 2 active credentials (for rotation).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineUserCredential {
     /// Key ID (kid) for this credential.
     pub kid: String,

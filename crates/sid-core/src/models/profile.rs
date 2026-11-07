@@ -305,7 +305,7 @@ impl std::str::FromStr for ExportFormat {
 pub const EXPORT_DOWNLOAD_WINDOW_HOURS: u32 = 72;
 
 /// Data export job — tracks async export preparation and download.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportJob {
     /// Unique export job ID.
     pub id: uuid::Uuid,
@@ -368,7 +368,7 @@ impl ExportJob {
 }
 
 /// Legal hold information — freezes account closure for litigation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LegalHold {
     /// Court case or legal reference.
     pub court_reference: String,
@@ -393,7 +393,7 @@ pub struct LegalHold {
 }
 
 /// Tracks an in-progress account closure request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClosureRequest {
     /// Profile being closed.
     pub profile_id: ProfileId,
@@ -567,7 +567,7 @@ parse_stored!(ProfileVisibility, "profile visibility", [Public, Private]);
 /// Profile represents a user identity in StructuredID.
 ///
 /// A Profile IS the user (no separate User entity).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub id: ProfileId,
 

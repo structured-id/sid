@@ -224,6 +224,102 @@ async fn the_management_of_an_installation_does_not_change() {
     );
 }
 
+/// The separation-of-duties warnings the host configures reach the
+/// installation's authorization management: a signed-in administrator
+/// checking a proposed role is warned of the configured conflict, and an
+/// installation configured with none warns of nothing.
+#[tokio::test]
+async fn configured_sod_warnings_reach_the_conflict_check() {
+    use secrecy::ExposeSecret;
+    use sid_core::models::SodConflictRule;
+    use sid_core::models::authz::SodSeverity;
+    use sid_proto::sid::v1::authz::CheckSodConflictsRequest;
+
+    let master = MasterKey::new();
+    let storage = sqlite().await;
+    let root = Profile::new(Some("root"));
+    storage
+        .create_profile(&root, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    sid_authz::builtin::ensure_installation_administrator_role(storage.as_ref())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(
+                sid_core::models::RoleAssignmentPrincipal::Profile(root.id),
+                Role::installation_administrator().id,
+            )
+            .on_installation(),
+            AuditEntry::system("test", "assignment").into(),
+        )
+        .await
+        .unwrap();
+
+    // The administrator's own sign-in: the verified token is the caller.
+    let engine: Arc<dyn StorageBackend> = storage.clone();
+    let sign_in = crate::test_support::sign_in(engine);
+    let signed_in = sign_in
+        .sign_in(
+            &root,
+            sign_in.new_session(root.id, None),
+            sid_authn::sign_in_delivery::CeremonyClient::Native,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let sid_authn::sign_in_delivery::Delivery::Bearer { token, .. } = signed_in.delivery else {
+        panic!("a native sign-in delivers a bearer token");
+    };
+    let claims = sign_in
+        .jwt()
+        .validate_access_token(token.expose_secret())
+        .unwrap();
+    let caller = sid_authn::caller::Caller::from_claims(&claims).unwrap();
+    let proposal = || CheckSodConflictsRequest {
+        existing_roles: vec!["author".into()],
+        proposed_role: "reviewer".into(),
+    };
+
+    let mut configured = settings(&master, None);
+    configured.sod_warnings = vec![SodConflictRule {
+        name: "author_reviewer".into(),
+        description: None,
+        conflicting_roles: vec!["author".into(), "reviewer".into()],
+        severity: SodSeverity::Warning,
+    }];
+    let installation = Installation::open(storage.clone(), configured)
+        .await
+        .unwrap();
+    let authorization = installation.authorization(sid_authz::cedar::CedarService::new());
+    let admin = authorization
+        .installation_administrator(&caller)
+        .await
+        .unwrap();
+    let warned = authorization
+        .check_sod_conflicts(&admin, proposal())
+        .await
+        .unwrap();
+    assert!(warned.has_conflicts);
+    assert_eq!(warned.conflicts.len(), 1);
+    assert_eq!(warned.conflicts[0].rule_name, "author_reviewer");
+
+    let unconfigured = Installation::open(storage, settings(&master, None))
+        .await
+        .unwrap()
+        .authorization(sid_authz::cedar::CedarService::new());
+    let quiet = unconfigured
+        .check_sod_conflicts(&admin, proposal())
+        .await
+        .unwrap();
+    assert!(!quiet.has_conflicts);
+    assert!(quiet.conflicts.is_empty());
+}
+
 /// A store whose administrators cannot be read offers no claim and reports
 /// the failure, rather than reading as a fresh installation.
 #[tokio::test]
