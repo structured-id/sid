@@ -9,23 +9,19 @@
 
 use std::sync::Arc;
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Map, Value, json};
-use sid_authn::dpop::DPopValidator;
-use sid_authn::issuer::IssuerRegistry;
-use sid_authn::resource::{self, Scheme};
-use sid_authn::revocation_cache::RevocationCache;
-use sid_core::models::{OidcIssuer, SessionId};
+use sid::oauth::provider::{Presented, ProviderError};
+use sid_authn::resource::Scheme;
+use sid_core::models::OidcIssuer;
 use sid_infra::authn::resource as presented_request;
 use sid_infra::grpc_error::{ApiError, ErrorReason};
-use sid_plugin::storage::StorageBackend;
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::o_auth2_authorize_response::Result as AuthorizeResult;
 use sid_proto::sid::v1::oidc_provider_service_server::OidcProviderService;
 use sid_proto::sid::v1::project_service_server::ProjectService;
 use sid_proto::sid::v1::{
-    DeviceAuthorizationRequest, EndSessionRequest, IssuerHandleRequest, JsonWebKey, JsonWebKeySet,
+    DeviceAuthorizationRequest, EndSessionRequest, IssuerHandleRequest, JsonWebKeySet,
     OAuth2AuthorizeRequest, OAuth2IntrospectRequest, OAuth2RevokeRequest, OAuth2TokenRequest,
     ProtocolRequest, ProviderMetadata, UserInfo,
 };
@@ -50,35 +46,22 @@ const GET_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/GetUserInfo";
 const POST_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/PostUserInfo";
 
 pub struct OidcProviderServiceImpl {
-    issuers: Arc<IssuerRegistry>,
-    storage: Arc<dyn StorageBackend>,
-    revocation: Arc<RevocationCache>,
-    dpop: DPopValidator,
     auth: Arc<AuthServiceImpl>,
     project: Arc<ProjectServiceImpl>,
     login_url: Option<url::Url>,
 }
 
 impl OidcProviderServiceImpl {
-    /// The endpoints of the issuers in `issuers`; UserInfo reads users from
-    /// `storage`, checks revocation in `revocation` and records DPoP proofs
-    /// in `storage`'s ceremony state, which every replica shares. The OAuth
-    /// endpoints run the logic of `auth`, the registration endpoints that of
-    /// `project`; a user who must sign in is sent to `login_url`, or,
-    /// without one, the client gets `login_required`.
+    /// The issuer endpoints over the engine's OAuth of `auth`: discovery,
+    /// keys, UserInfo and the OAuth endpoints; the registration endpoints
+    /// run the logic of `project`; a user who must sign in is sent to
+    /// `login_url`, or, without one, the client gets `login_required`.
     pub fn new(
-        issuers: Arc<IssuerRegistry>,
-        storage: Arc<dyn StorageBackend>,
-        revocation: Arc<RevocationCache>,
         auth: Arc<AuthServiceImpl>,
         project: Arc<ProjectServiceImpl>,
         login_url: Option<url::Url>,
     ) -> Self {
         Self {
-            issuers,
-            dpop: DPopValidator::new(storage.clone()),
-            storage,
-            revocation,
             auth,
             project,
             login_url,
@@ -98,14 +81,9 @@ impl OidcProviderServiceImpl {
     ) -> Result<Response<HttpBody>, Status> {
         use oauth_http::AuthorizeRefusal;
 
-        let issuer = match self
-            .issuers
-            .by_handle(&request.get_ref().issuer_handle)
-            .await
-        {
-            Ok(Some(issuer)) => issuer,
-            Ok(None) => return Ok(oauth_http::page(404, "Unknown issuer")),
-            Err(e) => return Err(internal(e)),
+        let issuer = match self.page_issuer(&request.get_ref().issuer_handle).await? {
+            Some(issuer) => issuer,
+            None => return Ok(oauth_http::page(404, "Unknown issuer")),
         };
         let (metadata, _, asked) = request.into_parts();
         let pending = match asked.request_uri.as_deref() {
@@ -205,10 +183,9 @@ impl OidcProviderServiceImpl {
         handle: &str,
         request: LogoutRequest<'_>,
     ) -> Result<Response<HttpBody>, Status> {
-        let issuer = match self.issuers.by_handle(handle).await {
-            Ok(Some(issuer)) => issuer,
-            Ok(None) => return Ok(oauth_http::page(404, "Unknown issuer")),
-            Err(e) => return Err(internal(e)),
+        let issuer = match self.page_issuer(handle).await? {
+            Some(issuer) => issuer,
+            None => return Ok(oauth_http::page(404, "Unknown issuer")),
         };
         const CONFIRM: &str = "Sign out of your account on this device?";
         let ended = self.auth.end_session(metadata, &issuer, request).await;
@@ -306,125 +283,70 @@ fn form_authorize_request(
 }
 
 impl OidcProviderServiceImpl {
-    /// The issuer `handle` names, or NOT_FOUND.
-    async fn issuer(&self, handle: &str) -> Result<OidcIssuer, Status> {
-        match self.issuers.by_handle(handle).await {
-            Ok(Some(issuer)) => Ok(issuer),
-            Ok(None) => Err(ApiError::new(
-                ErrorReason::OidcIssuerNotFound,
-                "no OIDC issuer has this handle",
-            )
-            .with_resource("OidcIssuer", handle)
-            .into()),
-            Err(e) => Err(internal(e)),
+    /// The issuer `handle` names for a page answer; `None` for no issuer.
+    async fn page_issuer(&self, handle: &str) -> Result<Option<OidcIssuer>, Status> {
+        match self.auth.oauth().issuer_by_handle(handle).await {
+            Ok(issuer) => Ok(Some(issuer)),
+            Err(ProviderError::IssuerNotFound(_)) => Ok(None),
+            Err(e) => Err(provider_refusal(e)),
         }
     }
 
-    /// UserInfo for a request to the RPC at `rpc` (OIDC Core 1.0 §5.3): the
-    /// token must be one this issuer signed for its UserInfo resource,
-    /// unrevoked, for the `openid` scope, sent under its key binding (its
-    /// proof naming the request as received, over REST or gRPC), and of a
-    /// session that still exists.
+    /// UserInfo for a request to the RPC at `rpc` (OIDC Core 1.0 §5.3; see
+    /// [`sid::oauth::OAuth::user_info`]), its proof naming the request as
+    /// received, over REST or gRPC.
     async fn user_info(
         &self,
         request: Request<IssuerHandleRequest>,
         rpc: &str,
     ) -> Result<Response<UserInfo>, Status> {
-        let proof_target =
-            presented_request::request_target(&request, self.auth.public_origin(), rpc);
-        let issuer = self.issuer(&request.get_ref().issuer_handle).await?;
-        let Some((scheme, token)) = presented_request::presented(&request) else {
-            return Err(no_token());
-        };
-        let verifier = self.issuers.verifier(&issuer).await.map_err(internal)?;
-        // Only this issuer's tokens for its UserInfo resource: a sibling
-        // issuer's or a sign-in token names another `iss` or key, and a token
-        // for another resource another `aud` (RFC 9068 §4).
-        let endpoint = sid_authn::issuer::userinfo_endpoint(&issuer.canonical_url);
-        let claims = verifier
-            .validate_access_token_for(token, &endpoint)
-            .map_err(|_| invalid_token(scheme))?;
-        match self.revocation.is_revoked(&claims.jti, &claims.sid).await {
-            Ok(false) => {}
-            Ok(true) => return Err(invalid_token(scheme)),
-            Err(e) => {
-                return Err(sid_infra::grpc_error::refuse::dependency_unavailable(
-                    "token revocation state",
-                    e,
-                ));
-            }
-        }
-        // A key-bound token needs its proof for this request (RFC 9449 §7.1),
-        // naming it as it was received.
-        resource::check_sender(
-            &self.dpop,
+        let target = presented_request::request_target(&request, self.auth.public_origin(), rpc);
+        let proofs = presented_request::proofs(&request);
+        let presented = presented_request::presented(&request).map(|(scheme, token)| Presented {
             scheme,
             token,
-            claims.cnf.as_ref().map(|cnf| cnf.jkt.as_str()),
-            &presented_request::proofs(&request),
-            &proof_target.method,
-            Some(&proof_target.uri),
+            proofs: &proofs,
+            method: &target.method,
+            uri: &target.uri,
+        });
+        self.auth
+            .oauth()
+            .user_info(&request.get_ref().issuer_handle, presented)
+            .await
+            .map(Response::new)
+            .map_err(provider_refusal)
+    }
+}
+
+/// The answer to a refused or failed issuer endpoint: the RFC 6750 / RFC 9449
+/// challenges go out as `www-authenticate`.
+fn provider_refusal(e: ProviderError) -> Status {
+    match e {
+        ProviderError::IssuerNotFound(handle) => ApiError::new(
+            ErrorReason::OidcIssuerNotFound,
+            "no OIDC issuer has this handle",
         )
-        .await
-        .map_err(|e| match e {
-            // An unreachable replay record cannot rule out a replay; the
-            // client retries the same request with a new proof.
-            resource::SenderError::Proof(sid_authn::dpop::DPopError::ReplayStoreUnavailable) => {
-                sid_infra::grpc_error::refuse::dependency_unavailable(
-                    "DPoP replay record",
-                    "replay store unreachable",
-                )
-            }
-            other => {
-                tracing::debug!(error = %other, "UserInfo: sender constraint not met");
-                refused(
-                    ErrorReason::TokenInvalid,
-                    "the proof of possession is not valid",
-                    &[other.challenge().to_string()],
-                )
-            }
-        })?;
-        // RFC 6750 §3.1: a token without `openid` was not issued for UserInfo.
-        if !claims.scope.split_whitespace().any(|s| s == "openid") {
-            return Err(refused(
-                ErrorReason::ScopeNotGranted,
-                "the access token lacks the openid scope",
-                &[format!(
-                    r#"{} error="insufficient_scope", scope="openid""#,
-                    scheme_name(scheme)
-                )],
-            ));
+        .with_resource("OidcIssuer", handle)
+        .into(),
+        ProviderError::NoToken => no_token(),
+        ProviderError::InvalidToken(scheme) => invalid_token(scheme),
+        ProviderError::Proof { challenge } => refused(
+            ErrorReason::TokenInvalid,
+            "the proof of possession is not valid",
+            &[challenge],
+        ),
+        ProviderError::InsufficientScope(scheme) => refused(
+            ErrorReason::ScopeNotGranted,
+            "the access token lacks the openid scope",
+            &[format!(
+                r#"{} error="insufficient_scope", scope="openid""#,
+                scheme_name(scheme)
+            )],
+        ),
+        ProviderError::Unavailable { what, cause } => {
+            sid_infra::grpc_error::refuse::dependency_unavailable(what, cause)
         }
-        let session_id = SessionId::parse(&claims.sid).map_err(|_| invalid_token(scheme))?;
-        let session = match self.storage.get_session(session_id).await {
-            Ok(Some(session)) if !session.is_expired() => session,
-            Ok(_) => return Err(invalid_token(scheme)),
-            Err(e) => return Err(internal(e)),
-        };
-        let profile = match self.storage.get_profile(session.profile_id).await {
-            Ok(Some(profile)) => profile,
-            Ok(None) => return Err(invalid_token(scheme)),
-            Err(e) => return Err(internal(e)),
-        };
-        let email = self
-            .storage
-            .get_primary_profile_email(profile.id)
-            .await
-            .map_err(internal)?;
-        let phone = self
-            .storage
-            .get_primary_profile_phone(profile.id)
-            .await
-            .map_err(internal)?;
-        // `sub` as the token carries it: the ID token of this client under the
-        // same hop carried the same value (OIDC Core 1.0 §5.3.2).
-        Ok(Response::new(granted_claims(
-            claims.sub.clone(),
-            &claims.scope,
-            &profile,
-            email.as_ref(),
-            phone.as_ref(),
-        )))
+        ProviderError::Store(e) => internal(e),
     }
 }
 
@@ -507,119 +429,6 @@ fn invalid_token(scheme: Scheme) -> Status {
     )
 }
 
-/// The claims of `profile` the token's `scopes` grant (OIDC Core 1.0 §5.4),
-/// about subject `sub`.
-fn granted_claims(
-    sub: String,
-    scopes: &str,
-    profile: &sid_core::models::Profile,
-    email: Option<&sid_core::models::ProfileEmail>,
-    phone: Option<&sid_core::models::ProfilePhone>,
-) -> UserInfo {
-    let granted = |scope: &str| scopes.split_whitespace().any(|s| s == scope);
-    let mut info = UserInfo {
-        sub,
-        ..Default::default()
-    };
-    if granted("profile") {
-        info.name = profile.formatted_name();
-        info.given_name = profile.given_name.clone();
-        info.family_name = profile.family_name.clone();
-        info.middle_name = profile.middle_name.clone();
-        info.preferred_username = profile.username.clone();
-        // Seconds since the epoch fit 32 bits until 2106; a time outside
-        // that range is left out rather than wrapped.
-        info.updated_at = u32::try_from(profile.updated_at.timestamp()).ok();
-    }
-    if granted("email")
-        && let Some(email) = email
-    {
-        info.email = Some(email.email.clone());
-        info.email_verified = Some(email.verified);
-    }
-    if granted("phone")
-        && let Some(phone) = phone
-    {
-        info.phone_number = Some(phone.formatted_e164());
-        info.phone_number_verified = Some(phone.verified);
-    }
-    info
-}
-
-fn strings(values: &[&str]) -> Vec<String> {
-    values.iter().map(|v| (*v).to_string()).collect()
-}
-
-/// The asymmetric algorithms a registered client key verifies, wherever a
-/// client authenticates with `private_key_jwt`.
-const CLIENT_ASSERTION_ALGORITHMS: &[&str] = &[
-    "EdDSA", "ES256", "ES384", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
-];
-
-/// The metadata of `issuer`: every endpoint under its URL.
-fn metadata(issuer: &str) -> ProviderMetadata {
-    ProviderMetadata {
-        issuer: issuer.to_string(),
-        authorization_endpoint: format!("{issuer}/oauth2/authorize"),
-        token_endpoint: format!("{issuer}/oauth2/token"),
-        userinfo_endpoint: Some(sid_authn::issuer::userinfo_endpoint(issuer)),
-        jwks_uri: format!("{issuer}/jwks"),
-        end_session_endpoint: Some(format!("{issuer}/oauth2/end-session")),
-        introspection_endpoint: Some(format!("{issuer}/oauth2/introspect")),
-        revocation_endpoint: Some(format!("{issuer}/oauth2/revoke")),
-        device_authorization_endpoint: Some(format!("{issuer}/oauth2/device")),
-        response_types_supported: strings(&["code"]),
-        grant_types_supported: strings(&[
-            "authorization_code",
-            "refresh_token",
-            "client_credentials",
-            "urn:ietf:params:oauth:grant-type:device_code",
-            "urn:ietf:params:oauth:grant-type:token-exchange",
-        ]),
-        // OIDC Core §8: `public` is issuer-relative. Within this issuer every
-        // client of the organization gets the same permitted subject for a
-        // user; other organizations and contours are other issuers.
-        subject_types_supported: strings(&["public"]),
-        // Signed with the issuer's own Ed25519 key.
-        id_token_signing_alg_values_supported: strings(&["EdDSA"]),
-        scopes_supported: strings(&["openid", "profile", "email", "offline_access"]),
-        token_endpoint_auth_methods_supported: strings(&[
-            "client_secret_basic",
-            "client_secret_post",
-            "private_key_jwt",
-            "none",
-        ]),
-        token_endpoint_auth_signing_alg_values_supported: strings(CLIENT_ASSERTION_ALGORITHMS),
-        // Revocation authenticates a client as the token endpoint does
-        // (RFC 7009 §2.1), a public one by naming itself.
-        revocation_endpoint_auth_methods_supported: strings(&[
-            "client_secret_basic",
-            "client_secret_post",
-            "private_key_jwt",
-            "none",
-        ]),
-        revocation_endpoint_auth_signing_alg_values_supported: strings(CLIENT_ASSERTION_ALGORITHMS),
-        // Only an authenticated caller introspects (RFC 7662 §2.1, §4).
-        introspection_endpoint_auth_methods_supported: strings(&[
-            "client_secret_basic",
-            "client_secret_post",
-            "private_key_jwt",
-        ]),
-        introspection_endpoint_auth_signing_alg_values_supported: strings(
-            CLIENT_ASSERTION_ALGORITHMS,
-        ),
-        code_challenge_methods_supported: strings(&["S256"]),
-        dpop_signing_alg_values_supported: strings(
-            sid_core::models::dpop::DPopProof::SIGNING_ALGORITHMS,
-        ),
-        backchannel_logout_supported: true,
-        backchannel_logout_session_supported: true,
-        // RFC 9207 §3: every authorization response names its issuer.
-        authorization_response_iss_parameter_supported: true,
-        registration_endpoint: Some(format!("{issuer}/oauth2/register")),
-    }
-}
-
 #[tonic::async_trait]
 impl OidcProviderService for OidcProviderServiceImpl {
     /// Public data every relying party fetches, so the caller is not
@@ -628,8 +437,12 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<IssuerHandleRequest>,
     ) -> Result<Response<ProviderMetadata>, Status> {
-        let issuer = self.issuer(&request.into_inner().issuer_handle).await?;
-        Ok(Response::new(metadata(&issuer.canonical_url)))
+        self.auth
+            .oauth()
+            .provider_metadata(&request.into_inner().issuer_handle)
+            .await
+            .map(Response::new)
+            .map_err(provider_refusal)
     }
 
     /// Public keys only, so the caller is not authenticated.
@@ -637,23 +450,13 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<IssuerHandleRequest>,
     ) -> Result<Response<JsonWebKeySet>, Status> {
-        let issuer = self.issuer(&request.into_inner().issuer_handle).await?;
-        let mut keys = self.issuers.public_keys(&issuer).await.map_err(internal)?;
-        // Newest generation first, as the contract lists them.
-        keys.reverse();
-        let mut response = Response::new(JsonWebKeySet {
-            keys: keys
-                .into_iter()
-                .map(|(kid, public_key)| JsonWebKey {
-                    kty: "OKP".into(),
-                    r#use: "sig".into(),
-                    alg: "EdDSA".into(),
-                    kid,
-                    crv: "Ed25519".into(),
-                    x: URL_SAFE_NO_PAD.encode(public_key),
-                })
-                .collect(),
-        });
+        let mut response = Response::new(
+            self.auth
+                .oauth()
+                .jwks(&request.into_inner().issuer_handle)
+                .await
+                .map_err(provider_refusal)?,
+        );
         response.metadata_mut().insert(
             "cache-control",
             tonic::metadata::MetadataValue::from_static(JWKS_CACHE_CONTROL),

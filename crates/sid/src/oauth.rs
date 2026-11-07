@@ -41,6 +41,7 @@ pub mod authorization;
 pub mod device_approval;
 pub mod end_session;
 mod grants;
+pub mod provider;
 pub use grants::{ACCESS_TOKEN_TYPE, DEVICE_CODE_GRANT};
 
 /// Why an OAuth endpoint refused or failed a request. Each refusal names the

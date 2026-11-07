@@ -88,7 +88,6 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         event_bus,
         revocation_cache,
         issuer,
-        issuers,
         oidc_issuer,
         ..
     } = svc;
@@ -110,12 +109,7 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         .await
         .add(OidcProviderServiceServer::new(
             sid_server::grpc::oidc_provider_service::OidcProviderServiceImpl::new(
-                issuers,
-                storage.clone(),
-                revocation_cache.clone(),
-                auth,
-                project,
-                None,
+                auth, project, None,
             ),
         ))
         .await
