@@ -18,7 +18,10 @@ fn storage(e: sqlx::Error) -> SidError {
 }
 
 /// Insert `generation` and its credentials in `tx`.
-async fn insert_generation(tx: &mut WriteTx, generation: &NativeGeneration) -> SidResult<()> {
+pub(super) async fn insert_generation(
+    tx: &mut WriteTx,
+    generation: &NativeGeneration,
+) -> SidResult<()> {
     sqlx::query(
         "INSERT INTO native_generations (id, session_id, key_jkt, expires_at, created_at)
          VALUES (?, ?, ?, ?, ?)",
@@ -60,7 +63,7 @@ async fn session_live(
     Ok(live.is_some())
 }
 
-fn presented_row(row: &sqlx::sqlite::SqliteRow) -> SidResult<NativePresented> {
+pub(super) fn presented_row(row: &sqlx::sqlite::SqliteRow) -> SidResult<NativePresented> {
     let exchange: Option<Vec<u8>> = col(row, "exchange")?;
     let state = match exchange {
         None => NativeGenerationState::Current,

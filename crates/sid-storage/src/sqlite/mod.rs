@@ -47,6 +47,7 @@ mod rbac;
 mod reset;
 mod scim_outbound;
 mod session;
+mod session_grants;
 mod signals;
 mod webauthn;
 mod work;
@@ -654,6 +655,21 @@ impl GrantStore for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<sid_core::models::NativeRotationOutcome> {
         self.rotate_native_generation_impl(rotation, ctx).await
+    }
+
+    async fn export_session_grants(
+        &self,
+        id: sid_core::models::SessionId,
+    ) -> SidResult<sid_core::models::SessionGrants> {
+        self.export_session_grants_impl(id).await
+    }
+
+    async fn import_session_grants(
+        &self,
+        grants: &sid_core::models::SessionGrants,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_session_grants_impl(grants, ctx).await
     }
 
     async fn create_auth_code(

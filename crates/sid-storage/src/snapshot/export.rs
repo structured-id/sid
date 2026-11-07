@@ -81,13 +81,19 @@ pub async fn export(
             .credentials
             .extend(backend.get_credentials_by_profile(pid, None).await?);
         let now = Utc::now();
-        snapshot.sessions.extend(
-            backend
-                .list_sessions(&pid)
-                .await?
-                .into_iter()
-                .filter(|s| s.expires_at > now),
-        );
+        for session in backend.list_sessions(&pid).await? {
+            if session.expires_at <= now {
+                continue;
+            }
+            let grants = backend.export_session_grants(session.id).await?;
+            if !(grants.refresh_tokens.is_empty()
+                && grants.authorization_codes.is_empty()
+                && grants.native_generations.is_empty())
+            {
+                snapshot.session_grants.push(grants);
+            }
+            snapshot.sessions.push(session);
+        }
         snapshot
             .service_bindings
             .extend(backend.list_service_bindings(pid).await?);

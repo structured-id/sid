@@ -33,7 +33,7 @@ impl std::error::Error for AuthCodeError {}
 /// Authorization code (stored as SHA-256 hash, never plaintext). `O` is how
 /// the serving authority represents its stable user: a local Profile by
 /// default.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationCode<O = ProfileId> {
     /// SHA-256 hash of the authorization code string.
     pub code_hash: Vec<u8>,

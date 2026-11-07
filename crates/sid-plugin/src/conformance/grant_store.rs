@@ -14,7 +14,7 @@ use sid_core::models::{
     AuditEntry, AuthCodeRedemption, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
     MutationContext, NativeExchange, NativeGeneration, NativeGenerationState, NativePresented,
     NativeRotation, NativeRotationOutcome, RefreshToken, ResourceId, RevocationReason, Session,
-    SessionEnd, SessionId,
+    SessionEnd, SessionGrants, SessionId,
 };
 use uuid::Uuid;
 
@@ -1731,4 +1731,186 @@ pub async fn native_generations_end_with_their_session<H: GrantHarness>(h: &H) {
             .await
             .is_none()
     );
+}
+
+/// A fresh key of `bytes.len()` bytes no other scenario uses.
+fn fresh_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    bytes.truncate(len);
+    bytes
+}
+
+/// `grants` as another session's: every record under a fresh key, the links
+/// between them (a rotation's replacement, a generation's successor) kept.
+fn rekeyed<O: Clone>(grants: &SessionGrants<O>, session: SessionId) -> SessionGrants<O> {
+    use std::collections::HashMap;
+    let tokens: HashMap<Uuid, Uuid> = grants
+        .refresh_tokens
+        .iter()
+        .map(|t| (t.id, Uuid::now_v7()))
+        .collect();
+    let generations: HashMap<Uuid, Uuid> = grants
+        .native_generations
+        .iter()
+        .map(|g| (g.generation.id, Uuid::now_v7()))
+        .collect();
+    let mut moved = grants.clone();
+    moved.session = session;
+    for token in &mut moved.refresh_tokens {
+        token.id = tokens[&token.id];
+        token.token_hash = fresh_bytes(token.token_hash.len());
+        token.replaced_by = token.replaced_by.map(|r| tokens[&r]);
+        token.session_id = session;
+    }
+    for code in &mut moved.authorization_codes {
+        code.code_hash = fresh_bytes(code.code_hash.len());
+        code.authentication.session = session;
+    }
+    for stored in &mut moved.native_generations {
+        stored.generation.id = generations[&stored.generation.id];
+        stored.generation.session_id = session;
+        for hash in &mut stored.generation.credential_hashes {
+            *hash = fresh_bytes(hash.len());
+        }
+        stored.generation.credential_hashes.sort();
+        if let NativeGenerationState::Rotated { successor, .. } = &mut stored.state {
+            *successor = generations[successor];
+        }
+    }
+    moved
+}
+
+/// A session's grants are exported as stored, revoked, used and rotated ones
+/// included, and restore exactly: into a session holding none they are written
+/// as given, a repeat writes nothing, a different record under a stored key is
+/// a conflict that writes nothing, and a grant naming another session than the
+/// one it moves with is refused.
+pub async fn session_grants_move_as_stored<H: GrantHarness>(h: &H) {
+    let resource = h.resource().await;
+    let s = session(h.owner().await);
+    let family = Uuid::now_v7();
+    let first = refresh(&s, family, resource);
+    // The redemption stores `s` and its token, and leaves the code used in
+    // the grants of the session that authorized it.
+    let code = code(h, s.profile_id.clone(), resource).await;
+    let authorizing = code.authentication.session;
+    h.store().create_auth_code(&code, ctx()).await.unwrap();
+    assert_eq!(
+        h.store()
+            .redeem_auth_code(&code.code_hash, &s, &first, ctx())
+            .await
+            .unwrap(),
+        AuthCodeRedemption::Redeemed
+    );
+    let second = refresh(&s, family, resource);
+    let grace = ms(Utc::now() + Duration::seconds(30));
+    assert!(
+        h.store()
+            .rotate_refresh_token(first.id, &second, grace, ctx())
+            .await
+            .unwrap()
+    );
+    let generation = native_generation(&s, "jkt-conformance", 2);
+    h.store()
+        .issue_native_generation(&generation, ctx())
+        .await
+        .unwrap();
+    let successor = native_generation(&s, "jkt-conformance", 1);
+    assert_eq!(
+        h.store()
+            .rotate_native_generation(
+                NativeRotation {
+                    presented: generation.id,
+                    exchange: exchange(),
+                    successor: &successor,
+                    sealed: b"sealed",
+                    redeliver_until: grace,
+                },
+                ctx(),
+            )
+            .await
+            .unwrap(),
+        NativeRotationOutcome::Rotated
+    );
+
+    let held = h.store().export_session_grants(s.id).await.unwrap();
+    assert_eq!(held.session, s.id);
+    assert_eq!(held.refresh_tokens.len(), 2);
+    let rotated = held
+        .refresh_tokens
+        .iter()
+        .find(|t| t.id == first.id)
+        .unwrap();
+    assert!(rotated.revoked);
+    assert_eq!(rotated.replaced_by, Some(second.id));
+    assert_eq!(held.native_generations.len(), 2);
+    assert!(held.native_generations.iter().any(|g| {
+        g.generation.id == generation.id
+            && matches!(&g.state, NativeGenerationState::Rotated { successor: n, .. } if *n == successor.id)
+    }));
+    let codes = h.store().export_session_grants(authorizing).await.unwrap();
+    assert_eq!(codes.authorization_codes.len(), 1);
+    assert!(codes.authorization_codes[0].used);
+    assert_eq!(codes.authorization_codes[0].session_id, Some(s.id));
+
+    // A session restored without grants takes them as given.
+    let target = session(s.profile_id.clone());
+    h.store()
+        .create_session_atomic(&target, 0, None, ctx())
+        .await
+        .unwrap();
+    let mut moved = rekeyed(&held, target.id);
+    moved
+        .authorization_codes
+        .extend(rekeyed(&codes, target.id).authorization_codes);
+    assert!(
+        h.store()
+            .import_session_grants(&moved, ctx())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        h.store().export_session_grants(target.id).await.unwrap(),
+        sorted(moved.clone())
+    );
+    assert!(
+        !h.store()
+            .import_session_grants(&moved, ctx())
+            .await
+            .unwrap(),
+        "a repeat writes nothing"
+    );
+
+    // A new token is written before the differing generation is found: the
+    // refusal takes it back.
+    let mut differing = moved.clone();
+    differing
+        .refresh_tokens
+        .push(refresh(&target, Uuid::now_v7(), resource));
+    differing.native_generations[0].generation.key_jkt = "jkt-other".into();
+    let refused = h.store().import_session_grants(&differing, ctx()).await;
+    assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+    assert_eq!(
+        h.store().export_session_grants(target.id).await.unwrap(),
+        sorted(moved.clone()),
+        "a refused import writes nothing"
+    );
+
+    let mut elsewhere = rekeyed(&held, target.id);
+    elsewhere.session = s.id;
+    let refused = h.store().import_session_grants(&elsewhere, ctx()).await;
+    assert!(matches!(refused, Err(Error::Validation(_))), "{refused:?}");
+}
+
+/// Grants in the order a store exports them.
+fn sorted<O>(mut grants: SessionGrants<O>) -> SessionGrants<O> {
+    grants.refresh_tokens.sort_by_key(|t| t.id);
+    grants
+        .authorization_codes
+        .sort_by(|a, b| a.code_hash.cmp(&b.code_hash));
+    grants.native_generations.sort_by_key(|g| g.generation.id);
+    grants
 }

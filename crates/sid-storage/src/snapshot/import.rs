@@ -596,19 +596,17 @@ pub async fn import(
         }
     }
 
-    for token in &snapshot.refresh_tokens {
-        result.refresh_tokens += created(
-            backend
-                .create_refresh_token(token, audit("import_refresh_token", &token.id.to_string()))
-                .await,
-            || async {
-                Ok(backend
-                    .get_refresh_token_by_hash(&token.token_hash)
-                    .await?
-                    .is_some_and(|stored| stored.id == token.id))
-            },
-        )
-        .await?;
+    // A session's grants after their session and the resources they name.
+    for grants in &snapshot.session_grants {
+        if backend
+            .import_session_grants(
+                grants,
+                audit("import_session_grants", &grants.session.to_string()),
+            )
+            .await?
+        {
+            result.session_grants += 1;
+        }
     }
 
     for iat in &snapshot.initial_access_tokens {
@@ -1038,7 +1036,8 @@ pub struct ImportResult {
     pub protected_resources: u64,
     pub oauth2_clients: u64,
     pub resource_access: u64,
-    pub refresh_tokens: u64,
+    /// Sessions whose grants were restored.
+    pub session_grants: u64,
     pub initial_access_tokens: u64,
     pub roles: u64,
     pub groups: u64,
@@ -1087,7 +1086,7 @@ impl ImportResult {
             self.protected_resources,
             self.oauth2_clients,
             self.resource_access,
-            self.refresh_tokens,
+            self.session_grants,
             self.initial_access_tokens,
             self.roles,
             self.groups,
@@ -1139,7 +1138,7 @@ impl std::fmt::Display for ImportResult {
         writeln!(f, "  Protected Resources:  {}", self.protected_resources)?;
         writeln!(f, "  OAuth2 Clients:       {}", self.oauth2_clients)?;
         writeln!(f, "  Resource Access:      {}", self.resource_access)?;
-        writeln!(f, "  Refresh Tokens:       {}", self.refresh_tokens)?;
+        writeln!(f, "  Session Grants:       {}", self.session_grants)?;
         writeln!(f, "  IATs:                 {}", self.initial_access_tokens)?;
         writeln!(f, "  Roles:                {}", self.roles)?;
         writeln!(f, "  Groups:               {}", self.groups)?;

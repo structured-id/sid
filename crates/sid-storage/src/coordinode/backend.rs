@@ -233,6 +233,21 @@ impl GrantStore for CoordinodeBackend {
         CoordinodeBackend::rotate_native_generation(self, rotation, ctx).await
     }
 
+    async fn export_session_grants(
+        &self,
+        id: SessionId,
+    ) -> Result<sid_core::models::SessionGrants> {
+        CoordinodeBackend::export_session_grants(self, id).await
+    }
+
+    async fn import_session_grants(
+        &self,
+        grants: &sid_core::models::SessionGrants,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_session_grants(self, grants, ctx).await
+    }
+
     async fn create_auth_code(&self, code: &AuthorizationCode, ctx: MutationContext) -> Result<()> {
         CoordinodeBackend::create_auth_code(self, code, ctx).await
     }

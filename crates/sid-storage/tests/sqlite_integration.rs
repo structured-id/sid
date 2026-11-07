@@ -448,6 +448,7 @@ mod grant_store {
         native_redelivery_ends_with_its_window,
         concurrent_native_rotation,
         native_generations_end_with_their_session,
+        session_grants_move_as_stored,
     );
 }
 

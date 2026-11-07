@@ -19,8 +19,8 @@ use sid_core::models::{
     InitialAccessToken, IssuerSigningKey, MachineUser, MachineUserCredential, MagicLinkSession,
     OAuth2Client, OidcIssuer, OperationPeriodState, OperationRecord, OperationResourceBinding,
     Organization, OutboundDlqEntry, PersonalAccessToken, Principal, Profile, ProfileGrant,
-    ProfileMetadata, Project, ProtectedResource, RefreshToken, ResourceAccess, Role,
-    RoleAssignment, ScimOutboundRecord, ScimOutboundTarget, ServiceBinding, Session,
+    ProfileMetadata, Project, ProtectedResource, ResourceAccess, Role, RoleAssignment,
+    ScimOutboundRecord, ScimOutboundTarget, ServiceBinding, Session, SessionGrants,
     SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
 };
 
@@ -150,8 +150,10 @@ pub struct Snapshot {
     /// Explicit client-to-resource access.
     pub resource_access: Vec<ResourceAccess>,
 
-    /// Refresh tokens.
-    pub refresh_tokens: Vec<RefreshToken>,
+    /// The grants of each exported session: refresh tokens, the
+    /// authorization codes it authorized and native generations, revoked,
+    /// used and rotated ones included, so a reused grant is still recognized.
+    pub session_grants: Vec<SessionGrants>,
 
     /// Initial access tokens (DCR).
     pub initial_access_tokens: Vec<InitialAccessToken>,
@@ -272,7 +274,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -330,7 +332,7 @@ impl Snapshot {
             protected_resources: Vec::new(),
             oauth2_clients: Vec::new(),
             resource_access: Vec::new(),
-            refresh_tokens: Vec::new(),
+            session_grants: Vec::new(),
             initial_access_tokens: Vec::new(),
             roles: Vec::new(),
             groups: Vec::new(),
@@ -390,7 +392,14 @@ impl Snapshot {
             self.protected_resources.len() as u64,
             self.oauth2_clients.len() as u64,
             self.resource_access.len() as u64,
-            self.refresh_tokens.len() as u64,
+            self.session_grants
+                .iter()
+                .map(|g| {
+                    (g.refresh_tokens.len()
+                        + g.authorization_codes.len()
+                        + g.native_generations.len()) as u64
+                })
+                .sum(),
             self.initial_access_tokens.len() as u64,
             self.roles.len() as u64,
             self.groups.len() as u64,

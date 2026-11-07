@@ -23,7 +23,10 @@ fn storage(e: sqlx::Error) -> SidError {
 }
 
 /// Insert `generation` and its credentials in `tx`.
-async fn insert_generation(tx: &mut Tx<'_>, generation: &NativeGeneration) -> SidResult<()> {
+pub(super) async fn insert_generation(
+    tx: &mut Tx<'_>,
+    generation: &NativeGeneration,
+) -> SidResult<()> {
     sqlx::query(
         "INSERT INTO native_generations (id, session_id, key_jkt, expires_at, created_at)
          VALUES ($1, $2, $3, $4, $5)",
@@ -60,7 +63,7 @@ async fn hold_live_session(tx: &mut Tx<'_>, id: SessionId) -> SidResult<bool> {
     Ok(live.is_some())
 }
 
-fn presented_row(row: &sqlx::postgres::PgRow) -> SidResult<NativePresented> {
+pub(super) fn presented_row(row: &sqlx::postgres::PgRow) -> SidResult<NativePresented> {
     let get = |e: sqlx::Error| SidError::Storage(format!("native generation: {e}"));
     let exchange: Option<Vec<u8>> = row.try_get("exchange").map_err(get)?;
     let state = match exchange {

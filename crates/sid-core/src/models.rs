@@ -183,7 +183,8 @@ pub use mfa::{
 pub use mutation::{ActorFence, CeremonyConsumption, MutationContext};
 pub use native_session::{
     NATIVE_EXCHANGE_LEN, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
-    NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome,
+    NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome, SessionGrants,
+    StoredNativeGeneration,
 };
 pub use notification::{
     DeliveryResult, DeliveryStatus, NotificationChannel, NotificationId, NotificationPriority,

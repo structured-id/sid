@@ -10,7 +10,7 @@ use sid_core::Result;
 use sid_core::models::{
     AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, NativeGeneration,
     NativePresented, NativeRotation, NativeRotationOutcome, RefreshToken, Session, SessionEnd,
-    SessionId, SignInProof,
+    SessionGrants, SessionId, SignInProof,
 };
 use uuid::Uuid;
 
@@ -178,6 +178,29 @@ pub trait GrantStore: Send + Sync {
     ) -> Result<NativeRotationOutcome> {
         Err(sid_core::Error::Unavailable(
             "native sessions are unsupported by this store".into(),
+        ))
+    }
+
+    /// Every grant session `id` holds, as stored: its refresh tokens, the
+    /// authorization codes it authorized and its native generations, revoked,
+    /// used and expired ones included.
+    async fn export_session_grants(&self, _id: SessionId) -> Result<SessionGrants<Self::Owner>> {
+        Err(sid_core::Error::Unavailable(
+            "this store does not export its grants".into(),
+        ))
+    }
+
+    /// Restore `grants` of a stored session exactly as exported, in one
+    /// transaction. Returns `false`, writing nothing, when every record is
+    /// already stored as given; a different record under the same key is
+    /// `Conflict` and nothing is written.
+    async fn import_session_grants(
+        &self,
+        _grants: &SessionGrants<Self::Owner>,
+        _ctx: MutationContext,
+    ) -> Result<bool> {
+        Err(sid_core::Error::Unavailable(
+            "this store does not import grants".into(),
         ))
     }
 

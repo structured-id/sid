@@ -2228,6 +2228,21 @@ impl GrantStore for PostgresBackend {
         self.rotate_native_generation_impl(rotation, ctx).await
     }
 
+    async fn export_session_grants(
+        &self,
+        id: SessionId,
+    ) -> SidResult<sid_core::models::SessionGrants> {
+        self.export_session_grants_impl(id).await
+    }
+
+    async fn import_session_grants(
+        &self,
+        grants: &sid_core::models::SessionGrants,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_session_grants_impl(grants, ctx).await
+    }
+
     async fn create_auth_code(
         &self,
         code: &AuthorizationCode,
@@ -2238,39 +2253,7 @@ impl GrantStore for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri,
-                scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
-                authenticated_at, amr, assurance_level, elevation_level, elevation_until,
-                authorizing_session_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
-        )
-        .bind(&code.code_hash)
-        .bind(code.profile_id)
-        .bind(&code.client_id)
-        .bind(&code.redirect_uri)
-        .bind(code.scopes.join(" "))
-        .bind(&code.code_challenge)
-        .bind(&code.nonce)
-        .bind(code.expires_at)
-        .bind(code.created_at)
-        .bind(code.used)
-        .bind(code.resource)
-        .bind(code.authentication.authenticated_at)
-        .bind(code.authentication.amr.join(" "))
-        .bind(code.authentication.assurance_level.as_str())
-        .bind(code.authentication.elevation.map(|e| e.level.as_str()))
-        .bind(code.authentication.elevation.map(|e| e.until))
-        .bind(code.authentication.session)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            // The authorizing session ended before the code was stored.
-            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                SidError::NotFound(format!("session {}", code.authentication.session))
-            }
-            _ => insert_error("authorization code", e),
-        })?;
+        session_grants::insert_auth_code(&mut tx, code).await?;
         Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
         tx.commit()
             .await
@@ -9329,6 +9312,7 @@ mod principal_store;
 mod provisioning_connector;
 mod refresh_token;
 mod session;
+mod session_grants;
 mod sign_in_history;
 mod work;
 pub use work::PgWorkStore;
