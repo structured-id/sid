@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! StructuredID Protocol Buffer Definitions
 //!
-//! Generated code from proto/ repository via `tonic-build`.
+//! Generated code from proto/ repository via `tonic-build`: the messages
+//! always, the gRPC client and server stubs with the `grpc` feature.
 //! Do not edit generated files manually.
 //!
 //! Proto packages are organized by domain (sid.v1.identity, sid.v1.authn, etc.)
@@ -10,10 +11,18 @@
 #![allow(clippy::all)]
 #![allow(warnings)]
 
+/// The generated code of proto package `$package`, without the transport
+/// `tonic::include_proto!` would require.
+macro_rules! include_proto {
+    ($package:literal) => {
+        include!(concat!(env!("OUT_DIR"), "/", $package, ".rs"));
+    };
+}
+
 pub mod sid {
     pub mod v1 {
         pub mod common {
-            tonic::include_proto!("sid.v1.common");
+            include_proto!("sid.v1.common");
         }
 
         /// Identifier messages, owned by `sid-ids-proto` with their validated
@@ -21,57 +30,57 @@ pub mod sid {
         pub use sid_ids_proto::sid::v1::ids;
 
         pub mod identity {
-            tonic::include_proto!("sid.v1.identity");
+            include_proto!("sid.v1.identity");
         }
 
         pub mod authn {
-            tonic::include_proto!("sid.v1.authn");
+            include_proto!("sid.v1.authn");
         }
 
         pub mod authz {
-            tonic::include_proto!("sid.v1.authz");
+            include_proto!("sid.v1.authz");
         }
 
         pub mod account {
-            tonic::include_proto!("sid.v1.account");
+            include_proto!("sid.v1.account");
         }
 
         pub mod admin {
-            tonic::include_proto!("sid.v1.admin");
+            include_proto!("sid.v1.admin");
         }
 
         pub mod projects {
-            tonic::include_proto!("sid.v1.projects");
+            include_proto!("sid.v1.projects");
         }
 
         pub mod machine {
-            tonic::include_proto!("sid.v1.machine");
+            include_proto!("sid.v1.machine");
         }
 
         pub mod federation {
-            tonic::include_proto!("sid.v1.federation");
+            include_proto!("sid.v1.federation");
         }
 
         pub mod events {
-            tonic::include_proto!("sid.v1.events");
+            include_proto!("sid.v1.events");
         }
 
         pub mod scim {
-            tonic::include_proto!("sid.v1.scim");
+            include_proto!("sid.v1.scim");
         }
 
         pub mod attestation {
-            tonic::include_proto!("sid.v1.attestation");
+            include_proto!("sid.v1.attestation");
         }
 
         pub mod test {
-            tonic::include_proto!("sid.v1.test");
+            include_proto!("sid.v1.test");
         }
 
         /// Public UI settings a UI host serves with its configuration; kept
         /// out of the flat re-export below.
         pub mod ui {
-            tonic::include_proto!("sid.v1.ui");
+            include_proto!("sid.v1.ui");
         }
 
         // Re-export all domain types at sid::v1::* for ergonomic access.
@@ -146,7 +155,7 @@ impl TryFrom<&sid::v1::common::IpAddress> for core::net::IpAddr {
 /// The Google API types the SID protos use, such as `google.api.HttpBody`.
 pub mod google {
     pub mod api {
-        tonic::include_proto!("google.api");
+        include_proto!("google.api");
     }
 }
 
