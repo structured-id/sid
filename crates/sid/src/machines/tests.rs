@@ -153,7 +153,7 @@ fn test_wire_ids_of_the_machine_api() {
         Some(sid_ids_proto::MachineUserId { value: vec![] }),
         None,
     ] {
-        match wire_id(bad.as_ref(), "machine_user_id").unwrap_err() {
+        match MachineError::from(wire_id(bad.as_ref(), "machine_user_id").unwrap_err()) {
             MachineError::InvalidField { field, .. } => assert_eq!(field, "machine_user_id"),
             other => panic!("refused as {other:?}"),
         }

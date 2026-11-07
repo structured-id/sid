@@ -37,6 +37,8 @@ use sid_proto::sid::v1::{
 };
 use tracing::info;
 
+use crate::wire::{FieldError, to_timestamp, wire_id};
+
 /// Why a machine operation was refused or failed.
 #[derive(Debug, thiserror::Error)]
 pub enum MachineError {
@@ -86,15 +88,10 @@ impl From<MachineError> for Effect<MachineError> {
     }
 }
 
-/// The identifier `field` of a request names, validated before any lookup.
-fn wire_id<W: sid_ids_proto::WireId>(
-    value: Option<&W>,
-    field: &'static str,
-) -> Result<W::Domain, MachineError> {
-    sid_ids_proto::required(value).map_err(|e| MachineError::InvalidField {
-        field,
-        reason: format!("{field}: {e}"),
-    })
+impl From<FieldError> for MachineError {
+    fn from(FieldError { field, reason }: FieldError) -> Self {
+        Self::InvalidField { field, reason }
+    }
 }
 
 /// Machine identity management of one installation.
@@ -917,13 +914,6 @@ fn sha256_hex(data: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: dt.timestamp(),
-        nanos: dt.timestamp_subsec_nanos() as i32,
-    }
 }
 
 /// The time of an optional field.

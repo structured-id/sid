@@ -7098,6 +7098,7 @@ dependencies = [
 name = "structured-id"
 version = "0.2.23"
 dependencies = [
+ "argon2",
  "async-trait",
  "chrono",
  "prost",
@@ -7116,6 +7117,7 @@ dependencies = [
  "sid-proto",
  "sid-storage",
  "sqlx",
+ "subtle",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
