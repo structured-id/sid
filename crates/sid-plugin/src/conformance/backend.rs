@@ -19,11 +19,13 @@ pub mod audit_retention;
 pub mod backup;
 pub mod branding;
 pub mod browser_session;
+pub mod ceremony_commit;
 pub mod cleanup;
 pub mod config;
 pub mod consent;
 pub mod device;
 pub mod device_auth;
+pub mod device_enrollment;
 pub mod directory;
 pub mod directory_query;
 pub mod email_policy;
@@ -1411,63 +1413,57 @@ pub async fn test_access_request_approval_grants_the_role(backend: &dyn StorageB
     );
 }
 
-/// A device holds one live attestation: a second one is refused, rotation
-/// replaces the key of the live one only, a revoked key is never rotated back
-/// to life, and a new enrollment replaces a revoked one. It is found by id,
-/// by device while not revoked and per profile, and removed with the device.
+/// A device's key binding, enrolled by the ceremony's commit, is found by
+/// id, by device while not revoked and per profile; it is revoked once, kept
+/// as revoked, and removed with its device.
 pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
     use sid_core::models::{
-        AttestationStatus, DeviceAttestation, DeviceAttestationFormat, DeviceId, KeyStorageType,
+        AttestationStatus, Device, DeviceAttestation, DeviceAttestationFormat, DeviceEnrollment,
+        DeviceType, EnrollmentTarget, KeyStorageType,
     };
 
     let owner = create_test_profile("attested");
     backend.create_profile(&owner, test_audit()).await.unwrap();
-    let device = DeviceId::generate();
+    let device = Device::new(owner.id, DeviceType::Mobile);
     let mut att = DeviceAttestation::new_ce(
-        device,
+        device.id,
         owner.id,
         DeviceAttestationFormat::Apple,
         KeyStorageType::SecureEnclave,
-        vec![0x04, 0x01],
+        r#"{"crv":"Ed25519","kty":"OKP","x":"key-1"}"#.into(),
     );
     att.aaguid = Some("2fc0579f-8113-47ea-b116-bb5a8db9202a".into());
     backend
-        .create_device_attestation(&att, test_audit())
+        .commit_device_enrollment(
+            &DeviceEnrollment {
+                profile_id: owner.id,
+                session: None,
+                target: EnrollmentTarget::NewDevice(device.clone()),
+                attestation: att.clone(),
+            },
+            test_audit(),
+        )
         .await
         .unwrap();
-    let mut second = att.clone();
-    second.id = sid_core::models::DeviceAttestationId::new();
-    let err = backend
-        .create_device_attestation(&second, test_audit())
-        .await
-        .expect_err("a second live attestation");
-    assert!(matches!(err, sid_core::Error::Conflict(_)), "{err:?}");
 
     let stored = backend
         .get_device_attestation(att.id)
         .await
         .unwrap()
         .expect("stored");
-    assert_eq!(stored.device_id, device);
+    assert_eq!(stored.device_id, device.id);
     assert_eq!(stored.format, DeviceAttestationFormat::Apple);
     assert_eq!(stored.key_storage, KeyStorageType::SecureEnclave);
     assert_eq!(stored.status, AttestationStatus::Unverified);
-    assert_eq!(stored.device_public_key, [0x04, 0x01]);
+    assert_eq!(stored.public_jwk, att.public_jwk);
     assert_eq!(stored.aaguid, att.aaguid);
-
     assert!(
         backend
-            .rotate_device_attestation(device, &[0x04, 0x02], None, None, test_audit())
+            .get_device_attestation_by_device_id(device.id)
             .await
             .unwrap()
+            .is_some()
     );
-    let rotated = backend
-        .get_device_attestation_by_device_id(device)
-        .await
-        .unwrap()
-        .expect("found by device");
-    assert_eq!(rotated.device_public_key, [0x04, 0x02]);
-    assert_eq!(rotated.status, AttestationStatus::Unverified);
     assert_eq!(
         backend
             .list_device_attestations_by_profile(owner.id)
@@ -1479,31 +1475,24 @@ pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
 
     assert!(
         backend
-            .revoke_device_attestation(device, test_audit())
+            .revoke_device_attestation(device.id, test_audit())
             .await
             .unwrap()
     );
     assert!(
         !backend
-            .revoke_device_attestation(device, test_audit())
+            .revoke_device_attestation(device.id, test_audit())
             .await
             .unwrap(),
         "a revoked key was revoked again"
     );
     assert!(
         backend
-            .get_device_attestation_by_device_id(device)
+            .get_device_attestation_by_device_id(device.id)
             .await
             .unwrap()
             .is_none(),
         "a revoked key is still found for its device"
-    );
-    assert!(
-        !backend
-            .rotate_device_attestation(device, &[0x04, 0x03], None, None, test_audit())
-            .await
-            .unwrap(),
-        "a revoked key was rotated"
     );
     let revoked = backend
         .get_device_attestation(att.id)
@@ -1511,35 +1500,14 @@ pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("kept as revoked");
     assert_eq!(revoked.status, AttestationStatus::Revoked);
-    assert_eq!(revoked.device_public_key, [0x04, 0x02]);
-
-    // A new enrollment replaces the revoked attestation.
-    let renewed = DeviceAttestation::new_ce(
-        device,
-        owner.id,
-        DeviceAttestationFormat::Apple,
-        KeyStorageType::SecureEnclave,
-        vec![0x04, 0x09],
-    );
-    backend
-        .create_device_attestation(&renewed, test_audit())
-        .await
-        .unwrap();
-    let live = backend
-        .get_device_attestation_by_device_id(device)
-        .await
-        .unwrap()
-        .expect("the new enrollment");
-    assert_eq!(live.id, renewed.id);
-    assert_eq!(live.device_public_key, [0x04, 0x09]);
 
     backend
-        .delete_device_attestation(device, test_audit())
+        .delete_device_attestation(device.id, test_audit())
         .await
         .unwrap();
     assert!(
         backend
-            .get_device_attestation(renewed.id)
+            .get_device_attestation(att.id)
             .await
             .unwrap()
             .is_none()
@@ -1550,25 +1518,42 @@ pub async fn test_device_attestation_roundtrip(backend: &dyn StorageBackend) {
 /// hardware-attested, in the same write.
 pub async fn test_revoked_key_clears_hardware_attestation(backend: &dyn StorageBackend) {
     use sid_core::models::{
-        DeviceAttestation, DeviceAttestationFormat, DeviceType, KeyStorageType,
+        AttestationStatus, DeviceAttestation, DeviceAttestationFormat, DeviceEnrollment,
+        DeviceType, EnrollmentTarget, KeyStorageType,
     };
 
     let owner = create_test_profile("hw_attested");
     backend.create_profile(&owner, test_audit()).await.unwrap();
-    let mut device = sid_core::models::Device::new(owner.id, DeviceType::Mobile);
-    device.hardware_attested = true;
-    backend.create_device(&device, test_audit()).await.unwrap();
-    let att = DeviceAttestation::new_ce(
+    let device = sid_core::models::Device::new(owner.id, DeviceType::Mobile);
+    let mut att = DeviceAttestation::new_ce(
         device.id,
         owner.id,
         DeviceAttestationFormat::Tpm,
         KeyStorageType::Tpm,
-        vec![0x04, 0x01],
+        r#"{"crv":"Ed25519","kty":"OKP","x":"tpm"}"#.into(),
     );
+    // Verified hardware evidence attests the device.
+    att.status = AttestationStatus::Verified;
     backend
-        .create_device_attestation(&att, test_audit())
+        .commit_device_enrollment(
+            &DeviceEnrollment {
+                profile_id: owner.id,
+                session: None,
+                target: EnrollmentTarget::NewDevice(device.clone()),
+                attestation: att,
+            },
+            test_audit(),
+        )
         .await
         .unwrap();
+    assert!(
+        backend
+            .get_device(device.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .hardware_attested
+    );
 
     assert!(
         backend

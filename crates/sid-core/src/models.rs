@@ -131,7 +131,7 @@ pub use credential::{
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
     AttestationStatus, DeviceAttestation, DeviceAttestationFormat, DeviceAttestationId,
-    KeyStorageType,
+    DeviceEnrollment, EnrollmentTarget, KeyStorageType,
 };
 pub use device_authorization::{
     DEVICE_CODE_LIFETIME_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DeviceAuthCodeId,
@@ -180,7 +180,7 @@ pub use mfa::{
     ChallengeStatus, EnrollmentStatus, FactorCategory, FactorProperties, MfaChallenge,
     MfaEnrollment, MfaMethod, PhishingResistance, RecoveryCode, RecoveryCodeSet,
 };
-pub use mutation::{ActorFence, MutationContext};
+pub use mutation::{ActorFence, CeremonyConsumption, MutationContext};
 pub use native_session::{
     NATIVE_EXCHANGE_LEN, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
     NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome,

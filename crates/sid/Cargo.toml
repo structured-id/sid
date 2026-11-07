@@ -65,6 +65,8 @@ sid-opaque-ke = { workspace = true }
 sid-pake-core = { workspace = true }
 # A real passkey ceremony for the stored-passkey conversions.
 sid-authn = { workspace = true, features = ["keyed", "password-operation", "soft-authenticator"] }
+# Signs the device-key proofs of the enrollment ceremony tests.
+jsonwebtoken = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -357,53 +357,7 @@ impl DPopValidator {
         expected_method: &str,
         expected_url: &str,
     ) -> Result<CheckedProof, DPopError> {
-        // 1. Split JWT into header.payload.signature
-        let parts: Vec<&str> = proof_jwt.splitn(3, '.').collect();
-        if parts.len() != 3 {
-            return Err(DPopError::InvalidProof("malformed JWT".into()));
-        }
-
-        // 2. Decode JOSE header (need JWK before we can verify signature)
-        let header_bytes = URL_SAFE_NO_PAD
-            .decode(parts[0])
-            .map_err(|_| DPopError::InvalidProof("invalid base64 in header".into()))?;
-        let header: DPopJoseHeader = serde_json::from_slice(&header_bytes)
-            .map_err(|e| DPopError::InvalidProof(format!("invalid header JSON: {e}")))?;
-
-        // 3. Verify typ: dpop+jwt, or sid-native+jwt for a native proof
-        if header.typ.as_deref() != Some(typ) {
-            return Err(DPopError::InvalidProof(format!(
-                "expected typ={typ}, got {:?}",
-                header.typ
-            )));
-        }
-
-        // 4. Parse algorithm (must be asymmetric)
-        let alg = parse_algorithm(&header.alg)?;
-
-        // The jwk header carries a public key only (RFC 9449 §4.3).
-        if header.jwk.get("d").is_some() {
-            return Err(DPopError::InvalidProof(
-                "jwk header contains private key material".into(),
-            ));
-        }
-
-        // 5. Build DecodingKey from embedded JWK
-        let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(header.jwk.clone())
-            .map_err(|e| DPopError::InvalidProof(format!("invalid JWK: {e}")))?;
-        let decoding_key = jsonwebtoken::DecodingKey::from_jwk(&jwk)
-            .map_err(|e| DPopError::InvalidProof(format!("cannot create key from JWK: {e}")))?;
-
-        // 6. Verify signature and decode claims
-        let mut validation = jsonwebtoken::Validation::new(alg);
-        validation.validate_exp = false; // DPoP uses iat freshness, not exp
-        validation.validate_aud = false;
-        validation.required_spec_claims.clear();
-
-        let token_data = jsonwebtoken::decode::<DPopPayload>(proof_jwt, &decoding_key, &validation)
-            .map_err(|e| DPopError::InvalidProof(format!("signature verification failed: {e}")))?;
-
-        let payload = token_data.claims;
+        let (payload, jwk) = verify_key_jws::<DPopPayload>(proof_jwt, typ)?;
 
         // 7. Verify htm matches expected HTTP method
         if !payload.htm.eq_ignore_ascii_case(expected_method) {
@@ -431,12 +385,70 @@ impl DPopValidator {
             jti: payload.jti,
             iat: payload.iat,
             ath: payload.ath,
-            jwk: header.jwk,
+            jwk,
             sid_rt: payload.sid_rt,
             sid_ex: payload.sid_ex,
             sid_cer: payload.sid_cer,
         })
     }
+}
+
+/// The claims of `jws`, a compact JWS whose protected header names its
+/// `typ`, an asymmetric `alg` and `jwk`, the public key it is signed with,
+/// and that key: checked form, type, algorithm and signature. Every
+/// key-bound proof (DPoP, native, device-key) is read through this check.
+pub(crate) fn verify_key_jws<C: serde::de::DeserializeOwned>(
+    jws: &str,
+    typ: &str,
+) -> Result<(C, serde_json::Value), DPopError> {
+    // 1. Split JWT into header.payload.signature
+    let parts: Vec<&str> = jws.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return Err(DPopError::InvalidProof("malformed JWT".into()));
+    }
+
+    // 2. Decode JOSE header (need JWK before we can verify signature)
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|_| DPopError::InvalidProof("invalid base64 in header".into()))?;
+    let header: DPopJoseHeader = serde_json::from_slice(&header_bytes)
+        .map_err(|e| DPopError::InvalidProof(format!("invalid header JSON: {e}")))?;
+
+    // 3. Verify typ: each proof kind has its own, so none is accepted as
+    // another.
+    if header.typ.as_deref() != Some(typ) {
+        return Err(DPopError::InvalidProof(format!(
+            "expected typ={typ}, got {:?}",
+            header.typ
+        )));
+    }
+
+    // 4. Parse algorithm (must be asymmetric)
+    let alg = parse_algorithm(&header.alg)?;
+
+    // The jwk header carries a public key only (RFC 9449 §4.3).
+    if header.jwk.get("d").is_some() {
+        return Err(DPopError::InvalidProof(
+            "jwk header contains private key material".into(),
+        ));
+    }
+
+    // 5. Build DecodingKey from embedded JWK
+    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(header.jwk.clone())
+        .map_err(|e| DPopError::InvalidProof(format!("invalid JWK: {e}")))?;
+    let decoding_key = jsonwebtoken::DecodingKey::from_jwk(&jwk)
+        .map_err(|e| DPopError::InvalidProof(format!("cannot create key from JWK: {e}")))?;
+
+    // 6. Verify signature and decode claims; freshness and audience are each
+    // proof kind's own claims.
+    let mut validation = jsonwebtoken::Validation::new(alg);
+    validation.validate_exp = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let token_data = jsonwebtoken::decode::<C>(jws, &decoding_key, &validation)
+        .map_err(|e| DPopError::InvalidProof(format!("signature verification failed: {e}")))?;
+    Ok((token_data.claims, header.jwk))
 }
 
 /// Parse a JWA algorithm string into `jsonwebtoken::Algorithm`.
@@ -478,7 +490,15 @@ fn same_htu(htu: &str, request_uri: &str) -> bool {
 ///
 /// Creates a canonical JSON representation of the required JWK members
 /// (sorted alphabetically), then SHA-256 hashes it and base64url-encodes.
-fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> Result<String, DPopError> {
+pub(crate) fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> Result<String, DPopError> {
+    let hash = Sha256::digest(canonical_jwk(jwk)?.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(hash))
+}
+
+/// The public key of `jwk` as its RFC 7638 §3.2 required members, sorted,
+/// without whitespace: the thumbprint's input, and the one stored form of a
+/// public key that carries nothing else.
+pub(crate) fn canonical_jwk(jwk: &serde_json::Value) -> Result<String, DPopError> {
     let kty = jwk
         .get("kty")
         .and_then(|v| v.as_str())
@@ -508,15 +528,21 @@ fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> Result<String, DPopError> 
             )));
         }
     };
-
-    let hash = Sha256::digest(canonical.as_bytes());
-    Ok(URL_SAFE_NO_PAD.encode(hash))
+    Ok(canonical)
 }
 
-/// Extract a required string member from a JWK JSON object.
+/// Extract a required string member from a JWK JSON object. Every member the
+/// canonical form names is base64url (RFC 7518 §6) or a curve name, so a
+/// value with any other character is refused rather than written into the
+/// canonical JSON unescaped.
 fn get_required_member(jwk: &serde_json::Value, name: &str) -> Result<String, DPopError> {
     jwk.get(name)
         .and_then(|v| v.as_str())
+        .filter(|v| {
+            !v.is_empty()
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
         .map(String::from)
         .ok_or_else(|| DPopError::InvalidProof(format!("JWK missing required member: {name}")))
 }

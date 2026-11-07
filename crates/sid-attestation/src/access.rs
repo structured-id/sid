@@ -14,7 +14,7 @@ use sid_auth::receiver::{Action, Actions, Guarded, Receiver};
 
 /// Reading a device's key attestation.
 pub const DEVICE_READ: &str = "attestation.device.read";
-/// Registering, rotating or revoking a device's key.
+/// Enrolling, rotating or revoking a device's key.
 pub const DEVICE_CHANGE: &str = "attestation.device.change";
 /// Listing a Profile's device key attestations.
 pub const PROFILE_READ: &str = "attestation.profile.read";
@@ -24,7 +24,10 @@ pub fn action(path: &str) -> Option<Action> {
     let method = path.strip_prefix("/sid.v1.attestation.AttestationService/")?;
     Some(Action::OwnedObject(match method {
         "GetDeviceAttestation" => DEVICE_READ,
-        "RegisterDeviceKey" | "RotateDeviceKey" | "RevokeDeviceKey" => DEVICE_CHANGE,
+        "StartDeviceEnrollment"
+        | "FinishDeviceEnrollment"
+        | "RotateDeviceKey"
+        | "RevokeDeviceKey" => DEVICE_CHANGE,
         "ListDeviceAttestations" => PROFILE_READ,
         _ => return None,
     }))

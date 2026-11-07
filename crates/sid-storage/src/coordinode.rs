@@ -156,6 +156,12 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     if let Some(completion) = &ctx.operation {
         operation::record(tx, completion)?;
     }
+    // The ceremony it completes, once: a retry of a committed command was
+    // answered above, and a ceremony gone or changed meanwhile completes
+    // nothing.
+    if let Some(ceremony) = &ctx.ceremony {
+        ceremony::consume(tx, ceremony)?;
+    }
     audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
     for owed in &ctx.work {
         work::insert(tx, owed, sid_plugin::OWED_WORK_CAPACITY)?;

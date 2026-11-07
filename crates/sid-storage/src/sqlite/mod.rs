@@ -222,6 +222,12 @@ impl SqliteBackend {
         if let Some(operation) = &ctx.operation {
             operation::record_in_tx(&mut tx, operation).await?;
         }
+        // The ceremony it completes, once: a retry of a committed command
+        // was answered above, and a ceremony gone or changed meanwhile
+        // completes nothing.
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
         SqliteAuditLog::log_in_conn(&mut tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
@@ -237,10 +243,15 @@ impl SqliteBackend {
     /// its completion, so a retry after a later change does not apply it
     /// then; there is no audit or owed work for a change that did not happen.
     pub async fn commit_unchanged(mut tx: WriteTx, ctx: &MutationContext) -> SidResult<()> {
-        let Some(operation) = &ctx.operation else {
+        if ctx.operation.is_none() && ctx.ceremony.is_none() {
             return Ok(());
-        };
-        operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(operation) = &ctx.operation {
+            operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
@@ -254,7 +265,7 @@ impl SqliteBackend {
         chain_id: &str,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        if rows > 0 || !ctx.work.is_empty() || ctx.operation.is_some() {
+        if rows > 0 || !ctx.work.is_empty() || ctx.operation.is_some() || ctx.ceremony.is_some() {
             Self::commit_mutation(tx, chain_id, ctx).await?;
         }
         Ok(rows)
@@ -2111,31 +2122,12 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
-    async fn create_device_attestation(
+    async fn commit_device_enrollment(
         &self,
-        attestation: &sid_core::models::DeviceAttestation,
-        audit: MutationContext,
+        enrollment: &sid_core::models::DeviceEnrollment,
+        ctx: MutationContext,
     ) -> SidResult<()> {
-        self.create_device_attestation_impl(attestation, audit)
-            .await
-    }
-
-    async fn rotate_device_attestation(
-        &self,
-        device_id: sid_core::models::DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.rotate_device_attestation_impl(
-            device_id,
-            device_public_key,
-            attestation_object,
-            attestation_certificate,
-            audit,
-        )
-        .await
+        self.commit_device_enrollment_impl(enrollment, ctx).await
     }
 
     async fn revoke_device_attestation(

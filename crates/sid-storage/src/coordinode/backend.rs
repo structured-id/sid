@@ -1494,31 +1494,12 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::get_device_by_fingerprint(self, profile_id, fingerprint_hash).await
     }
 
-    async fn create_device_attestation(
+    async fn commit_device_enrollment(
         &self,
-        attestation: &DeviceAttestation,
+        enrollment: &sid_core::models::DeviceEnrollment,
         ctx: MutationContext,
     ) -> Result<()> {
-        CoordinodeBackend::create_device_attestation(self, attestation, ctx).await
-    }
-
-    async fn rotate_device_attestation(
-        &self,
-        device_id: DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        ctx: MutationContext,
-    ) -> Result<bool> {
-        CoordinodeBackend::rotate_device_attestation(
-            self,
-            device_id,
-            device_public_key,
-            attestation_object,
-            attestation_certificate,
-            ctx,
-        )
-        .await
+        CoordinodeBackend::commit_device_enrollment(self, enrollment, ctx).await
     }
 
     async fn revoke_device_attestation(

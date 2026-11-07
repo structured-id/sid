@@ -176,6 +176,26 @@ async fn stored_state_is_sealed_and_bound_to_its_key() {
     ));
 }
 
+/// A consumption names the state exactly as it was read, under its own
+/// namespace and key, so a mutation consuming it removes only that state.
+#[tokio::test]
+async fn consumption_names_the_state_as_read() {
+    let store: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let challenges: ChallengeStore<String> =
+        ChallengeStore::new(store.clone(), keys(), "test", Duration::from_secs(60));
+    challenges.insert("k1", &"state".to_string()).await.unwrap();
+    let read = challenges.read_versioned("k1").await.unwrap().unwrap();
+
+    let consumption = challenges.consumption("k1", &read);
+
+    assert_eq!(consumption.namespace, "test");
+    assert_eq!(consumption.key, "k1");
+    assert_eq!(
+        Some(consumption.stored),
+        store.read_ceremony_state("test", "k1").await.unwrap()
+    );
+}
+
 /// An unreachable store is an error, never "no state" that could be read as
 /// a fresh start or as success.
 #[tokio::test]

@@ -6,15 +6,20 @@
 //! caller may do on a device it does not own.
 
 use sid::devices::{DeviceAccess, DeviceKeyError, DeviceKeys, KeyCaller};
-use sid_core::models::SessionId;
+use sid_core::models::{OperationContext, SessionId};
+use sid_infra::authn::operation::context;
+use sid_infra::authn::sign_in_refusal::{authentication_failed, ceremony_expired};
 use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
-use sid_infra::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::attestation::attestation_service_server::AttestationService;
 use sid_proto::sid::v1::attestation::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
+
+/// The ceremony a refusal names.
+const CEREMONY: &str = "device-key ceremony";
 
 pub struct AttestationServiceImpl {
     storage: Arc<dyn StorageBackend>,
@@ -52,8 +57,18 @@ fn split<T>(request: Request<T>) -> (Request<()>, T) {
     (Request::from_parts(metadata, extensions, ()), message)
 }
 
-/// The answer to a refused or failed device key operation.
-fn refusal(e: DeviceKeyError<Status>) -> Status {
+/// The call's operation context, or why it has none: the refusal answers
+/// only where the operation requires the context.
+fn deferred_context<T>(request: &Request<T>) -> (Option<OperationContext>, Option<Status>) {
+    match context(request) {
+        Ok(context) => (Some(context), None),
+        Err(refused) => (None, Some(refused)),
+    }
+}
+
+/// The answer to a refused or failed device key operation; a missing
+/// operation context is answered with the context's own refusal.
+fn refusal(e: DeviceKeyError<Status>, context: Option<Status>) -> Status {
     match e {
         DeviceKeyError::Access(status) => status,
         DeviceKeyError::Denied => ApiError::new(
@@ -61,6 +76,7 @@ fn refusal(e: DeviceKeyError<Status>) -> Status {
             "the caller may not perform this operation",
         )
         .into(),
+        DeviceKeyError::Enrollment(refusal) => refusal.into_status(),
         DeviceKeyError::DeviceNotFound(id) => {
             not_found(ErrorReason::DeviceNotFound, "Device", id.to_string())
         }
@@ -75,37 +91,54 @@ fn refusal(e: DeviceKeyError<Status>) -> Status {
         )
         .with_resource("DeviceAttestation", id.to_string())
         .into(),
+        DeviceKeyError::CeremonyExpired => ceremony_expired(CEREMONY),
+        DeviceKeyError::Changed => ApiError::new(
+            ErrorReason::InvalidState,
+            "the device's key changed since the ceremony started; start it again",
+        )
+        .with_precondition("CEREMONY_STATE", CEREMONY, "superseded")
+        .into(),
+        // A proof that does not prove the ceremony is answered as any failed
+        // authentication, without saying which binding it missed.
+        DeviceKeyError::Proof(_) => authentication_failed(),
         DeviceKeyError::MissingField(field) => missing_field(field),
-        DeviceKeyError::InvalidId(field) => invalid_field(field, "not an identifier of its kind"),
+        DeviceKeyError::InvalidField { field, reason } => invalid_field(field, reason),
+        // Only a keyed call requires its context, and its context's refusal
+        // is passed along with the error.
+        DeviceKeyError::ContextRequired => context.unwrap_or_else(|| ApiError::internal().into()),
+        DeviceKeyError::Operation(e) => e.into_status(),
         DeviceKeyError::Store(e) => storage_failure(e),
     }
 }
 
 impl AttestationServiceImpl {
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    /// The service over `storage`, sealing pending ceremonies under `keys`.
+    pub fn new(storage: Arc<dyn StorageBackend>, keys: Arc<dyn sid_keys::KeyManager>) -> Self {
         Self {
-            keys: DeviceKeys::new(storage.clone()),
+            keys: DeviceKeys::new(storage.clone(), keys),
             storage,
         }
     }
 
     /// The caller of `request`: the Profile of the stored, live sign-in its
-    /// token was issued from, never the token's subject. A token of no
-    /// sign-in (a client's own) has no Profile and owns no device.
+    /// token was issued from, never the token's subject, and that sign-in. A
+    /// token of no sign-in (a client's own) has no Profile and owns no
+    /// device.
     async fn caller<T>(&self, request: &Request<T>) -> Result<KeyCaller, Status> {
         let claims = sid_auth::receiver::owner_claims(request)?;
-        let profile = match SessionId::parse(&claims.sid) {
+        let session = match SessionId::parse(&claims.sid) {
             Ok(id) => self
                 .storage
                 .get_session(id)
                 .await
                 .map_err(storage_failure)?
-                .filter(|s| !s.is_expired())
-                .map(|s| s.profile_id),
+                .filter(|s| !s.is_expired()),
             Err(_) => None,
         };
+        let profile = session.as_ref().map(|s| s.profile_id);
         Ok(KeyCaller {
             profile,
+            session: session.map(|s| s.id),
             subject: claims.sub.clone(),
             interactive: profile.is_some() && claims.acr != sid_authn::caller::ACR_IMPERSONATION,
         })
@@ -114,18 +147,35 @@ impl AttestationServiceImpl {
 
 #[tonic::async_trait]
 impl AttestationService for AttestationServiceImpl {
-    #[instrument(skip_all, fields(method = "register_device_key"))]
-    async fn register_device_key(
+    #[instrument(skip_all, fields(method = "start_device_enrollment"))]
+    async fn start_device_enrollment(
         &self,
-        request: Request<RegisterDeviceKeyRequest>,
-    ) -> Result<Response<DeviceAttestation>, Status> {
+        request: Request<StartDeviceEnrollmentRequest>,
+    ) -> Result<Response<DeviceEnrollmentChallenge>, Status> {
         let caller = self.caller(&request).await?;
+        // The ceremony binds the issuer whose sign-in authorized it.
+        let issuer = sid_auth::receiver::owner_claims(&request)?.iss.clone();
         let (mut head, req) = split(request);
         self.keys
-            .register_key(&mut ReceiverAccess(&mut head), &caller, req)
+            .start_enrollment(&mut ReceiverAccess(&mut head), &caller, &issuer, req)
             .await
             .map(Response::new)
-            .map_err(refusal)
+            .map_err(|e| refusal(e, None))
+    }
+
+    #[instrument(skip_all, fields(method = "finish_device_enrollment"))]
+    async fn finish_device_enrollment(
+        &self,
+        request: Request<FinishDeviceEnrollmentRequest>,
+    ) -> Result<Response<DeviceAttestation>, Status> {
+        let caller = self.caller(&request).await?;
+        let (operation, refused) = deferred_context(&request);
+        let (mut head, req) = split(request);
+        self.keys
+            .finish_enrollment(&mut ReceiverAccess(&mut head), &caller, operation, req)
+            .await
+            .map(Response::new)
+            .map_err(|e| refusal(e, refused))
     }
 
     #[instrument(skip_all, fields(method = "get_device_attestation"))]
@@ -139,7 +189,7 @@ impl AttestationService for AttestationServiceImpl {
             .get_attestation(&mut ReceiverAccess(&mut head), &caller, req)
             .await
             .map(Response::new)
-            .map_err(refusal)
+            .map_err(|e| refusal(e, None))
     }
 
     #[instrument(skip_all, fields(method = "rotate_device_key"))]
@@ -148,12 +198,13 @@ impl AttestationService for AttestationServiceImpl {
         request: Request<RotateDeviceKeyRequest>,
     ) -> Result<Response<DeviceAttestation>, Status> {
         let caller = self.caller(&request).await?;
+        let (operation, refused) = deferred_context(&request);
         let (mut head, req) = split(request);
         self.keys
-            .rotate_key(&mut ReceiverAccess(&mut head), &caller, req)
+            .rotate_key(&mut ReceiverAccess(&mut head), &caller, operation, req)
             .await
             .map(Response::new)
-            .map_err(refusal)
+            .map_err(|e| refusal(e, refused))
     }
 
     #[instrument(skip_all, fields(method = "revoke_device_key"))]
@@ -162,12 +213,13 @@ impl AttestationService for AttestationServiceImpl {
         request: Request<RevokeDeviceKeyRequest>,
     ) -> Result<Response<()>, Status> {
         let caller = self.caller(&request).await?;
+        let (operation, refused) = deferred_context(&request);
         let (mut head, req) = split(request);
         self.keys
-            .revoke_key(&mut ReceiverAccess(&mut head), &caller, req)
+            .revoke_key(&mut ReceiverAccess(&mut head), &caller, operation, req)
             .await
             .map(Response::new)
-            .map_err(refusal)
+            .map_err(|e| refusal(e, refused))
     }
 
     #[instrument(skip_all, fields(method = "list_device_attestations"))]
@@ -181,7 +233,7 @@ impl AttestationService for AttestationServiceImpl {
             .list_attestations(&mut ReceiverAccess(&mut head), &caller, req)
             .await
             .map(Response::new)
-            .map_err(refusal)
+            .map_err(|e| refusal(e, None))
     }
 }
 

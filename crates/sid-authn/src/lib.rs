@@ -37,6 +37,7 @@ pub mod credential_enrollment;
 pub mod data_export;
 pub mod dcr;
 pub mod device_auth;
+pub mod device_key_proof;
 pub mod dpop;
 pub mod email;
 pub mod event_relay;

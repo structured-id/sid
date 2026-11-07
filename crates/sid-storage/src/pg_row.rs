@@ -1115,17 +1115,16 @@ impl DeviceRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct DeviceAttestationRow {
-    pub id: Uuid,
+    pub id: DeviceAttestationId,
     pub device_id: CoreDeviceId,
     pub profile_id: ProfileId,
     pub format: String,
     pub key_storage: String,
     pub status: String,
-    pub device_public_key: Vec<u8>,
+    pub public_jwk: String,
     pub attestation_object: Option<Vec<u8>>,
     pub attestation_certificate: Option<Vec<u8>>,
     pub aaguid: Option<String>,
-    pub credential_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -1134,17 +1133,16 @@ pub struct DeviceAttestationRow {
 impl DeviceAttestationRow {
     pub fn into_domain(self) -> SidResult<DeviceAttestation> {
         Ok(DeviceAttestation {
-            id: DeviceAttestationId(self.id),
+            id: self.id,
             device_id: self.device_id,
             profile_id: self.profile_id,
             format: self.format.parse().map_err(SidError::Storage)?,
             key_storage: self.key_storage.parse().map_err(SidError::Storage)?,
             status: self.status.parse().map_err(SidError::Storage)?,
-            device_public_key: self.device_public_key,
+            public_jwk: self.public_jwk,
             attestation_object: self.attestation_object,
             attestation_certificate: self.attestation_certificate,
             aaguid: self.aaguid,
-            credential_id: self.credential_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
             revoked_at: self.revoked_at,
