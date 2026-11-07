@@ -21,7 +21,6 @@ pub mod machine_user_service;
 mod native_session;
 pub mod oidc_issuer_service;
 pub mod oidc_provider_service;
-pub mod password_operation;
 #[allow(dead_code)]
 pub mod pat_service;
 pub mod project_service;

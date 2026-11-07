@@ -1344,7 +1344,7 @@ pub fn spawn_cleanup_settlements(
             // (the bus unreachable at start) is tried again here. Meanwhile
             // the relayed cleanup stays owed and is relayed again.
             loop {
-                match crate::grpc::password_operation::consume_cleanup_settlements(
+                match sid_authn::password_operation::consume_cleanup_settlements(
                     bus.as_ref(),
                     storage.clone(),
                     &authority,
