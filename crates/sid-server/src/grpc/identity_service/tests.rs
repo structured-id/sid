@@ -1,5 +1,5 @@
 use super::*;
-use sid_core::models::{DeviceId, PrincipalId, ProfileId};
+use sid_core::models::{CredentialId, DeviceId, PrincipalId, ProfileId};
 use sid_infra::grpc_error::extract_error_info;
 use tonic::Code;
 
@@ -146,7 +146,11 @@ fn a_deferred_context_answers_with_its_own_refusal() {
 fn the_last_primary_credential_is_refused() {
     let id = CredentialId(uuid::Uuid::now_v7());
     let refused =
-        refuse_last_primary(sid_core::models::CredentialRevocation::LastPrimary, id).unwrap_err();
+        sid::identity::last_primary(sid_core::models::CredentialRevocation::LastPrimary, id)
+            .map_err(refusal)
+            .unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition);
-    assert!(refuse_last_primary(sid_core::models::CredentialRevocation::Revoked, id).is_ok());
+    assert!(
+        sid::identity::last_primary(sid_core::models::CredentialRevocation::Revoked, id).is_ok()
+    );
 }

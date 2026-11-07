@@ -21,18 +21,14 @@ use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
-use sid_authn::webauthn::{AssertionPurpose, AssertionResponse, VerifiedAssertion, WebAuthnServer};
-use sid_core::models::event::{Event, event_types};
+use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
+use sid_authn::webauthn::WebAuthnServer;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{
-    AuditEntry, Credential, CredentialData, CredentialId, CredentialType, ProfileId, ProfileType,
-    Session, SessionId,
-};
-use sid_core::models::{MutationContext, OidcIssuer, RevocationReason};
+use sid_core::models::{AuditEntry, CredentialId, ProfileId, ProfileType, SessionId};
+use sid_core::models::{OidcIssuer, RevocationReason};
 use sid_infra::authn::ceremony::Respond;
-use sid_infra::authn::operation::{context, run};
+use sid_infra::authn::operation::context;
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
 use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_infra::oauth_http::{
@@ -64,32 +60,9 @@ use refusal::{
     mfa_not_enrolled, registration_restricted, session_ended, session_provisional,
     step_up_required,
 };
+use sid::second_factor::{Enroller, FactorCaller};
 use sid_authn::sign_in_security::device_id as compute_device_id;
 use sign_in_security::sign_in_refusal;
-
-/// Who binds a second factor: an interactive session, or a sign-in's pending
-/// context owing its first.
-enum Enroller {
-    Session(sid_authn::caller::Caller),
-    SignIn(Box<Session>),
-}
-
-impl Enroller {
-    fn profile_id(&self) -> ProfileId {
-        match self {
-            Self::Session(caller) => caller.profile_id,
-            Self::SignIn(pending) => pending.profile_id,
-        }
-    }
-}
-
-/// Who verifies a second factor.
-enum FactorCaller {
-    /// A sign-in's pending context, completed into its session for `client`.
-    Pending(Session, CeremonyClient),
-    /// An installation session stepping up.
-    StepUp(Session),
-}
 
 /// Parse space-separated acr_values string into the highest requested AuthLevel.
 ///
@@ -187,12 +160,6 @@ fn step_up_method_unavailable(method: StepUpMethod, decay: &str) -> Status {
 
 use super::convert::wire_id;
 
-/// A stored credential's id as an answer carries it.
-#[allow(clippy::result_large_err)]
-fn credential_wire(id: CredentialId) -> Result<Option<sid_ids_proto::CredentialId>, Status> {
-    super::convert::stored_id::<sid_ids::CredentialId, _>(id.0)
-}
-
 /// The refusal of an email code request. The limit counts requests per
 /// address, known or not, so it tells nothing about an account.
 fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
@@ -216,17 +183,6 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
         e @ (sid_authn::otp::OtpError::Internal(_) | sid_authn::otp::OtpError::Sealed(_)) => {
             internal("request email code", e)
         }
-    }
-}
-
-/// A TOTP code is exactly six ASCII digits (RFC 6238 §5.3 with the default
-/// `Digit` of 6); anything else is a malformed request, not a wrong code.
-#[allow(clippy::result_large_err)]
-fn require_totp_code_format(code: &str) -> Result<(), Status> {
-    if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(())
-    } else {
-        Err(invalid_field("code", "six digits"))
     }
 }
 
@@ -274,6 +230,72 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
     }
+}
+
+/// The answer to a refused or failed second-factor step.
+fn second_factor_refusal(e: sid::second_factor::SecondFactorError) -> Status {
+    use sid::second_factor::SecondFactorError as E;
+    match e {
+        E::InvalidField { field, reason } => invalid_field(field, reason),
+        E::MissingField(field) => missing_field(field),
+        E::AlreadyEnrolled => ApiError::new(
+            ErrorReason::InvalidState,
+            "a TOTP authenticator is already enrolled",
+        )
+        .with_precondition("MFA_ENROLLMENT", "TOTP", "already enrolled")
+        .into(),
+        E::NotEnrolled(what) => mfa_not_enrolled(what),
+        E::ProfileNotFound(id) => {
+            not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
+        }
+        E::Expired(ceremony) => ceremony_expired(ceremony),
+        E::AuthenticationFailed => authentication_failed(),
+        E::SessionEnded => session_ended(),
+        E::SessionProvisional(id) => session_provisional(id),
+        E::ChangedConcurrently => changed_concurrently(),
+        E::SessionTooOld => ApiError::new(
+            ErrorReason::InvalidState,
+            "the session is too old for a step-up: full re-authentication required",
+        )
+        .with_precondition("SESSION_DECAY", "low", "sign in again")
+        .into(),
+        E::MethodUnavailable(method, decay) => step_up_method_unavailable(method, decay),
+        E::StepUpRequired(unmet) => step_up_required(&unmet).into(),
+        E::RecoveryCodesIssued(recorded) => recovery_codes_issued(&recorded),
+        E::CredentialNotFound(id) => credential_not_found(id),
+        E::Identity(e) => super::identity_service::refusal(e),
+        E::Caller(e) => e.into_status(),
+        E::Enrollment(e) => e.into_status(),
+        E::Operation(e) => e.into_status(),
+        E::SignIn(e) => sign_in_refusal(e),
+        E::Unavailable { what, cause } => dependency_unavailable(what, cause),
+        E::Store(e) => storage_failure(e),
+        E::Internal | E::ContextRequired => ApiError::internal().into(),
+    }
+}
+
+/// A request's operation context for an operation that requires it only
+/// after its other checks: the context, or the refusal of its absence.
+fn deferred_context<T>(
+    request: &Request<T>,
+) -> (Option<sid_core::models::OperationContext>, Option<Status>) {
+    match context(request) {
+        Ok(context) => (Some(context), None),
+        Err(refused) => (None, Some(refused)),
+    }
+}
+
+/// The answer of a second-factor operation that deferred its context: the
+/// context's own refusal where the operation required it.
+#[allow(clippy::result_large_err)]
+fn deferred_second_factor<T>(
+    result: Result<T, sid::second_factor::SecondFactorError>,
+    refused: Option<Status>,
+) -> Result<Response<T>, Status> {
+    result.map(Response::new).map_err(|e| match (e, refused) {
+        (sid::second_factor::SecondFactorError::ContextRequired, Some(refused)) => refused,
+        (e, _) => second_factor_refusal(e),
+    })
 }
 
 /// The answer to a refused or failed passkey ceremony.
@@ -326,16 +348,9 @@ fn password_refusal(e: sid::password::PasswordError) -> Status {
     }
 }
 
-/// Challenge-store key of a WebAuthn step-up: bound to the session that
-/// requested it, so a completion on another session cannot consume it.
-fn step_up_challenge_key(session_id: &str, challenge_id: &str) -> String {
-    format!("step-up:{session_id}:{challenge_id}")
-}
-
 pub struct AuthServiceImpl {
     pub(crate) storage: Arc<dyn StorageBackend>,
     pub(crate) oauth2: Arc<OAuth2Server>,
-    pub(crate) webauthn: Arc<WebAuthnServer>,
     pub(crate) jwt: Arc<JwtService>,
     pub(crate) opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     pub(crate) revocation_cache: Arc<RevocationCache>,
@@ -347,13 +362,11 @@ pub struct AuthServiceImpl {
     history_evaluation: Option<Arc<sid_authn::password_operation::HistoryEvaluation>>,
     /// Passkey binding and sign-in ceremonies.
     passkeys: sid::passkey::Passkeys,
-    /// WebAuthn ceremony of a pending step-up, keyed by session and step-up
-    /// challenge id: only a completion on the same session consumes it.
-    step_up_state: ChallengeStore<String>,
+    /// Second factors: TOTP and recovery codes, step-ups and their pending
+    /// ceremonies.
+    second_factors: sid::second_factor::SecondFactors,
     /// Upgrades of imported password hashes between their steps.
     imported_passwords: sid::password::ImportedPasswordUpgrades,
-    /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
-    totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -383,8 +396,6 @@ pub struct AuthServiceImpl {
     sign_ins: sid::sign_in::SignIn,
     /// Field encryption for credential secrets the server reads back (TOTP seeds).
     key_manager: Arc<dyn sid_keys::KeyManager>,
-    /// TOTP codes already accepted, shared by every replica.
-    totp_replay: sid_authn::TotpReplayGuard,
     /// Ends a profile's sessions everywhere (tokens, RPs) on a password reset.
     cascade: Arc<RevocationCascadeService>,
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
@@ -466,7 +477,6 @@ impl AuthServiceImpl {
         authz: Arc<sid_authz::CeAuthzEngine<dyn StorageBackend>>,
         password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
-        let ttl = std::time::Duration::from_secs(300); // 5 minutes
         let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
         let captcha_gate =
             sid_authn::captcha::CaptchaGate::new(ceremonies.clone(), key_manager.clone());
@@ -501,6 +511,12 @@ impl AuthServiceImpl {
         );
         let passkeys =
             sid::passkey::Passkeys::new(webauthn.clone(), ceremonies.clone(), key_manager.clone());
+        let second_factors = sid::second_factor::SecondFactors::new(
+            webauthn,
+            issuer.clone(),
+            ceremonies.clone(),
+            key_manager.clone(),
+        );
         let sign_ins = sid::sign_in::SignIn::new(sid::sign_in::SignInParts {
             storage: storage.clone(),
             jwt: jwt.clone(),
@@ -517,7 +533,6 @@ impl AuthServiceImpl {
         Self {
             storage,
             oauth2,
-            webauthn,
             jwt,
             opaque_zkpp,
             revocation_cache,
@@ -525,21 +540,10 @@ impl AuthServiceImpl {
             password_ops,
             history_evaluation,
             passkeys,
-            step_up_state: ChallengeStore::new(
-                ceremonies.clone(),
-                key_manager.clone(),
-                "webauthn-step-up",
-                ttl,
-            ),
+            second_factors,
             imported_passwords: sid::password::ImportedPasswordUpgrades::new(
                 ceremonies.clone(),
                 key_manager.clone(),
-            ),
-            totp_enrollment: ChallengeStore::new(
-                ceremonies.clone(),
-                key_manager.clone(),
-                "totp-enrollment",
-                ttl,
             ),
             continuations: ChallengeStore::new(
                 ceremonies.clone(),
@@ -564,7 +568,6 @@ impl AuthServiceImpl {
                 .origin()
                 .ascii_serialization(),
             issuer,
-            totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
             sign_ins,
             key_manager,
             cascade,
@@ -640,27 +643,6 @@ impl AuthServiceImpl {
         metadata: &tonic::metadata::MetadataMap,
     ) -> Result<CeremonyClient, Status> {
         sid_infra::authn::ceremony::ceremony_client(metadata, self.sign_in_origin.as_ref())
-    }
-
-    /// Accept `code` for `secret` once: a wrong code and a code already
-    /// accepted on any path answer alike (RFC 6238 §5.2).
-    async fn accept_totp(
-        &self,
-        profile_id: ProfileId,
-        secret: &[u8],
-        code: &str,
-    ) -> Result<(), Status> {
-        let step = sid_authn::totp_step(secret, code).ok_or_else(authentication_failed)?;
-        let first = self
-            .totp_replay
-            .first_use(profile_id, step)
-            .await
-            .map_err(|e| dependency_unavailable("TOTP replay record", e))?;
-        if first {
-            Ok(())
-        } else {
-            Err(authentication_failed())
-        }
     }
 
     /// The client address of `request`; a call whose address did not resolve
@@ -849,136 +831,6 @@ impl AuthServiceImpl {
             .map_err(sign_in_refusal)
     }
 
-    /// Record an authentication on the active session `id`: `authenticate`
-    /// changes it and the result is stored with a compare-and-swap on the
-    /// session's authentication, so an ended session is never recreated and a
-    /// concurrent authentication is not undone. Returns the stored session.
-    /// An ended or expired session is Unauthenticated, a provisional one
-    /// FailedPrecondition, one authenticated again in between Aborted.
-    async fn authenticate_session(
-        &self,
-        id: SessionId,
-        ctx: MutationContext,
-        authenticate: impl FnOnce(&mut sid_core::models::session::ActiveSession<'_>),
-    ) -> Result<Session, Status> {
-        let mut session = self
-            .storage
-            .get_session(id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(session_ended)?;
-        let expected = session.authentication();
-        if session.is_provisional {
-            return Err(session_provisional(id));
-        }
-        let mut active = session.as_active().ok_or_else(session_ended)?;
-        authenticate(&mut active);
-        let recorded = self
-            .storage
-            .record_session_authentication(id, &expected, &session.authentication(), ctx)
-            .await
-            .map_err(storage_failure)?;
-        if recorded {
-            return Ok(session);
-        }
-        match self
-            .storage
-            .get_session(id)
-            .await
-            .map_err(storage_failure)?
-        {
-            Some(now) if !now.is_expired() => Err(changed_concurrently()),
-            _ => Err(session_ended()),
-        }
-    }
-
-    /// Spend one recovery code of the profile's active set; returns how many
-    /// remain. The code is removed with a compare-and-swap on the stored set,
-    /// so concurrent requests spend a code once and never lose each other's
-    /// removals; every stored hash is compared, in constant time.
-    async fn consume_recovery_code(
-        &self,
-        profile_id: ProfileId,
-        code: &str,
-    ) -> Result<usize, Status> {
-        use subtle::ConstantTimeEq;
-        let input_hash = sid_authn::hash_code(&sid_authn::normalize_code(code));
-        // A lost race re-reads the set; a bound keeps a stuck writer from spinning.
-        for _ in 0..8 {
-            let credentials = self
-                .storage
-                .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
-                .await
-                .map_err(storage_failure)?;
-            let set = credentials
-                .into_iter()
-                .find(|c| c.status.is_active())
-                .ok_or_else(|| mfa_not_enrolled("recovery code set"))?;
-            let mut hashes: Vec<String> = serde_json::from_slice(set.data.expose())
-                .map_err(|e| internal("read recovery code set", e))?;
-            let mut matched = None;
-            for (i, stored) in hashes.iter().enumerate() {
-                if bool::from(input_hash.as_bytes().ct_eq(stored.as_bytes())) {
-                    matched = Some(i);
-                }
-            }
-            let Some(index) = matched else {
-                return Err(authentication_failed());
-            };
-            hashes.remove(index);
-            let remaining =
-                serde_json::to_vec(&hashes).map_err(|e| internal("write recovery code set", e))?;
-            // A spent code is security-relevant (it may mean the account is
-            // compromised); the spend owes the event, a lost race owes nothing.
-            let used = Event::new(&self.issuer, event_types::MFA_RECOVERY_CODE_USED)
-                .with_subject(format!("profile/{}", profile_id))
-                .with_data(serde_json::json!({
-                    "remaining": hashes.len(),
-                    "needs_regeneration": hashes.len() <= 3,
-                }));
-            let ctx = MutationContext::from(AuditEntry::user(
-                profile_id.to_string(),
-                "credential.recovery_code_used",
-                set.id.0.to_string(),
-            ))
-            .with_work(used.relay());
-            if self
-                .storage
-                .replace_credential_data(set.id, set.data.expose(), &remaining, ctx)
-                .await
-                .map_err(storage_failure)?
-            {
-                return Ok(hashes.len());
-            }
-        }
-        // Each lost race means another spend committed; after the bound the
-        // caller retries rather than being told the code is wrong.
-        Err(changed_concurrently())
-    }
-
-    /// Refuse a sign-in attempt while `identity` is locked out. Checked before
-    /// any password work and for known and unknown identities alike, so a
-    /// lockout neither lets guessing continue nor confirms a guess.
-    async fn refuse_if_locked(&self, identity: &str) -> Result<(), Status> {
-        self.sign_ins
-            .refuse_if_locked(identity)
-            .await
-            .map_err(sign_in_refusal)
-    }
-
-    /// Count a failed login attempt (brute force and stuffing limits); one
-    /// that cannot be counted refuses the request.
-    async fn record_failed_login(
-        &self,
-        identity: &str,
-        client_ip: Option<std::net::IpAddr>,
-    ) -> Result<(), Status> {
-        self.sign_ins
-            .record_failed_login(identity, client_ip)
-            .await
-            .map_err(sign_in_refusal)
-    }
-
     /// Count an attempt from `client_ip` against the stuffing limit.
     async fn record_ip_attempt(&self, client_ip: Option<std::net::IpAddr>) -> Result<(), Status> {
         self.sign_ins
@@ -1063,33 +915,6 @@ impl AuthServiceImpl {
             .map_err(sign_in_refusal)
     }
 
-    /// Refuse unless the caller's own interactive session may bind a new
-    /// `credential_type` credential to `profile_id` now. Checked at the start
-    /// and again at the finish of every ceremony that binds one, against the
-    /// stored session and the account's current credentials.
-    async fn require_enrollment_authority(
-        &self,
-        caller: &sid_authn::caller::Caller,
-        profile_id: ProfileId,
-        credential_type: CredentialType,
-    ) -> Result<(), Status> {
-        if caller.profile_id != profile_id {
-            return Err(ApiError::new(
-                ErrorReason::InsufficientPermissions,
-                "a credential is bound only to the caller's own profile",
-            )
-            .into());
-        }
-        sid_authn::credential_enrollment::authorize(
-            self.storage.as_ref(),
-            caller,
-            credential_type,
-            self.security_policy().auth.passkey_satisfies_mfa,
-        )
-        .await
-        .or_status()
-    }
-
     /// Who binds a second factor in `request`: a sign-in's pending context
     /// when it presents one, otherwise the caller's session.
     async fn enroller<T>(&self, request: &Request<T>) -> Result<Enroller, Status> {
@@ -1097,60 +922,6 @@ impl AuthServiceImpl {
             return Ok(Enroller::SignIn(Box::new(pending)));
         }
         Ok(Enroller::Session(self.caller_claims(request).await?.caller))
-    }
-
-    /// Refuse unless `enroller` may bind a new TOTP authenticator now.
-    async fn require_totp_enrollment_authority(&self, enroller: &Enroller) -> Result<(), Status> {
-        match enroller {
-            Enroller::Session(caller) => {
-                self.require_enrollment_authority(caller, caller.profile_id, CredentialType::Totp)
-                    .await
-            }
-            Enroller::SignIn(pending) => {
-                // A password replaced since the first factor binds nothing.
-                self.first_factor_fence(pending).await?;
-                sid_authn::credential_enrollment::authorize_sign_in(
-                    self.storage.as_ref(),
-                    pending,
-                    self.security_policy().auth.passkey_satisfies_mfa,
-                )
-                .await
-                .or_status()
-            }
-        }
-    }
-
-    /// The credential `pending`'s first factor proved, while it still holds:
-    /// it commits with what the context completes, as in a sign-in that needs
-    /// no second factor. One replaced or revoked since completes nothing, and
-    /// a reset after waits for the session and ends it.
-    async fn first_factor_fence(
-        &self,
-        pending: &Session,
-    ) -> Result<Option<sid_core::models::CredentialFence>, Status> {
-        self.sign_ins
-            .first_factor_fence(pending)
-            .await
-            .map_err(sign_in_refusal)
-    }
-
-    /// The profile's passkeys that may still sign in (revoked ones never do).
-    async fn active_passkeys(&self, profile_id: ProfileId) -> Result<Vec<Credential>, Status> {
-        sid::passkey::active(self.storage.as_ref(), profile_id)
-            .await
-            .map_err(storage_failure)
-    }
-
-    /// Record a successful assertion on the passkey that made it (see
-    /// [`sid::passkey::record_use`]).
-    async fn record_passkey_use(
-        &self,
-        passkeys: &[Credential],
-        verified: &VerifiedAssertion,
-    ) -> Result<(&'static str, sid_core::models::CredentialFence), Status> {
-        sid::passkey::record_use(self.storage.as_ref(), passkeys, verified)
-            .await
-            .map_err(passkey_refusal)
     }
 
     /// The caller's verified access token and the caller it stands for
@@ -1168,63 +939,11 @@ impl AuthServiceImpl {
         .await
     }
 
-    /// The profile's active TOTP credential and its seed. A seed stored under
-    /// an older key version is written back re-sealed under the current one.
-    async fn active_totp_seed(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<Option<(Credential, zeroize::Zeroizing<Vec<u8>>)>, Status> {
-        let credential = self
-            .storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|c| c.status.is_active());
-        let Some(mut credential) = credential else {
-            return Ok(None);
-        };
-        let opened = sid_authn::sealed_secret::open(
-            self.key_manager.as_ref(),
-            &sid_authn::sealed_secret::totp_context(profile_id),
-            credential.data.expose(),
-        )
-        .await
-        .map_err(|e| internal("open TOTP seed", e))?;
-        if let Some(resealed) = opened.resealed {
-            // Not applied when another reader resealed it first or it was
-            // revoked meanwhile; the use that follows is conditional on the
-            // credential still being active.
-            let applied = self
-                .storage
-                .reseal_credential_data(
-                    credential.id,
-                    credential.data.expose(),
-                    &resealed,
-                    AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
-                        .into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-            if applied {
-                credential.data = CredentialData::new(resealed);
-            }
-        }
-        Ok(Some((credential, opened.secret)))
-    }
-
     /// The authenticated caller of `request`.
     #[allow(clippy::result_large_err)]
     async fn caller<T>(&self, request: &Request<T>) -> Result<sid_authn::caller::Caller, Status> {
         sid_infra::authn::caller::authenticate(request, self.jwt.verifier(), &self.revocation_cache)
             .await
-    }
-
-    /// A full session of `profile_id` from `ip_address`, for the
-    /// installation's absolute lifetime when it sets one, with the sign-in
-    /// scopes; its authentication is the caller's to set.
-    fn new_session(&self, profile_id: ProfileId, ip_address: Option<std::net::IpAddr>) -> Session {
-        self.sign_ins.new_session(profile_id, ip_address)
     }
 
     /// Who verifies a second factor in `request`: a sign-in's pending
@@ -1290,77 +1009,6 @@ impl AuthServiceImpl {
         } else {
             FactorCaller::StepUp(session)
         })
-    }
-
-    /// Complete `pending` with the verified second factor `method` (RFC 8176):
-    /// the current login requirements are met by the completed
-    /// authentication, the pending context ends exactly once and the account
-    /// gets its session with a new credential, delivered to `client` (with
-    /// the refresh generation bound to `native_key` when it proved one).
-    async fn complete_pending_sign_in(
-        &self,
-        pending: Session,
-        method: &str,
-        client: CeremonyClient,
-        native_key: Option<&str>,
-    ) -> Result<SignedIn, Status> {
-        use sid_core::models::session::AuthLevel;
-        let profile = self
-            .storage
-            .get_profile(pending.profile_id)
-            .await
-            .map_err(storage_failure)?
-            .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
-            .ok_or_else(authentication_failed)?;
-        let now = Utc::now();
-        let requirements = self.login_requirements(None).await?;
-        if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
-            let mut completed = pending.clone();
-            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
-            completed.amr.push(method.to_string());
-            return Err(step_up_required(&requirements.unmet(&completed, now)).into());
-        }
-
-        let proved_by = self.first_factor_fence(&pending).await?;
-
-        let mut session = self.new_session(profile.id, pending.ip_address);
-        session.device_id = pending.device_id;
-        session.user_agent = pending.user_agent.clone();
-        session.assurance_level = pending.assurance_level.max(AuthLevel::Standard);
-        session.amr = pending.amr.clone();
-        if !session.amr.iter().any(|m| m == method) {
-            session.amr.push(method.to_string());
-        }
-        // The authentication began with the first factor.
-        session.authenticated_at = pending.authenticated_at;
-        // The pending context ends in the session's own commit: of concurrent
-        // completions one signs in, and one ended meanwhile completes nothing.
-        let signed_in = self
-            .sign_ins
-            .complete_pending(
-                &profile,
-                (
-                    pending.id,
-                    &sid_core::models::SessionEnd::new(
-                        sid_core::models::RevocationReason::SignInCompleted,
-                        pending.profile_id.to_string(),
-                    ),
-                ),
-                session,
-                client,
-                native_key,
-                proved_by
-                    .as_ref()
-                    .map(sid_core::models::SignInProof::Credential),
-                requirements.fence,
-            )
-            .await
-            .map_err(sign_in_refusal)?;
-        // Recorded from the address the rules judged at the first factor.
-        self.sign_ins
-            .record_completed(profile.id, pending.ip_address)
-            .await;
-        Ok(signed_in)
     }
 
     /// Complete a local first-factor sign-in as `admission` decided: the
@@ -2889,68 +2537,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<TotpEnrollmentChallenge>, Status> {
         self.check_maintenance().await?;
         let enroller = self.enroller(&request).await?;
-        let profile_id = enroller.profile_id();
-        self.require_totp_enrollment_authority(&enroller).await?;
-
-        // Check if user already has an active TOTP credential.
-        let existing = self
-            .storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
+        self.second_factors
+            .totp_enrollment_start(&self.sign_ins, &enroller)
             .await
-            .map_err(storage_failure)?;
-        if existing.iter().any(|c| c.status.is_active()) {
-            return Err(ApiError::new(
-                ErrorReason::InvalidState,
-                "a TOTP authenticator is already enrolled",
-            )
-            .with_precondition("MFA_ENROLLMENT", "TOTP", "already enrolled")
-            .into());
-        }
-
-        // Generate TOTP secret and build enrollment challenge.
-        let secret = sid_authn::generate_secret();
-        // Resolve account name for the otpauth URI (email or username).
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| {
-                not_found(
-                    ErrorReason::ProfileNotFound,
-                    "Profile",
-                    profile_id.to_string(),
-                )
-            })?;
-        let primary_email = self
-            .storage
-            .get_primary_profile_email(profile.id)
-            .await
-            .map_err(storage_failure)?;
-        let account_name_owned = primary_email
-            .as_ref()
-            .map(|e| e.email.clone())
-            .or_else(|| profile.username.clone())
-            .unwrap_or_else(|| profile.id.to_string());
-        // The caller's own pending enrollment (5 min TTL): both steps are
-        // authenticated as this profile, and a new start replaces the old.
-        let enrollment_key = format!("totp:{}", profile_id);
-        self.totp_enrollment
-            .insert(&enrollment_key, &(profile_id, secret.clone()))
-            .await
-            .or_status()?;
-
-        // The secret and the parameters the codes are checked with; the
-        // client presents them (Base32, otpauth URI, QR).
-        Ok(Response::new(TotpEnrollmentChallenge {
-            issuer: "StructuredID".to_string(),
-            account_name: account_name_owned,
-            shared_secret: secret,
-            algorithm: TotpAlgorithm::Sha1.into(),
-            digits: sid_authn::TOTP_DIGITS,
-            period_seconds: u32::try_from(sid_authn::TOTP_PERIOD)
-                .expect("the TOTP period is a few seconds"),
-        }))
+            .map(Response::new)
+            .map_err(second_factor_refusal)
     }
 
     async fn finish_totp_enrollment(
@@ -2959,101 +2550,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<FinishTotpEnrollmentResponse>, Status> {
         self.check_maintenance().await?;
         let enroller = self.enroller(&request).await?;
-        let profile_id = enroller.profile_id();
-
-        let req = request.into_inner();
-        require_totp_code_format(&req.code)?;
-
-        // The caller's own pending enrollment (keyed by profile id); another
-        // profile's never matches, and reads as expired.
-        let enrollment_key = format!("totp:{}", profile_id);
-        let secret = self
-            .totp_enrollment
-            .take(&enrollment_key)
+        self.second_factors
+            .totp_enrollment_finish(&self.sign_ins, &enroller, &request.into_inner().code)
             .await
-            .or_status()?
-            .filter(|(enrolled_pid, _)| *enrolled_pid == profile_id)
-            .map(|(_, secret)| secret)
-            .ok_or_else(|| ceremony_expired("TOTP enrollment"))?;
-        // The account may have changed since the start.
-        self.require_totp_enrollment_authority(&enroller).await?;
-
-        // Verify the TOTP code to confirm the user set up their authenticator
-        // correctly; the code is spent, like any accepted one.
-        self.accept_totp(profile_id, &secret, &req.code).await?;
-
-        // Store the seed only sealed under the key manager, bound to this profile.
-        let sealed = sid_authn::sealed_secret::seal(
-            self.key_manager.as_ref(),
-            &sid_authn::sealed_secret::totp_context(profile_id),
-            &secret,
-        )
-        .await
-        .map_err(|e| internal("seal TOTP seed", e))?;
-        let credential = Credential::new(
-            profile_id,
-            CredentialType::Totp,
-            CredentialData::new(sealed),
-            Some("TOTP Authenticator".to_string()),
-        );
-        let credential_id = credential.id;
-
-        // Whether this is the first MFA factor: it then gets recovery codes.
-        let existing_mfa = self
-            .storage
-            .get_credentials_by_profile(profile_id, None)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .filter(|c| {
-                matches!(
-                    c.credential_type,
-                    CredentialType::Totp | CredentialType::WebAuthn
-                ) && c.status.is_active()
-                    && c.id != credential_id
-            })
-            .count();
-
-        let enrolled = Event::new(&self.issuer, event_types::MFA_ENROLLED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "method": "totp",
-                "credential_id": credential_id.0.to_string(),
-                "first_mfa": existing_mfa == 0,
-            }));
-        // The first MFA factor comes with recovery codes, stored with it: a
-        // factor without its codes could not be enrolled again to get them.
-        let (recovery_codes, recovery_set) = if existing_mfa == 0 {
-            let (plaintext, hashes) = sid_authn::generate_recovery_codes();
-            let recovery_data =
-                serde_json::to_vec(&hashes).map_err(|e| internal("encode recovery codes", e))?;
-            let set = Credential::new(
-                profile_id,
-                CredentialType::Recovery,
-                CredentialData::new(recovery_data),
-                Some("Recovery Codes".to_string()),
-            );
-            (plaintext, Some(set))
-        } else {
-            (vec![], None)
-        };
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "credential.totp_enrolled",
-            credential_id.0.to_string(),
-        ))
-        .with_work(enrolled.relay());
-        self.storage
-            .enroll_credential(&credential, recovery_set.as_ref(), ctx)
-            .await
-            .map_err(storage_failure)?;
-
-        info!("TOTP enrolled for profile {}", profile_id);
-
-        Ok(Response::new(FinishTotpEnrollmentResponse {
-            credential_id: credential_wire(credential_id)?,
-            recovery_codes,
-        }))
+            .map(Response::new)
+            .map_err(second_factor_refusal)
     }
 
     async fn verify_totp(
@@ -3065,9 +2566,6 @@ impl AuthService for AuthServiceImpl {
         // application's token never turns into one. A sign-in's pending
         // context is completed into its session instead.
         let caller = self.factor_caller(&request).await?;
-        let profile_id = match &caller {
-            FactorCaller::Pending(session, _) | FactorCaller::StepUp(session) => session.profile_id,
-        };
         let client_ip = self.client_ip(&request)?;
         // A native completion asking for a renewable session binds its key
         // to the pending context it presents; a step-up renews nothing.
@@ -3097,118 +2595,26 @@ impl AuthService for AuthServiceImpl {
             None => None,
         };
 
-        let req = request.into_inner();
-        require_totp_code_format(&req.code)?;
-
-        // A code guess spends the account's sign-in budget, shared by every
-        // context and replica: once it is spent, no code is checked.
-        let identity = profile_id.to_string();
-        self.refuse_if_locked(&identity).await?;
-
-        // The active TOTP credential only; a revoked one never verifies.
-        let (totp_cred, secret) = self
-            .active_totp_seed(profile_id)
-            .await?
-            .ok_or_else(|| mfa_not_enrolled("TOTP authenticator"))?;
-        if let Err(refused) = self.accept_totp(profile_id, &secret, &req.code).await {
-            self.record_failed_login(&identity, client_ip).await?;
-            return Err(refused);
-        }
-
-        // The use is recorded only on a credential still active: one revoked
-        // since it was read neither verifies nor comes back.
-        let used = self
-            .storage
-            .mark_credential_used(
-                totp_cred.id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "credential.mfa_verified",
-                    totp_cred.id.0.to_string(),
-                )
-                .into(),
+        // A completed sign-in and a step-up both answer with the session's
+        // new credential.
+        self.second_factors
+            .verify_totp(
+                &self.sign_ins,
+                self.oauth.login_policy(),
+                caller,
+                client_ip,
+                native_key.as_deref(),
+                &request.into_inner().code,
             )
             .await
-            .map_err(storage_failure)?;
-        if !used {
-            return Err(authentication_failed());
-        }
-
-        let session_id = match caller {
-            FactorCaller::Pending(pending, client) => {
-                let signed_in = self
-                    .complete_pending_sign_in(pending, "otp", client, native_key.as_deref())
-                    .await?;
-                info!("TOTP completed the sign-in of profile {}", profile_id);
-                return signed_in.respond(|session_id, expires_in| MfaVerifyResponse {
-                    verified: true,
-                    session_id: Some(session_id.into()),
-                    expires_in: Some(expires_in),
-                    redirect_to: None,
-                    remaining_codes: None,
-                });
-            }
-            FactorCaller::StepUp(session) => session.id,
-        };
-
-        // Elevate the session; a token must not claim an elevation that was not stored.
-        let session = self
-            .authenticate_session(
-                session_id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "session.step_up",
-                    session_id.to_string(),
-                )
-                .into(),
-                |active| {
-                    active.elevate(sid_core::models::session::AuthLevel::Standard);
-                    active.add_amr("otp");
-                },
-            )
-            .await?;
-
-        // Issue new token with elevated claims.
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(session_ended)?;
-
-        let sub = profile_id.to_string();
-        let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), &profile)
-            .await
-            .map_err(storage_failure)?;
-        let access_token = self
-            .jwt
-            .issue_access_token(
-                &sub,
-                Some(&sub),
-                &roles,
-                &session,
-                &session.scopes,
-                None,
-                None,
-            )
-            .map_err(|e| internal("issue access token", e))?;
-
-        info!("TOTP step-up verified for profile {}", profile_id);
-
-        // The caller presented the session's token, so the elevated one goes
-        // back the same way, whoever it is (a native client or a BFF).
-        SignedIn {
-            session_id,
-            expires_in: self.jwt.access_token_ttl_secs(),
-            delivery: Delivery::bearer(access_token.into()),
-        }
-        .respond(|session_id, expires_in| MfaVerifyResponse {
-            verified: true,
-            session_id: Some(session_id.into()),
-            expires_in: Some(expires_in),
-            redirect_to: None,
-            remaining_codes: None,
-        })
+            .map_err(second_factor_refusal)?
+            .respond(|session_id, expires_in| MfaVerifyResponse {
+                verified: true,
+                session_id: Some(session_id.into()),
+                expires_in: Some(expires_in),
+                redirect_to: None,
+                remaining_codes: None,
+            })
     }
 
     // ── MFA: SMS ──
@@ -3235,73 +2641,13 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<GenerateRecoveryCodesResponse>, Status> {
         self.check_maintenance().await?;
         let caller = self.caller_claims(&request).await?.caller;
-        let profile_id = caller.profile_id;
-        // New codes step up to Standard, so issuing them is an enrollment.
-        self.require_enrollment_authority(&caller, profile_id, CredentialType::Recovery)
-            .await?;
-        let context = context(&request)?;
-        let command = sid_authn::operation::KeyedCommand::by_profile::<
-            sid_proto::keyed::authn::auth_service::GenerateRecoveryCodes,
-        >(profile_id, context, request.get_ref());
-        // SID keeps only the codes' hashes: a retry of a completed generation
-        // names the set it issued and issues no other, so the codes already
-        // delivered stay valid until a new command replaces them.
-        if let Some(recorded) = command.completed(&*self.storage).await.or_status()? {
-            return Err(recovery_codes_issued(&recorded));
-        }
-
-        // Generate new recovery codes.
-        let (plaintext, hashes) = sid_authn::generate_recovery_codes();
-        let recovery_data =
-            serde_json::to_vec(&hashes).map_err(|e| internal("encode recovery codes", e))?;
-
-        // The new set takes the old one's place in one transaction: old codes
-        // never keep working beside the new ones, and a failure leaves the
-        // old set usable rather than none.
-        let credential = Credential::new(
-            profile_id,
-            CredentialType::Recovery,
-            CredentialData::new(recovery_data),
-            Some("Recovery Codes".to_string()),
-        );
-        let generated = Event::new(&self.issuer, event_types::MFA_ENROLLED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "method": "recovery",
-                "credential_id": credential.id.0.to_string(),
-                "regenerated": true,
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "credential.recovery_codes_generated",
-            credential.id.0.to_string(),
-        ))
-        .with_work(generated.relay())
-        .with_operation(command.completion(credential.id.0.as_bytes().to_vec()));
-        match self.storage.replace_credential(&credential, ctx).await {
-            Ok(_) => {}
-            // Another attempt of this command committed first: its set is
-            // the issued one.
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return Err(recovery_codes_issued(
-                    &command
-                        .committed_elsewhere(&*self.storage)
-                        .await
-                        .or_status()?,
-                ));
-            }
-            Err(e) => return Err(storage_failure(e)),
-        }
-
-        info!(
-            "Recovery codes generated for profile {} ({} codes)",
-            profile_id,
-            plaintext.len()
-        );
-
-        Ok(Response::new(GenerateRecoveryCodesResponse {
-            codes: plaintext,
-        }))
+        let (context, refused) = deferred_context(&request);
+        deferred_second_factor(
+            self.second_factors
+                .generate_recovery_codes(&self.sign_ins, &caller, context, request.get_ref())
+                .await,
+            refused,
+        )
     }
 
     async fn verify_recovery_code(
@@ -3309,49 +2655,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<VerifyRecoveryCodeRequest>,
     ) -> Result<Response<MfaVerifyResponse>, Status> {
         self.check_maintenance().await?;
-        // A second factor authenticates the IdP session, never an
-        // application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation().or_status()?;
-        let claims = verified.claims;
-        let profile_id = verified.caller.profile_id;
-
-        let req = request.into_inner();
-        if req.code.is_empty() {
-            return Err(missing_field("code"));
-        }
-
-        let session_id = SessionId::parse(&claims.sid)
-            .map_err(|e| internal("read session id of a verified token", e))?;
-        let remaining = i32::try_from(self.consume_recovery_code(profile_id, &req.code).await?)
-            .map_err(|e| internal("count remaining recovery codes", e))?;
-
-        // Record the method on the session (recovery codes grant Basic, fallback only).
-        self.authenticate_session(
-            session_id,
-            AuditEntry::user(
-                profile_id.to_string(),
-                "session.recovery_code_used",
-                session_id.to_string(),
-            )
-            .into(),
-            |active| active.add_amr("mca"), // multi-code authenticator
-        )
-        .await?;
-
-        info!(
-            "Recovery code used for profile {} ({} remaining)",
-            profile_id, remaining
-        );
-
-        Ok(Response::new(MfaVerifyResponse {
-            verified: true,
-            session_id: Some(session_id.into()),
-            // Recovery doesn't elevate: no new token is delivered.
-            expires_in: None,
-            redirect_to: None,
-            remaining_codes: Some(remaining),
-        }))
+        self.second_factors
+            .verify_recovery_code(&self.sign_ins, &verified, &request.into_inner().code)
+            .await
+            .map(Response::new)
+            .map_err(second_factor_refusal)
     }
 
     // ── OTP ──
@@ -3692,153 +3001,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<RequestStepUpRequest>,
     ) -> Result<Response<StepUpChallenge>, Status> {
         self.check_maintenance().await?;
-        // Step-up elevates the IdP session, never an application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation().or_status()?;
-        verified.caller.require_interactive().or_status()?;
-        let claims = verified.claims;
-        let req_inner = request.into_inner();
-
-        let method = StepUpMethod::try_from(req_inner.method).unwrap_or(StepUpMethod::Unspecified);
-
-        // ── Session decay + method filtering ──
-        // Step-up always works on the caller's own session, the token's.
-        let session_id = SessionId::parse(&claims.sid)
-            .map_err(|e| internal("read session id of a verified token", e))?;
-        let session = self
-            .storage
-            .get_session(session_id)
+        self.second_factors
+            .step_up_request(&self.sign_ins, &verified, request.into_inner().method)
             .await
-            .map_err(storage_failure)?
-            .ok_or_else(session_ended)?;
-
-        let decay = session.decay_level();
-
-        // Low decay (12h+) → full re-auth required, no step-up possible.
-        // The token itself still works for other calls, so this is a state of
-        // the session, not a failed authentication.
-        if decay > sid_core::models::session::SessionDecayLevel::Medium {
-            return Err(ApiError::new(
-                ErrorReason::InvalidState,
-                "the session is too old for a step-up: full re-authentication required",
-            )
-            .with_precondition("SESSION_DECAY", "low", "sign in again")
-            .into());
-        }
-
-        // Determine which methods are available at current decay level.
-        // Only credentials that may still authenticate offer a method.
-        let enrolled_creds: Vec<Credential> = self
-            .storage
-            .get_credentials_by_profile(session.profile_id, None)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .filter(|c| c.status.is_active())
-            .collect();
-
-        let has_totp = enrolled_creds
-            .iter()
-            .any(|c| c.credential_type == CredentialType::Totp);
-        let has_webauthn = enrolled_creds
-            .iter()
-            .any(|c| c.credential_type == CredentialType::WebAuthn);
-        let has_recovery = enrolled_creds
-            .iter()
-            .any(|c| c.credential_type == CredentialType::Recovery);
-
-        // Medium decay (4-12h) → phishing-resistant only (WebAuthn).
-        // Full/High (0-4h) → all enrolled methods.
-        let phishing_resistant_only = decay >= sid_core::models::session::SessionDecayLevel::Medium;
-
-        let mut allowed = Vec::new();
-        if has_webauthn {
-            allowed.push(StepUpMethod::Webauthn as i32);
-        }
-        if !phishing_resistant_only {
-            if has_totp {
-                allowed.push(StepUpMethod::Totp as i32);
-            }
-            if has_recovery {
-                allowed.push(StepUpMethod::RecoveryCode as i32);
-            }
-        }
-
-        let decay_str = match decay {
-            sid_core::models::session::SessionDecayLevel::Full => "full",
-            sid_core::models::session::SessionDecayLevel::High => "high",
-            sid_core::models::session::SessionDecayLevel::Medium => "medium",
-            sid_core::models::session::SessionDecayLevel::Low => "low",
-        };
-
-        match method {
-            StepUpMethod::Unspecified => {
-                // Query mode: return available methods without starting a challenge.
-                // If no methods are available, step-up is impossible — fail now rather
-                // than returning an empty allowed_methods list (empty success = nonsense).
-                if allowed.is_empty() {
-                    return Err(mfa_not_enrolled("second factor usable for a step-up"));
-                }
-                Ok(Response::new(StepUpChallenge {
-                    method: StepUpMethod::Unspecified as i32,
-                    challenge_id: None,
-                    challenge: None,
-                    allowed_methods: allowed,
-                    decay_level: decay_str.to_string(),
-                }))
-            }
-            StepUpMethod::Totp | StepUpMethod::RecoveryCode => {
-                // Validate method is allowed at current decay level.
-                if !allowed.contains(&(method as i32)) {
-                    return Err(step_up_method_unavailable(method, decay_str));
-                }
-                // 1-phase methods: no challenge needed, client calls CompleteStepUp directly.
-                Ok(Response::new(StepUpChallenge {
-                    method: req_inner.method,
-                    challenge_id: None,
-                    challenge: None,
-                    allowed_methods: allowed,
-                    decay_level: decay_str.to_string(),
-                }))
-            }
-            StepUpMethod::Webauthn => {
-                // 2-phase: generate WebAuthn authentication challenge.
-                let passkeys: Vec<&Credential> = enrolled_creds
-                    .iter()
-                    .filter(|c| c.credential_type == CredentialType::WebAuthn)
-                    .collect();
-
-                if passkeys.is_empty() {
-                    return Err(mfa_not_enrolled("passkey"));
-                }
-
-                let result = self
-                    .webauthn
-                    .authentication_start(AssertionPurpose::StepUp, passkeys)
-                    .await
-                    .map_err(|e| internal("start passkey step-up", e))?;
-                let options_json = result.options;
-
-                // Store state_key keyed by session and challenge: only a completion
-                // on the same session can consume it.
-                let challenge_id = sid_ids::StepUpChallengeId::generate();
-                self.step_up_state
-                    .insert(
-                        &step_up_challenge_key(&claims.sid, &challenge_id.to_string()),
-                        &result.state_key,
-                    )
-                    .await
-                    .or_status()?;
-
-                Ok(Response::new(StepUpChallenge {
-                    method: req_inner.method,
-                    challenge_id: Some(challenge_id.into()),
-                    challenge: Some(step_up_challenge::Challenge::WebauthnOptions(options_json)),
-                    allowed_methods: allowed,
-                    decay_level: decay_str.to_string(),
-                }))
-            }
-        }
+            .map(Response::new)
+            .map_err(second_factor_refusal)
     }
 
     async fn complete_step_up(
@@ -3846,161 +3014,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<CompleteStepUpRequest>,
     ) -> Result<Response<CompleteStepUpResponse>, Status> {
         self.check_maintenance().await?;
-        // Step-up elevates the IdP session, never an application's session.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation().or_status()?;
-        let claims = verified.claims;
-        let profile_id = verified.caller.profile_id;
-        let session_id = SessionId::parse(&claims.sid)
-            .map_err(|e| internal("read session id of a verified token", e))?;
-
-        let req = request.into_inner();
-        let method = StepUpMethod::try_from(req.method).unwrap_or(StepUpMethod::Unspecified);
-
-        // Dispatch proof verification by method.
-        let (amr_methods, target_level) = match method {
-            StepUpMethod::Totp => {
-                let Some(complete_step_up_request::Proof::TotpCode(code)) = req.proof else {
-                    return Err(missing_field("totp_code"));
-                };
-                require_totp_code_format(&code)?;
-
-                let (_, secret) = self
-                    .active_totp_seed(profile_id)
-                    .await?
-                    .ok_or_else(|| mfa_not_enrolled("TOTP authenticator"))?;
-                self.accept_totp(profile_id, &secret, &code).await?;
-
-                (vec!["otp"], sid_core::models::session::AuthLevel::Standard)
-            }
-
-            StepUpMethod::RecoveryCode => {
-                let Some(complete_step_up_request::Proof::RecoveryCode(code)) = req.proof else {
-                    return Err(missing_field("recovery_code"));
-                };
-
-                // The code is spent before it counts: a code that cannot be
-                // removed would stay reusable, so a failed write fails the step-up.
-                self.consume_recovery_code(profile_id, &code).await?;
-
-                (vec!["mca"], sid_core::models::session::AuthLevel::Standard)
-            }
-
-            StepUpMethod::Webauthn => {
-                let Some(complete_step_up_request::Proof::WebauthnAssertion(assertion_bytes)) =
-                    req.proof
-                else {
-                    return Err(missing_field("webauthn_assertion"));
-                };
-
-                let credential = AssertionResponse::parse(&assertion_bytes)
-                    .map_err(|_| invalid_field("webauthn_assertion", "not a WebAuthn assertion"))?;
-
-                // The step-up this session requested, and the assertion must
-                // answer that step-up's own challenge.
-                let expired = || ceremony_expired("passkey step-up");
-                let challenge_id = wire_id(req.challenge_id.as_ref(), "challenge_id")?;
-                let state_key = self
-                    .step_up_state
-                    .take(&step_up_challenge_key(
-                        &claims.sid,
-                        &challenge_id.to_string(),
-                    ))
-                    .await
-                    .or_status()?
-                    .ok_or_else(expired)?;
-                if credential.state_key().ok() != Some(state_key) {
-                    return Err(expired());
-                }
-
-                let passkeys = self.active_passkeys(profile_id).await?;
-                let verified = self
-                    .webauthn
-                    .authentication_finish(AssertionPurpose::StepUp, &credential, &passkeys)
-                    .await
-                    .map_err(|e| match e {
-                        sid_core::Error::AuthenticationFailed(why) => {
-                            warn!("WebAuthn step-up verification failed: {why}");
-                            authentication_failed()
-                        }
-                        other => internal("finish passkey step-up", other),
-                    })?;
-                let (key_amr, _) = self.record_passkey_use(&passkeys, &verified).await?;
-
-                // Determine target level based on user_verified.
-                // user_verified=true → Elevated (phishing-resistant, 2 NIST factors).
-                // user_verified=false → Standard (possession only).
-                let target = if verified.user_verified {
-                    sid_core::models::session::AuthLevel::Elevated
-                } else {
-                    sid_core::models::session::AuthLevel::Standard
-                };
-
-                (
-                    sid_authn::webauthn::passkey_amr(key_amr, verified.user_verified),
-                    target,
-                )
-            }
-
-            StepUpMethod::Unspecified => return Err(missing_field("method")),
-        };
-
-        // ── Shared elevation logic ──
-
-        // The elevated token is issued only for an elevation that is stored.
-        let session = self
-            .authenticate_session(
-                session_id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "session.step_up",
-                    session_id.to_string(),
-                )
-                .into(),
-                |active| {
-                    active.elevate(target_level);
-                    for method in &amr_methods {
-                        active.add_amr(method);
-                    }
-                    // The step-up is an authentication now: it is what a
-                    // later sensitive operation counts as fresh.
-                    active.refresh_authentication();
-                },
-            )
-            .await?;
-
-        // Issue rotated access token with elevated assurance.
-        let acr = session.assurance_at(Utc::now()).acr_value().to_string();
-        let amr = session.amr.clone();
-        let new_token = self
-            .jwt
-            .reissue_elevated_token(&claims, &session)
-            .map_err(|e| internal("reissue stepped-up token", e))?;
-        // The rotated token replaces the one this call came with; that one
-        // stops for its remaining lifetime.
-        // Both are Unix-second timestamps of this era: the difference cannot
-        // overflow; a negative one is a token already expired.
-        let remaining = u64::try_from(claims.exp - Utc::now().timestamp()).unwrap_or(0);
-        self.revocation_cache
-            .revoke_jti(
-                claims.jti.clone(),
-                std::time::Duration::from_secs(remaining),
-            )
+        self.second_factors
+            .step_up_complete(&self.sign_ins, &verified, request.into_inner())
             .await
-            .map_err(|e| dependency_unavailable("token revocation", e))?;
-
-        info!(
-            profile = %profile_id,
-            methods = ?amr_methods,
-            acr = %acr,
-            "Step-up completed via generic RPC"
-        );
-
-        Ok(Response::new(CompleteStepUpResponse {
-            new_session_token: new_token,
-            acr,
-            amr,
-        }))
+            .map(Response::new)
+            .map_err(second_factor_refusal)
     }
 
     // ── MFA credential management ──
@@ -4011,89 +3030,13 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<DeleteMfaCredentialResponse>, Status> {
         self.check_maintenance().await?;
         let verified = self.caller_claims(&request).await?;
-        let claims = verified.claims;
-
-        // Require elevated session (step-up auth completed).
-        if !claims.acr.contains("elevated") && !claims.acr.contains("critical") {
-            return Err(step_up_required(&sid_authn::login_policy::Unmet {
-                acr: Some(sid_core::models::session::AuthLevel::Elevated),
-                ..Default::default()
-            })
-            .into());
-        }
-
-        let profile_id = verified.caller.profile_id;
-
-        let context = context(&request)?;
-        let req = request.into_inner();
-        let credential_id = sid_core::models::CredentialId(
-            wire_id(req.credential_id.as_ref(), "credential_id")?.into_uuid(),
-        );
-
-        // A retry of a completed deletion answers as it did, not as a
-        // credential no longer there, and owes no second event.
-        let command = sid_authn::operation::KeyedCommand::by_profile::<
-            sid_proto::keyed::authn::auth_service::DeleteMfaCredential,
-        >(profile_id, context, &req);
-        let response = run(&command, &*self.storage, || async {
-            // Load credential and verify ownership + type.
-            let credentials = self
-                .storage
-                .get_credentials_by_profile(profile_id, None)
-                .await?;
-            let credential = credentials
-                .iter()
-                .find(|c| c.id == credential_id)
-                .ok_or_else(|| credential_not_found(credential_id))?;
-
-            // Only allow deleting MFA credentials (TOTP, WebAuthn, Recovery).
-            let cred_type = match credential.credential_type {
-                CredentialType::Totp => "totp",
-                CredentialType::WebAuthn => "webauthn",
-                CredentialType::Recovery => "recovery",
-                _ => {
-                    return Err(invalid_field(
-                        "credential_id",
-                        "not a second factor (TOTP, passkey or recovery codes)",
-                    )
-                    .into());
-                }
-            };
-
-            let response = DeleteMfaCredentialResponse {
-                deleted: true,
-                credential_type: cred_type.to_string(),
-            };
-            let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
-                .with_subject(format!("profile/{}", profile_id))
-                .with_data(serde_json::json!({
-                    "credential_type": cred_type,
-                    "credential_id": credential_id.0.to_string(),
-                }));
-            let ctx = MutationContext::from(AuditEntry::user(
-                profile_id.to_string(),
-                "credential.mfa_deleted",
-                credential_id.0.to_string(),
-            ))
-            .with_work(disabled.relay())
-            .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
-            // Revoked, not deleted; a passkey that is the last way to sign
-            // in stays. The event commits only with a revocation that
-            // happened.
-            let outcome = self.storage.revoke_credential(credential_id, ctx).await?;
-            crate::grpc::identity_service::refuse_last_primary(outcome, credential_id)?;
-
-            info!(
-                profile = %profile_id,
-                credential = %credential_id.0,
-                r#type = cred_type,
-                "MFA credential deleted (self-service)"
-            );
-            Ok(response)
-        })
-        .await?;
-
-        Ok(Response::new(response))
+        let (context, refused) = deferred_context(&request);
+        deferred_second_factor(
+            self.second_factors
+                .delete(&self.sign_ins, &verified, context, request.into_inner())
+                .await,
+            refused,
+        )
     }
 
     // ── Account deletion ──

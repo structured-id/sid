@@ -24,16 +24,3 @@ pub(crate) fn wire_id<W: sid_ids_proto::WireId>(
     sid_ids_proto::required(value)
         .map_err(|e| sid_infra::grpc_error::refuse::invalid_field(field, format!("{field}: {e}")))
 }
-
-/// A stored reference as an answer carries it. A stored value that is not a
-/// valid identifier of its kind is corruption, never sent as it is.
-#[allow(clippy::result_large_err)]
-pub(crate) fn stored_id<D, W>(id: uuid::Uuid) -> Result<Option<W>, tonic::Status>
-where
-    D: TryFrom<uuid::Uuid, Error = sid_ids::IdError>,
-    W: From<D>,
-{
-    D::try_from(id)
-        .map(|d| Some(W::from(d)))
-        .map_err(|e| sid_infra::grpc_error::refuse::internal("stored identifier", e))
-}

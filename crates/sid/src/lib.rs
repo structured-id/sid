@@ -26,6 +26,7 @@ pub mod projects;
 pub mod provisioning;
 pub mod rate_limit;
 pub mod registration;
+pub mod second_factor;
 pub mod security;
 pub mod sign_in;
 pub mod upstream;
