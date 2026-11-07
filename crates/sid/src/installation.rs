@@ -12,6 +12,7 @@ use sid_authn::issuer::IssuerRegistry;
 use sid_authn::jwt::AccessTokenTtl;
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::revocation_cache::RevocationCache;
+use sid_authz::CeAuthzEngine;
 use sid_core::models::{
     AuditEntry, BootstrapPolicy, CentralAdoption, OidcIssuer, Organization, ProtectedResource,
 };
@@ -70,6 +71,9 @@ pub struct Installation {
     pub revocation_cache: Arc<RevocationCache>,
     /// The key every replica signs and checks proof-of-work challenges with.
     pub captcha_pow_key: [u8; 32],
+    /// The installation's fixed RBAC/ABAC decision, one engine for every
+    /// component, so its compiled policies are shared.
+    pub authorization: Arc<CeAuthzEngine<dyn StorageBackend>>,
 }
 
 /// Why an installation does not open. Nothing is served from a store that
@@ -212,6 +216,7 @@ impl Installation {
             .map_err(store("installation OIDC issuer signing key"))?;
 
         Ok(Self {
+            authorization: Arc::new(CeAuthzEngine::new(storage.clone())),
             storage,
             key_manager,
             organization,
