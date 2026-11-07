@@ -15,7 +15,7 @@ use sid_core::models::{
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::{self as pb};
 
-use crate::wire::{FieldError, to_timestamp, wire_id};
+use crate::wire::{FieldError, json_object_to_struct, struct_to_json, to_timestamp, wire_id};
 
 /// The flow timeout a configuration that names none gets.
 const DEFAULT_TIMEOUT_SECONDS: u32 = 300;
@@ -384,82 +384,24 @@ fn on_error_from_proto(v: i32) -> Result<ActionOnError, FlowError> {
     }
 }
 
-fn json_to_prost_value(v: serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match v {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(b) => Kind::BoolValue(b),
-        serde_json::Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(s) => Kind::StringValue(s),
-        serde_json::Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
-            values: arr.into_iter().map(json_to_prost_value).collect(),
-        }),
-        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
-            fields: map
-                .into_iter()
-                .map(|(k, v)| (k, json_to_prost_value(v)))
-                .collect(),
-        }),
-    };
-    prost_types::Value { kind: Some(kind) }
-}
-
-fn prost_value_to_json(v: prost_types::Value) -> serde_json::Value {
-    use prost_types::value::Kind;
-    match v.kind {
-        Some(Kind::NullValue(_)) | None => serde_json::Value::Null,
-        Some(Kind::BoolValue(b)) => serde_json::Value::Bool(b),
-        Some(Kind::NumberValue(n)) => {
-            serde_json::Value::Number(serde_json::Number::from_f64(n).unwrap_or_else(|| 0.into()))
-        }
-        Some(Kind::StringValue(s)) => serde_json::Value::String(s),
-        Some(Kind::ListValue(list)) => {
-            serde_json::Value::Array(list.values.into_iter().map(prost_value_to_json).collect())
-        }
-        Some(Kind::StructValue(s)) => serde_json::Value::Object(
-            s.fields
-                .into_iter()
-                .map(|(k, v)| (k, prost_value_to_json(v)))
-                .collect(),
-        ),
-    }
-}
-
-/// An object as a protobuf struct; anything else is no parameters.
-fn json_to_prost_struct(v: serde_json::Value) -> Option<prost_types::Struct> {
-    match v {
-        serde_json::Value::Object(map) => Some(prost_types::Struct {
-            fields: map
-                .into_iter()
-                .map(|(k, v)| (k, json_to_prost_value(v)))
-                .collect(),
-        }),
-        _ => None,
-    }
-}
-
-fn prost_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
-    serde_json::Value::Object(
-        s.fields
-            .iter()
-            .map(|(k, v)| (k.clone(), prost_value_to_json(v.clone())))
-            .collect(),
-    )
-}
-
+/// A step's parameters: an object is a protobuf struct, anything else no
+/// parameters.
 fn step_to_proto(step_type: &str, step: &StepConfig) -> pb::admin::StepConfig {
     pb::admin::StepConfig {
         step_type: step_type.to_string(),
         enabled: step.enabled,
-        params: json_to_prost_struct(step.params.clone()),
+        params: match step.params.clone() {
+            serde_json::Value::Object(map) => Some(json_object_to_struct(map)),
+            _ => None,
+        },
     }
 }
 
 fn step_from_proto(step: &pb::admin::StepConfig) -> (String, StepConfig) {
     let params = step
         .params
-        .as_ref()
-        .map(prost_struct_to_json)
+        .clone()
+        .map(struct_to_json)
         .unwrap_or(serde_json::Value::Null);
     (
         step.step_type.clone(),
