@@ -25,7 +25,7 @@ use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
 use sid_authn::webauthn::WebAuthnServer;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{AuditEntry, CredentialId, ProfileId, ProfileType, SessionId};
+use sid_core::models::{AuditEntry, CredentialId, ProfileId, SessionId};
 use sid_core::models::{OidcIssuer, RevocationReason};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::context;
@@ -227,6 +227,41 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::InvalidIdentifier(detail) => invalid_field("identifier", detail),
         E::Identity(e) => super::identity_service::refusal(e),
         E::Operation(e) => e.into_status(),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
+/// The answer to a refused or failed mailbox sign-in step.
+fn email_sign_in_refusal(e: sid::email_sign_in::EmailSignInError) -> Status {
+    use sid::email_sign_in::EmailSignInError as E;
+    match e {
+        E::InvalidField { field, reason } => invalid_field(field, reason),
+        E::Code(e) => otp_refusal(e),
+        E::CodeSessionExpired => ceremony_expired("email code"),
+        E::CodeExpired => ApiError::new(
+            ErrorReason::TokenExpired,
+            "the code has expired; request a new one",
+        )
+        .into(),
+        E::TooManyCodes => ApiError::new(
+            ErrorReason::QuotaExceeded,
+            "too many wrong codes; request a new one",
+        )
+        .with_quota_violation("email_code_attempts", "attempts per code")
+        .into(),
+        E::LinkExpired => ApiError::new(
+            ErrorReason::TokenExpired,
+            "the link has expired; request a new one",
+        )
+        .into(),
+        E::LinkUsed => ApiError::new(
+            ErrorReason::TokenInvalid,
+            "the link was already used; request a new one",
+        )
+        .into(),
+        E::AuthenticationFailed => authentication_failed(),
+        E::SignIn(e) => sign_in_refusal(e),
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
     }
@@ -613,6 +648,11 @@ impl AuthServiceImpl {
         self.sign_ins.policy()
     }
 
+    /// Sign-ins by mailbox over this service's sign-ins.
+    fn email_sign_in(&self) -> sid::email_sign_in::EmailSignIn<'_> {
+        sid::email_sign_in::EmailSignIn::new(&self.sign_ins, self.oauth.login_policy())
+    }
+
     /// Password replacement over this service's sign-ins and operations.
     fn passwords(&self) -> sid::password::Passwords<'_> {
         sid::password::Passwords::new(&self.sign_ins, &self.password_ops)
@@ -831,14 +871,6 @@ impl AuthServiceImpl {
             .map_err(sign_in_refusal)
     }
 
-    /// Count an attempt from `client_ip` against the stuffing limit.
-    async fn record_ip_attempt(&self, client_ip: Option<std::net::IpAddr>) -> Result<(), Status> {
-        self.sign_ins
-            .record_ip_attempt(client_ip)
-            .await
-            .map_err(sign_in_refusal)
-    }
-
     /// The installation's public origin, which every URI a sender proof
     /// names starts with.
     pub(crate) fn public_origin(&self) -> &str {
@@ -885,34 +917,6 @@ impl AuthServiceImpl {
             .select_target(issuer, requester, resource)
             .await
             .map_err(oauth_refusal)
-    }
-
-    /// Resolve a profile by principal (email, phone, or username).
-    ///
-    /// Uses principal-type-aware lookup, falling back to username lookup.
-    /// Like `resolve_profile`, but returns `None` for nonexistent users instead
-    /// of an error. Storage errors still propagate.
-    async fn resolve_profile_optional(
-        &self,
-        identifier: &str,
-    ) -> Result<Option<sid_core::models::Profile>, Status> {
-        self.sign_ins
-            .resolve_profile(identifier)
-            .await
-            .map_err(sign_in_refusal)
-    }
-
-    /// The mailbox login mail for the email key `key` goes to on `profile`
-    /// (see [`sid::sign_in::SignIn::login_mail_destination`]).
-    async fn login_mail_destination(
-        &self,
-        profile: ProfileId,
-        key: &str,
-    ) -> Result<Option<String>, Status> {
-        self.sign_ins
-            .login_mail_destination(profile, key)
-            .await
-            .map_err(sign_in_refusal)
     }
 
     /// Who binds a second factor in `request`: a sign-in's pending context
@@ -1034,27 +1038,6 @@ impl AuthServiceImpl {
             )
             .await
             .map_err(sign_in_refusal)
-    }
-
-    /// Provisional session for a weak-possession login (email OTP, magic link):
-    /// 15 minutes, provisional scopes only. Mailbox possession alone never grants
-    /// a full session to an existing account.
-    async fn create_provisional_session_and_issue_tokens(
-        &self,
-        profile: &sid_core::models::Profile,
-        amr: &str,
-        device_id: Option<uuid::Uuid>,
-        client_ip: Option<std::net::IpAddr>,
-        client: CeremonyClient,
-        policy: Option<sid_core::models::ActorFence>,
-    ) -> Result<SignedIn, Status> {
-        let mut session = sid_core::models::Session::new_provisional(profile.id, client_ip);
-        session.device_id = device_id;
-        session.amr = vec![amr.to_string()];
-        // Mailbox possession proves no stored credential, and a provisional
-        // session is not renewable.
-        self.sign_in(profile, session, client, None, None, policy, None)
-            .await
     }
 
     /// Store `session` and deliver its credential to `client`: the browser
@@ -2086,68 +2069,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<RequestMagicLinkResponse>, Status> {
         self.check_maintenance().await?;
         let magic_link = self.require_magic_links()?;
-        let req = request.into_inner();
-
-        // Anti-enumeration: an unknown address, an account that may not use
-        // magic links (anything but a Corporate Profile) and an account past
-        // its request limit get the same answer; only a real request sends a
-        // link.
-        let unsent = || {
-            Ok(Response::new(RequestMagicLinkResponse {
-                magic_link_id: Some(sid_ids::MagicLinkId::generate().into()),
-                expires_in: sid_core::models::MAGIC_LINK_EXPIRY_SECS as i32,
-            }))
-        };
-        // Links go to an email address, to the account its sign-in assignment
-        // routes to, under the normalized address (one request limit for
-        // every spelling of it).
-        let (principal_type, address) = parse_principal(&req.principal)?;
-        if principal_type != PrincipalType::Email {
-            return unsent();
-        }
-        let profile = self.resolve_profile_optional(&address).await?;
-        let Some(profile) = profile.filter(|p| p.profile_type == ProfileType::Corporate) else {
-            return unsent();
-        };
-        // The link goes to the mailbox the account bound the address with,
-        // never the key or the caller's spelling of it.
-        let Some(destination) = self.login_mail_destination(profile.id, &address).await? else {
-            info!("magic link requested for an account with no login mailbox: no link sent");
-            return unsent();
-        };
-
-        // The session and the work emailing its link commit together; the
-        // token leaves this service only inside that email, never logged or
-        // put into an event.
-        let (result, _token) = match magic_link.request_magic_link(&address, &destination).await {
-            Ok(sent) => sent,
-            Err(sid_authn::magic_link::MagicLinkError::RateLimited { .. }) => {
-                info!("Magic link request past the per-address limit: no link sent");
-                return unsent();
-            }
-            // A full email queue refuses only real accounts' requests; it
-            // answers as an unknown address does, so a backlog never tells the
-            // caller which addresses have accounts.
-            Err(sid_authn::magic_link::MagicLinkError::DeliveryBacklog(why)) => {
-                warn!(%why, "magic link email queue full: no link sent");
-                return unsent();
-            }
-            Err(
-                e @ (sid_authn::magic_link::MagicLinkError::Internal(_)
-                | sid_authn::magic_link::MagicLinkError::Sealed(_)),
-            ) => {
-                return Err(internal("request magic link", e));
-            }
-        };
-
-        info!(session_id = %result.session_id, "Magic link requested");
-
-        let magic_link_id = sid_ids::MagicLinkId::from_uuid(result.session_id)
-            .map_err(|e| internal("magic link id", e))?;
-        Ok(Response::new(RequestMagicLinkResponse {
-            magic_link_id: Some(magic_link_id.into()),
-            expires_in: result.expires_in_seconds as i32,
-        }))
+        self.email_sign_in()
+            .request_link(magic_link, &request.into_inner().principal)
+            .await
+            .map(Response::new)
+            .map_err(email_sign_in_refusal)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "verify_magic_link"))]
@@ -2163,84 +2089,23 @@ impl AuthService for AuthServiceImpl {
         let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let req = request.into_inner();
-
-        let session_id = wire_id(req.magic_link_id.as_ref(), "magic_link_id")?.into_uuid();
-
-        let result = magic_link
-            .verify_magic_link(session_id, &req.token)
+        let attempt = sid::email_sign_in::Attempt {
+            client,
+            client_ip,
+            context: AttemptContext {
+                captcha_pass: captcha_pass.as_deref(),
+                user_agent: user_agent.as_deref(),
+            },
+        };
+        self.email_sign_in()
+            .verify_link(magic_link, attempt, request.into_inner())
             .await
-            .map_err(|e| internal("verify magic link", e))?;
-
-        match result {
-            sid_authn::magic_link::MagicLinkVerifyResult::Success { email } => {
-                // The account the address's sign-in assignment routes to now,
-                // not the one it routed to when the link was mailed; only a
-                // Corporate Profile may sign in by link, checked at use.
-                let profile = self
-                    .resolve_profile_optional(&email)
-                    .await?
-                    .filter(|p| p.profile_type == ProfileType::Corporate)
-                    .ok_or_else(authentication_failed)?;
-
-                // Evaluate login security (anomaly detection + policy enforcement).
-                // A mailed link, like a mailed code, is mailbox possession over
-                // a second channel: `mca` (RFC 8176 §2).
-                let policy = self
-                    .evaluate_login_security(
-                        profile.id,
-                        client_ip,
-                        "magic_link",
-                        (
-                            sid_core::models::session::AuthLevel::Basic,
-                            &["mca".to_string()],
-                        ),
-                        AttemptContext {
-                            captcha_pass: captcha_pass.as_deref(),
-                            user_agent: user_agent.as_deref(),
-                        },
-                    )
-                    .await?;
-
-                let signed_in = self
-                    .create_provisional_session_and_issue_tokens(
-                        &profile,
-                        "mca",
-                        user_agent.as_deref().map(compute_device_id),
-                        client_ip,
-                        client,
-                        policy,
-                    )
-                    .await?;
-
-                info!("Magic link verified for profile {}", profile.id);
-
-                signed_in.respond(|session_id, expires_in| VerifyMagicLinkResponse {
-                    session_id: Some(session_id.into()),
-                    // A provisional session lasts minutes.
-                    expires_in: expires_in as i32,
-                })
-            }
-            sid_authn::magic_link::MagicLinkVerifyResult::InvalidToken => {
-                // Record IP-level failed attempt (no profile_id available for magic link failures).
-                self.record_ip_attempt(client_ip).await?;
-                Err(authentication_failed())
-            }
-            sid_authn::magic_link::MagicLinkVerifyResult::Expired => Err(ApiError::new(
-                ErrorReason::TokenExpired,
-                "the link has expired; request a new one",
-            )
-            .into()),
-            sid_authn::magic_link::MagicLinkVerifyResult::AlreadyConsumed => Err(ApiError::new(
-                ErrorReason::TokenInvalid,
-                "the link was already used; request a new one",
-            )
-            .into()),
-            sid_authn::magic_link::MagicLinkVerifyResult::SessionNotFound => {
-                self.record_ip_attempt(client_ip).await?;
-                Err(authentication_failed())
-            }
-        }
+            .map_err(email_sign_in_refusal)?
+            .respond(|session_id, expires_in| VerifyMagicLinkResponse {
+                session_id: Some(session_id.into()),
+                // A provisional session lasts minutes.
+                expires_in: expires_in as i32,
+            })
     }
 
     // ── Session Validation ──
@@ -2671,56 +2536,11 @@ impl AuthService for AuthServiceImpl {
         request: Request<RequestOtpRequest>,
     ) -> Result<Response<RequestOtpResponse>, Status> {
         self.check_maintenance().await?;
-        let req = request.into_inner();
-
-        let handle = parse_handle(&req.principal)?;
-        let Some(email) = handle.email.as_ref() else {
-            return Err(invalid_field(
-                "principal",
-                "a code is sent to an email address",
-            ));
-        };
-        let normalized = &handle.normalized;
-        // The caller sees the address as they typed it; the key only limits
-        // requests across every spelling.
-        let masked =
-            sid_plugin::otp::mask_target(&email.delivery, sid_plugin::otp::OtpChannel::Email);
-
-        // Every address gets a real pending code, whether or not it routes to
-        // an account, and resend and verify answer alike, so no answer tells
-        // whether the account exists. Only an account's code is emailed, to
-        // the mailbox its assignment was bound with, fixed now: neither the
-        // resolution key nor a caller's equivalent spelling (another mailbox
-        // where the key folds dots or tags) ever receives it. The code leaves
-        // this service only inside that email; it is never logged or put
-        // into an event.
-        let destination = match self.resolve_profile_optional(normalized).await? {
-            Some(account) => self.login_mail_destination(account.id, normalized).await?,
-            None => None,
-        };
-        if destination.is_none() {
-            tracing::debug!("email code requested for an address with no login mailbox: no mail");
-        }
-        let destination = match destination.as_deref() {
-            Some(mailbox) => sid_authn::otp::CodeDestination::Email(mailbox),
-            None => sid_authn::otp::CodeDestination::None,
-        };
-        let (result, _code) = self
-            .otp
-            .request_otp(normalized, destination)
+        self.email_sign_in()
+            .request_code(&self.otp, &request.into_inner().principal)
             .await
-            .map_err(otp_refusal)?;
-
-        info!(session_id = %result.session_id, "OTP code requested");
-
-        let otp_session_id = sid_ids::OtpSessionId::from_uuid(result.session_id)
-            .map_err(|e| internal("email code session id", e))?;
-        Ok(Response::new(RequestOtpResponse {
-            otp_session_id: Some(otp_session_id.into()),
-            masked_target: masked,
-            expires_in_seconds: result.expires_in_seconds,
-            code_length: result.code_length,
-        }))
+            .map(Response::new)
+            .map_err(email_sign_in_refusal)
     }
 
     #[instrument(skip_all, fields(method = "verify_otp"))]
@@ -2734,91 +2554,29 @@ impl AuthService for AuthServiceImpl {
         let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let req = request.into_inner();
-
-        let session_id = wire_id(req.otp_session_id.as_ref(), "otp_session_id")?.into_uuid();
-
-        let result = self
-            .otp
-            .verify_otp(&session_id, &req.code)
+        let attempt = sid::email_sign_in::Attempt {
+            client,
+            client_ip,
+            context: AttemptContext {
+                captcha_pass: captcha_pass.as_deref(),
+                user_agent: user_agent.as_deref(),
+            },
+        };
+        // A wrong code, and an address that routes nowhere, answer alike.
+        let Some(signed_in) = self
+            .email_sign_in()
+            .verify_code(&self.otp, attempt, request.into_inner())
             .await
-            .map_err(|e| internal("verify email code", e))?;
-
-        match result {
-            sid_authn::otp::OtpVerifyResult::Success { target } => {
-                // The account the address routes to; an address that routes
-                // nowhere answers like a wrong code.
-                let Some(profile) = self.resolve_profile_optional(&target).await? else {
-                    return Ok(Response::new(VerifyOtpResponse::default()));
-                };
-
-                // Evaluate login security (anomaly detection + policy enforcement).
-                // An emailed code confirms the address over a second channel:
-                // `mca` (RFC 8176 §2), not `otp`, which names a code generator.
-                let policy = self
-                    .evaluate_login_security(
-                        profile.id,
-                        client_ip,
-                        "otp",
-                        (
-                            sid_core::models::session::AuthLevel::Basic,
-                            &["mca".to_string()],
-                        ),
-                        AttemptContext {
-                            captcha_pass: captcha_pass.as_deref(),
-                            user_agent: user_agent.as_deref(),
-                        },
-                    )
-                    .await?;
-
-                let signed_in = self
-                    .create_provisional_session_and_issue_tokens(
-                        &profile,
-                        "mca",
-                        user_agent.as_deref().map(compute_device_id),
-                        client_ip,
-                        client,
-                        policy,
-                    )
-                    .await?;
-
-                info!("OTP verified for profile {}", profile.id);
-
-                signed_in.respond(|session_id, expires_in| VerifyOtpResponse {
-                    verified: true,
-                    redirect_to: None,
-                    session_id: Some(session_id.into()),
-                    expires_in: Some(expires_in),
-                })
-            }
-            sid_authn::otp::OtpVerifyResult::InvalidCode { remaining_attempts } => {
-                self.record_ip_attempt(client_ip).await?;
-                warn!(
-                    session_id = %session_id,
-                    remaining_attempts = remaining_attempts,
-                    "OTP verification failed: invalid code"
-                );
-                Ok(Response::new(VerifyOtpResponse::default()))
-            }
-            sid_authn::otp::OtpVerifyResult::Expired => Err(ApiError::new(
-                ErrorReason::TokenExpired,
-                "the code has expired; request a new one",
-            )
-            .into()),
-            sid_authn::otp::OtpVerifyResult::MaxAttempts => {
-                self.record_ip_attempt(client_ip).await?;
-                Err(ApiError::new(
-                    ErrorReason::QuotaExceeded,
-                    "too many wrong codes; request a new one",
-                )
-                .with_quota_violation("email_code_attempts", "attempts per code")
-                .into())
-            }
-            sid_authn::otp::OtpVerifyResult::SessionNotFound => {
-                self.record_ip_attempt(client_ip).await?;
-                Err(ceremony_expired("email code"))
-            }
-        }
+            .map_err(email_sign_in_refusal)?
+        else {
+            return Ok(Response::new(VerifyOtpResponse::default()));
+        };
+        signed_in.respond(|session_id, expires_in| VerifyOtpResponse {
+            verified: true,
+            redirect_to: None,
+            session_id: Some(session_id.into()),
+            expires_in: Some(expires_in),
+        })
     }
 
     #[instrument(skip_all, fields(method = "resend_otp"))]
@@ -2827,24 +2585,11 @@ impl AuthService for AuthServiceImpl {
         request: Request<ResendOtpRequest>,
     ) -> Result<Response<ResendOtpResponse>, Status> {
         self.check_maintenance().await?;
-        let req = request.into_inner();
-
-        let session_id = wire_id(req.otp_session_id.as_ref(), "otp_session_id")?.into_uuid();
-
-        // A new code in the same session, the one the client verifies
-        // against, sent to the mailbox bound at the request.
-        let (result, _code) = self
-            .otp
-            .resend_otp(&session_id)
+        self.email_sign_in()
+            .resend_code(&self.otp, request.into_inner().otp_session_id.as_ref())
             .await
-            .map_err(otp_refusal)?
-            .ok_or_else(|| ceremony_expired("email code"))?;
-
-        info!(session_id = %result.session_id, "OTP code resent");
-
-        Ok(Response::new(ResendOtpResponse {
-            expires_in: result.expires_in_seconds as i32,
-        }))
+            .map(Response::new)
+            .map_err(email_sign_in_refusal)
     }
 
     // ── Email/Phone verification ──

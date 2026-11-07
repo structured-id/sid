@@ -10,6 +10,7 @@ pub mod admin;
 pub mod authorization;
 pub mod branding;
 pub mod email_provider;
+pub mod email_sign_in;
 pub mod enrollment;
 pub mod flows;
 pub mod identity;
