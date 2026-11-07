@@ -19,6 +19,7 @@ pub mod audit_retention;
 pub mod backup;
 pub mod branding;
 pub mod browser_session;
+pub mod ceremony_commit;
 pub mod cleanup;
 pub mod config;
 pub mod consent;

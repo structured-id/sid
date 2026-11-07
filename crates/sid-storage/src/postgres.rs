@@ -444,6 +444,12 @@ impl PostgresBackend {
         if let Some(operation) = &ctx.operation {
             operation::record_in_tx(tx, operation).await?;
         }
+        // The ceremony it completes, once: a retry of a committed command
+        // was answered above, and a ceremony gone or changed meanwhile
+        // completes nothing.
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(tx, ceremony).await?;
+        }
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
@@ -458,10 +464,15 @@ impl PostgresBackend {
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         ctx: &MutationContext,
     ) -> SidResult<()> {
-        let Some(operation) = &ctx.operation else {
+        if ctx.operation.is_none() && ctx.ceremony.is_none() {
             return Ok(());
-        };
-        operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(operation) = &ctx.operation {
+            operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))

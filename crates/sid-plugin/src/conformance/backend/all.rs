@@ -120,6 +120,13 @@ macro_rules! __storage_conformance {
             $crate::__storage_scenarios!($setup [$(super::$finish)?],browser_session:
                 test_ending_a_session_ends_what_it_authenticated
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],ceremony_commit:
+                test_a_mutation_consumes_its_ceremony
+                test_a_changed_or_absent_ceremony_completes_nothing
+                test_an_expired_ceremony_completes_nothing
+                test_concurrent_completions_commit_once
+                test_a_completed_command_is_answered_before_its_ceremony
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],cleanup:
                 test_delete_outbound_dlq_entry
                 test_cleanup_expired_device_auth_codes

@@ -74,6 +74,24 @@ fn delete(tx: &Statements<'_>, slot: &[u8]) -> SidResult<()> {
     Ok(())
 }
 
+/// Remove `ceremony` inside a mutation's transaction, while it is live and
+/// exactly as read; otherwise `Error::Expired`, and the mutation commits
+/// nothing. The removal writes the node, so a concurrent consumer of the
+/// same ceremony conflicts and runs again on what this one left.
+pub(super) fn consume(
+    tx: &Statements<'_>,
+    ceremony: &sid_core::models::CeremonyConsumption,
+) -> SidResult<()> {
+    let slot = slot(ceremony.namespace, &ceremony.key)?;
+    match stored(tx, &slot)? {
+        Some((held, expires)) if expires > now() && held == ceremony.stored => delete(tx, &slot),
+        _ => Err(SidError::Expired(format!(
+            "ceremony {}:{} is no longer pending",
+            ceremony.namespace, ceremony.key
+        ))),
+    }
+}
+
 /// The count and window end stored for `slot`.
 fn counted(tx: &Statements<'_>, slot: &[u8]) -> SidResult<Option<(i64, i64)>> {
     let rows = tx.run(

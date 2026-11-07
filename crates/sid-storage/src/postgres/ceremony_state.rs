@@ -43,6 +43,41 @@ impl PostgresBackend {
     }
 }
 
+/// Remove `ceremony` inside a mutation's transaction, while it is live and
+/// exactly as read; otherwise `Error::Expired`, and the mutation commits
+/// nothing. The row is locked first, so the condition is evaluated on the
+/// version a concurrent consumer left (see [`PostgresBackend::lock_state`]).
+pub(crate) async fn consume_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ceremony: &sid_core::models::CeremonyConsumption,
+) -> SidResult<()> {
+    sqlx::query("SELECT 1 FROM ceremony_states WHERE namespace = $1 AND state_key = $2 FOR UPDATE")
+        .bind(ceremony.namespace)
+        .bind(&ceremony.key)
+        .execute(&mut **tx)
+        .await
+        .map_err(failure("lock ceremony state"))?;
+    let removed = sqlx::query(
+        "DELETE FROM ceremony_states
+         WHERE namespace = $1 AND state_key = $2 AND value = $3 AND expires_at > clock_timestamp()",
+    )
+    .bind(ceremony.namespace)
+    .bind(&ceremony.key)
+    .bind(&ceremony.stored)
+    .execute(&mut **tx)
+    .await
+    .map_err(failure("consume ceremony state"))?
+    .rows_affected();
+    if removed == 1 {
+        Ok(())
+    } else {
+        Err(SidError::Expired(format!(
+            "ceremony {}:{} is no longer pending",
+            ceremony.namespace, ceremony.key
+        )))
+    }
+}
+
 /// `ttl` in seconds, as `make_interval` takes it.
 fn seconds(ttl: Duration) -> f64 {
     ttl.as_secs_f64()
