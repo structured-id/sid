@@ -175,6 +175,86 @@ async fn change_reaches_only_own_active_password() {
     ));
 }
 
+fn fixed_policy() -> sid_authn::login_policy::FixedLoginPolicy {
+    sid_authn::login_policy::FixedLoginPolicy::of(
+        &sid_core::models::security_policy::SecurityPolicy::ce_default(),
+    )
+}
+
+/// Without the page a reset link opens, or without a mail provider, every
+/// reset request is refused alike, before any address is looked up.
+#[tokio::test]
+async fn reset_needs_its_page_and_mail() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let sign_in = sign_in(storage.clone());
+    let operations = operations(&backend);
+    let policy = fixed_policy();
+    let none = PasswordResets::new(&sign_in, &operations, &policy, None);
+    assert!(matches!(
+        none.request("alice@example.com").await,
+        Err(PasswordError::NotConfigured("password_reset"))
+    ));
+    let service = PasswordResetService::new(storage.clone(), keys());
+    let resets = PasswordResets::new(&sign_in, &operations, &policy, Some(&service));
+    assert!(matches!(
+        resets.request("not-an-account@example.com").await,
+        Err(PasswordError::NotConfigured("email_provider"))
+    ));
+}
+
+/// A reset goes on only while its session is verified and unexpired: an
+/// unknown one answers as expired (the reset starts again from the email),
+/// one whose link is not verified yet is refused as unverified.
+#[tokio::test]
+async fn reset_steps_need_a_verified_session() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let sign_in = sign_in(storage.clone());
+    let operations = operations(&backend);
+    let policy = fixed_policy();
+    let service = PasswordResetService::new(storage.clone(), keys());
+    let resets = PasswordResets::new(&sign_in, &operations, &policy, Some(&service));
+    assert!(matches!(
+        resets
+            .verified_session(ResetSessionId(uuid::Uuid::now_v7()))
+            .await,
+        Err(PasswordError::ResetExpired)
+    ));
+    let alice = stored_profile(storage.as_ref(), "alice").await;
+    let pending = service
+        .request(alice, "alice@example.com", "alice@example.com")
+        .await
+        .unwrap();
+    assert!(matches!(
+        resets.verified_session(pending).await,
+        Err(PasswordError::ResetUnverified(subject)) if subject == pending.0.to_string()
+    ));
+}
+
+/// A reset's sign-in passes the organization's login requirements: under
+/// the baseline a password sign-in is admitted, with the policy's fence.
+#[tokio::test]
+async fn reset_sign_in_follows_login_requirements() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let sign_in = sign_in(storage);
+    let operations = operations(&backend);
+    let policy = fixed_policy();
+    let resets = PasswordResets::new(&sign_in, &operations, &policy, None);
+    let method = LoginMethod::Password;
+    assert!(
+        resets
+            .admitted(
+                ProfileId::generate(),
+                method.auth_level(false),
+                &method.amr()
+            )
+            .await
+            .is_some()
+    );
+}
+
 /// The current password's guesses during changes are counted apart from the
 /// account's sign-in budget: a change cannot lock the owner's sign-in, and a
 /// sign-in lockout does not reuse the change's count.

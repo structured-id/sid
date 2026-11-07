@@ -971,6 +971,26 @@ pub fn auth_service(
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     options: AuthOptions,
 ) -> Arc<AuthServiceImpl> {
+    auth_service_keyed(storage, cache, options, true)
+}
+
+/// As [`auth_service`], while the password proof keys are still being
+/// generated: every password operation is refused as unavailable.
+#[allow(dead_code)]
+pub fn auth_service_awaiting_keys(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    options: AuthOptions,
+) -> Arc<AuthServiceImpl> {
+    auth_service_keyed(storage, cache, options, false)
+}
+
+fn auth_service_keyed(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    options: AuthOptions,
+    keys_ready: bool,
+) -> Arc<AuthServiceImpl> {
     let AuthOptions {
         opaque_router,
         jwt,
@@ -1006,7 +1026,7 @@ pub fn auth_service(
     let zkpp =
         Arc::new(ZkppOpaqueServer::new(&opaque_router, verifiers, config).expect("ZKPP server"));
     let opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
-        Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
+        Arc::new(arc_swap::ArcSwap::from_pointee(keys_ready.then_some(zkpp)));
 
     let otp_service = Arc::new(sid_authn::otp::OtpService::new(
         storage.clone(),
@@ -1243,6 +1263,46 @@ pub fn auth_service_revoking(
             browser_cookie: None,
             without_sign_in_page: false,
             login_policy,
+        },
+    )
+}
+
+/// The authentication service over `storage` with the CE defaults, while
+/// its password proof keys are still being generated.
+#[allow(dead_code)]
+pub fn auth_service_before_keys(storage: Arc<dyn StorageBackend>) -> Arc<AuthServiceImpl> {
+    let jwt = test_jwt();
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let revocation_cache = Arc::new(RevocationCache::new(
+        std::time::Duration::from_secs(900),
+        cache.clone(),
+    ));
+    auth_service_awaiting_keys(
+        storage.clone(),
+        cache,
+        AuthOptions {
+            opaque_router: test_opaque_router(),
+            oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
+            jwt,
+            webauthn: test_webauthn(storage.clone()),
+            revocation_cache: revocation_cache.clone(),
+            feature_flags: FeatureFlagService::disabled(),
+            magic_link: None,
+            zkpp: None,
+            issuers: Arc::new(sid_authn::issuer::IssuerRegistry::new(
+                storage.clone(),
+                test_key_manager(),
+            )),
+            org: test_org(),
+            cascade: Arc::new(RevocationCascadeService::new(storage, revocation_cache)),
+            security_policy: None,
+            // No password is installed while the keys are generated.
+            history_keys: Arc::new(mock_storage::MockStorage::new()),
+            enrollment_pin: None,
+            browser_cookie: None,
+            without_sign_in_page: false,
+            login_policy: None,
         },
     )
 }

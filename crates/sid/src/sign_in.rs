@@ -352,6 +352,39 @@ impl SignIn {
         &self.opaque
     }
 
+    /// Stops revoked sessions' access tokens in every process.
+    pub(crate) fn revocation(&self) -> &RevocationCache {
+        &self.revocation
+    }
+
+    /// The mailbox login mail for the email key `key` goes to on `profile`,
+    /// the account it routes to: the address in the spelling that profile
+    /// bound it with (its binding's contact, which registration, import and
+    /// directory provisioning each record with the binding), never another
+    /// spelling of the key. `None` when that binding records no such
+    /// contact: a lost spelling is not inferred from the key.
+    pub async fn login_mail_destination(
+        &self,
+        profile: ProfileId,
+        key: &str,
+    ) -> Result<Option<String>, SignInError> {
+        use sid_core::models::principal::PrincipalType;
+        let principals = self.storage.get_principals_by_profile(profile).await?;
+        let Some(contact) = principals
+            .iter()
+            .find(|p| p.principal_type == PrincipalType::Email && p.value == key)
+            .and_then(|p| p.source_email_id)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .storage
+            .get_profile_email(contact)
+            .await?
+            .filter(|email| email.profile_id == profile)
+            .map(|email| email.email))
+    }
+
     /// Which sign-in each CAPTCHA was asked of, and the passes earned.
     pub fn captcha_gate(&self) -> &CaptchaGate {
         &self.captcha_gate
