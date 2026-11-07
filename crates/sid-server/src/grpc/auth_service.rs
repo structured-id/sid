@@ -9,12 +9,10 @@ use chrono::{Duration, Utc};
 use sid::sign_in::{AttemptContext, FirstFactor, FirstFactorSignedIn, LoginMethod};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
-use sid_authn::device_auth;
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::jwt::JwtService;
 use sid_authn::magic_link::MagicLinkService;
-use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
 use sid_authn::oauth2::{OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
@@ -111,22 +109,6 @@ fn extract_captcha_pass(metadata: &tonic::metadata::MetadataMap) -> Option<Strin
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
-}
-
-/// Parse a principal string and determine its type.
-///
-/// Delegates to `sid_authn::normalize::normalize_principal` for full
-/// NFC + IDNA + anti-homoglyph normalization. Returns `(PrincipalType, normalized_value)`.
-fn parse_principal(identifier: &str) -> Result<(PrincipalType, String), tonic::Status> {
-    let handle = parse_handle(identifier)?;
-    Ok((handle.principal_type.to_principal_type(), handle.normalized))
-}
-
-/// [`parse_principal`] plus, for an email, the validated mailbox in the
-/// spelling given (what a new contact stores and mail goes to) and the
-/// policy revision its key was derived under.
-fn parse_handle(identifier: &str) -> Result<NormalizedPrincipal, tonic::Status> {
-    normalize_principal(identifier).map_err(|e| invalid_field("identifier", e.to_string()))
 }
 
 /// `ALREADY_EXISTS` with the error-model reason for the identifier kind.
@@ -227,6 +209,26 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::InvalidIdentifier(detail) => invalid_field("identifier", detail),
         E::Identity(e) => super::identity_service::refusal(e),
         E::Operation(e) => e.into_status(),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
+/// The answer to a refused or failed device authorization decision.
+fn device_approval_refusal(e: sid::oauth::device_approval::DeviceApprovalError) -> Status {
+    use sid::oauth::device_approval::DeviceApprovalError as E;
+    match e {
+        E::NotCurrent => invalid_field("user_code", "not a current device code"),
+        E::SessionEnded => session_ended(),
+        E::StepUp(unmet) => step_up_required(&unmet).into(),
+        E::AlreadyDecided => ApiError::new(
+            ErrorReason::InvalidState,
+            "the device authorization is already decided",
+        )
+        .with_precondition("DEVICE_AUTHORIZATION_STATE", "user_code", "decided")
+        .into(),
+        E::Caller(e) => e.into_status(),
+        E::OAuth(e) => oauth_refusal(e),
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
     }
@@ -2117,32 +2119,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<ValidateSessionRequest>,
     ) -> Result<Response<ValidateSessionResponse>, Status> {
         let caller = self.caller(&request).await?;
-        let req = request.into_inner();
-        let session_id = wire_id(req.session_id.as_ref(), "session_id")?;
-
-        match self.storage.get_session(session_id).await {
-            // Someone else's session answers exactly like an unknown one.
-            Ok(Some(session)) if caller.require_self_or_admin(session.profile_id).is_ok() => {
-                let now = chrono::Utc::now();
-                let valid = session.expires_at > now;
-
-                // The owner and the expiry are set only for a valid session,
-                // as the response contract says.
-                Ok(Response::new(ValidateSessionResponse {
-                    valid,
-                    profile_id: valid.then(|| session.profile_id.into()),
-                    scopes: vec![],
-                    expires_at: valid.then(|| super::convert::to_timestamp(session.expires_at)),
-                }))
-            }
-            Ok(_) => Ok(Response::new(ValidateSessionResponse {
-                valid: false,
-                profile_id: None,
-                scopes: vec![],
-                expires_at: None,
-            })),
-            Err(e) => Err(storage_failure(e)),
-        }
+        let session_id = wire_id(request.get_ref().session_id.as_ref(), "session_id")?;
+        self.sign_ins
+            .validate_session(&caller, session_id)
+            .await
+            .map(Response::new)
+            .map_err(sign_in_refusal)
     }
 
     // ── Unified Login Flow ──
@@ -2155,27 +2137,13 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<ResolvePrincipalResponse>, Status> {
         self.check_maintenance().await?;
         let req = request.into_inner();
-
         if req.principal.trim().is_empty() {
             return Err(missing_field("principal"));
         }
-
-        let (principal_type, _) = parse_principal(&req.principal)?;
-
-        // The answer reads no account: it is the same for every identifier of
-        // a type, so it cannot tell whether one has an account (WebAuthn
-        // Level 3 §14.6.2). Each method's own step decides, refusing an
-        // unknown account like a wrong secret. Password and passkey sign-in
-        // are always served (passkeys through the discoverable flow); magic
-        // links only where enabled, and only to an email address.
-        let mut available_methods = vec!["opaque".to_string(), "webauthn".to_string()];
-        if principal_type == PrincipalType::Email && self.magic_link.is_some() {
-            available_methods.push("magic_link".to_string());
-        }
-
-        Ok(Response::new(ResolvePrincipalResponse {
-            available_methods,
-        }))
+        self.sign_ins
+            .sign_in_methods(&req.principal, self.magic_link.is_some())
+            .map(Response::new)
+            .map_err(sign_in_refusal)
     }
 
     // ── Device Authorization Grant (RFC 8628) ──
@@ -2203,116 +2171,12 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<SubmitDeviceUserCodeResponse>, Status> {
         self.check_maintenance().await?;
 
-        // The user's approval grants another client access: an authorization
-        // decision of the IdP session, never of an application's token.
         let verified = self.caller_claims(&request).await?;
-        verified.require_installation().or_status()?;
-        let profile_id = verified.caller.profile_id;
-
-        let req = request.into_inner();
-
-        // An unknown user code and an expired one answer alike: the user
-        // starts again on the device.
-        let normalized = device_auth::normalize_user_code(&req.user_code);
-        let auth = self
-            .storage
-            .get_device_auth_by_user_code(&normalized)
+        self.oauth
+            .submit_device_user_code(&self.sign_ins, &verified, request.into_inner())
             .await
-            .map_err(storage_failure)?
-            .filter(|auth| !auth.is_expired())
-            .ok_or_else(|| invalid_field("user_code", "not a current device code"))?;
-
-        // An approval grants the application access as an authorization does:
-        // the approving session is judged against the application's login
-        // requirements now, and the decision commits only under their fence.
-        // A denial grants nothing and needs no judgement.
-        let mut fence = None;
-        if req.approve {
-            let session_id = SessionId::parse(&verified.claims.sid)
-                .map_err(|e| internal("read session id of a verified token", e))?;
-            let now = Utc::now();
-            let session = self
-                .storage
-                .get_session(session_id)
-                .await
-                .map_err(storage_failure)?
-                .filter(|session| session.profile_id == profile_id)
-                .filter(|session| self.authorizes(session, now))
-                .ok_or_else(session_ended)?;
-            let client = self
-                .storage
-                .get_oauth2_client(&auth.client_id)
-                .await
-                .map_err(storage_failure)?
-                .ok_or_else(|| invalid_field("user_code", "not a current device code"))?;
-            let requirements = self
-                .login_requirements(Some(&auth.client_id))
-                .await?
-                .with_client(&client, None);
-            match requirements.decide(&session, now) {
-                sid_authn::login_policy::LoginDecision::Allow { audited } => {
-                    if !audited.is_empty() {
-                        info!(
-                            client = %auth.client_id,
-                            unmet = ?audited,
-                            "Login requirements unmet, device approval allowed by audit enforcement"
-                        );
-                    }
-                }
-                sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
-                    return Err(step_up_required(&unmet).into());
-                }
-            }
-            fence = requirements.fence;
-        }
-
-        let decision = if req.approve {
-            sid_core::models::DeviceAuthDecision::Authorize(profile_id)
-        } else {
-            sid_core::models::DeviceAuthDecision::Deny
-        };
-        let audit = sid_core::models::AuditEntry::user(
-            profile_id.to_string(),
-            "device_authorization.submit",
-            format!(
-                "user_code={}, approve={}, client_id={}",
-                normalized, req.approve, auth.client_id
-            ),
-        );
-        // Only a pending request takes a decision, once: a concurrent approval
-        // and denial cannot both apply, and a resolved one is not changed.
-        let mut ctx: sid_core::models::MutationContext = audit.into();
-        if let Some(fence) = fence {
-            ctx = ctx.fenced_by(fence);
-        }
-        let decided = match self
-            .storage
-            .decide_device_auth(auth.id, decision, ctx)
-            .await
-        {
-            Ok(decided) => decided,
-            Err(sid_core::Error::Fenced(_)) => return Err(authorize::policy_changed()),
-            Err(e) => return Err(storage_failure(e)),
-        };
-        if !decided {
-            return Err(ApiError::new(
-                ErrorReason::InvalidState,
-                "the device authorization is already decided",
-            )
-            .with_precondition("DEVICE_AUTHORIZATION_STATE", "user_code", "decided")
-            .into());
-        }
-
-        info!(
-            "Device user code submitted: code={}, approve={}, profile={:?}",
-            normalized, req.approve, profile_id
-        );
-
-        Ok(Response::new(SubmitDeviceUserCodeResponse {
-            client_id: auth.client_id,
-            scope: auth.scope,
-            completed: true,
-        }))
+            .map(Response::new)
+            .map_err(device_approval_refusal)
     }
 
     // ── Legacy Password Migration ──

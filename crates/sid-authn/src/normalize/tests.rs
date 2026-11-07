@@ -185,6 +185,15 @@ fn test_leading_trailing_whitespace() {
     assert_eq!(result.normalized, "alice@example.com");
 }
 
+/// Whitespace around a phone number is not part of it: it still reads as a
+/// phone, in E.164.
+#[test]
+fn test_phone_leading_trailing_whitespace() {
+    let result = normalize_principal("  +380501234567  ").unwrap();
+    assert_eq!(result.principal_type, LoginPrincipalType::Phone);
+    assert_eq!(result.normalized, "+380501234567");
+}
+
 // ── Confusable skeleton ────────────────────────────────────
 
 #[test]
