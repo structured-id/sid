@@ -226,6 +226,17 @@ pub async fn test_enabled_providers_and_identities_by_profile(backend: &dyn Stor
         !listed.contains(&disabled.id),
         "a disabled provider was listed"
     );
+    // Regression: administration listed only the enabled providers, so a
+    // disabled one could not be found to enable again, and an export
+    // dropped it. Every provider is listed there, in display order.
+    let all = backend.list_upstream_providers().await.unwrap();
+    let ids: Vec<_> = all.iter().map(|p| p.id).collect();
+    assert!(ids.contains(&enabled.id) && ids.contains(&disabled.id));
+    assert!(
+        all.windows(2)
+            .all(|w| (w[0].display_order, w[0].id) <= (w[1].display_order, w[1].id)),
+        "providers are listed in display order"
+    );
 
     let profile = create_test_profile("upstream_links");
     let other = create_test_profile("upstream_other");

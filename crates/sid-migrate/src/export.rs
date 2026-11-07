@@ -272,8 +272,9 @@ pub async fn export_snapshot(
     // 5. Global entities
     info!("exporting global entities...");
 
-    // Upstream providers
-    let providers = backend.list_enabled_upstream_providers().await?;
+    // Upstream providers, disabled ones included: an import restores them as
+    // they were.
+    let providers = backend.list_upstream_providers().await?;
     snapshot.upstream_providers.extend(providers);
 
     // SoD rules

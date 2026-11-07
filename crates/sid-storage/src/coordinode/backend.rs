@@ -1679,6 +1679,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_enabled_upstream_providers(self).await
     }
 
+    async fn list_upstream_providers(&self) -> Result<Vec<UpstreamProvider>> {
+        CoordinodeBackend::list_upstream_providers(self).await
+    }
+
     async fn get_upstream_identity_by_provider_subject(
         &self,
         provider_id: UpstreamProviderId,

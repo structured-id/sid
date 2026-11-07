@@ -5731,6 +5731,16 @@ impl StorageBackend for PostgresBackend {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
+    async fn list_upstream_providers(&self) -> SidResult<Vec<UpstreamProvider>> {
+        let rows = sqlx::query_as::<_, crate::pg_row::UpstreamProviderRow>(
+            "SELECT * FROM upstream_providers ORDER BY display_order ASC, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
     // === UPSTREAM IDENTITY OPERATIONS ===
 
     async fn get_upstream_identity_by_provider_subject(

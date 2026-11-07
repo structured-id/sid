@@ -717,9 +717,18 @@ impl CoordinodeBackend {
     }
 
     pub(super) async fn list_enabled_upstream_providers(&self) -> SidResult<Vec<UpstreamProvider>> {
-        self.read(|tx| {
+        self.upstream_providers("WHERE u.enabled = true").await
+    }
+
+    pub(super) async fn list_upstream_providers(&self) -> SidResult<Vec<UpstreamProvider>> {
+        self.upstream_providers("").await
+    }
+
+    /// The providers `filter` admits, by display order then id.
+    async fn upstream_providers(&self, filter: &'static str) -> SidResult<Vec<UpstreamProvider>> {
+        self.read(move |tx| {
             let rows = tx.run(
-                &format!("MATCH (u:SidUpstreamProvider) WHERE u.enabled = true RETURN {PROVIDER}"),
+                &format!("MATCH (u:SidUpstreamProvider) {filter} RETURN {PROVIDER}"),
                 Params::default(),
             )?;
             let all = rows.iter().map(provider).collect::<SidResult<Vec<_>>>()?;

@@ -280,6 +280,14 @@ impl SqliteBackend {
         rows.iter().map(row_to_upstream_provider).collect()
     }
 
+    pub(crate) async fn list_upstream_providers_impl(&self) -> SidResult<Vec<UpstreamProvider>> {
+        let rows = sqlx::query("SELECT * FROM upstream_providers ORDER BY display_order, id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        rows.iter().map(row_to_upstream_provider).collect()
+    }
+
     // === UpstreamIdentity ===
 
     pub(crate) async fn get_upstream_identity_by_provider_subject_impl(

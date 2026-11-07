@@ -1350,6 +1350,10 @@ pub trait StorageBackend:
     /// List enabled upstream providers (for login screen).
     async fn list_enabled_upstream_providers(&self) -> Result<Vec<UpstreamProvider>>;
 
+    /// Every upstream provider, enabled or not, by display order then id
+    /// (administration and export).
+    async fn list_upstream_providers(&self) -> Result<Vec<UpstreamProvider>>;
+
     // === UPSTREAM IDENTITY OPERATIONS ===
 
     /// Find upstream identity by provider + upstream subject (for returning users).
