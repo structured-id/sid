@@ -448,6 +448,8 @@ capability!(issuer_store:
     foreign_first_key_refused,
     unknown_handle_names_nothing,
     unknown_organization_refused,
+    issuer_restored_as_stored,
+    issuer_restore_never_replaces,
 );
 
 /// Run work store conformance `scenario` against this backend.

@@ -34,4 +34,20 @@ pub trait IssuerStore: Send + Sync {
 
     /// Every signing key of `issuer`, ascending by generation.
     async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> Result<Vec<IssuerSigningKey>>;
+
+    /// Every issuer of the store, ascending by creation.
+    async fn list_oidc_issuers(&self) -> Result<Vec<OidcIssuer>>;
+
+    /// Restore `issuer` with its signing keys `keys` (every generation, as
+    /// sealed at the source) in one transaction. Returns `false`, writing
+    /// nothing, when exactly this issuer and these keys are already stored; an
+    /// issuer of the same id, handle, URL or authority and organization that
+    /// differs in any of them is a `Conflict`, as are keys of another issuer
+    /// or a generation sequence that does not start at 1 without gaps.
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &OidcIssuer,
+        keys: &[IssuerSigningKey],
+        ctx: MutationContext,
+    ) -> Result<bool>;
 }

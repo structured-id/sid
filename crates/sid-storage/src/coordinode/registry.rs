@@ -142,6 +142,78 @@ fn hold_org(tx: &Statements<'_>, id: OrgId) -> SidResult<()> {
     Ok(())
 }
 
+/// Create the node of `issuer`; its id, handle, URL and authority key are
+/// unique.
+fn create_issuer(tx: &Statements<'_>, issuer: &OidcIssuer) -> SidResult<()> {
+    tx.run(
+        "CREATE (i:SidIssuer {id: $id, handle: $handle, canonical_url: $canonical_url,
+            authority: $authority, recipient_org: $recipient_org, authority_key: $key,
+            created_at: $created_at})",
+        Params::default()
+            .with("id", uuid(issuer.id.as_uuid()))
+            .with("handle", text(issuer.handle.as_str()))
+            .with("canonical_url", text(&issuer.canonical_url))
+            .with("authority", text(issuer.authority.as_str()))
+            .with("recipient_org", uuid(issuer.recipient_org.as_uuid()))
+            .with(
+                "key",
+                authority_key(issuer.authority, issuer.recipient_org)?,
+            )
+            .with("created_at", time(issuer.created_at)),
+    )?;
+    Ok(())
+}
+
+/// Create the node of signing key `k`; its issuer and generation are unique.
+fn create_issuer_key(tx: &Statements<'_>, k: &IssuerSigningKey) -> SidResult<()> {
+    tx.run(
+        "CREATE (k:SidIssuerKey {issuer_id: $issuer_id, generation_key: $generation_key,
+            generation: $generation, key_id: $key_id, public_key: $public_key,
+            sealed_private_key: $sealed, created_at: $created_at})",
+        Params::default()
+            .with("issuer_id", uuid(k.issuer_id.as_uuid()))
+            .with(
+                "generation_key",
+                key(&[k.issuer_id.as_bytes(), &k.generation.to_be_bytes()])?,
+            )
+            .with("generation", Value::Int(i64::from(k.generation)))
+            .with("key_id", text(&k.key_id))
+            .with("public_key", Value::Binary(k.public_key.to_vec()))
+            .with("sealed", Value::Binary(k.sealed_private_key.clone()))
+            .with("created_at", time(k.created_at)),
+    )?;
+    Ok(())
+}
+
+/// Every signing key of `issuer_id`, ascending by generation.
+fn issuer_keys(tx: &Statements<'_>, issuer_id: IssuerId) -> SidResult<Vec<IssuerSigningKey>> {
+    let rows = tx.run(
+        "MATCH (k:SidIssuerKey) WHERE k.issuer_id = $id
+         RETURN k.issuer_id AS issuer_id, k.generation AS generation, k.key_id AS key_id,
+                k.public_key AS public_key, k.sealed_private_key AS sealed,
+                k.created_at AS created_at
+         ORDER BY k.generation",
+        Params::default().with("id", uuid(issuer_id.as_uuid())),
+    )?;
+    rows.iter()
+        .map(|row| {
+            let generation = get_int(row, "generation")?;
+            Ok(IssuerSigningKey {
+                issuer_id: IssuerId::from_uuid(get_uuid(row, "issuer_id")?)
+                    .map_err(stored("key issuer"))?,
+                generation: u32::try_from(generation)
+                    .map_err(|_| SidError::Storage(format!("generation: {generation}")))?,
+                key_id: get_text(row, "key_id")?,
+                public_key: get_bytes(row, "public_key")?
+                    .try_into()
+                    .map_err(|_| SidError::Storage("public key is not 32 bytes".into()))?,
+                sealed_private_key: get_bytes(row, "sealed")?,
+                created_at: get_time(row, "created_at")?,
+            })
+        })
+        .collect()
+}
+
 // === Applications ===
 
 fn application(row: &Row) -> SidResult<Application> {
@@ -768,44 +840,8 @@ impl CoordinodeBackend {
             if !exists.is_empty() {
                 return Ok(Decision::Abandon(false));
             }
-            tx.run(
-                "CREATE (i:SidIssuer {id: $id, handle: $handle, canonical_url: $canonical_url,
-                    authority: $authority, recipient_org: $recipient_org, authority_key: $key,
-                    created_at: $created_at})",
-                Params::default()
-                    .with("id", uuid(stored.id.as_uuid()))
-                    .with("handle", text(stored.handle.as_str()))
-                    .with("canonical_url", text(&stored.canonical_url))
-                    .with("authority", text(stored.authority.as_str()))
-                    .with("recipient_org", uuid(stored.recipient_org.as_uuid()))
-                    .with(
-                        "key",
-                        authority_key(stored.authority, stored.recipient_org)?,
-                    )
-                    .with("created_at", time(stored.created_at)),
-            )?;
-            tx.run(
-                "CREATE (k:SidIssuerKey {issuer_id: $issuer_id, generation_key: $generation_key,
-                    generation: $generation, key_id: $key_id, public_key: $public_key,
-                    sealed_private_key: $sealed, created_at: $created_at})",
-                Params::default()
-                    .with("issuer_id", uuid(first_key.issuer_id.as_uuid()))
-                    .with(
-                        "generation_key",
-                        key(&[
-                            first_key.issuer_id.as_bytes(),
-                            &first_key.generation.to_be_bytes(),
-                        ])?,
-                    )
-                    .with("generation", Value::Int(i64::from(first_key.generation)))
-                    .with("key_id", text(&first_key.key_id))
-                    .with("public_key", Value::Binary(first_key.public_key.to_vec()))
-                    .with(
-                        "sealed",
-                        Value::Binary(first_key.sealed_private_key.clone()),
-                    )
-                    .with("created_at", time(first_key.created_at)),
-            )?;
+            create_issuer(tx, &stored)?;
+            create_issuer_key(tx, &first_key)?;
             finalize(tx, &format!("oidc_issuer:{}", stored.id), ctx.clone())?;
             Ok(Decision::Commit(true))
         })
@@ -816,32 +852,52 @@ impl CoordinodeBackend {
         &self,
         issuer_id: IssuerId,
     ) -> SidResult<Vec<IssuerSigningKey>> {
-        self.read(move |tx| {
+        self.read(move |tx| issuer_keys(tx, issuer_id)).await
+    }
+
+    pub(super) async fn list_oidc_issuers(&self) -> SidResult<Vec<OidcIssuer>> {
+        self.read(|tx| {
             let rows = tx.run(
-                "MATCH (k:SidIssuerKey) WHERE k.issuer_id = $id
-                 RETURN k.issuer_id AS issuer_id, k.generation AS generation, k.key_id AS key_id,
-                        k.public_key AS public_key, k.sealed_private_key AS sealed,
-                        k.created_at AS created_at
-                 ORDER BY k.generation",
-                Params::default().with("id", uuid(issuer_id.as_uuid())),
+                &format!("MATCH (i:SidIssuer) RETURN {ISSUER} ORDER BY i.created_at, i.id"),
+                Params::default(),
             )?;
-            rows.iter()
-                .map(|row| {
-                    let generation = get_int(row, "generation")?;
-                    Ok(IssuerSigningKey {
-                        issuer_id: IssuerId::from_uuid(get_uuid(row, "issuer_id")?)
-                            .map_err(stored("key issuer"))?,
-                        generation: u32::try_from(generation)
-                            .map_err(|_| SidError::Storage(format!("generation: {generation}")))?,
-                        key_id: get_text(row, "key_id")?,
-                        public_key: get_bytes(row, "public_key")?
-                            .try_into()
-                            .map_err(|_| SidError::Storage("public key is not 32 bytes".into()))?,
-                        sealed_private_key: get_bytes(row, "sealed")?,
-                        created_at: get_time(row, "created_at")?,
-                    })
-                })
-                .collect()
+            rows.iter().map(issuer).collect()
+        })
+        .await
+    }
+
+    pub(super) async fn import_oidc_issuer(
+        &self,
+        restored: &OidcIssuer,
+        keys: &[IssuerSigningKey],
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        restored.check_keys(keys)?;
+        let (restored, keys) = (restored.clone(), keys.to_vec());
+        self.transaction(move |tx| {
+            hold_org(tx, restored.recipient_org)?;
+            let rows = tx.run(
+                &format!("MATCH (i:SidIssuer) WHERE i.id = $id RETURN {ISSUER}, id(i) AS node"),
+                Params::default().with("id", uuid(restored.id.as_uuid())),
+            )?;
+            if let Some(row) = rows.first() {
+                // Its node is held: a concurrent change of it conflicts.
+                super::hold_first(tx, &rows)?;
+                return if issuer(row)? == restored && issuer_keys(tx, restored.id)? == keys {
+                    Ok(Decision::Abandon(false))
+                } else {
+                    Err(SidError::Conflict(format!(
+                        "issuer {} is stored differently",
+                        restored.id
+                    )))
+                };
+            }
+            create_issuer(tx, &restored)?;
+            for key in &keys {
+                create_issuer_key(tx, key)?;
+            }
+            finalize(tx, &format!("oidc_issuer:{}", restored.id), ctx.clone())?;
+            Ok(Decision::Commit(true))
         })
         .await
     }

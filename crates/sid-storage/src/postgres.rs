@@ -1885,6 +1885,82 @@ impl IssuerStore for PostgresBackend {
             )
             .collect()
     }
+
+    async fn list_oidc_issuers(&self) -> SidResult<Vec<sid_core::models::OidcIssuer>> {
+        let rows: Vec<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("oidc issuers: {e}")))?;
+        rows.into_iter().map(issuer_from_row).collect()
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        keys: &[sid_core::models::IssuerSigningKey],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_keys(keys)?;
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import oidc issuer: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let stored: Option<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers WHERE id = $1 FOR UPDATE",
+        )
+        .bind(issuer.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(stored) = stored {
+            // Rows are never deleted or changed but by a later generation, so
+            // what is stored now is what the restore must match.
+            let same = issuer_from_row(stored)? == *issuer
+                && self.oidc_issuer_signing_keys(issuer.id).await? == keys;
+            return if same {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "issuer {} is stored differently",
+                    issuer.id
+                )))
+            };
+        }
+        sqlx::query(
+            "INSERT INTO oidc_issuers (id, handle, canonical_url, authority, recipient_org, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(issuer.id)
+        .bind(issuer.handle.as_str())
+        .bind(&issuer.canonical_url)
+        .bind(issuer.authority.as_str())
+        .bind(issuer.recipient_org)
+        .bind(issuer.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("oidc issuer", e))?;
+        for key in keys {
+            sqlx::query(
+                "INSERT INTO oidc_issuer_signing_keys
+                     (issuer_id, generation, key_id, public_key, sealed_private_key, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(key.issuer_id)
+            .bind(key_generation(key.generation)?)
+            .bind(&key.key_id)
+            .bind(key.public_key.as_slice())
+            .bind(&key.sealed_private_key)
+            .bind(key.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("oidc issuer signing key", e))?;
+        }
+        Self::audit_in_tx(&mut tx, &format!("oidc_issuer:{}", issuer.id), audit).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
 }
 
 #[async_trait]

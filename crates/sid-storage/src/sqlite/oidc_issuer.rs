@@ -109,34 +109,121 @@ impl SqliteBackend {
         &self,
         issuer: IssuerId,
     ) -> SidResult<Vec<IssuerSigningKey>> {
-        let rows = sqlx::query(
-            "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
-             FROM oidc_issuer_signing_keys WHERE issuer_id = ? ORDER BY generation",
-        )
-        .bind(issuer)
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(format!("oidc issuer signing keys: {e}")))?;
+        signing_keys(&mut conn, issuer).await
+    }
+
+    pub(crate) async fn list_oidc_issuers_impl(&self) -> SidResult<Vec<OidcIssuer>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {ISSUER_COLUMNS} FROM oidc_issuers ORDER BY created_at, id"
+        )))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| SidError::Storage(format!("oidc issuer signing keys: {e}")))?;
-        rows.iter()
-            .map(|row| {
-                let issuer_id: IssuerId = col(row, "issuer_id")?;
-                let stored = |what: &str| {
-                    SidError::Storage(format!("signing key of issuer {issuer_id}: {what}"))
-                };
-                let generation: i64 = col(row, "generation")?;
-                let public_key: Vec<u8> = col(row, "public_key")?;
-                Ok(IssuerSigningKey {
-                    issuer_id,
-                    generation: u32::try_from(generation)
-                        .map_err(|_| stored("generation out of range"))?,
-                    key_id: col(row, "key_id")?,
-                    public_key: public_key
-                        .try_into()
-                        .map_err(|_| stored("public key is not 32 bytes"))?,
-                    sealed_private_key: col(row, "sealed_private_key")?,
-                    created_at: dt_col(row, "created_at")?,
-                })
-            })
-            .collect()
+        .map_err(|e| SidError::Storage(format!("oidc issuers: {e}")))?
+        .iter()
+        .map(issuer_from_row)
+        .collect()
     }
+
+    pub(crate) async fn import_oidc_issuer_impl(
+        &self,
+        issuer: &OidcIssuer,
+        keys: &[IssuerSigningKey],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_keys(keys)?;
+        // The write transaction holds the database write lock: what is read
+        // here is what the restore commits against.
+        let mut tx = self.begin_write().await?;
+        let stored = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {ISSUER_COLUMNS} FROM oidc_issuers WHERE id = ?"
+        )))
+        .bind(issuer.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("import oidc issuer: {e}")))?;
+        if let Some(stored) = stored {
+            let same = issuer_from_row(&stored)? == *issuer
+                && signing_keys(&mut tx, issuer.id).await? == keys;
+            return if same {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "issuer {} is stored differently",
+                    issuer.id
+                )))
+            };
+        }
+        sqlx::query(
+            "INSERT INTO oidc_issuers (id, handle, canonical_url, authority, recipient_org, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(issuer.id)
+        .bind(issuer.handle.as_str())
+        .bind(&issuer.canonical_url)
+        .bind(issuer.authority.as_str())
+        .bind(issuer.recipient_org)
+        .bind(fmt_dt(&issuer.created_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("oidc issuer", e))?;
+        for key in keys {
+            sqlx::query(
+                "INSERT INTO oidc_issuer_signing_keys
+                     (issuer_id, generation, key_id, public_key, sealed_private_key, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(key.issuer_id)
+            .bind(i64::from(key.generation))
+            .bind(&key.key_id)
+            .bind(key.public_key.as_slice())
+            .bind(&key.sealed_private_key)
+            .bind(fmt_dt(&key.created_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("oidc issuer signing key", e))?;
+        }
+        Self::commit_mutation(tx, &format!("oidc_issuer:{}", issuer.id), audit).await?;
+        Ok(true)
+    }
+}
+
+/// Every signing key of `issuer` on `conn`, ascending by generation.
+async fn signing_keys(
+    conn: &mut sqlx::SqliteConnection,
+    issuer: IssuerId,
+) -> SidResult<Vec<IssuerSigningKey>> {
+    let rows = sqlx::query(
+        "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
+         FROM oidc_issuer_signing_keys WHERE issuer_id = ? ORDER BY generation",
+    )
+    .bind(issuer)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| SidError::Storage(format!("oidc issuer signing keys: {e}")))?;
+    rows.iter()
+        .map(|row| {
+            let issuer_id: IssuerId = col(row, "issuer_id")?;
+            let stored = |what: &str| {
+                SidError::Storage(format!("signing key of issuer {issuer_id}: {what}"))
+            };
+            let generation: i64 = col(row, "generation")?;
+            let public_key: Vec<u8> = col(row, "public_key")?;
+            Ok(IssuerSigningKey {
+                issuer_id,
+                generation: u32::try_from(generation)
+                    .map_err(|_| stored("generation out of range"))?,
+                key_id: col(row, "key_id")?,
+                public_key: public_key
+                    .try_into()
+                    .map_err(|_| stored("public key is not 32 bytes"))?,
+                sealed_private_key: col(row, "sealed_private_key")?,
+                created_at: dt_col(row, "created_at")?,
+            })
+        })
+        .collect()
 }

@@ -72,6 +72,7 @@ const UNIQUE: &[(&str, &str, &str)] = &[
     ),
     ("sid_issuer_id", "SidIssuer", "id"),
     ("sid_issuer_handle", "SidIssuer", "handle"),
+    ("sid_issuer_url", "SidIssuer", "canonical_url"),
     ("sid_issuer_authority", "SidIssuer", "authority_key"),
     ("sid_issuer_key", "SidIssuerKey", "generation_key"),
     ("sid_organization_id", "SidOrganization", "id"),

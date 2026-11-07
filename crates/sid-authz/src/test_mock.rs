@@ -186,6 +186,17 @@ impl sid_plugin::IssuerStore for MockStorage {
     ) -> Result<Vec<sid_core::models::IssuerSigningKey>> {
         unimplemented!()
     }
+    async fn list_oidc_issuers(&self) -> Result<Vec<sid_core::models::OidcIssuer>> {
+        unimplemented!()
+    }
+    async fn import_oidc_issuer(
+        &self,
+        _: &sid_core::models::OidcIssuer,
+        _: &[sid_core::models::IssuerSigningKey],
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
 }
 
 #[async_trait::async_trait]

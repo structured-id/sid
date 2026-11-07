@@ -513,6 +513,19 @@ impl IssuerStore for SqliteBackend {
     ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
         self.oidc_issuer_signing_keys_impl(issuer).await
     }
+
+    async fn list_oidc_issuers(&self) -> SidResult<Vec<sid_core::models::OidcIssuer>> {
+        self.list_oidc_issuers_impl().await
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        keys: &[sid_core::models::IssuerSigningKey],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_oidc_issuer_impl(issuer, keys, audit).await
+    }
 }
 
 // ─── GrantStore impl — see session.rs and auth.rs ───

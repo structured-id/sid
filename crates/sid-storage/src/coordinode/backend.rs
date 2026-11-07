@@ -102,6 +102,19 @@ impl IssuerStore for CoordinodeBackend {
     async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> Result<Vec<IssuerSigningKey>> {
         CoordinodeBackend::oidc_issuer_signing_keys(self, issuer).await
     }
+
+    async fn list_oidc_issuers(&self) -> Result<Vec<OidcIssuer>> {
+        CoordinodeBackend::list_oidc_issuers(self).await
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &OidcIssuer,
+        keys: &[IssuerSigningKey],
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_oidc_issuer(self, issuer, keys, ctx).await
+    }
 }
 
 #[async_trait]

@@ -1202,6 +1202,22 @@ impl sid_plugin::IssuerStore for MockStorage {
         keys.sort_by_key(|k| k.generation);
         Ok(keys)
     }
+
+    async fn list_oidc_issuers(&self) -> SidResult<Vec<sid_core::models::OidcIssuer>> {
+        Ok(self.inner.lock().unwrap().oidc_issuers.clone())
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        _: &sid_core::models::OidcIssuer,
+        _: &[sid_core::models::IssuerSigningKey],
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        // The server tests never restore a snapshot into this mock.
+        Err(sid_core::Error::Storage(
+            "the mock store does not restore issuers".into(),
+        ))
+    }
 }
 
 impl MockStorageInner {
