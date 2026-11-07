@@ -1932,6 +1932,13 @@ pub trait StorageBackend:
         entity_type: OutboundEntityType,
     ) -> Result<Option<ScimOutboundRecord>>;
 
+    /// Every mapping of SCIM target `target_id`, as stored, ordered by
+    /// entity and type.
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>>;
+
     /// Store a dead letter as it stands (snapshot import), counting nothing;
     /// an existing id is `Conflict`, never replaced.
     async fn create_outbound_dlq_entry(

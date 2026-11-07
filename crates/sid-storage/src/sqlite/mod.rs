@@ -3000,6 +3000,12 @@ impl StorageBackend for SqliteBackend {
         self.get_scim_outbound_record_impl(target_id, sid_entity_id, entity_type)
             .await
     }
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: sid_core::models::ScimOutboundTargetId,
+    ) -> SidResult<Vec<sid_core::models::ScimOutboundRecord>> {
+        self.list_scim_outbound_records_impl(target_id).await
+    }
     async fn create_outbound_dlq_entry(
         &self,
         entry: &sid_core::models::OutboundDlqEntry,

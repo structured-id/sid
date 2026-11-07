@@ -2291,6 +2291,13 @@ impl StorageBackend for CoordinodeBackend {
             .await
     }
 
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>> {
+        CoordinodeBackend::list_scim_outbound_records(self, target_id).await
+    }
+
     async fn create_outbound_dlq_entry(
         &self,
         entry: &OutboundDlqEntry,

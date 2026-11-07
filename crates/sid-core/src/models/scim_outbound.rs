@@ -146,7 +146,7 @@ impl Default for OutboundSyncConfig {
 ///
 /// Stores the downstream `id` returned by the app's SCIM API after POST /Users or POST /Groups.
 /// Used for subsequent PATCH/DELETE operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScimOutboundRecord {
     /// Target this record belongs to.
     pub target_id: ScimOutboundTargetId,

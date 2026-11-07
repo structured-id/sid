@@ -5956,6 +5956,12 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<Option<ScimOutboundRecord>> {
         Ok(None)
     }
+    async fn list_scim_outbound_records(
+        &self,
+        _: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        Ok(Vec::new())
+    }
     async fn create_outbound_dlq_entry(
         &self,
         _: &OutboundDlqEntry,

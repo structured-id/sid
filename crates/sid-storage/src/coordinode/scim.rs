@@ -396,6 +396,25 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (r:SidScimRecord) WHERE r.target_id = $id RETURN {RECORD}"),
+                Params::default().with("id", uuid(&target_id.0)),
+            )?;
+            let mut records = rows.iter().map(record).collect::<SidResult<Vec<_>>>()?;
+            records.sort_by(|a, b| {
+                (a.sid_entity_id, a.entity_type.as_str())
+                    .cmp(&(b.sid_entity_id, b.entity_type.as_str()))
+            });
+            Ok(records)
+        })
+        .await
+    }
+
     pub(super) async fn list_outbound_dlq_entries(
         &self,
         target_id: ScimOutboundTargetId,

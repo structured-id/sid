@@ -8022,6 +8022,23 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        sqlx::query_as::<_, crate::pg_row::ScimOutboundRecordRow>(
+            "SELECT * FROM scim_outbound_records WHERE target_id = $1
+             ORDER BY sid_entity_id, entity_type",
+        )
+        .bind(target_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect()
+    }
+
     async fn create_outbound_dlq_entry(
         &self,
         entry: &OutboundDlqEntry,

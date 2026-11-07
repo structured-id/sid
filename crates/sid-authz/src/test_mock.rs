@@ -2243,6 +2243,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<Option<ScimOutboundRecord>> {
         unimplemented!()
     }
+    async fn list_scim_outbound_records(
+        &self,
+        _: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>> {
+        unimplemented!()
+    }
     async fn create_outbound_dlq_entry(
         &self,
         _: &OutboundDlqEntry,

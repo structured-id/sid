@@ -239,6 +239,9 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         let scim_targets = backend.list_scim_outbound_targets(proj_id).await?;
         for target in &scim_targets {
             snapshot
+                .scim_outbound_records
+                .extend(backend.list_scim_outbound_records(target.id).await?);
+            snapshot
                 .outbound_dlq_entries
                 .extend(backend.list_outbound_dlq_entries(target.id).await?);
         }
