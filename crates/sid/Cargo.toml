@@ -28,6 +28,8 @@ sid-ids-proto = { workspace = true }
 sid-ids = { workspace = true, features = ["std"] }
 # The stored form of sealed email provider credentials.
 base64 = { workspace = true }
+# IP allowlist entries, validated as addresses or CIDR blocks.
+ipnet = { workspace = true }
 # Hex-encoded export checksums.
 hex = { workspace = true }
 prost = { workspace = true }
