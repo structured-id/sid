@@ -88,7 +88,7 @@ async fn unreachable_provider_is_unavailable() {
         error_reason(&err).as_deref(),
         Some("DEPENDENCY_UNAVAILABLE")
     );
-    assert!(sid_core::grpc_error::extract_retry_delay(&err).is_some());
+    assert!(sid_infra::grpc_error::extract_retry_delay(&err).is_some());
 }
 
 /// Regression: a stored XOAUTH2 configuration without its provider details

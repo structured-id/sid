@@ -23,7 +23,6 @@ use sid_authn::bearer_secret;
 use sid_authn::issuer::IssuerRegistry;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::provisioning_connector::SCIM_BEARER_PREFIX;
 use sid_core::models::{
     AuditEntry, ConnectorCredentialKind, OidcIssuer, OrgId, ProjectId, ProtectedResource,
@@ -41,6 +40,7 @@ use sid_proto::sid::v1::scim_protocol_service_server::ScimProtocolServiceServer;
 use sid_scim::grpc::{ScimDirectory, ScimServiceImpl};
 use sid_scim::protocol::ScimProtocolServiceImpl;
 use sid_server::feature_flags::FeatureFlagService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use sid_server::grpc::oidc_provider_service::OidcProviderServiceImpl;
 use sid_server::grpc::project_service::ProjectServiceImpl;
 use sid_server::grpc::provisioning_service::ProvisioningServiceImpl;

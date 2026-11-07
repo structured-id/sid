@@ -207,6 +207,32 @@ impl KeyedCommand {
             .transpose()
     }
 
+    /// `answer`, this command's outcome as a handler reached it after its
+    /// first completion lookup, with a refusal resolved: when a concurrent
+    /// attempt of this command completed meanwhile (its effect being what
+    /// this attempt was refused for: a value it took, a state it moved on, a
+    /// record it removed), that attempt's recorded answer is this one's; when
+    /// another command completed under the key meanwhile, the key conflicts.
+    pub async fn settle<T, E>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        answer: Result<T, E>,
+    ) -> Result<T, CommandError<E>>
+    where
+        T: prost::Message + Default,
+    {
+        match answer {
+            Ok(answer) => Ok(answer),
+            Err(refusal) => match self.replay::<T>(storage).await {
+                Ok(Some(recorded)) => Ok(recorded),
+                Err(OperationError::KeyConflict) => {
+                    Err(CommandError::Operation(OperationError::KeyConflict))
+                }
+                _ => Err(CommandError::Refused(refusal)),
+            },
+        }
+    }
+
     /// The completion to commit with the effect, answering retries with
     /// `result`.
     pub fn completion(&self, result: Vec<u8>) -> OperationCompletion {

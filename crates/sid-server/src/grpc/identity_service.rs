@@ -7,15 +7,13 @@
 use crate::feature_flags::FeatureFlagService;
 use prost::Message;
 use sid_authn::account_closure::AccountClosureService;
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::data_export::DataExportService;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::passkey_prompt;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::registration::parse_e164;
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::{
@@ -24,6 +22,9 @@ use sid_core::models::{
     RevocationReason, SessionId,
 };
 use sid_core::models::{ContestCheck, MutationContext, NewRegistration};
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{Effect, context, run, run_recorded};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::identity::identity_service as keyed;
 use sid_proto::sid::v1::identity_service_server::IdentityService;
@@ -33,7 +34,7 @@ use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
 use super::convert;
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, internal, invalid_field, maintenance, missing_field, not_configured,
     not_found, not_in_this_build, storage_failure,
 };
@@ -81,7 +82,7 @@ fn target_profile(
         return Ok(caller.profile_id);
     };
     let pid = convert::wire_id(Some(named), "profile_id")?;
-    caller.require_self_or_admin(pid)?;
+    caller.require_self_or_admin(pid).or_status()?;
     Ok(pid)
 }
 
@@ -220,7 +221,7 @@ async fn taken_unless_completed(
             "committed by another attempt".into(),
         )),
         Ok(None) => contact_taken(principal_type).into(),
-        Err(e) => Effect::Refused(e.into()),
+        Err(e) => Effect::Operation(e),
     }
 }
 
@@ -366,11 +367,13 @@ impl IdentityServiceImpl {
                 Err(sid_authn::operation::OperationError::OutcomeUnknown) => {
                     Err(changed_concurrently())
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => Err(e.into_status()),
             };
         }
         // The claim as this commit left it, whatever changed since.
-        Ok(Some(command.recorded_effect(&*self.storage).await?))
+        Ok(Some(
+            command.recorded_effect(&*self.storage).await.or_status()?,
+        ))
     }
 
     /// A profile's primary email and phone for a profile read; a failed read
@@ -413,45 +416,42 @@ impl IdentityServiceImpl {
         } else {
             "device.revoke_trust"
         };
-        let device: sid_core::models::Device = command
-            .run_recorded(&*self.storage, || async {
-                self.owned_device(caller_id, device_id).await?;
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller_id.to_string(),
-                    action,
-                    device_id.to_string(),
-                ))
-                .with_operation(command.effect_completion());
-                match self
-                    .storage
-                    .set_device_trust(device_id, trusted, MAX_TRUSTED_DEVICES, ctx)
-                    .await?
-                {
-                    DeviceTrustChange::Changed => {
-                        info!(device_id = %device_id, trusted, "Device trust changed")
-                    }
-                    DeviceTrustChange::Unchanged => {}
-                    DeviceTrustChange::NotFound => return Err(device_not_found(device_id).into()),
-                    DeviceTrustChange::LimitReached => {
-                        return Err(Effect::Refused(
-                            ApiError::new(
-                                ErrorReason::QuotaExceeded,
-                                "the limit of trusted devices is reached",
-                            )
-                            .with_quota_violation(
-                                "trusted_devices",
-                                format!(
-                                    "at most {MAX_TRUSTED_DEVICES} trusted devices per profile"
-                                ),
-                            )
-                            .into(),
-                        ));
-                    }
+        let device: sid_core::models::Device = run_recorded(&command, &*self.storage, || async {
+            self.owned_device(caller_id, device_id).await?;
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller_id.to_string(),
+                action,
+                device_id.to_string(),
+            ))
+            .with_operation(command.effect_completion());
+            match self
+                .storage
+                .set_device_trust(device_id, trusted, MAX_TRUSTED_DEVICES, ctx)
+                .await?
+            {
+                DeviceTrustChange::Changed => {
+                    info!(device_id = %device_id, trusted, "Device trust changed")
                 }
-                // The device as this commit left it, whatever changed since.
-                Ok(command.recorded_effect(&*self.storage).await?)
-            })
-            .await?;
+                DeviceTrustChange::Unchanged => {}
+                DeviceTrustChange::NotFound => return Err(device_not_found(device_id).into()),
+                DeviceTrustChange::LimitReached => {
+                    return Err(Effect::Refused(
+                        ApiError::new(
+                            ErrorReason::QuotaExceeded,
+                            "the limit of trusted devices is reached",
+                        )
+                        .with_quota_violation(
+                            "trusted_devices",
+                            format!("at most {MAX_TRUSTED_DEVICES} trusted devices per profile"),
+                        )
+                        .into(),
+                    ));
+                }
+            }
+            // The device as this commit left it, whatever changed since.
+            Ok(command.recorded_effect(&*self.storage).await?)
+        })
+        .await?;
         Ok(Response::new(convert::device_to_proto(&device)))
     }
 
@@ -561,7 +561,7 @@ impl IdentityService for IdentityServiceImpl {
         // Provisioning an account for someone else is an administrator action;
         // self-registration goes through the registration ceremonies.
         let caller = self.caller(&request).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -577,7 +577,7 @@ impl IdentityService for IdentityServiceImpl {
             KeyedCommand::by_profile::<keyed::CreateProfile>(caller.profile_id, operation, &req);
         // A completed creation answers before the checks below, which its own
         // account would now fail (its handles are taken).
-        if let Some(response) = command.replay(&*self.storage).await? {
+        if let Some(response) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(response));
         }
         // A refusal a concurrent attempt of this command caused (the handles
@@ -748,38 +748,39 @@ impl IdentityService for IdentityServiceImpl {
                 "profile_id": profile.id.to_string(),
                 "username": profile.username,
             }));
-            command
-                .run(&*self.storage, || async {
-                    let ctx = MutationContext::from(AuditEntry::user(
-                        caller.profile_id.to_string(),
-                        "profile.create",
-                        profile.id.to_string(),
-                    ))
-                    .with_work(created.relay())
-                    .with_operation(command.completion(response.encode_to_vec()));
-                    match self.storage.register_profile(&registration, ctx).await {
-                        Ok(()) => {}
-                        Err(sid_core::Error::Conflict(_)) => {
-                            return Err(taken_unless_completed(
-                                &command,
-                                &*self.storage,
-                                principal_type,
-                            )
-                            .await);
-                        }
-                        Err(e) => return Err(e.into()),
+            run(&command, &*self.storage, || async {
+                let ctx = MutationContext::from(AuditEntry::user(
+                    caller.profile_id.to_string(),
+                    "profile.create",
+                    profile.id.to_string(),
+                ))
+                .with_work(created.relay())
+                .with_operation(command.completion(response.encode_to_vec()));
+                match self.storage.register_profile(&registration, ctx).await {
+                    Ok(()) => {}
+                    Err(sid_core::Error::Conflict(_)) => {
+                        return Err(taken_unless_completed(
+                            &command,
+                            &*self.storage,
+                            principal_type,
+                        )
+                        .await);
                     }
-                    info!(
-                        "Created profile {} ({})",
-                        profile.username.as_deref().unwrap_or("<no username>"),
-                        profile.id
-                    );
-                    Ok(response.clone())
-                })
-                .await
+                    Err(e) => return Err(e.into()),
+                }
+                info!(
+                    "Created profile {} ({})",
+                    profile.username.as_deref().unwrap_or("<no username>"),
+                    profile.id
+                );
+                Ok(response.clone())
+            })
+            .await
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_profile"))]
@@ -797,18 +798,18 @@ impl IdentityService for IdentityServiceImpl {
         let (named, profile) = match req.identifier {
             Some(get_profile_request::Identifier::Id(id)) => {
                 let pid = convert::wire_id(Some(&id), "id")?;
-                caller.require_self_or_admin(pid)?;
+                caller.require_self_or_admin(pid).or_status()?;
                 (pid.to_string(), self.storage.get_profile(pid).await)
             }
             // A handle is personal data: the refusal names its kind, not its
             // value, since error details travel through proxies and logs.
             Some(get_profile_request::Identifier::Username(username)) => {
-                caller.require_admin()?;
+                caller.require_admin().or_status()?;
                 let found = self.storage.get_profile_by_username(&username).await;
                 ("username".to_string(), found)
             }
             Some(get_profile_request::Identifier::Email(email)) => {
-                caller.require_admin()?;
+                caller.require_admin().or_status()?;
                 let found = self.storage.get_profile_by_email(&email).await;
                 ("email".to_string(), found)
             }
@@ -843,74 +844,73 @@ impl IdentityService for IdentityServiceImpl {
         let operation = context(&request);
         let req = request.into_inner();
         let pid = convert::wire_id(req.id.as_ref(), "id")?;
-        caller.require_self_or_admin(pid)?;
+        caller.require_self_or_admin(pid).or_status()?;
         let operation = operation?;
 
         // A retry of a completed edit answers with the profile as that edit
         // left it and never writes its names again over a later edit.
         let command =
             KeyedCommand::by_profile::<keyed::UpdateProfile>(caller.profile_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let mut profile = self
-                    .storage
-                    .get_profile(pid)
-                    .await?
-                    .ok_or_else(|| profile_not_found(pid.to_string()))?;
-                let req = req.clone();
-                if let Some(v) = req.given_name {
-                    profile.given_name = Some(v);
-                }
-                if let Some(v) = req.family_name {
-                    profile.family_name = Some(v);
-                }
-                if let Some(v) = req.middle_name {
-                    profile.middle_name = Some(v);
-                }
-                if let Some(v) = req.honorific_prefix {
-                    profile.honorific_prefix = Some(v);
-                }
-                if let Some(v) = req.honorific_suffix {
-                    profile.honorific_suffix = Some(v);
-                }
-                profile.updated_at = chrono::Utc::now();
+        let response = run(&command, &*self.storage, || async {
+            let mut profile = self
+                .storage
+                .get_profile(pid)
+                .await?
+                .ok_or_else(|| profile_not_found(pid.to_string()))?;
+            let req = req.clone();
+            if let Some(v) = req.given_name {
+                profile.given_name = Some(v);
+            }
+            if let Some(v) = req.family_name {
+                profile.family_name = Some(v);
+            }
+            if let Some(v) = req.middle_name {
+                profile.middle_name = Some(v);
+            }
+            if let Some(v) = req.honorific_prefix {
+                profile.honorific_prefix = Some(v);
+            }
+            if let Some(v) = req.honorific_suffix {
+                profile.honorific_suffix = Some(v);
+            }
+            profile.updated_at = chrono::Utc::now();
 
-                // The profile as this edit leaves it, with the contacts it
-                // has: the edit changes no contact.
-                let (primary_email, primary_phone) = self.primary_contacts(pid).await?;
-                let mut left = profile.clone();
-                left.revision += 1;
-                let response = UpdateProfileResponse {
-                    profile: Some(convert::profile_to_proto_with_contacts(
-                        &left,
-                        primary_email.as_ref(),
-                        primary_phone.as_ref(),
-                    )),
-                };
-                let changed = sid_core::models::event::Event::new(
-                    "sid-identity",
-                    sid_core::models::event::event_types::PROFILE_CLAIM_CHANGED,
-                )
-                .with_subject(format!("profile/{}", profile.id))
-                .with_data(serde_json::json!({
-                    "profile_id": profile.id.to_string(),
-                }));
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller.profile_id.to_string(),
-                    "profile.update",
-                    profile.id.to_string(),
-                ))
-                .with_work(changed.relay())
-                .with_operation(command.completion(response.encode_to_vec()));
-                // Over the revision read above, so the names written here never
-                // carry back a status or role changed meanwhile (a suspension
-                // stays).
-                if !self.storage.update_profile(&profile, ctx).await? {
-                    return Err(changed_concurrently().into());
-                }
-                Ok(response)
-            })
-            .await?;
+            // The profile as this edit leaves it, with the contacts it
+            // has: the edit changes no contact.
+            let (primary_email, primary_phone) = self.primary_contacts(pid).await?;
+            let mut left = profile.clone();
+            left.revision += 1;
+            let response = UpdateProfileResponse {
+                profile: Some(convert::profile_to_proto_with_contacts(
+                    &left,
+                    primary_email.as_ref(),
+                    primary_phone.as_ref(),
+                )),
+            };
+            let changed = sid_core::models::event::Event::new(
+                "sid-identity",
+                sid_core::models::event::event_types::PROFILE_CLAIM_CHANGED,
+            )
+            .with_subject(format!("profile/{}", profile.id))
+            .with_data(serde_json::json!({
+                "profile_id": profile.id.to_string(),
+            }));
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller.profile_id.to_string(),
+                "profile.update",
+                profile.id.to_string(),
+            ))
+            .with_work(changed.relay())
+            .with_operation(command.completion(response.encode_to_vec()));
+            // Over the revision read above, so the names written here never
+            // carry back a status or role changed meanwhile (a suspension
+            // stays).
+            if !self.storage.update_profile(&profile, ctx).await? {
+                return Err(changed_concurrently().into());
+            }
+            Ok(response)
+        })
+        .await?;
         Ok(Response::new(response))
     }
 
@@ -923,7 +923,7 @@ impl IdentityService for IdentityServiceImpl {
         // Hard deletion is an administrator action; a user closes their own
         // account through the closure flow.
         let caller = self.caller(&request).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -935,35 +935,34 @@ impl IdentityService for IdentityServiceImpl {
         // events and purge only once.
         let command =
             KeyedCommand::by_profile::<keyed::DeleteProfile>(caller.profile_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let response = DeleteProfileResponse {};
-                let deleted = sid_core::models::event::Event::new(
-                    "sid-identity",
-                    sid_core::models::event::event_types::USER_DELETED,
-                )
-                .with_subject(format!("profile/{}", pid))
-                .with_data(serde_json::json!({
-                    "profile_id": pid.to_string(),
-                }));
-                let mut ctx = MutationContext::from(AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "profile.delete",
-                    pid.to_string(),
-                ))
-                .with_work(deleted.relay())
-                .with_operation(command.completion(response.encode_to_vec()));
-                // The owner's history keys go with it, owed in the same
-                // transaction.
-                if let Some(purge) =
-                    super::password_operation::owner_purge(self.storage.as_ref(), pid).await?
-                {
-                    ctx = ctx.with_work(purge);
-                }
-                self.storage.delete_profile(pid, ctx).await?;
-                Ok(response)
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let response = DeleteProfileResponse {};
+            let deleted = sid_core::models::event::Event::new(
+                "sid-identity",
+                sid_core::models::event::event_types::USER_DELETED,
+            )
+            .with_subject(format!("profile/{}", pid))
+            .with_data(serde_json::json!({
+                "profile_id": pid.to_string(),
+            }));
+            let mut ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "profile.delete",
+                pid.to_string(),
+            ))
+            .with_work(deleted.relay())
+            .with_operation(command.completion(response.encode_to_vec()));
+            // The owner's history keys go with it, owed in the same
+            // transaction.
+            if let Some(purge) =
+                super::password_operation::owner_purge(self.storage.as_ref(), pid).await?
+            {
+                ctx = ctx.with_work(purge);
+            }
+            self.storage.delete_profile(pid, ctx).await?;
+            Ok(response)
+        })
+        .await?;
         Ok(Response::new(response))
     }
 
@@ -973,7 +972,7 @@ impl IdentityService for IdentityServiceImpl {
         &self,
         request: Request<ListProfilesRequest>,
     ) -> Result<Response<ListProfilesResponse>, Status> {
-        self.caller(&request).await?.require_admin()?;
+        self.caller(&request).await?.require_admin().or_status()?;
         let req = request.into_inner();
         let limit: u64 = if req.page_size > 0 {
             req.page_size.min(MAX_PROFILE_PAGE) as u64
@@ -1053,7 +1052,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<UpdateCredentialRequest>,
     ) -> Result<Response<UpdateCredentialResponse>, Status> {
         let caller = self.caller(&request).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -1079,32 +1078,32 @@ impl IdentityService for IdentityServiceImpl {
                 .unchanged(&*self.storage, audit, || async {
                     credential_response(self.visible_credential(&caller, cred_id).await?)
                 })
-                .await?;
+                .await
+                .or_status()?;
             return Ok(Response::new(response));
         };
-        let response = command
-            .run(&*self.storage, || async {
-                let mut cred = self.visible_credential(&caller, cred_id).await?;
-                cred.label = Some(label.clone());
-                let response = credential_response(cred)?;
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller.profile_id.to_string(),
-                    "credential.update",
-                    cred_id.0.to_string(),
-                ))
-                .with_operation(command.completion(response.encode_to_vec()));
-                // A revoked credential is gone for its owner: renaming it
-                // neither succeeds nor revives it.
-                if !self
-                    .storage
-                    .set_credential_label(cred_id, Some(&label), ctx)
-                    .await?
-                {
-                    return Err(credential_not_found(cred_id).into());
-                }
-                Ok(response)
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let mut cred = self.visible_credential(&caller, cred_id).await?;
+            cred.label = Some(label.clone());
+            let response = credential_response(cred)?;
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller.profile_id.to_string(),
+                "credential.update",
+                cred_id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            // A revoked credential is gone for its owner: renaming it
+            // neither succeeds nor revives it.
+            if !self
+                .storage
+                .set_credential_label(cred_id, Some(&label), ctx)
+                .await?
+            {
+                return Err(credential_not_found(cred_id).into());
+            }
+            Ok(response)
+        })
+        .await?;
         Ok(Response::new(response))
     }
 
@@ -1115,7 +1114,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RevokeCredentialRequest>,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
         let caller = self.caller(&request).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -1127,36 +1126,35 @@ impl IdentityService for IdentityServiceImpl {
         // credential not found.
         let command =
             KeyedCommand::by_profile::<keyed::RevokeCredential>(caller.profile_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let credential = self.visible_credential(&caller, cred_id).await?;
-                // Removing protection takes the authority adding it would:
-                // otherwise a weaker session revokes the strong factor, then
-                // adds its own.
-                if caller.profile_id == credential.profile_id {
-                    sid_authn::credential_enrollment::authorize(
-                        self.storage.as_ref(),
-                        &caller,
-                        credential.credential_type,
-                        SecurityPolicy::ce_default().auth.passkey_satisfies_mfa,
-                    )
-                    .await?;
-                }
+        let response = run(&command, &*self.storage, || async {
+            let credential = self.visible_credential(&caller, cred_id).await?;
+            // Removing protection takes the authority adding it would:
+            // otherwise a weaker session revokes the strong factor, then
+            // adds its own.
+            if caller.profile_id == credential.profile_id {
+                sid_authn::credential_enrollment::authorize(
+                    self.storage.as_ref(),
+                    &caller,
+                    credential.credential_type,
+                    SecurityPolicy::ce_default().auth.passkey_satisfies_mfa,
+                )
+                .await?;
+            }
 
-                // Revoked, not deleted; the profile keeps one active primary
-                // credential, checked in the same step as the revocation.
-                let response = RevokeCredentialResponse {};
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller.profile_id.to_string(),
-                    "credential.revoke",
-                    cred_id.0.to_string(),
-                ))
-                .with_operation(command.completion(response.encode_to_vec()));
-                let outcome = self.storage.revoke_credential(cred_id, ctx).await?;
-                refuse_last_primary(outcome, cred_id)?;
-                Ok(response)
-            })
-            .await?;
+            // Revoked, not deleted; the profile keeps one active primary
+            // credential, checked in the same step as the revocation.
+            let response = RevokeCredentialResponse {};
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller.profile_id.to_string(),
+                "credential.revoke",
+                cred_id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            let outcome = self.storage.revoke_credential(cred_id, ctx).await?;
+            refuse_last_primary(outcome, cred_id)?;
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -1168,7 +1166,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<AddPrincipalRequest>,
     ) -> Result<Response<AddPrincipalResponse>, Status> {
         let caller = self.caller(&request).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -1196,8 +1194,8 @@ impl IdentityService for IdentityServiceImpl {
         // second contestation check and never adds back a claim removed since.
         let command =
             KeyedCommand::by_profile::<keyed::AddPrincipal>(caller.profile_id, operation, &req);
-        let stored: sid_core::models::Principal = command
-            .run_recorded(&*self.storage, || async {
+        let stored: sid_core::models::Principal =
+            run_recorded(&command, &*self.storage, || async {
                 self.storage
                     .get_profile(pid)
                     .await?
@@ -1293,7 +1291,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RemovePrincipalRequest>,
     ) -> Result<Response<RemovePrincipalResponse>, Status> {
         let caller = self.caller(&request).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -1307,8 +1305,7 @@ impl IdentityService for IdentityServiceImpl {
         // not found, and never removes a binding made again since.
         let command =
             KeyedCommand::by_profile::<keyed::RemovePrincipal>(caller.profile_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
+        let response = run(&command, &*self.storage, || async {
                 // A principal can be held by several accounts (contestation),
                 // so the request removes one holder's binding: the caller's
                 // own, or for an administrator the only holder's. The request
@@ -1416,7 +1413,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RevokeSessionRequest>,
     ) -> Result<Response<RevokeSessionResponse>, Status> {
         let caller = self.caller(&request).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
@@ -1434,7 +1431,7 @@ impl IdentityService for IdentityServiceImpl {
         let Some(owner) = session.as_ref().map(|s| s.profile_id) else {
             return Ok(Response::new(RevokeSessionResponse {}));
         };
-        caller.require_self_or_admin(owner)?;
+        caller.require_self_or_admin(owner).or_status()?;
 
         // Access tokens stop in every process, refresh tokens are revoked and
         // the session is deleted.
@@ -1489,31 +1486,30 @@ impl IdentityService for IdentityServiceImpl {
         let command = KeyedCommand::by_profile::<keyed::RecordPasskeyPromptDismissal>(
             profile_id, operation, &req,
         );
-        let response = command
-            .run(&*self.storage, || async {
-                let updated = passkey_prompt::record_dismissal(
-                    self.stored_passkey_prompt(profile_id).await?,
-                    policy.passkey_prompt.skip_cooldown_days,
-                );
-                let metadata = ProfileMetadata::new(
-                    profile_id,
-                    passkey_prompt::PROFILE_METADATA_KEY,
-                    serde_json::to_value(&updated)
-                        .map_err(|e| internal("serialize passkey prompt state", e))?,
-                );
-                let response = RecordPasskeyPromptDismissalResponse {
-                    state: Some(self.passkey_prompt_state(profile_id, Some(updated)).await?),
-                };
-                let ctx = MutationContext::from(AuditEntry::user(
-                    profile_id.to_string(),
-                    "passkey_prompt.dismiss",
-                    profile_id.to_string(),
-                ))
-                .with_operation(command.completion(response.encode_to_vec()));
-                self.storage.set_profile_metadata(&metadata, ctx).await?;
-                Ok(response)
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let updated = passkey_prompt::record_dismissal(
+                self.stored_passkey_prompt(profile_id).await?,
+                policy.passkey_prompt.skip_cooldown_days,
+            );
+            let metadata = ProfileMetadata::new(
+                profile_id,
+                passkey_prompt::PROFILE_METADATA_KEY,
+                serde_json::to_value(&updated)
+                    .map_err(|e| internal("serialize passkey prompt state", e))?,
+            );
+            let response = RecordPasskeyPromptDismissalResponse {
+                state: Some(self.passkey_prompt_state(profile_id, Some(updated)).await?),
+            };
+            let ctx = MutationContext::from(AuditEntry::user(
+                profile_id.to_string(),
+                "passkey_prompt.dismiss",
+                profile_id.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            self.storage.set_profile_metadata(&metadata, ctx).await?;
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -1535,8 +1531,8 @@ impl IdentityService for IdentityServiceImpl {
         // Named even by its owner: revocation ends every session of the
         // Profile, so it is never implied by the caller's context.
         let profile_id = convert::wire_id(req.profile_id.as_ref(), "profile_id")?;
-        caller.require_self_or_admin(profile_id)?;
-        caller.require_interactive()?;
+        caller.require_self_or_admin(profile_id).or_status()?;
+        caller.require_interactive().or_status()?;
 
         // The audit records the reason given; an unknown one is refused, not
         // recorded as another.
@@ -1557,7 +1553,7 @@ impl IdentityService for IdentityServiceImpl {
         // An owner revokes their own profile as a user request; every other
         // reason is an administrative decision.
         if reason != RevocationReason::UserRequested {
-            caller.require_admin()?;
+            caller.require_admin().or_status()?;
         }
 
         let revocation = self
@@ -1618,18 +1614,17 @@ impl IdentityService for IdentityServiceImpl {
         // its grace period unchanged, and is never refused as a profile
         // already closing.
         let command = KeyedCommand::by_profile::<keyed::RequestClosure>(caller_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let closure = self
-                    .closure_service
-                    .request_closure(caller_id, mode, caller_id, |closure| {
-                        Some(command.completion(answer(closure).encode_to_vec()))
-                    })
-                    .await
-                    .map_err(|e| account_effect("request closure", CLOSURE, caller_id, e))?;
-                Ok(answer(&closure))
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let closure = self
+                .closure_service
+                .request_closure(caller_id, mode, caller_id, |closure| {
+                    Some(command.completion(answer(closure).encode_to_vec()))
+                })
+                .await
+                .map_err(|e| account_effect("request closure", CLOSURE, caller_id, e))?;
+            Ok(answer(&closure))
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -1650,22 +1645,19 @@ impl IdentityService for IdentityServiceImpl {
         // A retry of a completed cancellation answers as it did and never
         // cancels a closure requested again since.
         let command = KeyedCommand::by_profile::<keyed::CancelClosure>(caller_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let response = CancelClosureResponse {};
-                self.closure_service
-                    .cancel_closure(
-                        caller_id,
-                        caller_id,
-                        Some(command.completion(response.encode_to_vec())),
-                    )
-                    .await
-                    .map_err(|e| {
-                        account_effect("cancel closure", CLOSURE_TO_CANCEL, caller_id, e)
-                    })?;
-                Ok(response)
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let response = CancelClosureResponse {};
+            self.closure_service
+                .cancel_closure(
+                    caller_id,
+                    caller_id,
+                    Some(command.completion(response.encode_to_vec())),
+                )
+                .await
+                .map_err(|e| account_effect("cancel closure", CLOSURE_TO_CANCEL, caller_id, e))?;
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -1729,18 +1721,17 @@ impl IdentityService for IdentityServiceImpl {
         // A retry of a completed preparation answers with the export it
         // created and prepares no other.
         let command = KeyedCommand::by_profile::<keyed::PrepareExport>(caller_id, operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let job = self
-                    .data_export
-                    .prepare_export(caller_id, format, &caller_id.to_string(), |job| {
-                        Some(command.completion(answer(job).encode_to_vec()))
-                    })
-                    .await
-                    .map_err(|e| account_effect("prepare export", NEW_EXPORT, caller_id, e))?;
-                Ok(answer(&job))
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || async {
+            let job = self
+                .data_export
+                .prepare_export(caller_id, format, &caller_id.to_string(), |job| {
+                    Some(command.completion(answer(job).encode_to_vec()))
+                })
+                .await
+                .map_err(|e| account_effect("prepare export", NEW_EXPORT, caller_id, e))?;
+            Ok(answer(&job))
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -1846,18 +1837,17 @@ impl IdentityService for IdentityServiceImpl {
         // export no longer ready.
         let command =
             KeyedCommand::by_profile::<keyed::AcknowledgeExport>(caller_id, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                self.data_export
-                    .acknowledge_export(
-                        caller_id,
-                        &caller_id.to_string(),
-                        Some(command.completion(().encode_to_vec())),
-                    )
-                    .await
-                    .map_err(|e| account_effect("acknowledge export", EXPORT, caller_id, e))
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            self.data_export
+                .acknowledge_export(
+                    caller_id,
+                    &caller_id.to_string(),
+                    Some(command.completion(().encode_to_vec())),
+                )
+                .await
+                .map_err(|e| account_effect("acknowledge export", EXPORT, caller_id, e))
+        })
+        .await?;
 
         Ok(Response::new(()))
     }
@@ -1932,33 +1922,33 @@ impl IdentityService for IdentityServiceImpl {
                 .unchanged_recorded(&*self.storage, audit, || {
                     self.owned_device(caller_id, device_id)
                 })
-                .await?;
+                .await
+                .or_status()?;
             return Ok(Response::new(convert::device_to_proto(&device)));
         };
 
         // Only the name is written: a trust change or removal made meanwhile
         // is never undone by this copy, nor a later rename by a retry, which
         // answers with the device as the first commit left it.
-        let device: sid_core::models::Device = command
-            .run_recorded(&*self.storage, || async {
-                self.owned_device(caller_id, device_id).await?;
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller_id.to_string(),
-                    "device.update",
-                    device_id.to_string(),
-                ))
-                .with_operation(command.effect_completion());
-                if !self
-                    .storage
-                    .rename_device(device_id, Some(&name), ctx)
-                    .await?
-                {
-                    return Err(device_not_found(device_id).into());
-                }
-                // The device as this commit left it, whatever changed since.
-                Ok(command.recorded_effect(&*self.storage).await?)
-            })
-            .await?;
+        let device: sid_core::models::Device = run_recorded(&command, &*self.storage, || async {
+            self.owned_device(caller_id, device_id).await?;
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller_id.to_string(),
+                "device.update",
+                device_id.to_string(),
+            ))
+            .with_operation(command.effect_completion());
+            if !self
+                .storage
+                .rename_device(device_id, Some(&name), ctx)
+                .await?
+            {
+                return Err(device_not_found(device_id).into());
+            }
+            // The device as this commit left it, whatever changed since.
+            Ok(command.recorded_effect(&*self.storage).await?)
+        })
+        .await?;
         Ok(Response::new(convert::device_to_proto(&device)))
     }
 
@@ -1976,20 +1966,19 @@ impl IdentityService for IdentityServiceImpl {
         // A retry of a completed removal answers as it did, not as a device
         // not found.
         let command = KeyedCommand::by_profile::<keyed::RemoveDevice>(caller_id, operation?, &req);
-        command
-            .run(&*self.storage, || async {
-                self.owned_device(caller_id, device_id).await?;
-                // The audit names the user who removed it, not the system.
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller_id.to_string(),
-                    "device.remove",
-                    device_id.to_string(),
-                ))
-                .with_operation(command.completion(().encode_to_vec()));
-                self.storage.delete_device(device_id, ctx).await?;
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            self.owned_device(caller_id, device_id).await?;
+            // The audit names the user who removed it, not the system.
+            let ctx = MutationContext::from(AuditEntry::user(
+                caller_id.to_string(),
+                "device.remove",
+                device_id.to_string(),
+            ))
+            .with_operation(command.completion(().encode_to_vec()));
+            self.storage.delete_device(device_id, ctx).await?;
+            Ok(())
+        })
+        .await?;
 
         info!(device_id = %device_id, "Device removed");
         Ok(Response::new(()))

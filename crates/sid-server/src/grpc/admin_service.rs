@@ -16,11 +16,11 @@ use sid_core::models::{
     AuditEntry, MutationContext, ProfileId, ProfileMetadata, ProfileStatus, RevocationReason,
 };
 use sid_infra::authn::caller::authenticate;
-use sid_infra::authn::operation::{Effect, context, run, settle};
+use sid_infra::authn::operation::{Effect, context, run, run_recorded};
 use sid_infra::grpc_error::refuse::{
     changed_concurrently, internal, invalid_field, not_found, storage_failure,
 };
-use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::admin_service as keyed;
 use sid_proto::sid::v1::admin_service_server::AdminService;
@@ -66,7 +66,7 @@ impl AdminServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn require_admin<T>(&self, req: &Request<T>) -> Result<String, Status> {
         let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller.profile_id.to_string())
     }
 
@@ -192,7 +192,7 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<()>, Status> {
         use sid_authn::admin_claim::{self, ClaimError};
         let caller = authenticate(&request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         let token = secrecy::SecretString::from(request.into_inner().claim_token);
         match admin_claim::claim(
             self.storage.as_ref(),
@@ -238,11 +238,10 @@ impl AdminService for AdminServiceImpl {
         // A retry of a completed update answers as it did and never writes
         // its copy again over a later change.
         let command = admin_command::<keyed::AdminUpdateProfile>(&actor, operation, &req);
-        let response = command
-            .run(&*self.storage, || {
-                self.update_profile(&actor, &command, profile_id, req.clone())
-            })
-            .await?;
+        let response = run(&command, &*self.storage, || {
+            self.update_profile(&actor, &command, profile_id, req.clone())
+        })
+        .await?;
 
         // A suspended profile loses every live sign-in: sessions (their
         // tokens stop in every process, RPs are owed a logout) and PATs.
@@ -283,24 +282,23 @@ impl AdminService for AdminServiceImpl {
         // and never ends sessions signed in after it. The store records that
         // count with the deletion.
         let command = admin_command::<keyed::RevokeAllSessions>(&actor, operation, &req);
-        let ended: usize = command
-            .run_recorded(&*self.storage, || async {
-                // Through the cascade: the sessions' tokens stop in every
-                // process and each RP they signed in to is owed a back-channel
-                // logout; each revoked event commits with its deletion.
-                let ctx = MutationContext::from(AuditEntry::admin(
-                    actor.clone(),
-                    "session.revoke_all",
-                    profile_id.to_string(),
-                ))
-                .with_operation(command.effect_completion());
-                let revoked = self
-                    .cascade
-                    .revoke_sessions(profile_id, RevocationReason::Admin, &actor, ctx)
-                    .await?;
-                Ok(revoked.cascade_entries.len())
-            })
-            .await?;
+        let ended: usize = run_recorded(&command, &*self.storage, || async {
+            // Through the cascade: the sessions' tokens stop in every
+            // process and each RP they signed in to is owed a back-channel
+            // logout; each revoked event commits with its deletion.
+            let ctx = MutationContext::from(AuditEntry::admin(
+                actor.clone(),
+                "session.revoke_all",
+                profile_id.to_string(),
+            ))
+            .with_operation(command.effect_completion());
+            let revoked = self
+                .cascade
+                .revoke_sessions(profile_id, RevocationReason::Admin, &actor, ctx)
+                .await?;
+            Ok(revoked.cascade_entries.len())
+        })
+        .await?;
         let count = u64::try_from(ended).expect("a session count fits in u64");
 
         info!(
@@ -373,31 +371,30 @@ impl AdminService for AdminServiceImpl {
         // A retry of a completed write answers with the entry it wrote and
         // never writes it again over a later value.
         let command = admin_command::<keyed::SetProfileMetadata>(&actor, operation, &req);
-        let entry = command
-            .run(&*self.storage, || async {
-                let json_value = req
-                    .value
-                    .clone()
-                    .map(pbjson_value_to_json)
-                    .unwrap_or(serde_json::Value::Null);
-                let metadata = ProfileMetadata::new(profile_id, req.key.clone(), json_value);
-                let entry = to_proto_metadata(metadata.clone());
-                let ctx = MutationContext::from(AuditEntry::admin(
-                    actor.clone(),
-                    "metadata.set",
-                    format!("{}:{}", profile_id, metadata.key),
-                ))
-                .with_operation(command.completion(entry.encode_to_vec()));
-                self.storage
-                    .set_profile_metadata(&metadata, ctx)
-                    .await
-                    .map_err(|e| match e {
-                        sid_core::Error::NotFound(_) => Effect::from(profile_not_found(profile_id)),
-                        other => Effect::from(other),
-                    })?;
-                Ok(entry)
-            })
-            .await?;
+        let entry = run(&command, &*self.storage, || async {
+            let json_value = req
+                .value
+                .clone()
+                .map(pbjson_value_to_json)
+                .unwrap_or(serde_json::Value::Null);
+            let metadata = ProfileMetadata::new(profile_id, req.key.clone(), json_value);
+            let entry = to_proto_metadata(metadata.clone());
+            let ctx = MutationContext::from(AuditEntry::admin(
+                actor.clone(),
+                "metadata.set",
+                format!("{}:{}", profile_id, metadata.key),
+            ))
+            .with_operation(command.completion(entry.encode_to_vec()));
+            self.storage
+                .set_profile_metadata(&metadata, ctx)
+                .await
+                .map_err(|e| match e {
+                    sid_core::Error::NotFound(_) => Effect::from(profile_not_found(profile_id)),
+                    other => Effect::from(other),
+                })?;
+            Ok(entry)
+        })
+        .await?;
         Ok(Response::new(entry))
     }
 
@@ -415,20 +412,19 @@ impl AdminService for AdminServiceImpl {
         // A retry of a completed deletion answers as it did and never
         // deletes a value written after it.
         let command = admin_command::<keyed::DeleteProfileMetadata>(&actor, operation, &req);
-        command
-            .run(&*self.storage, || async {
-                let ctx = MutationContext::from(AuditEntry::admin(
-                    actor.clone(),
-                    "metadata.delete",
-                    format!("{}:{}", profile_id, req.key),
-                ))
-                .with_operation(command.completion(().encode_to_vec()));
-                self.storage
-                    .delete_profile_metadata(profile_id, &req.key, ctx)
-                    .await?;
-                Ok(())
-            })
-            .await?;
+        run(&command, &*self.storage, || async {
+            let ctx = MutationContext::from(AuditEntry::admin(
+                actor.clone(),
+                "metadata.delete",
+                format!("{}:{}", profile_id, req.key),
+            ))
+            .with_operation(command.completion(().encode_to_vec()));
+            self.storage
+                .delete_profile_metadata(profile_id, &req.key, ctx)
+                .await?;
+            Ok(())
+        })
+        .await?;
 
         info!(
             "Admin: deleted metadata key '{}' for profile {}",

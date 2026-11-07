@@ -942,7 +942,7 @@ async fn test_registration_cannot_attach_password_to_existing_account() {
         .expect_err("second registration of the same email must fail");
     assert_eq!(err.code(), tonic::Code::AlreadyExists, "{}", err.message());
     let (reason, domain, _) =
-        sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo detail");
+        sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo detail");
     assert_eq!(reason, "EMAIL_ALREADY_REGISTERED");
     assert_eq!(domain, "structured.id");
     assert_eq!(opaque_credential_count(&svc, email).await, 1);
@@ -1949,7 +1949,7 @@ async fn test_authorize_acr_values_step_up_required() {
     );
     // The requirement travels as STEP_UP_REQUIRED with the acr to reach as a
     // PreconditionFailure, never as text the client parses.
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo");
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo");
     assert_eq!(reason, "STEP_UP_REQUIRED");
     let violations = tonic_types::StatusExt::get_details_precondition_failure(&err)
         .expect("PreconditionFailure")
@@ -2145,7 +2145,7 @@ async fn test_authorize_client_required_amr_enforced() {
         "client.required_amr=[hwk] should fail when session.amr=[pwd]"
     );
     // Each missing method is a PreconditionFailure violation of type "amr".
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo");
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo");
     assert_eq!(reason, "STEP_UP_REQUIRED");
     let violations = tonic_types::StatusExt::get_details_precondition_failure(&err)
         .expect("PreconditionFailure")
@@ -2829,7 +2829,7 @@ async fn test_admin_delete_system_project_forbidden() {
     // SID provisions and keeps the system project: the administrator has the
     // right, the resource's state forbids the change.
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo");
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo");
     assert_eq!(reason, "SYSTEM_MANAGED");
 }
 
@@ -6564,7 +6564,7 @@ async fn test_security_anomaly_log_refuses_a_foreign_page_token() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo");
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo");
     assert_eq!(reason, "INVALID_FIELD_VALUE");
 }
 
@@ -6645,7 +6645,7 @@ async fn test_security_update_password_policy_denied_in_ce() {
     // Configurable policy is not part of this build: FEATURE_NOT_AVAILABLE,
     // and the public contract names no edition.
     assert_eq!(err.code(), tonic::Code::Unimplemented);
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&err).expect("ErrorInfo");
+    let (reason, _, _) = sid_infra::grpc_error::extract_error_info(&err).expect("ErrorInfo");
     assert_eq!(reason, "FEATURE_NOT_AVAILABLE");
     assert_eq!(
         err.message(),
@@ -7509,7 +7509,7 @@ async fn test_governance_decide_request_requires_bearer_token() {
 
     let storage = MockStorage::new();
     let jwt = test_jwt();
-    let svc = sid_authz::governance_grpc::GovernanceServiceImpl::new(
+    let svc = sid_server::grpc::governance_service::GovernanceServiceImpl::new(
         Arc::new(storage),
         jwt.clone(),
         common::test_revocation(),
@@ -7533,7 +7533,7 @@ async fn test_governance_decide_request_with_bearer_extracts_reviewer() {
     let storage = MockStorage::new().with_profile(profile.clone());
     common::assign_administrator(&storage, profile.id).await;
     let jwt = test_jwt();
-    let svc = sid_authz::governance_grpc::GovernanceServiceImpl::new(
+    let svc = sid_server::grpc::governance_service::GovernanceServiceImpl::new(
         Arc::new(storage),
         jwt.clone(),
         common::test_revocation(),

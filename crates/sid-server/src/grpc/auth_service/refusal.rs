@@ -4,12 +4,12 @@
 //! status message.
 
 use sid_authn::captcha::CaptchaChallenge as IssuedChallenge;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_proto::sid::v1::{CaptchaChallenge, CaptchaKind};
 use tracing::{error, warn};
 
 // The password sign-in refusals every authority answers alike.
-pub(super) use sid_authn::sign_in_refusal::{
+pub(super) use sid_infra::authn::sign_in_refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, too_many_attempts,
 };
 

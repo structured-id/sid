@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::mock_storage::MockStorage;
-use sid_authn::operation::grpc::OperationPeriods;
+use sid_infra::authn::operation::OperationPeriods;
 use sid_proto::sid::v1::operation_service_server::OperationServiceServer;
 use tonic::codegen::{Bytes, http};
 use tower::ServiceExt;
@@ -27,7 +27,7 @@ fn upstream() -> impl tower::Service<
         Arc::new(MockStorage::new()),
     )));
     tower::ServiceBuilder::new()
-        .layer(sid_authn::operation::grpc::OperationContextLayer)
+        .layer(sid_infra::authn::operation::OperationContextLayer)
         .service(routes)
 }
 
@@ -62,7 +62,9 @@ async fn every_keyed_method_requires_its_context() {
             .unwrap_or_else(|| panic!("{method}: refused at the boundary"));
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{method}");
         assert_eq!(
-            sid_core::grpc_error::extract_error_info(&status).unwrap().0,
+            sid_infra::grpc_error::extract_error_info(&status)
+                .unwrap()
+                .0,
             "REQUIRED_FIELD_MISSING",
             "{method}"
         );

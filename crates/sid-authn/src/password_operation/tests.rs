@@ -490,7 +490,10 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
             Ok(_) => panic!("an invalid submission must refuse"),
         };
         assert!(
-            matches!(refused, PasswordOperationError::InvalidProof),
+            matches!(
+                refused,
+                StepError::Operation(PasswordOperationError::InvalidProof)
+            ),
             "{refused:?}"
         );
         assert_eq!(ops.proof_permits.available_permits(), 0);
@@ -531,7 +534,9 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
     assert!(
         matches!(
             refused,
-            PasswordOperationError::Unavailable("proof verification capacity")
+            StepError::Operation(PasswordOperationError::Unavailable(
+                "proof verification capacity"
+            ))
         ),
         "{refused:?}"
     );
@@ -667,7 +672,10 @@ async fn a_host_step_amends_the_pending_operation() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(refused, HostRefusal::NotThisCaller), "{refused:?}");
+    assert!(
+        matches!(refused, StepError::Host(HostRefusal::NotThisCaller)),
+        "{refused:?}"
+    );
 
     let kept = ops.take(&op.id).await.unwrap();
     assert_eq!(kept.registration_request.as_deref(), Some(&b"staged"[..]));
@@ -708,7 +716,10 @@ async fn a_refused_finish_keeps_the_operation() {
         Ok(_) => panic!("a refused caller finishes nothing"),
     };
 
-    assert!(matches!(refused, HostRefusal::NotThisCaller), "{refused:?}");
+    assert!(
+        matches!(refused, StepError::Host(HostRefusal::NotThisCaller)),
+        "{refused:?}"
+    );
     let kept = ops.take(&op.id).await.expect("the operation stays pending");
     assert_eq!(kept.expires_at, op.expires_at);
 }
@@ -736,7 +747,10 @@ async fn an_authorized_terminal_failure_ends_the_operation() {
     };
 
     assert!(
-        matches!(failed, PasswordOperationError::PolicyChanged),
+        matches!(
+            failed,
+            StepError::Operation(PasswordOperationError::PolicyChanged)
+        ),
         "{failed:?}"
     );
     let gone = ops
@@ -769,7 +783,10 @@ async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
         Ok(_) => panic!("another policy must not finish the old operation"),
     };
     assert!(
-        matches!(refused, PasswordOperationError::PolicyChanged),
+        matches!(
+            refused,
+            StepError::Operation(PasswordOperationError::PolicyChanged)
+        ),
         "{refused:?}"
     );
 }

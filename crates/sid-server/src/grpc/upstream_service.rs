@@ -7,11 +7,10 @@
 //! with account resolution (returning user, linking, JIT provisioning).
 
 use prost::Message;
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::upstream::oidc::OidcProviderClient;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
@@ -20,6 +19,9 @@ use sid_core::models::{
     UpstreamProtocol as DomainUpstreamProtocol, UpstreamProvider as DomainUpstreamProvider,
     UpstreamProviderId, client_secret_context,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::ceremony::Respond;
+use sid_infra::authn::operation::context;
 use sid_keys::KeyManager;
 use sid_plugin::UpstreamIdpProvider;
 use sid_plugin::storage::StorageBackend;
@@ -41,11 +43,11 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 
 use super::auth_service::AuthServiceImpl;
 use super::convert;
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
     not_found, storage_failure,
 };
@@ -219,7 +221,7 @@ impl UpstreamServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller)
     }
 
@@ -268,7 +270,7 @@ impl UpstreamService for UpstreamServiceImpl {
             operation,
             &fingerprinted,
         );
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         // A refusal a concurrent attempt of this command caused (the name its
@@ -336,7 +338,9 @@ impl UpstreamService for UpstreamServiceImpl {
             Ok(response)
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn get_upstream_provider(
@@ -379,7 +383,7 @@ impl UpstreamService for UpstreamServiceImpl {
             operation,
             &fingerprinted,
         );
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         // A refusal a concurrent attempt of this command caused (the
@@ -470,7 +474,9 @@ impl UpstreamService for UpstreamServiceImpl {
             Ok(response)
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn delete_upstream_provider(
@@ -577,7 +583,10 @@ impl UpstreamService for UpstreamServiceImpl {
             nonce: request.nonce,
         };
 
-        self.auth_state.insert(&request.state, &auth_state).await?;
+        self.auth_state
+            .insert(&request.state, &auth_state)
+            .await
+            .or_status()?;
 
         Ok(Response::new(InitiateUpstreamAuthResponse {
             authorization_url: request.url,
@@ -611,7 +620,8 @@ impl UpstreamService for UpstreamServiceImpl {
         let auth_state = self
             .auth_state
             .take(&req.state)
-            .await?
+            .await
+            .or_status()?
             .ok_or_else(|| invalid_field("state", "unknown, expired or already used"))?;
 
         // Validate redirect_uri matches what was stored during initiation.

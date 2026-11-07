@@ -5,7 +5,6 @@
 //! token exchange (opaque -> short-lived JWT) + introspection (RFC 7662).
 
 use sha2::{Digest, Sha256};
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{
@@ -13,6 +12,8 @@ use sid_core::models::{
     ProfileId,
     pat::{PAT_MAX_ACTIVE_PER_USER, PAT_MAX_LIFETIME_DAYS},
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::{
     self, AdminRevokePatRequest, CreatePatRequest, CreatePatResponse, ExchangePatRequest,
@@ -24,10 +25,10 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 
 use super::convert;
-use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
+use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
 
 /// Proto `PatStatus` enum alias to avoid collision with domain type.
 type ProtoPatStatus = v1::PatStatus;
@@ -59,7 +60,7 @@ impl PatServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn token_owner<T>(&self, request: &Request<T>) -> Result<ProfileId, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation_cache).await?;
-        caller.require_interactive()?;
+        caller.require_interactive().or_status()?;
         Ok(caller.profile_id)
     }
 
@@ -68,7 +69,7 @@ impl PatServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<ProfileId, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation_cache).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller.profile_id)
     }
 }
@@ -161,7 +162,7 @@ impl PatService for PatServiceImpl {
         request: Request<CreatePatRequest>,
     ) -> Result<Response<CreatePatResponse>, Status> {
         let profile_id = self.token_owner(&request).await?;
-        let context = sid_authn::operation::grpc::context(&request)?;
+        let context = context(&request)?;
         let req = request.into_inner();
         let command = sid_authn::operation::KeyedCommand::by_profile::<
             sid_proto::keyed::machine::pat_service::CreatePat,
@@ -169,7 +170,11 @@ impl PatService for PatServiceImpl {
         // SID keeps only the token's hash: a retry of a completed creation
         // answers with the token it created, its value empty, and creates no
         // second token.
-        if let Some(recorded) = command.replay::<CreatePatResponse>(&*self.storage).await? {
+        if let Some(recorded) = command
+            .replay::<CreatePatResponse>(&*self.storage)
+            .await
+            .or_status()?
+        {
             return Ok(Response::new(recorded));
         }
         // A refusal a concurrent attempt of this command caused (the slot its
@@ -243,7 +248,7 @@ impl PatService for PatServiceImpl {
                 // Another attempt of this command committed first: its token is
                 // the created one.
                 Err(sid_core::Error::OperationCompleted(_)) => {
-                    return Err(sid_core::grpc_error::refuse::changed_concurrently());
+                    return Err(sid_infra::grpc_error::refuse::changed_concurrently());
                 }
                 // The limit is counted before the key: the slot may be full with
                 // the token a concurrent attempt of this command made.
@@ -271,7 +276,9 @@ impl PatService for PatServiceImpl {
             Ok(response)
         }
         .await;
-        Ok(Response::new(command.settle(&*self.storage, answer).await?))
+        Ok(Response::new(
+            command.settle(&*self.storage, answer).await.or_status()?,
+        ))
     }
 
     async fn list_pats(

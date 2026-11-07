@@ -7,7 +7,10 @@
 
 pub mod installation;
 pub mod lifecycle;
+pub mod machines;
 pub mod maintenance;
+pub mod projects;
+mod wire;
 
 pub use installation::{Installation, InstallationError, InstallationSettings, Management};
 pub use lifecycle::{Engine, EngineError, EngineParts, Running};

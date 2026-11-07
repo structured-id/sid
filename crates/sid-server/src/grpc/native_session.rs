@@ -6,10 +6,11 @@
 
 use sid_authn::dpop::{DPopError, DPopValidator, NativeProofBinding};
 use sid_authn::native_session::{NativeError, PROOF_METADATA};
-use sid_authn::resource::{RequestTarget, request_target};
+use sid_authn::resource::RequestTarget;
 use sid_authn::sign_in_delivery::CeremonyClient;
-use sid_core::grpc_error::refuse::{dependency_unavailable, internal, storage_failure};
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_infra::authn::resource::request_target;
+use sid_infra::grpc_error::refuse::{dependency_unavailable, internal, storage_failure};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Status};
 use tracing::warn;

@@ -20,9 +20,21 @@ sid-core = { workspace = true }
 sid-crypto = { workspace = true }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
+# The management operations' requests and answers: the API's messages as
+# data, the same for every entry point.
+sid-proto = { workspace = true }
+sid-ids-proto = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+# Hashes of issued client secrets.
+argon2 = { workspace = true }
 chrono = { workspace = true }
+rand = { workspace = true }
 secrecy = { workspace = true }
+sha2 = { workspace = true }
 serde_json = { workspace = true }
+# Constant-time comparison of registration access tokens.
+subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

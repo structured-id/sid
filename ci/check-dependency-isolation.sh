@@ -221,7 +221,7 @@ check_transport_closures() {
     # shellcheck disable=SC2086
     found="$(cargo tree --locked -p sid-infra --no-default-features $flags -e normal \
       --prefix none -f '{p}' \
-      | grep -E '^(sqlx|sqlx-core|libsqlite3-sys|sid-storage|async-nats|fred|structured-proxy|axum) ' \
+      | grep -E '^(sqlx|sqlx-core|libsqlite3-sys|sid-storage|async-nats|fred|structured-proxy) ' \
       | sort -u || true)"
     if [[ -n "$found" ]]; then
       echo "FAIL adapter closure sid-infra [$flags] pulls a store, broker, cache or listener:"

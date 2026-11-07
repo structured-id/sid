@@ -117,7 +117,7 @@ pub fn new_operation_context() -> sid_core::models::OperationContext {
 
 /// `metadata` naming one new command: a fresh key under the adopted period.
 pub fn name_new_command(metadata: &mut tonic::metadata::MetadataMap) {
-    sid_authn::operation::grpc::insert_context(metadata, &new_operation_context());
+    sid_infra::authn::operation::insert_context(metadata, &new_operation_context());
 }
 
 /// `metadata` naming the command `key` under the adopted period: the same
@@ -125,7 +125,7 @@ pub fn name_new_command(metadata: &mut tonic::metadata::MetadataMap) {
 pub fn name_command(metadata: &mut tonic::metadata::MetadataMap, key: &str) {
     let mut context = new_operation_context();
     context.key = sid_core::models::OperationKey::parse(key).unwrap();
-    sid_authn::operation::grpc::insert_context(metadata, &context);
+    sid_infra::authn::operation::insert_context(metadata, &context);
 }
 
 /// A stored credential's id as a request names it.
@@ -1261,7 +1261,7 @@ pub struct TestServices {
     /// Shared, as the server shares it with the OIDC provider endpoints.
     pub auth: Arc<AuthServiceImpl>,
     /// The password history evaluator, co-located as CE serves it.
-    pub evaluator: sid_authn::password_operation::PasswordHistoryEvaluatorImpl,
+    pub evaluator: sid_infra::authn::password_operation::PasswordHistoryEvaluatorImpl,
     /// Shared, so a test can also serve it over the network.
     pub identity: Arc<IdentityServiceImpl>,
     /// Shared, as the server shares it with the OIDC provider endpoints.
@@ -1278,7 +1278,7 @@ pub struct TestServices {
     pub mock_storage: Arc<MockStorage>,
     /// The authorization service, with no configured verifier.
     #[allow(dead_code)]
-    pub authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
+    pub authz: Arc<sid_server::grpc::authz_service::AuthzServiceImpl>,
     #[allow(dead_code)]
     pub cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     pub jwt: Arc<JwtService>,
@@ -1776,7 +1776,7 @@ impl TestServices {
         // The authorization service as a server composes it, without a
         // configured verifier: no proof admission is trusted until a test
         // configures one.
-        let authz = Arc::new(sid_authz::grpc::AuthzServiceImpl::new(
+        let authz = Arc::new(sid_server::grpc::authz_service::AuthzServiceImpl::new(
             Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
             storage.clone(),
             sid_authz::cedar::CedarService::new(),

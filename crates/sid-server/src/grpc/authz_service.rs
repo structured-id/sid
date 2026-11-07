@@ -24,7 +24,7 @@ use sid_core::models::{
     TOKEN_INTROSPECT,
 };
 use sid_infra::authn::caller::authenticate;
-use sid_infra::authn::operation::metadata_context;
+use sid_infra::authn::operation::{Effect, metadata_context, run_recorded};
 use sid_infra::authn::own_token::authenticate_service;
 use sid_infra::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
@@ -169,7 +169,7 @@ fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status
         .map(Response::new)
         .map_err(|e| {
             tracing::warn!(error = %e, "recorded AssignRole answer unreadable");
-            Status::from(sid_core::grpc_error::ApiError::internal())
+            Status::from(sid_infra::grpc_error::ApiError::internal())
         })
 }
 
@@ -202,7 +202,7 @@ fn settled<T>(
         Ok(()) => Ok(Response::new(answer)),
         Err(sid_core::Error::OperationCompleted(_)) => Err(changed_concurrently()),
         Err(sid_core::Error::OperationPeriodRefused(refusal)) => {
-            Err(OperationError::PeriodRefused(refusal).into())
+            Err(OperationError::PeriodRefused(refusal).into_status())
         }
         Err(e) => Err(refuse(e)),
     }
@@ -222,7 +222,8 @@ async fn resolved<T: prost::Message + Default>(
         Err(refusal) => command
             .settle(storage, Err::<T, _>(refusal))
             .await
-            .map(Response::new),
+            .map(Response::new)
+            .or_status(),
     }
 }
 
@@ -809,7 +810,7 @@ fn revocation_refusal(error: sid_core::Error) -> Status {
 
 /// an authority that changed before the commit, or an invalid change.
 pub(crate) fn administration_refusal(error: sid_core::Error) -> Status {
-    use sid_core::grpc_error::refuse::authority_changed;
+    use sid_infra::grpc_error::refuse::authority_changed;
     match error {
         sid_core::Error::AuthorizationDenied(_) => ApiError::new(
             ErrorReason::InsufficientPermissions,
@@ -897,7 +898,7 @@ impl AuthzServiceImpl {
         };
         match self.request_evidence(&asker, resource, &evaluation).await {
             Ok(_) => Ok(()),
-            Err(status) if refuses_evidence(&status) => Err(sid_core::grpc_error::ApiError::new(
+            Err(status) if refuses_evidence(&status) => Err(sid_infra::grpc_error::ApiError::new(
                 ErrorReason::TokenInvalid,
                 "the request's token or proof is not usable for this request",
             )
@@ -1398,7 +1399,7 @@ impl AuthzServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .require_installation_administrator(caller.profile_id)
             .await
@@ -1682,7 +1683,7 @@ impl AuthzService for AuthzServiceImpl {
         // not "name taken" by that very role.
         let command =
             command::<keyed::CreateRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1768,7 +1769,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed edit answers with the role as that edit left
         // it, and never writes it over a later edit.
         let command = command::<keyed::UpdateRole>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1833,7 +1834,7 @@ impl AuthzService for AuthzServiceImpl {
         // found" for the role it deleted.
         let command =
             command::<keyed::DeleteRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -1902,7 +1903,7 @@ impl AuthzService for AuthzServiceImpl {
         // made, whether or not it is still in force, and never a second one.
         let (metadata, _, req) = request.into_parts();
         let command = command::<keyed::AssignRole>(&metadata, administrator.subject(), &req)?;
-        if let Some(result) = command.completed(&*self.storage).await? {
+        if let Some(result) = command.completed(&*self.storage).await.or_status()? {
             return decode_assigned(&result);
         }
         let answer = async {
@@ -2027,7 +2028,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed revocation answers as the first, not "not
         // found" for the assignment it removed.
         let command = command::<keyed::RevokeRole>(&metadata, administrator.subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2117,7 +2118,7 @@ impl AuthzService for AuthzServiceImpl {
         // not "name taken" by that very group.
         let command =
             command::<keyed::CreateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2217,38 +2218,34 @@ impl AuthzService for AuthzServiceImpl {
         let group: Group = match req.description.as_deref() {
             // Without a description nothing is written: the group as it is,
             // recorded as this command's outcome so its retry answers the same.
-            None => {
-                command
-                    .unchanged_recorded(&*self.storage, audit(), || async {
-                        self.storage
-                            .get_group(group_id)
-                            .await
-                            .map_err(storage_failure)?
-                            .ok_or_else(|| group_not_found(group_id.to_string()))
-                    })
-                    .await?
-            }
+            None => command
+                .unchanged_recorded(&*self.storage, audit(), || async {
+                    self.storage
+                        .get_group(group_id)
+                        .await
+                        .map_err(storage_failure)?
+                        .ok_or_else(|| group_not_found(group_id.to_string()))
+                })
+                .await
+                .or_status()?,
             // Only the description is written, so a concurrent directory sync
             // of the name is never reverted and a deleted group is never
             // recreated; the group as that write left it is the answer.
             Some(desc) => {
-                command
-                    .run_recorded(&*self.storage, || async {
-                        let ctx = MutationContext::from(audit())
-                            .with_operation(command.effect_completion());
-                        match self
-                            .storage
-                            .set_group_description(group_id, Some(desc), ctx)
-                            .await
-                        {
-                            Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
-                            Ok(false) => Err(sid_authn::operation::grpc::Effect::Refused(
-                                group_not_found(group_id.to_string()),
-                            )),
-                            Err(e) => Err(sid_authn::operation::grpc::Effect::Store(e)),
-                        }
-                    })
-                    .await?
+                run_recorded(&command, &*self.storage, || async {
+                    let ctx =
+                        MutationContext::from(audit()).with_operation(command.effect_completion());
+                    match self
+                        .storage
+                        .set_group_description(group_id, Some(desc), ctx)
+                        .await
+                    {
+                        Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
+                        Ok(false) => Err(Effect::Refused(group_not_found(group_id.to_string()))),
+                        Err(e) => Err(Effect::Store(e)),
+                    }
+                })
+                .await?
             }
         };
         Ok(Response::new(UpdateGroupResponse {
@@ -2268,7 +2265,7 @@ impl AuthzService for AuthzServiceImpl {
         // found" for the group it deleted.
         let command =
             command::<keyed::DeleteGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2332,7 +2329,7 @@ impl AuthzService for AuthzServiceImpl {
         // adds the member back after a later removal.
         let command =
             command::<keyed::AddToGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2387,7 +2384,7 @@ impl AuthzService for AuthzServiceImpl {
             format!("user:{}", caller.profile_id),
             &req,
         )?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2447,7 +2444,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed creation answers with the policy it created,
         // not "name taken" by that very policy.
         let command = command::<keyed::CreatePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2521,7 +2518,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed edit answers with the policy as that edit
         // left it, and never writes it over a later edit.
         let command = command::<keyed::UpdatePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2576,7 +2573,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry of a completed deletion answers as the first, not "not
         // found" for the policy it deleted.
         let command = command::<keyed::DeletePolicy>(&metadata, asker.own_subject(), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let answer = async {
@@ -2850,7 +2847,7 @@ impl AuthzService for AuthzServiceImpl {
         let result = simulator
             .simulate(project_id, &changes, &subjects, &actions, &resource)
             .await
-            .map_err(|e| sid_core::grpc_error::refuse::internal("simulate", e))?;
+            .map_err(|e| sid_infra::grpc_error::refuse::internal("simulate", e))?;
 
         info!(
             project_id = %project_id,

@@ -7,8 +7,9 @@ use sid_authn::opaque::OpaqueRouter;
 use sid_authn::password_sign_in::{
     OpenedPassword, PasswordSignInError, PasswordSignInHost, PendingSignIn,
 };
-use sid_core::grpc_error::refuse::storage_failure;
 use sid_core::models::{Credential, Profile, ProfileId};
+use sid_infra::grpc_error::IntoStatus;
+use sid_infra::grpc_error::refuse::storage_failure;
 use sid_plugin::CredentialStore;
 use tonic::Status;
 
@@ -25,7 +26,7 @@ impl From<Status> for SignInStatus {
 
 impl From<PasswordSignInError> for SignInStatus {
     fn from(e: PasswordSignInError) -> Self {
-        Self(e.into())
+        Self(e.into_status())
     }
 }
 

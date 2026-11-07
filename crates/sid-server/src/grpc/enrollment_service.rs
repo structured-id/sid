@@ -4,23 +4,25 @@
 //! Manages enrollment policy, invite codes, and registration statistics.
 
 use prost::Message;
-use sid_authn::caller::{Caller, authenticate};
+use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::context;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::service_auth::{AuthenticatedService, ServiceCaller, authenticate_service};
+use sid_authn::service_auth::{AuthenticatedService, ServiceCaller};
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
-use sid_core::grpc_error::refuse::{
-    dependency_unavailable, internal, invalid_field, missing_field, not_found, storage_failure,
-};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, INVITE_CREATE, INVITE_READ, INVITE_REVOKE, Invite, InviteCreator, InviteFilter,
     InviteId, InviteStatus, ModeWrite, MutationContext, ProfileId, ResourceId,
     generate_invite_code,
 };
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{context, run};
+use sid_infra::authn::own_token::authenticate_service;
+use sid_infra::grpc_error::refuse::{
+    dependency_unavailable, internal, invalid_field, missing_field, not_found, storage_failure,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::enrollment_service as keyed;
 use std::sync::Arc;
@@ -252,7 +254,7 @@ impl EnrollmentServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         Ok(caller)
     }
 
@@ -409,7 +411,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             operation,
             &req,
         );
-        if let Some(recorded) = command.replay(&*self.storage).await? {
+        if let Some(recorded) = command.replay(&*self.storage).await.or_status()? {
             return Ok(Response::new(recorded));
         }
         let policy = req
@@ -469,7 +471,10 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         {
             Ok(_) => {}
             Err(sid_core::Error::OperationCompleted(_)) => {
-                let recorded = command.committed_elsewhere(&*self.storage).await?;
+                let recorded = command
+                    .committed_elsewhere(&*self.storage)
+                    .await
+                    .or_status()?;
                 return ProtoEnrollmentPolicy::decode(recorded.as_slice())
                     .map(Response::new)
                     .map_err(|e| internal("read a recorded policy", e));
@@ -497,40 +502,38 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         // A retry of a completed creation answers with the invite it created
         // and creates no second one.
         let command = actor.command::<keyed::CreateInvite>(operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let (max_uses, expires_at) = self
-                    .invite_terms(
-                        req.max_uses,
-                        req.unlimited_uses,
-                        req.expires_at,
-                        req.never_expires,
-                    )
-                    .await?;
+        let response = run(&command, &*self.storage, || async {
+            let (max_uses, expires_at) = self
+                .invite_terms(
+                    req.max_uses,
+                    req.unlimited_uses,
+                    req.expires_at,
+                    req.never_expires,
+                )
+                .await?;
 
-                let invite = Invite {
-                    id: InviteId::generate(),
-                    code: generate_invite_code(),
-                    created_by: actor.creator(),
-                    created_by_name: self.invite_creator_name(actor).await?,
-                    metadata: req.metadata.clone().into_iter().collect(),
-                    max_uses,
-                    use_count: 0,
-                    expires_at,
-                    active: true,
-                    created_at: chrono::Utc::now(),
-                };
-                let response = invite_to_proto(&invite);
-                let ctx =
-                    MutationContext::from(actor.audit("invite.create", invite.id.to_string()))
-                        .with_operation(command.completion(response.encode_to_vec()));
-                self.storage
-                    .create_invites(std::slice::from_ref(&invite), ctx)
-                    .await?;
-                info!("Created invite {}", invite.id);
-                Ok(response)
-            })
-            .await?;
+            let invite = Invite {
+                id: InviteId::generate(),
+                code: generate_invite_code(),
+                created_by: actor.creator(),
+                created_by_name: self.invite_creator_name(actor).await?,
+                metadata: req.metadata.clone().into_iter().collect(),
+                max_uses,
+                use_count: 0,
+                expires_at,
+                active: true,
+                created_at: chrono::Utc::now(),
+            };
+            let response = invite_to_proto(&invite);
+            let ctx = MutationContext::from(actor.audit("invite.create", invite.id.to_string()))
+                .with_operation(command.completion(response.encode_to_vec()));
+            self.storage
+                .create_invites(std::slice::from_ref(&invite), ctx)
+                .await?;
+            info!("Created invite {}", invite.id);
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }
@@ -683,44 +686,43 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         // answers with the invites the first commit created and creates no
         // others.
         let command = actor.command::<keyed::BulkCreateInvites>(operation, &req);
-        let response = command
-            .run(&*self.storage, || async {
-                let (max_uses, expires_at) = self
-                    .invite_terms(
-                        req.max_uses,
-                        req.unlimited_uses,
-                        req.expires_at,
-                        req.never_expires,
-                    )
-                    .await?;
-                let created_by_name = self.invite_creator_name(actor).await?;
+        let response = run(&command, &*self.storage, || async {
+            let (max_uses, expires_at) = self
+                .invite_terms(
+                    req.max_uses,
+                    req.unlimited_uses,
+                    req.expires_at,
+                    req.never_expires,
+                )
+                .await?;
+            let created_by_name = self.invite_creator_name(actor).await?;
 
-                let now = chrono::Utc::now();
-                let invites: Vec<Invite> = (0..count)
-                    .map(|_| Invite {
-                        id: InviteId::generate(),
-                        code: generate_invite_code(),
-                        created_by: actor.creator(),
-                        created_by_name: created_by_name.clone(),
-                        metadata: req.metadata.clone().into_iter().collect(),
-                        max_uses,
-                        use_count: 0,
-                        expires_at,
-                        active: true,
-                        created_at: now,
-                    })
-                    .collect();
-                let response = sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
-                    invites: invites.iter().map(invite_to_proto).collect(),
-                };
-                let ids: Vec<String> = invites.iter().map(|i| i.id.to_string()).collect();
-                let ctx = MutationContext::from(actor.audit("invite.bulk_create", ids.join(",")))
-                    .with_operation(command.completion(response.encode_to_vec()));
-                self.storage.create_invites(&invites, ctx).await?;
-                info!("Bulk created {} invites", invites.len());
-                Ok(response)
-            })
-            .await?;
+            let now = chrono::Utc::now();
+            let invites: Vec<Invite> = (0..count)
+                .map(|_| Invite {
+                    id: InviteId::generate(),
+                    code: generate_invite_code(),
+                    created_by: actor.creator(),
+                    created_by_name: created_by_name.clone(),
+                    metadata: req.metadata.clone().into_iter().collect(),
+                    max_uses,
+                    use_count: 0,
+                    expires_at,
+                    active: true,
+                    created_at: now,
+                })
+                .collect();
+            let response = sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
+                invites: invites.iter().map(invite_to_proto).collect(),
+            };
+            let ids: Vec<String> = invites.iter().map(|i| i.id.to_string()).collect();
+            let ctx = MutationContext::from(actor.audit("invite.bulk_create", ids.join(",")))
+                .with_operation(command.completion(response.encode_to_vec()));
+            self.storage.create_invites(&invites, ctx).await?;
+            info!("Bulk created {} invites", invites.len());
+            Ok(response)
+        })
+        .await?;
 
         Ok(Response::new(response))
     }

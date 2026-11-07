@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use sid_authn::password_operation::{
     EVALUATION_WINDOW, HistoryAdmission, HistoryEvaluation, HistoryPreparation,
-    PasswordOperationError, operation_id, preparation_response, selection_of,
+    PasswordOperationError, StepError, operation_id, preparation_response, selection_of,
 };
 use sid_core::models::HistoryEpochDescriptor;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
@@ -67,6 +67,21 @@ impl IntoStatus for PasswordOperationError {
             E::Ceremony(e) => e.into_status(),
             E::Operation(e) => e.into_status(),
         }
+    }
+}
+
+impl<E: IntoStatus> IntoStatus for StepError<E> {
+    fn into_status(self) -> Status {
+        match self {
+            StepError::Operation(e) => e.into_status(),
+            StepError::Host(e) => e.into_status(),
+        }
+    }
+}
+
+impl From<PasswordOperationError> for super::operation::Effect {
+    fn from(e: PasswordOperationError) -> Self {
+        Self::Refused(e.into_status())
     }
 }
 

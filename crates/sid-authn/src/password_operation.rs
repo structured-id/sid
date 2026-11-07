@@ -677,13 +677,43 @@ fn step_missing(what: &'static str) -> PasswordOperationError {
     PasswordOperationError::StepMissing(what)
 }
 
+/// Why a host step of a password operation was refused: by the operation
+/// itself, or by the host's own check `E`, returned as it is.
+#[derive(Debug)]
+pub enum StepError<E> {
+    Operation(PasswordOperationError),
+    Host(E),
+}
+
+impl<E> From<PasswordOperationError> for StepError<E> {
+    fn from(e: PasswordOperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+impl<E> From<ChallengeStoreError> for StepError<E> {
+    fn from(e: ChallengeStoreError) -> Self {
+        Self::Operation(e.into())
+    }
+}
+
+impl<E: From<PasswordOperationError>> StepError<E> {
+    /// The refusal, in a vocabulary that also names the operation's own.
+    pub fn refusal(self) -> E {
+        match self {
+            Self::Operation(e) => e.into(),
+            Self::Host(e) => e,
+        }
+    }
+}
+
 /// The refusal of a purpose's commit: a write cutoff that won the commit's
 /// serialization is [`PasswordOperationError::HistoryKeyWithdrawn`],
-/// anything else `other`.
-pub fn commit_refusal<E: From<PasswordOperationError>>(
+/// anything else `other`'s.
+pub fn commit_refusal<E>(
     e: sid_core::Error,
     other: impl FnOnce(sid_core::Error) -> E,
-) -> E {
+) -> StepError<E> {
     match e {
         sid_core::Error::Fenced(reason) => {
             warn!("password commit refused by the history write cutoff: {reason}");
@@ -692,7 +722,7 @@ pub fn commit_refusal<E: From<PasswordOperationError>>(
         // The operation is taken exclusively before its commit, so another
         // completion of its key is its terminal abort, which won.
         sid_core::Error::OperationCompleted(_) => expired().into(),
-        e => other(e),
+        e => StepError::Host(other(e)),
     }
 }
 
@@ -1087,33 +1117,33 @@ where
     /// step), which is then kept until its deadline whatever `step` decided.
     /// Concurrent steps of one operation are serialized by the exclusive
     /// take: the second one finds the operation taken and is refused.
-    pub async fn amend<T, E: From<PasswordOperationError>>(
+    pub async fn amend<T, E>(
         &self,
         id: &PasswordOperationId,
         step: impl FnOnce(&mut PendingOperation<S::Owner, P>) -> Result<T, E>,
-    ) -> Result<T, E> {
+    ) -> Result<T, StepError<E>> {
         let mut op = self.take(id).await?;
         let result = step(&mut op);
         self.store(&op).await?;
-        result
+        result.map_err(StepError::Host)
     }
 
     /// Begin the change `id`'s sign-in with the current password, when
     /// `authorized` accepts its purpose: `state` is the server side of the
     /// KE2 the challenge answers with. Its KE3 comes in execute.
-    pub async fn begin_current_password<E: From<PasswordOperationError>>(
+    pub async fn begin_current_password<E>(
         &self,
         id: &PasswordOperationId,
         state: LoginState,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<(), E> {
+    ) -> Result<(), StepError<E>> {
         let mut op = self.take(id).await?;
         let result = authorized(&op);
         if result.is_ok() {
             op.current_password = CurrentPassword::Started(state);
         }
         self.store(&op).await?;
-        result
+        result.map_err(StepError::Host)
     }
 
     /// Execute's half of the change `id`'s sign-in with the current
@@ -1121,19 +1151,19 @@ where
     /// state, once, under the change's context over the request the
     /// challenge fixed. A failed check leaves the operation without a proof;
     /// a retry of a proven operation stays proven.
-    pub async fn prove_current_password<E: From<PasswordOperationError>>(
+    pub async fn prove_current_password<E>(
         &self,
         id: &PasswordOperationId,
         finalization: &[u8],
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
         verify: impl FnOnce(&LoginState, &[u8], &[u8]) -> bool,
-    ) -> Result<CurrentPasswordCheck, E> {
+    ) -> Result<CurrentPasswordCheck, StepError<E>> {
         let mut op = self.take(id).await?;
         let context = op
             .registration_request
             .as_deref()
             .map(|request| change_context(&op.id, request));
-        let checked = authorized(&op).and_then(|()| {
+        let checked = authorized(&op).map_err(StepError::Host).and_then(|()| {
             match (
                 std::mem::take(&mut op.current_password),
                 finalization.is_empty(),
@@ -1180,14 +1210,14 @@ where
     /// it already fixed, when `authorized` accepts its purpose: a change
     /// answers execute with the response to the request its challenge fixed,
     /// never a new one.
-    pub async fn fixed_opaque_start<E: From<PasswordOperationError>>(
+    pub async fn fixed_opaque_start<E>(
         &self,
         zkpp: &ZkppOpaqueServer,
         id: &PasswordOperationId,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Vec<u8>, E> {
+    ) -> Result<Vec<u8>, StepError<E>> {
         let mut op = self.take(id).await?;
-        let result = authorized(&op).and_then(|()| {
+        let result = authorized(&op).map_err(StepError::Host).and_then(|()| {
             let request = op
                 .registration_request
                 .clone()
@@ -1200,15 +1230,17 @@ where
 
     /// The OPAQUE start of the operation `id`, when `authorized` accepts its
     /// purpose (see [`Self::start_opaque`]).
-    pub async fn opaque_start<E: From<PasswordOperationError>>(
+    pub async fn opaque_start<E>(
         &self,
         zkpp: &ZkppOpaqueServer,
         id: &PasswordOperationId,
         request: Vec<u8>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Vec<u8>, E> {
+    ) -> Result<Vec<u8>, StepError<E>> {
         let mut op = self.take(id).await?;
-        let result = authorized(&op).and_then(|()| Ok(Self::start_opaque(zkpp, &mut op, request)?));
+        let result = authorized(&op)
+            .map_err(StepError::Host)
+            .and_then(|()| Ok(Self::start_opaque(zkpp, &mut op, request)?));
         self.store(&op).await?;
         result
     }
@@ -1222,7 +1254,7 @@ where
     /// operation for an exact retry; it is not a rejected proof. A finish
     /// whose verification ran past the operation's commit deadline commits
     /// nothing: a first enrollment's cleanup may be recorded from then on.
-    pub async fn finish<E: From<PasswordOperationError>>(
+    pub async fn finish<E>(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
         id: &PasswordOperationId,
@@ -1230,7 +1262,7 @@ where
         record: &[u8],
         proof: Option<PasswordRegistrationProof>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Finish<S::Owner, P>, E> {
+    ) -> Result<Finish<S::Owner, P>, StepError<E>> {
         let finished = self
             .verify_finish(zkpp, id, method, record, proof, authorized)
             .await?;
@@ -1244,7 +1276,7 @@ where
 
     /// The finish up to the host's commit. A refusal of the host's own
     /// `authorized` is returned as it is; every other one is the operation's.
-    async fn verify_finish<E: From<PasswordOperationError>>(
+    async fn verify_finish<E>(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
         id: &PasswordOperationId,
@@ -1252,7 +1284,7 @@ where
         record: &[u8],
         proof: Option<PasswordRegistrationProof>,
         authorized: impl FnOnce(&PendingOperation<S::Owner, P>) -> Result<(), E>,
-    ) -> Result<Finish<S::Owner, P>, E> {
+    ) -> Result<Finish<S::Owner, P>, StepError<E>> {
         let taken = self
             .ops
             .take(&id.to_string())
@@ -1271,7 +1303,7 @@ where
         // operation goes back pending, as at every other step.
         if let Err(refused) = authorized(&op) {
             self.store(&op).await?;
-            return Err(refused);
+            return Err(StepError::Host(refused));
         }
         Ok(self.verify_taken(zkpp, op, method, record, proof).await?)
     }

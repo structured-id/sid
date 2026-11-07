@@ -456,7 +456,7 @@ async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() 
     use sid_proto::sid::v1::authz::assign_role_request::Principal;
     use sid_proto::sid::v1::authz_service_server::AuthzService;
     let i = invites().await;
-    let authz = sid_authz::grpc::AuthzServiceImpl::new(
+    let authz = sid_server::grpc::authz_service::AuthzServiceImpl::new(
         Arc::new(sid_authz::CeAuthzEngine::new(i.svc.storage.clone())),
         i.svc.storage.clone(),
         sid_authz::cedar::CedarService::new(),

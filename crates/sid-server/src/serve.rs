@@ -121,7 +121,7 @@ impl CeServices {
             .add(SecurityServiceServer::from_arc(c.security_svc.clone()))
             .await
             .add(GovernanceServiceServer::new(
-                sid_authz::governance_grpc::GovernanceServiceImpl::new(
+                crate::grpc::governance_service::GovernanceServiceImpl::new(
                     c.storage.clone(),
                     c.jwt.clone(),
                     c.revocation_cache.clone(),
@@ -157,7 +157,7 @@ impl CeServices {
             ))
             .await
             .add(OperationServiceServer::new(
-                sid_authn::operation::grpc::OperationPeriods::new(c.storage.clone()),
+                sid_infra::authn::operation::OperationPeriods::new(c.storage.clone()),
             ))
             .await;
 
@@ -384,7 +384,7 @@ pub async fn serve_on(
         .accept_http1(true)
         .layer(tower::util::option_layer(grpc_edge))
         .layer(tonic_web::GrpcWebLayer::new())
-        .layer(sid_authn::operation::grpc::OperationContextLayer)
+        .layer(sid_infra::authn::operation::OperationContextLayer)
         .add_routes(routes)
         // tonic's own bind sets only TCP_NODELAY (on by default).
         .serve_with_incoming_shutdown(
@@ -450,7 +450,7 @@ pub fn transcoder_upstream(
             browser_route::BrowserRoute::new(inner, issuers.clone())
         }))
         .map_request(transcoded_request)
-        .layer(sid_authn::operation::grpc::OperationContextLayer)
+        .layer(sid_infra::authn::operation::OperationContextLayer)
         .service(routes)
 }
 
@@ -464,7 +464,7 @@ fn transcoded_request<B>(mut request: http::Request<B>) -> http::Request<B> {
         .extensions()
         .get::<structured_proxy::ReceivedRequest>()
     {
-        let transcoded = sid_authn::resource::TranscodedRequest::new(
+        let transcoded = sid_infra::authn::resource::TranscodedRequest::new(
             received.method().as_str(),
             received.path_and_query().path(),
         );
@@ -491,8 +491,8 @@ pub const HTTP_FORWARDED_HEADERS: [&str; 15] = [
     "x-real-ip",
     "accept-language",
     "user-agent",
-    sid_authn::operation::grpc::OPERATION_KEY_HEADER,
-    sid_authn::operation::grpc::OPERATION_PERIOD_HEADER,
+    sid_infra::authn::operation::OPERATION_KEY_HEADER,
+    sid_infra::authn::operation::OPERATION_PERIOD_HEADER,
     // A native client's proof of its application key and the refresh
     // credential it presents (native_session.proto).
     sid_authn::native_session::PROOF_METADATA,

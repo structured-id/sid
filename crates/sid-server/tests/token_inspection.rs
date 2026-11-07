@@ -14,7 +14,6 @@ use std::sync::atomic::AtomicBool;
 use common::mock_storage::MockStorage;
 use common::{TestServices, test_client, test_profile};
 use sid_authz::cedar::CedarService;
-use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{ProjectId, ResourceId, TOKEN_INSPECTOR_ROLE};
 use sid_proto::sid::v1::OAuth2IntrospectRequest;
 use sid_proto::sid::v1::auth_service_server::AuthService;
@@ -22,6 +21,7 @@ use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
 use sid_proto::sid::v1::authz::{AssignRoleRequest, ListRoleAssignmentsRequest};
 use sid_proto::sid::v1::authz_service_server::AuthzService;
+use sid_server::grpc::authz_service::AuthzServiceImpl;
 use tonic::{Code, Request};
 
 fn authz(svc: &TestServices) -> AuthzServiceImpl {

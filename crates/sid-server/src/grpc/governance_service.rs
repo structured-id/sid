@@ -13,7 +13,7 @@ use sid_core::models::{
 };
 use sid_infra::authn::caller::authenticate;
 use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
-use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
+use sid_infra::grpc_error::{ApiError, ErrorReason, OrStatus};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::governance_service_server::GovernanceService;
 use sid_proto::sid::v1::authz::{
@@ -96,7 +96,7 @@ impl GovernanceServiceImpl {
     #[allow(clippy::result_large_err)]
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
-        caller.require_admin()?;
+        caller.require_admin().or_status()?;
         sid_authz::admin::RoleAdministration::new(self.storage.clone())
             .require_installation_administrator(caller.profile_id)
             .await
@@ -146,7 +146,7 @@ impl GovernanceService for GovernanceServiceImpl {
 
         let requester_id: ProfileId =
             wire_id(req.requester_profile_id.as_ref(), "requester_profile_id")?;
-        caller.require_self_or_admin(requester_id)?;
+        caller.require_self_or_admin(requester_id).or_status()?;
 
         if req.requested_role.is_empty() {
             return Err(missing_field("requested_role"));

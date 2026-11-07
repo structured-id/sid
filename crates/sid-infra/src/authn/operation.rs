@@ -25,8 +25,61 @@ pub const OPERATION_KEY_HEADER: &str = "idempotency-key";
 /// (`SID-Operation-Period` in HTTP): one canonical unsigned decimal.
 pub const OPERATION_PERIOD_HEADER: &str = OPERATION_PERIOD_FIELD;
 
-/// A keyed command's effect that did not commit, refused with a status.
-pub type Effect = sid_authn::operation::Effect<Status>;
+/// Why a keyed command's effect did not commit, for a method refusing with
+/// a status: [`sid_authn::operation::Effect`] whose refusal a handler gives
+/// as it answers, with `?` on its status.
+#[derive(Debug)]
+pub enum Effect {
+    Refused(Status),
+    Operation(OperationError),
+    Store(sid_core::Error),
+}
+
+impl From<Status> for Effect {
+    fn from(status: Status) -> Self {
+        Self::Refused(status)
+    }
+}
+
+impl From<sid_core::Error> for Effect {
+    fn from(e: sid_core::Error) -> Self {
+        Self::Store(e)
+    }
+}
+
+impl From<OperationError> for Effect {
+    fn from(e: OperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+/// A refusal of the authentication core inside an effect, answered with its
+/// status.
+macro_rules! refused_by {
+    ($($core:ty),*) => {$(
+        impl From<$core> for Effect {
+            fn from(e: $core) -> Self {
+                Self::Refused(e.into_status())
+            }
+        }
+    )*};
+}
+
+refused_by!(
+    sid_authn::caller::CallerError,
+    sid_authn::challenge_store::ChallengeStoreError,
+    sid_authn::credential_enrollment::EnrollmentError
+);
+
+impl From<Effect> for sid_authn::operation::Effect<Status> {
+    fn from(effect: Effect) -> Self {
+        match effect {
+            Effect::Refused(status) => Self::Refused(status),
+            Effect::Operation(e) => Self::Operation(e),
+            Effect::Store(e) => Self::Store(e),
+        }
+    }
+}
 
 /// [`KeyedCommand::execute`] for a method refusing with a status.
 #[allow(clippy::result_large_err)]
@@ -40,7 +93,10 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, Effect>>,
 {
-    command.execute(storage, effect).await.or_status()
+    command
+        .execute(storage, || async { effect().await.map_err(Into::into) })
+        .await
+        .or_status()
 }
 
 /// [`KeyedCommand::execute_recorded`] for a method refusing with a status.
@@ -55,29 +111,10 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, Effect>>,
 {
-    command.execute_recorded(storage, effect).await.or_status()
-}
-
-/// `answer`, `command`'s outcome as a handler reached it after its first
-/// completion lookup, with a refusal resolved: when a concurrent attempt of
-/// this command completed meanwhile (its effect being what this attempt was
-/// refused for: a value it took, a state it moved on, a record it removed),
-/// that attempt's recorded answer is this one's; when another command
-/// completed under the key meanwhile, the key conflicts.
-#[allow(clippy::result_large_err)]
-pub async fn settle<T: prost::Message + Default>(
-    command: &KeyedCommand,
-    storage: &(impl sid_plugin::OperationResultStore + ?Sized),
-    answer: Result<T, Status>,
-) -> Result<T, Status> {
-    match answer {
-        Ok(answer) => Ok(answer),
-        Err(refusal) => match command.replay::<T>(storage).await {
-            Ok(Some(recorded)) => Ok(recorded),
-            Err(OperationError::KeyConflict) => Err(OperationError::KeyConflict.into_status()),
-            _ => Err(refusal),
-        },
-    }
+    command
+        .execute_recorded(storage, || async { effect().await.map_err(Into::into) })
+        .await
+        .or_status()
 }
 
 impl IntoStatus for OperationError {

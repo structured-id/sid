@@ -41,6 +41,8 @@ sid-serve = { workspace = true }
 sid-notify = { workspace = true }
 ipnet = { workspace = true }
 tonic = { workspace = true }
+# Reads which field a refusal names, to tell a refused token from other refusals.
+tonic-types = { workspace = true }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-web = { workspace = true }

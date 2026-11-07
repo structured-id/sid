@@ -6,7 +6,6 @@
 
 pub mod account_service;
 pub mod admin_service;
-mod application_view;
 pub mod auth_service;
 pub mod authz_service;
 pub mod branding_service;
