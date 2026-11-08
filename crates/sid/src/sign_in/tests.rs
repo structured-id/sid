@@ -352,6 +352,21 @@ async fn required_mfa_asks_a_factor_or_its_enrollment() {
     ));
 }
 
+// Regression: recovery codes left after the account disabled its TOTP are a
+// recovery mechanism, not an enabled factor: the password signs in again
+// rather than owing a factor the account no longer has.
+#[tokio::test]
+async fn recovery_codes_alone_are_no_enabled_factor() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Recovery).await;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &SecurityPolicy::ce_default()).await,
+        FirstFactor::Admitted(_)
+    ));
+}
+
 // Regression: under audit enforcement a policy part TOTP cannot meet (a
 // higher level) does not withhold the TOTP the account's protection owes:
 // the password sign-in awaits it.

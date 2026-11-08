@@ -148,19 +148,23 @@ impl LoginRequirements {
     }
 
     /// These requirements for an authentication of `owner`, with the
-    /// protection its active credentials establish in `store`, the credential
-    /// owner: a pending enrollment is no protection, and a lost factor does
-    /// not lower it.
+    /// protection its active sign-in factors establish in `store`, the
+    /// credential owner: a pending enrollment is no protection, and a lost
+    /// factor, still active, does not lower it.
     pub async fn for_account<S: CredentialStore + ?Sized>(
         mut self,
         store: &S,
         owner: S::Owner,
     ) -> sid_core::Result<Self> {
+        // The factors a sign-in can use: recovery codes are the recovery
+        // of an account, not an enabled factor, and once its TOTP is
+        // disabled they protect nothing a sign-in could present.
         let active: Vec<_> = store
             .get_credentials_by_profile(owner, None)
             .await?
             .into_iter()
             .filter(|c| c.status.is_active())
+            .filter(|c| c.credential_type != sid_core::models::CredentialType::Recovery)
             .collect();
         let established = crate::credential_enrollment::established_assurance(
             &active,
