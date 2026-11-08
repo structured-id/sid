@@ -425,6 +425,7 @@ impl PostgresBackend {
     ) -> SidResult<()> {
         // The authority first: a write whose actor or policy changed
         // commits nothing.
+        let mut session_until = None;
         match ctx.fence {
             Some(sid_core::models::ActorFence::Connector {
                 connector,
@@ -441,7 +442,10 @@ impl PostgresBackend {
                 session,
                 profile,
                 fresh_until,
-            }) => Self::check_session_fence(tx, session, profile, fresh_until).await?,
+            }) => {
+                session_until =
+                    Some(Self::check_session_fence(tx, session, profile, fresh_until).await?)
+            }
             None => {}
         }
         // Then the completion: a keyed command another commit already
@@ -459,6 +463,11 @@ impl PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
         work::insert_owed_work_in_tx(tx, &ctx.work, OWED_WORK_CAPACITY).await?;
+        // Every lock this finalization takes is held now: a sign-in that
+        // ended while one of them was awaited authorizes nothing.
+        if let Some(until) = session_until {
+            Self::session_fence_holds(until)?;
+        }
         Ok(())
     }
 
@@ -508,13 +517,15 @@ impl PostgresBackend {
     /// Fail with `Fenced` unless `profile` can still sign in and `session` is
     /// still its live sign-in, fresh until `fresh_until` when given. Both rows
     /// are share-locked until the transaction ends, so a sign-out or a status
-    /// change either waits for this commit or is seen by it.
+    /// change either waits for this commit or is seen by it. Returns when the
+    /// sign-in stops authorizing (its expiry or freshness, the earlier): the
+    /// caller checks it again once every later lock is held.
     async fn check_session_fence(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         session: sid_core::models::SessionId,
         profile: sid_core::models::ProfileId,
         fresh_until: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> SidResult<()> {
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
         let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
         let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
         let status: Option<String> =
@@ -529,19 +540,30 @@ impl PostgresBackend {
         }) {
             return Err(fenced("belongs to an account that can no longer sign in"));
         }
-        let live: Option<bool> = sqlx::query_scalar(
-            "SELECT expires_at > NOW() FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
+        // The expiry is compared with the clock once the row is locked: `NOW()`
+        // is the transaction's start, before any lock wait.
+        let expires_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT expires_at FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
         )
         .bind(session)
         .bind(profile)
         .fetch_optional(&mut **tx)
         .await
         .map_err(storage)?;
-        if live != Some(true) {
+        let Some(expires_at) = expires_at else {
             return Err(fenced("ended"));
-        }
-        if fresh_until.is_some_and(|until| chrono::Utc::now() >= until) {
-            return Err(fenced("is no longer fresh"));
+        };
+        let until = fresh_until.map_or(expires_at, |fresh| fresh.min(expires_at));
+        Self::session_fence_holds(until)?;
+        Ok(until)
+    }
+
+    /// Fail with `Fenced` once the sign-in's authorization ended at `until`.
+    fn session_fence_holds(until: chrono::DateTime<chrono::Utc>) -> SidResult<()> {
+        if chrono::Utc::now() >= until {
+            return Err(SidError::Fenced(
+                "the sign-in ended or is no longer fresh".into(),
+            ));
         }
         Ok(())
     }
