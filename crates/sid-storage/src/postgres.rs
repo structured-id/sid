@@ -8603,7 +8603,7 @@ impl StorageBackend for PostgresBackend {
         config: &sid_core::models::BrandingConfig,
         audit: MutationContext,
     ) -> SidResult<()> {
-        let data = serde_json::to_value(config)
+        let data = serde_json::to_value(crate::stored_branding(config))
             .map_err(|e| SidError::Internal(format!("branding data: {e}")))?;
         let mut tx = self
             .pool
@@ -8635,7 +8635,7 @@ impl StorageBackend for PostgresBackend {
         config: &sid_core::models::BrandingConfig,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let data = serde_json::to_value(config)
+        let data = serde_json::to_value(crate::stored_branding(config))
             .map_err(|e| SidError::Internal(format!("branding data: {e}")))?;
         let revision = i64::try_from(config.revision)
             .map_err(|e| SidError::Validation(format!("branding revision: {e}")))?;

@@ -715,7 +715,11 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
 /// branding draft, a Cedar policy, a profile grant, a pending device code,
 /// a pending magic link and a quarantined released principal.
 async fn settings(source: &SqliteBackend, installation: &Installation, profile: &Profile) {
-    let now = Utc::now();
+    use chrono::Timelike;
+    // Below the stores' microseconds, as a host clock may report it.
+    let now = Utc::now()
+        .with_nanosecond(123_456_789)
+        .expect("a nanosecond within the second");
     source
         .create_branding_config(
             &BrandingConfig {
