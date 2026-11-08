@@ -789,6 +789,64 @@ async fn a_native_completion_is_recovered_before_its_revocation_arrives() {
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 }
 
+/// Regression: a native completion's token that a step-up has since
+/// replaced and stopped is not delivered again: a delayed retry of the
+/// completion is refused rather than answered with the revoked token, which
+/// would overwrite the client's current one.
+#[tokio::test]
+async fn a_completion_whose_token_a_step_up_replaced_is_not_delivered_again() {
+    use common::native_client::{Binds, proof, rpc_uri, with_proof};
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB", "CCCC-DDDD"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+    let complete = || {
+        let mut request = with_proof(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB".to_string(),
+            },
+            &proof(
+                &rpc_uri("VerifyRecoveryCode"),
+                Binds::Ceremony(pending_token.as_bytes()),
+            ),
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        request
+    };
+    let first = bearer(&svc.auth.verify_recovery_code(complete()).await.unwrap());
+
+    let mut step_up = Request::new(CompleteStepUpRequest {
+        method: StepUpMethod::RecoveryCode as i32,
+        challenge_id: None,
+        proof: Some(complete_step_up_request::Proof::RecoveryCode(
+            "CCCC-DDDD".to_string(),
+        )),
+    });
+    step_up
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {first}").parse().unwrap());
+    let rotated = svc
+        .auth
+        .complete_step_up(step_up)
+        .await
+        .expect("a step-up of the completed session")
+        .into_inner()
+        .new_session_token;
+    assert_ne!(rotated, first);
+
+    let late = svc.auth.verify_recovery_code(complete()).await;
+    assert!(
+        late.as_ref().map_or(true, |r| bearer(r) != first),
+        "the replaced token was delivered again"
+    );
+    let refused = late.expect_err("the completion's token was replaced");
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+}
+
 /// A policy that names the method it requires (`otp`) is not met by a
 /// recovery code: none is offered, and one presented is refused before it
 /// is spent.

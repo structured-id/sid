@@ -282,6 +282,15 @@ impl RetainedDelivery {
         }
     }
 
+    /// The access token a native delivery carries, to tell whether it is
+    /// still usable before it is handed out again.
+    pub fn bearer_token(&self) -> Option<&secrecy::SecretString> {
+        match &self.credential {
+            Opened::Bearer { token, .. } => Some(token),
+            Opened::Browser(_) => None,
+        }
+    }
+
     /// One refresh credential of the native first generation this delivery
     /// carries, to tell whether that generation is still the session's.
     pub fn refresh_credential(&self) -> Option<&str> {

@@ -1427,6 +1427,26 @@ impl SignIn {
                 return Err(ended());
             }
         }
+        // A later step-up replaced and stopped the access token: handing it
+        // out again would replace the client's current one with a revoked
+        // credential.
+        if let Some(token) = delivery.bearer_token() {
+            let claims = self
+                .jwt()
+                .validate_access_token(secrecy::ExposeSecret::expose_secret(token))
+                .map_err(|_| ended())?;
+            if self
+                .revocation()
+                .is_revoked(&claims.jti, &claims.sid)
+                .await
+                .map_err(|e| SignInError::Unavailable {
+                    what: "token revocation",
+                    cause: e.to_string(),
+                })?
+            {
+                return Err(ended());
+            }
+        }
         delivery
             .signed_in(&self.cookie, &session)
             .map(Some)
