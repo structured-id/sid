@@ -62,8 +62,18 @@ type Metadata = {
   }[];
 };
 
+// The full `cargo metadata` of a consumer build runs past Node's default
+// 1 MiB of captured output; the bound only guards against a runaway child.
+const OUTPUT_LIMIT = 256 * 1024 * 1024;
+
 function run(cwd: string, env: NodeJS.ProcessEnv, ...argv: string[]): string {
-  return execFileSync(argv[0], argv.slice(1), { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+  return execFileSync(argv[0], argv.slice(1), {
+    cwd,
+    env,
+    encoding: "utf8",
+    maxBuffer: OUTPUT_LIMIT,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
 }
 
 function main(): void {
