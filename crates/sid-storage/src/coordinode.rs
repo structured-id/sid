@@ -171,6 +171,10 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     if let Some(spend) = &ctx.spend {
         credential::spend(tx, spend)?;
     }
+    // The native session's first generation, beside the session it renews.
+    if let Some(generation) = &ctx.generation {
+        session::insert_generation(tx, generation)?;
+    }
     audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
     for owed in &ctx.work {
         work::insert(tx, owed, sid_plugin::OWED_WORK_CAPACITY)?;

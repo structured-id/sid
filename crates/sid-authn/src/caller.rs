@@ -240,6 +240,11 @@ pub async fn authenticate_token(
 pub enum FactorToken {
     /// The token of a sign-in owing this factor: its claims, verified.
     Pending(AccessTokenClaims),
+    /// The verified token of a sign-in owing this factor whose context has
+    /// ended: it may only receive again what its completion committed, which
+    /// the completion's own record decides (an ended context without one
+    /// receives nothing).
+    Ended(AccessTokenClaims),
     /// A caller's ordinary token, as [`authenticate_token`] verifies it.
     Session(Verified),
 }
@@ -253,8 +258,11 @@ pub async fn authenticate_factor_token(
     current: &(impl CurrentToken + ?Sized),
 ) -> Result<FactorToken, CallerError> {
     if let Ok(claims) = verifier.validate_pending_access_token(token) {
-        if claims.cnf.is_some() || current.ended(token, &claims).await? {
+        if claims.cnf.is_some() {
             return Err(CallerError::Unauthenticated);
+        }
+        if current.ended(token, &claims).await? {
+            return Ok(FactorToken::Ended(claims));
         }
         return Ok(FactorToken::Pending(claims));
     }

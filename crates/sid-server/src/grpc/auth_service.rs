@@ -57,6 +57,14 @@ use refusal::{
     registration_restricted, session_ended, session_provisional, step_up_required,
 };
 use sid::second_factor::{Enroller, FactorCaller};
+use sid::sign_in::CompletedContext;
+
+/// What a second-factor verification presents: who verifies the factor,
+/// or the browser's own session a completion already installed.
+enum FactorRequest {
+    Caller(FactorCaller),
+    SignedIn(sid_core::models::Session),
+}
 use sign_in_security::sign_in_refusal;
 
 /// Extract User-Agent from gRPC metadata.
@@ -747,11 +755,90 @@ impl AuthServiceImpl {
             .await
     }
 
+    /// Who verifies the second factor of `request` to `rpc` and the native
+    /// application key its fresh proof binds to the pending context it
+    /// presents (a completed context's key goes with the context), or the
+    /// browser's own session a completion already installed. A step-up
+    /// renews nothing and takes no proof.
+    async fn second_factor_request<T>(
+        &self,
+        request: &Request<T>,
+        rpc: &str,
+    ) -> Result<Result<(FactorCaller, Option<String>), sid_core::models::Session>, Status> {
+        let mut caller = match self.factor_request(request).await? {
+            FactorRequest::Caller(caller) => caller,
+            FactorRequest::SignedIn(session) => return Ok(Err(session)),
+        };
+        let native = match &caller {
+            FactorCaller::Pending(_, client) => {
+                NativeProof::of(request, *client, self.public_origin(), rpc)?
+            }
+            FactorCaller::Completed(CompletedContext::Native { .. }) => {
+                NativeProof::of(request, CeremonyClient::Native, self.public_origin(), rpc)?
+            }
+            FactorCaller::Completed(CompletedContext::Browser { .. }) => None,
+            FactorCaller::StepUp(_) => {
+                if request.metadata().get(PROOF_METADATA).is_some() {
+                    return Err(super::native_session::field_refused(
+                        PROOF_METADATA,
+                        "a step-up renews no session",
+                    ));
+                }
+                None
+            }
+        };
+        let native_key = match &native {
+            Some(_) => {
+                let pending = sid_infra::authn::caller::bearer_token(request)?.to_owned();
+                self.native_ceremony_key(native.as_ref(), pending.as_bytes())
+                    .await?
+            }
+            None => None,
+        };
+        if let FactorCaller::Completed(CompletedContext::Native { key, .. }) = &mut caller {
+            key.clone_from(&native_key);
+        }
+        Ok(Ok((caller, native_key)))
+    }
+
+    /// The answer to a second-factor verification from a browser whose
+    /// completion already installed `session`'s cookie: that session, with
+    /// no effect and no new credential.
+    async fn already_signed_in(
+        &self,
+        session: &sid_core::models::Session,
+        remaining_codes: Option<i32>,
+    ) -> Result<Response<MfaVerifyResponse>, Status> {
+        let expires_in = self
+            .sign_ins
+            .current_sign_in(self.oauth.login_policy(), session)
+            .await
+            .map_err(sign_in_refusal)?;
+        Ok(Response::new(MfaVerifyResponse {
+            verified: true,
+            session_id: Some(session.id.into()),
+            expires_in: Some(expires_in),
+            redirect_to: None,
+            remaining_codes,
+        }))
+    }
+
     /// Who verifies a second factor in `request`: a sign-in's pending
     /// context, named by its token or, from the browser sign-in page, by its
     /// cookie with the CSRF token it was given; or an installation session
     /// stepping up, by its token.
     async fn factor_caller<T>(&self, request: &Request<T>) -> Result<FactorCaller, Status> {
+        match self.factor_request(request).await? {
+            FactorRequest::Caller(caller) => Ok(caller),
+            FactorRequest::SignedIn(_) => Err(session_ended()),
+        }
+    }
+
+    /// What a second-factor verification in `request` presents (see
+    /// [`Self::factor_caller`]); also the browser whose completion already
+    /// installed its session cookie before the response was lost, and the
+    /// context of a completion that committed.
+    async fn factor_request<T>(&self, request: &Request<T>) -> Result<FactorRequest, Status> {
         let metadata = request.metadata();
         if metadata.get("authorization").is_none() {
             // Only the exact sign-in page completes a pending sign-in with its
@@ -759,24 +846,56 @@ impl AuthServiceImpl {
             if self.ceremony_client(metadata)? != CeremonyClient::Browser {
                 return Err(session_ended());
             }
-            let pending = self
-                .browser_session(metadata)
-                .await?
-                .filter(|s| s.awaits_second_factor() && !s.is_expired())
-                .ok_or_else(session_ended)?;
-            let sent = metadata
-                .get_all("x-csrf-token")
-                .iter()
-                .filter_map(|value| value.to_str().ok());
-            let csrf = pending.browser_csrf.as_ref().ok_or_else(session_ended)?;
-            if !sid_authn::browser_session::BrowserCsrf::matches(sent, csrf) {
-                return Err(ApiError::new(
+            let csrf_invalid = || -> Status {
+                ApiError::new(
                     ErrorReason::CsrfTokenInvalid,
                     "the sign-in's CSRF token is missing or wrong",
                 )
-                .into());
+                .into()
+            };
+            let sent = || {
+                metadata
+                    .get_all("x-csrf-token")
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+            };
+            let Some(session) = self
+                .browser_session(metadata)
+                .await?
+                .filter(|s| !s.is_expired())
+            else {
+                // A cookie no session holds: the context of a completion
+                // that committed, presented with the CSRF token it was
+                // given, which the completion's record checks.
+                let secret = self
+                    .sign_ins
+                    .browser_secret_hash(
+                        metadata
+                            .get_all("cookie")
+                            .iter()
+                            .filter_map(|value| value.to_str().ok()),
+                    )
+                    .ok_or_else(session_ended)?;
+                let mut tokens = sent();
+                let (Some(csrf), None) = (tokens.next(), tokens.next()) else {
+                    return Err(csrf_invalid());
+                };
+                return Ok(FactorRequest::Caller(FactorCaller::Completed(
+                    CompletedContext::Browser {
+                        secret,
+                        csrf: csrf.to_owned(),
+                    },
+                )));
+            };
+            let csrf = session.browser_csrf.as_ref().ok_or_else(session_ended)?;
+            if !sid_authn::browser_session::BrowserCsrf::matches(sent(), csrf) {
+                return Err(csrf_invalid());
             }
-            return Ok(FactorCaller::Pending(pending, CeremonyClient::Browser));
+            return Ok(if session.awaits_second_factor() {
+                FactorRequest::Caller(FactorCaller::Pending(session, CeremonyClient::Browser))
+            } else {
+                FactorRequest::SignedIn(session)
+            });
         }
         // The pending context's token is accepted here and nowhere else.
         let (claims, profile_id, pending) = match sid_infra::authn::caller::verify_factor_request(
@@ -790,6 +909,15 @@ impl AuthServiceImpl {
                 let caller = sid_authn::caller::Caller::from_claims(&claims).or_status()?;
                 (claims, caller.profile_id, true)
             }
+            // The token of an ended context: it names the completion it may
+            // receive again; the native key is the request's own proof.
+            sid_authn::caller::FactorToken::Ended(claims) => {
+                let pending = SessionId::parse(&claims.sid)
+                    .map_err(|e| internal("read session id of a verified token", e))?;
+                return Ok(FactorRequest::Caller(FactorCaller::Completed(
+                    CompletedContext::Native { pending, key: None },
+                )));
+            }
             sid_authn::caller::FactorToken::Session(verified) => {
                 verified.require_installation().or_status()?;
                 (verified.claims, verified.caller.profile_id, false)
@@ -797,19 +925,35 @@ impl AuthServiceImpl {
         };
         let session_id = SessionId::parse(&claims.sid)
             .map_err(|e| internal("read session id of a verified token", e))?;
-        let session = self
+        let Some(session) = self
             .storage
             .get_session(session_id)
             .await
             .map_err(storage_failure)?
+        else {
+            // A pending context gone before its end reached this process (a
+            // completion that committed while its revocation was lost or is
+            // still in flight): it names the completion it may receive, as
+            // an ended one does; the native key is the request's own proof.
+            if pending {
+                return Ok(FactorRequest::Caller(FactorCaller::Completed(
+                    CompletedContext::Native {
+                        pending: session_id,
+                        key: None,
+                    },
+                )));
+            }
+            return Err(session_ended());
+        };
+        let session = Some(session)
             .filter(|session| session.profile_id == profile_id)
             .filter(|session| session.awaits_second_factor() == pending)
             .ok_or_else(session_ended)?;
-        Ok(if pending {
+        Ok(FactorRequest::Caller(if pending {
             FactorCaller::Pending(session, CeremonyClient::Native)
         } else {
             FactorCaller::StepUp(session)
-        })
+        }))
     }
 
     /// Who completes the upstream sign-in `request`: its client (a browser
@@ -1703,35 +1847,14 @@ impl AuthService for AuthServiceImpl {
         // Step-up elevates the IdP session and answers with its new token: an
         // application's token never turns into one. A sign-in's pending
         // context is completed into its session instead.
-        let caller = self.factor_caller(&request).await?;
+        let (caller, native_key) = match self
+            .second_factor_request(&request, "/sid.v1.authn.AuthService/VerifyTotp")
+            .await?
+        {
+            Ok(verifying) => verifying,
+            Err(signed_in) => return self.already_signed_in(&signed_in, None).await,
+        };
         let client_ip = self.client_ip(&request)?;
-        // A native completion asking for a renewable session binds its key
-        // to the pending context it presents; a step-up renews nothing.
-        let native = match &caller {
-            FactorCaller::Pending(_, client) => NativeProof::of(
-                &request,
-                *client,
-                self.public_origin(),
-                "/sid.v1.authn.AuthService/VerifyTotp",
-            )?,
-            FactorCaller::StepUp(_) => {
-                if request.metadata().get(PROOF_METADATA).is_some() {
-                    return Err(super::native_session::field_refused(
-                        PROOF_METADATA,
-                        "a step-up renews no session",
-                    ));
-                }
-                None
-            }
-        };
-        let native_key = match &native {
-            Some(_) => {
-                let pending = sid_infra::authn::caller::bearer_token(&request)?.to_owned();
-                self.native_ceremony_key(native.as_ref(), pending.as_bytes())
-                    .await?
-            }
-            None => None,
-        };
 
         // A completed sign-in and a step-up both answer with the session's
         // new credential.
@@ -1795,33 +1918,14 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // As VerifyTotp: a sign-in's pending context is completed into its
         // session; an installation session has the code recorded.
-        let caller = self.factor_caller(&request).await?;
+        let (caller, native_key) = match self
+            .second_factor_request(&request, "/sid.v1.authn.AuthService/VerifyRecoveryCode")
+            .await?
+        {
+            Ok(verifying) => verifying,
+            Err(signed_in) => return self.already_signed_in(&signed_in, None).await,
+        };
         let client_ip = self.client_ip(&request)?;
-        let native = match &caller {
-            FactorCaller::Pending(_, client) => NativeProof::of(
-                &request,
-                *client,
-                self.public_origin(),
-                "/sid.v1.authn.AuthService/VerifyRecoveryCode",
-            )?,
-            FactorCaller::StepUp(_) => {
-                if request.metadata().get(PROOF_METADATA).is_some() {
-                    return Err(super::native_session::field_refused(
-                        PROOF_METADATA,
-                        "a step-up renews no session",
-                    ));
-                }
-                None
-            }
-        };
-        let native_key = match &native {
-            Some(_) => {
-                let pending = sid_infra::authn::caller::bearer_token(&request)?.to_owned();
-                self.native_ceremony_key(native.as_ref(), pending.as_bytes())
-                    .await?
-            }
-            None => None,
-        };
         let spent = self
             .second_factors
             .verify_recovery_code(
@@ -2053,7 +2157,26 @@ impl AuthService for AuthServiceImpl {
         request: Request<CompleteStepUpRequest>,
     ) -> Result<Response<CompleteStepUpResponse>, Status> {
         self.check_maintenance().await?;
-        let verified = self.caller_claims(&request).await?;
+        let verified = match self.caller_claims(&request).await {
+            Ok(verified) => verified,
+            // The step-up of this token committed and stopped it before its
+            // response arrived: the token, still signed by this issuer,
+            // receives only what that step-up committed.
+            Err(refused) => {
+                let committed = match sid_infra::authn::caller::bearer_token(&request)
+                    .ok()
+                    .and_then(|token| self.jwt.verifier().validate_access_token(token).ok())
+                {
+                    Some(claims) => self
+                        .second_factors
+                        .step_up_redeliver(&self.sign_ins, &claims)
+                        .await
+                        .map_err(second_factor_refusal)?,
+                    None => None,
+                };
+                return committed.map(Response::new).ok_or(refused);
+            }
+        };
         self.second_factors
             .step_up_complete(&self.sign_ins, &verified, request.into_inner())
             .await

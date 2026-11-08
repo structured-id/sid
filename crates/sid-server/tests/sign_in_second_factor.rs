@@ -494,9 +494,10 @@ async fn recover_with_token(
 /// Regression: an account whose TOTP authenticator is enrolled but lost
 /// completes its password sign-in with a recovery code, recorded as `mca`,
 /// the code spent once; a retry of the completion, whose response was lost,
-/// spends nothing more and signs in no second session. Before, a recovery
-/// code was accepted only on an already completed session, so the pending
-/// sign-in could not be completed at all.
+/// receives the same session and token, spends nothing more and signs in no
+/// second session, whatever code it presents. Before, a recovery code was
+/// accepted only on an already completed session, so the pending sign-in
+/// could not be completed at all.
 #[tokio::test]
 async fn a_pending_sign_in_is_completed_by_a_recovery_code() {
     let seed = sid_authn::generate_secret();
@@ -525,18 +526,325 @@ async fn a_pending_sign_in_is_completed_by_a_recovery_code() {
     assert!(claims.amr.iter().any(|m| m == "pwd"), "{:?}", claims.amr);
     assert!(claims.amr.iter().any(|m| m == "mca"), "{:?}", claims.amr);
     assert!(!claims.amr.iter().any(|m| m == "otp"), "{:?}", claims.amr);
-    assert_eq!(completed.into_inner().remaining_codes, Some(1));
+    let body = completed.into_inner();
+    assert_eq!(body.remaining_codes, Some(1));
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 
     for code in ["AAAA-BBBB", "CCCC-DDDD"] {
-        assert!(
-            recover_with_token(&svc, &pending_token, code)
-                .await
-                .is_err()
-        );
+        let again = recover_with_token(&svc, &pending_token, code)
+            .await
+            .expect("the committed sign-in, delivered again");
+        assert_eq!(bearer(&again), token, "the same credential");
+        let again = again.into_inner();
+        assert_eq!(again.session_id, body.session_id);
+        assert_eq!(again.remaining_codes, Some(1));
     }
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
     assert_eq!(codes_left(&svc, profile).await, 1, "a retry spends no code");
+}
+
+/// The last recovery code completes the sign-in of an account whose TOTP is
+/// lost; the response is lost. The same pending context receives the
+/// committed session without another code, which it no longer has: one
+/// session, one code spent. Once that session is revoked the context
+/// receives nothing, and nothing new is created.
+#[tokio::test]
+async fn the_last_recovery_code_survives_a_lost_response() {
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+
+    let lost = recover_with_token(&svc, &pending_token, "AAAA-BBBB")
+        .await
+        .expect("committed");
+    let token = bearer(&lost);
+    let session_id: sid_core::models::SessionId =
+        sid_ids_proto::required(lost.into_inner().session_id.as_ref()).unwrap();
+    assert_eq!(codes_left(&svc, profile).await, 0);
+
+    let again = recover_with_token(&svc, &pending_token, "AAAA-BBBB")
+        .await
+        .expect("the lost sign-in, delivered again");
+    assert_eq!(bearer(&again), token);
+    let body = again.into_inner();
+    assert_eq!(
+        sid_ids_proto::required(body.session_id.as_ref()).unwrap(),
+        session_id
+    );
+    assert_eq!(body.remaining_codes, Some(0));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+
+    // A revoked session is not resurrected by its saved delivery.
+    svc.storage
+        .delete_session(
+            session_id,
+            &sid_core::models::SessionEnd::new(
+                sid_core::models::RevocationReason::UserRequested,
+                profile.to_string(),
+            ),
+            AuditEntry::system("test", "revoke").into(),
+        )
+        .await
+        .unwrap();
+    let refused = recover_with_token(&svc, &pending_token, "AAAA-BBBB")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    assert_eq!(svc.mock_storage.sessions_of(profile), 0);
+    assert_eq!(codes_left(&svc, profile).await, 0);
+}
+
+/// Two completions of one pending context race with different recovery
+/// codes: one commits, the other receives that same sign-in, and only one
+/// code is spent.
+#[tokio::test]
+async fn concurrent_completions_sign_in_once_and_spend_one_code() {
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB", "CCCC-DDDD"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+
+    let (a, b) = tokio::join!(
+        recover_with_token(&svc, &pending_token, "AAAA-BBBB"),
+        recover_with_token(&svc, &pending_token, "CCCC-DDDD"),
+    );
+    let (a, b) = (a.expect("signed in"), b.expect("signed in"));
+    assert_eq!(bearer(&a), bearer(&b), "one sign-in for both");
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+    assert_eq!(codes_left(&svc, profile).await, 1, "one code spent");
+}
+
+/// The sign-in page's completion by a recovery code: its response is lost,
+/// and the page retries with the same pending cookie and CSRF token: the same
+/// session cookie, nothing more. Another CSRF token receives nothing. When
+/// the cookie was installed before the body was lost, the page presents the
+/// new session's cookie and is answered with that session, again with no
+/// effect.
+#[tokio::test]
+async fn the_sign_in_page_recovers_a_lost_completion() {
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+    let finish = start_login(&svc, PRINCIPAL, PASSWORD).await;
+    let first = common::opaque_client::finish_with_origins(&svc, finish, &[SIGN_IN_ORIGIN])
+        .await
+        .expect("pending context");
+    let pending_cookie = cookie_of(&first);
+    let csrf = first.into_inner().browser_csrf.expect("the CSRF token");
+    let recover = |cookie: &str, csrf: &str| {
+        let mut request = Request::new(VerifyRecoveryCodeRequest {
+            code: "AAAA-BBBB".to_string(),
+        });
+        let metadata = request.metadata_mut();
+        metadata.insert("origin", SIGN_IN_ORIGIN.parse().unwrap());
+        metadata.insert("cookie", cookie.parse().unwrap());
+        metadata.insert("x-csrf-token", csrf.parse().unwrap());
+        svc.auth.verify_recovery_code(request)
+    };
+
+    let lost = recover(&pending_cookie, &csrf).await.expect("committed");
+    let session_cookie = cookie_of(&lost);
+    let session_id = lost.into_inner().session_id;
+    let again = recover(&pending_cookie, &csrf)
+        .await
+        .expect("the lost sign-in, delivered again");
+    assert_eq!(cookie_of(&again), session_cookie, "the same session cookie");
+    assert_eq!(again.into_inner().session_id, session_id);
+
+    let foreign = recover(&pending_cookie, "not-the-token").await.unwrap_err();
+    assert_eq!(foreign.code(), Code::Unauthenticated, "{foreign:?}");
+
+    // The cookie arrived, the body did not: the page asks with the session
+    // cookie it now holds and the only CSRF token it has, the one the
+    // pending context gave it, which the session keeps.
+    let secret = BrowserCookie::default()
+        .secret([session_cookie.as_str()])
+        .unwrap();
+    let session = svc
+        .storage
+        .get_session_by_browser_secret(&secret.hash())
+        .await
+        .unwrap()
+        .expect("the installed cookie names the session");
+    assert_eq!(
+        sid_authn::browser_session::BrowserCsrf::encode(session.browser_csrf.as_ref().unwrap()),
+        csrf
+    );
+    let installed = recover(&session_cookie, &csrf)
+        .await
+        .expect("answered with the installed session");
+    assert!(installed.metadata().get("set-cookie").is_none());
+    assert_eq!(installed.into_inner().session_id, session_id);
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+    assert_eq!(codes_left(&svc, profile).await, 0);
+}
+
+/// A native client that proved its application key at completion receives
+/// the session's first generation; after a lost response the same context,
+/// proving the same key again, receives that same generation. A proof by
+/// another key receives nothing.
+#[tokio::test]
+async fn a_native_completion_redelivers_its_first_generation() {
+    use common::native_client::{Binds, generation, proof, proof_with, rpc_uri, with_proof};
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+    let recover = |proof: String| {
+        let mut request = with_proof(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB".to_string(),
+            },
+            &proof,
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        svc.auth.verify_recovery_code(request)
+    };
+    let fresh = || {
+        proof(
+            &rpc_uri("VerifyRecoveryCode"),
+            Binds::Ceremony(pending_token.as_bytes()),
+        )
+    };
+
+    let lost = recover(fresh()).await.expect("committed");
+    let token = bearer(&lost);
+    let first = generation(&lost).expect("the first generation");
+    let again = recover(fresh()).await.expect("delivered again");
+    assert_eq!(bearer(&again), token);
+    assert_eq!(generation(&again).expect("the same generation"), first);
+
+    let other_key = proof_with(
+        &common::native_client::other_key(),
+        &rpc_uri("VerifyRecoveryCode"),
+        Binds::Ceremony(pending_token.as_bytes()),
+    );
+    let refused = recover(other_key).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+}
+
+/// Regression: a native completion committed, but the end of its pending
+/// context never reached another replica (its revocation was not recorded).
+/// The retry there still verifies as a pending context whose session is gone;
+/// it is answered from the completion with the same token and generation, as
+/// it would be once the revocation arrived. Before, it was refused as an
+/// ended sign-in and the committed session was unreachable.
+#[tokio::test]
+async fn a_native_completion_is_recovered_before_its_revocation_arrives() {
+    use common::native_client::{Binds, generation, proof, rpc_uri, with_proof};
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+    let recover = || {
+        let mut request = with_proof(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB".to_string(),
+            },
+            &proof(
+                &rpc_uri("VerifyRecoveryCode"),
+                Binds::Ceremony(pending_token.as_bytes()),
+            ),
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        request
+    };
+
+    svc.mock_storage.fail_admissions("revoked-session");
+    let _lost = svc.auth.verify_recovery_code(recover()).await;
+    svc.mock_storage.record_admissions();
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1, "it committed");
+
+    let replica = svc
+        .restarted_under(
+            std::sync::Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+            policy.clone(),
+        )
+        .await;
+    let again = replica
+        .auth
+        .verify_recovery_code(recover())
+        .await
+        .expect("the committed sign-in, delivered again");
+    assert!(generation(&again).is_some(), "with its first generation");
+    let repeat = replica
+        .auth
+        .verify_recovery_code(recover())
+        .await
+        .expect("delivered again");
+    assert_eq!(bearer(&repeat), bearer(&again));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+}
+
+/// Regression: a native completion's token that a step-up has since
+/// replaced and stopped is not delivered again: a delayed retry of the
+/// completion is refused rather than answered with the revoked token, which
+/// would overwrite the client's current one.
+#[tokio::test]
+async fn a_completion_whose_token_a_step_up_replaced_is_not_delivered_again() {
+    use common::native_client::{Binds, proof, rpc_uri, with_proof};
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB", "CCCC-DDDD"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+    let complete = || {
+        let mut request = with_proof(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB".to_string(),
+            },
+            &proof(
+                &rpc_uri("VerifyRecoveryCode"),
+                Binds::Ceremony(pending_token.as_bytes()),
+            ),
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        request
+    };
+    let first = bearer(&svc.auth.verify_recovery_code(complete()).await.unwrap());
+
+    let mut step_up = Request::new(CompleteStepUpRequest {
+        method: StepUpMethod::RecoveryCode as i32,
+        challenge_id: None,
+        proof: Some(complete_step_up_request::Proof::RecoveryCode(
+            "CCCC-DDDD".to_string(),
+        )),
+    });
+    step_up
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {first}").parse().unwrap());
+    let rotated = svc
+        .auth
+        .complete_step_up(step_up)
+        .await
+        .expect("a step-up of the completed session")
+        .into_inner()
+        .new_session_token;
+    assert_ne!(rotated, first);
+
+    let late = svc.auth.verify_recovery_code(complete()).await;
+    assert!(
+        late.as_ref().map_or(true, |r| bearer(r) != first),
+        "the replaced token was delivered again"
+    );
+    let refused = late.expect_err("the completion's token was replaced");
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
 }
 
 /// A policy that names the method it requires (`otp`) is not met by a
@@ -672,11 +980,12 @@ async fn wrong_codes_lock_the_account_out() {
 }
 
 /// The pending context authorizes no application grant and no account
-/// operation, and completes once only.
+/// operation, and completes once only: a repeat receives the sign-in that
+/// completion committed and creates no second one.
 #[tokio::test]
 async fn a_pending_context_authorizes_nothing_else() {
     let seed = sid_authn::generate_secret();
-    let (svc, _policy, _) = services(Some(&seed)).await;
+    let (svc, _policy, profile) = services(Some(&seed)).await;
     let pending_token = bearer(&native_sign_in(&svc).await.unwrap());
 
     let mut enroll = Request::new(StartTotpEnrollmentRequest {});
@@ -702,7 +1011,7 @@ async fn a_pending_context_authorizes_nothing_else() {
     );
     assert!(svc.auth.o_auth2_authorize(authorize).await.is_err());
 
-    verify_with_token(
+    let completed = verify_with_token(
         &svc,
         &pending_token,
         sid_authn::generate_current_totp(&seed),
@@ -715,8 +1024,17 @@ async fn a_pending_context_authorizes_nothing_else() {
         sid_authn::generate_current_totp(&seed),
     )
     .await
-    .expect_err("a completed context completes nothing again");
-    assert_eq!(again.code(), Code::Unauthenticated, "{again:?}");
+    .expect("the committed sign-in, not a second one");
+    assert_eq!(bearer(&again), bearer(&completed));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+
+    // An ended context still authorizes nothing but its own result.
+    let mut enroll = Request::new(StartTotpEnrollmentRequest {});
+    enroll.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {pending_token}").parse().unwrap(),
+    );
+    assert!(svc.auth.start_totp_enrollment(enroll).await.is_err());
 }
 
 /// A requirement TOTP cannot meet is refused and stores no session, with no

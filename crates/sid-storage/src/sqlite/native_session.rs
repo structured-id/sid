@@ -86,22 +86,6 @@ pub(super) fn presented_row(row: &sqlx::sqlite::SqliteRow) -> SidResult<NativePr
 }
 
 impl SqliteBackend {
-    pub(crate) async fn issue_native_generation_impl(
-        &self,
-        generation: &NativeGeneration,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        let mut tx = self.begin_write().await?;
-        let now = fmt_dt(&chrono::Utc::now());
-        if !session_live(&mut tx, generation.session_id, &now).await? {
-            return Err(SidError::Fenced(
-                "the session ended before its native generation".into(),
-            ));
-        }
-        insert_generation(&mut tx, generation).await?;
-        Self::commit_mutation(tx, &format!("session:{}", generation.session_id), ctx).await
-    }
-
     pub(crate) async fn native_generation_by_credential_impl(
         &self,
         hash: &[u8],

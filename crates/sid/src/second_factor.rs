@@ -143,6 +143,22 @@ fn require_totp_code_format(code: &str) -> Result<(), SecondFactorError> {
     }
 }
 
+/// The namespace of committed step-ups, whose results are their rotated
+/// tokens sealed for a lost response.
+const STEP_UP_NAMESPACE: &str = "step-up";
+
+/// The method a committed step-up records.
+const STEP_UP_METHOD: &str = "complete_step_up";
+
+/// The key of the step-up the token `claims` stand for: the token it
+/// rotates, which stops once it commits.
+fn step_up_completion_key(
+    claims: &sid_authn::jwt::AccessTokenClaims,
+) -> Result<sid_core::models::OperationKey, SecondFactorError> {
+    sid_core::models::OperationKey::parse(&format!("step-up:{}", claims.jti))
+        .map_err(|e| internal("name a step-up", e))
+}
+
 /// A spend whose credential changed before its commit lost to a concurrent
 /// one: nothing was spent, and the client retries.
 fn spent_concurrently(e: SecondFactorError) -> SecondFactorError {
@@ -178,15 +194,67 @@ impl Enroller {
 pub enum FactorCaller {
     /// A sign-in's pending context, completed into its session for `client`.
     Pending(Session, CeremonyClient),
+    /// A pending context its client proves that is no longer live: it may
+    /// only receive again the sign-in its completion committed.
+    Completed(crate::sign_in::CompletedContext),
     /// An installation session stepping up.
     StepUp(Session),
 }
 
-impl FactorCaller {
-    pub fn profile_id(&self) -> ProfileId {
+/// What a completed pending context receives again, through the shared
+/// sign-in completion: its committed sign-in, or the context has ended.
+async fn redelivered(
+    sign_in: &SignIn,
+    login_policy: &dyn LoginPolicySource,
+    completed: &crate::sign_in::CompletedContext,
+) -> Result<SignedIn, SecondFactorError> {
+    sign_in
+        .redeliver_second_factor(login_policy, completed)
+        .await?
+        .ok_or(SecondFactorError::SessionEnded)
+}
+
+/// A caller whose factor is judged now: a live pending context or an
+/// installation session.
+enum LiveCaller {
+    Pending(Session, CeremonyClient),
+    StepUp(Session),
+}
+
+impl LiveCaller {
+    fn profile_id(&self) -> ProfileId {
         match self {
             Self::Pending(session, _) | Self::StepUp(session) => session.profile_id,
         }
+    }
+}
+
+/// `caller` as it stands now: a pending context still live, read again
+/// (a completed one, or one a host still holds after its completion
+/// committed, is the context a retry of that completion proves), or the
+/// session stepping up.
+async fn live_caller(
+    sign_in: &SignIn,
+    caller: FactorCaller,
+    native_key: Option<&str>,
+) -> Result<Result<LiveCaller, crate::sign_in::CompletedContext>, SecondFactorError> {
+    let (pending, client) = match caller {
+        FactorCaller::Completed(completed) => return Ok(Err(completed)),
+        FactorCaller::StepUp(session) => return Ok(Ok(LiveCaller::StepUp(session))),
+        FactorCaller::Pending(pending, client) => (pending, client),
+    };
+    let live = sign_in
+        .storage()
+        .get_session(pending.id)
+        .await?
+        .filter(|s| {
+            s.profile_id == pending.profile_id && s.awaits_second_factor() && !s.is_expired()
+        });
+    match live {
+        Some(live) => Ok(Ok(LiveCaller::Pending(live, client))),
+        None => crate::sign_in::CompletedContext::of(&pending, client, native_key)
+            .map(Err)
+            .ok_or(SecondFactorError::SessionEnded),
     }
 }
 
@@ -351,8 +419,21 @@ impl SecondFactors {
         ctx: MutationContext,
         authenticate: impl FnOnce(&mut sid_core::models::session::ActiveSession<'_>),
     ) -> Result<Session, SecondFactorError> {
-        let storage = sign_in.storage();
-        let mut session = storage
+        let (expected, session) = self.authenticated(sign_in, id, authenticate).await?;
+        self.record_authentication(sign_in, &expected, session, ctx)
+            .await
+    }
+
+    /// The active session `id` as `authenticate` changes it, with the
+    /// authentication it was read with; nothing is stored.
+    async fn authenticated(
+        &self,
+        sign_in: &SignIn,
+        id: SessionId,
+        authenticate: impl FnOnce(&mut sid_core::models::session::ActiveSession<'_>),
+    ) -> Result<(sid_core::models::SessionAuthentication, Session), SecondFactorError> {
+        let mut session = sign_in
+            .storage()
             .get_session(id)
             .await?
             .ok_or(SecondFactorError::SessionEnded)?;
@@ -362,13 +443,26 @@ impl SecondFactors {
         }
         let mut active = session.as_active().ok_or(SecondFactorError::SessionEnded)?;
         authenticate(&mut active);
+        Ok((expected, session))
+    }
+
+    /// Store `session`'s authentication over `expected` with a
+    /// compare-and-swap, committing `ctx` with it.
+    async fn record_authentication(
+        &self,
+        sign_in: &SignIn,
+        expected: &sid_core::models::SessionAuthentication,
+        session: Session,
+        ctx: MutationContext,
+    ) -> Result<Session, SecondFactorError> {
+        let storage = sign_in.storage();
         if storage
-            .record_session_authentication(id, &expected, &session.authentication(), ctx)
+            .record_session_authentication(session.id, expected, &session.authentication(), ctx)
             .await?
         {
             return Ok(session);
         }
-        match storage.get_session(id).await? {
+        match storage.get_session(session.id).await? {
             Some(now) if !now.is_expired() => Err(SecondFactorError::ChangedConcurrently),
             _ => Err(SecondFactorError::SessionEnded),
         }
@@ -592,8 +686,14 @@ impl SecondFactors {
         native_key: Option<&str>,
         code: &str,
     ) -> Result<SignedIn, SecondFactorError> {
-        let profile_id = caller.profile_id();
         require_totp_code_format(code)?;
+        // A context whose completion committed receives that sign-in again,
+        // and the code is not judged a second time.
+        let caller = match live_caller(sign_in, caller, native_key).await? {
+            Ok(live) => live,
+            Err(completed) => return redelivered(sign_in, login_policy, &completed).await,
+        };
+        let profile_id = caller.profile_id();
         let identity = profile_id.to_string();
         sign_in.refuse_if_locked(&identity).await?;
 
@@ -625,14 +725,14 @@ impl SecondFactors {
         }
 
         let session_id = match caller {
-            FactorCaller::Pending(pending, client) => {
+            LiveCaller::Pending(pending, client) => {
                 let signed_in = sign_in
                     .complete_second_factor(login_policy, pending, "otp", client, native_key, None)
                     .await?;
                 info!("TOTP completed the sign-in of profile {}", profile_id);
                 return Ok(signed_in);
             }
-            FactorCaller::StepUp(session) => session.id,
+            LiveCaller::StepUp(session) => session.id,
         };
 
         // A token must not claim an elevation that was not stored.
@@ -768,14 +868,27 @@ impl SecondFactors {
         native_key: Option<&str>,
         code: &str,
     ) -> Result<RecoveryCodeSpent, SecondFactorError> {
-        let profile_id = caller.profile_id();
         if code.is_empty() {
             return Err(SecondFactorError::MissingField("code"));
         }
         let amr = crate::sign_in::RECOVERY_CODE_AMR;
+        // A context whose completion committed receives that sign-in again;
+        // the code presented is not judged and nothing more is spent.
+        let caller = match live_caller(sign_in, caller, native_key).await? {
+            Ok(live) => live,
+            Err(completed) => {
+                let signed_in = redelivered(sign_in, login_policy, &completed).await?;
+                return Ok(RecoveryCodeSpent {
+                    session_id: signed_in.session_id,
+                    remaining: self.codes_left(sign_in, &signed_in).await?,
+                    signed_in: Some(signed_in),
+                });
+            }
+        };
+        let profile_id = caller.profile_id();
         let (pending, client) = match caller {
-            FactorCaller::Pending(pending, client) => (pending, client),
-            FactorCaller::StepUp(session) => {
+            LiveCaller::Pending(pending, client) => (pending, client),
+            LiveCaller::StepUp(session) => {
                 let (spend, remaining) = self.recovery_spend(sign_in, profile_id, code).await?;
                 // The code is spent in the commit recording it on the session.
                 self.authenticate_session(
@@ -806,12 +919,6 @@ impl SecondFactors {
         // a completion refused (the pending context ended, the policy or the
         // first factor changed) or lost to a concurrent one spends nothing.
         // The checks here answer early; the commit makes them again.
-        let pending = sign_in
-            .storage()
-            .get_session(pending.id)
-            .await?
-            .filter(|s| s.profile_id == profile_id && s.awaits_second_factor() && !s.is_expired())
-            .ok_or(SecondFactorError::SessionEnded)?;
         sign_in
             .second_factor_requirements(login_policy, &pending, amr)
             .await?;
@@ -827,6 +934,12 @@ impl SecondFactors {
         let signed_in = sign_in
             .complete_second_factor(login_policy, pending, amr, client, native_key, Some(spend))
             .await?;
+        // A concurrent completion that committed first answers instead of
+        // this one, and this code stays unspent: the count is the store's.
+        let remaining = match self.codes_left(sign_in, &signed_in).await {
+            Ok(left) => left,
+            Err(_) => remaining,
+        };
         info!(
             "A recovery code completed the sign-in of profile {} ({} remaining)",
             profile_id, remaining
@@ -836,6 +949,31 @@ impl SecondFactors {
             remaining,
             signed_in: Some(signed_in),
         })
+    }
+
+    /// How many recovery codes the account `signed_in` signed into has left.
+    async fn codes_left(
+        &self,
+        sign_in: &SignIn,
+        signed_in: &SignedIn,
+    ) -> Result<i32, SecondFactorError> {
+        let storage = sign_in.storage();
+        let session = storage
+            .get_session(signed_in.session_id)
+            .await?
+            .ok_or(SecondFactorError::SessionEnded)?;
+        let left = match storage
+            .get_credentials_by_profile(session.profile_id, Some(CredentialType::Recovery))
+            .await?
+            .into_iter()
+            .find(|c| c.status.is_active())
+        {
+            Some(set) => serde_json::from_slice::<Vec<String>>(set.data.expose())
+                .map_err(|e| internal("read recovery code set", e))?
+                .len(),
+            None => 0,
+        };
+        i32::try_from(left).map_err(|e| internal("count remaining recovery codes", e))
     }
 
     /// The step-up methods the installation session `verified` stands for
@@ -964,6 +1102,11 @@ impl SecondFactors {
         let claims = &verified.claims;
         let profile_id = verified.caller.profile_id;
         let session_id = token_session(verified)?;
+        // A step-up of this token already committed: its rotated token is
+        // delivered again and the proof is not judged a second time.
+        if let Some(committed) = self.step_up_redeliver(sign_in, claims).await? {
+            return Ok(committed);
+        }
         let method = StepUpMethod::try_from(request.method).unwrap_or(StepUpMethod::Unspecified);
         let mut spend = None;
         let (amr_methods, target_level) = match method {
@@ -1050,57 +1193,86 @@ impl SecondFactors {
             StepUpMethod::Unspecified => return Err(SecondFactorError::MissingField("method")),
         };
 
-        // The elevated token is issued only for an elevation that is stored.
-        let ctx = MutationContext::from(AuditEntry::user(
+        let (expected, elevated) = self
+            .authenticated(sign_in, session_id, |active| {
+                active.elevate(target_level);
+                for method in &amr_methods {
+                    active.add_amr(method);
+                }
+                // The step-up is an authentication now: it is what a later
+                // sensitive operation counts as fresh.
+                active.refresh_authentication();
+            })
+            .await?;
+        // The rotated token exists before the elevation commits and is
+        // sealed into that commit: the elevation, the factor's spend and
+        // the answer to a lost response commit together, kept no longer
+        // than the token they replace.
+        let new_token = sign_in
+            .jwt()
+            .reissue_elevated_token(claims, &elevated)
+            .map_err(|e| internal("reissue stepped-up token", e))?;
+        // Kept while both the token it replaces and the replacement are
+        // valid: a replacement past its own expiry is never delivered.
+        let replacement_exp = sign_in
+            .jwt()
+            .validate_access_token(&new_token)
+            .map_err(|e| internal("read the stepped-up token", e))?
+            .exp;
+        let deadline = chrono::DateTime::from_timestamp(claims.exp.min(replacement_exp), 0)
+            .unwrap_or_else(chrono::Utc::now)
+            .min(elevated.expires_at);
+        let sealed = sid_authn::sign_in_delivery::retain_bearer(
+            sign_in.keys(),
+            &self.step_up_context(claims),
+            &elevated,
+            sid_authn::sign_in_delivery::BearerCredential {
+                token: &new_token.clone().into(),
+                token_expires_at: deadline,
+                refresh: None,
+            },
+            deadline,
+        )
+        .await
+        .map_err(|e| internal("seal the stepped-up token", e))?;
+        let mut ctx = MutationContext::from(AuditEntry::user(
             profile_id.to_string(),
             "session.step_up",
             session_id.to_string(),
-        ));
-        let session = self
-            .authenticate_session(
-                sign_in,
-                session_id,
-                match spend {
-                    Some(spend) => spend.into_context(ctx),
-                    None => ctx,
-                },
-                |active| {
-                    active.elevate(target_level);
-                    for method in &amr_methods {
-                        active.add_amr(method);
-                    }
-                    // The step-up is an authentication now: it is what a
-                    // later sensitive operation counts as fresh.
-                    active.refresh_authentication();
-                },
+        ))
+        .with_operation(
+            sid_core::models::OperationCompletion::new(
+                STEP_UP_NAMESPACE,
+                step_up_completion_key(claims)?,
+                STEP_UP_METHOD,
+                claims.sid.as_bytes(),
+                sealed,
             )
+            .retained_until(deadline),
+        );
+        if let Some(spend) = spend {
+            ctx = spend.into_context(ctx);
+        }
+        let session = match self
+            .record_authentication(sign_in, &expected, elevated, ctx)
             .await
-            .map_err(spent_concurrently)?;
+        {
+            Ok(session) => session,
+            // Another attempt of this step-up committed first: its token.
+            Err(SecondFactorError::Store(SidError::OperationCompleted(_))) => {
+                return self
+                    .step_up_redeliver(sign_in, claims)
+                    .await?
+                    .ok_or(SecondFactorError::ChangedConcurrently);
+            }
+            Err(e) => return Err(spent_concurrently(e)),
+        };
         let acr = session
             .assurance_at(chrono::Utc::now())
             .acr_value()
             .to_string();
         let amr = session.amr.clone();
-        let new_token = sign_in
-            .jwt()
-            .reissue_elevated_token(claims, &session)
-            .map_err(|e| internal("reissue stepped-up token", e))?;
-        // The rotated token replaces the one this call came with; that one
-        // stops for its remaining lifetime. Both are Unix-second timestamps
-        // of this era: the difference cannot overflow; a negative one is a
-        // token already expired.
-        let remaining = u64::try_from(claims.exp - chrono::Utc::now().timestamp()).unwrap_or(0);
-        sign_in
-            .revocation()
-            .revoke_jti(
-                claims.jti.clone(),
-                std::time::Duration::from_secs(remaining),
-            )
-            .await
-            .map_err(|e| SecondFactorError::Unavailable {
-                what: "token revocation",
-                cause: e.to_string(),
-            })?;
+        self.stop_token(sign_in, claims).await?;
         info!(
             profile = %profile_id,
             methods = ?amr_methods,
@@ -1112,6 +1284,110 @@ impl SecondFactors {
             acr,
             amr,
         })
+    }
+
+    /// Stop the token `claims` stand for, which a step-up replaced, for its
+    /// remaining lifetime; repeating it changes nothing.
+    async fn stop_token(
+        &self,
+        sign_in: &SignIn,
+        claims: &sid_authn::jwt::AccessTokenClaims,
+    ) -> Result<(), SecondFactorError> {
+        // Both are Unix-second timestamps of this era: the difference cannot
+        // overflow; a negative one is a token already expired.
+        let remaining = u64::try_from(claims.exp - chrono::Utc::now().timestamp()).unwrap_or(0);
+        sign_in
+            .revocation()
+            .revoke_jti(
+                claims.jti.clone(),
+                std::time::Duration::from_secs(remaining),
+            )
+            .await
+            .map_err(|e| SecondFactorError::Unavailable {
+                what: "token revocation",
+                cause: e.to_string(),
+            })
+    }
+
+    /// The sealing context of the step-up the token `claims` stand for.
+    fn step_up_context(&self, claims: &sid_authn::jwt::AccessTokenClaims) -> String {
+        format!("step-up:{}:{}:{}", self.issuer, claims.sid, claims.jti)
+    }
+
+    /// The step-up the token `claims` stand for, already committed,
+    /// answered again after a lost response: the same rotated token, with
+    /// the session's assurance and methods as they stand now. `None` when
+    /// no step-up of that token committed, or it is no longer kept. The
+    /// token's own signature is all `claims` must have passed: the step-up
+    /// stopped it, and its record is the only authority it carries here. A
+    /// session ended or expired, or an account that can no longer sign in,
+    /// receives nothing.
+    pub async fn step_up_redeliver(
+        &self,
+        sign_in: &SignIn,
+        claims: &sid_authn::jwt::AccessTokenClaims,
+    ) -> Result<Option<CompleteStepUpResponse>, SecondFactorError> {
+        let storage = sign_in.storage();
+        let Some(record) = storage
+            .get_operation_result(STEP_UP_NAMESPACE, &step_up_completion_key(claims)?)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !record.matches(STEP_UP_METHOD, claims.sid.as_bytes(), None) {
+            return Err(SecondFactorError::AuthenticationFailed);
+        }
+        let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
+            sign_in.keys(),
+            &self.step_up_context(claims),
+            &record.completion.result,
+        )
+        .await
+        .map_err(|e| internal("open the stepped-up token", e))?;
+        let now = chrono::Utc::now();
+        if delivery.deadline <= now {
+            return Ok(None);
+        }
+        let session = storage
+            .get_session(delivery.session_id)
+            .await?
+            .filter(|s| !s.is_expired() && s.id.to_string() == claims.sid)
+            .ok_or(SecondFactorError::SessionEnded)?;
+        storage
+            .get_profile(session.profile_id)
+            .await?
+            .filter(|p| p.status.can_authenticate())
+            .ok_or(SecondFactorError::SessionEnded)?;
+        let token = delivery
+            .into_bearer_token()
+            .ok_or_else(|| internal("open the stepped-up token", "not a bearer delivery"))?;
+        // A later step-up of the rotated token replaced and stopped it: that
+        // token is no longer deliverable, and handing it out would replace
+        // the client's current one with a revoked credential.
+        let rotated = sign_in
+            .jwt()
+            .validate_access_token(secrecy::ExposeSecret::expose_secret(&token))
+            .map_err(|e| internal("read the stepped-up token", e))?;
+        let replaced = sign_in
+            .revocation()
+            .is_revoked(&rotated.jti, &rotated.sid)
+            .await
+            .map_err(|e| SecondFactorError::Unavailable {
+                what: "token revocation",
+                cause: e.to_string(),
+            })?;
+        if replaced {
+            return Ok(None);
+        }
+        // The stopped token stops before the step-up is reported: a first
+        // attempt that committed but failed to revoke it, or ended before,
+        // has it revoked here.
+        self.stop_token(sign_in, claims).await?;
+        Ok(Some(CompleteStepUpResponse {
+            new_session_token: secrecy::ExposeSecret::expose_secret(&token).to_owned(),
+            acr: session.assurance_at(now).acr_value().to_string(),
+            amr: session.amr.clone(),
+        }))
     }
 
     /// Remove one of the caller's second factors (TOTP, passkey, recovery

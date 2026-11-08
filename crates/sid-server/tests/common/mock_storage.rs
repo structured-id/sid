@@ -387,6 +387,12 @@ impl MockStorage {
         *self.unrecordable_admissions.lock().unwrap() = Some(namespace);
     }
 
+    /// From now on, admissions and state are recorded in every namespace.
+    #[allow(dead_code)]
+    pub fn record_admissions(&self) {
+        *self.unrecordable_admissions.lock().unwrap() = None;
+    }
+
     /// Storage whose refresh-token revocation fails with a storage fault.
     #[allow(dead_code)]
     pub fn with_failing_refresh_revocation(self) -> Self {
@@ -1046,7 +1052,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         not_before: chrono::DateTime<chrono::Utc>,
         audit: AuditEntry,
     ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.key_write_cutoff {
             Some(current) if current >= not_before => Ok(current),
@@ -1438,21 +1444,6 @@ impl GrantStore for MockStorage {
         }
         inner.owe(&ctx)?;
         Ok(ended.into_iter().map(|session| session.id).collect())
-    }
-
-    async fn issue_native_generation(
-        &self,
-        generation: &NativeGeneration,
-        _ctx: MutationContext,
-    ) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner.native_session_live(generation.session_id) {
-            return Err(sid_core::Error::Fenced(
-                "the session ended before its native generation".into(),
-            ));
-        }
-        inner.insert_native_generation(generation);
-        Ok(())
     }
 
     async fn native_generation_by_credential(
@@ -2257,7 +2248,7 @@ impl CredentialStore for MockStorage {
         not_before: chrono::DateTime<chrono::Utc>,
         ctx: MutationContext,
     ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.history_write_cutoff {
             Some(current) if current >= not_before => Ok(current),
@@ -6741,6 +6732,9 @@ impl MockStorageInner {
                 .expect("checked above");
             credential.data = sid_core::models::CredentialData::new(spend.left.clone());
             credential.mark_used();
+        }
+        if let Some(generation) = &ctx.generation {
+            self.insert_native_generation(generation);
         }
         let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {

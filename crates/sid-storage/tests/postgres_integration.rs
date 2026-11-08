@@ -889,7 +889,8 @@ mod grant_store {
         rotate_refresh_token,
         rotate_after_sign_out_is_refused,
         concurrent_rotation,
-        native_generation_issued_for_a_live_session,
+        native_generation_names_its_credentials,
+        native_generation_commits_with_its_session,
         native_generation_rotates_once,
         native_redelivery_ends_with_its_window,
         concurrent_native_rotation,
@@ -928,13 +929,14 @@ async fn test_native_rotation_waits_for_its_sessions_end() {
         .await
         .unwrap();
     let session = common::create_test_session(profile.id);
-    backend
-        .create_session_atomic(&session, 0, None, common::test_audit())
-        .await
-        .unwrap();
     let first = native_generation(session.id);
     backend
-        .issue_native_generation(&first, common::test_audit())
+        .create_session_atomic(
+            &session,
+            0,
+            None,
+            common::test_audit().issuing(first.clone()),
+        )
         .await
         .unwrap();
 

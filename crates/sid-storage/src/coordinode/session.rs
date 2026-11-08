@@ -589,7 +589,10 @@ fn presented(row: &Row) -> SidResult<NativePresented> {
 }
 
 /// Store `generation` and its credentials in `tx`.
-fn insert_generation(tx: &Statements<'_>, generation: &NativeGeneration) -> SidResult<()> {
+pub(super) fn insert_generation(
+    tx: &Statements<'_>,
+    generation: &NativeGeneration,
+) -> SidResult<()> {
     tx.run(
         "CREATE (g:SidNativeGeneration {id: $id, session_id: $session_id, key_jkt: $key_jkt,
             expires_at: $expires_at, created_at: $created_at})",
@@ -1031,27 +1034,6 @@ impl CoordinodeBackend {
     }
 
     // === Native generations ===
-
-    pub(super) async fn issue_native_generation(
-        &self,
-        generation: &NativeGeneration,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        let generation = generation.clone();
-        self.mutate(
-            format!("session:{}", generation.session_id),
-            ctx,
-            move |tx| {
-                if !claim_live_session(tx, generation.session_id)? {
-                    return Err(SidError::Fenced(
-                        "the session ended before its native generation".into(),
-                    ));
-                }
-                insert_generation(tx, &generation)
-            },
-        )
-        .await
-    }
 
     pub(super) async fn native_generation_by_credential(
         &self,

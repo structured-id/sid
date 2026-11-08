@@ -238,6 +238,8 @@ impl SignIn {
         // session it delivers.
         let retained = RetainedSignIn {
             keys: self.keys.as_ref(),
+            namespace: ADMITTED_NAMESPACE,
+            method: ADMITTED_METHOD,
             completion_key: completion.key()?,
             context: self.admitted_context(&completion),
             deadline: completion.deadline.min(session.expires_at),

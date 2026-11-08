@@ -210,14 +210,6 @@ impl GrantStore for CoordinodeBackend {
         CoordinodeBackend::rotate_refresh_token(self, old_id, new, grace_expires_at, ctx).await
     }
 
-    async fn issue_native_generation(
-        &self,
-        generation: &sid_core::models::NativeGeneration,
-        ctx: MutationContext,
-    ) -> Result<()> {
-        CoordinodeBackend::issue_native_generation(self, generation, ctx).await
-    }
-
     async fn native_generation_by_credential(
         &self,
         hash: &[u8],

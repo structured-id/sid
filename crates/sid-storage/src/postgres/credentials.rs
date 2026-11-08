@@ -200,7 +200,7 @@ impl CredentialStore for PostgresBackend {
         not_before: chrono::DateTime<chrono::Utc>,
         audit: MutationContext,
     ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut tx = self
             .pool
             .begin()

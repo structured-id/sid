@@ -463,6 +463,11 @@ impl PostgresBackend {
         if let Some(spend) = &ctx.spend {
             credentials::spend_in_tx(tx, spend).await?;
         }
+        // The native session's first generation, beside the session it
+        // renews.
+        if let Some(generation) = &ctx.generation {
+            native_session::insert_generation(tx, generation).await?;
+        }
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
@@ -2267,14 +2272,6 @@ impl GrantStore for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(true)
-    }
-
-    async fn issue_native_generation(
-        &self,
-        generation: &sid_core::models::NativeGeneration,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        self.issue_native_generation_impl(generation, ctx).await
     }
 
     async fn native_generation_by_credential(

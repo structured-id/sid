@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::{
-    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, NativeGeneration,
-    NativePresented, NativeRotation, NativeRotationOutcome, RefreshToken, Session, SessionEnd,
-    SessionGrants, SessionId, SignInProof,
+    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, NativePresented,
+    NativeRotation, NativeRotationOutcome, RefreshToken, Session, SessionEnd, SessionGrants,
+    SessionId, SignInProof,
 };
 use uuid::Uuid;
 
@@ -134,21 +134,6 @@ pub trait GrantStore: Send + Sync {
         grace_expires_at: DateTime<Utc>,
         ctx: MutationContext,
     ) -> Result<bool>;
-
-    /// Store the first generation of a native session's refresh credentials,
-    /// bound to its application key, only while that session exists and has
-    /// not expired: otherwise `Error::Fenced` and nothing is stored. An
-    /// existing generation id or credential hash is `Conflict`. A store
-    /// without native sessions refuses with `Error::Unavailable`.
-    async fn issue_native_generation(
-        &self,
-        _generation: &NativeGeneration,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        Err(sid_core::Error::Unavailable(
-            "native sessions are unsupported by this store".into(),
-        ))
-    }
 
     /// The generation the credential hashed to `hash` belongs to, whatever
     /// its state; expiry is the caller's to check.

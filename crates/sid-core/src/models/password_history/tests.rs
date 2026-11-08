@@ -60,6 +60,24 @@ fn an_enrollment_cleanup_waits_for_its_commit_deadline() {
     );
 }
 
+/// Regression: an expiry finer than a store keeps instants made the cleanup's
+/// due time one the store truncated below the deadline, and one that differs
+/// from the due time its admission states.
+#[test]
+fn an_enrollment_cleanup_is_due_at_an_instant_a_store_keeps() {
+    let expires_at = DateTime::from_timestamp_nanos(1_790_000_000_123_456_789);
+    let due = EnrollmentAdmission {
+        operation: Uuid::now_v7(),
+        owner_domain: [1; 32],
+        expires_at,
+    }
+    .work()
+    .not_before
+    .expect("due at a set time");
+    assert_eq!(due.timestamp_subsec_nanos() % 1000, 0, "{due:?}");
+    assert!(due >= commit_deadline(expires_at) + REPLICA_CLOCK_SKEW);
+}
+
 /// A transferred history must accept its next write: a revision that cannot
 /// move once more would refuse every later password of its owner.
 #[test]
