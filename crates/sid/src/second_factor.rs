@@ -10,7 +10,7 @@ use sid_authn::caller::{Caller, CallerError, Verified};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::credential_enrollment::EnrollmentError;
 use sid_authn::login_policy::{LoginPolicySource, Unmet};
-use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
+use sid_authn::operation::{CommandError, Effect, OperationError};
 use sid_authn::second_factor::pending::CompletedContext;
 use sid_authn::second_factor::{
     FactorCeremonies, FactorError, FactorSpend, RECOVERY_CODE_AMR, TOTP_AMR,
@@ -18,7 +18,6 @@ use sid_authn::second_factor::{
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
 use sid_authn::webauthn::{AssertionPurpose, AssertionResponse, WebAuthnServer};
 use sid_core::Error as SidError;
-use sid_core::models::event::{Event, event_types};
 use sid_core::models::session::{AuthLevel, SessionDecayLevel};
 use sid_core::models::{
     AuditEntry, Credential, CredentialId, CredentialType, MutationContext, OperationContext,
@@ -143,6 +142,10 @@ impl From<FactorError> for SecondFactorError {
             FactorError::NotEnrolled(what) => Self::NotEnrolled(what),
             FactorError::Expired(what) => Self::Expired(what),
             FactorError::AuthenticationFailed => Self::AuthenticationFailed,
+            FactorError::CredentialNotFound(id) => Self::CredentialNotFound(id),
+            FactorError::LastSignInMethod(id) => {
+                Self::Identity(crate::identity::IdentityError::LastPrimary(id))
+            }
             FactorError::Unavailable { what, cause } => Self::Unavailable { what, cause },
             FactorError::RecoveryCodesIssued(id) => Self::RecoveryCodesIssued(id),
             FactorError::Operation(e) => Self::Operation(e),
@@ -152,6 +155,17 @@ impl From<FactorError> for SecondFactorError {
                 internal("a second-factor credential", e)
             }
         }
+    }
+}
+
+/// A shared second-factor step inside a keyed command's effect: a store
+/// failure stays the store's, for the command to resolve against a
+/// concurrent attempt.
+fn factor_effect(e: FactorError) -> Effect<SecondFactorError> {
+    match e {
+        FactorError::Store(e) => Effect::Store(e),
+        FactorError::Operation(e) => Effect::Operation(e),
+        e => Effect::Refused(e.into()),
     }
 }
 
@@ -1199,58 +1213,27 @@ impl SecondFactors {
         let profile_id = verified.caller.profile_id;
         let credential_id =
             CredentialId(wire_id(request.credential_id.as_ref(), "credential_id")?.into_uuid());
-        let storage = sign_in.storage();
-        let command = KeyedCommand::by_profile::<
-            sid_proto::keyed::authn::auth_service::DeleteMfaCredential,
-        >(profile_id, operation, &request);
+        let credentials = credentials(sign_in);
+        let command = self
+            .ceremonies
+            .command::<sid_proto::keyed::authn::auth_service::DeleteMfaCredential>(
+                profile_id, operation, &request,
+            );
         Ok(command
-            .execute::<_, SecondFactorError, _, _>(&**storage, || async {
-                let credentials = storage.get_credentials_by_profile(profile_id, None).await?;
-                let credential = credentials
-                    .iter()
-                    .find(|c| c.id == credential_id)
-                    .ok_or(SecondFactorError::CredentialNotFound(credential_id))?;
-                let kind = match credential.credential_type {
-                    CredentialType::Totp => "totp",
-                    CredentialType::WebAuthn => "webauthn",
-                    CredentialType::Recovery => "recovery",
-                    _ => {
-                        return Err(SecondFactorError::InvalidField {
-                            field: "credential_id",
-                            reason: "not a second factor (TOTP, passkey or recovery codes)"
-                                .to_string(),
-                        }
-                        .into());
-                    }
-                };
-                let response = DeleteMfaCredentialResponse {
-                    deleted: true,
-                    credential_type: kind.to_string(),
-                };
-                let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
-                    .with_subject(format!("profile/{}", profile_id))
-                    .with_data(serde_json::json!({
-                        "credential_type": kind,
-                        "credential_id": credential_id.0.to_string(),
-                    }));
-                let ctx = MutationContext::from(AuditEntry::user(
-                    profile_id.to_string(),
-                    "credential.mfa_deleted",
-                    credential_id.0.to_string(),
-                ))
-                .with_work(disabled.relay())
-                .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
-                // The event commits only with a revocation that happened.
-                let outcome = storage.revoke_credential(credential_id, ctx).await?;
-                crate::identity::last_primary(outcome, credential_id)
-                    .map_err(SecondFactorError::from)?;
-                info!(
-                    profile = %profile_id,
-                    credential = %credential_id.0,
-                    r#type = kind,
-                    "MFA credential deleted (self-service)"
-                );
-                Ok(response)
+            .execute::<_, SecondFactorError, _, _>(sign_in.storage().as_ref(), || async {
+                let kind = sid_authn::second_factor::removable_factor(
+                    credentials,
+                    profile_id,
+                    credential_id,
+                )
+                .await
+                .map_err(factor_effect)?;
+                self.ceremonies
+                    .remove_factor(credentials, profile_id, credential_id, kind, |response| {
+                        command.completion(prost::Message::encode_to_vec(response))
+                    })
+                    .await
+                    .map_err(factor_effect)
             })
             .await?)
     }

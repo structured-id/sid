@@ -326,6 +326,160 @@ async fn offered_and_enrollable_factors_follow_the_accounts_protection() {
     );
 }
 
+/// The removal of `credential` as the keyed command `context` names, run as
+/// a host runs it: both shared steps inside the command.
+async fn remove(
+    f: &Fixture,
+    owner: ProfileId,
+    credential: CredentialId,
+    context: &OperationContext,
+) -> Result<DeleteMfaCredentialResponse, FactorError> {
+    use crate::operation::{CommandError, Effect};
+    use sid_proto::keyed::authn::auth_service::DeleteMfaCredential;
+    let request = sid_proto::sid::v1::DeleteMfaCredentialRequest {
+        credential_id: Some(
+            sid_ids::CredentialId::from_uuid(credential.0)
+                .unwrap()
+                .into(),
+        ),
+    };
+    let command = f
+        .factors
+        .command::<DeleteMfaCredential>(owner, context.clone(), &request);
+    let effect = |e: FactorError| match e {
+        FactorError::Store(e) => Effect::Store(e),
+        e => Effect::Refused(e),
+    };
+    command
+        .execute(&f.store, || async {
+            let kind = removable_factor(&f.store, owner, credential)
+                .await
+                .map_err(effect)?;
+            f.factors
+                .remove_factor(&f.store, owner, credential, kind, |response| {
+                    command.completion(prost::Message::encode_to_vec(response))
+                })
+                .await
+                .map_err(effect)
+        })
+        .await
+        .map_err(|e| match e {
+            CommandError::Refused(e) => e,
+            CommandError::Operation(e) => FactorError::Operation(e),
+        })
+}
+
+/// A removed TOTP authenticator is revoked with its record kept, stops
+/// verifying, and a retry of the same command answers as the removal did
+/// instead of reading the credential it removed as not found.
+#[tokio::test]
+async fn a_removed_totp_stops_verifying_and_a_retry_answers_alike() {
+    let f = fixture().await;
+    let alice = account(&f).await;
+    let (secret, done) = enrolled(&f, alice).await;
+    let context = operation(&f, "remove-1").await;
+    let removed = remove(&f, alice, done.credential_id, &context)
+        .await
+        .unwrap();
+    assert!(removed.deleted);
+    assert_eq!(removed.credential_type, "totp");
+    let stored = f
+        .store
+        .get_credential(done.credential_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.status.is_active());
+    assert!(matches!(
+        f.factors
+            .verify_totp(
+                &f.store,
+                f.keys.as_ref(),
+                alice,
+                &crate::generate_next_totp(&secret)
+            )
+            .await,
+        Err(FactorError::NotEnrolled(_))
+    ));
+    assert_eq!(
+        remove(&f, alice, done.credential_id, &context)
+            .await
+            .unwrap(),
+        removed
+    );
+    // A new command for the same credential finds it removed.
+    let again = operation(&f, "remove-2").await;
+    assert!(matches!(
+        remove(&f, alice, done.credential_id, &again).await,
+        Err(FactorError::CredentialNotFound(id)) if id == done.credential_id
+    ));
+}
+
+/// Another account's factor reads as not found, so its id reveals nothing,
+/// and a password is not a second factor to remove.
+#[tokio::test]
+async fn only_the_accounts_own_second_factors_are_removable() {
+    let f = fixture().await;
+    let alice = account(&f).await;
+    let bob = Profile::new(Some("bob"));
+    f.store.create_profile(&bob, ctx()).await.unwrap();
+    let bob = bob.id;
+    let (_, done) = enrolled(&f, alice).await;
+    assert!(matches!(
+        removable_factor(&f.store, bob, done.credential_id).await,
+        Err(FactorError::CredentialNotFound(_))
+    ));
+    let password = Credential::new(
+        alice,
+        CredentialType::Opaque,
+        CredentialData::new(vec![1]),
+        None,
+    );
+    f.store.create_credential(&password, ctx()).await.unwrap();
+    assert!(matches!(
+        removable_factor(&f.store, alice, password.id).await,
+        Err(FactorError::InvalidField {
+            field: "credential_id",
+            ..
+        })
+    ));
+    assert_eq!(
+        removable_factor(&f.store, alice, done.credential_id)
+            .await
+            .unwrap(),
+        CredentialType::Totp
+    );
+}
+
+/// A passkey that is the account's last way to sign in stays, and the
+/// refusal names it.
+#[tokio::test]
+async fn the_last_passkey_stays() {
+    let f = fixture().await;
+    let alice = account(&f).await;
+    let passkey = Credential::new(
+        alice,
+        CredentialType::WebAuthn,
+        CredentialData::new(vec![1]),
+        None,
+    );
+    f.store.create_credential(&passkey, ctx()).await.unwrap();
+    let context = operation(&f, "remove-last").await;
+    assert!(matches!(
+        remove(&f, alice, passkey.id, &context).await,
+        Err(FactorError::LastSignInMethod(id)) if id == passkey.id
+    ));
+    assert!(
+        f.store
+            .get_credential(passkey.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .is_active()
+    );
+}
+
 /// Events about an account name it by the authority's account kind.
 #[test]
 fn events_name_the_account_by_its_kind() {

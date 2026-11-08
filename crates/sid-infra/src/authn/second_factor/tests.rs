@@ -163,4 +163,28 @@ fn factor_refusals_carry_their_reason() {
         PendingError::SessionEnded.into_status().code(),
         tonic::Code::Unauthenticated
     );
+    let id = sid_core::models::CredentialId::new();
+    assert_eq!(
+        FactorError::CredentialNotFound(id).into_status().code(),
+        tonic::Code::NotFound
+    );
+    assert_eq!(
+        FactorError::LastSignInMethod(id).into_status().code(),
+        tonic::Code::FailedPrecondition
+    );
+}
+
+/// Inside a keyed command a store failure stays the store's, so the command
+/// can resolve it against a concurrent attempt; a refusal is a status.
+#[test]
+fn factor_steps_keep_store_failures_for_the_command() {
+    use crate::authn::operation::Effect;
+    assert!(matches!(
+        Effect::from(FactorError::Store(sid_core::Error::Internal("down".into()))),
+        Effect::Store(_)
+    ));
+    assert!(matches!(
+        Effect::from(FactorError::AuthenticationFailed),
+        Effect::Refused(_)
+    ));
 }
