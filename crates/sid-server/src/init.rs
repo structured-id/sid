@@ -1401,24 +1401,14 @@ where
         info!(%in_force, "password history write cutoff in force for history commits");
     }
     let Some(evaluator) = optional("SID_PASSWORD_HISTORY_EVALUATOR")? else {
-        let store = local().await?;
-        if let Some(cutoff) = cutoff {
-            store
-                .raise_write_cutoff(cutoff, audit())
-                .await
-                .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
-        }
-        let history_keys = sid_authn::field_keys::field_key_manager(
-            store.as_ref(),
+        return PasswordHistoryAuthority::in_process(
+            local().await?,
             master_key_path,
             Arc::new(sid_crypto::AwsLcPrimitives::new()),
+            cutoff,
         )
         .await
-        .context("password history evaluator keys")?;
-        return Ok(PasswordHistoryAuthority::InProcess {
-            store,
-            history_keys,
-        });
+        .context("the in-process password history evaluator");
     };
     // The evaluator's internal listener, which the deployment keeps reachable
     // by this server alone over its protected internal transport.

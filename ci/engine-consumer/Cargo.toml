@@ -29,6 +29,10 @@ sid-crypto = { version = "0.1", default-features = false, features = ["std", "pr
 # client runs it.
 sid-opaque-ke = "4.2"
 sid-pake-core = "0.1"
+# The field and curve encodings of the history evaluation and the proof.
+ff = "0.14"
+group = "0.14"
+pasta_curves = "0.6"
 rand = "0.10"
 # The host's own CoordiNode database.
 coordinode-embed = { version = "0.9", optional = true }
@@ -38,3 +42,18 @@ secrecy = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v7"] }
+
+# The proof arithmetic, optimized as in the engine workspace: its keygen
+# and proving are 10-20x slower without it.
+[profile.dev.package.halo2_proofs]
+opt-level = 3
+[profile.dev.package.halo2_gadgets]
+opt-level = 3
+[profile.dev.package.pasta_curves]
+opt-level = 3
+[profile.dev.package.ff]
+opt-level = 3
+[profile.dev.package.group]
+opt-level = 3
+[profile.dev.package.sid-pake-core]
+opt-level = 2

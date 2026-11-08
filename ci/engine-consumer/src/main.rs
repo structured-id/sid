@@ -4,16 +4,21 @@
 //! CoordiNode database, named by the first argument. Each step states what
 //! it shows and fails the process when the engine does otherwise.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ff::PrimeField;
+use group::GroupEncoding;
+use pasta_curves::pallas;
 use secrecy::{ExposeSecret, SecretString};
 use sid::admin::Admin;
 use sid::auth_mail::{AuthMailDelivery, MailError, OwedMail};
 use sid::authorization::{Authorization, InstallationAdministrator};
 use sid::lifecycle::{Drained, Engine, EngineParts};
-use sid::registration::{PendingRegistration, Registration};
+use sid::password_operation::PasswordOperations;
+use sid::registration::Registration;
 use sid::sign_in::completions::Completer;
 use sid::sign_in::{AttemptContext, SignIn, SignInParts};
 use sid::snapshot::{ArchiveKey, Store};
@@ -21,14 +26,24 @@ use sid::work::{CeMail, CeWork, CeWorkParts};
 use sid::{Installation, InstallationSettings};
 use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
-use sid_authn::opaque::OpaqueRouter;
+use sid_authn::opaque_zkpp::ZkppOpaqueServer;
+use sid_authn::opaque_zkpp::setup::{ZkppSettings, spawn_zkpp_server};
+use sid_authn::password_operation::{HistoryEvaluation, PasswordHistoryAuthority};
 use sid_authn::work_runner::{RetrySchedule, RunnerConfig, WorkHandler, WorkOutcome};
+use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::{
-    ClaimedWork, Credential, CredentialData, CredentialType, NewWork, OperationContext,
-    OperationKey, ProjectId, WorkKind, WorkState,
+    ClaimedWork, NewWork, OperationContext, OperationKey, ProjectId, WorkKind, WorkState,
 };
+use sid_pake_core::binding::operation_context;
+use sid_pake_core::circuit::{CircuitShape, ZKPP_K};
+use sid_pake_core::client::{ComparisonDomain, EvaluatorAnswer};
+use sid_pake_core::history::EvaluationProof;
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
+use sid_pake_core::prover::ZkppProver;
+use sid_pake_core::types::CE_DEFAULT_POLICY;
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
+use sid_proto::sid::v1::authn::{OpaqueZkppRegistrationFinishRequest, PasswordRegistrationProof};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -97,8 +112,8 @@ fn tokens() -> Result<Arc<JwtService>, Failure> {
     )?))
 }
 
-/// What a host serves an installation with: sign-in, administration and
-/// authorization management over its parts.
+/// What a host serves an installation with: sign-in, registration,
+/// administration and authorization management over its parts.
 struct Served {
     installation: Installation,
     jwt: Arc<JwtService>,
@@ -106,12 +121,112 @@ struct Served {
     admin: Admin,
     authorization: Authorization,
     registration: Registration,
+    /// The installation's password operations; its history evaluator runs
+    /// in the host's process, over the host's database (`history`).
+    passwords: PasswordOperations,
+    history: Arc<HistoryEvaluation>,
+}
+
+/// Whether a registration's finish carries the client's proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Made,
+    Omitted,
+}
+
+/// An application's client of password registration: the ZKPP prover of
+/// each history shape it was asked for, under the CE policy.
+#[derive(Default)]
+struct Client {
+    provers: BTreeMap<usize, ZkppProver>,
+}
+
+impl Client {
+    fn prover(&mut self, history_domains: usize) -> Result<&ZkppProver, Failure> {
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            self.provers.entry(history_domains)
+        {
+            let shape = CircuitShape {
+                policy: CE_DEFAULT_POLICY,
+                history_domains,
+            };
+            let params = sid_pake_core::keygen::generate_params(ZKPP_K);
+            let pk = sid_pake_core::keygen::generate_pk(&params, shape)
+                .map_err(|e| format!("proving key: {e:?}"))?;
+            slot.insert(ZkppProver::new(params, pk, shape));
+        }
+        Ok(&self.provers[&history_domains])
+    }
+}
+
+/// The installation's ZKPP server, once its verifying keys are made from
+/// the parameters cached under `cache`; proofs are required.
+async fn zkpp_server(
+    installation: &Installation,
+    cache: &Path,
+) -> Result<Arc<ZkppOpaqueServer>, Failure> {
+    let slot = spawn_zkpp_server(
+        &installation.opaque_router,
+        &ZkppSettings::parse(None, None, None)?,
+        cache,
+    )?;
+    Ok(tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            if let Some(server) = Option::clone(&slot.load_full()) {
+                return server;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the ZKPP verifying keys are made")?)
+}
+
+fn array32(bytes: &[u8], what: &str) -> Result<[u8; 32], Failure> {
+    Ok(bytes.try_into().map_err(|_| format!("{what}: 32 bytes"))?)
+}
+
+fn base(bytes: &[u8], what: &str) -> Result<pallas::Base, Failure> {
+    Ok(Option::from(pallas::Base::from_repr(array32(bytes, what)?))
+        .ok_or_else(|| format!("{what}: a base-field element"))?)
+}
+
+fn scalar(bytes: &[u8], what: &str) -> Result<pallas::Scalar, Failure> {
+    Ok(
+        Option::from(pallas::Scalar::from_repr(array32(bytes, what)?))
+            .ok_or_else(|| format!("{what}: a scalar"))?,
+    )
+}
+
+fn point(bytes: &[u8], what: &str) -> Result<pallas::Affine, Failure> {
+    Ok(
+        Option::from(pallas::Affine::from_bytes(&array32(bytes, what)?))
+            .ok_or_else(|| format!("{what}: a curve point"))?,
+    )
 }
 
 impl Served {
-    fn new(installation: Installation) -> Result<Self, Failure> {
+    async fn new(
+        installation: Installation,
+        history: Arc<dyn HistoryKeyStore>,
+        master_key: &Path,
+    ) -> Result<Self, Failure> {
         let jwt = tokens()?;
         let storage = installation.storage.clone();
+        let (passwords, evaluation) = PasswordOperations::with_authority(
+            storage.clone(),
+            storage.clone(),
+            installation.key_manager.clone(),
+            installation.organization.id,
+            PasswordHistoryAuthority::in_process(
+                history,
+                master_key,
+                Arc::new(sid_crypto::RustCryptoPrimitives::new()),
+                None,
+            )
+            .await?,
+        );
+        let history = evaluation.ok_or("the history evaluator runs in the host")?;
         let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
             Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
         let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
@@ -158,41 +273,129 @@ impl Served {
             installation,
             jwt,
             sign_in,
+            passwords,
+            history,
         })
     }
 
-    /// Register `principal` with `password` as its client would: an OPAQUE
-    /// registration against the installation's server setup, committed as
-    /// the account's first credential.
+    /// Register `principal` with `password` as its client would: the
+    /// password operation's OPAQUE start, the history evaluation by the
+    /// installation's evaluator, the client's proof bound to the operation
+    /// and its request (unless `proof` omits it), and the finish that
+    /// verifies it and commits the account with its first credential and
+    /// history.
     async fn register(
         &self,
+        client: &mut Client,
+        zkpp: &Arc<ZkppOpaqueServer>,
         principal: &str,
         password: &[u8],
         claim: Option<&SecretString>,
         enabled: bool,
+        proof: Proof,
     ) -> Result<(), Failure> {
-        let pending = self
+        let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+        let started = sid_pake_core::client::start_registration(&mut rng, password)?;
+        let request = started.request.serialize().to_vec();
+        let start = self
             .registration
-            .begin(principal, claim.map(|c| c.expose_secret()), None, enabled)
+            .start(
+                &self.passwords,
+                zkpp,
+                principal,
+                claim.map(|c| c.expose_secret()),
+                None,
+                request.clone(),
+                enabled,
+            )
             .await?;
-        let PendingRegistration::NewAccount { profile_id, .. } = pending else {
-            return Err(format!("{principal} is already registered").into());
-        };
-        let mut credential = Credential::new(
-            profile_id,
-            CredentialType::Opaque,
-            CredentialData::new(Vec::new()),
-            None,
-        );
-        let record = opaque_registration(
-            &self.installation.opaque_router,
-            &credential.opaque_credential_identifier(),
+        let context = start.history.ok_or("the start names its operation")?;
+        let operation = sid_authn::password_operation::operation_id(context.operation_id.as_ref())?;
+        let asked = sid_pake_core::client::history_request(
+            &mut rng,
+            base(&context.owner_domain, "owner domain")?,
             password,
+        )
+        .ok_or("the password fits the circuit")?;
+        let answers = self
+            .history
+            .evaluate(&operation, &asked.blinded.to_bytes())
+            .await?;
+        let domains = context
+            .domains
+            .iter()
+            .map(|d| {
+                Ok(ComparisonDomain {
+                    domain: base(&d.comparison_domain, "comparison domain")?,
+                    evaluator_public_key: point(&d.evaluator_public_key, "evaluator key")?,
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        let evaluated = answers
+            .iter()
+            .map(|a| {
+                let proof = a.proof.as_ref().ok_or("an evaluation proof")?;
+                Ok(EvaluatorAnswer {
+                    evaluation: point(&a.evaluated_element, "evaluation")?,
+                    proof: EvaluationProof {
+                        c: scalar(&proof.challenge, "challenge")?,
+                        s: scalar(&proof.response, "response")?,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        let history = sid_pake_core::client::verified_history(
+            password,
+            operation.as_bytes(),
+            &asked,
+            &domains,
+            &evaluated,
         )?;
-        credential.data = CredentialData::new(record.data);
-        credential.opaque_curve = Some(record.curve as u8);
+        let proof = match proof {
+            Proof::Made => {
+                let bound = client.prover(domains.len())?.prove(
+                    password,
+                    started.blind(),
+                    &operation_context(operation.as_bytes(), &request),
+                    &history,
+                )?;
+                Some(PasswordRegistrationProof {
+                    zkpp_proof: bound.snark_proof.0,
+                    instances: bound
+                        .instances
+                        .iter()
+                        .map(|i| i.to_repr().to_vec())
+                        .collect(),
+                    evaluation_proofs: answers.into_iter().filter_map(|a| a.proof).collect(),
+                })
+            }
+            Proof::Omitted => None,
+        };
+        let record = started
+            .state
+            .finish(
+                &mut rng,
+                password,
+                sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(
+                    &start.registration_response,
+                )?,
+                sid_opaque_ke::ClientRegistrationFinishParameters::default(),
+            )?
+            .message
+            .serialize()
+            .to_vec();
         self.registration
-            .commit(pending, credential, None, None, enabled)
+            .finish(
+                &self.passwords,
+                zkpp.clone(),
+                OpaqueZkppRegistrationFinishRequest {
+                    operation_id: context.operation_id,
+                    registration_record: record,
+                    proof,
+                },
+                SecurityPolicy::ce_default().password.history_max_age_days,
+                enabled,
+            )
             .await?;
         Ok(())
     }
@@ -255,8 +458,18 @@ impl Served {
             admin,
             authorization,
             registration,
+            passwords,
+            history,
         } = self;
-        drop((jwt, sign_in, admin, authorization, registration));
+        drop((
+            jwt,
+            sign_in,
+            admin,
+            authorization,
+            registration,
+            passwords,
+            history,
+        ));
         installation.close().await;
     }
 
@@ -267,28 +480,6 @@ impl Served {
             .installation_administrator(&caller)
             .await?)
     }
-}
-
-/// The client half of an OPAQUE registration against `router`: the record
-/// the server keeps.
-fn opaque_registration(
-    router: &OpaqueRouter,
-    credential_identifier: &[u8],
-    password: &[u8],
-) -> Result<sid_plugin::crypto::StoredCredential, Failure> {
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-    let start = sid_opaque_ke::ClientRegistration::<PallasCipherSuite>::start(&mut rng, password)?;
-    let (response, _) =
-        router.registration_start(&start.message.serialize(), credential_identifier)?;
-    let response =
-        sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(&response)?;
-    let finished = start.state.finish(
-        &mut rng,
-        password,
-        response,
-        sid_opaque_ke::ClientRegistrationFinishParameters::default(),
-    )?;
-    Ok(router.registration_finish(&finished.message.serialize())?)
 }
 
 /// The next keyed call's operation context, named `key`.
@@ -341,8 +532,10 @@ impl AuthMailDelivery for HostMail {
 }
 
 /// The installation's engine: the CE work it owes, assembled by the
-/// engine library, and the host's own `extra` handlers.
-fn engine(installation: &Installation, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
+/// engine library with its in-process history evaluator, and the host's own
+/// `extra` handlers.
+fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
+    let installation = &served.installation;
     let storage = installation.storage.clone();
     let mail: Arc<dyn AuthMailDelivery> = Arc::new(HostMail::default());
     let codes = Arc::new(sid_authn::otp::OtpService::new(
@@ -368,7 +561,7 @@ fn engine(installation: &Installation, extra: Vec<Arc<dyn WorkHandler>>) -> Engi
         revocation: installation.revocation_cache.clone(),
         event_bus: Arc::new(sid_plugin::event_bus::InProcessEventBus::new()),
         required_receivers: Vec::new(),
-        history_evaluation: None,
+        history_evaluation: Some(served.history.clone()),
         issuer: ISSUER.to_owned(),
         closures: Arc::new(sid_authn::account_closure::AccountClosureService::new(
             storage.clone(),
@@ -448,6 +641,8 @@ async fn work_state(storage: &dyn StorageBackend, work: &NewWork) -> Result<Work
 trait HostStore: Sized {
     async fn open(path: &Path) -> Result<Self, Failure>;
     fn backend(&self) -> Arc<dyn StorageBackend>;
+    /// The password history evaluator's store in the same database.
+    fn history_keys(&self) -> Arc<dyn HistoryKeyStore>;
     fn store(&self) -> Store<'_>;
 }
 
@@ -455,7 +650,7 @@ trait HostStore: Sized {
 struct SqliteHost {
     backend: Arc<sid_storage::sqlite::SqliteBackend>,
     audit: sid_storage::sqlite::SqliteAuditLog,
-    keys: sid_storage::sqlite::SqliteHistoryKeyStore,
+    keys: Arc<sid_storage::sqlite::SqliteHistoryKeyStore>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -465,7 +660,7 @@ impl HostStore for SqliteHost {
         let backend = Arc::new(sid_storage::sqlite::SqliteBackend::new(path).await?);
         Ok(Self {
             audit: sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
-            keys: backend.history_keys(),
+            keys: Arc::new(backend.history_keys()),
             backend,
         })
     }
@@ -474,11 +669,15 @@ impl HostStore for SqliteHost {
         self.backend.clone()
     }
 
+    fn history_keys(&self) -> Arc<dyn HistoryKeyStore> {
+        self.keys.clone()
+    }
+
     fn store(&self) -> Store<'_> {
         Store {
             storage: self.backend.as_ref(),
             audit: &self.audit,
-            history_keys: &self.keys,
+            history_keys: self.keys.as_ref(),
         }
     }
 }
@@ -487,7 +686,7 @@ impl HostStore for SqliteHost {
 #[cfg(feature = "coordinode")]
 struct CoordinodeHost {
     backend: Arc<sid_storage::coordinode::CoordinodeBackend>,
-    keys: sid_storage::coordinode::CoordinodeHistoryKeyStore,
+    keys: Arc<sid_storage::coordinode::CoordinodeHistoryKeyStore>,
 }
 
 #[cfg(feature = "coordinode")]
@@ -499,7 +698,7 @@ impl HostStore for CoordinodeHost {
         let backend =
             Arc::new(sid_storage::coordinode::CoordinodeBackend::new(Arc::new(db)).await?);
         Ok(Self {
-            keys: backend.history_keys(),
+            keys: Arc::new(backend.history_keys()),
             backend,
         })
     }
@@ -508,11 +707,15 @@ impl HostStore for CoordinodeHost {
         self.backend.clone()
     }
 
+    fn history_keys(&self) -> Arc<dyn HistoryKeyStore> {
+        self.keys.clone()
+    }
+
     fn store(&self) -> Store<'_> {
         Store {
             storage: self.backend.as_ref(),
             audit: self.backend.as_ref(),
-            history_keys: &self.keys,
+            history_keys: self.keys.as_ref(),
         }
     }
 }
@@ -536,26 +739,62 @@ async fn main() -> Result<(), Failure> {
 }
 
 async fn run<S: HostStore>() -> Result<(), Failure> {
-    const PASSWORD: &[u8] = b"correct-horse-battery-staple";
+    const PASSWORD: &[u8] = b"Embedded-Host-7Engine";
     let crypto = sid_crypto::RustCryptoPrimitives::new();
     let host = Host::new();
     let source = S::open(&host.database("source")).await?;
-    let served =
-        Served::new(Installation::open(source.backend(), settings(&host.master_key())).await?)?;
+    let served = Served::new(
+        Installation::open(source.backend(), settings(&host.master_key())).await?,
+        source.history_keys(),
+        &host.master_key(),
+    )
+    .await?;
     let storage = source.backend();
+    let zkpp = zkpp_server(&served.installation, &host.database("zkpp")).await?;
+    let mut client = Client::default();
 
     // Bootstrap: a fresh installation offers its claim; nobody registers
     // without it, and the first account registered with it administers.
+    // Every password is installed with the client's proof: one without it
+    // is refused.
     let claim = served
         .installation
         .admin_claim()
         .await?
         .ok_or("a fresh installation offers its claim")?;
     check(
-        served.register(GUEST, PASSWORD, None, true).await.is_err(),
+        served
+            .register(&mut client, &zkpp, GUEST, PASSWORD, None, true, Proof::Made)
+            .await
+            .is_err(),
         "no registration without the claim before the installation is claimed",
     )?;
-    served.register(ROOT, PASSWORD, Some(&claim), false).await?;
+    check(
+        served
+            .register(
+                &mut client,
+                &zkpp,
+                ROOT,
+                PASSWORD,
+                Some(&claim),
+                false,
+                Proof::Omitted,
+            )
+            .await
+            .is_err(),
+        "a password without its proof is refused",
+    )?;
+    served
+        .register(
+            &mut client,
+            &zkpp,
+            ROOT,
+            PASSWORD,
+            Some(&claim),
+            false,
+            Proof::Made,
+        )
+        .await?;
     check(
         served.installation.admin_claim().await?.is_none(),
         "the claim closes once taken",
@@ -571,7 +810,19 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     println!("verified: the claiming account signs in with its password and administers");
 
     // A registered user without the role is refused administration.
-    served.register(GUEST, PASSWORD, None, true).await?;
+    served
+        .register(&mut client, &zkpp, GUEST, PASSWORD, None, true, Proof::Made)
+        .await?;
+    let passwords = storage
+        .list_credentials_by_type(sid_core::models::CredentialType::Opaque, None, 10)
+        .await?;
+    check(
+        passwords.len() == 2
+            && passwords
+                .iter()
+                .all(|c| c.policy_evidence != sid_core::models::PolicyEvidence::Unverified),
+        "each installed password carries the evidence of its verified proof",
+    )?;
     let (guest, guest_token) = served.password_sign_in(GUEST, PASSWORD).await?;
     check(
         served
@@ -637,7 +888,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         owed_work(storage.as_ref()).await? > 1,
         "the installation owes CE work besides the host's",
     )?;
-    let running = engine(&served.installation, vec![]).start();
+    let running = engine(&served, vec![]).start();
     tokio::time::timeout(Duration::from_secs(10), async {
         while owed_work(storage.as_ref()).await.ok() != Some(1) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -668,11 +919,17 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     let organization = served.installation.organization.clone();
     let issuer = served.installation.issuer.clone();
     served.close().await;
-    drop((storage, source));
+    drop((storage, source, zkpp));
     let source = S::open(&host.database("source")).await?;
-    let reopened = Installation::open(source.backend(), settings(&host.master_key())).await?;
+    let reopened = Served::new(
+        Installation::open(source.backend(), settings(&host.master_key())).await?,
+        source.history_keys(),
+        &host.master_key(),
+    )
+    .await?;
     check(
-        reopened.organization == organization && reopened.issuer == issuer,
+        reopened.installation.organization == organization
+            && reopened.installation.issuer == issuer,
         "a restart reopens the same installation",
     )?;
     check(
@@ -701,8 +958,12 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "an initialized store takes no archive",
     )?;
     reopened.close().await;
-    let restored =
-        Served::new(Installation::open(target.backend(), settings(&host.master_key())).await?)?;
+    let restored = Served::new(
+        Installation::open(target.backend(), settings(&host.master_key())).await?,
+        target.history_keys(),
+        &host.master_key(),
+    )
+    .await?;
     check(
         restored.installation.organization == organization
             && restored.installation.issuer == issuer,
@@ -713,7 +974,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // starts, its administrator signs in with the same password, and a keyed
     // command repeated there answers with what the source recorded.
     let target_storage = target.backend();
-    let running = engine(&restored.installation, vec![Arc::new(Probe(kind))]).start();
+    let running = engine(&restored, vec![Arc::new(Probe(kind))]).start();
     tokio::time::timeout(Duration::from_secs(10), async {
         while work_state(target_storage.as_ref(), &work).await.ok() != Some(WorkState::Completed) {
             tokio::time::sleep(Duration::from_millis(10)).await;
