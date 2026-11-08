@@ -154,6 +154,7 @@ macro_rules! __storage_conformance {
                 test_device_auth_create_and_get
                 test_device_auth_decided_once
                 test_device_poll_interval
+                test_device_code_needs_its_approving_session
                 test_device_code_redeemed_once
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],device_enrollment:

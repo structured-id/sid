@@ -438,6 +438,20 @@ impl SqliteBackend {
         let storage = |e: sqlx::Error| SidError::Storage(format!("redeem device code: {e}"));
         let now = fmt_dt(&chrono::Utc::now());
         let mut tx = self.begin_write().await?;
+        // Under the write lock: a sign-out of the approving session either
+        // came first, leaving the device nothing to redeem, or waits.
+        if let Some(approver) = session.authenticated_by {
+            let live: Option<i32> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE id = ?")
+                .bind(approver)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+            if live.is_none() {
+                return Err(SidError::NotFound(
+                    "the session that approved the device ended".into(),
+                ));
+            }
+        }
         // The session goes first (the code references it); a redemption that
         // does not apply rolls it back with the transaction.
         super::session::insert_session(&mut *tx, session).await?;

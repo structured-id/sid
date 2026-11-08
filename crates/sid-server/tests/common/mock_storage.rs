@@ -5061,6 +5061,13 @@ impl StorageBackend for MockStorage {
             _ => return Ok(DeviceCodeRedemption::NotAuthorized),
         }
         let id = code.id;
+        if let Some(approver) = session.authenticated_by
+            && !inner.sessions.contains_key(&approver)
+        {
+            return Err(sid_core::Error::NotFound(
+                "the session that approved the device ended".into(),
+            ));
+        }
         inner.owe(&audit)?;
         let code = inner.device_codes.get_mut(&id).expect("found above");
         code.status = DeviceAuthStatus::Redeemed;

@@ -908,6 +908,15 @@ impl CoordinodeBackend {
             if c.status != DeviceAuthStatus::Authorized || c.expires_at <= Utc::now() {
                 return Ok(Decision::Abandon(DeviceCodeRedemption::NotAuthorized));
             }
+            // A sign-out of the approving session either came first, leaving
+            // the device nothing to redeem, or conflicts with this commit.
+            if let Some(approver) = session.authenticated_by
+                && !super::session::claim_session(tx, approver)?
+            {
+                return Err(SidError::NotFound(
+                    "the session that approved the device ended".into(),
+                ));
+            }
             super::session::insert(tx, &session)?;
             // Written at the authorized status: of concurrent redemptions one
             // commits, the others run again and find it redeemed.
