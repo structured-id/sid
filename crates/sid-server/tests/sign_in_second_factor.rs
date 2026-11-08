@@ -659,7 +659,8 @@ async fn the_sign_in_page_recovers_a_lost_completion() {
     assert_eq!(foreign.code(), Code::Unauthenticated, "{foreign:?}");
 
     // The cookie arrived, the body did not: the page asks with the session
-    // it now holds and that session's own CSRF token.
+    // cookie it now holds and the only CSRF token it has, the one the
+    // pending context gave it, which the session keeps.
     let secret = BrowserCookie::default()
         .secret([session_cookie.as_str()])
         .unwrap();
@@ -669,9 +670,11 @@ async fn the_sign_in_page_recovers_a_lost_completion() {
         .await
         .unwrap()
         .expect("the installed cookie names the session");
-    let session_csrf =
-        sid_authn::browser_session::BrowserCsrf::encode(session.browser_csrf.as_ref().unwrap());
-    let installed = recover(&session_cookie, &session_csrf)
+    assert_eq!(
+        sid_authn::browser_session::BrowserCsrf::encode(session.browser_csrf.as_ref().unwrap()),
+        csrf
+    );
+    let installed = recover(&session_cookie, &csrf)
         .await
         .expect("answered with the installed session");
     assert!(installed.metadata().get("set-cookie").is_none());

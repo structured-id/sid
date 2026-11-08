@@ -345,6 +345,10 @@ struct Completing<'a> {
     id: SessionId,
     end: &'a SessionEnd,
     spend: Option<FactorSpend>,
+    /// The CSRF token the sign-in page holds for the context: the session
+    /// completing it keeps it, the only one that page has (the completion's
+    /// answer carries none).
+    csrf: Option<sid_core::models::BrowserCsrfToken>,
 }
 
 /// Signing users in for one authority.
@@ -1183,7 +1187,7 @@ impl SignIn {
     pub async fn complete_pending(
         &self,
         profile: &Profile,
-        pending: (SessionId, &SessionEnd),
+        (pending, end): (&Session, &SessionEnd),
         session: Session,
         client: CeremonyClient,
         native_key: Option<&str>,
@@ -1202,15 +1206,16 @@ impl SignIn {
                 policy,
                 limit,
                 Some(Completing {
-                    id: pending.0,
-                    end: pending.1,
+                    id: pending.id,
+                    end,
                     spend,
+                    csrf: pending.browser_csrf,
                 }),
                 retained,
             )
             .await?;
         self.revocation
-            .revoke_session(pending.0.to_string())
+            .revoke_session(pending.id.to_string())
             .await
             .map_err(|e| SignInError::Unavailable {
                 what: "session revocation",
@@ -1305,7 +1310,7 @@ impl SignIn {
             .complete_pending(
                 &profile,
                 (
-                    pending.id,
+                    &pending,
                     &SessionEnd::new(
                         sid_core::models::RevocationReason::SignInCompleted,
                         pending.profile_id.to_string(),
@@ -1478,6 +1483,9 @@ impl SignIn {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
+                if let Some(kept) = pending.as_ref().and_then(|p| p.csrf) {
+                    session.browser_csrf = Some(kept);
+                }
                 let csrf = session.browser_csrf.as_ref().map(BrowserCsrf::encode);
                 let retained = match retained {
                     Some(retained) => {
@@ -1658,7 +1666,7 @@ impl SignIn {
             ctx = ctx.issuing(generation);
         }
         let stored = match pending {
-            Some(Completing { id, end, spend }) => {
+            Some(Completing { id, end, spend, .. }) => {
                 if let Some(spend) = spend {
                     ctx = spend.into_context(ctx);
                 }

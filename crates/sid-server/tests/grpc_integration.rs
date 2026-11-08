@@ -8239,6 +8239,48 @@ async fn test_a_lost_step_up_response_is_delivered_again() {
         .expect("the remaining code is unspent");
 }
 
+/// Regression: a step-up committed but could not record the stop of the
+/// token it replaced, so it failed; its retry receives the rotated token and
+/// records that stop before answering, and a replica started afterwards
+/// refuses the replaced token. Before, the retry answered with the rotated
+/// token while the replaced one stayed valid everywhere else.
+#[tokio::test]
+async fn test_a_redelivered_step_up_stops_the_replaced_token() {
+    use sid_core::models::credential::CredentialStatus;
+    let (svc, bearer) = recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Active).await;
+    svc.mock_storage.fail_admissions("revoked-jti");
+    svc.auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await
+        .expect_err("the stop of the replaced token was not recorded");
+    svc.mock_storage.record_admissions();
+
+    let again = svc
+        .auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await
+        .expect("the committed step-up")
+        .into_inner();
+    assert!(!again.new_session_token.is_empty());
+
+    let replica = svc
+        .restarted_with(std::sync::Arc::new(
+            sid_plugin::cache::InMemoryCacheBackend::new(),
+        ))
+        .await;
+    let refused = replica
+        .auth
+        .verify_recovery_code(authed_request(
+            VerifyRecoveryCodeRequest {
+                code: "ZZZZ-ZZZZ-ZZZZ".to_string(),
+            },
+            &bearer,
+        ))
+        .await
+        .expect_err("the replaced token is stopped");
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{refused:?}");
+}
+
 #[tokio::test]
 async fn test_complete_step_up_totp_wrong_code() {
     use sid_core::models::session::Session;

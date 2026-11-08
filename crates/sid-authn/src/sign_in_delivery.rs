@@ -197,7 +197,8 @@ async fn seal_retained(
     sealed_secret::seal(keys, context, &plain).await
 }
 
-/// A sign-in's delivery kept for a lost response, as sealed.
+/// A sign-in's delivery kept for a lost response, as sealed: the one form
+/// the store holds (an earlier form goes with the database it was in).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Retained {
     session: sid_ids::SessionId,

@@ -387,6 +387,12 @@ impl MockStorage {
         *self.unrecordable_admissions.lock().unwrap() = Some(namespace);
     }
 
+    /// From now on, admissions and state are recorded in every namespace.
+    #[allow(dead_code)]
+    pub fn record_admissions(&self) {
+        *self.unrecordable_admissions.lock().unwrap() = None;
+    }
+
     /// Storage whose refresh-token revocation fails with a storage fault.
     #[allow(dead_code)]
     pub fn with_failing_refresh_revocation(self) -> Self {

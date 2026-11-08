@@ -1212,7 +1212,14 @@ impl SecondFactors {
             .jwt()
             .reissue_elevated_token(claims, &elevated)
             .map_err(|e| internal("reissue stepped-up token", e))?;
-        let deadline = chrono::DateTime::from_timestamp(claims.exp, 0)
+        // Kept while both the token it replaces and the replacement are
+        // valid: a replacement past its own expiry is never delivered.
+        let replacement_exp = sign_in
+            .jwt()
+            .validate_access_token(&new_token)
+            .map_err(|e| internal("read the stepped-up token", e))?
+            .exp;
+        let deadline = chrono::DateTime::from_timestamp(claims.exp.min(replacement_exp), 0)
             .unwrap_or_else(chrono::Utc::now)
             .min(elevated.expires_at);
         let sealed = sid_authn::sign_in_delivery::retain_bearer(
@@ -1265,22 +1272,7 @@ impl SecondFactors {
             .acr_value()
             .to_string();
         let amr = session.amr.clone();
-        // The rotated token replaces the one this call came with; that one
-        // stops for its remaining lifetime. Both are Unix-second timestamps
-        // of this era: the difference cannot overflow; a negative one is a
-        // token already expired.
-        let remaining = u64::try_from(claims.exp - chrono::Utc::now().timestamp()).unwrap_or(0);
-        sign_in
-            .revocation()
-            .revoke_jti(
-                claims.jti.clone(),
-                std::time::Duration::from_secs(remaining),
-            )
-            .await
-            .map_err(|e| SecondFactorError::Unavailable {
-                what: "token revocation",
-                cause: e.to_string(),
-            })?;
+        self.stop_token(sign_in, claims).await?;
         info!(
             profile = %profile_id,
             methods = ?amr_methods,
@@ -1292,6 +1284,29 @@ impl SecondFactors {
             acr,
             amr,
         })
+    }
+
+    /// Stop the token `claims` stand for, which a step-up replaced, for its
+    /// remaining lifetime; repeating it changes nothing.
+    async fn stop_token(
+        &self,
+        sign_in: &SignIn,
+        claims: &sid_authn::jwt::AccessTokenClaims,
+    ) -> Result<(), SecondFactorError> {
+        // Both are Unix-second timestamps of this era: the difference cannot
+        // overflow; a negative one is a token already expired.
+        let remaining = u64::try_from(claims.exp - chrono::Utc::now().timestamp()).unwrap_or(0);
+        sign_in
+            .revocation()
+            .revoke_jti(
+                claims.jti.clone(),
+                std::time::Duration::from_secs(remaining),
+            )
+            .await
+            .map_err(|e| SecondFactorError::Unavailable {
+                what: "token revocation",
+                cause: e.to_string(),
+            })
     }
 
     /// The sealing context of the step-up the token `claims` stand for.
@@ -1346,6 +1361,10 @@ impl SecondFactors {
         let token = delivery
             .into_bearer_token()
             .ok_or_else(|| internal("open the stepped-up token", "not a bearer delivery"))?;
+        // The stopped token stops before the step-up is reported: a first
+        // attempt that committed but failed to revoke it, or ended before,
+        // has it revoked here.
+        self.stop_token(sign_in, claims).await?;
         Ok(Some(CompleteStepUpResponse {
             new_session_token: secrecy::ExposeSecret::expose_secret(&token).to_owned(),
             acr: session.assurance_at(now).acr_value().to_string(),
