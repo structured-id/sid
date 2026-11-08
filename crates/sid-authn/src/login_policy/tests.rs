@@ -44,6 +44,24 @@ fn required_mfa_needs_standard_whatever_the_minimum() {
     ));
 }
 
+// Regression: under audit enforcement a further factor that meets the
+// account's protection completes a sign-in whose policy part stays unmet
+// (a higher level, another method): that part is audited, not required.
+#[test]
+fn a_factor_meeting_the_protection_completes_an_audited_sign_in() {
+    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let mut r = requirements(AuthLevel::Elevated, EnforcementMode::Audit);
+    r.required_amr.insert("hwk".into());
+    r.account_protection = AuthLevel::Standard;
+    assert!(matches!(
+        r.decide(&password, Utc::now()),
+        LoginDecision::StepUp(_)
+    ));
+    assert!(r.met_with(&password, AuthLevel::Standard, "otp", Utc::now()));
+    r.enforcement = EnforcementMode::Hard;
+    assert!(!r.met_with(&password, AuthLevel::Standard, "otp", Utc::now()));
+}
+
 // Regression: an account's enabled protection is required of its sign-in
 // under optional MFA and is not waived by audit enforcement, which still
 // waives the policy's own unmet requirements.

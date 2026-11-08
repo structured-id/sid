@@ -203,8 +203,10 @@ impl LoginRequirements {
     }
 
     /// Whether `session`'s authentication, completed by a further factor
-    /// that reaches `level` and uses `method` (RFC 8176), meets every
-    /// requirement at `now`.
+    /// that reaches `level` and uses `method` (RFC 8176), is admitted at
+    /// `now` by the same decision as [`Self::decide`]: audit enforcement
+    /// lets the policy's unmet part pass once the account's protection is
+    /// met.
     pub fn met_with<O: Clone>(
         &self,
         session: &Session<O>,
@@ -217,7 +219,7 @@ impl LoginRequirements {
         if !completed.amr.iter().any(|m| m == method) {
             completed.amr.push(method.to_string());
         }
-        self.unmet(&completed, now).is_empty()
+        matches!(self.decide(&completed, now), LoginDecision::Allow { .. })
     }
 
     /// The decision on `session` at `now`: met is allowed; unmet is a step-up

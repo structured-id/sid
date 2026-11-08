@@ -124,6 +124,17 @@ pub trait GrantHost: Send + Sync {
         scopes: &[String],
     ) -> Result<AccountClaims, Self::Error>;
 
+    /// Refuse unless the login requirements in force for `client`, with the
+    /// protection the credential owner's account has now, still admit the
+    /// authentication `session` reports: a grant continues only while they
+    /// do, so a second factor enabled after a password-only authentication
+    /// ends that grant's issuance.
+    async fn admit(
+        &self,
+        client: &OAuth2Client,
+        session: &Session<Self::Owner>,
+    ) -> Result<(), Self::Error>;
+
     /// The signer of `issuer`.
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, Self::Error>;
 
@@ -223,6 +234,9 @@ pub async fn redeem_code<H: GrantHost>(
     .with_grant_authentication(exchanged.authentication());
     session.client_id = Some(client.client_id.clone());
     session.scopes = exchanged.scopes().to_vec();
+    host.admit(&client, &session)
+        .await
+        .map_err(GrantFailure::Host)?;
 
     let proof = host.proof().await.map_err(GrantFailure::Host)?;
     let claims = host
@@ -349,6 +363,9 @@ pub async fn refresh<H: GrantHost>(
         .map_err(GrantFailure::Storage)?
         .filter(|session| !session.is_expired())
         .ok_or_else(|| GrantFailure::invalid_grant("session ended"))?;
+    host.admit(&client, &session)
+        .await
+        .map_err(GrantFailure::Host)?;
 
     let claims = host
         .claims(&account, &issuer, &client, validated.scopes())

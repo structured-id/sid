@@ -475,6 +475,9 @@ impl SignIn {
         context: AttemptContext<'_>,
         requirements: &LoginRequirements,
     ) -> Result<FirstFactor, SignInError> {
+        // The factors are chosen under the same requirements the rules
+        // decide on: with the account's protection.
+        let requirements = &self.for_account(requirements, profile_id).await?;
         let authentication = AttemptAuthentication::Local {
             method,
             assurance,

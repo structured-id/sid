@@ -211,6 +211,30 @@ impl GrantHost for ProfileGrant<'_> {
         })
     }
 
+    async fn admit(
+        &self,
+        client: &OAuth2Client,
+        session: &sid_core::models::Session,
+    ) -> Result<(), OAuthError> {
+        let requirements = self
+            .oauth
+            .login_requirements(Some(&client.client_id))
+            .await?
+            .with_client(client, None)
+            .for_account(self.oauth.storage.as_ref(), session.profile_id)
+            .await?;
+        match requirements.decide(session, Utc::now()) {
+            sid_authn::login_policy::LoginDecision::Allow { .. } => Ok(()),
+            sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
+                info!(client = %client.client_id, ?unmet, "Grant no longer admitted by the login requirements");
+                Err(OAuthError::token(
+                    TokenError::InvalidGrant,
+                    "the grant's authentication no longer meets the login requirements",
+                ))
+            }
+        }
+    }
+
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, OAuthError> {
         self.oauth.issuer_signer(issuer).await
     }

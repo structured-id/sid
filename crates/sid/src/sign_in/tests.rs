@@ -352,6 +352,24 @@ async fn required_mfa_asks_a_factor_or_its_enrollment() {
     ));
 }
 
+// Regression: under audit enforcement a policy part TOTP cannot meet (a
+// higher level) does not withhold the TOTP the account's protection owes:
+// the password sign-in awaits it.
+#[tokio::test]
+async fn an_audited_policy_still_offers_the_owed_totp() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Totp).await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.min_acr = AuthLevel::Elevated;
+    policy.enforcement.mode = EnforcementMode::Audit;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, .. } if factors == vec![StepUpMethod::Totp]
+    ));
+}
+
 // A passkey ceremony that satisfies MFA admits an account with enabled TOTP
 // without a further factor; a password does not.
 #[tokio::test]

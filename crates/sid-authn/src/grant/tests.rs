@@ -317,6 +317,8 @@ struct Host {
     ended: Mutex<Vec<(SessionId, &'static str)>>,
     /// The DPoP key the request proves, if any.
     proof: Mutex<Option<DPopBinding>>,
+    /// Whether the login requirements still admit a grant's authentication.
+    admitted: std::sync::atomic::AtomicBool,
 }
 
 impl Host {
@@ -342,6 +344,7 @@ impl Host {
             gone: vec![],
             ended: Mutex::new(vec![]),
             proof: Mutex::new(None),
+            admitted: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -445,6 +448,18 @@ impl GrantHost for Host {
             id_token: None,
             custom_claims: None,
         })
+    }
+
+    async fn admit(
+        &self,
+        _client: &OAuth2Client,
+        _session: &Session<Account>,
+    ) -> Result<(), &'static str> {
+        if self.admitted.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err("not admitted")
+        }
     }
 
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, &'static str> {
@@ -590,6 +605,36 @@ async fn test_code_of_a_gone_account_is_refused() {
 
 // A refresh rotates the token within its family: the new one is the
 // account's and continues the family, the presented one is replaced.
+#[tokio::test]
+async fn test_a_grant_the_requirements_no_longer_admit_issues_nothing() {
+    use std::sync::atomic::Ordering;
+    let host = Host::new().await;
+    let code = host.authorize(Account(7));
+    let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+    let presented = first.refresh_token.unwrap();
+
+    // The account's protection grew past the grant's authentication.
+    host.admitted.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        refresh(&host, Some(&presented)).await,
+        Err(GrantFailure::Host("not admitted"))
+    ));
+    host.grants.with(|g| {
+        assert!(
+            g.refresh.iter().all(|t| t.replaced_by.is_none()),
+            "a refused refresh rotates nothing"
+        );
+    });
+    let unredeemed = host.authorize(Account(7));
+    assert!(matches!(
+        redeem_code(&host, code_grant(&unredeemed)).await,
+        Err(GrantFailure::Host("not admitted"))
+    ));
+
+    host.admitted.store(true, Ordering::SeqCst);
+    refresh(&host, Some(&presented)).await.unwrap();
+}
+
 #[tokio::test]
 async fn test_refresh_rotates_within_the_family() {
     let host = Host::new().await;
