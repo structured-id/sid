@@ -649,6 +649,7 @@ impl Served {
         caller: &Caller,
         client_id: &str,
         verifier: &str,
+        nonce: &str,
     ) -> Result<String, Failure> {
         use base64::Engine;
         use sha2::Digest;
@@ -658,7 +659,7 @@ impl Served {
             response_type: "code".into(),
             scope: Some("openid".into()),
             state: Some("host-state".into()),
-            nonce: Some(uuid::Uuid::now_v7().to_string()),
+            nonce: Some(nonce.to_owned()),
             code_challenge: Some(
                 base64::engine::general_purpose::URL_SAFE_NO_PAD
                     .encode(sha2::Sha256::digest(verifier.as_bytes())),
@@ -1529,15 +1530,39 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
     };
+    let nonce = uuid::Uuid::now_v7().to_string();
     let code = served
-        .authorization_code(&root, &app.client_id, &verifier)
+        .authorization_code(&root, &app.client_id, &verifier, &nonce)
         .await?;
     let redeemed = served.redeem(&app.client_id, &code, &verifier).await?;
+    // The access token is for the API (its audience), issued to the
+    // requesting client; the ID token is for the client (its audience),
+    // with the request's nonce and the same subject (RFC 9068 §3, OIDC Core
+    // §3.1.3.7).
+    let api_tokens = sid_authn::resource_token::ResourceTokenVerifier::new(
+        served.installation.issuers.clone(),
+        served.installation.issuer.clone(),
+        sid_core::models::ResourceIndicator::parse(API)?,
+    )
+    .await?;
+    let access = api_tokens.verify(&redeemed.access_token).await?;
     check(
-        !redeemed.access_token.is_empty()
-            && redeemed.refresh_token.is_some()
-            && redeemed.id_token.is_some(),
-        "the code redeems once for access, refresh and ID tokens",
+        access.client_id.as_deref() == Some(app.client_id.as_str()),
+        "the access token verifies at the API, issued to the requesting client",
+    )?;
+    let id_token = redeemed.id_token.as_deref().ok_or("an ID token")?;
+    let id_claims: sid_authn::jwt::IdTokenClaims = served
+        .installation
+        .issuers
+        .verifier(&served.installation.issuer)
+        .await?
+        .verify_claims(id_token)?;
+    check(
+        id_claims.aud == app.client_id
+            && id_claims.nonce.as_deref() == Some(nonce.as_str())
+            && id_claims.iss == served.installation.issuer.canonical_url
+            && id_claims.sub == access.sub,
+        "the ID token is the issuer's, for the client, with the request's nonce and subject",
     )?;
     let invalid_grant = |e: &OAuthError| matches!(e, OAuthError::Token { error, .. } if *error == TokenError::InvalidGrant);
     let rotated = redeemed.refresh_token.clone().ok_or("a refresh token")?;
@@ -1547,6 +1572,12 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         .clone()
         .ok_or("a rotated refresh token")?;
     check(current != rotated, "a refresh rotates the refresh token")?;
+    let refreshed = api_tokens.verify(&second.access_token).await?;
+    check(
+        refreshed.client_id == access.client_id && refreshed.sub == access.sub,
+        "a refresh keeps the grant's target, client and subject",
+    )?;
+    drop(api_tokens);
     // A client that lost the answer retries within the rotation's grace
     // window and is answered; after it, the rotated token is a replay.
     served.refresh(&app.client_id, &rotated).await?;
@@ -1571,14 +1602,14 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "a redeemed code is refused",
     )?;
     let fresh_code = served
-        .authorization_code(&root, &app.client_id, &verifier)
+        .authorization_code(&root, &app.client_id, &verifier, &nonce)
         .await?;
     refused(
         served
             .redeem(&app.client_id, &fresh_code, "not-the-verifier")
             .await,
         invalid_grant,
-        "a code redeemed without its PKCE verifier is refused",
+        "a code redeemed with a wrong PKCE verifier is refused",
     )?;
 
     // The CE work the installation committed so far (event relays of the
