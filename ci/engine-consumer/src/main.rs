@@ -26,6 +26,7 @@ use sid::password_operation::PasswordOperations;
 use sid::projects::ProjectError;
 use sid::projects::Projects;
 use sid::registration::Registration;
+use sid::second_factor::{Enroller, FactorCaller, SecondFactorError, SecondFactors};
 use sid::sign_in::completions::Completer;
 use sid::sign_in::{AttemptContext, SignIn, SignInParts};
 use sid::snapshot::{ArchiveKey, Store};
@@ -170,6 +171,7 @@ struct Served {
     machines: Machines,
     oauth: OAuth,
     devices: DeviceKeys,
+    factors: SecondFactors,
 }
 
 /// Whether a registration's finish carries the client's proof.
@@ -392,6 +394,17 @@ impl Served {
             ),
             oauth,
             devices: DeviceKeys::new(storage.clone(), installation.key_manager.clone()),
+            factors: SecondFactors::new(
+                Arc::new(sid_authn::webauthn::WebAuthnServer::new(
+                    "id.sid.example.com",
+                    &url::Url::parse(ISSUER)?,
+                    storage.clone(),
+                    installation.key_manager.clone(),
+                )?),
+                ISSUER.to_owned(),
+                storage.clone(),
+                installation.key_manager.clone(),
+            ),
             admin: Admin::new(storage.clone(), cascade, installation.key_manager.clone()),
             authorization: installation.authorization(sid_authz::cedar::CedarService::new()),
             registration: Registration::new(
@@ -540,6 +553,36 @@ impl Served {
         principal: &str,
         password: &[u8],
     ) -> Result<(Caller, SecretString), Failure> {
+        let policy = sid_authn::login_policy::FixedLoginPolicy::of(&SecurityPolicy::ce_default());
+        let signed_in = self
+            .password_first_factor(&policy, principal, password)
+            .await?;
+        if !signed_in.second_factors.is_empty() {
+            return Err(format!("{principal} owes a second factor").into());
+        }
+        self.bearer(signed_in.signed_in.delivery)
+    }
+
+    /// The caller and token a native sign-in delivers.
+    fn bearer(
+        &self,
+        delivery: sid_authn::sign_in_delivery::Delivery,
+    ) -> Result<(Caller, SecretString), Failure> {
+        let sid_authn::sign_in_delivery::Delivery::Bearer { token, .. } = delivery else {
+            return Err("a native sign-in delivers a bearer token".into());
+        };
+        let claims = self.jwt.validate_access_token(token.expose_secret())?;
+        Ok((Caller::from_claims(&claims)?, token))
+    }
+
+    /// `principal`'s native password sign-in with `password` under `policy`,
+    /// as far as its first factor takes it.
+    async fn password_first_factor(
+        &self,
+        policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        principal: &str,
+        password: &[u8],
+    ) -> Result<sid::sign_in::FirstFactorSignedIn, Failure> {
         let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
         let login = sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut rng, password)?;
         let started = self
@@ -555,13 +598,10 @@ impl Served {
             response,
             sid_opaque_ke::ClientLoginFinishParameters::default(),
         )?;
-        let policy = sid_authn::login_policy::FixedLoginPolicy::of(
-            &sid_core::models::security_policy::SecurityPolicy::ce_default(),
-        );
         let signed_in = self
             .sign_in
             .password_sign_in(
-                &policy,
+                policy,
                 &started.login_id,
                 &finished.message.serialize(),
                 Completer {
@@ -572,13 +612,7 @@ impl Served {
                 None,
             )
             .await?;
-        let sid_authn::sign_in_delivery::Delivery::Bearer { token, .. } =
-            signed_in.signed_in.delivery
-        else {
-            return Err("a native sign-in delivers a bearer token".into());
-        };
-        let claims = self.jwt.validate_access_token(token.expose_secret())?;
-        Ok((Caller::from_claims(&claims)?, token))
+        Ok(signed_in)
     }
 
     /// Stop serving: every part lets go of the store, then the installation
@@ -597,6 +631,7 @@ impl Served {
             machines,
             oauth,
             devices,
+            factors,
         } = self;
         drop((
             jwt,
@@ -607,7 +642,7 @@ impl Served {
             passwords,
             history,
         ));
-        drop((projects, machines, oauth, devices));
+        drop((projects, machines, oauth, devices, factors));
         installation.close().await;
     }
 
@@ -1551,18 +1586,17 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "the access token verifies at the API, issued to the requesting client",
     )?;
     let id_token = redeemed.id_token.as_deref().ok_or("an ID token")?;
-    let id_claims: sid_authn::jwt::IdTokenClaims = served
+    // The client's own validation (OIDC Core §3.1.3.7): the issuer's
+    // signature and `iss`, an ID token, for this client, with its nonce.
+    let id_claims = served
         .installation
         .issuers
         .verifier(&served.installation.issuer)
         .await?
-        .verify_claims(id_token)?;
+        .validate_id_token(id_token, &app.client_id, &nonce)?;
     check(
-        id_claims.aud == app.client_id
-            && id_claims.nonce.as_deref() == Some(nonce.as_str())
-            && id_claims.iss == served.installation.issuer.canonical_url
-            && id_claims.sub == access.sub,
-        "the ID token is the issuer's, for the client, with the request's nonce and subject",
+        id_claims.sub == access.sub,
+        "the ID token validates for the client with its nonce and the access token's subject",
     )?;
     let invalid_grant = |e: &OAuthError| matches!(e, OAuthError::Token { error, .. } if *error == TokenError::InvalidGrant);
     let rotated = redeemed.refresh_token.clone().ok_or("a refresh token")?;
@@ -1610,6 +1644,138 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
             .await,
         invalid_grant,
         "a code redeemed with a wrong PKCE verifier is refused",
+    )?;
+
+    // A second factor: the guest signs in again, enrolls a TOTP
+    // authenticator under that sign-in and receives recovery codes; from then
+    // on its password alone completes no sign-in, a wrong or spent code
+    // completes none, the next code does, and a recovery code is spent once.
+    let (guest, guest_token) = served.password_sign_in(GUEST, PASSWORD).await?;
+    let enroller = Enroller::Session(guest.clone());
+    let totp = served
+        .factors
+        .totp_enrollment_start(&served.sign_in, &enroller)
+        .await?;
+    let enrolled = served
+        .factors
+        .totp_enrollment_finish(
+            &served.sign_in,
+            &enroller,
+            &sid_authn::generate_current_totp(&totp.shared_secret),
+        )
+        .await?;
+    check(
+        !enrolled.recovery_codes.is_empty(),
+        "a first second factor comes with recovery codes",
+    )?;
+    let failed = |e: &SecondFactorError| matches!(e, SecondFactorError::AuthenticationFailed);
+    // Under login requirements a password alone does not meet: standard
+    // assurance.
+    let policy = sid_authn::login_policy::FixedLoginPolicy::of(&{
+        let mut policy = SecurityPolicy::ce_default();
+        policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
+        policy
+    });
+    let pending = served
+        .password_first_factor(&policy, GUEST, PASSWORD)
+        .await?;
+    check(
+        !pending.second_factors.is_empty(),
+        "under a policy requiring it, the password alone completes no sign-in",
+    )?;
+    let pending_session = || async {
+        Ok::<_, Failure>(
+            served
+                .installation
+                .storage
+                .get_session(pending.signed_in.session_id)
+                .await?
+                .ok_or("the pending sign-in")?,
+        )
+    };
+    refused(
+        served
+            .factors
+            .verify_totp(
+                &served.sign_in,
+                &policy,
+                FactorCaller::Pending(
+                    pending_session().await?,
+                    sid_authn::sign_in_delivery::CeremonyClient::Native,
+                ),
+                None,
+                None,
+                "000000",
+            )
+            .await,
+        failed,
+        "a wrong TOTP code completes no sign-in",
+    )?;
+    refused(
+        served
+            .factors
+            .verify_totp(
+                &served.sign_in,
+                &policy,
+                FactorCaller::Pending(
+                    pending_session().await?,
+                    sid_authn::sign_in_delivery::CeremonyClient::Native,
+                ),
+                None,
+                None,
+                &sid_authn::generate_current_totp(&totp.shared_secret),
+            )
+            .await,
+        failed,
+        "the code spent by the enrollment completes no sign-in",
+    )?;
+    let completed = served
+        .factors
+        .verify_totp(
+            &served.sign_in,
+            &policy,
+            FactorCaller::Pending(
+                pending_session().await?,
+                sid_authn::sign_in_delivery::CeremonyClient::Native,
+            ),
+            None,
+            None,
+            &sid_authn::generate_next_totp(&totp.shared_secret),
+        )
+        .await?;
+    let (second_factor, second_token) = served.bearer(completed.delivery)?;
+    let second_claims = served
+        .jwt
+        .validate_access_token(second_token.expose_secret())?;
+    check(
+        second_factor.profile_id == guest.profile_id
+            && second_claims.amr.iter().any(|m| m == "otp"),
+        "the next code completes the sign-in with the second factor recorded",
+    )?;
+    // A recovery code is spent once on the signed-in session.
+    let verified = sid_authn::caller::Verified {
+        claims: served
+            .jwt
+            .validate_access_token(guest_token.expose_secret())?,
+        caller: guest.clone(),
+        source: sid_authn::caller::TokenSource::Installation,
+    };
+    let code = enrolled.recovery_codes.first().ok_or("a recovery code")?;
+    let spent = served
+        .factors
+        .verify_recovery_code(&served.sign_in, &verified, code)
+        .await?;
+    check(
+        spent.remaining_codes == i32::try_from(enrolled.recovery_codes.len() - 1).ok(),
+        "a recovery code is spent, one fewer remains",
+    )?;
+    refused(
+        served
+            .factors
+            .verify_recovery_code(&served.sign_in, &verified, code)
+            .await,
+        failed,
+        "a spent recovery code is refused",
     )?;
 
     // The CE work the installation committed so far (event relays of the
