@@ -137,32 +137,17 @@ fn sealing_context(presented: uuid::Uuid) -> String {
     format!("native-refresh:{}", presented.hyphenated())
 }
 
-/// Bind the session a ceremony just committed to the application key `jkt`
-/// a verified ceremony proof named, and give it its first generation.
-pub async fn issue<S>(
-    store: &S,
-    session: &Session<S::Owner>,
+/// The first generation of the session a ceremony is about to commit, bound
+/// to the application key `key_jkt` a verified ceremony proof named: the
+/// generation as the session's commit stores it (see
+/// [`sid_core::models::MutationContext::issuing`]) and as it is delivered.
+pub fn first_generation(
+    session: &Session<impl Sized>,
     key_jkt: &str,
     policy: NativePolicy,
-) -> Result<NativeCredentialSet, NativeError>
-where
-    S: GrantStore + ?Sized,
-    S::Owner: std::fmt::Display,
-{
+) -> (NativeGeneration, NativeCredentialSet) {
     let first = new_generation(session, key_jkt, policy);
-    store
-        .issue_native_generation(
-            &first.generation,
-            // The account the session belongs to acted, not the session.
-            AuditEntry::user(
-                session.profile_id.to_string(),
-                "native_session.issue",
-                first.generation.id.to_string(),
-            )
-            .into(),
-        )
-        .await?;
-    Ok(first.set)
+    (first.generation, first.set)
 }
 
 /// One verified refresh request: the proof as sent, the endpoint the client

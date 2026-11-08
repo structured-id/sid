@@ -8206,6 +8206,39 @@ async fn test_complete_step_up_recovery_code_is_single_use() {
         .unwrap();
 }
 
+/// Regression: a step-up by a recovery code rotates the token and stops the
+/// one it came with; when its response is lost, the stopped token receives
+/// the same rotated token again, spending no further code, and the rotated
+/// one works. Before, the elevation and the spent code committed while the
+/// only token able to use them was lost with the response.
+#[tokio::test]
+async fn test_a_lost_step_up_response_is_delivered_again() {
+    use sid_core::models::credential::CredentialStatus;
+    let (svc, bearer) = recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Active).await;
+
+    let lost = svc
+        .auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await
+        .unwrap()
+        .into_inner();
+    let again = svc
+        .auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await
+        .expect("the committed step-up, delivered again")
+        .into_inner();
+    assert_eq!(again.new_session_token, lost.new_session_token);
+    assert_eq!(again.acr, lost.acr);
+
+    // The other code still completes a later step-up of the rotated token:
+    // the retry spent nothing.
+    svc.auth
+        .complete_step_up(recovery_step_up("ZZZZ-ZZZZ-ZZZZ", &lost.new_session_token))
+        .await
+        .expect("the remaining code is unspent");
+}
+
 #[tokio::test]
 async fn test_complete_step_up_totp_wrong_code() {
     use sid_core::models::session::Session;

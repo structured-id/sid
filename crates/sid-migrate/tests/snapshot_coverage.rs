@@ -342,8 +342,23 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
     };
     let family = Uuid::now_v7();
     let first = token(family);
+    let generation = |n: u8| NativeGeneration {
+        id: Uuid::now_v7(),
+        session_id: session.id,
+        key_jkt: "jkt".into(),
+        credential_hashes: vec![vec![n; 32]],
+        expires_at: Utc::now() + Duration::days(30),
+        created_at: Utc::now(),
+    };
+    // The session's first native generation commits with the session.
+    let current = generation(1);
     source
-        .redeem_auth_code(&code.code_hash, &session, &first, ctx())
+        .redeem_auth_code(
+            &code.code_hash,
+            &session,
+            &first,
+            ctx().issuing(current.clone()),
+        )
         .await
         .unwrap();
     source
@@ -353,19 +368,6 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
             Utc::now() + Duration::seconds(30),
             ctx(),
         )
-        .await
-        .unwrap();
-    let generation = |n: u8| NativeGeneration {
-        id: Uuid::now_v7(),
-        session_id: session.id,
-        key_jkt: "jkt".into(),
-        credential_hashes: vec![vec![n; 32]],
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
-    };
-    let current = generation(1);
-    source
-        .issue_native_generation(&current, ctx())
         .await
         .unwrap();
     source

@@ -1457,16 +1457,13 @@ fn exchange() -> NativeExchange {
     NativeExchange::from_bytes(Uuid::new_v4().as_bytes()).expect("16 bytes")
 }
 
-/// A stored session of a new owner with its first native generation.
+/// A stored session of a new owner with its first native generation,
+/// committed together.
 async fn native_session<H: GrantHarness>(h: &H) -> (Session<H::Owner>, NativeGeneration) {
     let s = session(h.owner().await);
-    h.store()
-        .create_session_atomic(&s, 0, None, ctx())
-        .await
-        .unwrap();
     let first = native_generation(&s, "jkt-conformance", 2);
     h.store()
-        .issue_native_generation(&first, ctx())
+        .create_session_atomic(&s, 0, None, ctx().issuing(first.clone()))
         .await
         .unwrap();
     (s, first)
@@ -1479,11 +1476,10 @@ async fn presented<H: GrantHarness>(h: &H, hash: &[u8]) -> Option<NativePresente
         .unwrap()
 }
 
-/// The first generation is stored only for a live session: each of its
-/// credentials names it, current, with its key; a session that does not
-/// exist or has expired gets none, and the same generation twice is a
-/// conflict.
-pub async fn native_generation_issued_for_a_live_session<H: GrantHarness>(h: &H) {
+/// Each credential of a first generation names it, current, with its key
+/// and expiry; a commit carrying a generation already stored is a conflict
+/// and stores neither its session nor anything of the generation.
+pub async fn native_generation_names_its_credentials<H: GrantHarness>(h: &H) {
     let (s, first) = native_session(h).await;
     for hash in &first.credential_hashes {
         let found = presented(h, hash).await.expect("credential stored");
@@ -1493,23 +1489,50 @@ pub async fn native_generation_issued_for_a_live_session<H: GrantHarness>(h: &H)
         assert_eq!(found.expires_at, first.expires_at);
         assert_eq!(found.state, NativeGenerationState::Current);
     }
-    let again = h.store().issue_native_generation(&first, ctx()).await;
+    let other = session(h.owner().await);
+    let again = h
+        .store()
+        .create_session_atomic(&other, 0, None, ctx().issuing(first.clone()))
+        .await;
     assert!(matches!(again, Err(Error::Conflict(_))), "{again:?}");
+    assert!(h.store().get_session(other.id).await.unwrap().is_none());
+}
 
-    let absent = native_generation(&session(h.owner().await), "jkt", 2);
-    let refused = h.store().issue_native_generation(&absent, ctx()).await;
-    assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
-    assert!(presented(h, &absent.credential_hashes[0]).await.is_none());
-
-    let mut expired = session(h.owner().await);
-    expired.expires_at = ms(Utc::now() - Duration::minutes(1));
+/// A session committed with its first generation stores both: the
+/// generation is current for its key from the commit. A completion refused
+/// (its pending context ended) stores neither the session nor the
+/// generation.
+pub async fn native_generation_commits_with_its_session<H: GrantHarness>(h: &H) {
+    let s = session(h.owner().await);
+    let first = native_generation(&s, "jkt-with-session", 2);
     h.store()
-        .create_session_atomic(&expired, 0, None, ctx())
+        .create_session_atomic(&s, 0, None, ctx().issuing(first.clone()))
         .await
         .unwrap();
-    let late = native_generation(&expired, "jkt", 2);
-    let refused = h.store().issue_native_generation(&late, ctx()).await;
+    let found = presented(h, &first.credential_hashes[0])
+        .await
+        .expect("the generation committed with its session");
+    assert_eq!(found.session_id, s.id);
+    assert_eq!(found.key_jkt, "jkt-with-session");
+    assert_eq!(found.state, NativeGenerationState::Current);
+
+    let owner = h.owner().await;
+    let late = session(owner);
+    let orphan = native_generation(&late, "jkt-with-session", 2);
+    let refused = h
+        .store()
+        .complete_pending_session(
+            sid_core::models::SessionId::generate(),
+            &end(),
+            &late,
+            0,
+            None,
+            ctx().issuing(orphan.clone()),
+        )
+        .await;
     assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
+    assert!(h.store().get_session(late.id).await.unwrap().is_none());
+    assert!(presented(h, &orphan.credential_hashes[0]).await.is_none());
 }
 
 /// A generation rotates once. A retry of the same exchange inside the window
@@ -1798,9 +1821,16 @@ pub async fn session_grants_move_as_stored<H: GrantHarness>(h: &H) {
     let code = code(h, s.profile_id.clone(), resource).await;
     let authorizing = code.authentication.session;
     h.store().create_auth_code(&code, ctx()).await.unwrap();
+    // The session's first native generation commits with the session.
+    let generation = native_generation(&s, "jkt-conformance", 2);
     assert_eq!(
         h.store()
-            .redeem_auth_code(&code.code_hash, &s, &first, ctx())
+            .redeem_auth_code(
+                &code.code_hash,
+                &s,
+                &first,
+                ctx().issuing(generation.clone())
+            )
             .await
             .unwrap(),
         AuthCodeRedemption::Redeemed
@@ -1813,11 +1843,6 @@ pub async fn session_grants_move_as_stored<H: GrantHarness>(h: &H) {
             .await
             .unwrap()
     );
-    let generation = native_generation(&s, "jkt-conformance", 2);
-    h.store()
-        .issue_native_generation(&generation, ctx())
-        .await
-        .unwrap();
     let successor = native_generation(&s, "jkt-conformance", 1);
     assert_eq!(
         h.store()

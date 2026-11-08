@@ -1853,10 +1853,16 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
             && recovered.remaining == i32::try_from(codes.len() - 1)?,
         "a recovery code completes the pending sign-in, recorded as mca, spent",
     )?;
-    refused(
-        recover(lost_session, &codes[1]).await,
-        |e| matches!(e, SecondFactorError::SessionEnded),
-        "a retried completion completes nothing more",
+    // The host retries with the pending context it still holds: the same
+    // session and token, whatever code it presents, and nothing spent.
+    let again = recover(lost_session, &codes[1]).await?;
+    let (_, again_token) =
+        served.bearer(again.signed_in.ok_or("the delivered sign-in")?.delivery)?;
+    check(
+        again.session_id == recovered.session_id
+            && again_token.expose_secret() == recovered_token.expose_secret()
+            && again.remaining == i32::try_from(codes.len() - 1)?,
+        "a retried completion receives the committed sign-in and spends nothing",
     )?;
     // A recovery code is spent once on a signed-in session.
     let signed_in_session = served

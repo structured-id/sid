@@ -92,22 +92,6 @@ pub(super) fn presented_row(row: &sqlx::postgres::PgRow) -> SidResult<NativePres
 }
 
 impl PostgresBackend {
-    pub(crate) async fn issue_native_generation_impl(
-        &self,
-        generation: &NativeGeneration,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        if !hold_live_session(&mut tx, generation.session_id).await? {
-            return Err(SidError::Fenced(
-                "the session ended before its native generation".into(),
-            ));
-        }
-        insert_generation(&mut tx, generation).await?;
-        Self::audit_in_tx(&mut tx, &format!("session:{}", generation.session_id), ctx).await?;
-        tx.commit().await.map_err(storage)
-    }
-
     pub(crate) async fn native_generation_by_credential_impl(
         &self,
         hash: &[u8],

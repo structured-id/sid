@@ -137,32 +137,104 @@ impl BrowserCredential {
         session: &Session<O>,
         deadline: DateTime<Utc>,
     ) -> Result<Vec<u8>, SealedSecretError> {
-        let retained = Retained {
-            session: session.id,
-            secret: self.0.encode().to_string(),
-            deadline,
-        };
-        let plain = zeroize::Zeroizing::new(
-            serde_json::to_vec(&retained).expect("a retained delivery encodes"),
-        );
-        sealed_secret::seal(keys, context, &plain).await
+        seal_retained(
+            keys,
+            context,
+            &Retained {
+                session: session.id,
+                deadline,
+                credential: RetainedCredential::Browser {
+                    secret: self.0.encode().to_string(),
+                },
+            },
+        )
+        .await
     }
 }
 
-/// A browser sign-in's delivery kept for a lost response, as sealed.
+/// A native client's credential for a session: its access token, until
+/// when that token is valid, and the session's first generation when the
+/// client proved its key.
+pub struct BearerCredential<'a> {
+    pub token: &'a secrecy::SecretString,
+    pub token_expires_at: DateTime<Utc>,
+    pub refresh: Option<&'a NativeCredentialSet>,
+}
+
+/// A native sign-in's delivery of `credential` for `session`, sealed under
+/// `keys` to `context` until `deadline`: what a lost response is answered
+/// with again.
+pub async fn retain_bearer<O>(
+    keys: &dyn sid_keys::KeyManager,
+    context: &str,
+    session: &Session<O>,
+    credential: BearerCredential<'_>,
+    deadline: DateTime<Utc>,
+) -> Result<Vec<u8>, SealedSecretError> {
+    seal_retained(
+        keys,
+        context,
+        &Retained {
+            session: session.id,
+            deadline,
+            credential: RetainedCredential::Bearer {
+                token: credential.token.expose_secret().to_owned(),
+                token_expires_at: credential.token_expires_at,
+                refresh: credential.refresh.map(Message::encode_to_vec),
+            },
+        },
+    )
+    .await
+}
+
+async fn seal_retained(
+    keys: &dyn sid_keys::KeyManager,
+    context: &str,
+    retained: &Retained,
+) -> Result<Vec<u8>, SealedSecretError> {
+    let plain =
+        zeroize::Zeroizing::new(serde_json::to_vec(retained).expect("a retained delivery encodes"));
+    sealed_secret::seal(keys, context, &plain).await
+}
+
+/// A sign-in's delivery kept for a lost response, as sealed.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Retained {
     session: sid_ids::SessionId,
-    secret: String,
     deadline: DateTime<Utc>,
+    credential: RetainedCredential,
 }
 
-/// A retained browser delivery opened again: the session it names, until
-/// when it may be redelivered, and its credential.
+/// The credential a retained delivery hands out again.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum RetainedCredential {
+    /// The browser's session cookie secret.
+    Browser { secret: String },
+    /// A native client's access token, its expiry and the encoded first
+    /// generation.
+    Bearer {
+        token: String,
+        token_expires_at: DateTime<Utc>,
+        refresh: Option<Vec<u8>>,
+    },
+}
+
+/// The credential of an opened retained delivery.
+enum Opened {
+    Browser(BrowserCredential),
+    Bearer {
+        token: secrecy::SecretString,
+        token_expires_at: DateTime<Utc>,
+        refresh: Option<NativeCredentialSet>,
+    },
+}
+
+/// A retained delivery opened again: the session it names, until when it
+/// may be redelivered, and its credential.
 pub struct RetainedDelivery {
     pub session_id: sid_ids::SessionId,
     pub deadline: DateTime<Utc>,
-    credential: BrowserCredential,
+    credential: Opened,
 }
 
 impl RetainedDelivery {
@@ -176,21 +248,72 @@ impl RetainedDelivery {
         let opened = sealed_secret::open(keys, context, sealed).await?;
         let retained: Retained =
             serde_json::from_slice(&opened.secret).map_err(|_| SealedSecretError::NotSealed)?;
-        let secret = BrowserSecret::decode(&retained.secret).ok_or(SealedSecretError::NotSealed)?;
+        let credential = match retained.credential {
+            RetainedCredential::Browser { secret } => Opened::Browser(BrowserCredential(
+                BrowserSecret::decode(&secret).ok_or(SealedSecretError::NotSealed)?,
+            )),
+            RetainedCredential::Bearer {
+                token,
+                token_expires_at,
+                refresh,
+            } => Opened::Bearer {
+                token: token.into(),
+                token_expires_at,
+                refresh: refresh
+                    .map(|bytes| NativeCredentialSet::decode(bytes.as_slice()))
+                    .transpose()
+                    .map_err(|_| SealedSecretError::NotSealed)?,
+            },
+        };
         Ok(Self {
             session_id: retained.session,
             deadline: retained.deadline,
-            credential: BrowserCredential(secret),
+            credential,
         })
     }
 
-    /// The same sign-in delivered again for the stored `session` it names,
-    /// only while that session still stores this credential's hash: none for
-    /// any other session.
+    /// The access token a native delivery carries, for a protocol that
+    /// returns it in its own message (a step-up's rotated token).
+    pub fn into_bearer_token(self) -> Option<secrecy::SecretString> {
+        match self.credential {
+            Opened::Bearer { token, .. } => Some(token),
+            Opened::Browser(_) => None,
+        }
+    }
+
+    /// One refresh credential of the native first generation this delivery
+    /// carries, to tell whether that generation is still the session's.
+    pub fn refresh_credential(&self) -> Option<&str> {
+        match &self.credential {
+            Opened::Bearer {
+                refresh: Some(set), ..
+            } => set.refresh_credentials.first().map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// The same sign-in delivered again for the stored `session` it names:
+    /// a browser's only while that session still stores this credential's
+    /// hash; none for any other session.
     pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> Option<SignedIn> {
-        let matches = session.id == self.session_id
-            && session.browser_secret_hash == Some(self.credential.0.hash());
-        matches.then(|| self.credential.signed_in(cookie, session))
+        if session.id != self.session_id {
+            return None;
+        }
+        match self.credential {
+            Opened::Browser(credential) => (session.browser_secret_hash
+                == Some(credential.0.hash()))
+            .then(|| credential.signed_in(cookie, session)),
+            // The token as issued: its lifetime is what remains of it.
+            Opened::Bearer {
+                token,
+                token_expires_at,
+                refresh,
+            } => Some(SignedIn {
+                session_id: session.id,
+                expires_in: (token_expires_at.min(session.expires_at) - Utc::now()).num_seconds(),
+                delivery: Delivery::Bearer { token, refresh },
+            }),
+        }
     }
 }
 

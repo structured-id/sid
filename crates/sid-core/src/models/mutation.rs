@@ -32,6 +32,10 @@ pub struct MutationContext {
     /// transaction: when the credential is no longer active and exactly as
     /// read, the backend commits nothing and returns `Error::Fenced`.
     pub spend: Option<CredentialSpend>,
+    /// The first refresh generation of a native session the mutation
+    /// commits, stored in the same transaction: a session and its
+    /// generation exist together or not at all.
+    pub generation: Option<super::NativeGeneration>,
 }
 
 /// A credential's data replaced as part of a mutation: a single-use secret
@@ -107,6 +111,13 @@ impl MutationContext {
         self
     }
 
+    /// Store `generation`, the first of the session this mutation commits,
+    /// in the same transaction.
+    pub fn issuing(mut self, generation: super::NativeGeneration) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+
     /// Record the completion of the caller's keyed command with the effect.
     pub fn with_operation(mut self, operation: OperationCompletion) -> Self {
         self.operation = Some(operation);
@@ -136,6 +147,7 @@ impl From<AuditEntry> for MutationContext {
             fence: None,
             ceremony: None,
             spend: None,
+            generation: None,
         }
     }
 }

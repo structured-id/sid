@@ -201,12 +201,14 @@ pub struct FirstFactorSignedIn {
     pub browser_csrf: Option<String>,
 }
 
-/// The keyed operation a browser sign-in completes, whose result is its
-/// delivery sealed for a lost response: the session commits with that
-/// completion, and a repeat of the operation finds it instead of a second
-/// session.
+/// The operation a sign-in completes, whose result is its delivery sealed
+/// for a lost response: the session commits with that completion, and a
+/// repeat of the operation finds it instead of a second session.
 pub struct RetainedSignIn<'a> {
     pub keys: &'a dyn sid_keys::KeyManager,
+    /// The completions of this kind of sign-in, and the method each names.
+    pub namespace: &'static str,
+    pub method: &'static str,
     pub completion_key: OperationKey,
     /// The sealing context: this operation of this issuer.
     pub context: String,
@@ -272,6 +274,68 @@ impl FactorSpend {
     /// `ctx`, also spending this.
     pub fn into_context(self, ctx: MutationContext) -> MutationContext {
         ctx.spending(self.spend).with_work(self.owes)
+    }
+}
+
+/// The namespace of second-factor completions, whose results are their
+/// deliveries sealed for a lost response.
+pub const SECOND_FACTOR_NAMESPACE: &str = "second-factor-sign-in";
+
+/// The method a second-factor completion records.
+pub const SECOND_FACTOR_METHOD: &str = "complete_second_factor";
+
+/// A sign-in's pending second-factor context as its client proves it,
+/// whether or not it has completed: the context names the completion whose
+/// result a retry after a lost response receives, and nothing else.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CompletedContext {
+    /// The sign-in page's context: the hash of its cookie's secret and the
+    /// CSRF token it was given (both checked by the browser adapter).
+    Browser {
+        secret: sid_core::models::BrowserSecretHash,
+        csrf: String,
+    },
+    /// A native client's context and the application key a fresh proof of
+    /// this request bound to it, when the client proves one.
+    Native {
+        pending: SessionId,
+        key: Option<String>,
+    },
+}
+
+impl CompletedContext {
+    /// The context `client` completes `pending` from, with the key
+    /// `native_key` a native client proved; `None` for a browser context
+    /// that holds no cookie binding.
+    pub fn of(pending: &Session, client: CeremonyClient, native_key: Option<&str>) -> Option<Self> {
+        match client {
+            CeremonyClient::Browser => Some(Self::Browser {
+                secret: pending.browser_secret_hash?,
+                csrf: pending.browser_csrf.as_ref().map(BrowserCsrf::encode)?,
+            }),
+            CeremonyClient::Native => Some(Self::Native {
+                pending: pending.id,
+                key: native_key.map(str::to_owned),
+            }),
+        }
+    }
+
+    /// The key of the completion this context names.
+    fn key(&self) -> Result<OperationKey, SignInError> {
+        let key = match self {
+            Self::Browser { secret, .. } => format!("browser:{}", hex::encode(secret.as_bytes())),
+            Self::Native { pending, .. } => format!("native:{pending}"),
+        };
+        OperationKey::parse(&key).map_err(|e| internal("name a second-factor completion", e))
+    }
+
+    /// What a retry must present again: the CSRF token a browser context
+    /// was given, the application key a native client proved.
+    fn inputs(&self) -> Vec<u8> {
+        match self {
+            Self::Browser { csrf, .. } => csrf.as_bytes().to_vec(),
+            Self::Native { key, .. } => key.as_deref().unwrap_or_default().as_bytes().to_vec(),
+        }
     }
 }
 
@@ -746,6 +810,46 @@ impl SignIn {
             .await?)
     }
 
+    /// The hash of the secret this authority's session cookie carries among
+    /// `cookies`, whether or not a session still holds it.
+    pub fn browser_secret_hash<'c>(
+        &self,
+        cookies: impl IntoIterator<Item = &'c str>,
+    ) -> Option<sid_core::models::BrowserSecretHash> {
+        self.cookie.secret(cookies).map(|secret| secret.hash())
+    }
+
+    /// The lifetime left of the browser's own live `session`, a sign-in a
+    /// completion already delivered by its cookie, answered again without
+    /// any effect: only while the account can sign in and the session meets
+    /// the requirements `login_policy` states now.
+    pub async fn current_sign_in(
+        &self,
+        login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        session: &Session,
+    ) -> Result<i64, SignInError> {
+        if session.is_expired() || session.awaits_second_factor() {
+            return Err(SignInError::SessionEnded);
+        }
+        self.storage
+            .get_profile(session.profile_id)
+            .await?
+            .filter(|profile| profile.status.can_authenticate())
+            .ok_or(SignInError::SessionEnded)?;
+        let requirements = self
+            .for_account(
+                &organization_requirements(login_policy).await?,
+                session.profile_id,
+            )
+            .await?;
+        if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
+            requirements.decide(session, Utc::now())
+        {
+            return Err(SignInRefusal::StepUp(unmet).into());
+        }
+        Ok((session.expires_at - Utc::now()).num_seconds())
+    }
+
     /// Whether the session `session_id` is still valid, as `caller` may ask:
     /// someone else's session answers exactly like an unknown one; the owner
     /// and the expiry are told only for a valid session.
@@ -1085,7 +1189,7 @@ impl SignIn {
         native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
-        spend: Option<FactorSpend>,
+        (spend, retained): (Option<FactorSpend>, Option<RetainedSignIn<'_>>),
     ) -> Result<SignedIn, SignInError> {
         let limit = self.policy.session.max_concurrent_sessions;
         let (signed_in, _) = self
@@ -1102,7 +1206,7 @@ impl SignIn {
                     end: pending.1,
                     spend,
                 }),
-                None,
+                retained,
             )
             .await?;
         self.revocation
@@ -1178,9 +1282,26 @@ impl SignIn {
         }
         // The authentication began with the first factor.
         session.authenticated_at = pending.authenticated_at;
+        // The delivery commits with the session, sealed to the context the
+        // client completed from, and is kept while either may still be used:
+        // a retry of that context after a lost response receives it again.
+        let completed = CompletedContext::of(&pending, client, native_key);
+        let retained = match &completed {
+            Some(completed) => Some(RetainedSignIn {
+                keys: self.keys.as_ref(),
+                namespace: SECOND_FACTOR_NAMESPACE,
+                method: SECOND_FACTOR_METHOD,
+                completion_key: completed.key()?,
+                context: self.second_factor_context(completed)?,
+                deadline: pending.expires_at.min(session.expires_at),
+                inputs: completed.inputs(),
+            }),
+            None => None,
+        };
         // The pending context ends in the session's own commit: of concurrent
-        // completions one signs in, and one ended meanwhile completes nothing.
-        let signed_in = self
+        // completions one signs in, and one ended meanwhile completes nothing
+        // more; it is answered with the completion that committed.
+        let committed = self
             .complete_pending(
                 &profile,
                 (
@@ -1195,12 +1316,116 @@ impl SignIn {
                 native_key,
                 proved_by.as_ref().map(SignInProof::Credential),
                 requirements.fence,
-                spend,
+                (spend, retained),
             )
-            .await?;
+            .await;
+        let signed_in = match (committed, &completed) {
+            (Err(SignInError::Fenced), Some(completed)) => {
+                match self
+                    .redeliver_second_factor(login_policy, completed)
+                    .await?
+                {
+                    Some(signed_in) => return Ok(signed_in),
+                    None => return Err(SignInError::Fenced),
+                }
+            }
+            (committed, _) => committed?,
+        };
         // Recorded from the address the rules judged at the first factor.
         self.record_completed(profile.id, pending.ip_address).await;
         Ok(signed_in)
+    }
+
+    /// The sealing context of a second-factor completion's delivery: the
+    /// completion this context names at this issuer.
+    fn second_factor_context(&self, completed: &CompletedContext) -> Result<String, SignInError> {
+        Ok(format!(
+            "second-factor-sign-in:{}:{}",
+            self.issuer,
+            completed.key()?.as_str()
+        ))
+    }
+
+    /// The sign-in the second factor of `completed` already completed,
+    /// delivered again to that context after a lost response: the same
+    /// session and credential (and, for a native client, the same first
+    /// generation), with no further effect. `None` when no completion of
+    /// that context committed, or it is no longer kept. A completion of
+    /// another context, an ended or expired session, an account that can no
+    /// longer sign in, requirements the session no longer meets, or a native
+    /// first generation already rotated deliver nothing.
+    pub async fn redeliver_second_factor(
+        &self,
+        login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        completed: &CompletedContext,
+    ) -> Result<Option<SignedIn>, SignInError> {
+        let Some(record) = self
+            .storage
+            .get_operation_result(SECOND_FACTOR_NAMESPACE, &completed.key()?)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // A completion of this context presented with another CSRF token or
+        // proved by another key is not this client's.
+        if !record.matches(SECOND_FACTOR_METHOD, &completed.inputs(), None) {
+            return Err(SignInError::AuthenticationFailed);
+        }
+        let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
+            self.keys.as_ref(),
+            &self.second_factor_context(completed)?,
+            &record.completion.result,
+        )
+        .await
+        .map_err(|e| internal("open the retained sign-in delivery", e))?;
+        if delivery.deadline <= Utc::now() {
+            return Ok(None);
+        }
+        let ended = || SignInError::SessionEnded;
+        let session = self
+            .storage
+            .get_session(delivery.session_id)
+            .await?
+            .filter(|session| !session.is_expired())
+            .ok_or_else(ended)?;
+        self.storage
+            .get_profile(session.profile_id)
+            .await?
+            .filter(|profile| profile.status.can_authenticate())
+            .ok_or_else(ended)?;
+        let requirements = self
+            .for_account(
+                &organization_requirements(login_policy).await?,
+                session.profile_id,
+            )
+            .await?;
+        if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
+            requirements.decide(&session, Utc::now())
+        {
+            return Err(SignInRefusal::StepUp(unmet).into());
+        }
+        // The first generation is handed out again only while it is the
+        // session's current one: a client that already renewed with it
+        // received it, and its retired credentials are never delivered.
+        if let Some(credential) = delivery.refresh_credential() {
+            let current = self
+                .storage
+                .native_generation_by_credential(&sid_authn::oauth2::OAuth2Server::hash_token(
+                    credential,
+                ))
+                .await?
+                .is_some_and(|generation| {
+                    generation.session_id == session.id
+                        && generation.state == sid_core::models::NativeGenerationState::Current
+                });
+            if !current {
+                return Err(ended());
+            }
+        }
+        delivery
+            .signed_in(&self.cookie, &session)
+            .map(Some)
+            .ok_or_else(ended)
     }
 
     /// Store a sign-in's pending second-factor context and deliver its
@@ -1239,11 +1464,22 @@ impl SignIn {
         pending: Option<Completing<'_>>,
         retained: Option<RetainedSignIn<'_>>,
     ) -> Result<(SignedIn, Option<String>), SignInError> {
+        // Kept no longer than it can be delivered again.
+        let completion = |retained: RetainedSignIn<'_>, sealed: Vec<u8>| {
+            OperationCompletion::new(
+                retained.namespace,
+                retained.completion_key,
+                retained.method,
+                &retained.inputs,
+                sealed,
+            )
+            .retained_until(retained.deadline)
+        };
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
                 let csrf = session.browser_csrf.as_ref().map(BrowserCsrf::encode);
-                let completion = match retained {
+                let retained = match retained {
                     Some(retained) => {
                         let sealed = credential
                             .retain(
@@ -1254,22 +1490,18 @@ impl SignIn {
                             )
                             .await
                             .map_err(|e| internal("seal the sign-in delivery", e))?;
-                        // Kept no longer than it can be delivered again.
-                        Some(
-                            OperationCompletion::new(
-                                ADMITTED_NAMESPACE,
-                                retained.completion_key,
-                                ADMITTED_METHOD,
-                                &retained.inputs,
-                                sealed,
-                            )
-                            .retained_until(retained.deadline),
-                        )
+                        Some(completion(retained, sealed))
                     }
                     None => None,
                 };
                 self.persist(
-                    profile, &session, proved_by, policy, limit, pending, completion,
+                    profile,
+                    &session,
+                    proved_by,
+                    (policy, limit),
+                    pending,
+                    retained,
+                    None,
                 )
                 .await?;
                 Ok((credential.signed_in(&self.cookie, &session), csrf))
@@ -1277,39 +1509,71 @@ impl SignIn {
             CeremonyClient::Native => {
                 // Checked before anything commits: a policy that cannot shape
                 // a generation creates no session.
-                let native = native_key
+                let first = native_key
                     .map(|key| {
                         NativePolicy::from_session_policy(&self.policy.session)
-                            .map(|policy| (key, policy))
+                            .map(|policy| native_session::first_generation(&session, key, policy))
                             .map_err(|e| internal("read the native session policy", e))
                     })
                     .transpose()?;
-                self.persist(profile, &session, proved_by, policy, limit, pending, None)
-                    .await?;
-                // The generation commits after the session it renews, which it
-                // checks is still live. A failure between the two leaves a
-                // session nothing was delivered for, as a lost response does;
-                // it ends with its lifetime.
-                let refresh = match native {
-                    Some((key, policy)) => Some(
-                        native_session::issue(self.storage.as_ref(), &session, key, policy).await?,
-                    ),
+                // The token and the first generation exist before the
+                // commit, which stores the generation beside the session and
+                // the sealed delivery with them: the session, its generation
+                // and the answer to a lost response commit together.
+                let (token, expires_in) = self.access_token(profile, &session).await?;
+                let token_expires_at = Utc::now() + Duration::seconds(expires_in);
+                let (generation, refresh) = match first {
+                    Some((generation, set)) => (Some(generation), Some(set)),
+                    None => (None, None),
+                };
+                let retained = match retained {
+                    Some(retained) => {
+                        let sealed = sid_authn::sign_in_delivery::retain_bearer(
+                            retained.keys,
+                            &retained.context,
+                            &session,
+                            sid_authn::sign_in_delivery::BearerCredential {
+                                token: &token,
+                                token_expires_at,
+                                refresh: refresh.as_ref(),
+                            },
+                            retained.deadline,
+                        )
+                        .await
+                        .map_err(|e| internal("seal the sign-in delivery", e))?;
+                        Some(completion(retained, sealed))
+                    }
                     None => None,
                 };
-                Ok((self.native_access(profile, &session, refresh).await?, None))
+                self.persist(
+                    profile,
+                    &session,
+                    proved_by,
+                    (policy, limit),
+                    pending,
+                    retained,
+                    generation,
+                )
+                .await?;
+                Ok((
+                    SignedIn {
+                        session_id: session.id,
+                        expires_in,
+                        delivery: Delivery::Bearer { token, refresh },
+                    },
+                    None,
+                ))
             }
         }
     }
 
-    /// A native client's access token for the stored `session` of `profile`,
-    /// with `refresh`, the session's refresh generation, beside it when the
-    /// client renews the session with one.
-    pub async fn native_access(
+    /// An access token for `session` of `profile` and its lifetime in
+    /// seconds: no longer than the session's.
+    async fn access_token(
         &self,
         profile: &Profile,
         session: &Session,
-        refresh: Option<NativeCredentialSet>,
-    ) -> Result<SignedIn, SignInError> {
+    ) -> Result<(secrecy::SecretString, i64), SignInError> {
         let sub = profile.id.to_string();
         let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), profile)
             .await
@@ -1331,30 +1595,41 @@ impl SignIn {
             .jwt
             .access_token_ttl_secs()
             .min((session.expires_at - Utc::now()).num_seconds());
+        Ok((access_token.into(), expires_in))
+    }
+
+    /// A native client's access token for the stored `session` of `profile`,
+    /// with `refresh`, the session's refresh generation, beside it when the
+    /// client renews the session with one.
+    pub async fn native_access(
+        &self,
+        profile: &Profile,
+        session: &Session,
+        refresh: Option<NativeCredentialSet>,
+    ) -> Result<SignedIn, SignInError> {
+        let (token, expires_in) = self.access_token(profile, session).await?;
         Ok(SignedIn {
             session_id: session.id,
             expires_in,
-            delivery: Delivery::Bearer {
-                token: access_token.into(),
-                refresh,
-            },
+            delivery: Delivery::Bearer { token, refresh },
         })
     }
 
     /// Store `session` under the concurrent-session `limit` (0: none) and
     /// announce it, while `policy` still holds; with `pending`, as the
     /// completion of that pending context, which ends in the same commit;
-    /// with `completion`, committing that keyed operation's completion.
+    /// with `completion`, committing that keyed operation's completion; with
+    /// `generation`, the native session's first generation beside it.
     #[allow(clippy::too_many_arguments)]
     async fn persist(
         &self,
         profile: &Profile,
         session: &Session,
         proved_by: Option<SignInProof<'_>>,
-        policy: Option<ActorFence>,
-        limit: u32,
+        (policy, limit): (Option<ActorFence>, u32),
         pending: Option<Completing<'_>>,
         completion: Option<OperationCompletion>,
+        generation: Option<sid_core::models::NativeGeneration>,
     ) -> Result<(), SignInError> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -1378,6 +1653,9 @@ impl SignIn {
         }
         if let Some(completion) = completion {
             ctx = ctx.with_operation(completion);
+        }
+        if let Some(generation) = generation {
+            ctx = ctx.issuing(generation);
         }
         let stored = match pending {
             Some(Completing { id, end, spend }) => {

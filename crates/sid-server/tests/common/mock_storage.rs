@@ -1440,21 +1440,6 @@ impl GrantStore for MockStorage {
         Ok(ended.into_iter().map(|session| session.id).collect())
     }
 
-    async fn issue_native_generation(
-        &self,
-        generation: &NativeGeneration,
-        _ctx: MutationContext,
-    ) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner.native_session_live(generation.session_id) {
-            return Err(sid_core::Error::Fenced(
-                "the session ended before its native generation".into(),
-            ));
-        }
-        inner.insert_native_generation(generation);
-        Ok(())
-    }
-
     async fn native_generation_by_credential(
         &self,
         hash: &[u8],
@@ -6734,6 +6719,9 @@ impl MockStorageInner {
                 .expect("checked above");
             credential.data = sid_core::models::CredentialData::new(spend.left.clone());
             credential.mark_used();
+        }
+        if let Some(generation) = &ctx.generation {
+            self.insert_native_generation(generation);
         }
         let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {

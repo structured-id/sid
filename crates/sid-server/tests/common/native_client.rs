@@ -27,16 +27,57 @@ pub enum Binds<'a> {
     },
 }
 
+/// An application instance's ES256 key: its public JWK and signing key.
+pub struct AppKey {
+    jwk: jsonwebtoken::jwk::Jwk,
+    key: jsonwebtoken::EncodingKey,
+}
+
+/// The test ES256 key every native proof here is signed by.
+fn test_key() -> AppKey {
+    AppKey {
+        jwk: serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "b0K7RgRe5HiYfkZuCqJFDTDaIAkBIkVOP3xIggAghyc",
+            "y": "01y9J7CAYH9p1uB6va3wvUKXiyIlFK_fm2NJckH7xcQ",
+        }))
+        .unwrap(),
+        key: jsonwebtoken::EncodingKey::from_ec_pem(include_bytes!(
+            "../../../sid-authn/tests/fixtures/test_es256_private.pem"
+        ))
+        .unwrap(),
+    }
+}
+
+/// A fresh ES256 key of another application instance.
+pub fn other_key() -> AppKey {
+    use p256::elliptic_curve::Generate;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    use p256::pkcs8::EncodePrivateKey;
+    let secret = p256::SecretKey::generate_from_rng(&mut rand::rng());
+    let point = secret.public_key().as_affine().to_sec1_point(false);
+    AppKey {
+        jwk: serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": URL_SAFE_NO_PAD.encode(point.x().unwrap()),
+            "y": URL_SAFE_NO_PAD.encode(point.y().unwrap()),
+        }))
+        .unwrap(),
+        key: jsonwebtoken::EncodingKey::from_ec_der(secret.to_pkcs8_der().unwrap().as_bytes()),
+    }
+}
+
 /// A SID native proof for `POST htu`, signed by the test ES256 key.
 pub fn proof(htu: &str, binds: Binds<'_>) -> String {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(serde_json::json!({
-        "kty": "EC",
-        "crv": "P-256",
-        "x": "b0K7RgRe5HiYfkZuCqJFDTDaIAkBIkVOP3xIggAghyc",
-        "y": "01y9J7CAYH9p1uB6va3wvUKXiyIlFK_fm2NJckH7xcQ",
-    }))
-    .unwrap();
+    proof_with(&test_key(), htu, binds)
+}
+
+/// A SID native proof for `POST htu`, signed by `key`.
+pub fn proof_with(key: &AppKey, htu: &str, binds: Binds<'_>) -> String {
+    use jsonwebtoken::{Algorithm, Header, encode};
+    let jwk = key.jwk.clone();
     let mut header = Header::new(Algorithm::ES256);
     header.typ = Some(sid_authn::dpop::NATIVE_PROOF_TYPE.into());
     header.jwk = Some(jwk);
@@ -58,11 +99,7 @@ pub fn proof(htu: &str, binds: Binds<'_>) -> String {
             claims["sid_ex"] = URL_SAFE_NO_PAD.encode(exchange).into();
         }
     }
-    let key = EncodingKey::from_ec_pem(include_bytes!(
-        "../../../sid-authn/tests/fixtures/test_es256_private.pem"
-    ))
-    .unwrap();
-    encode(&header, &claims, &key).unwrap()
+    encode(&header, &claims, &key.key).unwrap()
 }
 
 /// `message` carrying `proof` in its native proof metadata.

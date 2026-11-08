@@ -61,16 +61,17 @@ async fn session(h: &Harness, jkt: &str) -> (Session, NativeCredentialSet) {
         None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
+    let (first, set) = first_generation(&session, jkt, h.policy);
     h.store
         .create_session_atomic(
             &session,
             0,
             None,
-            AuditEntry::system("test", "session").into(),
+            sid_core::models::MutationContext::from(AuditEntry::system("test", "session"))
+                .issuing(first),
         )
         .await
         .unwrap();
-    let set = issue(&h.store, &session, jkt, h.policy).await.unwrap();
     (session, set)
 }
 
