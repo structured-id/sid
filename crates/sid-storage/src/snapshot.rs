@@ -399,6 +399,29 @@ impl Snapshot {
         serde_json::to_vec(self).map_err(|e| SnapshotError::Invalid(format!("snapshot JSON: {e}")))
     }
 
+    /// The snapshot as JSON with every object's keys in order: the same
+    /// bytes for the same contents, however its maps happen to iterate.
+    pub(crate) fn canonical_json(&self) -> Result<Vec<u8>> {
+        fn sorted(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let mut fields: Vec<_> = map.into_iter().collect();
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    serde_json::Value::Object(
+                        fields.into_iter().map(|(k, v)| (k, sorted(v))).collect(),
+                    )
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.into_iter().map(sorted).collect())
+                }
+                other => other,
+            }
+        }
+        let invalid = |e: serde_json::Error| SnapshotError::Invalid(format!("snapshot JSON: {e}"));
+        let value = serde_json::to_value(self).map_err(invalid)?;
+        serde_json::to_vec(&sorted(value)).map_err(invalid)
+    }
+
     /// A new empty snapshot of a source of backend `source_backend`.
     pub fn new(source_backend: &str) -> Self {
         Self {
