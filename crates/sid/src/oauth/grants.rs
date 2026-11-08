@@ -95,6 +95,7 @@ fn grant_refusal(failure: GrantFailure<OAuthError>) -> OAuthError {
         GrantFailure::ProofMismatch => {
             OAuthError::Dpop("refresh token is bound to another key".into())
         }
+        GrantFailure::Storage(SidError::Fenced(_)) => OAuthError::PolicyChanged,
         GrantFailure::Storage(e) => OAuthError::Store(e),
         GrantFailure::Issuance(e) => internal("issue tokens", e),
         GrantFailure::Host(e) => e,
@@ -215,8 +216,8 @@ impl GrantHost for ProfileGrant<'_> {
         &self,
         client: &OAuth2Client,
         session: &sid_core::models::Session,
-    ) -> Result<(), OAuthError> {
-        self.oauth.admitted_grant(client, session).await.map(|_| ())
+    ) -> Result<Option<sid_core::models::ActorFence>, OAuthError> {
+        self.oauth.admitted_grant(client, session).await
     }
 
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, OAuthError> {

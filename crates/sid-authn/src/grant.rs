@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{
-    AuditEntry, AuthCodeRedemption, OAuth2Client, OidcIssuer, Profile, ProfileEmail, ProfilePhone,
-    ResourceId, Session, SessionId,
+    ActorFence, AuditEntry, AuthCodeRedemption, MutationContext, OAuth2Client, OidcIssuer, Profile,
+    ProfileEmail, ProfilePhone, ResourceId, Session, SessionId,
 };
 use sid_plugin::GrantStore;
 use tracing::warn;
@@ -128,12 +128,13 @@ pub trait GrantHost: Send + Sync {
     /// protection the credential owner's account has now, still admit the
     /// authentication `session` reports: a grant continues only while they
     /// do, so a second factor enabled after a password-only authentication
-    /// ends that grant's issuance.
+    /// ends that grant's issuance. Returns the requirements' fence, which
+    /// the grant's commit holds to.
     async fn admit(
         &self,
         client: &OAuth2Client,
         session: &Session<Self::Owner>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<Option<ActorFence>, Self::Error>;
 
     /// The signer of `issuer`.
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, Self::Error>;
@@ -162,6 +163,15 @@ fn required<'a, E>(
     value
         .filter(|v| !v.is_empty())
         .ok_or(GrantFailure::MissingParameter(field))
+}
+
+/// The context of a grant's commit, held to the admission's `fence`.
+fn fenced(audit: AuditEntry, fence: Option<ActorFence>) -> MutationContext {
+    let ctx = MutationContext::from(audit);
+    match fence {
+        Some(fence) => ctx.fenced_by(fence),
+        None => ctx,
+    }
 }
 
 async fn end_compromised<H: GrantHost>(
@@ -234,7 +244,8 @@ pub async fn redeem_code<H: GrantHost>(
     .with_grant_authentication(exchanged.authentication());
     session.client_id = Some(client.client_id.clone());
     session.scopes = exchanged.scopes().to_vec();
-    host.admit(&client, &session)
+    let fence = host
+        .admit(&client, &session)
         .await
         .map_err(GrantFailure::Host)?;
 
@@ -261,19 +272,22 @@ pub async fn redeem_code<H: GrantHost>(
         )
         .map_err(GrantFailure::Issuance)?;
 
-    // The code, the session and the refresh token commit together.
+    // The code, the session and the refresh token commit together, while
+    // the requirements that admitted them hold.
     let redemption = host
         .store()
         .redeem_auth_code(
             &code_hash,
             &session,
             &refresh,
-            AuditEntry::user(
-                owner.to_string(),
-                "auth_code.exchange",
-                session.id.to_string(),
-            )
-            .into(),
+            fenced(
+                AuditEntry::user(
+                    owner.to_string(),
+                    "auth_code.exchange",
+                    session.id.to_string(),
+                ),
+                fence,
+            ),
         )
         .await
         .map_err(GrantFailure::Storage)?;
@@ -363,7 +377,8 @@ pub async fn refresh<H: GrantHost>(
         .map_err(GrantFailure::Storage)?
         .filter(|session| !session.is_expired())
         .ok_or_else(|| GrantFailure::invalid_grant("session ended"))?;
-    host.admit(&client, &session)
+    let fence = host
+        .admit(&client, &session)
         .await
         .map_err(GrantFailure::Host)?;
 
@@ -400,7 +415,10 @@ pub async fn refresh<H: GrantHost>(
             &rotated_to,
             Utc::now()
                 + Duration::seconds(sid_core::models::refresh_token::DEFAULT_GRACE_WINDOW_SECS),
-            AuditEntry::user(owner.to_string(), "token.rotate", rotated_to.id.to_string()).into(),
+            fenced(
+                AuditEntry::user(owner.to_string(), "token.rotate", rotated_to.id.to_string()),
+                fence,
+            ),
         )
         .await
         .map_err(GrantFailure::Storage)?;

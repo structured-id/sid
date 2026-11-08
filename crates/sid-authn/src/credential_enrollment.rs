@@ -47,12 +47,14 @@ pub fn credential_assurance(
 }
 
 /// The highest assurance the account's active credentials establish.
+/// Recovery codes are a fallback, not a factor, and establish none.
 pub fn established_assurance<O>(
     active: &[Credential<O>],
     passkey_satisfies_mfa: bool,
 ) -> AuthLevel {
     active
         .iter()
+        .filter(|c| c.credential_type != CredentialType::Recovery)
         .map(|c| credential_assurance(c.credential_type, passkey_satisfies_mfa))
         .max()
         .unwrap_or(AuthLevel::Basic)

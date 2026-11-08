@@ -156,15 +156,11 @@ impl LoginRequirements {
         store: &S,
         owner: S::Owner,
     ) -> sid_core::Result<Self> {
-        // The factors a sign-in can use: recovery codes are the recovery
-        // of an account, not an enabled factor, and once its TOTP is
-        // disabled they protect nothing a sign-in could present.
         let active: Vec<_> = store
             .get_credentials_by_profile(owner, None)
             .await?
             .into_iter()
             .filter(|c| c.status.is_active())
-            .filter(|c| c.credential_type != sid_core::models::CredentialType::Recovery)
             .collect();
         let established = crate::credential_enrollment::established_assurance(
             &active,

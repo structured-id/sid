@@ -367,6 +367,25 @@ async fn recovery_codes_alone_are_no_enabled_factor() {
     ));
 }
 
+// Regression: under required MFA an account left with recovery codes alone
+// has no factor to be asked for and no established protection barring its
+// first one: the password sign-in is offered TOTP enrollment, not refused.
+#[tokio::test]
+async fn required_mfa_offers_enrollment_to_an_account_with_recovery_codes_alone() {
+    use sid_core::models::security_policy::MfaEnforcement;
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Recovery).await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.mfa_enforcement = MfaEnforcement::Required;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, enrollable, .. }
+            if factors.is_empty() && enrollable == vec![StepUpMethod::Totp]
+    ));
+}
+
 // Regression: under audit enforcement a policy part TOTP cannot meet (a
 // higher level) does not withhold the TOTP the account's protection owes:
 // the password sign-in awaits it.

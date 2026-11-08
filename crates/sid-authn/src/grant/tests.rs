@@ -7,8 +7,9 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Utc};
 use sid_core::models::{
-    AuthorizationCode, BrowserSecretHash, GrantAuthentication, IssuerId, MutationContext,
-    ProtectedResource, RefreshToken, ResourceAccess, ResourceIndicator, ResourceState, SessionEnd,
+    ActorFence, AuthorizationCode, BrowserSecretHash, GrantAuthentication, IssuerId,
+    MutationContext, ProtectedResource, RefreshToken, ResourceAccess, ResourceIndicator,
+    ResourceState, SessionEnd,
 };
 use uuid::Uuid;
 
@@ -38,13 +39,26 @@ struct Grants {
     refresh: Vec<RefreshToken<Account>>,
 }
 
-/// The grant store of a host whose accounts are [`Account`]s.
+/// The grant store of a host whose accounts are [`Account`]s, with the
+/// epoch of the login policy it commits under.
 #[derive(Default)]
-struct MemoryGrants(Mutex<Grants>);
+struct MemoryGrants(Mutex<Grants>, std::sync::atomic::AtomicI64);
 
 impl MemoryGrants {
     fn with<T>(&self, f: impl FnOnce(&mut Grants) -> T) -> T {
         f(&mut self.0.lock().expect("grant state"))
+    }
+
+    /// Refuse a mutation decided under a login policy written over since.
+    fn check(&self, ctx: &MutationContext) -> sid_core::Result<()> {
+        match ctx.fence {
+            Some(ActorFence::LoginPolicy { epoch })
+                if epoch != self.1.load(std::sync::atomic::Ordering::SeqCst) =>
+            {
+                Err(sid_core::Error::Fenced("the login policy changed".into()))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -163,8 +177,9 @@ impl GrantStore for MemoryGrants {
         old_id: Uuid,
         new: &RefreshToken<Account>,
         grace_expires_at: DateTime<Utc>,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> sid_core::Result<bool> {
+        self.check(&ctx)?;
         Ok(self.with(|g| {
             let Some(old) = g.refresh.iter_mut().find(|t| t.id == old_id) else {
                 return false;
@@ -201,8 +216,9 @@ impl GrantStore for MemoryGrants {
         code_hash: &[u8],
         session: &Session<Account>,
         refresh_token: &RefreshToken<Account>,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> sid_core::Result<AuthCodeRedemption> {
+        self.check(&ctx)?;
         Ok(self.with(|g| {
             let code = g
                 .codes
@@ -454,9 +470,9 @@ impl GrantHost for Host {
         &self,
         _client: &OAuth2Client,
         _session: &Session<Account>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Option<ActorFence>, &'static str> {
         if self.admitted.load(std::sync::atomic::Ordering::SeqCst) {
-            Ok(())
+            Ok(Some(ActorFence::LoginPolicy { epoch: 0 }))
         } else {
             Err("not admitted")
         }
@@ -633,6 +649,37 @@ async fn test_a_grant_the_requirements_no_longer_admit_issues_nothing() {
 
     host.admitted.store(true, Ordering::SeqCst);
     refresh(&host, Some(&presented)).await.unwrap();
+}
+
+// A grant admitted under a login policy commits under that policy's fence:
+// a policy written between the admission and the commit refuses both the
+// code redemption and the refresh, and nothing is stored.
+#[tokio::test]
+async fn test_a_policy_changed_after_admission_commits_no_grant() {
+    use std::sync::atomic::Ordering;
+    let host = Host::new().await;
+    let code = host.authorize(Account(7));
+    let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+    let presented = first.refresh_token.unwrap();
+    let unredeemed = host.authorize(Account(7));
+
+    host.grants.1.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        refresh(&host, Some(&presented)).await,
+        Err(GrantFailure::Storage(sid_core::Error::Fenced(_)))
+    ));
+    assert!(matches!(
+        redeem_code(&host, code_grant(&unredeemed)).await,
+        Err(GrantFailure::Storage(sid_core::Error::Fenced(_)))
+    ));
+    host.grants.with(|g| {
+        assert!(g.refresh.iter().all(|t| t.replaced_by.is_none()));
+        assert_eq!(
+            g.sessions.len(),
+            1,
+            "the fenced redemption stored no session"
+        );
+    });
 }
 
 #[tokio::test]
