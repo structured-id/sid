@@ -17,7 +17,8 @@ coordinode = ["sid-storage/storage-coordinode", "dep:coordinode-embed"]
 # workspace that produced them.
 [dependencies]
 sid = { package = "structured-id", version = "0.2" }
-sid-authn = "0.2"
+# The software authenticator plays the user's passkey.
+sid-authn = { version = "0.2", features = ["soft-authenticator"] }
 sid-authz = { version = "0.2", default-features = false }
 sid-core = "0.2"
 sid-plugin = "0.2"

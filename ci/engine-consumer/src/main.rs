@@ -22,6 +22,7 @@ use sid::lifecycle::{Drained, Engine, EngineParts};
 use sid::machines::MachineError;
 use sid::machines::Machines;
 use sid::oauth::{OAuth, OAuthError, OAuthParts};
+use sid::passkey::{Assertion, PasskeyError, Passkeys};
 use sid::password_operation::PasswordOperations;
 use sid::projects::ProjectError;
 use sid::projects::Projects;
@@ -69,6 +70,8 @@ use sid_proto::sid::v1::{
 type Failure = Box<dyn std::error::Error>;
 
 const ISSUER: &str = "https://id.sid.example.com";
+/// The WebAuthn relying party the issuer's origin belongs to.
+const RP_ID: &str = "id.sid.example.com";
 const WORK_KIND: &str = "host_probe";
 const ROOT: &str = "root@sid.example.com";
 const GUEST: &str = "guest@sid.example.com";
@@ -172,6 +175,7 @@ struct Served {
     oauth: OAuth,
     devices: DeviceKeys,
     factors: SecondFactors,
+    passkeys: Passkeys,
 }
 
 /// Whether a registration's finish carries the client's proof.
@@ -385,7 +389,19 @@ impl Served {
             )),
             installation_url: ISSUER.to_owned(),
         });
+        // One relying party serves second factors and passkey sign-in.
+        let webauthn = Arc::new(sid_authn::webauthn::WebAuthnServer::new(
+            RP_ID,
+            &url::Url::parse(ISSUER)?,
+            storage.clone(),
+            installation.key_manager.clone(),
+        )?);
         Ok(Self {
+            passkeys: Passkeys::new(
+                webauthn.clone(),
+                storage.clone(),
+                installation.key_manager.clone(),
+            ),
             projects: Projects::new(storage.clone(), installation.issuer.clone()),
             machines: Machines::new(
                 storage.clone(),
@@ -395,12 +411,7 @@ impl Served {
             oauth,
             devices: DeviceKeys::new(storage.clone(), installation.key_manager.clone()),
             factors: SecondFactors::new(
-                Arc::new(sid_authn::webauthn::WebAuthnServer::new(
-                    "id.sid.example.com",
-                    &url::Url::parse(ISSUER)?,
-                    storage.clone(),
-                    installation.key_manager.clone(),
-                )?),
+                webauthn,
                 ISSUER.to_owned(),
                 storage.clone(),
                 installation.key_manager.clone(),
@@ -615,6 +626,37 @@ impl Served {
         Ok(signed_in)
     }
 
+    /// A native passkey sign-in with `key`, for `principal`'s account or,
+    /// without one, the account the authenticator's credential names.
+    async fn passkey_sign_in(
+        &self,
+        key: &mut sid_authn::webauthn::soft_authenticator::SoftAuthenticator,
+        principal: Option<&str>,
+    ) -> Result<sid::sign_in::FirstFactorSignedIn, PasskeyError> {
+        let started = self
+            .passkeys
+            .authentication_start(
+                &self.sign_in,
+                sid_proto::sid::v1::WebAuthnAuthenticationStartRequest {
+                    principal: principal.map(str::to_owned),
+                },
+            )
+            .await?;
+        let assertion =
+            Assertion::parse(principal.map(str::to_owned), &key.assert(&started.options))?;
+        self.passkeys
+            .authentication_finish(
+                &self.sign_in,
+                &sid_authn::login_policy::FixedLoginPolicy::of(&SecurityPolicy::ce_default()),
+                assertion,
+                sid_authn::sign_in_delivery::CeremonyClient::Native,
+                None,
+                AttemptContext::default(),
+                None,
+            )
+            .await
+    }
+
     /// Stop serving: every part lets go of the store, then the installation
     /// stops what it runs itself.
     async fn close(self) {
@@ -632,6 +674,7 @@ impl Served {
             oauth,
             devices,
             factors,
+            passkeys,
         } = self;
         drop((
             jwt,
@@ -642,7 +685,7 @@ impl Served {
             passwords,
             history,
         ));
-        drop((projects, machines, oauth, devices, factors));
+        drop((projects, machines, oauth, devices, factors, passkeys));
         installation.close().await;
     }
 
@@ -1784,6 +1827,50 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         failed,
         "a spent recovery code is refused",
     )?;
+
+    // A passkey: the guest binds one under its two-factor sign-in and from
+    // then on signs in with it alone, naming its account or letting the
+    // authenticator name it; an assertion that does not verify signs in
+    // nobody.
+    let mut key = sid_authn::webauthn::soft_authenticator::SoftAuthenticator::new(ISSUER, RP_ID);
+    let options = served
+        .passkeys
+        .registration_start(&served.sign_in, &second_factor)
+        .await?;
+    served
+        .passkeys
+        .registration_finish(
+            &served.sign_in,
+            &second_factor,
+            sid_proto::sid::v1::WebAuthnRegistrationFinishRequest {
+                credential: key.register(&options.options),
+                label: Some("Laptop".into()),
+            },
+        )
+        .await?;
+    for principal in [Some(GUEST), None] {
+        let signed_in = served.passkey_sign_in(&mut key, principal).await?;
+        check(
+            signed_in.second_factors.is_empty(),
+            "a user-verified passkey completes the sign-in without another factor",
+        )?;
+        let (passkey_caller, passkey_token) = served.bearer(signed_in.signed_in.delivery)?;
+        let claims = served
+            .jwt
+            .validate_access_token(passkey_token.expose_secret())?;
+        check(
+            passkey_caller.profile_id == guest.profile_id
+                && claims.amr.iter().any(|m| m == "hwk" || m == "swk"),
+            "the passkey signs in its own account with the key method recorded",
+        )?;
+    }
+    key.behavior.corrupt_signature = true;
+    refused(
+        served.passkey_sign_in(&mut key, Some(GUEST)).await,
+        |e| matches!(e, PasskeyError::AuthenticationFailed),
+        "an assertion whose signature does not verify signs in nobody",
+    )?;
+    key.behavior.corrupt_signature = false;
 
     // The CE work the installation committed so far (event relays of the
     // registrations, the guest's session revocation) is settled by the CE
