@@ -186,6 +186,17 @@ impl sid_plugin::IssuerStore for MockStorage {
     ) -> Result<Vec<sid_core::models::IssuerSigningKey>> {
         unimplemented!()
     }
+    async fn list_oidc_issuers(&self) -> Result<Vec<sid_core::models::OidcIssuer>> {
+        unimplemented!()
+    }
+    async fn import_oidc_issuer(
+        &self,
+        _: &sid_core::models::OidcIssuer,
+        _: &[sid_core::models::IssuerSigningKey],
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
 }
 
 #[async_trait::async_trait]
@@ -1322,6 +1333,9 @@ impl sid_plugin::StorageBackend for MockStorage {
         assignments.push(assignment.clone());
         Ok(())
     }
+    async fn import_role_assignment(&self, _: &RoleAssignment, _: MutationContext) -> Result<bool> {
+        unimplemented!()
+    }
     async fn get_role_assignment(&self, id: RoleAssignmentId) -> Result<Option<RoleAssignment>> {
         Ok(self
             .role_assignments
@@ -1489,10 +1503,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         *assignments = kept;
         Ok(expired)
     }
-    async fn list_sod_rules(&self) -> Result<Vec<sid_core::models::SodConflictRule>> {
-        Ok(vec![])
-    }
-
     // === CEDAR POLICY ===
     async fn get_cedar_policy(&self, id: CedarPolicyId) -> Result<Option<CedarPolicy>> {
         Ok(self
@@ -1635,6 +1645,62 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: &sid_core::models::DeviceEnrollment,
         _: MutationContext,
     ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn import_device_attestation(
+        &self,
+        _: &sid_core::models::DeviceAttestation,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_principals(
+        &self,
+        _: Option<sid_core::models::PrincipalId>,
+        _: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>> {
+        unimplemented!()
+    }
+    async fn import_principal(
+        &self,
+        _: &sid_core::models::StoredPrincipal,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation> {
+        unimplemented!()
+    }
+    async fn export_webauthn_user_handles(
+        &self,
+        _: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>> {
+        unimplemented!()
+    }
+    async fn import_webauthn_user_handle(
+        &self,
+        _: &sid_core::models::StoredUserHandle,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_email_policy_activation(
+        &self,
+        _: &sid_core::models::EmailPolicyActivation,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>> {
+        unimplemented!()
+    }
+    async fn import_principal_quarantine(
+        &self,
+        _: &sid_core::models::QuarantinedPrincipal,
+        _: MutationContext,
+    ) -> Result<bool> {
         unimplemented!()
     }
     async fn revoke_device_attestation(&self, _: DeviceId, _: MutationContext) -> Result<bool> {
@@ -2121,6 +2187,80 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn delete_expired_magic_link_sessions(&self, _audit: MutationContext) -> Result<u64> {
         Ok(0)
     }
+    async fn export_magic_link_sessions(&self) -> Result<Vec<sid_core::models::MagicLinkSession>> {
+        unimplemented!()
+    }
+    async fn export_device_auth_codes(
+        &self,
+    ) -> Result<Vec<sid_core::models::DeviceAuthorizationCode>> {
+        unimplemented!()
+    }
+    async fn import_anomaly_event(
+        &self,
+        _: &sid_core::models::AnomalyEventRecord,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>> {
+        unimplemented!()
+    }
+    async fn import_ip_reputation(
+        &self,
+        _: &sid_core::models::IpReputation,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_ip_allowlist_entry(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
+        unimplemented!()
+    }
+    async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> Result<Vec<sid_core::models::ProvisioningConnector>> {
+        unimplemented!()
+    }
+    async fn import_provisioning_credential(
+        &self,
+        _: &sid_core::models::ProvisioningCredential,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_invite_redemption(
+        &self,
+        _: sid_core::models::InviteId,
+        _: &sid_core::models::InviteRedemption,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn import_registration_source(
+        &self,
+        _: sid_core::models::ProfileId,
+        _: &sid_core::models::RegistrationSource,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn export_access_requests(&self) -> Result<Vec<sid_core::models::AccessRequest>> {
+        unimplemented!()
+    }
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>> {
+        unimplemented!()
+    }
     async fn count_active_magic_links_for_email(&self, _: &str) -> Result<u32> {
         Ok(0)
     }
@@ -2174,6 +2314,12 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: uuid::Uuid,
         _: OutboundEntityType,
     ) -> Result<Option<ScimOutboundRecord>> {
+        unimplemented!()
+    }
+    async fn list_scim_outbound_records(
+        &self,
+        _: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>> {
         unimplemented!()
     }
     async fn create_outbound_dlq_entry(

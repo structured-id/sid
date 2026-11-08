@@ -190,6 +190,113 @@ pub async fn unknown_handle_names_nothing<H: IssuerHarness>(h: &H) {
     );
 }
 
+/// A restored issuer keeps its identity and every key generation as sealed
+/// at the source; restoring exactly the same again writes nothing, and the
+/// store lists it.
+pub async fn issuer_restored_as_stored<H: IssuerHarness>(h: &H) {
+    let store = h.store();
+    let org = h.organization().await;
+    let (restored, first) = issuer(org);
+    let mut second = first.clone();
+    second.generation = 2;
+    second.key_id = format!("kid-2-{}", restored.id);
+    second.sealed_private_key = vec![5, 6, 7];
+    let keys = [first, second];
+
+    assert!(
+        store
+            .import_oidc_issuer(&restored, &keys, ctx())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .import_oidc_issuer(&restored, &keys, ctx())
+            .await
+            .unwrap(),
+        "an exact repeat writes nothing"
+    );
+
+    assert_eq!(
+        store
+            .oidc_issuer_by_handle(&restored.handle)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&restored)
+    );
+    assert_eq!(
+        store.oidc_issuer_signing_keys(restored.id).await.unwrap(),
+        keys
+    );
+    assert!(store.list_oidc_issuers().await.unwrap().contains(&restored));
+}
+
+/// A restore never replaces what is stored: an issuer of the same id that
+/// differs in a key, or in its URL, is a conflict and changes nothing; a key
+/// history that skips a generation or names another issuer is refused.
+pub async fn issuer_restore_never_replaces<H: IssuerHarness>(h: &H) {
+    let store = h.store();
+    let org = h.organization().await;
+    let (restored, key) = issuer(org);
+    assert!(
+        store
+            .import_oidc_issuer(&restored, std::slice::from_ref(&key), ctx())
+            .await
+            .unwrap()
+    );
+
+    let mut other_key = key.clone();
+    other_key.sealed_private_key = vec![9, 9];
+    let changed_key = store
+        .import_oidc_issuer(&restored, &[other_key], ctx())
+        .await
+        .expect_err("a different key under a stored issuer");
+    assert!(
+        matches!(changed_key, sid_core::Error::Conflict(_)),
+        "{changed_key:?}"
+    );
+    let mut moved = restored.clone();
+    moved.canonical_url = "https://other.example.com/i/x".into();
+    let changed_url = store
+        .import_oidc_issuer(&moved, std::slice::from_ref(&key), ctx())
+        .await
+        .expect_err("a different URL under a stored issuer");
+    assert!(
+        matches!(changed_url, sid_core::Error::Conflict(_)),
+        "{changed_url:?}"
+    );
+    assert_eq!(
+        store.oidc_issuer_signing_keys(restored.id).await.unwrap(),
+        [key]
+    );
+
+    let (gap, gap_key) = issuer(h.organization().await);
+    let mut third = gap_key.clone();
+    third.generation = 3;
+    assert!(
+        store
+            .import_oidc_issuer(&gap, &[gap_key, third], ctx())
+            .await
+            .is_err()
+    );
+    let (foreign, _) = issuer(h.organization().await);
+    let (_, foreign_key) = issuer(org);
+    assert!(
+        store
+            .import_oidc_issuer(&foreign, &[foreign_key], ctx())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .oidc_issuer_by_handle(&gap.handle)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// An issuer serves an organization the store knows.
 pub async fn unknown_organization_refused<H: IssuerHarness>(h: &H) {
     let store = h.store();

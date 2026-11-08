@@ -36,6 +36,15 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
         .create_magic_link_session(&link, super::test_audit())
         .await
         .unwrap();
+    assert!(
+        backend
+            .export_magic_link_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.id == link.id && l.token_hash == link.token_hash),
+        "the export lists the link"
+    );
     let first = backend
         .try_consume_magic_link_session(link.id, super::test_audit())
         .await

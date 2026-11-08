@@ -1,0 +1,1651 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Import a snapshot into a target installation's database.
+
+use std::collections::{HashMap, HashSet};
+
+use sid_core::models::{AuditEntry, MutationContext, OperationKey, OperationResourceBinding};
+use sid_crypto::CryptoPrimitives;
+use sid_plugin::SnapshotRules;
+use sid_plugin::storage::StorageBackend;
+use tracing::info;
+
+use super::{FORMAT_VERSION, Result, Snapshot, SnapshotError, Store};
+
+/// The namespace the import of a snapshot is recorded in, keyed by the
+/// snapshot's id.
+const IMPORT_NAMESPACE: &str = "snapshot-import";
+
+/// The method the import of a snapshot is recorded as.
+const IMPORT_METHOD: &str = "sid.snapshot.Import";
+
+/// The largest sealed OPAQUE setup a snapshot may carry. Supported setups
+/// contain a seed and keypairs, well below it; a snapshot cannot cause
+/// unbounded copies through sealed-field inspection.
+const MAX_OPAQUE_SETUP: usize = 4096;
+
+fn invalid(what: impl Into<String>) -> SnapshotError {
+    SnapshotError::Invalid(what.into())
+}
+
+fn ensure(holds: bool, what: &str) -> Result<()> {
+    if holds { Ok(()) } else { Err(invalid(what)) }
+}
+
+/// Check the snapshot as a whole before anything uses it: its format, its
+/// installation identity, its issuers and device bindings, the sealed
+/// OPAQUE setup's public metadata and the password history state. Export
+/// and import both run it; a host may run it on an opened archive first.
+pub fn validate(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
+    if snapshot.metadata.version != FORMAT_VERSION {
+        return Err(SnapshotError::Format(snapshot.metadata.version));
+    }
+    validate_identity(snapshot)?;
+    validate_audit(snapshot)?;
+    validate_opaque_setup(snapshot, rules)?;
+    validate_history(snapshot, rules)
+}
+
+/// Every audit chain verifies on its own, and each chain appears once.
+fn validate_audit(snapshot: &Snapshot) -> Result<()> {
+    let mut chains = std::collections::BTreeSet::new();
+    for chain in &snapshot.audit_chains {
+        ensure(
+            chains.insert(chain.head.chain_id.as_str()),
+            "duplicate audit chain in snapshot",
+        )?;
+        chain
+            .check()
+            .map_err(|e| invalid(format!("audit chain {}: {e}", chain.head.chain_id)))?;
+    }
+    Ok(())
+}
+
+/// The installation identity: the organization the metadata names, the one
+/// every issuer serves, and each issuer's own key history; each device
+/// binding on a snapshot device of the same Profile.
+fn validate_identity(snapshot: &Snapshot) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let org = snapshot.organization.as_ref().map(|o| o.id);
+    ensure(
+        org == snapshot.metadata.installation_org,
+        "snapshot organization and metadata disagree",
+    )?;
+    ensure(
+        org.is_some() || (snapshot.profiles.is_empty() && snapshot.oidc_issuers.is_empty()),
+        "snapshot has accounts or issuers but no installation organization",
+    )?;
+    let mut issuers = BTreeSet::new();
+    for entry in &snapshot.oidc_issuers {
+        ensure(
+            Some(entry.issuer.recipient_org) == org,
+            "snapshot issuer serves another organization",
+        )?;
+        ensure(
+            issuers.insert(entry.issuer.id),
+            "duplicate issuer in snapshot",
+        )?;
+        entry
+            .issuer
+            .check_keys(&entry.keys)
+            .map_err(|e| invalid(e.to_string()))?;
+    }
+    let devices: BTreeMap<_, _> = snapshot
+        .devices
+        .iter()
+        .map(|d| (d.id, d.profile_id))
+        .collect();
+    let mut bound = BTreeSet::new();
+    for binding in &snapshot.device_attestations {
+        ensure(
+            devices.get(&binding.device_id) == Some(&binding.profile_id),
+            "snapshot device binding names no snapshot device of its profile",
+        )?;
+        ensure(
+            bound.insert(binding.device_id),
+            "a snapshot device has two key bindings",
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate public setup metadata without reading the independently held key.
+fn validate_opaque_setup(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
+    let Some(setup) = &snapshot.opaque_server_setup else {
+        return ensure(
+            !snapshot
+                .credentials
+                .iter()
+                .any(|c| c.credential_type == sid_core::models::CredentialType::Opaque),
+            "snapshot contains OPAQUE credentials without their server setup",
+        );
+    };
+    ensure(
+        setup.len() <= MAX_OPAQUE_SETUP,
+        "sealed OPAQUE setup is oversized",
+    )?;
+    let version = rules
+        .opaque_setup_key_version(setup)
+        .map_err(|e| invalid(format!("sealed OPAQUE setup: {e}")))?;
+    ensure(
+        snapshot.key_versions.iter().any(|v| v.version == version),
+        "snapshot omits the OPAQUE setup's key derivation version",
+    )
+}
+
+/// Validate the password history state of a snapshot as a whole: one history
+/// entry per profile; each archive and each key archive well formed; every
+/// key archive belongs to the history domain of a snapshot profile, once,
+/// with the evaluator's key derivation versions it is sealed under included
+/// (its own custody, not the credential service's); and every epoch a history
+/// names has its key with the same descriptor, so no history arrives that
+/// its owner's operations could not evaluate.
+fn validate_history(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let profiles: BTreeSet<_> = snapshot.profiles.iter().map(|p| p.id).collect();
+    let mut owners = BTreeSet::new();
+    for (owner, archive) in &snapshot.password_histories {
+        ensure(
+            profiles.contains(owner) && owners.insert(*owner),
+            "invalid snapshot history owner",
+        )?;
+        if let Some(archive) = archive {
+            ensure(archive.owner == *owner, "history archive owner mismatch")?;
+            archive.validate().map_err(|e| invalid(e.to_string()))?;
+        }
+    }
+    ensure(
+        owners == profiles,
+        "snapshot must include history state for every profile",
+    )?;
+
+    // The evaluator's owner domain of each profile.
+    let domains: BTreeMap<[u8; 32], sid_core::models::ProfileId> =
+        match snapshot.metadata.installation_org {
+            Some(installation) => profiles
+                .iter()
+                .map(|p| (rules.history_owner_domain(installation, *p), *p))
+                .collect(),
+            None => BTreeMap::new(),
+        };
+    let mut keys = BTreeMap::new();
+    for archive in &snapshot.history_keys {
+        archive.validate().map_err(|e| invalid(e.to_string()))?;
+        let owner = domains
+            .get(&archive.owner_domain)
+            .ok_or_else(|| invalid("history keys of no snapshot profile"))?;
+        ensure(
+            keys.insert(*owner, archive).is_none(),
+            "duplicate history keys of one owner",
+        )?;
+        for epoch in &archive.epochs {
+            let sealed = sid_keys::EncryptedField::from_bytes(&epoch.key.0)
+                .map_err(|e| invalid(format!("sealed history key: {e}")))?;
+            ensure(
+                snapshot
+                    .history_key_versions
+                    .iter()
+                    .any(|v| v.version == sealed.key_version),
+                "snapshot omits a required history key derivation version",
+            )?;
+        }
+    }
+    for (owner, archive) in &snapshot.password_histories {
+        let Some(archive) = archive else { continue };
+        // The evaluator selects its active epoch first, and an operation
+        // accepts only the history's active epoch there or a replacement the
+        // history does not record yet (a rotation not committed when the
+        // snapshot was taken). Any other recorded epoch active on the key
+        // side would refuse every later operation of the owner.
+        let key_active = keys.get(owner).and_then(|k| {
+            k.epochs
+                .iter()
+                .find(|e| e.epoch.status == sid_core::models::HistoryEpochUse::Active)
+        });
+        if let Some(key_active) = key_active {
+            let recorded = archive.epochs.iter().find(|e| e.id == key_active.epoch.id);
+            ensure(
+                recorded.is_none_or(|e| e.status == sid_core::models::HistoryEpochUse::Active),
+                "snapshot history and keys disagree on the active epoch",
+            )?;
+        }
+        for epoch in &archive.epochs {
+            let key = keys
+                .get(owner)
+                .and_then(|k| {
+                    k.epochs
+                        .iter()
+                        .find(|e| e.epoch.descriptor() == epoch.descriptor())
+                })
+                .ok_or_else(|| invalid("snapshot history names an epoch without its key"))?;
+            // An entry retained under an epoch is compared at every later
+            // replacement, which a retired key no longer evaluates.
+            ensure(
+                key.epoch.status != sid_core::models::HistoryEpochUse::Retired
+                    || !archive.entries.iter().any(|e| e.epoch == epoch.id),
+                "snapshot history retains an entry under a retired key",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The record of this snapshot's import in a target: the snapshot's id and
+/// the digest of its contents. Its presence in a target that already holds
+/// the snapshot's organization is what tells a resumed import from an
+/// import into an initialized installation.
+fn import_record(
+    snapshot: &Snapshot,
+    crypto: &dyn CryptoPrimitives,
+) -> Result<OperationResourceBinding> {
+    Ok(OperationResourceBinding {
+        namespace: IMPORT_NAMESPACE.to_owned(),
+        key: OperationKey::parse(&snapshot.metadata.snapshot_id.to_string())
+            .map_err(|e| invalid(format!("snapshot id: {e}")))?,
+        method: IMPORT_METHOD.to_owned(),
+        // Over the canonical form: a snapshot read again from its archive
+        // keeps the record its first import attempt bound.
+        fingerprint: crypto.sha256(&snapshot.canonical_json()?).to_vec(),
+        period: None,
+        resource: snapshot.metadata.snapshot_id,
+    })
+}
+
+/// Whether the target may take this snapshot, decided before anything is
+/// written: `true` for a fresh import into an uninitialized target, `false`
+/// to resume the interrupted import of this same snapshot into it. An
+/// initialized installation, or one holding another identity or another
+/// snapshot's import, is refused.
+async fn admit_target(
+    backend: &dyn StorageBackend,
+    snapshot: &Snapshot,
+    record: &OperationResourceBinding,
+) -> Result<bool> {
+    let refused = |what: &str| SnapshotError::Target(what.to_owned());
+    match backend.instance_organization().await? {
+        None => {
+            if !backend.list_oidc_issuers().await?.is_empty() || backend.count_profiles().await? > 0
+            {
+                return Err(refused(
+                    "the target holds data without an installation organization",
+                ));
+            }
+            Ok(true)
+        }
+        Some(held) => {
+            if snapshot.organization.as_ref() != Some(&held) {
+                return Err(refused("the target is another installation"));
+            }
+            let resumed = backend.export_operation_resources().await?.iter().any(|b| {
+                b.namespace == record.namespace
+                    && b.key == record.key
+                    && b.same_command(record)
+                    && b.resource == record.resource
+            });
+            if !resumed {
+                return Err(refused(
+                    "an initialized installation is not an import destination; \
+                     only the interrupted import of this same snapshot is resumed",
+                ));
+            }
+            Ok(false)
+        }
+    }
+}
+
+/// Import `snapshot` into the target store `backend` and the history
+/// evaluator's key store `history_keys`, checked by `rules`.
+///
+/// The snapshot, its identity and its consistency with the target are
+/// checked before the first write. A target is either uninitialized (no
+/// installation organization, issuers or profiles), or holds this same
+/// snapshot's interrupted import, which the call then resumes. Entities are
+/// written in dependency order, each with an audit entry; nothing is served,
+/// issued or run: the host activates the restored installation afterwards.
+pub async fn import(
+    store: Store<'_>,
+    rules: &dyn SnapshotRules,
+    crypto: &dyn CryptoPrimitives,
+    snapshot: &Snapshot,
+) -> Result<ImportResult> {
+    let Store {
+        storage: backend,
+        audit: audit_log,
+        history_keys,
+    } = store;
+    validate(snapshot, rules)?;
+    let record = import_record(snapshot, crypto)?;
+    let fresh = admit_target(backend, snapshot, &record).await?;
+    // A target whose audit holds another history of a chain is not this
+    // installation's, whatever else it lacks: refused before any write.
+    for chain in &snapshot.audit_chains {
+        match audit_log.export_chain(&chain.head.chain_id).await {
+            Ok(held) if held.holds(chain) => {}
+            Ok(_) => {
+                return Err(SnapshotError::Target(format!(
+                    "the target's audit chain {} holds another history",
+                    chain.head.chain_id
+                )));
+            }
+            Err(sid_core::models::audit::AuditError::ChainNotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let setup_kind = sid_core::models::InstanceSecret::OpaqueServerSetup;
+    let target = |what: &str| SnapshotError::Target(what.to_owned());
+    let current_setup = backend.get_instance_secret(setup_kind).await?;
+    if current_setup.is_some() && current_setup != snapshot.opaque_server_setup {
+        return Err(target("target OPAQUE setup conflicts with snapshot"));
+    }
+    for (owner, archive) in &snapshot.password_histories {
+        let current = backend.export_password_history(*owner).await?;
+        if current.is_some() && current.as_ref() != archive.as_ref() {
+            return Err(target("target password history conflicts with snapshot"));
+        }
+    }
+    for archive in &snapshot.history_keys {
+        let current = history_keys.export_keys(&archive.owner_domain).await?;
+        if current.is_some() && current.as_ref() != Some(archive) {
+            return Err(target(
+                "target password history keys conflict with snapshot",
+            ));
+        }
+    }
+    // The evaluator's custody versions, checked like the field-key versions
+    // before anything is written: a conflicting version would open its keys
+    // under another derivation.
+    check_versions(
+        &snapshot.history_key_versions,
+        &history_keys.list_key_versions().await?,
+        "history key",
+    )?;
+    check_versions(
+        &snapshot.key_versions,
+        &backend.list_key_versions().await?,
+        "key",
+    )?;
+
+    let held = history_keys.export_key_records().await?;
+    let wanted = &snapshot.history_key_records;
+    let empty = held.abandoned.is_empty() && held.purged.is_empty() && held.audit.is_empty();
+    if !empty
+        && !(held.abandoned == wanted.abandoned
+            && held.purged == wanted.purged
+            && held.audit.starts_with(&wanted.audit))
+    {
+        return Err(target(
+            "target password history key store holds other records",
+        ));
+    }
+
+    let mut result = ImportResult::default();
+
+    // The source's audit chains before any record this import appends to
+    // them: each write below continues its chain after the source's last
+    // record. A resumed import finds them held, continued by its own.
+    for chain in &snapshot.audit_chains {
+        if audit_log.import_chain(chain).await? {
+            result.audit_chains += 1;
+        }
+    }
+    // Likewise the evaluator's own trail and fences, before its first write.
+    if history_keys
+        .import_key_records(
+            wanted,
+            entry("import_history_key_records", "password_history_keys"),
+        )
+        .await?
+    {
+        result.history_keys += 1;
+    }
+
+    // The import is recorded first: an interruption from here on leaves a
+    // target that only this same snapshot's import resumes.
+    if fresh {
+        backend.bind_operation_resource(&record).await?;
+    }
+    if let Some(org) = &snapshot.organization {
+        if backend
+            .insert_instance_organization(org, audit("import_organization", &org.id.to_string()))
+            .await?
+        {
+            result.organizations += 1;
+        } else if backend.instance_organization().await?.as_ref() != Some(org) {
+            return Err(target("the target took another installation organization"));
+        }
+    }
+    for entry in &snapshot.oidc_issuers {
+        if backend
+            .import_oidc_issuer(
+                &entry.issuer,
+                &entry.keys,
+                audit("import_oidc_issuer", &entry.issuer.id.to_string()),
+            )
+            .await?
+        {
+            result.oidc_issuers += 1;
+        }
+    }
+
+    // A centrally managed installation is recorded before any assignment:
+    // adoption refuses a store that already has a local administrator.
+    if snapshot.bootstrap_policy == sid_core::models::BootstrapPolicy::CentrallyManaged {
+        use sid_core::models::CentralAdoption;
+        match backend
+            .adopt_central_management(audit("import_bootstrap_policy", "installation"))
+            .await?
+        {
+            CentralAdoption::Adopted => result.policies += 1,
+            CentralAdoption::AlreadyCentral => {}
+            CentralAdoption::LocalAdministrator => {
+                return Err(target("the target has a local administrator"));
+            }
+        }
+    }
+    if let Some(policy) = &snapshot.enrollment_policy {
+        match backend.enrollment_policy().await? {
+            Some(held) if held == *policy => {}
+            Some(_) => return Err(target("the target holds another enrollment policy")),
+            None => {
+                backend
+                    .set_enrollment_policy(
+                        policy,
+                        sid_core::models::ModeWrite::Replace,
+                        audit("import_enrollment_policy", "installation"),
+                    )
+                    .await?;
+                result.policies += 1;
+            }
+        }
+    }
+    if let Some(epoch) = snapshot.login_policy_epoch
+        && backend
+            .import_login_policy_epoch(epoch, audit("import_login_policy_epoch", "installation"))
+            .await?
+    {
+        result.policies += 1;
+    }
+    for (cidr, description, created_at) in &snapshot.ip_allowlist {
+        if backend
+            .import_ip_allowlist_entry(
+                cidr,
+                description,
+                *created_at,
+                audit("import_ip_allowlist_entry", cidr),
+            )
+            .await?
+        {
+            result.policies += 1;
+        }
+    }
+    for params in &snapshot.key_versions {
+        if backend
+            .insert_key_version(
+                params,
+                audit("import_key_version", &params.version.to_string()),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else if !backend.list_key_versions().await?.contains(params) {
+            return Err(target("key version changed during import"));
+        }
+    }
+
+    // The setup precedes credentials and is insert-only. Recheck the stored
+    // value after insertion: a concurrent initializer must never replace it.
+    if let Some(setup) = &snapshot.opaque_server_setup {
+        backend
+            .insert_instance_secret(
+                setup_kind,
+                setup,
+                audit("import_opaque_setup", "opaque_server_setup"),
+            )
+            .await?;
+        if backend.get_instance_secret(setup_kind).await?.as_ref() != Some(setup) {
+            return Err(target("target OPAQUE setup changed during import"));
+        }
+    }
+
+    // Profiles before the projects they own, a manager before the profiles
+    // it manages.
+    info!(count = snapshot.profiles.len(), "importing profiles...");
+    for profile in references_first(&snapshot.profiles, |p| p.id, |p| p.manager_id, "profiles")? {
+        match backend
+            .create_profile(profile, audit("import_profile", &profile.id.to_string()))
+            .await
+        {
+            Ok(()) => result.profiles += 1,
+            // Imported before: a repeated import adds nothing. Another
+            // profile holding the user name is a real conflict.
+            Err(sid_core::Error::Conflict(_))
+                if backend.get_profile(profile.id).await?.as_ref() == Some(profile) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    info!(count = snapshot.projects.len(), "importing projects...");
+    for project in &snapshot.projects {
+        // The system project is the target's own, created with the store: it
+        // is kept as stored. Any other project must be the archive's.
+        let own = project.id == sid_core::models::ProjectId::SYSTEM;
+        result.projects += created(
+            backend
+                .create_project(project, audit("import_project", &project.id.to_string()))
+                .await,
+            || async {
+                let held = backend.get_project(project.id).await?;
+                Ok(if own {
+                    held.is_some()
+                } else {
+                    held.as_ref() == Some(project)
+                })
+            },
+        )
+        .await?;
+    }
+    backend
+        .ensure_system_project(audit("ensure_system_project", "system"))
+        .await?;
+
+    // Settings and records of the profiles and projects just restored.
+    for config in &snapshot.flow_configs {
+        let subject = format!("{}:{}", config.project_id, config.flow_type);
+        match backend
+            .get_flow_config(config.project_id, config.flow_type)
+            .await?
+        {
+            Some(held) if held == *config => {}
+            Some(_) => return Err(target("the target holds another flow configuration")),
+            None => {
+                backend
+                    .save_flow_config(config, audit("import_flow_config", &subject))
+                    .await?;
+                result.settings += 1;
+            }
+        }
+    }
+    for action in &snapshot.flow_actions {
+        result.settings += created(
+            backend
+                .create_flow_action(action, audit("import_flow_action", &action.id.to_string()))
+                .await,
+            || async { Ok(backend.get_flow_action(action.id).await?.as_ref() == Some(action)) },
+        )
+        .await?;
+    }
+    for consent in &snapshot.consents {
+        result.settings += created(
+            backend
+                .create_consent(consent, audit("import_consent", &consent.id.0.to_string()))
+                .await,
+            || async { Ok(backend.get_consent(consent.id).await?.as_ref() == Some(consent)) },
+        )
+        .await?;
+    }
+    for preferences in &snapshot.notification_preferences {
+        let subject = preferences.profile_id.to_string();
+        match backend
+            .get_notification_preferences(preferences.profile_id)
+            .await?
+        {
+            Some(held) if held == *preferences => {}
+            Some(_) => return Err(target("the target holds other notification preferences")),
+            None => {
+                backend
+                    .save_notification_preferences(
+                        preferences,
+                        audit("import_notification_preferences", &subject),
+                    )
+                    .await?;
+                result.settings += 1;
+            }
+        }
+    }
+    for (profile, source) in &snapshot.registration_sources {
+        if backend
+            .import_registration_source(
+                *profile,
+                source,
+                audit("import_registration_source", &profile.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
+    for (profile, location) in &snapshot.login_locations {
+        if backend
+            .import_login_location(
+                *profile,
+                location,
+                audit("import_login_location", &profile.to_string()),
+            )
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for reputation in &snapshot.ip_reputation {
+        if backend
+            .import_ip_reputation(reputation, audit("import_ip_reputation", &reputation.ip))
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for event in &snapshot.anomaly_events {
+        if backend
+            .import_anomaly_event(event, audit("import_anomaly_event", &event.id.to_string()))
+            .await?
+        {
+            result.signals += 1;
+        }
+    }
+    for session in &snapshot.reset_sessions {
+        result.signals += created(
+            backend
+                .create_reset_session(
+                    session,
+                    audit("import_reset_session", &session.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_reset_session(session.id).await?.as_ref() == Some(session)) },
+        )
+        .await?;
+    }
+    for request in &snapshot.access_requests {
+        result.settings += created(
+            backend
+                .create_access_request(
+                    request,
+                    audit("import_access_request", &request.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_access_request(request.id).await?.as_ref() == Some(request))
+            },
+        )
+        .await?;
+    }
+
+    // The write cutoffs precede the epochs they fence: from the first
+    // imported key, no write goes under an epoch the source had withdrawn.
+    // Raising is monotonic, so a target already past a cutoff keeps its own.
+    if let Some(cutoff) = snapshot.history_write_cutoff {
+        backend
+            .raise_history_write_cutoff(
+                cutoff,
+                audit("import_history_write_cutoff", "password_history"),
+            )
+            .await?;
+    }
+    if let Some(cutoff) = snapshot.history_key_write_cutoff {
+        history_keys
+            .raise_write_cutoff(
+                cutoff,
+                entry("import_history_key_write_cutoff", "password_history_keys"),
+            )
+            .await?;
+    }
+
+    // Keys precede history and history precedes credentials: a failure never
+    // installs a password without its retained comparison state, nor a
+    // history whose keys are missing. The evaluator's custody versions
+    // precede the keys they open.
+    for params in &snapshot.history_key_versions {
+        if history_keys
+            .insert_key_version(
+                params,
+                entry("import_history_key_version", &params.version.to_string()),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else if !history_keys.list_key_versions().await?.contains(params) {
+            return Err(target("history key version changed during import"));
+        }
+    }
+    for archive in &snapshot.history_keys {
+        if history_keys
+            .import_keys(
+                archive,
+                entry("import_history_keys", "password_history_keys"),
+            )
+            .await?
+        {
+            result.history_keys += 1;
+        }
+    }
+    for (_, archive) in &snapshot.password_histories {
+        if let Some(archive) = archive
+            && backend
+                .import_password_history(
+                    archive,
+                    audit("import_password_history", &archive.owner.to_string()),
+                )
+                .await?
+        {
+            result.password_histories += 1;
+        }
+    }
+
+    // Contacts before the claims that name them as their source.
+    for email in &snapshot.profile_emails {
+        result.contacts += created(
+            backend
+                .create_profile_email(
+                    email,
+                    audit("import_profile_email", &email.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_profile_email(email.id).await?.as_ref() == Some(email)) },
+        )
+        .await?;
+    }
+    for phone in &snapshot.profile_phones {
+        result.contacts += created(
+            backend
+                .create_profile_phone(
+                    phone,
+                    audit("import_profile_phone", &phone.id.0.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_profile_phone(phone.id).await?.as_ref() == Some(phone)) },
+        )
+        .await?;
+    }
+    for handle in &snapshot.webauthn_user_handles {
+        if backend
+            .import_webauthn_user_handle(
+                handle,
+                audit(
+                    "import_webauthn_user_handle",
+                    &handle.profile_id.to_string(),
+                ),
+            )
+            .await?
+        {
+            result.contacts += 1;
+        }
+    }
+    // The revision before the email keys written under it.
+    if let Some(activation) = &snapshot.email_policy {
+        backend
+            .import_email_policy_activation(
+                activation,
+                audit("import_email_policy", "installation"),
+            )
+            .await?;
+    }
+    info!(count = snapshot.principals.len(), "importing principals...");
+    for principal in &snapshot.principals {
+        if backend
+            .import_principal(
+                principal,
+                audit("import_principal", &principal.entity.id.0.to_string()),
+            )
+            .await?
+        {
+            result.principals += 1;
+        }
+    }
+    for entry in &snapshot.principal_quarantine {
+        if backend
+            .import_principal_quarantine(entry, audit("import_principal_quarantine", "quarantine"))
+            .await?
+        {
+            result.principals += 1;
+        }
+    }
+
+    info!(
+        count = snapshot.credentials.len(),
+        "importing credentials..."
+    );
+    for credential in &snapshot.credentials {
+        match backend
+            .create_credential(
+                credential,
+                audit("import_credential", &credential.id.to_string()),
+            )
+            .await
+        {
+            Ok(()) => result.credentials += 1,
+            Err(sid_core::Error::Conflict(_))
+                if backend.get_credential(credential.id).await?.as_ref() == Some(credential) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    info!(count = snapshot.sessions.len(), "importing sessions...");
+    // An application session after the IdP session it was authenticated by.
+    for session in references_first(
+        &snapshot.sessions,
+        |s| s.id,
+        |s| s.authenticated_by,
+        "sessions",
+    )? {
+        result.sessions += created(
+            backend
+                .create_session(session, audit("import_session", &session.id.to_string()))
+                .await,
+            || async { Ok(backend.get_session(session.id).await?.as_ref() == Some(session)) },
+        )
+        .await?;
+    }
+
+    // Service bindings: the pairwise `sub` of every client.
+    for binding in &snapshot.service_bindings {
+        if backend
+            .import_service_binding(
+                binding,
+                audit("import_service_binding", &binding.binding_id.to_string()),
+            )
+            .await?
+        {
+            result.service_bindings += 1;
+        }
+    }
+
+    // Machine users before the resource access and role assignments that
+    // name them.
+    for mu in &snapshot.machine_users {
+        result.machine_users += created(
+            backend
+                .create_machine_user(mu, audit("import_machine_user", &mu.id.to_string()))
+                .await,
+            || async { Ok(backend.get_machine_user(mu.id).await?.as_ref() == Some(mu)) },
+        )
+        .await?;
+    }
+
+    // Applications, then their resource roles (the retired ones keep their
+    // indicators reserved), then their client roles (a client may name a
+    // resource as its default), then access.
+    for app in &snapshot.applications {
+        result.applications += created(
+            backend
+                .create_application(
+                    app,
+                    None,
+                    None,
+                    audit("import_application", &app.id.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_application(app.id).await?.as_ref() == Some(app)) },
+        )
+        .await?;
+    }
+    for resource in &snapshot.protected_resources {
+        if backend
+            .import_protected_resource(
+                resource,
+                audit("import_protected_resource", &resource.id.to_string()),
+            )
+            .await?
+        {
+            result.protected_resources += 1;
+        }
+    }
+    for client in &snapshot.oauth2_clients {
+        result.oauth2_clients += created(
+            backend
+                .create_oauth2_client(client, audit("import_oauth2_client", &client.client_id))
+                .await,
+            || async {
+                Ok(backend.get_oauth2_client(&client.client_id).await?.as_ref() == Some(client))
+            },
+        )
+        .await?;
+    }
+    for access in &snapshot.resource_access {
+        // A repeated import finds the same access; other access is a conflict.
+        match backend
+            .resource_access(&access.client_id, access.resource_id)
+            .await?
+        {
+            Some(held) if held == *access => {}
+            Some(_) => return Err(target("the target holds other resource access")),
+            None => {
+                let subject = format!("{}:{}", access.client_id, access.resource_id);
+                backend
+                    .set_resource_access(access, audit("import_resource_access", &subject))
+                    .await?;
+                result.resource_access += 1;
+            }
+        }
+    }
+
+    // A session's grants after their session and the resources they name.
+    for grants in &snapshot.session_grants {
+        if backend
+            .import_session_grants(
+                grants,
+                audit("import_session_grants", &grants.session.to_string()),
+            )
+            .await?
+        {
+            result.session_grants += 1;
+        }
+    }
+
+    for iat in &snapshot.initial_access_tokens {
+        result.initial_access_tokens += created(
+            backend
+                .create_initial_access_token(iat, audit("import_iat", &iat.id.to_string()))
+                .await,
+            || async { Ok(backend.get_initial_access_token(iat.id).await?.as_ref() == Some(iat)) },
+        )
+        .await?;
+    }
+
+    for role in &snapshot.roles {
+        result.roles += created(
+            backend
+                .create_role(role, audit("import_role", &role.id.to_string()))
+                .await,
+            || async { Ok(backend.get_role(role.id).await?.as_ref() == Some(role)) },
+        )
+        .await?;
+    }
+    for group in references_first(&snapshot.groups, |g| g.id, |g| g.parent_group_id, "groups")? {
+        result.groups += created(
+            backend
+                .create_group(group, audit("import_group", &group.id.to_string()))
+                .await,
+            || async { Ok(backend.get_group(group.id).await?.as_ref() == Some(group)) },
+        )
+        .await?;
+    }
+    // Each group's stored members are read once, keyed by profile.
+    let mut listed = HashSet::new();
+    let mut members = HashMap::new();
+    for member in &snapshot.group_members {
+        if listed.insert(member.group_id) {
+            for held in backend.list_group_members(member.group_id).await? {
+                members.insert((held.group_id, held.profile_id), held);
+            }
+        }
+        match members.get(&(member.group_id, member.profile_id)) {
+            Some(held) if held == member => continue,
+            Some(_) => return Err(target("the target holds another group membership")),
+            None => {}
+        }
+        backend
+            .add_to_group(
+                member,
+                audit(
+                    "import_group_member",
+                    &format!("{}:{}", member.group_id, member.profile_id),
+                ),
+            )
+            .await?;
+        result.group_members += 1;
+    }
+
+    // Provisioning connectors before the roles they hold, their credentials
+    // as they were whatever the connector's state.
+    for connector in &snapshot.provisioning_connectors {
+        result.settings += created(
+            backend
+                .create_provisioning_connector(
+                    connector,
+                    audit("import_provisioning_connector", &connector.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_provisioning_connector(connector.id)
+                    .await?
+                    .as_ref()
+                    == Some(connector))
+            },
+        )
+        .await?;
+    }
+    for credential in &snapshot.provisioning_credentials {
+        if backend
+            .import_provisioning_credential(
+                credential,
+                audit("import_provisioning_credential", &credential.id.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
+
+    // Role assignments after their roles and principals, a redelegated one
+    // after its source. They are restored as recorded, envelope and
+    // provenance included: the source installation authorized them.
+    for assignment in references_first(
+        &snapshot.role_assignments,
+        |a| a.id,
+        |a| a.provenance.as_ref().and_then(|p| p.depends_on),
+        "role assignments",
+    )? {
+        if backend
+            .import_role_assignment(
+                assignment,
+                audit("import_role_assignment", &assignment.id.to_string()),
+            )
+            .await?
+        {
+            result.role_assignments += 1;
+        }
+    }
+
+    for policy in &snapshot.cedar_policies {
+        result.cedar_policies += created(
+            backend
+                .create_cedar_policy(policy, audit("import_cedar_policy", &policy.id.to_string()))
+                .await,
+            || async { Ok(backend.get_cedar_policy(policy.id).await?.as_ref() == Some(policy)) },
+        )
+        .await?;
+    }
+    for meta in &snapshot.profile_metadata {
+        match backend
+            .get_profile_metadata(meta.profile_id, &meta.key)
+            .await?
+        {
+            Some(held) if held == *meta => continue,
+            Some(_) => return Err(target("the target holds another profile metadata entry")),
+            None => {}
+        }
+        backend
+            .set_profile_metadata(
+                meta,
+                audit(
+                    "import_profile_metadata",
+                    &format!("{}:{}", meta.profile_id, meta.key),
+                ),
+            )
+            .await?;
+        result.profile_metadata += 1;
+    }
+
+    info!(count = snapshot.devices.len(), "importing devices...");
+    for device in &snapshot.devices {
+        result.devices += created(
+            backend
+                .create_device(device, audit("import_device", &device.id.to_string()))
+                .await,
+            || async { Ok(backend.get_device(device.id).await?.as_ref() == Some(device)) },
+        )
+        .await?;
+    }
+    // Key bindings after their devices, revoked ones included.
+    for binding in &snapshot.device_attestations {
+        if backend
+            .import_device_attestation(
+                binding,
+                audit("import_device_attestation", &binding.device_id.to_string()),
+            )
+            .await?
+        {
+            result.device_attestations += 1;
+        }
+    }
+    for code in &snapshot.device_auth_codes {
+        result.device_auth_codes += created(
+            backend
+                .create_device_auth_code(
+                    code,
+                    audit("import_device_auth_code", &code.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_device_auth_by_device_code_hash(&code.device_code_hash)
+                    .await?
+                    .as_ref()
+                    == Some(code))
+            },
+        )
+        .await?;
+    }
+
+    for grant in &snapshot.profile_grants {
+        result.profile_grants += created(
+            backend
+                .create_profile_grant(grant, audit("import_profile_grant", &grant.id.to_string()))
+                .await,
+            || async { Ok(backend.get_profile_grant(grant.id).await?.as_ref() == Some(grant)) },
+        )
+        .await?;
+    }
+    for provider in &snapshot.upstream_providers {
+        result.upstream_providers += created(
+            backend
+                .create_upstream_provider(
+                    provider,
+                    audit("import_upstream_provider", &provider.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_upstream_provider(provider.id).await?.as_ref() == Some(provider))
+            },
+        )
+        .await?;
+    }
+    for identity in &snapshot.upstream_identities {
+        result.upstream_identities += created(
+            backend
+                .create_upstream_identity(
+                    identity,
+                    audit("import_upstream_identity", &identity.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_upstream_identity_by_provider_subject(
+                        identity.provider_id,
+                        &identity.upstream_subject,
+                    )
+                    .await?
+                    .as_ref()
+                    == Some(identity))
+            },
+        )
+        .await?;
+    }
+    for pat in &snapshot.personal_access_tokens {
+        result.personal_access_tokens += created(
+            backend
+                .create_pat(pat, None, audit("import_pat", &pat.id.to_string()))
+                .await,
+            || async { Ok(backend.get_pat(pat.id).await?.as_ref() == Some(pat)) },
+        )
+        .await?;
+    }
+    for cred in &snapshot.machine_credentials {
+        result.machine_credentials += created(
+            backend
+                .add_machine_credential(cred, None, audit("import_machine_credential", &cred.kid))
+                .await,
+            || async {
+                Ok(backend
+                    .get_machine_credential_by_kid(&cred.kid)
+                    .await?
+                    .as_ref()
+                    == Some(cred))
+            },
+        )
+        .await?;
+    }
+    // Each machine user's stored grants are read once, keyed by target.
+    let mut listed = HashSet::new();
+    let mut grants = HashMap::new();
+    for grant in &snapshot.impersonation_grants {
+        if listed.insert(grant.machine_user_id) {
+            for held in backend
+                .list_impersonation_grants(grant.machine_user_id)
+                .await?
+            {
+                grants.insert(
+                    (held.machine_user_id, held.target_type, held.target.clone()),
+                    held,
+                );
+            }
+        }
+        let key = (
+            grant.machine_user_id,
+            grant.target_type,
+            grant.target.clone(),
+        );
+        match grants.get(&key) {
+            Some(held) if held == grant => continue,
+            Some(_) => return Err(target("the target holds another impersonation grant")),
+            None => {}
+        }
+        backend
+            .save_impersonation_grant(
+                grant,
+                audit(
+                    "import_impersonation_grant",
+                    &grant.machine_user_id.to_string(),
+                ),
+            )
+            .await?;
+        result.impersonation_grants += 1;
+    }
+    for req in &snapshot.closure_requests {
+        result.closure_requests += created(
+            backend
+                .create_closure_request(
+                    req,
+                    audit("import_closure_request", &req.profile_id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_closure_request(req.profile_id).await?.as_ref() == Some(req))
+            },
+        )
+        .await?;
+    }
+    for job in &snapshot.export_jobs {
+        result.export_jobs += created(
+            backend
+                .create_export_job(job, audit("import_export_job", &job.id.to_string()))
+                .await,
+            || async { Ok(backend.get_export_job_by_id(job.id).await?.as_ref() == Some(job)) },
+        )
+        .await?;
+    }
+    // Invites after their creators, their redemptions after the profiles and
+    // credentials they name. A redemption leaves the use count as exported.
+    for invite in &snapshot.invites {
+        result.settings += created(
+            backend
+                .create_invites(
+                    std::slice::from_ref(invite),
+                    audit("import_invite", &invite.id.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_invite(invite.id).await?.as_ref() == Some(invite)) },
+        )
+        .await?;
+    }
+    for (invite, redemption) in &snapshot.invite_redemptions {
+        if backend
+            .import_invite_redemption(
+                *invite,
+                redemption,
+                audit("import_invite_redemption", &invite.to_string()),
+            )
+            .await?
+        {
+            result.settings += 1;
+        }
+    }
+
+    // Owed deliveries and dead letters: stored, not run. The restored
+    // installation's workers take them when the host activates it.
+    for work in &snapshot.durable_work {
+        if backend.import_work(work).await? {
+            result.durable_work += 1;
+        }
+    }
+    // The periods keyed commands are admitted under, before the completions
+    // named with them; then the completions (their results answer retries)
+    // and the identifiers keyed creations bound.
+    backend
+        .import_operation_periods(&snapshot.operation_periods)
+        .await?;
+    for record in &snapshot.operation_results {
+        if backend.import_operation_result(record).await? {
+            result.operation_results += 1;
+        }
+    }
+    for binding in &snapshot.operation_resources {
+        if backend.import_operation_resource(binding).await? {
+            result.operation_resources += 1;
+        }
+    }
+
+    for session in &snapshot.magic_link_sessions {
+        result.magic_link_sessions += created(
+            backend
+                .create_magic_link_session(
+                    session,
+                    audit("import_magic_link", &session.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_magic_link_session(session.id).await?.as_ref() == Some(session))
+            },
+        )
+        .await?;
+    }
+    for target in &snapshot.scim_outbound_targets {
+        result.scim_outbound_targets += created(
+            backend
+                .create_scim_outbound_target(
+                    target,
+                    audit("import_scim_outbound_target", &target.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.get_scim_outbound_target(target.id).await?.as_ref() == Some(target))
+            },
+        )
+        .await?;
+    }
+    for record in &snapshot.scim_outbound_records {
+        // A mapping is identified by its target, entity and type.
+        result.scim_outbound_records += created(
+            backend
+                .create_scim_outbound_record(
+                    record,
+                    audit(
+                        "import_scim_outbound_record",
+                        &format!("{}:{}", record.target_id, record.sid_entity_id),
+                    ),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .get_scim_outbound_record(
+                        record.target_id,
+                        record.sid_entity_id,
+                        record.entity_type,
+                    )
+                    .await?
+                    .as_ref()
+                    == Some(record))
+            },
+        )
+        .await?;
+    }
+    for config in &snapshot.branding_configs {
+        result.branding_configs += created(
+            backend
+                .create_branding_config(
+                    config,
+                    audit("import_branding_config", &config.id.to_string()),
+                )
+                .await,
+            || async { Ok(backend.get_branding_config(config.id).await?.as_ref() == Some(config)) },
+        )
+        .await?;
+    }
+    for entry in &snapshot.outbound_dlq_entries {
+        result.outbound_dlq_entries += created(
+            backend
+                .create_outbound_dlq_entry(
+                    entry,
+                    audit("import_outbound_dlq", &entry.id.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend
+                    .list_outbound_dlq_entries(entry.target_id)
+                    .await?
+                    .contains(entry))
+            },
+        )
+        .await?;
+    }
+
+    // Ceremonies in flight, replay records and attempt counts, with their
+    // deadlines as the source set them.
+    result.signals += backend.import_ceremony_state(&snapshot.ceremony).await?;
+
+    info!(total = result.total(), "import complete");
+    Ok(result)
+}
+
+/// Refuse a snapshot whose derivation parameters repeat a version or
+/// conflict with the target's for the same version.
+fn check_versions(
+    snapshot: &[sid_keys::KeyVersionParams],
+    target: &[sid_keys::KeyVersionParams],
+    what: &str,
+) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for params in snapshot {
+        if !seen.insert(params.version) {
+            return Err(invalid(format!("duplicate {what} version in snapshot")));
+        }
+        if target
+            .iter()
+            .any(|v| v.version == params.version && v != params)
+        {
+            return Err(SnapshotError::Target(format!(
+                "target {what} derivation parameters conflict with snapshot"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Count of records a create added: 1, or 0 when the same record (`stored`
+/// finds it by its id) was imported before. Any other conflict, such as a
+/// different record holding the same unique name, fails the import.
+async fn created<Fut>(result: sid_core::Result<()>, stored: impl FnOnce() -> Fut) -> Result<u64>
+where
+    Fut: std::future::Future<Output = sid_core::Result<bool>>,
+{
+    match result {
+        Ok(()) => Ok(1),
+        Err(sid_core::Error::Conflict(reason)) => {
+            if stored().await? {
+                Ok(0)
+            } else {
+                Err(sid_core::Error::Conflict(reason).into())
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `records` with each one after the record it references (`reference`),
+/// otherwise in their listed order. A reference outside `records`, or to the
+/// record itself, orders nothing: the store holds it or refuses the record.
+/// Records referencing each other in a cycle are refused, named `what`.
+fn references_first<'a, T, K>(
+    records: &'a [T],
+    key: impl Fn(&T) -> K,
+    reference: impl Fn(&T) -> Option<K>,
+    what: &str,
+) -> Result<Vec<&'a T>>
+where
+    K: std::hash::Hash + Eq,
+{
+    let index: HashMap<K, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (key(r), i))
+        .collect();
+    // Each record's dependents, and whether it waits for its reference.
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+    let mut waiting = vec![false; records.len()];
+    for (i, record) in records.iter().enumerate() {
+        if let Some(&referenced) = reference(record).and_then(|k| index.get(&k))
+            && referenced != i
+        {
+            dependents[referenced].push(i);
+            waiting[i] = true;
+        }
+    }
+    let mut ordered = Vec::with_capacity(records.len());
+    let mut ready: std::collections::VecDeque<usize> =
+        (0..records.len()).filter(|&i| !waiting[i]).collect();
+    while let Some(i) = ready.pop_front() {
+        ordered.push(&records[i]);
+        ready.extend(dependents[i].iter().copied());
+    }
+    if ordered.len() != records.len() {
+        return Err(invalid(format!("{what} reference each other in a cycle")));
+    }
+    Ok(ordered)
+}
+
+/// The audit entry of an imported record.
+fn entry(action: &str, resource: &str) -> AuditEntry {
+    AuditEntry::system(action, resource).with_metadata(serde_json::json!({"tool": "snapshot"}))
+}
+
+/// The mutation context of an imported record.
+fn audit(action: &str, resource: &str) -> MutationContext {
+    entry(action, resource).into()
+}
+
+/// Result of an import operation with per-entity counts.
+#[derive(Debug, Default)]
+pub struct ImportResult {
+    pub audit_chains: u64,
+    pub organizations: u64,
+    pub oidc_issuers: u64,
+    pub key_versions: u64,
+    pub history_keys: u64,
+    pub password_histories: u64,
+    pub projects: u64,
+    pub profiles: u64,
+    /// Email and phone contacts.
+    pub contacts: u64,
+    pub principals: u64,
+    pub credentials: u64,
+    pub sessions: u64,
+    pub service_bindings: u64,
+    pub applications: u64,
+    pub protected_resources: u64,
+    pub oauth2_clients: u64,
+    pub resource_access: u64,
+    /// Sessions whose grants were restored.
+    pub session_grants: u64,
+    pub initial_access_tokens: u64,
+    pub roles: u64,
+    pub groups: u64,
+    pub group_members: u64,
+    pub role_assignments: u64,
+    pub cedar_policies: u64,
+    pub profile_metadata: u64,
+    pub devices: u64,
+    pub device_attestations: u64,
+    pub device_auth_codes: u64,
+    pub profile_grants: u64,
+    pub upstream_providers: u64,
+    pub upstream_identities: u64,
+    pub personal_access_tokens: u64,
+    pub machine_users: u64,
+    pub machine_credentials: u64,
+    pub impersonation_grants: u64,
+    pub closure_requests: u64,
+    pub export_jobs: u64,
+    pub durable_work: u64,
+    pub operation_results: u64,
+    pub operation_resources: u64,
+    pub magic_link_sessions: u64,
+    pub scim_outbound_targets: u64,
+    pub scim_outbound_records: u64,
+    pub outbound_dlq_entries: u64,
+    pub branding_configs: u64,
+    /// Installation policies: bootstrap, enrollment, login epoch, IP
+    /// allowlist.
+    pub policies: u64,
+    /// Profile and project settings and records: flows, consents,
+    /// preferences, registration sources, access requests, invites,
+    /// provisioning connectors.
+    pub settings: u64,
+    /// Sign-in signals and ceremonies: locations, IP reputation, anomaly
+    /// events, reset sessions, ceremony state.
+    pub signals: u64,
+}
+
+impl ImportResult {
+    /// Total imported entities.
+    pub fn total(&self) -> u64 {
+        [
+            self.audit_chains,
+            self.organizations,
+            self.oidc_issuers,
+            self.key_versions,
+            self.history_keys,
+            self.password_histories,
+            self.projects,
+            self.profiles,
+            self.contacts,
+            self.principals,
+            self.credentials,
+            self.sessions,
+            self.service_bindings,
+            self.applications,
+            self.protected_resources,
+            self.oauth2_clients,
+            self.resource_access,
+            self.session_grants,
+            self.initial_access_tokens,
+            self.roles,
+            self.groups,
+            self.group_members,
+            self.role_assignments,
+            self.cedar_policies,
+            self.profile_metadata,
+            self.devices,
+            self.device_attestations,
+            self.device_auth_codes,
+            self.profile_grants,
+            self.upstream_providers,
+            self.upstream_identities,
+            self.personal_access_tokens,
+            self.machine_users,
+            self.machine_credentials,
+            self.impersonation_grants,
+            self.closure_requests,
+            self.export_jobs,
+            self.durable_work,
+            self.operation_results,
+            self.operation_resources,
+            self.magic_link_sessions,
+            self.scim_outbound_targets,
+            self.scim_outbound_records,
+            self.outbound_dlq_entries,
+            self.branding_configs,
+            self.policies,
+            self.settings,
+            self.signals,
+        ]
+        .iter()
+        .sum()
+    }
+}
+
+impl std::fmt::Display for ImportResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Import Summary:")?;
+        writeln!(f, "  Audit Chains:         {}", self.audit_chains)?;
+        writeln!(f, "  Organization:         {}", self.organizations)?;
+        writeln!(f, "  OIDC Issuers:         {}", self.oidc_issuers)?;
+        writeln!(f, "  Key Versions:         {}", self.key_versions)?;
+        writeln!(f, "  History Keys:         {}", self.history_keys)?;
+        writeln!(f, "  Password Histories:   {}", self.password_histories)?;
+        writeln!(f, "  Projects:             {}", self.projects)?;
+        writeln!(f, "  Profiles:             {}", self.profiles)?;
+        writeln!(f, "  Contacts:             {}", self.contacts)?;
+        writeln!(f, "  Principals:           {}", self.principals)?;
+        writeln!(f, "  Credentials:          {}", self.credentials)?;
+        writeln!(f, "  Sessions:             {}", self.sessions)?;
+        writeln!(f, "  Service Bindings:     {}", self.service_bindings)?;
+        writeln!(f, "  Applications:         {}", self.applications)?;
+        writeln!(f, "  Protected Resources:  {}", self.protected_resources)?;
+        writeln!(f, "  OAuth2 Clients:       {}", self.oauth2_clients)?;
+        writeln!(f, "  Resource Access:      {}", self.resource_access)?;
+        writeln!(f, "  Session Grants:       {}", self.session_grants)?;
+        writeln!(f, "  IATs:                 {}", self.initial_access_tokens)?;
+        writeln!(f, "  Roles:                {}", self.roles)?;
+        writeln!(f, "  Groups:               {}", self.groups)?;
+        writeln!(f, "  Group Members:        {}", self.group_members)?;
+        writeln!(f, "  Role Assignments:     {}", self.role_assignments)?;
+        writeln!(f, "  Cedar Policies:       {}", self.cedar_policies)?;
+        writeln!(f, "  Profile Metadata:     {}", self.profile_metadata)?;
+        writeln!(f, "  Devices:              {}", self.devices)?;
+        writeln!(f, "  Device Key Bindings:  {}", self.device_attestations)?;
+        writeln!(f, "  Device Auth Codes:    {}", self.device_auth_codes)?;
+        writeln!(f, "  Profile Grants:       {}", self.profile_grants)?;
+        writeln!(f, "  Upstream Providers:   {}", self.upstream_providers)?;
+        writeln!(f, "  Upstream Identities:  {}", self.upstream_identities)?;
+        writeln!(f, "  PATs:                 {}", self.personal_access_tokens)?;
+        writeln!(f, "  Machine Users:        {}", self.machine_users)?;
+        writeln!(f, "  Machine Credentials:  {}", self.machine_credentials)?;
+        writeln!(f, "  Impersonation Grants: {}", self.impersonation_grants)?;
+        writeln!(f, "  Closure Requests:     {}", self.closure_requests)?;
+        writeln!(f, "  Export Jobs:          {}", self.export_jobs)?;
+        writeln!(f, "  Durable Work:         {}", self.durable_work)?;
+        writeln!(f, "  Operation Results:    {}", self.operation_results)?;
+        writeln!(f, "  Operation Resources:  {}", self.operation_resources)?;
+        writeln!(f, "  Magic Link Sessions:  {}", self.magic_link_sessions)?;
+        writeln!(f, "  SCIM Targets:         {}", self.scim_outbound_targets)?;
+        writeln!(f, "  SCIM Records:         {}", self.scim_outbound_records)?;
+        writeln!(f, "  SCIM DLQ Entries:     {}", self.outbound_dlq_entries)?;
+        writeln!(f, "  Branding Configs:     {}", self.branding_configs)?;
+        writeln!(f, "  Policies:             {}", self.policies)?;
+        writeln!(f, "  Settings:             {}", self.settings)?;
+        writeln!(f, "  Sign-in Signals:      {}", self.signals)?;
+        writeln!(f, "  Total:                {}", self.total())
+    }
+}
+
+#[cfg(test)]
+mod tests;

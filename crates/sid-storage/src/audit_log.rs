@@ -8,7 +8,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use sid_core::models::audit::{
-    ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, compute_record_hash,
+    ActorType, AuditChain, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainCheckpoint,
+    ChainHead, compute_record_hash,
 };
 use sid_plugin::audit::{AuditLog, VerifyResult};
 use sqlx::postgres::{PgConnection, PgRow};
@@ -248,6 +249,168 @@ impl AuditLog for PostgresAuditLog {
 
         Ok(rows.iter().map(|r| r.get("chain_id")).collect())
     }
+
+    async fn export_chain(&self, chain_id: &str) -> Result<AuditChain, AuditError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| AuditError::Other(e.to_string()))?;
+        stored_chain(&mut conn, chain_id, false)
+            .await?
+            .ok_or_else(|| AuditError::ChainNotFound(chain_id.to_owned()))
+    }
+
+    async fn import_chain(&self, chain: &AuditChain) -> Result<bool, AuditError> {
+        chain.check()?;
+        let write = |e: sqlx::Error| AuditError::WriteFailed(e.to_string());
+        let mut tx = self.pool.begin().await.map_err(write)?;
+        // A concurrent importer or appender of the chain waits on its head.
+        if let Some(held) = stored_chain(&mut tx, &chain.head.chain_id, true).await? {
+            return if held.holds(chain) {
+                Ok(false)
+            } else {
+                Err(AuditError::Conflict(format!(
+                    "another chain {} is stored",
+                    chain.head.chain_id
+                )))
+            };
+        }
+        let sequence =
+            |s: u64| i64::try_from(s).map_err(|_| AuditError::Other(format!("sequence {s}")));
+        // Each record into its month's partition, created as retention
+        // expects to find it: a row parked in the default partition would
+        // keep that month's partition from being created later.
+        let months: std::collections::BTreeSet<(i32, u32)> = chain
+            .records
+            .iter()
+            .map(|r| {
+                use chrono::Datelike;
+                (r.timestamp.year(), r.timestamp.month())
+            })
+            .collect();
+        for (year, month) in months {
+            sqlx::query("SELECT create_audit_partition($1, $2)")
+                .bind(year)
+                .bind(i32::try_from(month).map_err(|_| AuditError::Other("month".into()))?)
+                .execute(&mut *tx)
+                .await
+                .map_err(write)?;
+        }
+        for record in &chain.records {
+            sqlx::query(
+                "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, \
+                 actor_type, action, resource, outcome, metadata, ip_address, device_id, \
+                 prev_hash, hash) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            )
+            .bind(&record.id)
+            .bind(record.timestamp)
+            .bind(&record.chain_id)
+            .bind(sequence(record.sequence)?)
+            .bind(&record.actor_id)
+            .bind(record.actor_type.to_string())
+            .bind(&record.action)
+            .bind(&record.resource)
+            .bind(record.outcome.to_string())
+            .bind(&record.metadata)
+            .bind(record.ip_address)
+            .bind(&record.device_id)
+            .bind(&record.prev_hash)
+            .bind(&record.hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(write)?;
+        }
+        sqlx::query(
+            "INSERT INTO audit_chain_heads (chain_id, last_record_id, last_hash, sequence) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&chain.head.chain_id)
+        .bind(&chain.head.last_record_id)
+        .bind(&chain.head.last_hash)
+        .bind(sequence(chain.head.sequence)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match &e {
+            // A concurrent first appender took the chain id meanwhile.
+            sqlx::Error::Database(db) if db.is_unique_violation() => AuditError::Conflict(format!(
+                "chain {} was started meanwhile",
+                chain.head.chain_id
+            )),
+            _ => write(e),
+        })?;
+        if let Some(checkpoint) = &chain.checkpoint {
+            sqlx::query(
+                "INSERT INTO audit_chain_checkpoints (chain_id, sequence, hash, cut_before) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(&chain.head.chain_id)
+            .bind(sequence(checkpoint.sequence)?)
+            .bind(&checkpoint.hash)
+            .bind(checkpoint.cut_before)
+            .execute(&mut *tx)
+            .await
+            .map_err(write)?;
+        }
+        tx.commit().await.map_err(write)?;
+        Ok(true)
+    }
+}
+
+/// Chain `chain_id` as stored, read on `conn`, its head locked when `lock`;
+/// `None` when it has no head.
+async fn stored_chain(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    lock: bool,
+) -> Result<Option<AuditChain>, AuditError> {
+    let read = |e: sqlx::Error| AuditError::Other(e.to_string());
+    let head_query = if lock {
+        "SELECT * FROM audit_chain_heads WHERE chain_id = $1 FOR UPDATE"
+    } else {
+        "SELECT * FROM audit_chain_heads WHERE chain_id = $1"
+    };
+    let Some(head) = sqlx::query(head_query)
+        .bind(chain_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(read)?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = sqlx::query("SELECT * FROM audit_chain_checkpoints WHERE chain_id = $1")
+        .bind(chain_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(read)?
+        .map(|row| ChainCheckpoint {
+            sequence: row.get::<i64, _>("sequence") as u64,
+            hash: row.get("hash"),
+            cut_before: row.get("cut_before"),
+        });
+    let records = sqlx::query(
+        "SELECT id, timestamp, chain_id, sequence, actor_id, actor_type, \
+         action, resource, outcome, metadata, ip_address, device_id, prev_hash, hash \
+         FROM audit_records WHERE chain_id = $1 ORDER BY sequence ASC",
+    )
+    .bind(chain_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(read)?
+    .iter()
+    .map(PostgresAuditLog::row_to_record)
+    .collect();
+    Ok(Some(AuditChain {
+        head: ChainHead {
+            chain_id: head.get("chain_id"),
+            last_record_id: head.get("last_record_id"),
+            last_hash: head.get("last_hash"),
+            sequence: head.get::<i64, _>("sequence") as u64,
+        },
+        checkpoint,
+        records,
+    }))
 }
 
 #[cfg(test)]

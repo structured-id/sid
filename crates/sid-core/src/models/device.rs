@@ -96,7 +96,7 @@ impl std::fmt::Display for DeviceAssurance {
 }
 
 /// Known device associated with a profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub id: DeviceId,
     pub profile_id: ProfileId,

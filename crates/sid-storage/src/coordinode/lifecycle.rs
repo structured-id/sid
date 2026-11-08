@@ -445,6 +445,19 @@ impl CoordinodeBackend {
         self.read(move |tx| get_link(tx, id)).await
     }
 
+    pub(super) async fn export_magic_link_sessions(&self) -> SidResult<Vec<MagicLinkSession>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (l:SidMagicLink) RETURN {LINK}"),
+                Params::default(),
+            )?;
+            let mut links = rows.iter().map(link).collect::<SidResult<Vec<_>>>()?;
+            links.sort_by_key(|l| l.id);
+            Ok(links)
+        })
+        .await
+    }
+
     pub(super) async fn consume_magic_link_session(
         &self,
         id: Uuid,

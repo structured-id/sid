@@ -185,6 +185,65 @@ pub async fn test_oauth_client_role_assignment(backend: &dyn StorageBackend) {
     );
 }
 
+/// An imported assignment is stored as recorded: the connector holding it
+/// keeps the revision it was restored at, a repeat writes nothing, and a
+/// different assignment under the same id is a conflict that writes nothing.
+pub async fn test_imported_assignment_keeps_its_connector_revision(backend: &dyn StorageBackend) {
+    use chrono::{DurationRound, TimeDelta};
+    use sid_core::models::{OrgId, ProvisioningConnector, ProvisioningDirection};
+
+    let role = stored_role(backend).await;
+    let connector =
+        ProvisioningConnector::new(OrgId::generate(), ProvisioningDirection::Inbound, "HR");
+    backend
+        .create_provisioning_connector(&connector, test_audit())
+        .await
+        .unwrap();
+    let restored = backend
+        .get_provisioning_connector(connector.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut assignment = RoleAssignment::new(
+        RoleAssignmentPrincipal::ProvisioningConnector(connector.id),
+        role.id,
+    );
+    assignment.created_at = assignment
+        .created_at
+        .duration_trunc(TimeDelta::milliseconds(1))
+        .unwrap();
+    assert!(
+        backend
+            .import_role_assignment(&assignment, test_audit())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .import_role_assignment(&assignment, test_audit())
+            .await
+            .unwrap()
+    );
+    let mut differing = assignment.clone();
+    differing.scope = Some("other".into());
+    let refused = backend
+        .import_role_assignment(&differing, test_audit())
+        .await;
+    assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+    assert_eq!(
+        backend.get_role_assignment(assignment.id).await.unwrap(),
+        Some(assignment)
+    );
+    assert_eq!(
+        backend
+            .get_provisioning_connector(connector.id)
+            .await
+            .unwrap(),
+        Some(restored),
+        "importing its assignment changed the connector"
+    );
+}
+
 /// A provisioning connector holds a role on one protected resource: the
 /// assignment is read back with its principal and scope, never under another
 /// connector, and is refused for a connector that does not exist.

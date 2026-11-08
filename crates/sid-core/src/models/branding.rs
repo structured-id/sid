@@ -15,7 +15,7 @@ pub use sid_ids::BrandingConfigId;
 ///
 /// Stored per-project. Each project can have one active branding config
 /// and optional draft configs for preview before publishing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrandingConfig {
     pub id: BrandingConfigId,
 
@@ -82,7 +82,7 @@ impl std::fmt::Display for BrandingStatus {
 }
 
 /// Visual assets for branding.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrandingAssets {
     /// Logo URL (SVG or PNG recommended). Displayed on login page header.
     pub logo_url: Option<String>,
@@ -95,7 +95,7 @@ pub struct BrandingAssets {
 }
 
 /// Background configuration for login pages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackgroundConfig {
     /// Solid color background.
@@ -110,7 +110,7 @@ pub enum BackgroundConfig {
 ///
 /// All values are CSS-compatible strings (e.g., "#1a73e8", "Inter, sans-serif", "8px").
 /// Applied as `--sid-{token-name}: {value}` custom properties.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesignTokens {
     /// Primary brand color (buttons, links, active states).
     #[serde(default = "defaults::color_primary")]
@@ -194,7 +194,7 @@ pub enum ButtonStyle {
 }
 
 /// Dark mode configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DarkModeConfig {
     /// Whether dark mode is enabled.
     pub enabled: bool,
@@ -206,7 +206,7 @@ pub struct DarkModeConfig {
 }
 
 /// Dark mode token overrides (only the tokens that differ from light mode).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DarkModeTokens {
     pub color_background: Option<String>,
     pub color_surface: Option<String>,
@@ -220,7 +220,7 @@ pub struct DarkModeTokens {
 }
 
 /// Configurable text for login/consent UI.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrandingText {
     /// Login page title (e.g., "Sign in to Acme").
     pub login_title: Option<String>,

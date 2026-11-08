@@ -178,7 +178,7 @@ impl std::fmt::Display for AttestationStatus {
 }
 
 /// Device attestation record — cryptographic identity of a device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceAttestation {
     pub id: DeviceAttestationId,
 

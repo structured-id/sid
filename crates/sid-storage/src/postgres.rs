@@ -22,8 +22,8 @@ use sid_core::{
         ProjectId, RefreshToken, RegistrationSource, RegistrationSourceType, RevocationReason,
         Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
         ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session,
-        SessionAuthentication, SessionEnd, SessionId, SodConflictRule, UpstreamIdentity,
-        UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
+        SessionAuthentication, SessionEnd, SessionId, UpstreamIdentity, UpstreamIdentityId,
+        UpstreamLogin, UpstreamProvider, UpstreamProviderId,
     },
 };
 use sid_plugin::storage::StorageBackend;
@@ -808,9 +808,23 @@ impl PostgresBackend {
             == 1)
     }
 
-    /// Insert `assignment`; an existing id is a `Conflict`, a missing role or
-    /// principal an error.
+    /// Insert `assignment`, advancing its connector's revision when a
+    /// provisioning connector holds it; an existing id is a `Conflict`, a
+    /// missing role or principal an error.
     async fn insert_role_assignment_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        assignment: &RoleAssignment,
+    ) -> SidResult<()> {
+        Self::insert_role_assignment_row_in_tx(tx, assignment).await?;
+        if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = assignment.principal {
+            Self::bump_connector_revision(tx, connector).await?;
+        }
+        Ok(())
+    }
+
+    /// Insert `assignment` as recorded, leaving its holder unchanged: a
+    /// restored connector's revision already counts its assignments.
+    async fn insert_role_assignment_row_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         assignment: &RoleAssignment,
     ) -> SidResult<()> {
@@ -869,9 +883,6 @@ impl PostgresBackend {
             .execute(&mut **tx)
             .await
             .map_err(|e| insert_error("approved ceiling", e))?;
-        }
-        if let Some(connector) = connector_id {
-            Self::bump_connector_revision(tx, connector).await?;
         }
         Ok(())
     }
@@ -1744,6 +1755,30 @@ impl AnomalyEventRow {
     }
 }
 
+/// An ip_reputation row without its score, which follows from the counts.
+type IpReputationRow = (
+    String,
+    i32,
+    i32,
+    chrono::DateTime<chrono::Utc>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    chrono::DateTime<chrono::Utc>,
+);
+
+fn reputation_of(row: IpReputationRow) -> sid_core::models::IpReputation {
+    let (ip, failed, succeeded, first_seen_at, last_failed_at, last_success_at, updated_at) = row;
+    sid_core::models::IpReputation {
+        ip,
+        failed_count: i64::from(failed),
+        success_count: i64::from(succeeded),
+        first_seen_at,
+        last_failed_at,
+        last_success_at,
+        updated_at,
+    }
+}
+
 #[async_trait]
 impl ClientResourceRegistry for PostgresBackend {
     async fn get_oauth2_client(&self, client_id: &str) -> SidResult<Option<OAuth2Client>> {
@@ -1906,6 +1941,82 @@ impl IssuerStore for PostgresBackend {
                 },
             )
             .collect()
+    }
+
+    async fn list_oidc_issuers(&self) -> SidResult<Vec<sid_core::models::OidcIssuer>> {
+        let rows: Vec<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("oidc issuers: {e}")))?;
+        rows.into_iter().map(issuer_from_row).collect()
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        keys: &[sid_core::models::IssuerSigningKey],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_keys(keys)?;
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import oidc issuer: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let stored: Option<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers WHERE id = $1 FOR UPDATE",
+        )
+        .bind(issuer.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(stored) = stored {
+            // Rows are never deleted or changed but by a later generation, so
+            // what is stored now is what the restore must match.
+            let same = issuer_from_row(stored)? == *issuer
+                && self.oidc_issuer_signing_keys(issuer.id).await? == keys;
+            return if same {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "issuer {} is stored differently",
+                    issuer.id
+                )))
+            };
+        }
+        sqlx::query(
+            "INSERT INTO oidc_issuers (id, handle, canonical_url, authority, recipient_org, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(issuer.id)
+        .bind(issuer.handle.as_str())
+        .bind(&issuer.canonical_url)
+        .bind(issuer.authority.as_str())
+        .bind(issuer.recipient_org)
+        .bind(issuer.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("oidc issuer", e))?;
+        for key in keys {
+            sqlx::query(
+                "INSERT INTO oidc_issuer_signing_keys
+                     (issuer_id, generation, key_id, public_key, sealed_private_key, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(key.issuer_id)
+            .bind(key_generation(key.generation)?)
+            .bind(&key.key_id)
+            .bind(key.public_key.as_slice())
+            .bind(&key.sealed_private_key)
+            .bind(key.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("oidc issuer signing key", e))?;
+        }
+        Self::audit_in_tx(&mut tx, &format!("oidc_issuer:{}", issuer.id), audit).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
     }
 }
 
@@ -2174,6 +2285,21 @@ impl GrantStore for PostgresBackend {
         self.rotate_native_generation_impl(rotation, ctx).await
     }
 
+    async fn export_session_grants(
+        &self,
+        id: SessionId,
+    ) -> SidResult<sid_core::models::SessionGrants> {
+        self.export_session_grants_impl(id).await
+    }
+
+    async fn import_session_grants(
+        &self,
+        grants: &sid_core::models::SessionGrants,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_session_grants_impl(grants, ctx).await
+    }
+
     async fn create_auth_code(
         &self,
         code: &AuthorizationCode,
@@ -2184,39 +2310,7 @@ impl GrantStore for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri,
-                scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
-                authenticated_at, amr, assurance_level, elevation_level, elevation_until,
-                authorizing_session_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
-        )
-        .bind(&code.code_hash)
-        .bind(code.profile_id)
-        .bind(&code.client_id)
-        .bind(&code.redirect_uri)
-        .bind(code.scopes.join(" "))
-        .bind(&code.code_challenge)
-        .bind(&code.nonce)
-        .bind(code.expires_at)
-        .bind(code.created_at)
-        .bind(code.used)
-        .bind(code.resource)
-        .bind(code.authentication.authenticated_at)
-        .bind(code.authentication.amr.join(" "))
-        .bind(code.authentication.assurance_level.as_str())
-        .bind(code.authentication.elevation.map(|e| e.level.as_str()))
-        .bind(code.authentication.elevation.map(|e| e.until))
-        .bind(code.authentication.session)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            // The authorizing session ended before the code was stored.
-            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                SidError::NotFound(format!("session {}", code.authentication.session))
-            }
-            _ => insert_error("authorization code", e),
-        })?;
+        session_grants::insert_auth_code(&mut tx, code).await?;
         Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
         tx.commit()
             .await
@@ -4184,6 +4278,14 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))
     }
 
+    async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
+        Self::login_policy_epoch(&self.pool).await
+    }
+
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> SidResult<bool> {
+        self.import_login_policy_epoch_impl(epoch, ctx).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -4714,6 +4816,42 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
 
+    async fn import_role_assignment(
+        &self,
+        assignment: &RoleAssignment,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        match Self::insert_role_assignment_row_in_tx(&mut tx, assignment).await {
+            Ok(()) => {}
+            // The id is taken: the same assignment imported before, or another.
+            Err(SidError::Conflict(_)) => {
+                drop(tx);
+                return match self.get_role_assignment(assignment.id).await? {
+                    Some(held) => crate::transfer_repeat(&held, assignment, "role assignment"),
+                    None => Err(SidError::Conflict(
+                        "the role assignment conflicts with a stored record".into(),
+                    )),
+                };
+            }
+            Err(e) => return Err(e),
+        }
+        Self::audit_in_tx(
+            &mut tx,
+            &format!("role_assignment:{}", assignment.id),
+            audit,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(true)
+    }
+
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,
@@ -4966,12 +5104,6 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(expired)
-    }
-
-    async fn list_sod_rules(&self) -> SidResult<Vec<SodConflictRule>> {
-        // CE: SoD rules stored in config (sid.yaml) or admin API.
-        // DB table for SoD rules will be added with governance feature.
-        Ok(vec![])
     }
 
     // === CEDAR POLICY OPERATIONS ===
@@ -5602,6 +5734,65 @@ impl StorageBackend for PostgresBackend {
         tx.commit().await.map_err(storage)
     }
 
+    async fn import_device_attestation(
+        &self,
+        att: &sid_core::models::DeviceAttestation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import device binding: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The device row first, then its binding: the order every binding
+        // change takes them in.
+        Self::owned_device_in_tx(&mut tx, att.device_id, att.profile_id).await?;
+        let stored = sqlx::query_as::<_, crate::pg_row::DeviceAttestationRow>(
+            "SELECT * FROM device_attestations WHERE device_id = $1 FOR UPDATE",
+        )
+        .bind(att.device_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(stored) = stored {
+            return if stored.into_domain()? == *att {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "device {} has another key binding",
+                    att.device_id
+                )))
+            };
+        }
+        sqlx::query(
+            "INSERT INTO device_attestations (id, device_id, profile_id, format, key_storage,
+                status, public_jwk, attestation_object, attestation_certificate,
+                aaguid, created_at, updated_at, revoked_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(att.id)
+        .bind(att.device_id)
+        .bind(att.profile_id)
+        .bind(att.format.as_str())
+        .bind(att.key_storage.as_str())
+        .bind(att.status.as_str())
+        .bind(&att.public_jwk)
+        .bind(&att.attestation_object)
+        .bind(&att.attestation_certificate)
+        .bind(&att.aaguid)
+        .bind(att.created_at)
+        .bind(att.updated_at)
+        .bind(att.revoked_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("device attestation", e))?;
+        Self::audit_in_tx(
+            &mut tx,
+            &format!("device_attestation:{}", att.device_id),
+            ctx,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     async fn revoke_device_attestation(
         &self,
         device_id: CoreDeviceId,
@@ -5741,6 +5932,18 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
         row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn export_device_auth_codes(&self) -> SidResult<Vec<CoreDeviceAuth>> {
+        sqlx::query_as::<_, crate::pg_row::DeviceAuthRow>(
+            "SELECT * FROM device_authorization_codes ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect()
     }
 
     async fn decide_device_auth(
@@ -6616,6 +6819,12 @@ impl StorageBackend for PostgresBackend {
         self.connector_list(org_id).await
     }
 
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::ProvisioningConnector>> {
+        self.connector_export().await
+    }
+
     async fn create_provisioning_connector(
         &self,
         connector: &sid_core::models::ProvisioningConnector,
@@ -6679,6 +6888,14 @@ impl StorageBackend for PostgresBackend {
         connector_id: sid_core::models::ProvisioningConnectorId,
     ) -> SidResult<Vec<sid_core::models::ProvisioningCredential>> {
         self.connector_list_credentials(connector_id).await
+    }
+
+    async fn import_provisioning_credential(
+        &self,
+        credential: &sid_core::models::ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.connector_import_credential(credential, ctx).await
     }
 
     async fn find_provisioning_credential(
@@ -6999,6 +7216,44 @@ impl StorageBackend for PostgresBackend {
         Ok(rows.into_iter().map(|r| r.into_record()).collect())
     }
 
+    async fn import_anomaly_event(
+        &self,
+        event: &sid_core::models::AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import_anomaly_event: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held = sqlx::query_as::<_, AnomalyEventRow>(
+            "SELECT id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp
+             FROM anomaly_events WHERE id = $1",
+        )
+        .bind(event.id.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row.into_record(), event, "anomaly event");
+        }
+        sqlx::query(
+            "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(event.id.0)
+        .bind(&event.rule_id)
+        .bind(&event.profile_id)
+        .bind(event.ip_address)
+        .bind(&event.description)
+        .bind(event.risk_score)
+        .bind(&event.reaction)
+        .bind(event.timestamp)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("anomaly event", e))?;
+        Self::audit_in_tx(&mut tx, &format!("anomaly_event:{}", event.id), ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     // === IP REPUTATION ===
 
     async fn record_ip_reputation_event(&self, ip: &str, success: bool) -> SidResult<()> {
@@ -7103,6 +7358,66 @@ impl StorageBackend for PostgresBackend {
         Ok(result.rows_affected())
     }
 
+    async fn export_ip_reputation(&self) -> SidResult<Vec<sid_core::models::IpReputation>> {
+        let rows: Vec<IpReputationRow> = sqlx::query_as(
+            "SELECT ip, failed_count, success_count, first_seen_at, last_failed_at,
+                    last_success_at, updated_at
+             FROM ip_reputation ORDER BY ip",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("export_ip_reputation: {e}")))?;
+        Ok(rows.into_iter().map(reputation_of).collect())
+    }
+
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import_ip_reputation: {e}"));
+        let counts = |n: i64| {
+            i32::try_from(n)
+                .map_err(|_| SidError::Validation(format!("reputation count {n} is out of range")))
+        };
+        let (failed, succeeded) = (
+            counts(reputation.failed_count)?,
+            counts(reputation.success_count)?,
+        );
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held: Option<IpReputationRow> = sqlx::query_as(
+            "SELECT ip, failed_count, success_count, first_seen_at, last_failed_at,
+                    last_success_at, updated_at
+             FROM ip_reputation WHERE ip = $1",
+        )
+        .bind(&reputation.ip)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&reputation_of(row), reputation, "IP reputation");
+        }
+        // The score as recording an event computes it from the counts.
+        sqlx::query(
+            "INSERT INTO ip_reputation (ip, failed_count, success_count, score, first_seen_at,
+                 last_failed_at, last_success_at, updated_at)
+             VALUES ($1, $2, $3, $2::real / ($2 + $3 + 1)::real, $4, $5, $6, $7)",
+        )
+        .bind(&reputation.ip)
+        .bind(failed)
+        .bind(succeeded)
+        .bind(reputation.first_seen_at)
+        .bind(reputation.last_failed_at)
+        .bind(reputation.last_success_at)
+        .bind(reputation.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("IP reputation", e))?;
+        Self::audit_in_tx(&mut tx, "ip_reputation", ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     // === IP ALLOWLIST ===
 
     async fn add_ip_allowlist_entry(
@@ -7147,6 +7462,39 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| sid_core::Error::Storage(format!("list_ip_allowlist_entries: {e}")))?;
         Ok(rows)
+    }
+
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import_ip_allowlist_entry: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held: Option<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT cidr, description, created_at FROM ip_allowlist_entries WHERE cidr = $1",
+        )
+        .bind(cidr)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let wanted = (cidr.to_owned(), description.to_owned(), created_at);
+        if let Some(held) = held {
+            return crate::transfer_repeat(&held, &wanted, "IP allowlist entry");
+        }
+        sqlx::query(
+            "INSERT INTO ip_allowlist_entries (cidr, description, created_at) VALUES ($1, $2, $3)",
+        )
+        .bind(cidr)
+        .bind(description)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("IP allowlist entry", e))?;
+        Self::commit_allowlist_change(tx, ctx).await?;
+        Ok(true)
     }
 
     async fn list_expiring_machine_credentials(
@@ -7323,6 +7671,64 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(result.rows_affected())
+    }
+
+    async fn export_principal_quarantine(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::QuarantinedPrincipal>> {
+        self.export_principal_quarantine_impl().await
+    }
+
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_quarantine_impl(entry, ctx).await
+    }
+
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> SidResult<Vec<sid_core::models::StoredPrincipal>> {
+        self.export_principals_impl(after, limit).await
+    }
+
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> SidResult<Vec<sid_core::models::StoredUserHandle>> {
+        self.export_webauthn_user_handles_impl(profile_id).await
+    }
+
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_webauthn_user_handle_impl(handle, ctx).await
+    }
+
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_principal_impl(principal, ctx).await
+    }
+
+    async fn email_policy_activation(&self) -> SidResult<sid_core::models::EmailPolicyActivation> {
+        self.email_policy_activation_impl().await
+    }
+
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_email_policy_activation_impl(activation, ctx)
+            .await
     }
 
     // === CLOSURE REQUEST ===
@@ -7548,6 +7954,18 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
         Ok(row.map(|r| r.into_domain()))
+    }
+
+    async fn export_magic_link_sessions(&self) -> SidResult<Vec<MagicLinkSession>> {
+        Ok(sqlx::query_as::<_, crate::pg_row::MagicLinkRow>(
+            "SELECT * FROM magic_link_sessions ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect())
     }
 
     async fn consume_magic_link_session(
@@ -7868,6 +8286,23 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        sqlx::query_as::<_, crate::pg_row::ScimOutboundRecordRow>(
+            "SELECT * FROM scim_outbound_records WHERE target_id = $1
+             ORDER BY sid_entity_id, entity_type",
+        )
+        .bind(target_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect()
+    }
+
     async fn create_outbound_dlq_entry(
         &self,
         entry: &OutboundDlqEntry,
@@ -8013,6 +8448,9 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<()> {
         let data = serde_json::to_value(action)
             .map_err(|e| SidError::Internal(format!("flow action: {e}")))?;
+        // A new action is at revision 0; an imported one keeps its own.
+        let revision = i64::try_from(action.revision)
+            .map_err(|e| SidError::Validation(format!("flow action revision: {e}")))?;
         let mut tx = self
             .pool
             .begin()
@@ -8020,8 +8458,8 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
             "INSERT INTO flow_actions (id, project_id, flow_type, action_point, action_order,
-                data, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                data, revision, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(action.id)
         .bind(action.project_id)
@@ -8029,6 +8467,7 @@ impl StorageBackend for PostgresBackend {
         .bind(action.action_point.as_str())
         .bind(action.order)
         .bind(&data)
+        .bind(revision)
         .bind(action.created_at)
         .bind(action.updated_at)
         .execute(&mut *tx)
@@ -8160,7 +8599,7 @@ impl StorageBackend for PostgresBackend {
         config: &sid_core::models::BrandingConfig,
         audit: MutationContext,
     ) -> SidResult<()> {
-        let data = serde_json::to_value(config)
+        let data = serde_json::to_value(crate::stored_branding(config))
             .map_err(|e| SidError::Internal(format!("branding data: {e}")))?;
         let mut tx = self
             .pool
@@ -8192,7 +8631,7 @@ impl StorageBackend for PostgresBackend {
         config: &sid_core::models::BrandingConfig,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let data = serde_json::to_value(config)
+        let data = serde_json::to_value(crate::stored_branding(config))
             .map_err(|e| SidError::Internal(format!("branding data: {e}")))?;
         let revision = i64::try_from(config.revision)
             .map_err(|e| SidError::Validation(format!("branding revision: {e}")))?;
@@ -8512,6 +8951,48 @@ impl StorageBackend for PostgresBackend {
             .collect())
     }
 
+    async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import invite redemption: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held: Option<(ProfileId, Option<Uuid>, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as(
+                "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
+                 WHERE invite_id = $1 AND profile_id = $2",
+            )
+            .bind(id)
+            .bind(redemption.profile_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if let Some((profile_id, credential_id, redeemed_at)) = held {
+            let stored = sid_core::models::InviteRedemption {
+                profile_id,
+                credential_id: credential_id.map(sid_core::models::CredentialId),
+                redeemed_at,
+            };
+            return crate::transfer_repeat(&stored, redemption, "invite redemption");
+        }
+        sqlx::query(
+            "INSERT INTO invite_redemptions (invite_id, profile_id, credential_id, redeemed_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(redemption.profile_id)
+        .bind(redemption.credential_id.map(|c| c.0))
+        .bind(redemption.redeemed_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("invite redemption", e))?;
+        Self::audit_in_tx(&mut tx, &format!("invite:{id}"), ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     async fn try_use_invite(
         &self,
         id: InviteId,
@@ -8577,6 +9058,49 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Get registration source failed: {e}")))?;
         row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn import_registration_source(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let storage =
+            |e: sqlx::Error| SidError::Storage(format!("import registration source: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let held = sqlx::query_as::<_, crate::pg_row::RegistrationSourceRow>(
+            "SELECT profile_id, source_type::text, source_id, referrer_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, client_id, created_at
+             FROM registration_sources WHERE profile_id = $1",
+        )
+        .bind(profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row.into_domain()?, source, "registration source");
+        }
+        sqlx::query(
+            "INSERT INTO registration_sources (profile_id, source_type, source_id, referrer_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, client_id, created_at)
+             VALUES ($1, $2::registration_source_type, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(profile_id)
+        .bind(source.source_type.as_str())
+        .bind(&source.source_id)
+        .bind(source.referrer_id)
+        .bind(&source.utm.source)
+        .bind(&source.utm.medium)
+        .bind(&source.utm.campaign)
+        .bind(&source.utm.term)
+        .bind(&source.utm.content)
+        .bind(&source.client_id)
+        .bind(source.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("registration source", e))?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
     }
 
     async fn count_registrations_by_source(
@@ -8821,6 +9345,16 @@ impl StorageBackend for PostgresBackend {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
+    async fn export_access_requests(&self) -> SidResult<Vec<AccessRequest>> {
+        let rows = sqlx::query_as::<_, AccessRequestRow>(
+            "SELECT * FROM access_requests ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("export access requests: {e}")))?;
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
     async fn decide_access_request(
         &self,
         request: &AccessRequest,
@@ -8918,6 +9452,18 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Get reset_session failed: {}", e)))?;
         row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn export_reset_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::PasswordResetSession>> {
+        let rows = sqlx::query_as::<_, crate::pg_row::PasswordResetSessionRow>(
+            "SELECT * FROM password_reset_sessions ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("export reset sessions: {e}")))?;
+        rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
     async fn verify_reset_session(
@@ -9213,9 +9759,11 @@ mod operation;
 pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;
+mod principal_transfer;
 mod provisioning_connector;
 mod refresh_token;
 mod session;
+mod session_grants;
 mod sign_in_history;
 mod work;
 pub use work::PgWorkStore;

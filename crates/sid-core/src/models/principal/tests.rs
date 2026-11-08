@@ -330,3 +330,46 @@ fn test_eligibility_not_bound() {
     let result = check_principal_eligibility(&assigned_to(profile_id), profile_id, false, CURRENT);
     assert_eq!(result, PrincipalEligibility::NotBound);
 }
+
+// ── StoredPrincipal::restores_under ──
+
+fn stored_at(revision: Option<i64>, disposition: Option<EmailKeyDisposition>) -> StoredPrincipal {
+    let mut entity = assigned_to(ProfileId::generate());
+    entity.email_policy_revision = revision;
+    StoredPrincipal {
+        entity,
+        claims: Vec::new(),
+        disposition,
+    }
+}
+
+fn disposition(outcome: EmailKeyOutcome, from: i64, to: i64) -> EmailKeyDisposition {
+    EmailKeyDisposition {
+        from_revision: from,
+        to_revision: to,
+        outcome,
+        reason: "address not re-established".into(),
+        recorded_at: Utc::now(),
+    }
+}
+
+/// A key under the active revision and a key that names no revision restore.
+#[test]
+fn test_restores_under_active_or_unrevisioned() {
+    assert!(stored_at(Some(2), None).restores_under(2));
+    assert!(stored_at(None, None).restores_under(2));
+}
+
+/// A key at an earlier revision restores only with its quarantine from that
+/// revision to the active one; a migration record or another span does not.
+#[test]
+fn test_restores_under_requires_matching_quarantine() {
+    let quarantined = disposition(EmailKeyOutcome::Quarantined, 1, 2);
+    assert!(stored_at(Some(1), Some(quarantined.clone())).restores_under(2));
+    assert!(!stored_at(Some(1), None).restores_under(2));
+    assert!(!stored_at(Some(1), Some(quarantined)).restores_under(3));
+    let migrated = disposition(EmailKeyOutcome::Migrated, 1, 2);
+    assert!(!stored_at(Some(1), Some(migrated)).restores_under(2));
+    let other_span = disposition(EmailKeyOutcome::Quarantined, 0, 2);
+    assert!(!stored_at(Some(1), Some(other_span)).restores_under(2));
+}

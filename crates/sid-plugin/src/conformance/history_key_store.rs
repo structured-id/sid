@@ -683,12 +683,32 @@ pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
     active.epoch.created_at = now;
     replaced.epoch.created_at = now;
     replaced.epoch.status = HistoryEpochUse::CompareOnly;
-    let mut epochs = vec![active, replaced.clone()];
+    let mut epochs = vec![active.clone(), replaced.clone()];
     epochs.sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    let mut uses = vec![
+        sid_core::models::KeyUse {
+            operation: Uuid::now_v7(),
+            epoch: active.epoch.id,
+            expires_at: now + chrono::Duration::minutes(5),
+        },
+        sid_core::models::KeyUse {
+            operation: Uuid::now_v7(),
+            epoch: replaced.epoch.id,
+            expires_at: now + chrono::Duration::minutes(6),
+        },
+    ];
+    uses.sort_unstable_by_key(|u| (u.operation, u.epoch));
+    let mut live = vec![active.epoch.id, replaced.epoch.id];
+    live.sort_unstable();
+    // What the store records beside the keys moves with them: the creating
+    // enrollment, the recorded lifecycle and the uses in flight.
     let archive = KeyArchive {
         owner_domain: domain,
         epochs,
         replaced: vec![(replaced.epoch.id, 4)],
+        created_by: vec![(active.epoch.id, Uuid::now_v7())],
+        lifecycle: Some(sid_core::models::KeyLifecycle { revision: 7, live }),
+        uses,
     };
     assert!(store.import_keys(&archive, audit()).await.unwrap());
     assert_eq!(
@@ -727,6 +747,9 @@ pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
         owner_domain: other,
         epochs,
         replaced: vec![],
+        created_by: vec![],
+        lifecycle: None,
+        uses: vec![],
     };
     assert!(matches!(
         store.import_keys(&unreplaced, audit()).await,
@@ -737,4 +760,35 @@ pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
         None
     );
     assert_eq!(store.export_keys(&domain).await.unwrap(), Some(archive));
+}
+
+/// The store's fences are exported for a transfer; importing exactly what
+/// the store holds adds nothing, and other records into a store that holds
+/// some are a conflict that writes nothing.
+pub async fn key_records_round_trip(store: &dyn HistoryKeyStore) {
+    let (abandoned_owner, operation) = (owner(), Uuid::now_v7());
+    store
+        .abandon_enrollment(&abandoned_owner, operation, audit())
+        .await
+        .unwrap();
+    let purged = owner();
+    store.purge_owner(&purged, audit()).await.unwrap();
+    let held = store.export_key_records().await.unwrap();
+    assert!(
+        held.abandoned
+            .iter()
+            .any(|a| a.operation == operation && a.owner_domain == abandoned_owner)
+    );
+    assert!(held.purged.iter().any(|p| p.owner_domain == purged));
+    assert!(!store.import_key_records(&held, audit()).await.unwrap());
+
+    let mut other = held.clone();
+    other.abandoned.retain(|a| a.operation != operation);
+    assert!(matches!(
+        store.import_key_records(&other, audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    let now = store.export_key_records().await.unwrap();
+    assert_eq!(now.abandoned, held.abandoned);
+    assert_eq!(now.purged, held.purged);
 }

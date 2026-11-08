@@ -31,8 +31,8 @@ use sid_core::models::{
     ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId, ProfileMetadata,
     ProfilePhone, ProfilePhoneId, Project, ProjectId, RefreshToken, Role, RoleAssignment,
     RoleAssignmentId, RoleAssignmentPrincipal, RoleId, ScimOutboundRecord, ScimOutboundTarget,
-    ScimOutboundTargetId, Session, SessionId, SodConflictRule, UpstreamIdentity,
-    UpstreamIdentityId, UpstreamProvider, UpstreamProviderId,
+    ScimOutboundTargetId, Session, SessionId, UpstreamIdentity, UpstreamIdentityId,
+    UpstreamProvider, UpstreamProviderId,
     credential::CredentialStatus as CoreCredentialStatus,
     device::DeviceAssurance,
     device_attestation::{DeviceAttestation, DeviceAttestationId},
@@ -1590,31 +1590,6 @@ impl ExportJobRow {
             created_at: self.created_at,
             ready_at: self.ready_at,
             expires_at: self.expires_at,
-        })
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// SodConflictRule
-// ═══════════════════════════════════════════════════════════════════
-
-#[derive(Debug, sqlx::FromRow)]
-pub struct SodRuleRow {
-    pub name: String,
-    pub description: Option<String>,
-    pub conflicting_roles: String,
-    pub severity: String,
-}
-
-impl SodRuleRow {
-    /// An unknown severity is an error: read as a warning, a blocking rule
-    /// would stop blocking.
-    pub fn into_domain(self) -> SidResult<SodConflictRule> {
-        Ok(SodConflictRule {
-            name: self.name,
-            description: self.description,
-            conflicting_roles: split_ws(&self.conflicting_roles),
-            severity: parsed("severity", &self.severity)?,
         })
     }
 }

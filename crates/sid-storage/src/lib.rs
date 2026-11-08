@@ -25,6 +25,9 @@ pub use postgres::{PgHistoryKeyStore, PgOperationStore, PgWorkStore, PostgresBac
 #[cfg(feature = "storage-pg")]
 pub use postgres_blob::PostgresBlobStore;
 
+/// The portable snapshot: over the storage traits, any backend.
+pub mod snapshot;
+
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub mod application_store;
 #[cfg(any(
@@ -45,6 +48,18 @@ mod key_versions;
     feature = "storage-coordinode"
 ))]
 mod policy_evidence;
+
+/// `config` as the SQL stores keep it: its times at the microseconds their
+/// timestamp columns hold, so the content in `data` and the record read
+/// back are the same, whatever precision the host clock reports.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::models::BrandingConfig {
+    use chrono::SubsecRound;
+    let mut stored = config.clone();
+    stored.created_at = stored.created_at.trunc_subsecs(6);
+    stored.updated_at = stored.updated_at.trunc_subsecs(6);
+    stored
+}
 
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
 /// its row).
@@ -235,6 +250,24 @@ fn administrator_role_assigned() -> sid_core::Error {
     sid_core::Error::InvalidState(
         "the installation administrator role cannot be deleted while it is assigned".into(),
     )
+}
+
+/// An exported record found already stored under its key: `false` when it
+/// is the same record, so a repeated import writes nothing, a `Conflict` when
+/// another one holds the key.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+fn transfer_repeat<T: PartialEq>(stored: &T, wanted: &T, what: &str) -> sid_core::Result<bool> {
+    if stored == wanted {
+        Ok(false)
+    } else {
+        Err(sid_core::Error::Conflict(format!(
+            "another {what} is stored under the exported one's key"
+        )))
+    }
 }
 
 /// The time before which an IP reputation entry counts as stale for a decay

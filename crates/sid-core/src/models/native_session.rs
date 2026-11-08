@@ -6,9 +6,10 @@
 //! window receives the committed successor again, and nothing branches.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::SessionId;
+use super::{AuthorizationCode, ProfileId, RefreshToken, SessionId};
 
 /// The most refresh credentials one generation may hold.
 pub const NATIVE_GENERATION_SIZE_MAX: u32 = 16;
@@ -17,7 +18,7 @@ pub const NATIVE_GENERATION_SIZE_MAX: u32 = 16;
 pub const NATIVE_EXCHANGE_LEN: usize = 16;
 
 /// The logical refresh exchange a client names and keeps across its retries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NativeExchange([u8; NATIVE_EXCHANGE_LEN]);
 
 impl NativeExchange {
@@ -31,7 +32,7 @@ impl NativeExchange {
 }
 
 /// One generation of a native session's refresh credentials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeGeneration {
     pub id: Uuid,
     pub session_id: SessionId,
@@ -44,7 +45,7 @@ pub struct NativeGeneration {
 }
 
 /// Where the generation a presented credential belongs to stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NativeGenerationState {
     /// No refresh has rotated it yet.
     Current,
@@ -67,6 +68,25 @@ pub struct NativePresented {
     pub key_jkt: String,
     pub expires_at: DateTime<Utc>,
     pub state: NativeGenerationState,
+}
+
+/// A generation as its store keeps it: its credentials and where it stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredNativeGeneration {
+    pub generation: NativeGeneration,
+    pub state: NativeGenerationState,
+}
+
+/// Every grant a session holds, revoked, used and expired ones included:
+/// its refresh tokens, the authorization codes it authorized and its native
+/// generations. A move carries them with their session, so a reused token or
+/// code is still recognized after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGrants<O = ProfileId> {
+    pub session: SessionId,
+    pub refresh_tokens: Vec<RefreshToken<O>>,
+    pub authorization_codes: Vec<AuthorizationCode<O>>,
+    pub native_generations: Vec<StoredNativeGeneration>,
 }
 
 /// One rotation a verified refresh asks its store to commit.

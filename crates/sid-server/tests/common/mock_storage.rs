@@ -1089,6 +1089,18 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
     async fn import_keys(&self, _: &KeyArchive, _: AuditEntry) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
     }
+
+    async fn export_key_records(&self) -> SidResult<sid_core::models::KeyStoreRecords> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+
+    async fn import_key_records(
+        &self,
+        _: &sid_core::models::KeyStoreRecords,
+        _: AuditEntry,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
 }
 
 #[async_trait]
@@ -1201,6 +1213,22 @@ impl sid_plugin::IssuerStore for MockStorage {
             .collect();
         keys.sort_by_key(|k| k.generation);
         Ok(keys)
+    }
+
+    async fn list_oidc_issuers(&self) -> SidResult<Vec<sid_core::models::OidcIssuer>> {
+        Ok(self.inner.lock().unwrap().oidc_issuers.clone())
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        _: &sid_core::models::OidcIssuer,
+        _: &[sid_core::models::IssuerSigningKey],
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        // The server tests never restore a snapshot into this mock.
+        Err(sid_core::Error::Storage(
+            "the mock store does not restore issuers".into(),
+        ))
     }
 }
 
@@ -4466,6 +4494,14 @@ impl StorageBackend for MockStorage {
         inner.role_assignments.push(a.clone());
         Ok(())
     }
+
+    async fn import_role_assignment(
+        &self,
+        _: &RoleAssignment,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,
@@ -4559,10 +4595,6 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<Vec<RoleAssignment>> {
         Ok(vec![])
     }
-    async fn list_sod_rules(&self) -> SidResult<Vec<SodConflictRule>> {
-        Ok(vec![])
-    }
-
     // === CEDAR POLICY OPERATIONS ===
     async fn get_cedar_policy(&self, id: CedarPolicyId) -> SidResult<Option<CedarPolicy>> {
         let inner = self.inner.lock().unwrap();
@@ -4794,6 +4826,82 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<()> {
         Err(sid_core::Error::Storage(
             "device enrollment is not supported by the mock store".into(),
+        ))
+    }
+    async fn import_device_attestation(
+        &self,
+        _: &sid_core::models::DeviceAttestation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        // The server tests never restore a snapshot into this mock.
+        Err(sid_core::Error::Storage(
+            "the mock store does not restore device bindings".into(),
+        ))
+    }
+    // The server tests never move a snapshot through this mock.
+    async fn export_principals(
+        &self,
+        _: Option<sid_core::models::PrincipalId>,
+        _: u32,
+    ) -> SidResult<Vec<sid_core::models::StoredPrincipal>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_principal(
+        &self,
+        _: &sid_core::models::StoredPrincipal,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn email_policy_activation(&self) -> SidResult<sid_core::models::EmailPolicyActivation> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn export_webauthn_user_handles(
+        &self,
+        _: ProfileId,
+    ) -> SidResult<Vec<sid_core::models::StoredUserHandle>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_webauthn_user_handle(
+        &self,
+        _: &sid_core::models::StoredUserHandle,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn import_email_policy_activation(
+        &self,
+        _: &sid_core::models::EmailPolicyActivation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
+        ))
+    }
+    async fn export_principal_quarantine(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::QuarantinedPrincipal>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_principal_quarantine(
+        &self,
+        _: &sid_core::models::QuarantinedPrincipal,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        Err(sid_core::Error::Storage(
+            "the mock store imports no snapshot".into(),
         ))
     }
     async fn revoke_device_attestation(
@@ -5803,6 +5911,88 @@ impl StorageBackend for MockStorage {
         inner.magic_links.retain(|_, link| !link.is_expired());
         Ok((before - inner.magic_links.len()) as u64)
     }
+    async fn export_magic_link_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::MagicLinkSession>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn export_device_auth_codes(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::DeviceAuthorizationCode>> {
+        Err(sid_core::Error::Storage(
+            "the mock store exports no snapshot".into(),
+        ))
+    }
+    async fn import_anomaly_event(
+        &self,
+        _: &sid_core::models::AnomalyEventRecord,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_ip_reputation(&self) -> SidResult<Vec<sid_core::models::IpReputation>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_ip_reputation(
+        &self,
+        _: &sid_core::models::IpReputation,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_ip_allowlist_entry(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_login_policy_epoch(&self, _: i64, _: MutationContext) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_provisioning_connectors(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::ProvisioningConnector>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_provisioning_credential(
+        &self,
+        _: &sid_core::models::ProvisioningCredential,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_invite_redemption(
+        &self,
+        _: sid_core::models::InviteId,
+        _: &sid_core::models::InviteRedemption,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn import_registration_source(
+        &self,
+        _: sid_core::models::ProfileId,
+        _: &sid_core::models::RegistrationSource,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_access_requests(&self) -> SidResult<Vec<sid_core::models::AccessRequest>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn export_reset_sessions(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::PasswordResetSession>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
     async fn count_active_magic_links_for_email(&self, email: &str) -> SidResult<u32> {
         let inner = self.inner.lock().unwrap();
         let active = inner
@@ -5863,6 +6053,12 @@ impl StorageBackend for MockStorage {
         _: OutboundEntityType,
     ) -> SidResult<Option<ScimOutboundRecord>> {
         Ok(None)
+    }
+    async fn list_scim_outbound_records(
+        &self,
+        _: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        Ok(Vec::new())
     }
     async fn create_outbound_dlq_entry(
         &self,

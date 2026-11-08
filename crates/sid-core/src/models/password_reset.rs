@@ -90,7 +90,7 @@ impl std::fmt::Display for ResetSessionStatus {
 }
 
 /// Password reset session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PasswordResetSession {
     pub id: ResetSessionId,
     pub profile_id: ProfileId,

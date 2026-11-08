@@ -53,4 +53,30 @@ impl PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(format!("read login policy epoch: {e}")))
     }
+
+    pub(super) async fn import_login_policy_epoch_impl(
+        &self,
+        epoch: i64,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import login policy epoch: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The row's insert serializes concurrent importers on its key.
+        let inserted = sqlx::query(
+            "INSERT INTO login_policy_epoch (id, epoch) VALUES (1, $1) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(epoch)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            let held = Self::login_policy_epoch(&mut *tx).await?;
+            return crate::transfer_repeat(&held, &Some(epoch), "login policy epoch");
+        }
+        Self::audit_in_tx(&mut tx, "installation:login_policy", ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
 }

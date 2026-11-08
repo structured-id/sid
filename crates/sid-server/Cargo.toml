@@ -85,7 +85,8 @@ zeroize = { workspace = true }
 tokio-stream = "0.1.19"
 # HTTP form of the annotated RPCs through the embedded transcoder (`http`).
 structured-proxy = { version = "8.1.4", default-features = false, optional = true }
-serde-saphyr = { workspace = true, optional = true }
+# The installation configuration file and the transcoder's settings.
+serde-saphyr = { workspace = true }
 # The gRPC-Web layer wraps the services the transcoder calls in process, and
 # each call carries the HTTP request it was transcoded from.
 tower = { workspace = true, features = ["util"] }
@@ -96,7 +97,7 @@ default = ["telemetry", "storage-pg", "scim", "http"]
 # Serve the annotated RPCs over HTTP (OIDC endpoints, RFC protocol forms)
 # through structured-proxy embedded as a library, at SID_BIND or per
 # SID_HTTP_CONFIG.
-http = ["dep:structured-proxy", "dep:serde-saphyr", "sid-infra/http"]
+http = ["dep:structured-proxy", "sid-infra/http"]
 
 # PostgreSQL storage backend (default for a full deployment).
 storage-pg = ["sid-storage/storage-pg"]
@@ -177,7 +178,6 @@ sid-ui-host = { path = "../sid-ui-host" }
 # The BFF test reads this server's issuer registry over gRPC.
 sid-infra = { workspace = true, features = ["issuer-client"] }
 prost = { workspace = true }
-serde-saphyr = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # A test reads the permission question that reached sid-authz.

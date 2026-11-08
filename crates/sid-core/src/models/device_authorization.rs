@@ -114,7 +114,7 @@ impl std::fmt::Display for DeviceAuthStatus {
 /// Created when a device calls the device authorization endpoint.
 /// The device receives `device_code` (secret, for polling) and `user_code`
 /// (short, human-readable, for the user to enter on another device).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceAuthorizationCode {
     pub id: DeviceAuthCodeId,
 

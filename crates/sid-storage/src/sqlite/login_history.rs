@@ -3,10 +3,23 @@
 //! countries) for SQLite backend.
 
 use sid_core::{Error as SidError, Result as SidResult, models::ProfileId};
+use sid_plugin::LoginLocation;
 use sqlx::Row;
 use std::net::IpAddr;
 
 use super::{SqliteBackend, col, fmt_dt, parse_dt};
+
+fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> SidResult<LoginLocation> {
+    Ok(LoginLocation {
+        country: col(row, "country")?,
+        latitude: col(row, "latitude")?,
+        longitude: col(row, "longitude")?,
+        login_count: col(row, "login_count")?,
+        first_seen: super::dt_col(row, "first_seen")?,
+        last_seen: super::dt_col(row, "last_seen")?,
+        designated: col(row, "designated")?,
+    })
+}
 
 /// The instant `window` ago, as stored timestamps are written.
 fn since(window: std::time::Duration) -> SidResult<String> {
@@ -110,6 +123,55 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Record login location failed: {e}")))?;
         Ok(())
+    }
+
+    pub(crate) async fn export_login_locations_impl(
+        &self,
+    ) -> SidResult<Vec<(ProfileId, LoginLocation)>> {
+        let rows = sqlx::query("SELECT * FROM profile_locations ORDER BY profile_id, country")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("export login locations: {e}")))?;
+        rows.iter()
+            .map(|row| Ok((col(row, "profile_id")?, row_to_location(row)?)))
+            .collect()
+    }
+
+    pub(crate) async fn import_login_location_impl(
+        &self,
+        profile_id: ProfileId,
+        location: &LoginLocation,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held =
+            sqlx::query("SELECT * FROM profile_locations WHERE profile_id = ? AND country = ?")
+                .bind(profile_id)
+                .bind(&location.country)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("import login location: {e}")))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(&row_to_location(&row)?, location, "login location");
+        }
+        sqlx::query(
+            "INSERT INTO profile_locations (profile_id, country, latitude, longitude, login_count, \
+                 first_seen, last_seen, designated) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(profile_id)
+        .bind(&location.country)
+        .bind(location.latitude)
+        .bind(location.longitude)
+        .bind(location.login_count)
+        .bind(fmt_dt(&location.first_seen))
+        .bind(fmt_dt(&location.last_seen))
+        .bind(location.designated)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("login location", e))?;
+        Self::commit_mutation(tx, &format!("profile:{profile_id}"), ctx).await?;
+        Ok(true)
     }
 
     pub(crate) async fn get_designated_countries_impl(

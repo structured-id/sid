@@ -26,7 +26,7 @@ pub struct ProjectChange {
 ///
 /// Every OAuth2Client belongs to exactly one Project.
 /// The system project "SID" is created automatically and cannot be deleted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,

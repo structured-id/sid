@@ -511,6 +511,93 @@ pub struct KeyArchive {
     /// `(epoch, revision)`: the revision at which a replaced epoch stopped
     /// being active; one per epoch that is no longer active.
     pub replaced: Vec<(HistoryEpochId, i64)>,
+    /// `(epoch, operation)`: the first enrollment that created an epoch, by
+    /// which a retried creation is recognized and an aborted one reclaimed.
+    pub created_by: Vec<(HistoryEpochId, uuid::Uuid)>,
+    /// The history revision the evaluator last recorded and the epochs that
+    /// revision kept live.
+    pub lifecycle: Option<KeyLifecycle>,
+    /// Epochs operations in flight hold until they settle or expire.
+    pub uses: Vec<KeyUse>,
+}
+
+/// The history revision the evaluator recorded for an owner and its live
+/// epochs, sorted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyLifecycle {
+    pub revision: i64,
+    pub live: Vec<HistoryEpochId>,
+}
+
+/// An epoch an operation in flight holds until `expires_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyUse {
+    pub operation: uuid::Uuid,
+    pub epoch: HistoryEpochId,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// What the evaluator's store keeps beside the owners' keys: the first
+/// enrollments it fenced as aborted, the owners it purged, and its own audit
+/// records in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KeyStoreRecords {
+    pub abandoned: Vec<AbandonedEnrollment>,
+    pub purged: Vec<PurgedOwner>,
+    pub audit: Vec<KeyAuditRecord>,
+}
+
+/// A first enrollment fenced as aborted: nothing is created under it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonedEnrollment {
+    pub operation: uuid::Uuid,
+    pub owner_domain: [u8; 32],
+    pub at: DateTime<Utc>,
+}
+
+/// An owner whose keys were destroyed: nothing is created for it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgedOwner {
+    pub owner_domain: [u8; 32],
+    pub at: DateTime<Utc>,
+}
+
+/// One record of the evaluator's own audit trail, in its order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyAuditRecord {
+    pub sequence: i64,
+    pub occurred_at: DateTime<Utc>,
+    pub actor_id: String,
+    pub actor_type: String,
+    pub action: String,
+    pub resource: String,
+    pub outcome: String,
+    pub metadata: serde_json::Value,
+}
+
+impl KeyStoreRecords {
+    /// Check the canonical order the export writes, before any import write.
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .abandoned
+            .windows(2)
+            .any(|pair| pair[0].operation >= pair[1].operation)
+            || self
+                .purged
+                .windows(2)
+                .any(|pair| pair[0].owner_domain >= pair[1].owner_domain)
+            || self.audit.first().is_some_and(|a| a.sequence <= 0)
+            || self
+                .audit
+                .windows(2)
+                .any(|pair| pair[0].sequence >= pair[1].sequence)
+        {
+            return Err(Error::Validation(
+                "key store records are not in canonical order".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl KeyArchive {
@@ -589,6 +676,27 @@ impl KeyArchive {
         if self.replaced.len() != inactive {
             return Err(Error::Validation(
                 "key archive lacks a replacement for an inactive epoch".into(),
+            ));
+        }
+        // What names an epoch names one of the owner's, in canonical order.
+        let named = |epoch: &HistoryEpochId| ids.contains_key(epoch);
+        if self
+            .created_by
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+            || !self.created_by.iter().all(|(epoch, _)| named(epoch))
+            || self.uses.windows(2).any(|pair| {
+                (pair[0].operation, pair[0].epoch) >= (pair[1].operation, pair[1].epoch)
+            })
+            || !self.uses.iter().all(|u| named(&u.epoch))
+            || self.lifecycle.as_ref().is_some_and(|l| {
+                l.revision < 0
+                    || l.live.windows(2).any(|pair| pair[0] >= pair[1])
+                    || !l.live.iter().all(named)
+            })
+        {
+            return Err(Error::Validation(
+                "key archive names an epoch it does not hold".into(),
             ));
         }
         Ok(())

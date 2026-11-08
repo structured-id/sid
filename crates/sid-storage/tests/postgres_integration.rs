@@ -345,6 +345,7 @@ mod ceremony_state {
         concurrent_replacements_apply_once,
         key_is_admitted_once,
         concurrent_admissions_succeed_once,
+        records_move_with_their_deadlines,
         events_count_within_their_window,
         concurrent_events_are_counted_once,
         counts_are_read_and_cleared,
@@ -722,6 +723,7 @@ history_key_store!(
     lifecycle_follows_the_live_set,
     stale_live_set_cannot_retire,
     key_archive_round_trip,
+    key_records_round_trip,
     abandoned_enrollment_is_reclaimed,
     cleanup_races_preparation,
     key_versions_are_insert_only,
@@ -891,6 +893,7 @@ mod grant_store {
         native_redelivery_ends_with_its_window,
         concurrent_native_rotation,
         native_generations_end_with_their_session,
+        session_grants_move_as_stored,
     );
 }
 
@@ -1216,6 +1219,8 @@ mod issuer_store {
         foreign_first_key_refused,
         unknown_handle_names_nothing,
         unknown_organization_refused,
+        issuer_restored_as_stored,
+        issuer_restore_never_replaces,
     );
 }
 
@@ -2247,6 +2252,13 @@ async fn test_audit_chains_are_independent() {
     let backend = setup().await;
     let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
     common::audit_chain::test_audit_chains_are_independent(&log).await;
+}
+
+#[tokio::test]
+async fn test_audit_chain_moves_as_stored() {
+    let backend = setup().await;
+    let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chain_moves_as_stored(&log).await;
 }
 
 #[tokio::test]

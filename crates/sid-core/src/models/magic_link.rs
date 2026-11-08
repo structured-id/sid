@@ -21,7 +21,7 @@ pub fn magic_link_sealing_context(id: Uuid) -> String {
 }
 
 /// A persisted magic link session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MagicLinkSession {
     /// Session identifier (UUID v7).
     pub id: Uuid,

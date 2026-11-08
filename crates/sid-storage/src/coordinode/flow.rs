@@ -130,8 +130,12 @@ impl CoordinodeBackend {
         action: &FlowAction,
         ctx: MutationContext,
     ) -> SidResult<()> {
+        // A new action is at revision 0; an imported one keeps its own.
+        let revision = i64::try_from(action.revision)
+            .map_err(|e| SidError::Validation(format!("flow action revision: {e}")))?;
         let params = Params::default()
             .with("id", uuid(action.id.as_uuid()))
+            .with("revision", Value::Int(revision))
             .with("project_id", project_value(action.project_id))
             .with("flow_type", Value::String(action.flow_type.as_str().into()))
             .with(
@@ -155,7 +159,7 @@ impl CoordinodeBackend {
             tx.run(
                 "CREATE (a:SidFlowAction {id: $id, project_id: $project_id, flow_type: $flow_type,
                     action_point: $action_point, action_order: $action_order,
-                    content: $content, revision: 0, created_at: $created_at,
+                    content: $content, revision: $revision, created_at: $created_at,
                     updated_at: $updated_at})",
                 params.clone(),
             )?;

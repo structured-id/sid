@@ -131,7 +131,7 @@ impl AuditEntry {
 /// Stored audit record with hash chain fields.
 ///
 /// Immutable once written — no UPDATE or DELETE.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// Unique record ID (ULID — time-ordered).
     pub id: String,
@@ -224,8 +224,79 @@ impl fmt::Display for AuditOutcome {
     }
 }
 
+/// Where a chain resumes after retention removed its oldest records: the
+/// sequence and hash of the last removed record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainCheckpoint {
+    pub sequence: u64,
+    pub hash: String,
+    /// Records before this time were removed.
+    pub cut_before: DateTime<Utc>,
+}
+
+/// A hash chain as stored, for a move between stores: its head, the
+/// checkpoint retention left and its records in sequence order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditChain {
+    pub head: ChainHead,
+    pub checkpoint: Option<ChainCheckpoint>,
+    pub records: Vec<AuditRecord>,
+}
+
+impl AuditChain {
+    /// Check the chain as a whole: its records follow the checkpoint (or
+    /// genesis) without a gap, each links to the one before and hashes to
+    /// its stored hash, all are of the head's chain, and the head names the
+    /// last of them.
+    pub fn check(&self) -> Result<(), AuditError> {
+        let broken = |record_id: &str| AuditError::IntegrityViolation {
+            record_id: record_id.to_owned(),
+        };
+        let (mut sequence, mut hash) = match &self.checkpoint {
+            Some(c) => (c.sequence, c.hash.clone()),
+            None => (0, "genesis".to_owned()),
+        };
+        for record in &self.records {
+            let next = sequence.checked_add(1).ok_or_else(|| broken(&record.id))?;
+            if record.chain_id != self.head.chain_id
+                || record.sequence != next
+                || record.prev_hash != hash
+                || !verify_record_hash(record)
+            {
+                return Err(broken(&record.id));
+            }
+            sequence = next;
+            hash.clone_from(&record.hash);
+        }
+        let head_ok = match self.records.last() {
+            Some(last) => {
+                self.head.last_record_id == last.id
+                    && self.head.last_hash == last.hash
+                    && self.head.sequence == last.sequence
+            }
+            // Retention removed every record: the head is where the chain
+            // was cut.
+            None => self.head.sequence == sequence && self.head.last_hash == hash,
+        };
+        if head_ok {
+            Ok(())
+        } else {
+            Err(broken(&self.head.last_record_id))
+        }
+    }
+
+    /// Whether this stored chain holds `given`: the same checkpoint and
+    /// every record of `given`, possibly followed by later ones.
+    pub fn holds(&self, given: &AuditChain) -> bool {
+        self.head.chain_id == given.head.chain_id
+            && self.checkpoint == given.checkpoint
+            && self.head.sequence >= given.head.sequence
+            && self.records.starts_with(&given.records)
+    }
+}
+
 /// State of a hash chain head (for tracking the latest record).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainHead {
     /// Chain identifier (e.g., "profile:prof_01J8K...").
     pub chain_id: String,
@@ -251,6 +322,10 @@ pub enum AuditError {
 
     #[error("chain not found: {0}")]
     ChainNotFound(String),
+
+    /// The store holds another chain under the same id.
+    #[error("audit chain conflict: {0}")]
+    Conflict(String),
 
     #[error("audit error: {0}")]
     Other(String),

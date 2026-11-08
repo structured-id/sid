@@ -288,6 +288,23 @@ impl SqliteBackend {
         row.as_ref().map(row_to_record).transpose()
     }
 
+    pub(crate) async fn list_scim_outbound_records_impl(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> SidResult<Vec<ScimOutboundRecord>> {
+        sqlx::query(
+            "SELECT * FROM scim_outbound_records WHERE target_id = ? \
+             ORDER BY sid_entity_id, entity_type",
+        )
+        .bind(target_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?
+        .iter()
+        .map(row_to_record)
+        .collect()
+    }
+
     pub(crate) async fn create_outbound_dlq_entry_impl(
         &self,
         entry: &OutboundDlqEntry,

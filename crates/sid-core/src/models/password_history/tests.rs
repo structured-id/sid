@@ -144,6 +144,9 @@ fn an_archive_with_an_unusable_public_key_is_refused() {
             key: sealed_key(active.id, &domain),
         }],
         replaced: Vec::new(),
+        created_by: Vec::new(),
+        lifecycle: None,
+        uses: Vec::new(),
     };
     assert!(history(&active).validate().is_ok());
     assert!(keys(&active).validate().is_ok());

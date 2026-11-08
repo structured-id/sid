@@ -164,3 +164,63 @@ async fn the_last_administrator_assignment_is_not_revoked() {
     assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
     assert!(svc.storage.admin_exists().await.unwrap());
 }
+
+/// The separation-of-duties warnings of the service's configuration file
+/// reach CheckSodConflicts: the administrator is warned of the configured
+/// conflict, and a service started without the file warns of nothing.
+#[tokio::test]
+async fn configured_sod_warnings_reach_check_sod_conflicts() {
+    use sid_proto::sid::v1::authz::CheckSodConflictsRequest;
+
+    let dir = std::env::temp_dir().join(format!("sid-sod-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("sid.yaml");
+    std::fs::write(
+        &file,
+        "governance:
+  sod_warnings:
+    - name: author_reviewer
+      conflicting_roles: [author, reviewer]
+      severity: warning
+",
+    )
+    .unwrap();
+    let configured = sid_server::config::installation_config(file.to_str())
+        .unwrap()
+        .governance
+        .sod_warnings;
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let svc = TestServices::new(MockStorage::new());
+    let service = authz(&svc)
+        .await
+        .with_sod_warnings(Arc::new(sid_authz::sod::SodService::new(configured)));
+    let root = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
+    let proposal = || CheckSodConflictsRequest {
+        existing_roles: vec!["author".into()],
+        proposed_role: "reviewer".into(),
+    };
+    let warned = service
+        .check_sod_conflicts(bearing(&root, proposal()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(warned.has_conflicts);
+    assert_eq!(warned.conflicts[0].rule_name, "author_reviewer");
+
+    let unconfigured = sid_server::config::installation_config(None)
+        .unwrap()
+        .governance
+        .sod_warnings;
+    let svc = TestServices::new(MockStorage::new());
+    let service = authz(&svc)
+        .await
+        .with_sod_warnings(Arc::new(sid_authz::sod::SodService::new(unconfigured)));
+    let root = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
+    let quiet = service
+        .check_sod_conflicts(bearing(&root, proposal()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!quiet.has_conflicts);
+}

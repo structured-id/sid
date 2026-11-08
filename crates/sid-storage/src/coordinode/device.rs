@@ -454,6 +454,46 @@ impl CoordinodeBackend {
 
     // === Attestations ===
 
+    pub(super) async fn import_device_attestation(
+        &self,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let restored = attestation.clone();
+        let device_id = restored.device_id;
+        self.transaction(move |tx| {
+            // The device is claimed for the binding created under it: its
+            // removal, which takes its bindings, conflicts with this.
+            let rows = tx.run(
+                "MATCH (d:SidDevice) WHERE d.id = $id RETURN id(d) AS node, d.profile_id AS profile_id",
+                Params::default().with("id", bin(device_id.as_bytes())),
+            )?;
+            if !claim_first(tx, &rows)? {
+                return Err(SidError::NotFound(format!("device {device_id}")));
+            }
+            if id(&rows[0], "profile_id", ProfileId::from_slice)? != restored.profile_id {
+                return Err(SidError::Conflict(format!(
+                    "device {device_id} is another profile's"
+                )));
+            }
+            if let Some(stored) =
+                attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop()
+            {
+                return if stored == restored {
+                    Ok(Decision::Abandon(false))
+                } else {
+                    Err(SidError::Conflict(format!(
+                        "device {device_id} has another key binding"
+                    )))
+                };
+            }
+            insert_attestation(tx, &restored)?;
+            finalize(tx, &format!("device_attestation:{device_id}"), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
     pub(super) async fn commit_device_enrollment(
         &self,
         enrollment: &DeviceEnrollment,
@@ -723,6 +763,22 @@ impl CoordinodeBackend {
         let user_code = user_code.to_owned();
         self.read(move |tx| {
             auth_where(tx, "c.user_code = $value", Value::String(user_code.clone()))
+        })
+        .await
+    }
+
+    pub(super) async fn export_device_auth_codes(&self) -> SidResult<Vec<DeviceAuthorizationCode>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (c:SidDeviceAuth) RETURN {AUTH}"),
+                Params::default(),
+            )?;
+            let mut codes = rows
+                .iter()
+                .map(|row| auth(tx, row))
+                .collect::<SidResult<Vec<_>>>()?;
+            codes.sort_by_key(|c| c.id.0);
+            Ok(codes)
         })
         .await
     }

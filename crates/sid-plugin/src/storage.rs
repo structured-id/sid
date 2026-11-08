@@ -28,8 +28,8 @@ use sid_core::models::{
     ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken,
     RegistrationSource, RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
-    SessionEnd, SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
-    UpstreamProvider, UpstreamProviderId,
+    SessionEnd, SessionId, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin, UpstreamProvider,
+    UpstreamProviderId,
 };
 use uuid::Uuid;
 
@@ -314,8 +314,55 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// Principals as stored, with every claim and disposition, ordered by id,
+    /// at most `limit` of those after `after`.
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>>;
+
+    /// Restore `principal` exactly as exported, its claims and disposition
+    /// with it, in one transaction. Returns `false`, writing nothing, when it
+    /// is already stored as given; a different principal or claim under the
+    /// same key is `Conflict` and nothing is written.
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// The email policy revision active for the installation.
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation>;
+
+    /// Make `activation` the installation's active revision as exported,
+    /// while no email key is stored. Returns `false`, writing nothing, when it
+    /// already is; otherwise a store holding email keys is `Conflict`.
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// Every WebAuthn user handle `profile_id` holds, as stored, by relying
+    /// party.
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>>;
+
+    /// Restore `handle` exactly as exported. Returns `false`, writing
+    /// nothing, when it is already stored as given; another handle of the
+    /// Profile at that relying party, or the handle held by another Profile,
+    /// is `Conflict`.
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // Credential reads, transitions, password history and WebAuthn user
-    // handles are `CredentialStore`'s.
+    // handle allocation are `CredentialStore`'s.
 
     // === PASSWORD HISTORY TRANSFER ===
 
@@ -399,6 +446,15 @@ pub trait StorageBackend:
         offset: i32,
     ) -> Result<Vec<AnomalyEventRecord>>;
 
+    /// Store an exported anomaly event as it was recorded. The same event
+    /// stored before is `false` with nothing written; another one under its
+    /// id is a `Conflict`.
+    async fn import_anomaly_event(
+        &self,
+        event: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // === IP REPUTATION ===
 
     /// Record a login event for IP reputation tracking.
@@ -425,6 +481,18 @@ pub trait StorageBackend:
     /// and deletes entries with both counters at zero.
     async fn decay_ip_reputation(&self, older_than: std::time::Duration) -> Result<u64>;
 
+    /// Every address's learned reputation, for an instance transfer.
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>>;
+
+    /// Store an exported reputation as it was learned. The same one stored
+    /// before is `false` with nothing written; another for its address is a
+    /// `Conflict`.
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     // === IP ALLOWLIST ===
 
     /// Add a CIDR to the admin-configured IP allowlist, or relabel it, under
@@ -445,6 +513,17 @@ pub trait StorageBackend:
     async fn list_ip_allowlist_entries(
         &self,
     ) -> Result<Vec<(String, String, chrono::DateTime<chrono::Utc>)>>;
+
+    /// Store an exported allowlist entry with the time it was added. The
+    /// same entry stored before is `false` with nothing written; another for
+    /// its CIDR is a `Conflict`.
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     // === SESSION OPERATIONS ===
 
@@ -805,6 +884,14 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// The installation's login policy epoch, advanced by every change of a
+    /// policy a login is admitted under; `None` until the first change.
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>>;
+
+    /// Store an exported login policy epoch into a store that has none. The
+    /// same epoch stored before is `false`; another one is a `Conflict`.
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> Result<bool>;
+
     /// Make `profile` the first administrator, consuming the admin claim
     /// stored as `claim_sealed`: the claim is removed and the installation
     /// administrator assignment (the built-in role stored if it is not) is
@@ -1010,6 +1097,15 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// Store an exported role assignment as recorded, its holder unchanged (a
+    /// restored connector's revision already counts it). The same one stored
+    /// before is `false` with nothing written; another is a `Conflict`.
+    async fn import_role_assignment(
+        &self,
+        assignment: &RoleAssignment,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The role assignment `id`, with its envelope and provenance.
     async fn get_role_assignment(&self, id: RoleAssignmentId) -> Result<Option<RoleAssignment>>;
 
@@ -1088,11 +1184,6 @@ pub trait StorageBackend:
         &self,
         ctx: MutationContext,
     ) -> Result<Vec<RoleAssignment>>;
-
-    // === SOD (SEPARATION OF DUTIES) ===
-
-    /// List all SoD conflict rules.
-    async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>>;
 
     // === CEDAR POLICY OPERATIONS ===
 
@@ -1202,6 +1293,16 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// Restore the key binding `attestation` as the snapshot holds it, live
+    /// or revoked, onto its device, which must exist and be its Profile's.
+    /// Returns `false`, writing nothing, when exactly this binding is already
+    /// stored; another binding of the device is a `Conflict`, never replaced.
+    async fn import_device_attestation(
+        &self,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// Revoke a device's live attestation and, in the same transaction, stop
     /// counting the device as hardware-attested. False when there is none.
     async fn revoke_device_attestation(
@@ -1291,6 +1392,10 @@ pub trait StorageBackend:
 
     /// Delete expired device authorization codes. Returns count deleted.
     async fn cleanup_expired_device_auth_codes(&self, ctx: MutationContext) -> Result<u64>;
+
+    /// Every device authorization code as stored, decided and redeemed ones
+    /// included, ordered by id.
+    async fn export_device_auth_codes(&self) -> Result<Vec<DeviceAuthorizationCode>>;
 
     // === PROFILE GRANT OPERATIONS ===
 
@@ -1579,6 +1684,10 @@ pub trait StorageBackend:
         org_id: OrgId,
     ) -> Result<Vec<ProvisioningConnector>>;
 
+    /// Every organization's provisioning connectors, retired ones included,
+    /// for an instance transfer.
+    async fn export_provisioning_connectors(&self) -> Result<Vec<ProvisioningConnector>>;
+
     /// Store a new connector. An existing id is refused with
     /// `Error::Conflict`: a create never replaces.
     async fn create_provisioning_connector(
@@ -1654,6 +1763,16 @@ pub trait StorageBackend:
         connector_id: ProvisioningConnectorId,
     ) -> Result<Vec<ProvisioningCredential>>;
 
+    /// Store an exported credential as it was, whatever the state of it and
+    /// its stored connector. The same credential stored before is `false`
+    /// with nothing written; another under its id or verifier is a
+    /// `Conflict`.
+    async fn import_provisioning_credential(
+        &self,
+        credential: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The credential stored with `verifier` and its connector, whatever
     /// their states: the caller decides usability at the time of use.
     async fn find_provisioning_credential(
@@ -1701,6 +1820,21 @@ pub trait StorageBackend:
 
     /// Remove expired quarantine entries. Returns count removed.
     async fn cleanup_expired_quarantine(&self, ctx: MutationContext) -> Result<u64>;
+
+    /// Every quarantine entry as stored, expired ones not yet removed
+    /// included.
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>>;
+
+    /// Restore `entry` exactly as exported. Returns `false`, writing nothing,
+    /// when it is already stored as given; another entry of the same hash is
+    /// `Conflict`.
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     // === CLOSURE REQUEST OPERATIONS ===
 
@@ -1797,6 +1931,10 @@ pub trait StorageBackend:
     /// Count active (non-consumed, non-expired) magic link sessions for an email.
     async fn count_active_magic_links_for_email(&self, email: &str) -> Result<u32>;
 
+    /// Every magic link session as stored, consumed ones included, ordered
+    /// by id.
+    async fn export_magic_link_sessions(&self) -> Result<Vec<MagicLinkSession>>;
+
     // === SCIM OUTBOUND PROVISIONING ===
 
     /// Insert a new SCIM outbound target; an existing id is `Conflict`, never replaced.
@@ -1859,6 +1997,13 @@ pub trait StorageBackend:
         sid_entity_id: Uuid,
         entity_type: OutboundEntityType,
     ) -> Result<Option<ScimOutboundRecord>>;
+
+    /// Every mapping of SCIM target `target_id`, as stored, ordered by
+    /// entity and type.
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>>;
 
     /// Store a dead letter as it stands (snapshot import), counting nothing;
     /// an existing id is `Conflict`, never replaced.
@@ -2030,6 +2175,17 @@ pub trait StorageBackend:
         limit: u64,
     ) -> Result<Vec<sid_core::models::InviteRedemption>>;
 
+    /// Store an exported redemption of invite `id` as it was recorded,
+    /// leaving the invite's use count as stored. The same one stored before
+    /// is `false` with nothing written; another for its Profile is a
+    /// `Conflict`.
+    async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// Atomically increment invite use_count. Returns updated invite if successful
     /// (use_count < max_uses and active and not expired). Returns None if invite
     /// cannot be used — prevents TOCTOU race.
@@ -2048,6 +2204,16 @@ pub trait StorageBackend:
         &self,
         profile_id: ProfileId,
     ) -> Result<Option<RegistrationSource>>;
+
+    /// Store the exported registration source of `profile_id`. The same one
+    /// stored before is `false` with nothing written; another is a
+    /// `Conflict`.
+    async fn import_registration_source(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> Result<bool>;
 
     /// Count registrations by source type in a time range.
     async fn count_registrations_by_source(
@@ -2129,6 +2295,9 @@ pub trait StorageBackend:
     /// List pending access requests (status = Pending, not expired).
     async fn list_pending_access_requests(&self) -> Result<Vec<AccessRequest>>;
 
+    /// Every access request, decided ones included, for an instance transfer.
+    async fn export_access_requests(&self) -> Result<Vec<AccessRequest>>;
+
     /// Record the decision in `request` (status, reviewer, comment, review
     /// time) on a request that is still pending in storage. Returns `false`
     /// and writes nothing when it was already decided, so of concurrent
@@ -2167,6 +2336,10 @@ pub trait StorageBackend:
         &self,
         id: sid_core::models::ResetSessionId,
     ) -> Result<Option<sid_core::models::PasswordResetSession>>;
+
+    /// Every password reset session in any state, for an instance transfer:
+    /// a completed one still answers its token as used.
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>>;
 
     /// Mark a pending, unexpired reset session verified (its emailed token
     /// was checked). Returns `false` and writes nothing otherwise, so a token

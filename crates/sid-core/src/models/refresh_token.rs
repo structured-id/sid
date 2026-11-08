@@ -52,7 +52,7 @@ impl std::error::Error for RefreshTokenError {}
 
 /// Refresh token (stored as SHA-256 hash, never plaintext). `O` is how the
 /// serving authority represents its stable user: a local Profile by default.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshToken<O = ProfileId> {
     /// Token record ID (UUIDv7).
     pub id: Uuid,

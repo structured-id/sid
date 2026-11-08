@@ -82,7 +82,7 @@ impl std::str::FromStr for FlowType {
 ///
 /// Stored per (project_id, flow_type). Configures which steps are enabled
 /// and their parameters — but flow structure is hardcoded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowConfig {
     pub project_id: ProjectId,
     pub flow_type: FlowType,
@@ -102,7 +102,7 @@ fn default_timeout() -> u32 {
 }
 
 /// Configuration for a single step within a flow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepConfig {
     /// Whether this step is enabled. Disabled steps are skipped.
     #[serde(default = "default_true")]
@@ -233,7 +233,7 @@ pub enum ActionOnError {
 }
 
 /// An action attached to a flow at a specific hook point.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowAction {
     pub id: FlowActionId,
 
@@ -276,7 +276,7 @@ pub struct FlowAction {
 }
 
 /// Action-type-specific configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionConfig {
     /// Webhook: HTTP POST to URL.

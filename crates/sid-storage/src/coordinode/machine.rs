@@ -801,6 +801,60 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn export_provisioning_connectors(
+        &self,
+    ) -> SidResult<Vec<ProvisioningConnector>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                &format!("MATCH (c:SidProvisioningConnector) RETURN {CONNECTOR}"),
+                Params::default(),
+            )?;
+            let mut all = rows.iter().map(connector).collect::<SidResult<Vec<_>>>()?;
+            all.sort_by_key(|c| c.id);
+            Ok(all)
+        })
+        .await
+    }
+
+    pub(super) async fn import_provisioning_credential(
+        &self,
+        k: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let k = k.clone();
+        self.transaction(move |tx| {
+            let held = tx.run(
+                &format!(
+                    "MATCH (k:SidProvisioningCredential) WHERE k.id = $id
+                     RETURN {CONNECTOR_CREDENTIAL}"
+                ),
+                Params::default().with("id", bin(k.id.as_bytes())),
+            )?;
+            if let Some(row) = held.first() {
+                return crate::transfer_repeat(
+                    &connector_credential(row)?,
+                    &k,
+                    "connector credential",
+                )
+                .map(Decision::Abandon);
+            }
+            // Its connector's turn orders this with the connector's other writes.
+            take_turn(
+                tx,
+                "SidProvisioningConnector",
+                bin(k.connector_id.as_bytes()),
+            )?;
+            insert_connector_credential(tx, &k)?;
+            finalize(
+                tx,
+                &format!("provisioning_credential:{}", k.id),
+                ctx.clone(),
+            )?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
     pub(super) async fn create_provisioning_connector(
         &self,
         c: &ProvisioningConnector,

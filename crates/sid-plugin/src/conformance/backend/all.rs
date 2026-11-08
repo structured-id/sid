@@ -164,6 +164,7 @@ macro_rules! __storage_conformance {
                 test_an_enrollment_without_current_authority_commits_nothing
                 test_a_revocation_holds_only_under_a_live_sign_in
                 test_a_rotation_racing_a_revocation_settles
+                test_a_device_binding_is_restored_as_stored
                 test_concurrent_finishes_bind_once
                 test_a_retried_finish_is_answered_by_its_outcome
             );
@@ -270,6 +271,7 @@ macro_rules! __storage_conformance {
                 test_update_role_is_compare_and_swap
                 test_oauth_client_role_assignment
                 test_connector_role_assignment
+                test_imported_assignment_keeps_its_connector_revision
                 test_roles_by_project_and_name
                 test_role_assignments_by_principal
                 test_held_role_assignments_and_roles
@@ -299,6 +301,20 @@ macro_rules! __storage_conformance {
             $crate::__storage_scenarios!($setup [$(super::$finish)?],session_elevation:
                 test_session_elevation_roundtrip
                 test_session_base_level_refuses_step_up_levels
+            );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],transfer:
+                test_principals_move_as_stored
+                test_quarantined_key_restores_at_its_revision
+                test_email_policy_activation_moves
+                test_quarantine_moves_as_stored
+                test_user_handles_move_as_stored
+                test_profile_restores_at_its_revision
+                test_signals_move_as_stored
+                test_login_policy_epoch_moves
+                test_sign_in_records_move_as_stored
+                test_enrollment_records_move_as_stored
+                test_connector_credentials_move_as_stored
+                test_flow_action_restores_at_its_revision
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],upstream:
                 test_upstream_provider_write_contract

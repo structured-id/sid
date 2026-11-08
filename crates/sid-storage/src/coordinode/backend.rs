@@ -29,8 +29,8 @@ use sid_core::models::{
     ProtectedResource, RefreshToken, RegistrationSource, RegistrationSourceType, ResourceAccess,
     ResourceId, ResourceIndicator, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
-    SessionEnd, SessionId, SignInProof, SodConflictRule, UpstreamIdentity, UpstreamIdentityId,
-    UpstreamLogin, UpstreamProvider, UpstreamProviderId,
+    SessionEnd, SessionId, SignInProof, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
+    UpstreamProvider, UpstreamProviderId,
 };
 use sid_core::{Error as SidError, Result};
 use sid_plugin::storage::{JobLock, StorageBackend};
@@ -101,6 +101,19 @@ impl IssuerStore for CoordinodeBackend {
 
     async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> Result<Vec<IssuerSigningKey>> {
         CoordinodeBackend::oidc_issuer_signing_keys(self, issuer).await
+    }
+
+    async fn list_oidc_issuers(&self) -> Result<Vec<OidcIssuer>> {
+        CoordinodeBackend::list_oidc_issuers(self).await
+    }
+
+    async fn import_oidc_issuer(
+        &self,
+        issuer: &OidcIssuer,
+        keys: &[IssuerSigningKey],
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_oidc_issuer(self, issuer, keys, ctx).await
     }
 }
 
@@ -218,6 +231,21 @@ impl GrantStore for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<sid_core::models::NativeRotationOutcome> {
         CoordinodeBackend::rotate_native_generation(self, rotation, ctx).await
+    }
+
+    async fn export_session_grants(
+        &self,
+        id: SessionId,
+    ) -> Result<sid_core::models::SessionGrants> {
+        CoordinodeBackend::export_session_grants(self, id).await
+    }
+
+    async fn import_session_grants(
+        &self,
+        grants: &sid_core::models::SessionGrants,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_session_grants(self, grants, ctx).await
     }
 
     async fn create_auth_code(&self, code: &AuthorizationCode, ctx: MutationContext) -> Result<()> {
@@ -446,6 +474,19 @@ impl SignInHistoryStore for CoordinodeBackend {
 
     async fn get_designated_countries(&self, profile_id: ProfileId) -> Result<Vec<String>> {
         CoordinodeBackend::get_designated_countries(self, profile_id).await
+    }
+
+    async fn export_login_locations(&self) -> Result<Vec<(ProfileId, sid_plugin::LoginLocation)>> {
+        CoordinodeBackend::export_login_locations(self).await
+    }
+
+    async fn import_login_location(
+        &self,
+        owner: ProfileId,
+        location: &sid_plugin::LoginLocation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_login_location(self, owner, location, ctx).await
     }
 }
 
@@ -753,6 +794,36 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, DateTime<Utc>)>> {
         CoordinodeBackend::list_ip_allowlist_entries(self).await
+    }
+
+    async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: DateTime<Utc>,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_ip_allowlist_entry(self, cidr, description, created_at, ctx).await
+    }
+
+    async fn import_anomaly_event(
+        &self,
+        event: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_anomaly_event(self, event, ctx).await
+    }
+
+    async fn export_ip_reputation(&self) -> Result<Vec<sid_core::models::IpReputation>> {
+        CoordinodeBackend::export_ip_reputation(self).await
+    }
+
+    async fn import_ip_reputation(
+        &self,
+        reputation: &sid_core::models::IpReputation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_ip_reputation(self, reputation, ctx).await
     }
 
     // === SESSIONS ===
@@ -1098,6 +1169,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::set_enrollment_policy(self, policy, mode, ctx).await
     }
 
+    async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
+        CoordinodeBackend::login_policy_epoch(self).await
+    }
+
+    async fn import_login_policy_epoch(&self, epoch: i64, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::import_login_policy_epoch(self, epoch, ctx).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -1296,6 +1375,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::create_role_assignment(self, assignment, ctx).await
     }
 
+    async fn import_role_assignment(
+        &self,
+        assignment: &RoleAssignment,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_role_assignment(self, assignment, ctx).await
+    }
+
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,
@@ -1385,11 +1472,6 @@ impl StorageBackend for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<Vec<RoleAssignment>> {
         CoordinodeBackend::cleanup_expired_role_assignments(self, ctx).await
-    }
-
-    async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>> {
-        // No write path stores separation-of-duties rules: none are held.
-        Ok(Vec::new())
     }
 
     // === CEDAR POLICIES ===
@@ -1502,6 +1584,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::commit_device_enrollment(self, enrollment, ctx).await
     }
 
+    async fn import_device_attestation(
+        &self,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_device_attestation(self, attestation, ctx).await
+    }
+
     async fn revoke_device_attestation(
         &self,
         device_id: DeviceId,
@@ -1593,6 +1683,10 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn cleanup_expired_device_auth_codes(&self, ctx: MutationContext) -> Result<u64> {
         CoordinodeBackend::cleanup_expired_device_auth_codes(self, ctx).await
+    }
+
+    async fn export_device_auth_codes(&self) -> Result<Vec<DeviceAuthorizationCode>> {
+        CoordinodeBackend::export_device_auth_codes(self).await
     }
 
     // === PROFILE GRANTS ===
@@ -1897,6 +1991,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_provisioning_connectors(self, org_id).await
     }
 
+    async fn export_provisioning_connectors(&self) -> Result<Vec<ProvisioningConnector>> {
+        CoordinodeBackend::export_provisioning_connectors(self).await
+    }
+
     async fn create_provisioning_connector(
         &self,
         connector: &ProvisioningConnector,
@@ -1969,6 +2067,14 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_provisioning_credentials(self, connector_id).await
     }
 
+    async fn import_provisioning_credential(
+        &self,
+        credential: &ProvisioningCredential,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_provisioning_credential(self, credential, ctx).await
+    }
+
     async fn find_provisioning_credential(
         &self,
         verifier: &str,
@@ -2035,6 +2141,63 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn cleanup_expired_quarantine(&self, ctx: MutationContext) -> Result<u64> {
         CoordinodeBackend::cleanup_expired_quarantine(self, ctx).await
+    }
+
+    async fn export_principal_quarantine(
+        &self,
+    ) -> Result<Vec<sid_core::models::QuarantinedPrincipal>> {
+        CoordinodeBackend::export_principal_quarantine(self).await
+    }
+
+    async fn import_principal_quarantine(
+        &self,
+        entry: &sid_core::models::QuarantinedPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_principal_quarantine(self, entry, ctx).await
+    }
+
+    async fn export_principals(
+        &self,
+        after: Option<PrincipalId>,
+        limit: u32,
+    ) -> Result<Vec<sid_core::models::StoredPrincipal>> {
+        CoordinodeBackend::export_principals(self, after, limit).await
+    }
+
+    async fn export_webauthn_user_handles(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Vec<sid_core::models::StoredUserHandle>> {
+        CoordinodeBackend::export_webauthn_user_handles(self, profile_id).await
+    }
+
+    async fn import_webauthn_user_handle(
+        &self,
+        handle: &sid_core::models::StoredUserHandle,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_webauthn_user_handle(self, handle, ctx).await
+    }
+
+    async fn import_principal(
+        &self,
+        principal: &sid_core::models::StoredPrincipal,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_principal(self, principal, ctx).await
+    }
+
+    async fn email_policy_activation(&self) -> Result<sid_core::models::EmailPolicyActivation> {
+        CoordinodeBackend::email_policy_activation(self).await
+    }
+
+    async fn import_email_policy_activation(
+        &self,
+        activation: &sid_core::models::EmailPolicyActivation,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_email_policy_activation(self, activation, ctx).await
     }
 
     async fn create_closure_request(
@@ -2132,6 +2295,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::count_active_magic_links_for_email(self, email).await
     }
 
+    async fn export_magic_link_sessions(&self) -> Result<Vec<MagicLinkSession>> {
+        CoordinodeBackend::export_magic_link_sessions(self).await
+    }
+
     // === SCIM OUTBOUND ===
 
     async fn create_scim_outbound_target(
@@ -2196,6 +2363,13 @@ impl StorageBackend for CoordinodeBackend {
     ) -> Result<Option<ScimOutboundRecord>> {
         CoordinodeBackend::get_scim_outbound_record(self, target_id, sid_entity_id, entity_type)
             .await
+    }
+
+    async fn list_scim_outbound_records(
+        &self,
+        target_id: ScimOutboundTargetId,
+    ) -> Result<Vec<ScimOutboundRecord>> {
+        CoordinodeBackend::list_scim_outbound_records(self, target_id).await
     }
 
     async fn create_outbound_dlq_entry(
@@ -2375,6 +2549,15 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_invite_redemptions(self, id, offset, limit).await
     }
 
+    async fn import_invite_redemption(
+        &self,
+        id: InviteId,
+        redemption: &sid_core::models::InviteRedemption,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_invite_redemption(self, id, redemption, ctx).await
+    }
+
     async fn try_use_invite(&self, id: InviteId, ctx: MutationContext) -> Result<Option<Invite>> {
         CoordinodeBackend::try_use_invite(self, id, ctx).await
     }
@@ -2388,6 +2571,15 @@ impl StorageBackend for CoordinodeBackend {
         profile_id: ProfileId,
     ) -> Result<Option<RegistrationSource>> {
         CoordinodeBackend::get_registration_source(self, profile_id).await
+    }
+
+    async fn import_registration_source(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::import_registration_source(self, profile_id, source, ctx).await
     }
 
     async fn count_registrations_by_source(
@@ -2479,6 +2671,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_pending_access_requests(self).await
     }
 
+    async fn export_access_requests(&self) -> Result<Vec<AccessRequest>> {
+        CoordinodeBackend::export_access_requests(self).await
+    }
+
     async fn decide_access_request(
         &self,
         request: &AccessRequest,
@@ -2511,6 +2707,10 @@ impl StorageBackend for CoordinodeBackend {
         id: sid_core::models::ResetSessionId,
     ) -> Result<Option<sid_core::models::PasswordResetSession>> {
         CoordinodeBackend::get_reset_session(self, id).await
+    }
+
+    async fn export_reset_sessions(&self) -> Result<Vec<sid_core::models::PasswordResetSession>> {
+        CoordinodeBackend::export_reset_sessions(self).await
     }
 
     async fn verify_reset_session(

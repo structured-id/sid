@@ -18,7 +18,7 @@ use sid_core::models::{
     Credential, CredentialData, CredentialId, CredentialRevocation, CredentialType, HistoryArchive,
     HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId,
     HistoryEpochUse, HistoryEvidence, HistoryKsf, HistorySuite, MutationContext, PasswordHistory,
-    Profile, ProfileId, WebAuthnUserHandle,
+    Profile, ProfileId, StoredUserHandle, WebAuthnUserHandle,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -606,6 +606,20 @@ fn handle_key(rp_id: &str, handle: &WebAuthnUserHandle) -> SidResult<Value> {
     key(&[rp_id.as_bytes(), handle.0.as_slice()])
 }
 
+const HANDLE: &str = "w.profile_id AS profile_id, w.rp_id AS rp_id, w.user_handle AS user_handle,
+    w.created_at AS created_at";
+
+fn stored_handle(row: &Row) -> SidResult<StoredUserHandle> {
+    Ok(StoredUserHandle {
+        profile_id: ProfileId::from_uuid(get_uuid(row, "profile_id")?)
+            .map_err(|e| SidError::Storage(format!("handle profile: {e}")))?,
+        rp_id: get_text(row, "rp_id")?,
+        handle: WebAuthnUserHandle::from_slice(&get_bytes(row, "user_handle")?)
+            .ok_or_else(|| SidError::Storage("user_handle: not 16 bytes".into()))?,
+        created_at: get_time(row, "created_at")?,
+    })
+}
+
 impl CoordinodeBackend {
     pub(super) async fn get_credential(&self, id: CredentialId) -> SidResult<Option<Credential>> {
         self.read(move |tx| get(tx, id)).await
@@ -966,6 +980,82 @@ impl CoordinodeBackend {
             )?;
             finalize(tx, &format!("profile:{owner}"), ctx.clone())?;
             Ok(Decision::Commit(candidate))
+        })
+        .await
+    }
+
+    pub(super) async fn export_webauthn_user_handles(
+        &self,
+        owner: ProfileId,
+    ) -> SidResult<Vec<StoredUserHandle>> {
+        self.read(move |tx| {
+            let mut handles = tx
+                .run(
+                    &format!(
+                        "MATCH (w:SidWebAuthnHandle) WHERE w.profile_id = $id RETURN {HANDLE}"
+                    ),
+                    Params::default().with("id", profile_value(owner)),
+                )?
+                .iter()
+                .map(stored_handle)
+                .collect::<SidResult<Vec<_>>>()?;
+            handles.sort_by(|a, b| a.rp_id.cmp(&b.rp_id));
+            Ok(handles)
+        })
+        .await
+    }
+
+    pub(super) async fn import_webauthn_user_handle(
+        &self,
+        handle: &StoredUserHandle,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let handle = handle.clone();
+        self.transaction(move |tx| {
+            let pair = key(&[handle.profile_id.as_bytes(), handle.rp_id.as_bytes()])?;
+            let by_key = handle_key(&handle.rp_id, &handle.handle)?;
+            let held = tx
+                .run(
+                    &format!(
+                        "MATCH (w:SidWebAuthnHandle) WHERE w.pair = $pair OR w.handle_key = $key
+                         RETURN {HANDLE}"
+                    ),
+                    Params::default()
+                        .with("pair", pair.clone())
+                        .with("key", by_key.clone()),
+                )?
+                .iter()
+                .map(stored_handle)
+                .collect::<SidResult<Vec<_>>>()?;
+            if held.iter().any(|h| *h != handle) {
+                return Err(SidError::Conflict(
+                    "another user handle is stored at the relying party".into(),
+                ));
+            }
+            if !held.is_empty() {
+                return Ok(Decision::Abandon(false));
+            }
+            let profile = tx.run(
+                "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
+                Params::default().with("id", profile_value(handle.profile_id)),
+            )?;
+            if !claim_first(tx, &profile)? {
+                return Err(SidError::NotFound(format!("profile {}", handle.profile_id)));
+            }
+            tx.run(
+                "CREATE (w:SidWebAuthnHandle {pair: $pair, handle_key: $handle_key,
+                    profile_id: $profile, rp_id: $rp_id, user_handle: $handle,
+                    created_at: $created_at})",
+                Params::default()
+                    .with("pair", pair)
+                    .with("handle_key", by_key)
+                    .with("profile", profile_value(handle.profile_id))
+                    .with("rp_id", Value::String(handle.rp_id.clone()))
+                    .with("handle", Value::Binary(handle.handle.0.to_vec()))
+                    .with("created_at", time(handle.created_at)),
+            )?;
+            finalize(tx, &format!("profile:{}", handle.profile_id), ctx.clone())?;
+            Ok(Decision::Commit(true))
         })
         .await
     }

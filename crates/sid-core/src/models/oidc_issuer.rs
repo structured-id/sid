@@ -136,13 +136,35 @@ impl OidcIssuer {
         }
         Ok(())
     }
+
+    /// Whether `keys` may be this issuer's complete key history: all its
+    /// own, generations 1, 2, … in order without a gap.
+    pub fn check_keys(&self, keys: &[IssuerSigningKey]) -> crate::Result<()> {
+        let Some(first) = keys.first() else {
+            return Err(crate::Error::Validation(format!(
+                "issuer {} has no signing key",
+                self.id
+            )));
+        };
+        self.check_first_key(first)?;
+        for (expected, key) in (1u32..).zip(keys) {
+            if key.issuer_id != self.id || key.generation != expected {
+                return Err(crate::Error::Validation(format!(
+                    "signing keys of issuer {} are not its generations in order",
+                    self.id
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One generation of an issuer's Ed25519 token-signing key.
 ///
 /// The private key is stored only sealed under the key manager, bound to
-/// [`IssuerSigningKey::sealing_context`].
-#[derive(Clone)]
+/// [`IssuerSigningKey::sealing_context`]; a snapshot carries it sealed, as
+/// stored.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuerSigningKey {
     pub issuer_id: IssuerId,
     /// 1 for the first key; the highest generation signs.

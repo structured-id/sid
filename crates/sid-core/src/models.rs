@@ -47,6 +47,7 @@ pub mod event;
 pub mod incident;
 pub mod instance_secret;
 pub mod invite;
+pub mod ip_reputation;
 pub mod machine_user;
 pub mod magic_link;
 pub mod mapped_claims;
@@ -126,7 +127,7 @@ pub use consent::{
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialFence, CredentialId,
     CredentialRevocation, CredentialType, PolicyEvidence, PrincipalAssignmentFence, SignInProof,
-    WebAuthnUserHandle,
+    StoredUserHandle, WebAuthnUserHandle,
 };
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
@@ -166,6 +167,7 @@ pub use invite::{
     INVITE_CODE_LENGTH, Invite, InviteCreator, InviteFilter, InviteId, InviteRedemption,
     InviteStatus, generate_invite_code, normalize_invite_code,
 };
+pub use ip_reputation::IpReputation;
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,
     MachineOwner, MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId,
@@ -183,7 +185,8 @@ pub use mfa::{
 pub use mutation::{ActorFence, CeremonyConsumption, MutationContext};
 pub use native_session::{
     NATIVE_EXCHANGE_LEN, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
-    NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome,
+    NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome, SessionGrants,
+    StoredNativeGeneration,
 };
 pub use notification::{
     DeliveryResult, DeliveryStatus, NotificationChannel, NotificationId, NotificationPriority,
@@ -201,12 +204,13 @@ pub use operation::{
 };
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
-    CLEANUP_SETTLED_NAMESPACE, CleanupSettled, ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission,
-    EnrollmentCleanup, HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch,
-    HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf,
-    HistoryLiveSet, HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
-    OWNER_PURGE_KIND, OwnerPurge, PasswordHistory, RelayedCleanup, WrappedHistoryKey,
-    cleanup_successor, history_key_context,
+    AbandonedEnrollment, CLEANUP_SETTLED_NAMESPACE, CleanupSettled, ENROLLMENT_ADMISSION_KIND,
+    EnrollmentAdmission, EnrollmentCleanup, HistoryArchive, HistoryCommit, HistoryEntry,
+    HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryEvidence,
+    HistoryKsf, HistoryLiveSet, HistoryPreparation, HistorySuite, KeyArchive, KeyAuditRecord,
+    KeyEpoch, KeyEpochs, KeyLifecycle, KeyStoreRecords, KeyUse, NewKeyEpoch, OWNER_PURGE_KIND,
+    OwnerPurge, PasswordHistory, PurgedOwner, RelayedCleanup, WrappedHistoryKey, cleanup_successor,
+    history_key_context,
 };
 pub use password_reset::{
     PASSWORD_RESET_EMAIL_KIND, PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId,
@@ -214,9 +218,10 @@ pub use password_reset::{
 };
 pub use pat::{PatId, PatModel, PatStatus, PersonalAccessToken};
 pub use principal::{
+    EmailKeyDisposition, EmailKeyOutcome, EmailPolicyActivation,
     INSTALLATION_EMAIL_POLICY_REVISION, Principal, PrincipalBinding, PrincipalBindingId,
-    PrincipalEligibility, PrincipalEntity, PrincipalId, PrincipalType, UnknownPrincipalType,
-    check_principal_eligibility, federated_subject_value,
+    PrincipalEligibility, PrincipalEntity, PrincipalId, PrincipalType, QuarantinedPrincipal,
+    StoredPrincipal, UnknownPrincipalType, check_principal_eligibility, federated_subject_value,
 };
 pub use principal_contest::{
     ContestCheck, PRINCIPAL_CONTEST_CHECK_ATTEMPTS, PRINCIPAL_CONTEST_CHECK_KIND,

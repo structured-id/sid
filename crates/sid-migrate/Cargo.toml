@@ -21,8 +21,9 @@ sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-keys = { workspace = true }
 sid-authn = { workspace = true }
-# The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
+# The process's JWT signature provider, installed at startup, and the
+# primitives that seal snapshot archives.
+sid-crypto = { workspace = true, features = ["jwt", "aws-lc", "tls-aws-lc"] }
 sid-storage = { path = "../sid-storage", default-features = false }
 
 # CLI
@@ -50,8 +51,6 @@ uuid = { workspace = true }
 # Time
 chrono = { workspace = true }
 
-# URL parsing (for sanitizing connection strings in metadata)
-url = { workspace = true }
 
 [dev-dependencies]
 sid-crypto = { workspace = true, features = ["primitives"] }

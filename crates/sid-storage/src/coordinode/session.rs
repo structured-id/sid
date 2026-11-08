@@ -20,7 +20,8 @@ use sid_core::models::{
     AuthCodeRedemption, AuthLevel, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
     GrantAuthentication, MutationContext, NativeExchange, NativeGeneration, NativeGenerationState,
     NativePresented, NativeRotation, NativeRotationOutcome, ProfileId, RefreshToken,
-    RevocationReason, Session, SessionAuthentication, SessionEnd, SessionId, SignInProof,
+    RevocationReason, Session, SessionAuthentication, SessionEnd, SessionGrants, SessionId,
+    SignInProof, StoredNativeGeneration,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -923,39 +924,7 @@ impl CoordinodeBackend {
             if !claim_session(tx, auth.session)? {
                 return Err(SidError::NotFound(format!("session {}", auth.session)));
             }
-            tx.run(
-                "CREATE (a:SidAuthCode {code_hash: $hash, profile_id: $profile_id,
-                    client_id: $client_id, redirect_uri: $redirect_uri, scopes: $scopes,
-                    code_challenge: $code_challenge, nonce: $nonce, expires_at: $expires_at,
-                    created_at: $created_at, used: $used, session_id: null,
-                    resource_id: $resource_id, authorizing_session_id: $authorizing,
-                    authenticated_at: $authenticated_at, amr: $amr,
-                    assurance_level: $assurance_level, elevation_level: $elevation_level,
-                    elevation_until: $elevation_until})",
-                elevation_params(
-                    Params::default()
-                        .with("hash", Value::Binary(code.code_hash.clone()))
-                        .with("profile_id", profile_value(code.profile_id))
-                        .with("client_id", Value::String(code.client_id.clone()))
-                        .with("redirect_uri", Value::String(code.redirect_uri.clone()))
-                        .with("scopes", texts(&code.scopes))
-                        .with("code_challenge", opt_text(code.code_challenge.as_deref()))
-                        .with("nonce", opt_text(code.nonce.as_deref()))
-                        .with("expires_at", time(code.expires_at))
-                        .with("created_at", time(code.created_at))
-                        .with("used", Value::Bool(code.used))
-                        .with("resource_id", uuid(code.resource.as_uuid()))
-                        .with("authorizing", session_value(auth.session))
-                        .with("authenticated_at", time(auth.authenticated_at))
-                        .with("amr", texts(&auth.amr))
-                        .with(
-                            "assurance_level",
-                            Value::String(auth.assurance_level.as_str().into()),
-                        ),
-                    auth.elevation,
-                ),
-            )?;
-            Ok(())
+            insert_code(tx, &code)
         })
         .await
     }
@@ -1122,6 +1091,223 @@ impl CoordinodeBackend {
         })
         .await
     }
+
+    // === Moving a session's grants ===
+
+    pub(super) async fn export_session_grants(&self, id: SessionId) -> SidResult<SessionGrants> {
+        self.transaction(move |tx| Ok(Decision::Abandon(session_grants(tx, id)?)))
+            .await
+    }
+
+    pub(super) async fn import_session_grants(
+        &self,
+        grants: &SessionGrants,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        if grants
+            .refresh_tokens
+            .iter()
+            .any(|t| t.session_id != grants.session)
+            || grants
+                .authorization_codes
+                .iter()
+                .any(|c| c.authentication.session != grants.session)
+            || grants
+                .native_generations
+                .iter()
+                .any(|g| g.generation.session_id != grants.session)
+        {
+            return Err(SidError::Validation(
+                "a grant names another session than the one it moves with".into(),
+            ));
+        }
+        let mut given = grants.clone();
+        for generation in &mut given.native_generations {
+            generation.generation.credential_hashes.sort();
+        }
+        self.transaction(move |tx| {
+            // Ending the session removes its grants: the claim makes that
+            // conflict with this import.
+            if !claim_session(tx, given.session)? {
+                return Err(SidError::NotFound(format!("session {}", given.session)));
+            }
+            let stored = session_grants(tx, given.session)?;
+            let mut written = false;
+            for token in &given.refresh_tokens {
+                if !same(
+                    stored.refresh_tokens.iter().find(|t| t.id == token.id),
+                    token,
+                    "refresh token",
+                )? {
+                    insert_token(tx, token)?;
+                    written = true;
+                }
+            }
+            for code in &given.authorization_codes {
+                let held = stored
+                    .authorization_codes
+                    .iter()
+                    .find(|c| c.code_hash == code.code_hash);
+                if !same(held, code, "authorization code")? {
+                    insert_code(tx, code)?;
+                    written = true;
+                }
+            }
+            for generation in &given.native_generations {
+                let held = stored
+                    .native_generations
+                    .iter()
+                    .find(|g| g.generation.id == generation.generation.id);
+                if !same(held, generation, "native generation")? {
+                    insert_stored_generation(tx, generation)?;
+                    written = true;
+                }
+            }
+            if !written {
+                return Ok(Decision::Abandon(false));
+            }
+            finalize(tx, &format!("session:{}", given.session), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+}
+
+/// `stored` is `given`, or nothing is stored under its key.
+fn same<T: PartialEq>(stored: Option<&T>, given: &T, what: &str) -> SidResult<bool> {
+    match stored {
+        None => Ok(false),
+        Some(stored) if stored == given => Ok(true),
+        Some(_) => Err(SidError::Conflict(format!(
+            "a different {what} is stored under the same key"
+        ))),
+    }
+}
+
+/// Every grant session `id` holds, as stored, read in `tx`.
+fn session_grants(tx: &Statements<'_>, id: SessionId) -> SidResult<SessionGrants> {
+    let params = || Params::default().with("id", session_value(id));
+    let mut refresh_tokens = tx
+        .run(
+            &format!("MATCH (t:SidRefreshToken) WHERE t.session_id = $id RETURN {TOKEN}"),
+            params(),
+        )?
+        .iter()
+        .map(token)
+        .collect::<SidResult<Vec<_>>>()?;
+    refresh_tokens.sort_by_key(|t| t.id);
+    let mut authorization_codes = tx
+        .run(
+            &format!("MATCH (a:SidAuthCode) WHERE a.authorizing_session_id = $id RETURN {CODE}"),
+            params(),
+        )?
+        .iter()
+        .map(code)
+        .collect::<SidResult<Vec<_>>>()?;
+    authorization_codes.sort_by(|a, b| a.code_hash.cmp(&b.code_hash));
+    let mut native_generations = Vec::new();
+    for row in tx.run(
+        &format!("MATCH (g:SidNativeGeneration) WHERE g.session_id = $id RETURN {GENERATION}"),
+        params(),
+    )? {
+        let presented = presented(&row)?;
+        let mut credential_hashes = tx
+            .run(
+                "MATCH (c:SidNativeCredential) WHERE c.generation_id = $id
+                 RETURN c.credential_hash AS hash",
+                Params::default().with("id", uuid(&presented.generation)),
+            )?
+            .iter()
+            .map(|r| get_bytes(r, "hash"))
+            .collect::<SidResult<Vec<_>>>()?;
+        credential_hashes.sort();
+        native_generations.push(StoredNativeGeneration {
+            generation: NativeGeneration {
+                id: presented.generation,
+                session_id: presented.session_id,
+                key_jkt: presented.key_jkt,
+                credential_hashes,
+                expires_at: presented.expires_at,
+                created_at: get_time(&row, "created_at")?,
+            },
+            state: presented.state,
+        });
+    }
+    native_generations.sort_by_key(|g| g.generation.id);
+    Ok(SessionGrants {
+        session: id,
+        refresh_tokens,
+        authorization_codes,
+        native_generations,
+    })
+}
+
+/// Store `code` in `tx` as given, its redemption included.
+fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
+    let auth = &code.authentication;
+    check_levels(auth.assurance_level, auth.elevation)?;
+    tx.run(
+        "CREATE (a:SidAuthCode {code_hash: $hash, profile_id: $profile_id,
+            client_id: $client_id, redirect_uri: $redirect_uri, scopes: $scopes,
+            code_challenge: $code_challenge, nonce: $nonce, expires_at: $expires_at,
+            created_at: $created_at, used: $used, session_id: $session_id,
+            resource_id: $resource_id, authorizing_session_id: $authorizing,
+            authenticated_at: $authenticated_at, amr: $amr,
+            assurance_level: $assurance_level, elevation_level: $elevation_level,
+            elevation_until: $elevation_until})",
+        elevation_params(
+            Params::default()
+                .with("hash", Value::Binary(code.code_hash.clone()))
+                .with("profile_id", profile_value(code.profile_id))
+                .with("client_id", Value::String(code.client_id.clone()))
+                .with("redirect_uri", Value::String(code.redirect_uri.clone()))
+                .with("scopes", texts(&code.scopes))
+                .with("code_challenge", opt_text(code.code_challenge.as_deref()))
+                .with("nonce", opt_text(code.nonce.as_deref()))
+                .with("expires_at", time(code.expires_at))
+                .with("created_at", time(code.created_at))
+                .with("used", Value::Bool(code.used))
+                .with(
+                    "session_id",
+                    code.session_id.map_or(Value::Null, session_value),
+                )
+                .with("resource_id", uuid(code.resource.as_uuid()))
+                .with("authorizing", session_value(auth.session))
+                .with("authenticated_at", time(auth.authenticated_at))
+                .with("amr", texts(&auth.amr))
+                .with(
+                    "assurance_level",
+                    Value::String(auth.assurance_level.as_str().into()),
+                ),
+            auth.elevation,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Store generation `stored` in `tx`, with where it stands.
+fn insert_stored_generation(tx: &Statements<'_>, stored: &StoredNativeGeneration) -> SidResult<()> {
+    insert_generation(tx, &stored.generation)?;
+    if let NativeGenerationState::Rotated {
+        exchange,
+        successor,
+        redeliver_until,
+        sealed,
+    } = &stored.state
+    {
+        tx.run(
+            "MATCH (g:SidNativeGeneration) WHERE g.id = $id
+             SET g.exchange = $exchange, g.successor_id = $successor,
+                 g.redeliver_until = $until, g.sealed = $sealed",
+            Params::default()
+                .with("id", uuid(&stored.generation.id))
+                .with("exchange", Value::Binary(exchange.as_bytes().to_vec()))
+                .with("successor", uuid(successor))
+                .with("until", time(*redeliver_until))
+                .with("sealed", sealed.clone().map_or(Value::Null, Value::Binary)),
+        )?;
+    }
+    Ok(())
 }
 
 /// A sign-in proof the transaction keeps across its runs.

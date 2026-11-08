@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Context binding prevents ciphertext swapping between fields (for instance
 /// moving one account's TOTP secret onto another's row).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedField {
     /// AES-256-GCM ciphertext.
     pub ciphertext: Vec<u8>,

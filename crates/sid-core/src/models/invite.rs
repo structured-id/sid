@@ -115,7 +115,7 @@ pub struct InviteRedemption {
 // ── Invite entity ───────────────────────────────────────────────
 
 /// Invite code for gated registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Invite {
     /// Unique invite ID.
     pub id: InviteId,

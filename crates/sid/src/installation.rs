@@ -37,6 +37,9 @@ pub struct InstallationSettings {
     pub access_token_ttl: AccessTokenTtl,
     /// Who manages the installation; `None` keeps what is recorded.
     pub management: Option<Management>,
+    /// The separation-of-duties conflicts an administrator is warned of. They
+    /// belong to the installation configuration, never to its store.
+    pub sod_warnings: Vec<sid_core::models::SodConflictRule>,
 }
 
 /// Who manages an installation.
@@ -70,6 +73,9 @@ pub struct Installation {
     pub revocation_cache: Arc<RevocationCache>,
     /// The key every replica signs and checks proof-of-work challenges with.
     pub captcha_pow_key: [u8; 32],
+    /// The configured separation-of-duties warnings, for authorization
+    /// management.
+    pub sod_warnings: Arc<sid_authz::sod::SodService>,
 }
 
 /// Why an installation does not open. Nothing is served from a store that
@@ -222,7 +228,18 @@ impl Installation {
             opaque_router,
             revocation_cache,
             captcha_pow_key,
+            sod_warnings: Arc::new(sid_authz::sod::SodService::new(settings.sod_warnings)),
         })
+    }
+
+    /// Authorization management of this installation, warning of the
+    /// separation-of-duties conflicts its settings configure.
+    pub fn authorization(
+        &self,
+        cedar: sid_authz::cedar::CedarService,
+    ) -> crate::authorization::Authorization {
+        crate::authorization::Authorization::new(self.storage.clone(), cedar)
+            .with_sod_warnings(self.sod_warnings.clone())
     }
 
     /// The administrator claim token while the claim is open, for the host

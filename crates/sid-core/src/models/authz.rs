@@ -30,7 +30,7 @@ pub use sid_ids::RoleId;
 /// Scoped to a project — each project defines its own role set.
 /// `key` is the stable machine identifier (used in Cedar policies, tokens).
 /// `name` is the human-readable display name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Role {
     pub id: RoleId,
     pub project_id: ProjectId,
@@ -256,7 +256,7 @@ pub use sid_ids::GroupId;
 ///
 /// Scoped to a project — each project defines its own groups.
 /// Groups are flat (parent_group_id always None).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: GroupId,
     pub project_id: ProjectId,
@@ -289,7 +289,7 @@ impl Group {
 }
 
 /// Group membership record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupMember {
     pub group_id: GroupId,
     pub profile_id: ProfileId,
@@ -392,7 +392,7 @@ impl std::fmt::Display for ScopeType {
 pub const ROLE_EXPIRY_ALERT_HOURS: &[i64] = &[72, 24, 1];
 
 /// Role assignment — binds a role to a principal within an optional scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleAssignment {
     pub id: RoleAssignmentId,
     pub principal: RoleAssignmentPrincipal,
@@ -639,7 +639,7 @@ impl PolicyScope {
 ///
 /// Policies are validated on write (Cedar compile check).
 /// CE evaluates policies via embedded cedar-policy crate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CedarPolicy {
     pub id: CedarPolicyId,
     /// What the policy applies to; fixed at creation.
@@ -708,7 +708,7 @@ impl Default for ProfileGrantId {
 /// Unlike RoleAssignment (which is a single role→principal binding),
 /// ProfileGrant bundles all roles a profile has in a specific project.
 /// This is the "application access" entity shown in admin UIs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileGrant {
     pub id: ProfileGrantId,
     /// Project scope of this grant.
@@ -794,15 +794,18 @@ impl SodSeverity {
 
 parse_stored!(SodSeverity, "sod severity", [Warning, Block]);
 
-/// A separation of duties conflict rule.
+/// A separation of duties conflict rule, as the installation configuration
+/// defines it.
 ///
 /// Defines pairs of roles that should not be assigned to the same principal.
 /// Conflicts produce warnings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SodConflictRule {
     /// Rule name (e.g., "payment_segregation").
     pub name: String,
     /// Human-readable description.
+    #[serde(default)]
     pub description: Option<String>,
     /// Roles that conflict with each other.
     pub conflicting_roles: Vec<String>,

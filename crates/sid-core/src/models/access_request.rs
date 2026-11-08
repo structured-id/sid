@@ -62,7 +62,7 @@ impl std::fmt::Display for AccessRequestStatus {
 ///
 /// 1-step approval: submitted → pending → approved/denied.
 /// Optional duration → creates temporary role assignment on approval.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRequest {
     pub id: AccessRequestId,
     pub requester_id: ProfileId,

@@ -6,7 +6,9 @@
 use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::notification::NotificationPreferences;
-use sid_core::models::{AnomalyEventId, AnomalyEventRecord, MutationContext, ProfileId};
+use sid_core::models::{
+    AnomalyEventId, AnomalyEventRecord, IpReputation, MutationContext, ProfileId,
+};
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
@@ -32,6 +34,22 @@ fn event(row: &Row) -> SidResult<AnomalyEventRecord> {
             .map_err(|_| SidError::Storage(format!("risk_score: {risk_score}")))?,
         reaction: get_text(row, "reaction")?,
         timestamp: get_time(row, "occurred_at")?,
+    })
+}
+
+const REPUTATION: &str = "r.ip AS ip, r.failed_count AS failed, r.success_count AS succeeded,
+    r.first_seen_at AS first_seen_at, r.last_failed_at AS last_failed_at,
+    r.last_success_at AS last_success_at, r.updated_at AS updated_at";
+
+fn reputation(row: &Row) -> SidResult<IpReputation> {
+    Ok(IpReputation {
+        ip: get_text(row, "ip")?,
+        failed_count: get_int(row, "failed")?,
+        success_count: get_int(row, "succeeded")?,
+        first_seen_at: get_time(row, "first_seen_at")?,
+        last_failed_at: super::get_opt_time(row, "last_failed_at")?,
+        last_success_at: super::get_opt_time(row, "last_success_at")?,
+        updated_at: get_time(row, "updated_at")?,
     })
 }
 
@@ -397,6 +415,129 @@ impl CoordinodeBackend {
         &self,
     ) -> SidResult<Vec<(String, String, DateTime<Utc>)>> {
         self.read(allowlist).await
+    }
+
+    pub(super) async fn import_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        created_at: DateTime<Utc>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let wanted = (cidr.to_owned(), description.to_owned(), created_at);
+        self.transaction(move |tx| {
+            let (cidr, description, created_at) = &wanted;
+            if let Some(held) = allowlist(tx)?.into_iter().find(|(c, _, _)| c == cidr) {
+                return crate::transfer_repeat(&held, &wanted, "IP allowlist entry")
+                    .map(Decision::Abandon);
+            }
+            // Concurrent importers meet on the unique CIDR.
+            tx.run(
+                "CREATE (w:SidIpAllowlistEntry {cidr: $cidr, description: $description,
+                    created_at: $created_at})",
+                Params::default()
+                    .with("cidr", Value::String(cidr.clone()))
+                    .with("description", Value::String(description.clone()))
+                    .with("created_at", time(*created_at)),
+            )?;
+            Self::allowlist_changed(tx, &ctx)?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn import_anomaly_event(
+        &self,
+        e: &AnomalyEventRecord,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let e = e.clone();
+        self.transaction(move |tx| {
+            let held = tx.run(
+                &format!("MATCH (a:SidAnomalyEvent) WHERE a.id = $id RETURN {EVENT}"),
+                Params::default().with("id", uuid(&e.id.0)),
+            )?;
+            if let Some(row) = held.first() {
+                return crate::transfer_repeat(&event(row)?, &e, "anomaly event")
+                    .map(Decision::Abandon);
+            }
+            tx.run(
+                "CREATE (a:SidAnomalyEvent {id: $id, rule_id: $rule_id, profile_id: $profile_id,
+                    ip_address: $ip_address, description: $description, risk_score: $risk_score,
+                    reaction: $reaction, occurred_at: $occurred_at})",
+                Params::default()
+                    .with("id", uuid(&e.id.0))
+                    .with("rule_id", Value::String(e.rule_id.clone()))
+                    .with("profile_id", Value::String(e.profile_id.clone()))
+                    .with(
+                        "ip_address",
+                        e.ip_address.map_or(Value::Null, super::audit::ip_value),
+                    )
+                    .with("description", Value::String(e.description.clone()))
+                    .with("risk_score", Value::Int(i64::from(e.risk_score)))
+                    .with("reaction", Value::String(e.reaction.clone()))
+                    .with("occurred_at", time(e.timestamp)),
+            )?;
+            finalize(tx, &format!("anomaly_event:{}", e.id), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn export_ip_reputation(&self) -> SidResult<Vec<IpReputation>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                &format!("MATCH (r:SidIpReputation) RETURN {REPUTATION}"),
+                Params::default(),
+            )?;
+            let mut all = rows.iter().map(reputation).collect::<SidResult<Vec<_>>>()?;
+            all.sort_by(|a, b| a.ip.cmp(&b.ip));
+            Ok(all)
+        })
+        .await
+    }
+
+    pub(super) async fn import_ip_reputation(
+        &self,
+        r: &IpReputation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let r = r.clone();
+        self.transaction(move |tx| {
+            let held = tx.run(
+                &format!("MATCH (r:SidIpReputation) WHERE r.ip = $ip RETURN {REPUTATION}"),
+                Params::default().with("ip", Value::String(r.ip.clone())),
+            )?;
+            if let Some(row) = held.first() {
+                return crate::transfer_repeat(&reputation(row)?, &r, "IP reputation")
+                    .map(Decision::Abandon);
+            }
+            let score = Reputation {
+                failed: r.failed_count,
+                succeeded: r.success_count,
+            }
+            .score();
+            let at = |t: Option<DateTime<Utc>>| t.map_or(Value::Null, time);
+            // Concurrent importers meet on the unique address.
+            tx.run(
+                "CREATE (r:SidIpReputation {ip: $ip, failed_count: $failed,
+                    success_count: $succeeded, score: $score, first_seen_at: $first,
+                    last_failed_at: $last_failed, last_success_at: $last_success,
+                    updated_at: $updated})",
+                Params::default()
+                    .with("ip", Value::String(r.ip.clone()))
+                    .with("failed", Value::Int(r.failed_count))
+                    .with("succeeded", Value::Int(r.success_count))
+                    .with("score", Value::Float(score))
+                    .with("first", time(r.first_seen_at))
+                    .with("last_failed", at(r.last_failed_at))
+                    .with("last_success", at(r.last_success_at))
+                    .with("updated", time(r.updated_at)),
+            )?;
+            finalize(tx, "ip_reputation", ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
     }
 
     // === Notification preferences ===

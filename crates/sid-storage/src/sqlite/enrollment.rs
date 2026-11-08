@@ -304,6 +304,72 @@ impl SqliteBackend {
         row.as_ref().map(row_to_registration_source).transpose()
     }
 
+    pub(crate) async fn import_registration_source_impl(
+        &self,
+        profile_id: ProfileId,
+        source: &RegistrationSource,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query(
+            "SELECT profile_id, source_type, source_id, referrer_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, client_id, created_at \
+             FROM registration_sources WHERE profile_id = ?",
+        )
+        .bind(profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        if let Some(row) = held {
+            return crate::transfer_repeat(
+                &row_to_registration_source(&row)?,
+                source,
+                "registration source",
+            );
+        }
+        insert_registration_source(&mut tx, profile_id, source).await?;
+        Self::commit_mutation(tx, &format!("profile:{profile_id}"), ctx).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn import_invite_redemption_impl(
+        &self,
+        id: InviteId,
+        redemption: &InviteRedemption,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let held = sqlx::query(
+            "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions \
+             WHERE invite_id = ? AND profile_id = ?",
+        )
+        .bind(id)
+        .bind(redemption.profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("import invite redemption: {e}")))?;
+        if let Some(row) = held {
+            let stored = InviteRedemption {
+                profile_id: col(&row, "profile_id")?,
+                credential_id: col::<Option<uuid::Uuid>>(&row, "credential_id")?.map(CredentialId),
+                redeemed_at: dt_col(&row, "redeemed_at")?,
+            };
+            return crate::transfer_repeat(&stored, redemption, "invite redemption");
+        }
+        sqlx::query(
+            "INSERT INTO invite_redemptions (invite_id, profile_id, credential_id, redeemed_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(redemption.profile_id)
+        .bind(redemption.credential_id.map(|c| c.0))
+        .bind(fmt_dt(&redemption.redeemed_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("invite redemption", e))?;
+        Self::commit_mutation(tx, &format!("invite:{id}"), ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn count_registrations_by_source_impl(
         &self,
         since: chrono::DateTime<chrono::Utc>,

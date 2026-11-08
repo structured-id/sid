@@ -47,6 +47,7 @@ pub mod role;
 pub mod service_binding;
 pub mod session;
 pub mod session_elevation;
+pub mod transfer;
 pub mod upstream;
 pub mod work;
 
@@ -1998,6 +1999,11 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("record stored");
     assert_eq!(synced.downstream_id, "ext-42");
+    assert_eq!(
+        backend.list_scim_outbound_records(target.id).await.unwrap(),
+        vec![synced.clone()],
+        "the target's mappings are listed as stored"
+    );
     assert!(matches!(
         backend
             .create_scim_outbound_record(&record, test_audit())

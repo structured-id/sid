@@ -391,7 +391,9 @@ CREATE TABLE IF NOT EXISTS email_policy_activations (
 INSERT OR IGNORE INTO email_policy_activations (scope, revision) VALUES ('installation', 1);
 
 CREATE TABLE IF NOT EXISTS email_policy_dispositions (
-    principal_id  BLOB PRIMARY KEY CHECK (length(principal_id) = 16) REFERENCES principals (id) ON DELETE CASCADE,
+    -- Deferred: a restored quarantined key's record precedes the key.
+    principal_id  BLOB PRIMARY KEY CHECK (length(principal_id) = 16)
+                  REFERENCES principals (id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     from_revision INTEGER NOT NULL,
     to_revision   INTEGER NOT NULL,
     disposition   TEXT NOT NULL CHECK (disposition IN ('migrated', 'quarantined')),
@@ -399,13 +401,21 @@ CREATE TABLE IF NOT EXISTS email_policy_dispositions (
     recorded_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
--- An email key is written only under the active revision.
+-- An email key is written only under the active revision, except a key
+-- restored with its quarantine from its own revision to the active one.
 CREATE TRIGGER IF NOT EXISTS principals_email_policy_insert
 BEFORE INSERT ON principals
 WHEN (NEW.principal_type = 'email') <> (NEW.email_policy_revision IS NOT NULL)
   OR (NEW.principal_type = 'email'
       AND NEW.email_policy_revision IS NOT
-          (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
+          (SELECT revision FROM email_policy_activations WHERE scope = 'installation')
+      AND NOT EXISTS (SELECT 1 FROM email_policy_dispositions d
+                      WHERE d.principal_id = NEW.id
+                        AND d.disposition = 'quarantined'
+                        AND d.from_revision = NEW.email_policy_revision
+                        AND d.to_revision =
+                            (SELECT revision FROM email_policy_activations
+                             WHERE scope = 'installation')))
 BEGIN
     SELECT RAISE(ABORT, 'email policy fence');
 END;
@@ -1066,18 +1076,6 @@ CREATE INDEX IF NOT EXISTS idx_role_assignments_profile_id ON role_assignments(p
 CREATE INDEX IF NOT EXISTS idx_role_assignments_group_id ON role_assignments(group_id);
 CREATE INDEX IF NOT EXISTS idx_role_assignments_machine_user_id ON role_assignments(machine_user_id);
 CREATE INDEX IF NOT EXISTS idx_role_assignments_role_id ON role_assignments(role_id);
-
---------------------------------------------------------------------------------
--- sod_conflict_rules
---------------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS sod_conflict_rules (
-    id                BLOB PRIMARY KEY CHECK (length(id) = 16),
-    name              TEXT NOT NULL,
-    description       TEXT,
-    conflicting_roles TEXT NOT NULL DEFAULT '',
-    severity          TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('warning', 'block'))
-) STRICT;
 
 --------------------------------------------------------------------------------
 -- cedar_policies

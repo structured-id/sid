@@ -85,6 +85,59 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
 
     /// Drop every state and admission expired by now. Returns how many.
     async fn purge_expired_ceremony_state(&self) -> Result<u64>;
+
+    /// Every live state, admission and count with its deadline on the
+    /// store's clock, for an instance transfer: a challenge in flight, a
+    /// replay record or an attempt count keeps holding after the move.
+    async fn export_ceremony_state(&self) -> Result<CeremonyRecords> {
+        Err(sid_core::Error::Internal(
+            "this ceremony state store does not transfer its records".into(),
+        ))
+    }
+
+    /// Store exported records with their deadlines. A record already held
+    /// exactly is skipped; another live one under its key is a `Conflict`,
+    /// nothing written. Returns how many were stored.
+    async fn import_ceremony_state(&self, _records: &CeremonyRecords) -> Result<u64> {
+        Err(sid_core::Error::Internal(
+            "this ceremony state store does not transfer its records".into(),
+        ))
+    }
+}
+
+/// Live ceremony records with their deadlines, as a transfer carries them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CeremonyRecords {
+    /// States and admissions: an admission holds its holder (empty for
+    /// [`SingleUseAdmissions::admit_once`]) as its value.
+    pub states: Vec<CeremonyEntry>,
+    pub counts: Vec<CeremonyCount>,
+}
+
+impl CeremonyRecords {
+    /// Keep only the records still live at `at`.
+    pub fn retain_live_at(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.states.retain(|s| s.expires_at > at);
+        self.counts.retain(|c| c.window_ends > at);
+    }
+}
+
+/// A state or admission under `(namespace, key)` until `expires_at`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CeremonyEntry {
+    pub namespace: String,
+    pub key: String,
+    pub value: Vec<u8>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A count under `(namespace, key)` in a window ending at `window_ends`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CeremonyCount {
+    pub namespace: String,
+    pub key: String,
+    pub count: u64,
+    pub window_ends: chrono::DateTime<chrono::Utc>,
 }
 
 /// A state or admission by (namespace, key): its value and its deadline.
@@ -258,6 +311,95 @@ impl CeremonyStateStore for InProcessCeremonyState {
             u64::try_from(before - entries.len() + counted - counts.len())
                 .expect("map length fits u64"),
         )
+    }
+
+    async fn export_ceremony_state(&self) -> Result<CeremonyRecords> {
+        let (now, wall) = (std::time::Instant::now(), chrono::Utc::now());
+        let at = |deadline: std::time::Instant| {
+            chrono::Duration::from_std(deadline - now)
+                .ok()
+                .and_then(|left| wall.checked_add_signed(left))
+                // Milliseconds, the precision every store keeps a deadline at.
+                .and_then(|t| {
+                    chrono::DurationRound::duration_trunc(t, chrono::Duration::milliseconds(1)).ok()
+                })
+                .ok_or_else(|| sid_core::Error::Internal("ceremony deadline out of range".into()))
+        };
+        let mut states = Vec::new();
+        for ((namespace, key), (value, expires)) in self.entries().iter() {
+            if *expires > now {
+                states.push(CeremonyEntry {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                    expires_at: at(*expires)?,
+                });
+            }
+        }
+        let mut counts = Vec::new();
+        for ((namespace, key), (count, ends)) in
+            self.counts.lock().unwrap_or_else(|p| p.into_inner()).iter()
+        {
+            if *ends > now {
+                counts.push(CeremonyCount {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    count: *count,
+                    window_ends: at(*ends)?,
+                });
+            }
+        }
+        states.sort_by(|a, b| (&a.namespace, &a.key).cmp(&(&b.namespace, &b.key)));
+        counts.sort_by(|a, b| (&a.namespace, &a.key).cmp(&(&b.namespace, &b.key)));
+        Ok(CeremonyRecords { states, counts })
+    }
+
+    async fn import_ceremony_state(&self, records: &CeremonyRecords) -> Result<u64> {
+        let (now, wall) = (std::time::Instant::now(), chrono::Utc::now());
+        // A deadline already past on this clock holds nothing.
+        let until =
+            |at: chrono::DateTime<chrono::Utc>| (at - wall).to_std().ok().map(|left| now + left);
+        let mut entries = self.entries();
+        let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        // Checked before any write: a conflict stores nothing.
+        for s in &records.states {
+            if let Some((value, expires)) = entries.get(&(s.namespace.clone(), s.key.clone()))
+                && *expires > now
+                && *value != s.value
+            {
+                return Err(sid_core::Error::Conflict(
+                    "another live ceremony state holds the key".into(),
+                ));
+            }
+        }
+        for c in &records.counts {
+            if let Some((count, ends)) = counts.get(&(c.namespace.clone(), c.key.clone()))
+                && *ends > now
+                && *count != c.count
+            {
+                return Err(sid_core::Error::Conflict(
+                    "another live count holds the key".into(),
+                ));
+            }
+        }
+        let mut stored = 0;
+        for s in &records.states {
+            let slot = (s.namespace.clone(), s.key.clone());
+            let live = entries.get(&slot).is_some_and(|(_, e)| *e > now);
+            if let (false, Some(expires)) = (live, until(s.expires_at)) {
+                entries.insert(slot, (s.value.clone(), expires));
+                stored += 1;
+            }
+        }
+        for c in &records.counts {
+            let slot = (c.namespace.clone(), c.key.clone());
+            let live = counts.get(&slot).is_some_and(|(_, e)| *e > now);
+            if let (false, Some(ends)) = (live, until(c.window_ends)) {
+                counts.insert(slot, (c.count, ends));
+                stored += 1;
+            }
+        }
+        Ok(stored)
     }
 }
 

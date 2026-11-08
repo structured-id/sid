@@ -54,4 +54,22 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(format!("read login policy epoch: {e}")))
     }
+
+    pub(crate) async fn import_login_policy_epoch_impl(
+        &self,
+        epoch: i64,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        if let Some(held) = Self::login_policy_epoch(&mut *tx).await? {
+            return crate::transfer_repeat(&held, &epoch, "login policy epoch");
+        }
+        sqlx::query("INSERT INTO login_policy_epoch (id, epoch) VALUES (1, ?)")
+            .bind(epoch)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| super::insert_error("login policy epoch", e))?;
+        Self::commit_mutation(tx, "installation:login_policy", ctx).await?;
+        Ok(true)
+    }
 }

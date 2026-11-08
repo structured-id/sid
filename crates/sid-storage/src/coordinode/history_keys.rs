@@ -15,8 +15,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryPreparation,
-    HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, MutationContext, NewKeyEpoch, WrappedHistoryKey,
+    AbandonedEnrollment, AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryEpochUse,
+    HistoryKsf, HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, KeyLifecycle,
+    KeyStoreRecords, KeyUse, MutationContext, NewKeyEpoch, PurgedOwner, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::history_keys::HistoryKeyStore;
@@ -269,16 +270,30 @@ fn use_key(operation: Uuid, epoch: HistoryEpochId) -> SidResult<Value> {
 
 fn read_archive(tx: &Statements<'_>, domain: &[u8; 32]) -> SidResult<Option<KeyArchive>> {
     let epochs = owner_epochs(tx, domain)?;
-    if epochs.is_empty() {
+    let lifecycle = owner_lifecycle(tx, domain)?;
+    if epochs.is_empty() && lifecycle.is_none() {
         return Ok(None);
     }
+    let mut uses = owner_uses(tx, domain)?
+        .into_iter()
+        .map(|(operation, epoch, expires_at)| KeyUse {
+            operation,
+            epoch,
+            expires_at,
+        })
+        .collect::<Vec<_>>();
+    uses.sort_unstable_by_key(|u| (u.operation, u.epoch));
     let mut with_keys = Vec::with_capacity(epochs.len());
     let mut replaced = Vec::new();
+    let mut created_by = Vec::new();
     for s in epochs {
         let key = epoch_key(tx, s.epoch.id)?
             .ok_or_else(|| SidError::Storage("history epoch without its key".into()))?;
         if let Some(revision) = s.replaced_at {
             replaced.push((s.epoch.id, revision));
+        }
+        if let Some(op) = s.created_by {
+            created_by.push((s.epoch.id, op));
         }
         with_keys.push(NewKeyEpoch {
             epoch: s.epoch,
@@ -286,13 +301,86 @@ fn read_archive(tx: &Statements<'_>, domain: &[u8; 32]) -> SidResult<Option<KeyA
         });
     }
     replaced.sort_unstable();
+    created_by.sort_unstable();
     let archive = KeyArchive {
         owner_domain: *domain,
         epochs: with_keys,
         replaced,
+        created_by,
+        lifecycle,
+        uses,
     };
     archive.validate()?;
     Ok(Some(archive))
+}
+
+/// The lifecycle recorded for `domain`, read without taking its turn.
+fn owner_lifecycle(tx: &Statements<'_>, domain: &[u8; 32]) -> SidResult<Option<KeyLifecycle>> {
+    let rows = tx.run(
+        "MATCH (o:SidHistoryOwner) WHERE o.domain = $d RETURN o.revision AS revision, o.live AS live",
+        Params::default().with("d", domain_value(domain)),
+    )?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    match row.get("revision") {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => {
+            let mut live: Vec<HistoryEpochId> = get_document(row, "live")?;
+            live.sort_unstable();
+            Ok(Some(KeyLifecycle {
+                revision: get_int(row, "revision")?,
+                live,
+            }))
+        }
+    }
+}
+
+fn read_records(tx: &Statements<'_>) -> SidResult<KeyStoreRecords> {
+    let rows = tx.run(
+        "MATCH (a:SidHistoryAbandoned)
+         RETURN a.operation AS operation, a.owner_domain AS d, a.abandoned_at AS at",
+        Params::default(),
+    )?;
+    let mut abandoned = rows
+        .iter()
+        .map(|row| {
+            Ok(AbandonedEnrollment {
+                operation: get_uuid(row, "operation")?,
+                owner_domain: bytes32(row, "d")?,
+                at: get_time(row, "at")?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    abandoned.sort_unstable_by_key(|a| a.operation);
+    let rows = tx.run(
+        "MATCH (o:SidHistoryOwner) WHERE o.purged_at IS NOT NULL
+         RETURN o.domain AS d, o.purged_at AS at",
+        Params::default(),
+    )?;
+    let mut purged = rows
+        .iter()
+        .map(|row| {
+            Ok(PurgedOwner {
+                owner_domain: bytes32(row, "d")?,
+                at: get_time(row, "at")?,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    purged.sort_unstable_by_key(|p| p.owner_domain);
+    // This store's audit trail lives in the database's audit chains and
+    // moves with them.
+    Ok(KeyStoreRecords {
+        abandoned,
+        purged,
+        audit: Vec::new(),
+    })
+}
+
+fn bytes32(row: &Row, name: &str) -> SidResult<[u8; 32]> {
+    get_bytes(row, name)?
+        .try_into()
+        .map_err(|_| SidError::Storage(format!("{name}: not 32 bytes")))
 }
 
 fn epoch_key(tx: &Statements<'_>, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
@@ -743,10 +831,99 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
                 }
                 let replaced: BTreeMap<HistoryEpochId, i64> =
                     archive.replaced.iter().copied().collect();
+                let created_by: BTreeMap<HistoryEpochId, Uuid> =
+                    archive.created_by.iter().copied().collect();
                 for epoch in &archive.epochs {
-                    insert_epoch(tx, epoch, None, replaced.get(&epoch.epoch.id).copied())?;
+                    insert_epoch(
+                        tx,
+                        epoch,
+                        created_by.get(&epoch.epoch.id).copied(),
+                        replaced.get(&epoch.epoch.id).copied(),
+                    )?;
+                }
+                if let Some(lifecycle) = &archive.lifecycle {
+                    tx.run(
+                        "MATCH (o:SidHistoryOwner) WHERE o.domain = $d
+                         SET o.revision = $revision, o.live = $live",
+                        Params::default()
+                            .with("d", domain_value(&domain))
+                            .with("revision", Value::Int(lifecycle.revision))
+                            .with("live", document(&lifecycle.live, "live set")?),
+                    )?;
+                }
+                for u in &archive.uses {
+                    tx.run(
+                        "CREATE (u:SidHistoryKeyUse {pair: $pair, operation: $operation,
+                            epoch_id: $epoch_id, owner_domain: $d, expires_at: $expires_at})",
+                        Params::default()
+                            .with("pair", use_key(u.operation, u.epoch)?)
+                            .with("operation", uuid(&u.operation))
+                            .with("epoch_id", uuid(&u.epoch.0))
+                            .with("d", domain_value(&domain))
+                            .with("expires_at", time(u.expires_at)),
+                    )?;
                 }
                 audited(tx, &owner_chain(&domain), audit.clone())?;
+                Ok(Decision::Commit(true))
+            })
+            .await
+    }
+
+    async fn export_key_records(&self) -> SidResult<KeyStoreRecords> {
+        self.backend.read(read_records).await
+    }
+
+    async fn import_key_records(
+        &self,
+        records: &KeyStoreRecords,
+        audit: AuditEntry,
+    ) -> SidResult<bool> {
+        records.validate()?;
+        if !records.audit.is_empty() {
+            // The trail of this engine is the audit chains, which carry
+            // their own transfer; a separate store trail has no place here.
+            return Err(SidError::Validation(
+                "this history key store keeps its audit trail in the audit chains".into(),
+            ));
+        }
+        let records = records.clone();
+        self.backend
+            .transaction(move |tx| {
+                // Every fenced owner's turn first: its writes stay ordered.
+                for p in &records.purged {
+                    owner_turn(tx, &p.owner_domain)?;
+                }
+                for a in &records.abandoned {
+                    owner_turn(tx, &a.owner_domain)?;
+                }
+                let existing = read_records(tx)?;
+                if existing == records {
+                    return Ok(Decision::Abandon(false));
+                }
+                if !existing.abandoned.is_empty() || !existing.purged.is_empty() {
+                    return Err(SidError::Conflict(
+                        "the history key store already holds other records".into(),
+                    ));
+                }
+                for a in &records.abandoned {
+                    tx.run(
+                        "CREATE (a:SidHistoryAbandoned {operation: $op, owner_domain: $d,
+                            abandoned_at: $at})",
+                        Params::default()
+                            .with("op", uuid(&a.operation))
+                            .with("d", domain_value(&a.owner_domain))
+                            .with("at", time(a.at)),
+                    )?;
+                }
+                for p in &records.purged {
+                    tx.run(
+                        "MATCH (o:SidHistoryOwner) WHERE o.domain = $d SET o.purged_at = $at",
+                        Params::default()
+                            .with("d", domain_value(&p.owner_domain))
+                            .with("at", time(p.at)),
+                    )?;
+                }
+                audited(tx, STORE_CHAIN, audit.clone())?;
                 Ok(Decision::Commit(true))
             })
             .await

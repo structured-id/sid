@@ -83,6 +83,59 @@ fn row_to_attestation(row: &sqlx::sqlite::SqliteRow) -> SidResult<DeviceAttestat
 }
 
 impl SqliteBackend {
+    pub(crate) async fn import_device_attestation_impl(
+        &self,
+        att: &DeviceAttestation,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        // The write transaction holds the database write lock: what is read
+        // here is what the restore commits against.
+        let mut tx = self.begin_write().await?;
+        owned_device(&mut tx, att.device_id, att.profile_id).await?;
+        let stored = sqlx::query(concat!(
+            "SELECT ",
+            attestation_columns!(),
+            " FROM device_attestations WHERE device_id = ?"
+        ))
+        .bind(att.device_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read device binding: {e}")))?;
+        if let Some(stored) = stored {
+            return if row_to_attestation(&stored)? == *att {
+                Ok(false)
+            } else {
+                Err(SidError::Conflict(format!(
+                    "device {} has another key binding",
+                    att.device_id
+                )))
+            };
+        }
+        sqlx::query(concat!(
+            "INSERT INTO device_attestations (",
+            attestation_columns!(),
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ))
+        .bind(att.id)
+        .bind(att.device_id)
+        .bind(att.profile_id)
+        .bind(att.format.as_str())
+        .bind(att.key_storage.as_str())
+        .bind(att.status.as_str())
+        .bind(&att.public_jwk)
+        .bind(&att.attestation_object)
+        .bind(&att.attestation_certificate)
+        .bind(&att.aaguid)
+        .bind(fmt_dt(&att.created_at))
+        .bind(fmt_dt(&att.updated_at))
+        .bind(fmt_dt_opt(att.revoked_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("device attestation", e))?;
+        Self::commit_mutation(tx, &format!("device_attestation:{}", att.device_id), ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn commit_device_enrollment_impl(
         &self,
         enrollment: &DeviceEnrollment,

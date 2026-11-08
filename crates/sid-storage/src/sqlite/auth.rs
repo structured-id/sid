@@ -26,7 +26,7 @@ fn count_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u32> {
 
 /// A malformed id or time is an error: a replacement read as none would hide
 /// a refresh token's rotation from reuse detection.
-fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken> {
+pub(super) fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken> {
     Ok(RefreshToken {
         id: uuid_col(row, "id")?,
         token_hash: col(row, "token_hash")?,
@@ -45,7 +45,7 @@ fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken
     })
 }
 
-fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCode> {
+pub(super) fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCode> {
     Ok(AuthorizationCode {
         code_hash: col(row, "code_hash")?,
         profile_id: col(row, "profile_id")?,
@@ -118,6 +118,45 @@ pub(super) async fn insert_refresh_token(
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("refresh token", e))?;
+    Ok(())
+}
+
+/// Insert `code` in `tx` as given; an existing code hash is a `Conflict`.
+pub(super) async fn insert_auth_code(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    code: &AuthorizationCode,
+) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri, scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
+            authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id, session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&code.code_hash).bind(code.profile_id)
+    .bind(&code.client_id)
+    .bind(&code.redirect_uri)
+    .bind(code.scopes.join(" "))
+    .bind(&code.code_challenge)
+    .bind(&code.nonce)
+    .bind(fmt_dt(&code.expires_at))
+    .bind(fmt_dt(&code.created_at))
+    .bind(code.used)
+    .bind(code.resource)
+    .bind(fmt_dt(&code.authentication.authenticated_at))
+    .bind(code.authentication.amr.join(" "))
+    .bind(code.authentication.assurance_level.as_str())
+    .bind(code.authentication.elevation.map(|e| e.level.as_str()))
+    .bind(code.authentication.elevation.map(|e| fmt_dt(&e.until)))
+    .bind(code.authentication.session)
+    .bind(code.session_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| match &e {
+        // The authorizing session ended before the code was stored.
+        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+            SidError::NotFound(format!("session {}", code.authentication.session))
+        }
+        _ => insert_error("authorization code", e),
+    })?;
     Ok(())
 }
 
@@ -223,36 +262,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        sqlx::query(
-            "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri, scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
-                authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&code.code_hash).bind(code.profile_id)
-        .bind(&code.client_id)
-        .bind(&code.redirect_uri)
-        .bind(code.scopes.join(" "))
-        .bind(&code.code_challenge)
-        .bind(&code.nonce)
-        .bind(fmt_dt(&code.expires_at))
-        .bind(fmt_dt(&code.created_at))
-        .bind(code.used)
-        .bind(code.resource)
-        .bind(fmt_dt(&code.authentication.authenticated_at))
-        .bind(code.authentication.amr.join(" "))
-        .bind(code.authentication.assurance_level.as_str())
-        .bind(code.authentication.elevation.map(|e| e.level.as_str()))
-        .bind(code.authentication.elevation.map(|e| fmt_dt(&e.until)))
-        .bind(code.authentication.session)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            // The authorizing session ended before the code was stored.
-            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                SidError::NotFound(format!("session {}", code.authentication.session))
-            }
-            _ => insert_error("authorization code", e),
-        })?;
+        insert_auth_code(&mut tx, code).await?;
         Self::commit_mutation(tx, &format!("auth_code:{}", code.client_id), audit).await
     }
 

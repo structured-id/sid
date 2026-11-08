@@ -39,7 +39,7 @@ impl std::fmt::Display for UpstreamIdentityId {
 /// Each upstream provider can have at most one identity per profile.
 /// Each `(provider_id, upstream_subject)` pair is globally unique — prevents
 /// two profiles from claiming the same upstream account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamIdentity {
     pub id: UpstreamIdentityId,
 

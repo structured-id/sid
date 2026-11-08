@@ -7,7 +7,7 @@
 //! Implementation: PostgreSQL append-only table with hash chains.
 
 use async_trait::async_trait;
-use sid_core::models::audit::{AuditEntry, AuditError, AuditRecord};
+use sid_core::models::audit::{AuditChain, AuditEntry, AuditError, AuditRecord};
 
 /// Audit log trait for writing and querying audit records.
 ///
@@ -39,6 +39,24 @@ pub trait AuditLog: Send + Sync {
     ///
     /// Used by integrity verification to enumerate chains for batch verification.
     async fn list_chain_ids(&self) -> Result<Vec<String>, AuditError>;
+
+    /// Chain `chain_id` as stored, for a move between stores: its head, the
+    /// checkpoint retention left and its records in sequence order.
+    async fn export_chain(&self, _chain_id: &str) -> Result<AuditChain, AuditError> {
+        Err(AuditError::Other(
+            "this audit log does not export chains".into(),
+        ))
+    }
+
+    /// Restore `chain` as exported, checked as a whole first
+    /// ([`AuditChain::check`]), in one transaction. Returns `false`, writing
+    /// nothing, when the store already holds it, as it is or continued by
+    /// later records; a chain of the same id that is not that is `Conflict`.
+    async fn import_chain(&self, _chain: &AuditChain) -> Result<bool, AuditError> {
+        Err(AuditError::Other(
+            "this audit log does not import chains".into(),
+        ))
+    }
 }
 
 /// Result of chain verification.

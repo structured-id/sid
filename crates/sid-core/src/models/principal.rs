@@ -291,7 +291,7 @@ impl Default for PrincipalBindingId {
 /// Multiple profiles can bind the same Principal (email/phone).
 /// Contestation rules (see `PrincipalEligibility`) determine which
 /// bindings allow login.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalBinding {
     pub id: PrincipalBindingId,
 
@@ -342,6 +342,71 @@ impl PrincipalBinding {
         self.is_primary = true;
         self
     }
+}
+
+/// What an email policy change did to an email key it could not rederive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailKeyOutcome {
+    /// The key was rewritten under the new revision.
+    Migrated,
+    /// The key was kept reserved until its address is established again.
+    Quarantined,
+}
+
+/// An email key's disposition under a policy revision change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailKeyDisposition {
+    pub from_revision: i64,
+    pub to_revision: i64,
+    pub outcome: EmailKeyOutcome,
+    pub reason: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// A principal as stored, for a move between stores: the entity with its
+/// assignment and proof, every Profile's claim on it and, for an email key,
+/// its disposition under a policy change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPrincipal {
+    pub entity: PrincipalEntity,
+    pub claims: Vec<PrincipalBinding>,
+    pub disposition: Option<EmailKeyDisposition>,
+}
+
+impl StoredPrincipal {
+    /// Whether a store whose active email policy is `active` may take this
+    /// principal as it is: a key written under the active revision, or one
+    /// quarantined from its own revision to the active one.
+    pub fn restores_under(&self, active: i64) -> bool {
+        let Some(revision) = self.entity.email_policy_revision else {
+            return true;
+        };
+        revision == active
+            || self.disposition.as_ref().is_some_and(|d| {
+                d.outcome == EmailKeyOutcome::Quarantined
+                    && d.from_revision == revision
+                    && d.to_revision == active
+            })
+    }
+}
+
+/// The email policy revision active for the installation: email keys are
+/// written only under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailPolicyActivation {
+    pub revision: i64,
+    pub activated_at: DateTime<Utc>,
+}
+
+/// A released principal kept from reuse until `until`, known only by its
+/// hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantinedPrincipal {
+    pub principal_hash: String,
+    pub principal_type: String,
+    pub until: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Whether a Profile may route login through a Principal.
