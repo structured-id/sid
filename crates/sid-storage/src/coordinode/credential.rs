@@ -595,6 +595,29 @@ impl When {
     }
 }
 
+/// Spend `spend` inside a mutation's transaction: the credential must still
+/// be active and hold the data as read, else the mutation commits nothing.
+pub(super) fn spend(
+    tx: &Statements<'_>,
+    spend: &sid_core::models::CredentialSpend,
+) -> SidResult<()> {
+    let holds = get(tx, spend.credential)?
+        .is_some_and(|stored| When::ActiveHolding(spend.read.clone()).holds(&stored));
+    if !holds {
+        return Err(SidError::Fenced(
+            "the credential state it spends changed".into(),
+        ));
+    }
+    tx.run(
+        "MATCH (c:SidCredential) WHERE c.id = $id SET c.data = $data, c.last_used_at = $now",
+        Params::default()
+            .with("id", uuid(&spend.credential.0))
+            .with("data", Value::Binary(spend.left.clone()))
+            .with("now", time(Utc::now())),
+    )?;
+    Ok(())
+}
+
 /// A conditional write of one credential's properties.
 struct Update {
     when: When,

@@ -28,6 +28,21 @@ pub struct MutationContext {
     /// transaction: when it is no longer live and exactly as read, the
     /// backend commits nothing and returns `Error::Expired`.
     pub ceremony: Option<CeremonyConsumption>,
+    /// The credential state the mutation spends, replaced in the same
+    /// transaction: when the credential is no longer active and exactly as
+    /// read, the backend commits nothing and returns `Error::Fenced`.
+    pub spend: Option<CredentialSpend>,
+}
+
+/// A credential's data replaced as part of a mutation: a single-use secret
+/// of a set (a recovery code) is spent only by the effect it pays for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSpend {
+    pub credential: super::CredentialId,
+    /// The data as read, which the credential must still hold.
+    pub read: Vec<u8>,
+    /// The data it holds after the spend.
+    pub left: Vec<u8>,
 }
 
 /// Ceremony state a mutation consumes: its namespace and key and the stored
@@ -86,6 +101,12 @@ impl MutationContext {
         self
     }
 
+    /// Spend `spend` in the same transaction.
+    pub fn spending(mut self, spend: CredentialSpend) -> Self {
+        self.spend = Some(spend);
+        self
+    }
+
     /// Record the completion of the caller's keyed command with the effect.
     pub fn with_operation(mut self, operation: OperationCompletion) -> Self {
         self.operation = Some(operation);
@@ -114,6 +135,7 @@ impl From<AuditEntry> for MutationContext {
             operation: None,
             fence: None,
             ceremony: None,
+            spend: None,
         }
     }
 }

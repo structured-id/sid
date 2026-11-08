@@ -398,6 +398,85 @@ pub async fn label_only_on_active<H: CredentialHarness>(h: &H) {
     assert_eq!(stored.status, CredentialStatus::Revoked);
 }
 
+/// A mutation spending a credential's state commits the spend with itself:
+/// over data no longer as read, or a credential no longer active, it is
+/// refused with `Fenced` and commits neither its own change nor the spend;
+/// of two concurrent mutations spending the same read state exactly one
+/// commits.
+pub async fn spend_commits_with_its_mutation<H: CredentialHarness>(h: &H) {
+    let store = h.store();
+    let owner = h.owner().await;
+    let set = Credential::new(
+        owner.clone(),
+        CredentialType::Recovery,
+        b"v0".to_vec(),
+        None,
+    );
+    let factor = Credential::new(owner, CredentialType::Totp, vec![1], Some("old".into()));
+    for c in [&set, &factor] {
+        store.create_credential(c, ctx()).await.unwrap();
+    }
+    let spending = |read: &[u8], left: &[u8]| {
+        ctx().spending(sid_core::models::CredentialSpend {
+            credential: set.id,
+            read: read.to_vec(),
+            left: left.to_vec(),
+        })
+    };
+    let label = |id| async move {
+        store
+            .get_credential(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .label
+            .unwrap()
+    };
+
+    let stale = store
+        .set_credential_label(factor.id, Some("stale"), spending(b"other", b"lost"))
+        .await;
+    assert!(matches!(stale, Err(Error::Fenced(_))), "{stale:?}");
+    assert_eq!(
+        label(factor.id).await,
+        "old",
+        "a refused spend changed the label"
+    );
+
+    assert!(
+        store
+            .set_credential_label(factor.id, Some("v1"), spending(b"v0", b"v1"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(label(factor.id).await, "v1");
+    let stored = store.get_credential(set.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), b"v1");
+
+    let (a, b) = tokio::join!(
+        store.set_credential_label(factor.id, Some("a"), spending(b"v1", b"a")),
+        store.set_credential_label(factor.id, Some("b"), spending(b"v1", b"b")),
+    );
+    assert!(
+        a.is_ok() ^ b.is_ok(),
+        "exactly one concurrent spend must commit: {a:?} {b:?}"
+    );
+    let won = if a.is_ok() { "a" } else { "b" };
+    assert_eq!(label(factor.id).await, won);
+    let stored = store.get_credential(set.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), won.as_bytes());
+
+    assert_eq!(
+        store.revoke_credential(set.id, ctx()).await.unwrap(),
+        CredentialRevocation::Revoked
+    );
+    let revoked = store
+        .set_credential_label(factor.id, Some("revoked"), spending(won.as_bytes(), b"x"))
+        .await;
+    assert!(matches!(revoked, Err(Error::Fenced(_))), "{revoked:?}");
+    assert_eq!(label(factor.id).await, won);
+}
+
 /// A password change is a compare-and-swap over the current password of an
 /// active credential and stores the new policy evidence with it; of two
 /// concurrent changes from one password exactly one applies, and a revoked

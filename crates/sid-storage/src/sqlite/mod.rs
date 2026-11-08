@@ -275,6 +275,10 @@ impl SqliteBackend {
         if let Some(ceremony) = &ctx.ceremony {
             ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
         }
+        // The credential state it spends, exactly as read.
+        if let Some(spend) = &ctx.spend {
+            Self::spend_in_tx(&mut tx, spend).await?;
+        }
         SqliteAuditLog::log_in_conn(&mut tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
@@ -290,7 +294,7 @@ impl SqliteBackend {
     /// its completion, so a retry after a later change does not apply it
     /// then; there is no audit or owed work for a change that did not happen.
     pub async fn commit_unchanged(mut tx: WriteTx, ctx: &MutationContext) -> SidResult<()> {
-        if ctx.operation.is_none() && ctx.ceremony.is_none() {
+        if ctx.operation.is_none() && ctx.ceremony.is_none() && ctx.spend.is_none() {
             return Ok(());
         }
         if let Some(operation) = &ctx.operation {
@@ -298,6 +302,9 @@ impl SqliteBackend {
         }
         if let Some(ceremony) = &ctx.ceremony {
             ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
+        if let Some(spend) = &ctx.spend {
+            Self::spend_in_tx(&mut tx, spend).await?;
         }
         tx.commit()
             .await
@@ -312,7 +319,12 @@ impl SqliteBackend {
         chain_id: &str,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        if rows > 0 || !ctx.work.is_empty() || ctx.operation.is_some() || ctx.ceremony.is_some() {
+        if rows > 0
+            || !ctx.work.is_empty()
+            || ctx.operation.is_some()
+            || ctx.ceremony.is_some()
+            || ctx.spend.is_some()
+        {
             Self::commit_mutation(tx, chain_id, ctx).await?;
         }
         Ok(rows)

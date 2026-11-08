@@ -260,6 +260,29 @@ const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// authenticator.
 pub const RECOVERY_CODE_AMR: &str = "mca";
 
+/// A single-use secret a second factor spends (a recovery code): spent in
+/// the commit of the effect it pays for, with the work its spend owes, or
+/// not at all.
+pub struct FactorSpend {
+    pub spend: sid_core::models::CredentialSpend,
+    pub owes: sid_core::models::NewWork,
+}
+
+impl FactorSpend {
+    /// `ctx`, also spending this.
+    pub fn into_context(self, ctx: MutationContext) -> MutationContext {
+        ctx.spending(self.spend).with_work(self.owes)
+    }
+}
+
+/// The pending second-factor context a sign-in completes: it ends in the
+/// session's commit, which spends what its factor spends.
+struct Completing<'a> {
+    id: SessionId,
+    end: &'a SessionEnd,
+    spend: Option<FactorSpend>,
+}
+
 /// Signing users in for one authority.
 pub struct SignIn {
     storage: Arc<dyn StorageBackend>,
@@ -1050,8 +1073,8 @@ impl SignIn {
     /// Sign `profile` in as [`Self::sign_in`] does with `session`, the
     /// completion of the pending second-factor context `pending`: the
     /// context ends (owing what its end names) in the session's own commit,
-    /// which applies only while the context exists. Its access tokens stop
-    /// at once in every process.
+    /// which applies only while the context exists and spends `spend` when
+    /// given. Its access tokens stop at once in every process.
     #[allow(clippy::too_many_arguments)]
     pub async fn complete_pending(
         &self,
@@ -1062,6 +1085,7 @@ impl SignIn {
         native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
+        spend: Option<FactorSpend>,
     ) -> Result<SignedIn, SignInError> {
         let limit = self.policy.session.max_concurrent_sessions;
         let (signed_in, _) = self
@@ -1073,7 +1097,11 @@ impl SignIn {
                 proved_by,
                 policy,
                 limit,
-                Some(pending),
+                Some(Completing {
+                    id: pending.0,
+                    end: pending.1,
+                    spend,
+                }),
                 None,
             )
             .await?;
@@ -1118,7 +1146,8 @@ impl SignIn {
     /// the completed authentication, the first factor's credential still
     /// holds, the pending context ends exactly once and the account gets its
     /// session with a new credential, delivered to `client` (with the
-    /// refresh generation bound to `native_key` when it proved one).
+    /// refresh generation bound to `native_key` when it proved one); the
+    /// factor's `spend` commits with that session or not at all.
     pub async fn complete_second_factor(
         &self,
         login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
@@ -1126,6 +1155,7 @@ impl SignIn {
         method: &str,
         client: CeremonyClient,
         native_key: Option<&str>,
+        spend: Option<FactorSpend>,
     ) -> Result<SignedIn, SignInError> {
         let profile = self
             .storage
@@ -1165,6 +1195,7 @@ impl SignIn {
                 native_key,
                 proved_by.as_ref().map(SignInProof::Credential),
                 requirements.fence,
+                spend,
             )
             .await?;
         // Recorded from the address the rules judged at the first factor.
@@ -1205,7 +1236,7 @@ impl SignIn {
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
-        pending: Option<(SessionId, &SessionEnd)>,
+        pending: Option<Completing<'_>>,
         retained: Option<RetainedSignIn<'_>>,
     ) -> Result<(SignedIn, Option<String>), SignInError> {
         match client {
@@ -1322,7 +1353,7 @@ impl SignIn {
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
-        pending: Option<(SessionId, &SessionEnd)>,
+        pending: Option<Completing<'_>>,
         completion: Option<OperationCompletion>,
     ) -> Result<(), SignInError> {
         // The storage counts, evicts and inserts in one serialized step, and
@@ -1349,9 +1380,12 @@ impl SignIn {
             ctx = ctx.with_operation(completion);
         }
         let stored = match pending {
-            Some((pending, end)) => {
+            Some(Completing { id, end, spend }) => {
+                if let Some(spend) = spend {
+                    ctx = spend.into_context(ctx);
+                }
                 self.storage
-                    .complete_pending_session(pending, end, session, limit, proved_by, ctx)
+                    .complete_pending_session(id, end, session, limit, proved_by, ctx)
                     .await
             }
             None => {

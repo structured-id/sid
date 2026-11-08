@@ -459,6 +459,10 @@ impl PostgresBackend {
         if let Some(ceremony) = &ctx.ceremony {
             ceremony_state::consume_in_tx(tx, ceremony).await?;
         }
+        // The credential state it spends, exactly as read.
+        if let Some(spend) = &ctx.spend {
+            credentials::spend_in_tx(tx, spend).await?;
+        }
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
@@ -478,7 +482,7 @@ impl PostgresBackend {
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         ctx: &MutationContext,
     ) -> SidResult<()> {
-        if ctx.operation.is_none() && ctx.ceremony.is_none() {
+        if ctx.operation.is_none() && ctx.ceremony.is_none() && ctx.spend.is_none() {
             return Ok(());
         }
         if let Some(operation) = &ctx.operation {
@@ -486,6 +490,9 @@ impl PostgresBackend {
         }
         if let Some(ceremony) = &ctx.ceremony {
             ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
+        if let Some(spend) = &ctx.spend {
+            credentials::spend_in_tx(&mut tx, spend).await?;
         }
         tx.commit()
             .await

@@ -1461,6 +1461,35 @@ impl SqliteBackend {
         Ok(true)
     }
 
+    /// Spend `spend` inside a mutation's write transaction: the credential
+    /// must still be active and hold the data as read, else the mutation
+    /// commits nothing.
+    pub(crate) async fn spend_in_tx(
+        tx: &mut super::WriteTx,
+        spend: &sid_core::models::CredentialSpend,
+    ) -> SidResult<()> {
+        let spent = sqlx::query(
+            "UPDATE credentials SET data = ?, last_used_at = ?
+             WHERE id = ? AND status = 'active' AND data = ?",
+        )
+        .bind(&spend.left)
+        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(spend.credential.0)
+        .bind(&spend.read)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("spend credential state: {e}")))?
+        .rows_affected()
+            == 1;
+        if spent {
+            Ok(())
+        } else {
+            Err(SidError::Fenced(
+                "the credential state it spends changed".into(),
+            ))
+        }
+    }
+
     pub(crate) async fn replace_credential_data_impl(
         &self,
         id: CredentialId,
