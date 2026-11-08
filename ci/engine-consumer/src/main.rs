@@ -16,11 +16,14 @@ use secrecy::{ExposeSecret, SecretString};
 use sid::admin::Admin;
 use sid::auth_mail::{AuthMailDelivery, MailError, OwedMail};
 use sid::authorization::{Authorization, InstallationAdministrator};
+use sid::devices::DeviceKeyError;
 use sid::devices::{DeviceKeys, KeyCaller, LocalAccess};
 use sid::lifecycle::{Drained, Engine, EngineParts};
+use sid::machines::MachineError;
 use sid::machines::Machines;
-use sid::oauth::{OAuth, OAuthParts};
+use sid::oauth::{OAuth, OAuthError, OAuthParts};
 use sid::password_operation::PasswordOperations;
+use sid::projects::ProjectError;
 use sid::projects::Projects;
 use sid::registration::Registration;
 use sid::sign_in::completions::Completer;
@@ -29,6 +32,7 @@ use sid::snapshot::{ArchiveKey, Store};
 use sid::work::{CeMail, CeWork, CeWorkParts};
 use sid::{Installation, InstallationSettings};
 use sid_authn::caller::Caller;
+use sid_authn::caller::CallerError;
 use sid_authn::jwt::JwtService;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::opaque_zkpp::setup::{ZkppSettings, spawn_zkpp_server};
@@ -48,14 +52,16 @@ use sid_pake_core::types::CE_DEFAULT_POLICY;
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::attestation::{
-    DeviceEnrollmentChallenge, DeviceEnrollmentPurpose, FinishDeviceEnrollmentRequest,
-    GetDeviceAttestationRequest, RevokeDeviceKeyRequest, RotateDeviceKeyRequest,
+    AttestationStatus as DeviceAttestationStatus, DeviceEnrollmentChallenge,
+    DeviceEnrollmentPurpose, FinishDeviceEnrollmentRequest, GetDeviceAttestationRequest,
+    ListDeviceAttestationsRequest, RevokeDeviceKeyRequest, RotateDeviceKeyRequest,
     StartDeviceEnrollmentRequest,
 };
 use sid_proto::sid::v1::authn::{OpaqueZkppRegistrationFinishRequest, PasswordRegistrationProof};
 use sid_proto::sid::v1::{
     AddMachineCredentialRequest, CreateMachineUserRequest, CreateProjectRequest,
-    MachineCredentialType, RevokeMachineCredentialRequest, SetResourceAccessRequest,
+    ListMachineCredentialsRequest, MachineCredentialStatus, MachineCredentialType,
+    RevokeMachineCredentialRequest, SetResourceAccessRequest,
 };
 
 type Failure = Box<dyn std::error::Error>;
@@ -64,6 +70,23 @@ const ISSUER: &str = "https://id.sid.example.com";
 const WORK_KIND: &str = "host_probe";
 const ROOT: &str = "root@sid.example.com";
 const GUEST: &str = "guest@sid.example.com";
+
+/// `result` is the refusal `expected` names; success or any other failure
+/// (a store error, a misconfiguration) fails the run.
+fn refused<T, E: std::fmt::Debug>(
+    result: Result<T, E>,
+    expected: impl FnOnce(&E) -> bool,
+    what: &str,
+) -> Result<(), Failure> {
+    match result {
+        Ok(_) => Err(format!("not verified: {what}: it succeeded").into()),
+        Err(e) if expected(&e) => {
+            println!("verified: {what}");
+            Ok(())
+        }
+        Err(e) => Err(format!("not verified: {what}: refused otherwise: {e:?}").into()),
+    }
+}
 
 fn check(holds: bool, what: &str) -> Result<(), Failure> {
     if holds {
@@ -590,7 +613,7 @@ impl Served {
         &self,
         client_id: &str,
         secret: &str,
-    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, Failure> {
+    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, OAuthError> {
         let request = sid_proto::sid::v1::OAuth2TokenRequest {
             grant_type: "client_credentials".into(),
             client_id: Some(client_id.to_owned()),
@@ -610,7 +633,7 @@ impl Served {
             method: "POST".into(),
             uri: format!("{ISSUER}/oauth2/token"),
         };
-        Ok(self.oauth.token(&request, None, None, &target).await?)
+        self.oauth.token(&request, None, None, &target).await
     }
 
     async fn administrator(&self, password: &[u8]) -> Result<InstallationAdministrator, Failure> {
@@ -1046,6 +1069,41 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "a repeated keyed command answers with its first result",
     )?;
 
+    // While its sign-in is live, a user without the role creates neither a
+    // project nor a machine user: refused for its role.
+    let denied = |e: &CallerError| matches!(e, CallerError::Denied);
+    refused(
+        served
+            .projects
+            .create_project(
+                &guest,
+                operation(storage.as_ref(), "guest-project").await?,
+                CreateProjectRequest {
+                    name: "denied".into(),
+                    ..Default::default()
+                },
+            )
+            .await,
+        |e| matches!(e, ProjectError::Caller(e) if denied(e)),
+        "a user without the role creates no project",
+    )?;
+    refused(
+        served
+            .machines
+            .create_machine_user(
+                &guest,
+                operation(storage.as_ref(), "guest-machine").await?,
+                CreateMachineUserRequest {
+                    project_id: Some(ProjectId::SYSTEM.into()),
+                    display_name: "denied".into(),
+                    ..Default::default()
+                },
+            )
+            .await,
+        |e| matches!(e, MachineError::Caller(e) if denied(e)),
+        "a user without the role creates no machine user",
+    )?;
+
     // Revocation: the guest's sessions end and its token stops at once.
     let (root, _) = served.password_sign_in(ROOT, PASSWORD).await?;
     served
@@ -1068,22 +1126,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     )?;
 
     // Projects and machine identities: the administrator creates a project
-    // and a machine user in it; a user without the role creates neither.
-    check(
-        served
-            .projects
-            .create_project(
-                &guest,
-                operation(storage.as_ref(), "guest-project").await?,
-                CreateProjectRequest {
-                    name: "denied".into(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .is_err(),
-        "a user without the role creates no project",
-    )?;
+    // and a machine user in it.
     let project = served
         .projects
         .create_project(
@@ -1109,22 +1152,6 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         .await?
         .machine_user
         .ok_or("the created machine user")?;
-    check(
-        served
-            .machines
-            .create_machine_user(
-                &guest,
-                operation(storage.as_ref(), "guest-machine").await?,
-                CreateMachineUserRequest {
-                    project_id: project.id.clone(),
-                    display_name: "denied".into(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .is_err(),
-        "a user without the role creates no machine user",
-    )?;
     let added = served
         .machines
         .add_machine_credential(
@@ -1139,11 +1166,11 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         .await?;
     let kid = added.credential.ok_or("the added credential")?.kid;
     let api = &served.installation.authorization_api;
-    check(
+    refused(
         served
             .machine_token(&machine.client_id, &added.client_secret)
-            .await
-            .is_err(),
+            .await,
+        |e| matches!(e, OAuthError::Target(_)),
         "a machine user without access to a resource gets no token for it",
     )?;
     served
@@ -1181,11 +1208,11 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
             .await?,
         "the machine user's own token verifies at the resource as the machine user",
     )?;
-    check(
+    refused(
         served
             .machine_token(&machine.client_id, "not-the-secret")
-            .await
-            .is_err(),
+            .await,
+        |e| matches!(e, OAuthError::ClientRefused),
         "a wrong client secret gets no token",
     )?;
     // Revoking the credential stops its issued token and every new one.
@@ -1195,18 +1222,21 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
             &root,
             RevokeMachineCredentialRequest {
                 machine_user_id: machine.id.clone(),
-                kid,
+                kid: kid.clone(),
             },
         )
         .await?;
     check(
         sid_authn::caller::check_revocation(&served.installation.revocation_cache, &machine_claims)
-            .await?
-            && served
-                .machine_token(&machine.client_id, &added.client_secret)
-                .await
-                .is_err(),
-        "a revoked machine credential stops its token and obtains no new one",
+            .await?,
+        "a revoked machine credential stops its issued token",
+    )?;
+    refused(
+        served
+            .machine_token(&machine.client_id, &added.client_secret)
+            .await,
+        |e| matches!(e, OAuthError::ClientRefused),
+        "a revoked machine credential obtains no new token",
     )?;
 
     // Device keys: the owner's own sign-in enrolls a new device's key through
@@ -1229,7 +1259,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         display_name: Some("Laptop".into()),
         ..Default::default()
     };
-    check(
+    refused(
         served
             .devices
             .start_enrollment(
@@ -1238,8 +1268,8 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                 &issuer,
                 enroll(),
             )
-            .await
-            .is_err(),
+            .await,
+        |e| matches!(e, DeviceKeyError::Denied | DeviceKeyError::Enrollment(_)),
         "a revoked sign-in starts no device-key ceremony",
     )?;
     let challenge = served
@@ -1251,7 +1281,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         proof,
         ..Default::default()
     };
-    check(
+    refused(
         served
             .devices
             .finish_enrollment(
@@ -1265,8 +1295,8 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                     &first_key.thumbprint()?,
                 )?),
             )
-            .await
-            .is_err(),
+            .await,
+        |e| matches!(e, DeviceKeyError::Proof(_)),
         "a proof by another key binds nothing",
     )?;
     served
@@ -1279,8 +1309,10 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         )
         .await?;
     let device = challenge.device_id.clone();
+    // The thumbprint of the device's live key; none when it has no live
+    // key, any other failure fails the run.
     let live_key = || async {
-        served
+        match served
             .devices
             .get_attestation(
                 &mut LocalAccess(&root),
@@ -1290,14 +1322,16 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                 },
             )
             .await
-            .ok()
-            .map(|a| a.public_jwk)
+        {
+            Ok(a) => Ok::<_, Failure>(Some(sid_authn::device_key_proof::stored_key_thumbprint(
+                &a.public_jwk,
+            )?)),
+            Err(DeviceKeyError::NoAttestation(_)) => Ok(None),
+            Err(e) => Err(format!("device key: {e:?}").into()),
+        }
     };
     check(
-        live_key()
-            .await
-            .and_then(|k| sid_authn::device_key_proof::stored_key_thumbprint(&k).ok())
-            == Some(first_key.thumbprint()?),
+        live_key().await? == Some(first_key.thumbprint()?),
         "the enrolled device's live key is the proven one",
     )?;
     let rotation = served
@@ -1329,10 +1363,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         )
         .await?;
     check(
-        live_key()
-            .await
-            .and_then(|k| sid_authn::device_key_proof::stored_key_thumbprint(&k).ok())
-            == Some(next),
+        live_key().await? == Some(next),
         "a rotation approved by the current key installs the new one",
     )?;
     served
@@ -1347,7 +1378,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         )
         .await?;
     check(
-        live_key().await.is_none(),
+        live_key().await?.is_none(),
         "a revoked device key is no longer live",
     )?;
 
@@ -1481,24 +1512,73 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "the restored installation keeps the source's scheduled work, every other piece completed",
     )?;
     let administrator = restored.administrator(PASSWORD).await?;
+    // Revocations made before the snapshot hold after the restore: the
+    // credential and the device key are restored revoked.
     let (restored_root, _) = restored.password_sign_in(ROOT, PASSWORD).await?;
+    let credentials = restored
+        .machines
+        .list_machine_credentials(
+            &restored_root,
+            ListMachineCredentialsRequest {
+                machine_user_id: machine.id.clone(),
+            },
+        )
+        .await?
+        .credentials;
     check(
+        credentials
+            .iter()
+            .any(|c| c.kid == kid && c.status == MachineCredentialStatus::Revoked as i32),
+        "the restored installation keeps the machine credential revoked",
+    )?;
+    check(
+        sid_authn::caller::check_revocation(
+            &restored.installation.revocation_cache,
+            &machine_claims,
+        )
+        .await?,
+        "the restored installation stops the revoked credential's token",
+    )?;
+    refused(
         restored
             .machine_token(&machine.client_id, &added.client_secret)
-            .await
-            .is_err()
-            && restored
-                .devices
-                .get_attestation(
-                    &mut LocalAccess(&restored_root),
-                    &KeyCaller::from(&restored_root),
-                    GetDeviceAttestationRequest {
-                        device_id: device.clone(),
-                    },
-                )
-                .await
-                .is_err(),
-        "a revocation made before the snapshot holds after the restore",
+            .await,
+        |e| matches!(e, OAuthError::ClientRefused),
+        "the restored installation issues no token for the revoked credential",
+    )?;
+    let restored_owner = KeyCaller::from(&restored_root);
+    let bindings = restored
+        .devices
+        .list_attestations(
+            &mut LocalAccess(&restored_root),
+            &restored_owner,
+            ListDeviceAttestationsRequest {
+                profile_id: Some(restored_root.profile_id.into()),
+            },
+        )
+        .await?
+        .attestations;
+    check(
+        bindings
+            .iter()
+            .filter(|b| b.device_id == device)
+            .all(|b| b.status == DeviceAttestationStatus::Revoked as i32)
+            && bindings.iter().any(|b| b.device_id == device),
+        "the restored installation keeps the device's keys revoked",
+    )?;
+    refused(
+        restored
+            .devices
+            .get_attestation(
+                &mut LocalAccess(&restored_root),
+                &restored_owner,
+                GetDeviceAttestationRequest {
+                    device_id: device.clone(),
+                },
+            )
+            .await,
+        |e| matches!(e, DeviceKeyError::NoAttestation(_)),
+        "the restored device has no live key",
     )?;
     let again = restored
         .authorization
