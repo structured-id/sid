@@ -1656,13 +1656,10 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         .factors
         .totp_enrollment_start(&served.sign_in, &enroller)
         .await?;
+    let enrollment_code = sid_authn::generate_current_totp(&totp.shared_secret);
     let enrolled = served
         .factors
-        .totp_enrollment_finish(
-            &served.sign_in,
-            &enroller,
-            &sid_authn::generate_current_totp(&totp.shared_secret),
-        )
+        .totp_enrollment_finish(&served.sign_in, &enroller, &enrollment_code)
         .await?;
     check(
         !enrolled.recovery_codes.is_empty(),
@@ -1733,7 +1730,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                 ),
                 None,
                 None,
-                &sid_authn::generate_current_totp(&totp.shared_secret),
+                &enrollment_code,
             )
             .await,
         failed,
