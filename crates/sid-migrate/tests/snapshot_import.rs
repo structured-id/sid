@@ -1436,9 +1436,12 @@ async fn only_the_same_snapshot_resumes_into_an_initialized_target() {
 /// live and revoked, exactly as the source held them.
 #[tokio::test]
 async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
-    use chrono::{SubsecRound, Utc};
+    use chrono::{SubsecRound, Timelike, Utc};
     use sid_core::models::*;
-    let org = Organization::implicit_community("sid.example.com");
+    let mut org = Organization::implicit_community("sid.example.com");
+    // A time below the microsecond, as a host clock reporting nanoseconds
+    // gives it.
+    org.created_at = org.created_at.with_nanosecond(123_456_789).unwrap();
     let now = Utc::now().trunc_subsecs(3);
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
@@ -1478,8 +1481,12 @@ async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
         bindings.push(binding);
     }
 
+    // The organization as the source holds it: its creation time at the
+    // store's precision, not the host clock's.
+    let held = source.instance_organization().await.unwrap();
+    assert_eq!(held.as_ref().map(|o| o.id), Some(org.id));
     let snapshot = export(&source).await.unwrap();
-    assert_eq!(snapshot.organization.as_ref(), Some(&org));
+    assert_eq!(snapshot.organization, held);
     assert_eq!(snapshot.oidc_issuers.len(), 1);
     assert_eq!(snapshot.device_attestations.len(), 2);
 
@@ -1487,7 +1494,7 @@ async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
     let result = import(&target, &snapshot).await.unwrap();
     assert_eq!((result.organizations, result.oidc_issuers), (1, 1));
     assert_eq!(result.device_attestations, 2);
-    assert_eq!(target.instance_organization().await.unwrap(), Some(org));
+    assert_eq!(target.instance_organization().await.unwrap(), held);
     assert_eq!(
         target.oidc_issuer_by_handle(&issuer.handle).await.unwrap(),
         Some(issuer.clone())
