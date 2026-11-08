@@ -7,6 +7,7 @@
 
 pub mod account;
 pub mod admin;
+pub mod auth_mail;
 pub mod authorization;
 pub mod branding;
 pub mod devices;
@@ -34,6 +35,7 @@ pub mod sign_in;
 pub mod snapshot;
 pub mod upstream;
 mod wire;
+pub mod work;
 
 #[cfg(test)]
 mod test_support;

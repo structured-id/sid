@@ -948,18 +948,6 @@ impl AuthServiceImpl {
         })
     }
 
-    /// Where this service's evaluator is told what was settled here: the
-    /// in-process evaluator directly, a separate one by relayed events.
-    fn evaluator_delivery(&self) -> sid_authn::password_operation::EvaluatorDelivery {
-        use sid_authn::password_operation::EvaluatorDelivery;
-        match self.history_evaluation.clone() {
-            Some(evaluation) => EvaluatorDelivery::InProcess(evaluation),
-            None => EvaluatorDelivery::Relay {
-                source: self.issuer.clone(),
-            },
-        }
-    }
-
     /// The credential authority whose cleanup settlements this service
     /// consumes: its own, when its evaluator runs separately; `None` when the
     /// evaluator runs in process and settles directly.
@@ -967,23 +955,6 @@ impl AuthServiceImpl {
         self.history_evaluation
             .is_none()
             .then(|| self.issuer.clone())
-    }
-
-    /// The handler that ends this service's first enrollments at their
-    /// expiry: the evaluator reclaims an aborted one's key.
-    pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
-        Arc::new(sid_authn::password_operation::EnrollmentHandler::new(
-            self.storage.clone(),
-            self.evaluator_delivery(),
-        ))
-    }
-
-    /// The handler that has the evaluator destroy a deleted owner's keys.
-    pub fn owner_purge_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
-        Arc::new(sid_authn::password_operation::OwnerPurgeHandler::new(
-            self.storage.clone(),
-            self.evaluator_delivery(),
-        ))
     }
 
     /// The history evaluator, when it runs in this process: the engine's
