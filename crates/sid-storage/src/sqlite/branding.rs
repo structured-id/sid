@@ -24,7 +24,8 @@ fn row_to_branding(row: &sqlx::sqlite::SqliteRow) -> SidResult<BrandingConfig> {
 }
 
 fn data_of(config: &BrandingConfig) -> SidResult<String> {
-    serde_json::to_string(config).map_err(|e| SidError::Internal(format!("branding data: {e}")))
+    serde_json::to_string(&crate::stored_branding(config))
+        .map_err(|e| SidError::Internal(format!("branding data: {e}")))
 }
 
 impl SqliteBackend {

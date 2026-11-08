@@ -49,6 +49,18 @@ mod key_versions;
 ))]
 mod policy_evidence;
 
+/// `config` as the SQL stores keep it: its times at the microseconds their
+/// timestamp columns hold, so the content in `data` and the record read
+/// back are the same, whatever precision the host clock reports.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::models::BrandingConfig {
+    use chrono::SubsecRound;
+    let mut stored = config.clone();
+    stored.created_at = stored.created_at.trunc_subsecs(6);
+    stored.updated_at = stored.updated_at.trunc_subsecs(6);
+    stored
+}
+
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
 /// its row).
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
