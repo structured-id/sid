@@ -8,7 +8,10 @@ use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_proto::sid::v1::{CaptchaChallenge, CaptchaKind};
 use tracing::{error, warn};
 
-// The password sign-in refusals every authority answers alike.
+// The sign-in and second-factor refusals every authority answers alike.
+pub(super) use sid_infra::authn::second_factor::{
+    mfa_not_enrolled, recovery_codes_issued, session_ended, step_up_required, totp_already_enrolled,
+};
 pub(super) use sid_infra::authn::sign_in_refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, too_many_attempts,
 };
@@ -44,31 +47,6 @@ pub(super) fn captcha_required(challenge: &IssuedChallenge) -> Result<ApiError, 
     .with_detail(CAPTCHA_CHALLENGE_TYPE_URL, &detail))
 }
 
-/// STEP_UP_REQUIRED naming every requirement `unmet` leaves: the level by
-/// its acr value, each missing method by its `amr` value (RFC 8176), and an
-/// authentication too old by the age in seconds it must not exceed (the
-/// `max_age` of OpenID Connect Core 1.0 §3.1.2.1).
-pub(super) fn step_up_required(unmet: &sid_authn::login_policy::Unmet) -> ApiError {
-    let mut err = ApiError::new(
-        ErrorReason::StepUpRequired,
-        "a stronger or more recent sign-in is required",
-    );
-    if let Some(level) = unmet.acr {
-        err = err.with_precondition("acr", level.acr_value(), "authenticate at this level");
-    }
-    for method in &unmet.amr {
-        err = err.with_precondition("amr", method, "authenticate with this method");
-    }
-    if let Some(age) = unmet.max_authentication_age {
-        err = err.with_precondition(
-            "max_age",
-            age.as_secs().to_string(),
-            "authenticate again, no longer ago than this many seconds",
-        );
-    }
-    err
-}
-
 /// STEP_UP_REQUIRED raised by an anomaly rule: a second factor is needed. The
 /// rule name stays in the log; the client learns only what to do.
 pub(super) fn step_up_after_anomaly(rule: &str) -> ApiError {
@@ -80,12 +58,6 @@ pub(super) fn step_up_after_anomaly(rule: &str) -> ApiError {
     )
 }
 
-/// TOKEN_EXPIRED: the session the call acts on has ended or expired; the
-/// client signs in again.
-pub(super) fn session_ended() -> tonic::Status {
-    ApiError::new(ErrorReason::TokenExpired, "the session has ended").into()
-}
-
 /// INVALID_STATE: a provisional session (one that only continues a sign-in)
 /// cannot do this.
 pub(super) fn session_provisional(id: sid_core::models::SessionId) -> tonic::Status {
@@ -95,14 +67,6 @@ pub(super) fn session_provisional(id: sid_core::models::SessionId) -> tonic::Sta
     )
     .with_precondition("SESSION_STATE", id.to_string(), "provisional")
     .into()
-}
-
-/// MFA_REQUIRED: the profile has no second factor of the kind the call needs;
-/// it enrolls one first.
-pub(super) fn mfa_not_enrolled(kind: &'static str) -> tonic::Status {
-    ApiError::new(ErrorReason::MfaRequired, format!("no {kind} is enrolled"))
-        .with_precondition("MFA_ENROLLMENT", kind, "enroll it first")
-        .into()
 }
 
 /// REGISTRATION_RESTRICTED: self-registration needs `requirement` first

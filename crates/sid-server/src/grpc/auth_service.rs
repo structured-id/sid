@@ -54,7 +54,8 @@ pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_U
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, mfa_not_enrolled,
-    registration_restricted, session_ended, session_provisional, step_up_required,
+    recovery_codes_issued, registration_restricted, session_ended, session_provisional,
+    step_up_required, totp_already_enrolled,
 };
 use sid::second_factor::{Enroller, FactorCaller};
 use sid_authn::second_factor::pending::CompletedContext;
@@ -152,27 +153,6 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
             internal("request email code", e)
         }
     }
-}
-
-/// A retried GenerateRecoveryCodes whose set was issued: the codes were shown
-/// once and only their hashes are kept, so the answer names the set
-/// (`recorded`, its credential id) instead of codes. Replacing the set is a
-/// new command with a new key.
-fn recovery_codes_issued(recorded: &[u8]) -> Status {
-    let set = match uuid::Uuid::from_slice(recorded) {
-        Ok(id) => id.to_string(),
-        Err(e) => return internal("read the issued recovery code set", e),
-    };
-    ApiError::new(
-        ErrorReason::OperationResultUnavailable,
-        "these recovery codes were issued once; generate a new set to replace them",
-    )
-    .with_precondition(
-        "RECOVERY_CODES_ISSUED",
-        set,
-        "the codes are shown only once",
-    )
-    .into()
 }
 
 /// CREDENTIAL_NOT_FOUND for `id`: also the answer for a credential the caller
@@ -273,12 +253,7 @@ fn second_factor_refusal(e: sid::second_factor::SecondFactorError) -> Status {
     match e {
         E::InvalidField { field, reason } => invalid_field(field, reason),
         E::MissingField(field) => missing_field(field),
-        E::AlreadyEnrolled => ApiError::new(
-            ErrorReason::InvalidState,
-            "a TOTP authenticator is already enrolled",
-        )
-        .with_precondition("MFA_ENROLLMENT", "TOTP", "already enrolled")
-        .into(),
+        E::AlreadyEnrolled => totp_already_enrolled(),
         E::NotEnrolled(what) => mfa_not_enrolled(what),
         E::ProfileNotFound(id) => {
             not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
@@ -846,56 +821,20 @@ impl AuthServiceImpl {
             if self.ceremony_client(metadata)? != CeremonyClient::Browser {
                 return Err(session_ended());
             }
-            let csrf_invalid = || -> Status {
-                ApiError::new(
-                    ErrorReason::CsrfTokenInvalid,
-                    "the sign-in's CSRF token is missing or wrong",
-                )
-                .into()
-            };
-            let sent = || {
-                metadata
-                    .get_all("x-csrf-token")
-                    .iter()
-                    .filter_map(|value| value.to_str().ok())
-            };
-            let Some(session) = self
-                .browser_session(metadata)
-                .await?
-                .filter(|s| !s.is_expired())
-            else {
-                // A cookie no session holds: the context of a completion
-                // that committed, presented with the CSRF token it was
-                // given, which the completion's record checks.
-                let secret = self
-                    .sign_ins
-                    .browser_secret_hash(
-                        metadata
-                            .get_all("cookie")
-                            .iter()
-                            .filter_map(|value| value.to_str().ok()),
-                    )
-                    .ok_or_else(session_ended)?;
-                let mut tokens = sent();
-                let (Some(csrf), None) = (tokens.next(), tokens.next()) else {
-                    return Err(csrf_invalid());
-                };
-                return Ok(FactorRequest::Caller(FactorCaller::Completed(
-                    CompletedContext::Browser {
-                        secret,
-                        csrf: csrf.to_owned(),
-                    },
-                )));
-            };
-            let csrf = session.browser_csrf.as_ref().ok_or_else(session_ended)?;
-            if !sid_authn::browser_session::BrowserCsrf::matches(sent(), csrf) {
-                return Err(csrf_invalid());
-            }
-            return Ok(if session.awaits_second_factor() {
-                FactorRequest::Caller(FactorCaller::Pending(session, CeremonyClient::Browser))
-            } else {
-                FactorRequest::SignedIn(session)
-            });
+            use sid_infra::authn::second_factor::{BrowserFactor, browser_factor};
+            return Ok(
+                match browser_factor(metadata, self.sign_ins.cookie(), self.storage.as_ref())
+                    .await?
+                {
+                    BrowserFactor::Pending(session) => FactorRequest::Caller(
+                        FactorCaller::Pending(session, CeremonyClient::Browser),
+                    ),
+                    BrowserFactor::Completed(completed) => {
+                        FactorRequest::Caller(FactorCaller::Completed(completed))
+                    }
+                    BrowserFactor::SignedIn(session) => FactorRequest::SignedIn(session),
+                },
+            );
         }
         // The pending context's token is accepted here and nowhere else.
         let (claims, profile_id, pending) = match sid_infra::authn::caller::verify_factor_request(

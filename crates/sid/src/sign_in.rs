@@ -678,15 +678,6 @@ impl SignIn {
             .await?)
     }
 
-    /// The hash of the secret this authority's session cookie carries among
-    /// `cookies`, whether or not a session still holds it.
-    pub fn browser_secret_hash<'c>(
-        &self,
-        cookies: impl IntoIterator<Item = &'c str>,
-    ) -> Option<sid_core::models::BrowserSecretHash> {
-        self.cookie.secret(cookies).map(|secret| secret.hash())
-    }
-
     /// The lifetime left of the browser's own live `session`, a sign-in a
     /// completion already delivered by its cookie, answered again without
     /// any effect: only while the account can sign in and the session meets
