@@ -1009,7 +1009,18 @@ async fn test_handler_verify_recovery_code_no_credential() {
         .await
         .unwrap();
 
-    let token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    // A live session: the code is judged against the account's set.
+    let session = Session::new(
+        profile.id,
+        None,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    svc.storage
+        .create_session(&session, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let (token, _) =
+        common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
 
     // No recovery codes generated — must fail.
     let req = authed_request(

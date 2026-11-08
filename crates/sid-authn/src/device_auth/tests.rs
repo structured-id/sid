@@ -85,9 +85,16 @@ fn test_validate_poll_pending() {
 #[test]
 fn test_validate_poll_authorized() {
     let mut auth = make_pending_auth();
-    auth.as_pending()
-        .unwrap()
-        .authorize(sid_core::models::ProfileId::generate());
+    auth.as_pending().unwrap().authorize(
+        sid_core::models::ProfileId::generate(),
+        sid_core::models::GrantAuthentication {
+            session: sid_core::models::SessionId::generate(),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec!["pwd".into()],
+            assurance_level: sid_core::models::AuthLevel::Basic,
+            elevation: None,
+        },
+    );
     assert!(validate_poll(&auth).is_ok());
 }
 

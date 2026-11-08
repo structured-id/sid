@@ -40,6 +40,25 @@ fn password_only_account_enrolls_first_strong_factor() {
     }
 }
 
+/// Recovery codes left after the account's TOTP was removed are a fallback,
+/// not a factor: they establish no protection, so the password session
+/// binds a new TOTP as it would on a password-only account.
+#[test]
+fn recovery_codes_establish_no_protection() {
+    let account = credentials(&[CredentialType::Opaque, CredentialType::Recovery]);
+    assert_eq!(established_assurance(&account, true), AuthLevel::Basic);
+    assert_eq!(
+        check_enrollment(
+            &session(AuthLevel::Basic, 5),
+            &account,
+            CredentialType::Totp,
+            true,
+            Utc::now()
+        ),
+        Ok(())
+    );
+}
+
 /// An account protected by a passkey refuses a new passkey or TOTP from a
 /// password-only session (the email-reset → password → passkey bypass).
 #[test]

@@ -16,8 +16,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::models::ActorFence;
 use sid_core::models::oauth2_client::OAuth2Client;
-use sid_core::models::security_policy::{EnforcementMode, SecurityPolicy};
+use sid_core::models::security_policy::{EnforcementMode, MfaEnforcement, SecurityPolicy};
 use sid_core::models::session::{AuthLevel, Session};
+use sid_plugin::CredentialStore;
 
 use crate::anomaly::RuleReaction;
 
@@ -38,6 +39,18 @@ pub struct LoginRequirements {
     /// The policy state these were read under: what is decided on them
     /// commits only while it holds. None for a policy that never changes.
     pub fence: Option<ActorFence>,
+    /// Whether the policy requires multi-factor authentication: `Required`
+    /// needs standard assurance whatever `min_acr` and `required_amr` say.
+    pub mfa: MfaEnforcement,
+    /// Whether a passkey ceremony with user verification satisfies MFA, so
+    /// an account's enabled passkey establishes standard protection.
+    pub passkey_satisfies_mfa: bool,
+    /// The assurance the credential owner's own enabled protection requires
+    /// (see [`Self::for_account`]): standard once a second factor or a
+    /// passkey that satisfies MFA is active. Optional MFA makes setup
+    /// voluntary, not the enabled protection skippable, and audit
+    /// enforcement does not waive it.
+    pub account_protection: AuthLevel,
 }
 
 /// The source could not state the requirements: nothing is admitted under
@@ -73,6 +86,9 @@ impl FixedLoginPolicy {
             enforcement: policy.enforcement.mode,
             new_device: RuleReaction::StepUp,
             fence: None,
+            mfa: policy.auth.mfa_enforcement,
+            passkey_satisfies_mfa: policy.auth.passkey_satisfies_mfa,
+            account_protection: AuthLevel::Basic,
         })
     }
 }
@@ -131,12 +147,45 @@ impl LoginRequirements {
         self
     }
 
+    /// These requirements for an authentication of `owner`, with the
+    /// protection its active sign-in factors establish in `store`, the
+    /// credential owner: a pending enrollment is no protection, and a lost
+    /// factor, still active, does not lower it.
+    pub async fn for_account<S: CredentialStore + ?Sized>(
+        mut self,
+        store: &S,
+        owner: S::Owner,
+    ) -> sid_core::Result<Self> {
+        let active: Vec<_> = store
+            .get_credentials_by_profile(owner, None)
+            .await?
+            .into_iter()
+            .filter(|c| c.status.is_active())
+            .collect();
+        let established = crate::credential_enrollment::established_assurance(
+            &active,
+            self.passkey_satisfies_mfa,
+        );
+        self.account_protection = self.account_protection.max(established);
+        Ok(self)
+    }
+
+    /// The assurance the policy itself requires: its minimum, and standard
+    /// when it requires MFA.
+    fn policy_assurance(&self) -> AuthLevel {
+        match self.mfa {
+            MfaEnforcement::Required => self.min_acr.max(AuthLevel::Standard),
+            MfaEnforcement::Optional | MfaEnforcement::Adaptive => self.min_acr,
+        }
+    }
+
     /// What `session`'s authentication leaves unmet at `now`: the level in
     /// force then (a lapsed step-up no longer counts), the methods it used and
     /// its age from when it happened.
     pub fn unmet<O>(&self, session: &Session<O>, now: DateTime<Utc>) -> Unmet {
         let assurance = session.assurance_at(now);
-        let acr = (assurance < self.min_acr).then_some(self.min_acr);
+        let required = self.policy_assurance().max(self.account_protection);
+        let acr = (assurance < required).then_some(required);
         let amr = self
             .required_amr
             .iter()
@@ -154,8 +203,10 @@ impl LoginRequirements {
     }
 
     /// Whether `session`'s authentication, completed by a further factor
-    /// that reaches `level` and uses `method` (RFC 8176), meets every
-    /// requirement at `now`.
+    /// that reaches `level` and uses `method` (RFC 8176), is admitted at
+    /// `now` by the same decision as [`Self::decide`]: audit enforcement
+    /// lets the policy's unmet part pass once the account's protection is
+    /// met.
     pub fn met_with<O: Clone>(
         &self,
         session: &Session<O>,
@@ -168,15 +219,17 @@ impl LoginRequirements {
         if !completed.amr.iter().any(|m| m == method) {
             completed.amr.push(method.to_string());
         }
-        self.unmet(&completed, now).is_empty()
+        matches!(self.decide(&completed, now), LoginDecision::Allow { .. })
     }
 
     /// The decision on `session` at `now`: met is allowed; unmet is a step-up
     /// under soft or hard enforcement and is allowed, but reported, under
-    /// audit.
+    /// audit, except the account's own enabled protection, which audit does
+    /// not waive.
     pub fn decide<O>(&self, session: &Session<O>, now: DateTime<Utc>) -> LoginDecision {
         let unmet = self.unmet(session, now);
-        if unmet.is_empty() || self.enforcement == EnforcementMode::Audit {
+        let protection_unmet = session.assurance_at(now) < self.account_protection;
+        if unmet.is_empty() || (self.enforcement == EnforcementMode::Audit && !protection_unmet) {
             LoginDecision::Allow { audited: unmet }
         } else {
             LoginDecision::StepUp(unmet)

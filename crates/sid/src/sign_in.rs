@@ -138,6 +138,9 @@ pub enum LoginMethod {
         user_verified: bool,
         key_amr: &'static str,
     },
+    /// An upstream identity provider verified the user: SID verified no
+    /// method itself.
+    Upstream,
 }
 
 impl LoginMethod {
@@ -148,6 +151,16 @@ impl LoginMethod {
             Self::Passkey { user_verified, .. } => {
                 implied_auth_level("webauthn", passkey_satisfies_mfa, user_verified)
             }
+            Self::Upstream => AuthLevel::Basic,
+        }
+    }
+
+    /// The method name the sign-in rules weigh.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Password => "opaque",
+            Self::Passkey { .. } => "webauthn",
+            Self::Upstream => "upstream",
         }
     }
 
@@ -162,6 +175,8 @@ impl LoginMethod {
                 .iter()
                 .map(|m| m.to_string())
                 .collect(),
+            // RFC 8176 §1: only methods SID itself verified are named.
+            Self::Upstream => Vec::new(),
         }
     }
 }
@@ -255,6 +270,33 @@ pub struct SignInParts {
 
 /// How long a started password sign-in may be finished.
 const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The method a recovery code records: RFC 8176 `mca`, a multiple-channel
+/// authenticator.
+pub const RECOVERY_CODE_AMR: &str = "mca";
+
+/// A single-use secret a second factor spends (a recovery code): spent in
+/// the commit of the effect it pays for, with the work its spend owes, or
+/// not at all.
+pub struct FactorSpend {
+    pub spend: sid_core::models::CredentialSpend,
+    pub owes: sid_core::models::NewWork,
+}
+
+impl FactorSpend {
+    /// `ctx`, also spending this.
+    pub fn into_context(self, ctx: MutationContext) -> MutationContext {
+        ctx.spending(self.spend).with_work(self.owes)
+    }
+}
+
+/// The pending second-factor context a sign-in completes: it ends in the
+/// session's commit, which spends what its factor spends.
+struct Completing<'a> {
+    id: SessionId,
+    end: &'a SessionEnd,
+    spend: Option<FactorSpend>,
+}
 
 /// Signing users in for one authority.
 pub struct SignIn {
@@ -413,11 +455,30 @@ impl SignIn {
         (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
         requirements: &LoginRequirements,
     ) -> Result<(), SignInError> {
+        let requirements = self.for_account(requirements, profile_id).await?;
         let attempt = attempt(client_ip, authentication, context);
         Ok(
-            sid_authn::sign_in_security::evaluate(&Rules(self), &profile_id, attempt, requirements)
-                .await?,
+            sid_authn::sign_in_security::evaluate(
+                &Rules(self),
+                &profile_id,
+                attempt,
+                &requirements,
+            )
+            .await?,
         )
+    }
+
+    /// `requirements` for a sign-in of `profile_id`, with the protection its
+    /// active credentials establish here, the credential owner.
+    pub async fn for_account(
+        &self,
+        requirements: &LoginRequirements,
+        profile_id: ProfileId,
+    ) -> Result<LoginRequirements, SignInError> {
+        Ok(requirements
+            .clone()
+            .for_account(self.storage.as_ref(), profile_id)
+            .await?)
     }
 
     /// The same rules for a repeat of a sign-in already admitted and
@@ -431,12 +492,13 @@ impl SignIn {
         requirements: &LoginRequirements,
         admitted_from: Option<IpAddr>,
     ) -> Result<(), SignInError> {
+        let requirements = self.for_account(requirements, profile_id).await?;
         let attempt = attempt(client_ip, authentication, context);
         Ok(sid_authn::sign_in_security::check(
             &Rules(self),
             &profile_id,
             attempt,
-            requirements,
+            &requirements,
             admitted_from,
         )
         .await?)
@@ -455,6 +517,9 @@ impl SignIn {
         context: AttemptContext<'_>,
         requirements: &LoginRequirements,
     ) -> Result<FirstFactor, SignInError> {
+        // The factors are chosen under the same requirements the rules
+        // decide on: with the account's protection.
+        let requirements = &self.for_account(requirements, profile_id).await?;
         let authentication = AttemptAuthentication::Local {
             method,
             assurance,
@@ -517,6 +582,20 @@ impl SignIn {
                 .any(|c| c.status.is_active())
         {
             factors.push(StepUpMethod::Totp);
+        }
+        // Recovery codes complete the sign-in of an account whose enabled
+        // factor is unavailable: they are its fallback, never the account's
+        // only protection, and only where the requirements accept them.
+        if requirements.account_protection > AuthLevel::Basic
+            && requirements.met_with(first, AuthLevel::Standard, RECOVERY_CODE_AMR, now)
+            && self
+                .storage
+                .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
+                .await?
+                .iter()
+                .any(|c| c.status.is_active())
+        {
+            factors.push(StepUpMethod::RecoveryCode);
         }
         Ok(factors)
     }
@@ -1009,8 +1088,8 @@ impl SignIn {
     /// Sign `profile` in as [`Self::sign_in`] does with `session`, the
     /// completion of the pending second-factor context `pending`: the
     /// context ends (owing what its end names) in the session's own commit,
-    /// which applies only while the context exists. Its access tokens stop
-    /// at once in every process.
+    /// which applies only while the context exists and spends `spend` when
+    /// given. Its access tokens stop at once in every process.
     #[allow(clippy::too_many_arguments)]
     pub async fn complete_pending(
         &self,
@@ -1021,6 +1100,7 @@ impl SignIn {
         native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
+        spend: Option<FactorSpend>,
     ) -> Result<SignedIn, SignInError> {
         let limit = self.policy.session.max_concurrent_sessions;
         let (signed_in, _) = self
@@ -1032,7 +1112,11 @@ impl SignIn {
                 proved_by,
                 policy,
                 limit,
-                Some(pending),
+                Some(Completing {
+                    id: pending.0,
+                    end: pending.1,
+                    spend,
+                }),
                 None,
             )
             .await?;
@@ -1046,12 +1130,39 @@ impl SignIn {
         Ok(signed_in)
     }
 
+    /// The requirements `login_policy` states now, with the account's
+    /// protection, when `pending` completed by the second factor `method`
+    /// would meet them; the step-up they ask otherwise. A factor spent on
+    /// the completion is checked here before it is spent.
+    pub async fn second_factor_requirements(
+        &self,
+        login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        pending: &Session,
+        method: &str,
+    ) -> Result<LoginRequirements, SignInError> {
+        let now = Utc::now();
+        let requirements = self
+            .for_account(
+                &organization_requirements(login_policy).await?,
+                pending.profile_id,
+            )
+            .await?;
+        if !requirements.met_with(pending, AuthLevel::Standard, method, now) {
+            let mut completed = pending.clone();
+            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
+            completed.amr.push(method.to_string());
+            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
+        }
+        Ok(requirements)
+    }
+
     /// Complete `pending` with the verified second factor `method` (RFC
     /// 8176): the login requirements `login_policy` states now are met by
     /// the completed authentication, the first factor's credential still
     /// holds, the pending context ends exactly once and the account gets its
     /// session with a new credential, delivered to `client` (with the
-    /// refresh generation bound to `native_key` when it proved one).
+    /// refresh generation bound to `native_key` when it proved one); the
+    /// factor's `spend` commits with that session or not at all.
     pub async fn complete_second_factor(
         &self,
         login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
@@ -1059,6 +1170,7 @@ impl SignIn {
         method: &str,
         client: CeremonyClient,
         native_key: Option<&str>,
+        spend: Option<FactorSpend>,
     ) -> Result<SignedIn, SignInError> {
         let profile = self
             .storage
@@ -1066,15 +1178,9 @@ impl SignIn {
             .await?
             .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
             .ok_or(SignInError::AuthenticationFailed)?;
-        let now = Utc::now();
-        let requirements = organization_requirements(login_policy).await?;
-        if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
-            let mut completed = pending.clone();
-            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
-            completed.amr.push(method.to_string());
-            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
-        }
-
+        let requirements = self
+            .second_factor_requirements(login_policy, &pending, method)
+            .await?;
         let proved_by = self.first_factor_fence(&pending).await?;
 
         let mut session = self.new_session(profile.id, pending.ip_address);
@@ -1104,6 +1210,7 @@ impl SignIn {
                 native_key,
                 proved_by.as_ref().map(SignInProof::Credential),
                 requirements.fence,
+                spend,
             )
             .await?;
         // Recorded from the address the rules judged at the first factor.
@@ -1144,7 +1251,7 @@ impl SignIn {
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
-        pending: Option<(SessionId, &SessionEnd)>,
+        pending: Option<Completing<'_>>,
         retained: Option<RetainedSignIn<'_>>,
     ) -> Result<(SignedIn, Option<String>), SignInError> {
         match client {
@@ -1261,7 +1368,7 @@ impl SignIn {
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
-        pending: Option<(SessionId, &SessionEnd)>,
+        pending: Option<Completing<'_>>,
         completion: Option<OperationCompletion>,
     ) -> Result<(), SignInError> {
         // The storage counts, evicts and inserts in one serialized step, and
@@ -1288,9 +1395,12 @@ impl SignIn {
             ctx = ctx.with_operation(completion);
         }
         let stored = match pending {
-            Some((pending, end)) => {
+            Some(Completing { id, end, spend }) => {
+                if let Some(spend) = spend {
+                    ctx = spend.into_context(ctx);
+                }
                 self.storage
-                    .complete_pending_session(pending, end, session, limit, proved_by, ctx)
+                    .complete_pending_session(id, end, session, limit, proved_by, ctx)
                     .await
             }
             None => {

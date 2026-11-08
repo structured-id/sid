@@ -40,7 +40,11 @@ const AUTH: &str = "c.id AS id, c.client_id AS client_id,
     c.resource_id AS resource_id, c.status AS status, c.authorized_by AS authorized_by,
     c.project_id AS project_id, c.interval_secs AS interval_secs, c.created_at AS created_at,
     c.expires_at AS expires_at, c.authorized_at AS authorized_at,
-    c.last_polled_at AS last_polled_at, c.redeemed_session_id AS redeemed_session_id";
+    c.last_polled_at AS last_polled_at, c.redeemed_session_id AS redeemed_session_id,
+    c.authorizing_session_id AS authorizing_session_id,
+    c.authenticated_at AS authenticated_at, c.amr AS amr,
+    c.assurance_level AS assurance_level, c.elevation_level AS elevation_level,
+    c.elevation_until AS elevation_until";
 
 /// RFC 8628 §3.5: each slow_down adds 5 seconds to the polling interval.
 const SLOW_DOWN_STEP_SECS: i32 = 5;
@@ -264,6 +268,7 @@ fn auth(tx: &Statements<'_>, row: &Row) -> SidResult<DeviceAuthorizationCode> {
         authorized_at: get_opt_time(row, "authorized_at")?,
         last_polled_at: get_opt_time(row, "last_polled_at")?,
         redeemed_session_id,
+        authorized_with: super::session::opt_grant_authentication(row)?,
     })
 }
 
@@ -708,33 +713,39 @@ impl CoordinodeBackend {
                     resource_id: $resource_id, status: $status, authorized_by: $authorized_by,
                     project_id: $project_id, interval_secs: $interval, created_at: $created_at,
                     expires_at: $expires_at, authorized_at: $authorized_at,
-                    last_polled_at: $last_polled_at, redeemed_session_id: $redeemed})",
-                Params::default()
-                    .with("id", uuid(&c.id.0))
-                    .with("client_id", Value::String(c.client_id.clone()))
-                    .with(
-                        "device_code_hash",
-                        Value::Binary(c.device_code_hash.clone()),
-                    )
-                    .with("user_code", Value::String(c.user_code.clone()))
-                    .with("scope", opt_text(c.scope.as_deref()))
-                    .with("resource_id", bin(c.resource.as_bytes()))
-                    .with("status", Value::String(c.status.as_str().into()))
-                    .with(
-                        "authorized_by",
-                        c.authorized_by.map_or(Value::Null, |p| bin(p.as_bytes())),
-                    )
-                    .with("project_id", bin(c.project_id.as_bytes()))
-                    .with("interval", Value::Int(i64::from(c.interval)))
-                    .with("created_at", time(c.created_at))
-                    .with("expires_at", time(c.expires_at))
-                    .with("authorized_at", opt_time(c.authorized_at))
-                    .with("last_polled_at", opt_time(c.last_polled_at))
-                    .with(
-                        "redeemed",
-                        c.redeemed_session_id
-                            .map_or(Value::Null, |s| bin(s.as_bytes())),
-                    ),
+                    last_polled_at: $last_polled_at, redeemed_session_id: $redeemed,
+                    authorizing_session_id: $authorizing, authenticated_at: $authenticated_at,
+                    amr: $amr, assurance_level: $assurance_level,
+                    elevation_level: $elevation_level, elevation_until: $elevation_until})",
+                super::session::grant_authentication_params(
+                    Params::default(),
+                    c.authorized_with.as_ref(),
+                )?
+                .with("id", uuid(&c.id.0))
+                .with("client_id", Value::String(c.client_id.clone()))
+                .with(
+                    "device_code_hash",
+                    Value::Binary(c.device_code_hash.clone()),
+                )
+                .with("user_code", Value::String(c.user_code.clone()))
+                .with("scope", opt_text(c.scope.as_deref()))
+                .with("resource_id", bin(c.resource.as_bytes()))
+                .with("status", Value::String(c.status.as_str().into()))
+                .with(
+                    "authorized_by",
+                    c.authorized_by.map_or(Value::Null, |p| bin(p.as_bytes())),
+                )
+                .with("project_id", bin(c.project_id.as_bytes()))
+                .with("interval", Value::Int(i64::from(c.interval)))
+                .with("created_at", time(c.created_at))
+                .with("expires_at", time(c.expires_at))
+                .with("authorized_at", opt_time(c.authorized_at))
+                .with("last_polled_at", opt_time(c.last_polled_at))
+                .with(
+                    "redeemed",
+                    c.redeemed_session_id
+                        .map_or(Value::Null, |s| bin(s.as_bytes())),
+                ),
             )?;
             Ok(())
         })
@@ -796,20 +807,34 @@ impl CoordinodeBackend {
             if !pending {
                 return Ok(Decision::Abandon(false));
             }
-            let (status, by, at) = match decision {
-                DeviceAuthDecision::Authorize(profile) => {
-                    ("authorized", bin(profile.as_bytes()), time(now))
-                }
-                DeviceAuthDecision::Deny => ("denied", Value::Null, Value::Null),
+            let (status, by, at, authentication) = match &decision {
+                DeviceAuthDecision::Authorize {
+                    profile,
+                    authentication,
+                } => (
+                    "authorized",
+                    bin(profile.as_bytes()),
+                    time(now),
+                    Some(authentication),
+                ),
+                DeviceAuthDecision::Deny => ("denied", Value::Null, Value::Null, None),
             };
             tx.run(
                 "MATCH (c:SidDeviceAuth) WHERE c.id = $id AND c.status = 'pending'
-                 SET c.status = $status, c.authorized_by = $by, c.authorized_at = $at",
-                Params::default()
-                    .with("id", uuid(&id.0))
-                    .with("status", Value::String(status.into()))
-                    .with("by", by)
-                    .with("at", at),
+                 SET c.status = $status, c.authorized_by = $by, c.authorized_at = $at,
+                     c.authorizing_session_id = $authorizing,
+                     c.authenticated_at = $authenticated_at, c.amr = $amr,
+                     c.assurance_level = $assurance_level,
+                     c.elevation_level = $elevation_level,
+                     c.elevation_until = $elevation_until",
+                super::session::grant_authentication_params(
+                    Params::default()
+                        .with("id", uuid(&id.0))
+                        .with("status", Value::String(status.into()))
+                        .with("by", by)
+                        .with("at", at),
+                    authentication,
+                )?,
             )?;
             finalize(tx, &format!("device_auth:{}", id.0), ctx.clone())?;
             Ok(Decision::Commit(true))
@@ -882,6 +907,15 @@ impl CoordinodeBackend {
             }
             if c.status != DeviceAuthStatus::Authorized || c.expires_at <= Utc::now() {
                 return Ok(Decision::Abandon(DeviceCodeRedemption::NotAuthorized));
+            }
+            // A sign-out of the approving session either came first, leaving
+            // the device nothing to redeem, or conflicts with this commit.
+            if let Some(approver) = session.authenticated_by
+                && !super::session::claim_session(tx, approver)?
+            {
+                return Err(SidError::NotFound(
+                    "the session that approved the device ended".into(),
+                ));
             }
             super::session::insert(tx, &session)?;
             // Written at the authorized status: of concurrent redemptions one

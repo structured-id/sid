@@ -13,6 +13,33 @@ use uuid::Uuid;
 
 use super::{PostgresBackend, insert_error, password_history};
 
+/// Spend `spend` inside a mutation's transaction: the credential must still
+/// be active and hold the data as read, else the mutation commits nothing.
+pub(super) async fn spend_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spend: &sid_core::models::CredentialSpend,
+) -> SidResult<()> {
+    let spent = sqlx::query(
+        "UPDATE credentials SET data = $3, last_used_at = NOW()
+         WHERE id = $1 AND status = 'active' AND data = $2",
+    )
+    .bind(spend.credential.0)
+    .bind(&spend.read)
+    .bind(&spend.left)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("spend credential state: {e}")))?
+    .rows_affected()
+        == 1;
+    if spent {
+        Ok(())
+    } else {
+        Err(SidError::Fenced(
+            "the credential state it spends changed".into(),
+        ))
+    }
+}
+
 #[async_trait]
 impl CredentialStore for PostgresBackend {
     type Owner = ProfileId;

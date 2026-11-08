@@ -1556,6 +1556,58 @@ async fn test_authorization_code_reuse_revokes_first_exchange() {
     );
 }
 
+/// Regression: a second factor the account enables after a password-only
+/// grant ends that grant's issuance: its refresh token is refused, under
+/// optional MFA too, until the user authenticates with the factor again.
+#[tokio::test]
+async fn test_refresh_stops_once_the_account_enables_a_second_factor() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    let profile = test_profile();
+    let storage = MockStorage::new()
+        .with_client(test_client())
+        .with_profile(profile.clone());
+    let svc = TestServices::new(storage);
+    let code = authorize_code(&svc, &profile).await;
+    let first = svc
+        .auth
+        .o_auth2_token(code_exchange(&svc, &code))
+        .await
+        .expect("exchange")
+        .into_inner();
+    let refresh = |token: Option<String>| {
+        svc.auth.o_auth2_token(Request::new(OAuth2TokenRequest {
+            grant_type: "refresh_token".to_string(),
+            refresh_token: token,
+            client_id: Some("test-client".to_string()),
+            issuer_handle: svc.issuer.handle.to_string(),
+            ..Default::default()
+        }))
+    };
+    let renewed = refresh(first.refresh_token)
+        .await
+        .expect("a refresh before the factor")
+        .into_inner();
+
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                profile.id,
+                CredentialType::Totp,
+                CredentialData::new(b"seed".to_vec()),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+    let err = refresh(renewed.refresh_token)
+        .await
+        .expect_err("a password-only grant after the factor");
+    let oauth_error = tonic_types::StatusExt::get_details_error_info(&err)
+        .and_then(|info| info.metadata.get("oauthError").cloned());
+    assert_eq!(oauth_error.as_deref(), Some("invalid_grant"), "{err:?}");
+}
+
 /// Two concurrent exchanges of one code: exactly one gets tokens. The race
 /// itself is exercised against each storage backend by the storage
 /// conformance scenario; this checks the service path end to end.

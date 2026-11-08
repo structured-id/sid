@@ -23,7 +23,7 @@ use sid_core::models::{
 use sid_proto::sid::v1::{
     CompleteStepUpRequest, CompleteStepUpResponse, DeleteMfaCredentialRequest,
     DeleteMfaCredentialResponse, FinishTotpEnrollmentResponse, GenerateRecoveryCodesRequest,
-    GenerateRecoveryCodesResponse, MfaVerifyResponse, StepUpChallenge, StepUpMethod, TotpAlgorithm,
+    GenerateRecoveryCodesResponse, StepUpChallenge, StepUpMethod, TotpAlgorithm,
     TotpEnrollmentChallenge, complete_step_up_request, step_up_challenge,
 };
 use tracing::{info, warn};
@@ -143,6 +143,15 @@ fn require_totp_code_format(code: &str) -> Result<(), SecondFactorError> {
     }
 }
 
+/// A spend whose credential changed before its commit lost to a concurrent
+/// one: nothing was spent, and the client retries.
+fn spent_concurrently(e: SecondFactorError) -> SecondFactorError {
+    match e {
+        SecondFactorError::Store(SidError::Fenced(_)) => SecondFactorError::ChangedConcurrently,
+        other => other,
+    }
+}
+
 /// The installation session a verified token stands for.
 fn token_session(verified: &Verified) -> Result<SessionId, SecondFactorError> {
     SessionId::parse(&verified.claims.sid)
@@ -179,6 +188,14 @@ impl FactorCaller {
             Self::Pending(session, _) | Self::StepUp(session) => session.profile_id,
         }
     }
+}
+
+/// A spent recovery code: the session it authenticated, the codes left
+/// and, for a completed sign-in, its delivery.
+pub struct RecoveryCodeSpent {
+    pub session_id: SessionId,
+    pub remaining: i32,
+    pub signed_in: Option<SignedIn>,
 }
 
 /// How long a started enrollment or step-up may be finished.
@@ -357,65 +374,62 @@ impl SecondFactors {
         }
     }
 
-    /// Spend one recovery code of the profile's active set; returns how many
-    /// remain. The code is removed with a compare-and-swap on the stored
-    /// set, so concurrent requests spend a code once and never lose each
-    /// other's removals; every stored hash is compared, in constant time.
-    async fn consume_recovery_code(
+    /// The spend of one recovery code of the profile's active set and how
+    /// many remain after it. Nothing is spent here: the spend commits with
+    /// the effect it pays for, as a compare-and-swap on the set as read, so
+    /// concurrent uses spend a code once and only by an effect that
+    /// committed; every stored hash is compared, in constant time.
+    async fn recovery_spend(
         &self,
         sign_in: &SignIn,
         profile_id: ProfileId,
         code: &str,
-    ) -> Result<usize, SecondFactorError> {
+    ) -> Result<(crate::sign_in::FactorSpend, i32), SecondFactorError> {
         use subtle::ConstantTimeEq;
-        let storage = sign_in.storage();
         let input_hash = sid_authn::hash_code(&sid_authn::normalize_code(code));
-        // A lost race re-reads the set; a bound keeps a stuck writer from spinning.
-        for _ in 0..8 {
-            let set = storage
-                .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
-                .await?
-                .into_iter()
-                .find(|c| c.status.is_active())
-                .ok_or(SecondFactorError::NotEnrolled("recovery code set"))?;
-            let mut hashes: Vec<String> = serde_json::from_slice(set.data.expose())
-                .map_err(|e| internal("read recovery code set", e))?;
-            let mut matched = None;
-            for (i, stored) in hashes.iter().enumerate() {
-                if bool::from(input_hash.as_bytes().ct_eq(stored.as_bytes())) {
-                    matched = Some(i);
-                }
-            }
-            let Some(index) = matched else {
-                return Err(SecondFactorError::AuthenticationFailed);
-            };
-            hashes.remove(index);
-            let remaining =
-                serde_json::to_vec(&hashes).map_err(|e| internal("write recovery code set", e))?;
-            // A spent code is security-relevant (it may mean the account is
-            // compromised); the spend owes the event, a lost race owes nothing.
-            let used = Event::new(&self.issuer, event_types::MFA_RECOVERY_CODE_USED)
-                .with_subject(format!("profile/{}", profile_id))
-                .with_data(serde_json::json!({
-                    "remaining": hashes.len(),
-                    "needs_regeneration": hashes.len() <= 3,
-                }));
-            let ctx = MutationContext::from(AuditEntry::user(
-                profile_id.to_string(),
-                "credential.recovery_code_used",
-                set.id.0.to_string(),
-            ))
-            .with_work(used.relay());
-            if storage
-                .replace_credential_data(set.id, set.data.expose(), &remaining, ctx)
-                .await?
-            {
-                return Ok(hashes.len());
+        let set = sign_in
+            .storage()
+            .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
+            .await?
+            .into_iter()
+            .find(|c| c.status.is_active())
+            .ok_or(SecondFactorError::NotEnrolled("recovery code set"))?;
+        let mut hashes: Vec<String> = serde_json::from_slice(set.data.expose())
+            .map_err(|e| internal("read recovery code set", e))?;
+        let mut matched = None;
+        for (i, stored) in hashes.iter().enumerate() {
+            if bool::from(input_hash.as_bytes().ct_eq(stored.as_bytes())) {
+                matched = Some(i);
             }
         }
-        // Each lost race means another spend committed; after the bound the
-        // caller retries rather than being told the code is wrong.
-        Err(SecondFactorError::ChangedConcurrently)
+        let Some(index) = matched else {
+            return Err(SecondFactorError::AuthenticationFailed);
+        };
+        hashes.remove(index);
+        let left =
+            serde_json::to_vec(&hashes).map_err(|e| internal("write recovery code set", e))?;
+        // A spent code is security-relevant (it may mean the account is
+        // compromised); the spend owes the event, a spend that did not
+        // commit owes nothing.
+        let used = Event::new(&self.issuer, event_types::MFA_RECOVERY_CODE_USED)
+            .with_subject(format!("profile/{}", profile_id))
+            .with_data(serde_json::json!({
+                "remaining": hashes.len(),
+                "needs_regeneration": hashes.len() <= 3,
+            }));
+        let remaining = i32::try_from(hashes.len())
+            .map_err(|e| internal("count remaining recovery codes", e))?;
+        Ok((
+            crate::sign_in::FactorSpend {
+                spend: sid_core::models::CredentialSpend {
+                    credential: set.id,
+                    read: set.data.expose().to_vec(),
+                    left,
+                },
+                owes: used.relay(),
+            },
+            remaining,
+        ))
     }
 
     /// Start enrolling a TOTP authenticator for `enroller`: a new seed and
@@ -613,7 +627,7 @@ impl SecondFactors {
         let session_id = match caller {
             FactorCaller::Pending(pending, client) => {
                 let signed_in = sign_in
-                    .complete_second_factor(login_policy, pending, "otp", client, native_key)
+                    .complete_second_factor(login_policy, pending, "otp", client, native_key, None)
                     .await?;
                 info!("TOTP completed the sign-in of profile {}", profile_id);
                 return Ok(signed_in);
@@ -738,51 +752,89 @@ impl SecondFactors {
         Ok(GenerateRecoveryCodesResponse { codes: plaintext })
     }
 
-    /// Spend a recovery code on the installation session `verified` stands
-    /// for: the method is recorded on it (recovery grants no elevation, so
-    /// no new token is delivered).
+    /// Spend a recovery code for `caller`: a sign-in's pending context is
+    /// completed into its session, as by a TOTP code, when the requirements
+    /// `login_policy` states accept the code's method, checked before the
+    /// code is spent (with the refresh generation of `native_key` when a
+    /// native client proved one); an installation session has the method
+    /// recorded (recovery grants it no elevation, so no new token). A wrong
+    /// code completing a sign-in spends the account's sign-in budget.
     pub async fn verify_recovery_code(
         &self,
         sign_in: &SignIn,
-        verified: &Verified,
+        login_policy: &dyn LoginPolicySource,
+        caller: FactorCaller,
+        client_ip: Option<std::net::IpAddr>,
+        native_key: Option<&str>,
         code: &str,
-    ) -> Result<MfaVerifyResponse, SecondFactorError> {
-        // A second factor authenticates the IdP session, never an
-        // application's session.
-        verified.require_installation()?;
-        let profile_id = verified.caller.profile_id;
+    ) -> Result<RecoveryCodeSpent, SecondFactorError> {
+        let profile_id = caller.profile_id();
         if code.is_empty() {
             return Err(SecondFactorError::MissingField("code"));
         }
-        let session_id = token_session(verified)?;
-        let remaining = i32::try_from(
-            self.consume_recovery_code(sign_in, profile_id, code)
-                .await?,
-        )
-        .map_err(|e| internal("count remaining recovery codes", e))?;
-        self.authenticate_session(
-            sign_in,
-            session_id,
-            AuditEntry::user(
-                profile_id.to_string(),
-                "session.recovery_code_used",
-                session_id.to_string(),
-            )
-            .into(),
-            // RFC 8176 `mca`: a multiple-channel authenticator.
-            |active| active.add_amr("mca"),
-        )
-        .await?;
+        let amr = crate::sign_in::RECOVERY_CODE_AMR;
+        let (pending, client) = match caller {
+            FactorCaller::Pending(pending, client) => (pending, client),
+            FactorCaller::StepUp(session) => {
+                let (spend, remaining) = self.recovery_spend(sign_in, profile_id, code).await?;
+                // The code is spent in the commit recording it on the session.
+                self.authenticate_session(
+                    sign_in,
+                    session.id,
+                    spend.into_context(
+                        AuditEntry::user(
+                            profile_id.to_string(),
+                            "session.recovery_code_used",
+                            session.id.to_string(),
+                        )
+                        .into(),
+                    ),
+                    |active| active.add_amr(amr),
+                )
+                .await
+                .map_err(spent_concurrently)?;
+                return Ok(RecoveryCodeSpent {
+                    session_id: session.id,
+                    remaining,
+                    signed_in: None,
+                });
+            }
+        };
+        let identity = profile_id.to_string();
+        sign_in.refuse_if_locked(&identity).await?;
+        // The code is spent only in the commit that completes the sign-in:
+        // a completion refused (the pending context ended, the policy or the
+        // first factor changed) or lost to a concurrent one spends nothing.
+        // The checks here answer early; the commit makes them again.
+        let pending = sign_in
+            .storage()
+            .get_session(pending.id)
+            .await?
+            .filter(|s| s.profile_id == profile_id && s.awaits_second_factor() && !s.is_expired())
+            .ok_or(SecondFactorError::SessionEnded)?;
+        sign_in
+            .second_factor_requirements(login_policy, &pending, amr)
+            .await?;
+        sign_in.first_factor_fence(&pending).await?;
+        let (spend, remaining) = match self.recovery_spend(sign_in, profile_id, code).await {
+            Ok(spend) => spend,
+            Err(SecondFactorError::AuthenticationFailed) => {
+                sign_in.record_failed_login(&identity, client_ip).await?;
+                return Err(SecondFactorError::AuthenticationFailed);
+            }
+            Err(e) => return Err(e),
+        };
+        let signed_in = sign_in
+            .complete_second_factor(login_policy, pending, amr, client, native_key, Some(spend))
+            .await?;
         info!(
-            "Recovery code used for profile {} ({} remaining)",
+            "A recovery code completed the sign-in of profile {} ({} remaining)",
             profile_id, remaining
         );
-        Ok(MfaVerifyResponse {
-            verified: true,
-            session_id: Some(session_id.into()),
-            expires_in: None,
-            redirect_to: None,
-            remaining_codes: Some(remaining),
+        Ok(RecoveryCodeSpent {
+            session_id: signed_in.session_id,
+            remaining,
+            signed_in: Some(signed_in),
         })
     }
 
@@ -913,6 +965,7 @@ impl SecondFactors {
         let profile_id = verified.caller.profile_id;
         let session_id = token_session(verified)?;
         let method = StepUpMethod::try_from(request.method).unwrap_or(StepUpMethod::Unspecified);
+        let mut spend = None;
         let (amr_methods, target_level) = match method {
             StepUpMethod::Totp => {
                 let Some(complete_step_up_request::Proof::TotpCode(code)) = request.proof else {
@@ -931,12 +984,11 @@ impl SecondFactors {
                 else {
                     return Err(SecondFactorError::MissingField("recovery_code"));
                 };
-                // The code is spent before it counts: a code that cannot be
-                // removed would stay reusable, so a failed write fails the
-                // step-up.
-                self.consume_recovery_code(sign_in, profile_id, &code)
-                    .await?;
-                (vec!["mca"], AuthLevel::Standard)
+                // The code is spent in the commit storing the elevation: an
+                // elevation not stored spends nothing, and a spent code
+                // never stays reusable.
+                spend = Some(self.recovery_spend(sign_in, profile_id, &code).await?.0);
+                (vec![crate::sign_in::RECOVERY_CODE_AMR], AuthLevel::Standard)
             }
             StepUpMethod::Webauthn => {
                 let Some(complete_step_up_request::Proof::WebauthnAssertion(assertion)) =
@@ -999,16 +1051,19 @@ impl SecondFactors {
         };
 
         // The elevated token is issued only for an elevation that is stored.
+        let ctx = MutationContext::from(AuditEntry::user(
+            profile_id.to_string(),
+            "session.step_up",
+            session_id.to_string(),
+        ));
         let session = self
             .authenticate_session(
                 sign_in,
                 session_id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "session.step_up",
-                    session_id.to_string(),
-                )
-                .into(),
+                match spend {
+                    Some(spend) => spend.into_context(ctx),
+                    None => ctx,
+                },
                 |active| {
                     active.elevate(target_level);
                     for method in &amr_methods {
@@ -1019,7 +1074,8 @@ impl SecondFactors {
                     active.refresh_authentication();
                 },
             )
-            .await?;
+            .await
+            .map_err(spent_concurrently)?;
         let acr = session
             .assurance_at(chrono::Utc::now())
             .acr_value()

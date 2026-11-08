@@ -71,10 +71,15 @@ parse_stored!(
 );
 
 /// The user's decision on a pending device authorization request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceAuthDecision {
-    /// The profile signed in on the other device authorizes it.
-    Authorize(super::ProfileId),
+    /// The profile signed in on the other device authorizes it, with the
+    /// authentication of the session it approved from, which the device's
+    /// tokens report and their issuance is judged on.
+    Authorize {
+        profile: super::ProfileId,
+        authentication: super::GrantAuthentication,
+    },
     /// The user refuses the device.
     Deny,
 }
@@ -142,6 +147,11 @@ pub struct DeviceAuthorizationCode {
     /// Profile ID of the user who authorized (set when status = Authorized).
     pub authorized_by: Option<super::ProfileId>,
 
+    /// The authentication of the session the user approved from (set with
+    /// `authorized_by`): the device's tokens report it, and are issued only
+    /// while the login requirements still admit it.
+    pub authorized_with: Option<super::GrantAuthentication>,
+
     /// Project this client belongs to.
     pub project_id: ProjectId,
 
@@ -184,6 +194,7 @@ impl DeviceAuthorizationCode {
             resource,
             status: DeviceAuthStatus::Pending,
             authorized_by: None,
+            authorized_with: None,
             project_id,
             interval: DEVICE_CODE_POLL_INTERVAL_SECS,
             created_at: now,
@@ -229,10 +240,16 @@ impl DeviceAuthorizationCode {
 pub struct PendingDeviceAuth<'a>(&'a mut DeviceAuthorizationCode);
 
 impl<'a> PendingDeviceAuth<'a> {
-    /// User authorizes the device. Consumes the wrapper.
-    pub fn authorize(self, profile_id: super::ProfileId) {
+    /// User authorizes the device from a session that authenticated as
+    /// `authentication` states. Consumes the wrapper.
+    pub fn authorize(
+        self,
+        profile_id: super::ProfileId,
+        authentication: super::GrantAuthentication,
+    ) {
         self.0.status = DeviceAuthStatus::Authorized;
         self.0.authorized_by = Some(profile_id);
+        self.0.authorized_with = Some(authentication);
         self.0.authorized_at = Some(Utc::now());
     }
 

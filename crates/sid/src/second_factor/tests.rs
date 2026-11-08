@@ -53,40 +53,95 @@ fn totp_code_is_six_digits() {
     }
 }
 
-/// A recovery code is spent once: the set shrinks by one, the same code
-/// then fails like a wrong one, and an account without a set has none to
-/// spend.
+/// The recovery codes `profile` has left.
+async fn codes_left(storage: &dyn StorageBackend, profile: ProfileId) -> usize {
+    let set = storage
+        .get_credentials_by_profile(profile, Some(CredentialType::Recovery))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.status.is_active())
+        .unwrap();
+    serde_json::from_slice::<Vec<String>>(set.data.expose())
+        .unwrap()
+        .len()
+}
+
+/// Regression: a recovery code is spent only by the commit of the effect it
+/// pays for. An effect that fails (its session ended) spends nothing; of
+/// two spends read from the same set, the second commits nothing once the
+/// first did, so concurrent uses never spend a code without its effect;
+/// a spent code then fails like a wrong one, and an account without a set
+/// has none to spend. Before, the code was spent in its own commit, ahead
+/// of an effect that could still fail.
 #[tokio::test]
-async fn recovery_code_is_spent_once() {
+async fn recovery_code_is_spent_only_with_its_effect() {
     let backend = storage().await;
     let storage: Arc<dyn StorageBackend> = backend;
     let sign_in = sign_in(storage.clone());
     let factors = second_factors(storage.clone());
     let alice = stored_profile(storage.as_ref(), "alice").await;
     assert!(matches!(
-        factors
-            .consume_recovery_code(&sign_in, alice, "AAAA-BBBB")
-            .await,
+        factors.recovery_spend(&sign_in, alice, "AAAA-BBBB").await,
         Err(SecondFactorError::NotEnrolled("recovery code set"))
     ));
     stored_recovery_codes(storage.as_ref(), alice, &["AAAA-BBBB", "CCCC-DDDD"]).await;
-    assert_eq!(
-        factors
-            .consume_recovery_code(&sign_in, alice, "AAAA-BBBB")
-            .await
-            .unwrap(),
-        1
-    );
+    let session = sign_in.new_session(alice, None);
+    storage
+        .create_session(&session, AuditEntry::system("test", "session").into())
+        .await
+        .unwrap();
+    let record = |spend: crate::sign_in::FactorSpend, id: SessionId| {
+        let factors = &factors;
+        let sign_in = &sign_in;
+        async move {
+            factors
+                .authenticate_session(
+                    sign_in,
+                    id,
+                    spend.into_context(AuditEntry::system("test", "recovery").into()),
+                    |active| active.add_amr("mca"),
+                )
+                .await
+                .map_err(spent_concurrently)
+        }
+    };
+
+    // An effect that cannot commit spends nothing.
+    let (spend, _) = factors
+        .recovery_spend(&sign_in, alice, "AAAA-BBBB")
+        .await
+        .unwrap();
     assert!(matches!(
-        factors
-            .consume_recovery_code(&sign_in, alice, "AAAA-BBBB")
-            .await,
+        record(spend, SessionId::generate()).await,
+        Err(SecondFactorError::SessionEnded)
+    ));
+    assert_eq!(codes_left(storage.as_ref(), alice).await, 2);
+
+    // Two uses read the same set: the first spends with its effect, the
+    // second commits nothing.
+    let (first, remaining) = factors
+        .recovery_spend(&sign_in, alice, "AAAA-BBBB")
+        .await
+        .unwrap();
+    let (second, _) = factors
+        .recovery_spend(&sign_in, alice, "CCCC-DDDD")
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1);
+    record(first, session.id).await.unwrap();
+    assert!(matches!(
+        record(second, session.id).await,
+        Err(SecondFactorError::ChangedConcurrently)
+    ));
+    assert_eq!(codes_left(storage.as_ref(), alice).await, 1);
+
+    assert!(matches!(
+        factors.recovery_spend(&sign_in, alice, "AAAA-BBBB").await,
         Err(SecondFactorError::AuthenticationFailed)
     ));
     assert!(matches!(
-        factors
-            .consume_recovery_code(&sign_in, alice, "EEEE-FFFF")
-            .await,
+        factors.recovery_spend(&sign_in, alice, "EEEE-FFFF").await,
         Err(SecondFactorError::AuthenticationFailed)
     ));
 }

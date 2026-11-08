@@ -828,16 +828,16 @@ impl AuthServiceImpl {
     }
 
     /// Sign `profile` in after an upstream identity provider verified the
-    /// user, as every other sign-in completes: only an active Profile, after
+    /// user, as every first factor completes: only an active Profile, after
     /// the sign-in security rules for this client, with a session of this
-    /// authority's lifetime and limit. The provider, not SID, verified the
-    /// user: the session names no `amr` method (RFC 8176 §1) and has basic
-    /// assurance.
+    /// authority's lifetime and limit, or its pending context with the
+    /// second factor it owes. The provider, not SID, verified the user: the
+    /// session names no `amr` method (RFC 8176 §1) and has basic assurance.
     pub(crate) async fn complete_upstream_sign_in(
         &self,
         profile: &sid_core::models::Profile,
         ceremony: &UpstreamCeremony,
-    ) -> Result<SignedIn, Status> {
+    ) -> Result<FirstFactorSignedIn, Status> {
         self.sign_ins
             .upstream_sign_in(self.oauth.login_policy(), profile, ceremony.completer())
             .await
@@ -1793,12 +1793,64 @@ impl AuthService for AuthServiceImpl {
         request: Request<VerifyRecoveryCodeRequest>,
     ) -> Result<Response<MfaVerifyResponse>, Status> {
         self.check_maintenance().await?;
-        let verified = self.caller_claims(&request).await?;
-        self.second_factors
-            .verify_recovery_code(&self.sign_ins, &verified, &request.into_inner().code)
+        // As VerifyTotp: a sign-in's pending context is completed into its
+        // session; an installation session has the code recorded.
+        let caller = self.factor_caller(&request).await?;
+        let client_ip = self.client_ip(&request)?;
+        let native = match &caller {
+            FactorCaller::Pending(_, client) => NativeProof::of(
+                &request,
+                *client,
+                self.public_origin(),
+                "/sid.v1.authn.AuthService/VerifyRecoveryCode",
+            )?,
+            FactorCaller::StepUp(_) => {
+                if request.metadata().get(PROOF_METADATA).is_some() {
+                    return Err(super::native_session::field_refused(
+                        PROOF_METADATA,
+                        "a step-up renews no session",
+                    ));
+                }
+                None
+            }
+        };
+        let native_key = match &native {
+            Some(_) => {
+                let pending = sid_infra::authn::caller::bearer_token(&request)?.to_owned();
+                self.native_ceremony_key(native.as_ref(), pending.as_bytes())
+                    .await?
+            }
+            None => None,
+        };
+        let spent = self
+            .second_factors
+            .verify_recovery_code(
+                &self.sign_ins,
+                self.oauth.login_policy(),
+                caller,
+                client_ip,
+                native_key.as_deref(),
+                &request.into_inner().code,
+            )
             .await
-            .map(Response::new)
-            .map_err(second_factor_refusal)
+            .map_err(second_factor_refusal)?;
+        let remaining = spent.remaining;
+        match spent.signed_in {
+            Some(signed_in) => signed_in.respond(|session_id, expires_in| MfaVerifyResponse {
+                verified: true,
+                session_id: Some(session_id.into()),
+                expires_in: Some(expires_in),
+                redirect_to: None,
+                remaining_codes: Some(remaining),
+            }),
+            None => Ok(Response::new(MfaVerifyResponse {
+                verified: true,
+                session_id: Some(spent.session_id.into()),
+                expires_in: None,
+                redirect_to: None,
+                remaining_codes: Some(remaining),
+            })),
+        }
     }
 
     // ── OTP ──

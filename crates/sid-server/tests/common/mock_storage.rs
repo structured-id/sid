@@ -1366,6 +1366,10 @@ impl GrantStore for MockStorage {
                 "the pending sign-in has ended".into(),
             ));
         }
+        // Atomic like a backend: a failed spend ends nothing.
+        if let Some(spend) = &ctx.spend {
+            inner.check_spend(spend)?;
+        }
         for ended in inner.end_with_dependents(pending) {
             for owed in end.owed_by(&ended) {
                 inner.enqueue(&owed, u64::MAX)?;
@@ -4999,7 +5003,10 @@ impl StorageBackend for MockStorage {
         let code = inner.device_codes.get_mut(&id).expect("checked above");
         let pending = code.as_pending().expect("checked above");
         match decision {
-            DeviceAuthDecision::Authorize(profile_id) => pending.authorize(profile_id),
+            DeviceAuthDecision::Authorize {
+                profile,
+                authentication,
+            } => pending.authorize(profile, authentication),
             DeviceAuthDecision::Deny => pending.deny(),
         }
         Ok(true)
@@ -5054,6 +5061,13 @@ impl StorageBackend for MockStorage {
             _ => return Ok(DeviceCodeRedemption::NotAuthorized),
         }
         let id = code.id;
+        if let Some(approver) = session.authenticated_by
+            && !inner.sessions.contains_key(&approver)
+        {
+            return Err(sid_core::Error::NotFound(
+                "the session that approved the device ended".into(),
+            ));
+        }
         inner.owe(&audit)?;
         let code = inner.device_codes.get_mut(&id).expect("found above");
         code.status = DeviceAuthStatus::Redeemed;
@@ -6719,11 +6733,35 @@ impl MockStorageInner {
     /// nothing.
     fn owe(&mut self, ctx: &MutationContext) -> SidResult<()> {
         self.complete(ctx)?;
+        if let Some(spend) = &ctx.spend {
+            self.check_spend(spend)?;
+            let credential = self
+                .credentials
+                .get_mut(&spend.credential.0)
+                .expect("checked above");
+            credential.data = sid_core::models::CredentialData::new(spend.left.clone());
+            credential.mark_used();
+        }
         let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {
             self.enqueue(owed, capacity)?;
         }
         Ok(())
+    }
+
+    /// Refuse a spend whose credential is no longer active and as read.
+    fn check_spend(&self, spend: &sid_core::models::CredentialSpend) -> SidResult<()> {
+        let holds = self
+            .credentials
+            .get(&spend.credential.0)
+            .is_some_and(|c| c.status.is_active() && c.data.expose() == spend.read.as_slice());
+        if holds {
+            Ok(())
+        } else {
+            Err(sid_core::Error::Fenced(
+                "the credential state it spends changed".into(),
+            ))
+        }
     }
 
     /// Refuse `period` when it has no record: retired when its number was

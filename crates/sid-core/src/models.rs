@@ -182,7 +182,7 @@ pub use mfa::{
     ChallengeStatus, EnrollmentStatus, FactorCategory, FactorProperties, MfaChallenge,
     MfaEnrollment, MfaMethod, PhishingResistance, RecoveryCode, RecoveryCodeSet,
 };
-pub use mutation::{ActorFence, CeremonyConsumption, MutationContext};
+pub use mutation::{ActorFence, CeremonyConsumption, CredentialSpend, MutationContext};
 pub use native_session::{
     NATIVE_EXCHANGE_LEN, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
     NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome, SessionGrants,

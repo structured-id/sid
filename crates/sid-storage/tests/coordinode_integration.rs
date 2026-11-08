@@ -414,6 +414,7 @@ capability!(credential_store:
     mark_used_only_when_active,
     create_never_replaces,
     label_only_on_active,
+    spend_commits_with_its_mutation,
     change_password_is_compare_and_swap,
     reseal_keeps_status,
     replace_password_swaps_only_password,

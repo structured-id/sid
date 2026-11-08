@@ -378,8 +378,7 @@ impl UpstreamService for UpstreamServiceImpl {
                 upstream_identity.profile_id, provider_id
             );
 
-            return signed_in
-                .respond(|session_id, expires_in| success(session_id, expires_in, false));
+            return success(signed_in, false);
         }
 
         // Path B: No subject match — check for verified email match.
@@ -474,26 +473,34 @@ impl UpstreamService for UpstreamServiceImpl {
             profile.id, provider_id, claims.upstream_subject
         );
 
-        signed_in.respond(|session_id, expires_in| success(session_id, expires_in, true))
+        success(signed_in, true)
     }
 }
 
-/// The callback's answer for a session `session_id` whose credential lives
-/// `expires_in` seconds.
+/// The callback's answer for `signed_in`: its session, or its pending context
+/// with the second factor it owes, as after a password.
 fn success(
-    session_id: sid_core::models::SessionId,
-    expires_in: i64,
+    signed_in: sid::sign_in::FirstFactorSignedIn,
     new_profile_created: bool,
-) -> HandleUpstreamCallbackResponse {
-    HandleUpstreamCallbackResponse {
+) -> Result<Response<HandleUpstreamCallbackResponse>, Status> {
+    let sid::sign_in::FirstFactorSignedIn {
+        signed_in,
+        second_factors,
+        enrollable_factors,
+        browser_csrf,
+    } = signed_in;
+    signed_in.respond(|session_id, expires_in| HandleUpstreamCallbackResponse {
         result: Some(handle_upstream_callback_response::Result::Success(
             UpstreamAuthSuccess {
                 session_id: Some(session_id.into()),
                 expires_in,
                 new_profile_created,
+                second_factors,
+                browser_csrf,
+                enrollable_factors,
             },
         )),
-    }
+    })
 }
 
 #[cfg(test)]

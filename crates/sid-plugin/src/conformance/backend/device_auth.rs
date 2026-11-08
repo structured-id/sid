@@ -38,6 +38,24 @@ async fn stored_request(backend: &dyn StorageBackend) -> (DeviceAuthorizationCod
     (code, profile)
 }
 
+/// `profile`'s approval from a session that stepped up with a second factor.
+fn approval(profile: &Profile) -> DeviceAuthDecision {
+    use chrono::SubsecRound;
+    DeviceAuthDecision::Authorize {
+        profile: profile.id,
+        authentication: sid_core::models::GrantAuthentication {
+            session: sid_core::models::SessionId::generate(),
+            authenticated_at: Utc::now().trunc_subsecs(0),
+            amr: vec!["pwd".into(), "otp".into()],
+            assurance_level: sid_core::models::AuthLevel::Standard,
+            elevation: Some(sid_core::models::session::Elevation {
+                level: sid_core::models::AuthLevel::Elevated,
+                until: (Utc::now() + Duration::minutes(5)).trunc_subsecs(0),
+            }),
+        },
+    }
+}
+
 /// A request reads back whole by device code and by user code, and a create
 /// over an existing request is refused.
 pub async fn test_device_auth_create_and_get(backend: &dyn StorageBackend) {
@@ -80,12 +98,9 @@ pub async fn test_device_auth_create_and_get(backend: &dyn StorageBackend) {
 /// applies, and an expired request takes no decision.
 pub async fn test_device_auth_decided_once(backend: &dyn StorageBackend) {
     let (code, profile) = stored_request(backend).await;
+    let approved = approval(&profile);
     let (a, b) = tokio::join!(
-        backend.decide_device_auth(
-            code.id,
-            DeviceAuthDecision::Authorize(profile.id),
-            test_audit()
-        ),
+        backend.decide_device_auth(code.id, approved.clone(), test_audit()),
         backend.decide_device_auth(code.id, DeviceAuthDecision::Deny, test_audit()),
     );
     let (authorized, denied) = (a.unwrap(), b.unwrap());
@@ -101,10 +116,19 @@ pub async fn test_device_auth_decided_once(backend: &dyn StorageBackend) {
     if authorized {
         assert_eq!(stored.status, DeviceAuthStatus::Authorized);
         assert_eq!(stored.authorized_by, Some(profile.id));
+        let DeviceAuthDecision::Authorize { authentication, .. } = approved else {
+            unreachable!("an approval")
+        };
+        assert_eq!(
+            stored.authorized_with,
+            Some(authentication),
+            "the approval's authentication reads back whole"
+        );
         assert!(stored.authorized_at.is_some());
     } else {
         assert_eq!(stored.status, DeviceAuthStatus::Denied);
         assert!(stored.authorized_by.is_none());
+        assert!(stored.authorized_with.is_none());
     }
 
     let (mut expired, profile) = stored_request(backend).await;
@@ -118,11 +142,7 @@ pub async fn test_device_auth_decided_once(backend: &dyn StorageBackend) {
         .unwrap();
     assert!(
         !backend
-            .decide_device_auth(
-                expired.id,
-                DeviceAuthDecision::Authorize(profile.id),
-                test_audit()
-            )
+            .decide_device_auth(expired.id, approval(&profile), test_audit())
             .await
             .unwrap(),
         "an expired request was authorized"
@@ -150,6 +170,35 @@ pub async fn test_device_poll_interval(backend: &dyn StorageBackend) {
     assert!(stored.last_polled_at.is_some());
 }
 
+/// A device's session is stored only while the session that approved it
+/// lives: a redemption after that session ended (a sign-out between the
+/// approval and the device's poll) is `NotFound`, stores nothing and leaves
+/// the code unredeemed.
+pub async fn test_device_code_needs_its_approving_session(backend: &dyn StorageBackend) {
+    let (code, profile) = stored_request(backend).await;
+    assert!(
+        backend
+            .decide_device_auth(code.id, approval(&profile), test_audit())
+            .await
+            .unwrap()
+    );
+    let (mut session, token) = exchange_records(backend, &profile).await;
+    // An approving session that is no longer stored.
+    session.authenticated_by = Some(sid_core::models::SessionId::generate());
+    let err = backend
+        .redeem_device_code(&code.device_code_hash, &session, &token, test_audit())
+        .await
+        .expect_err("a redemption after the approving session ended");
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+    assert!(backend.get_session(session.id).await.unwrap().is_none());
+    let stored = backend
+        .get_device_auth_by_device_code_hash(&code.device_code_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, DeviceAuthStatus::Authorized);
+}
+
 /// An authorized code is redeemed once: the winner's session and refresh
 /// token are stored, a repeated or concurrent redemption stores nothing and
 /// names the first session; a pending code redeems nothing.
@@ -168,11 +217,7 @@ pub async fn test_device_code_redeemed_once(backend: &dyn StorageBackend) {
 
     assert!(
         backend
-            .decide_device_auth(
-                code.id,
-                DeviceAuthDecision::Authorize(profile.id),
-                test_audit()
-            )
+            .decide_device_auth(code.id, approval(&profile), test_audit())
             .await
             .unwrap()
     );

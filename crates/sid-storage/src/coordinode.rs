@@ -167,6 +167,10 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     if let Some(ceremony) = &ctx.ceremony {
         ceremony::consume(tx, ceremony)?;
     }
+    // The credential state it spends, exactly as read.
+    if let Some(spend) = &ctx.spend {
+        credential::spend(tx, spend)?;
+    }
     audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
     for owed in &ctx.work {
         work::insert(tx, owed, sid_plugin::OWED_WORK_CAPACITY)?;

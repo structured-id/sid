@@ -257,6 +257,181 @@ async fn first_factor_admitted_under_default_requirements() {
     assert!(matches!(decision, FirstFactor::Admitted(fence) if fence == requirements.fence));
 }
 
+/// An active credential of `credential_type` for `profile`.
+async fn enrolled(
+    storage: &dyn StorageBackend,
+    profile: ProfileId,
+    credential_type: CredentialType,
+) {
+    let credential = Credential::new(
+        profile,
+        credential_type,
+        CredentialData::new(b"enrolled".to_vec()),
+        None,
+    );
+    storage
+        .create_credential(&credential, AuditEntry::system("test", "credential").into())
+        .await
+        .unwrap();
+}
+
+/// The first-factor decision on a password sign-in of `profile` under `policy`.
+async fn password_first_factor(
+    sign_in: &SignIn,
+    profile: ProfileId,
+    policy: &SecurityPolicy,
+) -> FirstFactor {
+    let requirements = FixedLoginPolicy::of(policy)
+        .requirements(None)
+        .await
+        .unwrap();
+    let amr = vec!["pwd".to_string()];
+    sign_in
+        .first_factor(
+            profile,
+            None,
+            ("opaque", AuthLevel::Basic, &amr),
+            AttemptContext::default(),
+            &requirements,
+        )
+        .await
+        .unwrap()
+}
+
+// Regression: under optional MFA an account that enabled TOTP is not signed
+// in by its password alone: the sign-in awaits that factor. Before the
+// factor is enabled the password admits.
+#[tokio::test]
+async fn an_enabled_totp_is_required_under_optional_mfa() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    let policy = SecurityPolicy::ce_default();
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::Admitted(_)
+    ));
+    enrolled(storage.as_ref(), profile.id, CredentialType::Totp).await;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, enrollable, .. }
+            if factors == vec![StepUpMethod::Totp] && enrollable.is_empty()
+    ));
+}
+
+// Regression: required MFA is required of a basic sign-in with no method
+// named: an account without a factor is offered its enrollment, one with
+// TOTP is asked for it; CE has no grace, so soft enforcement does the same.
+#[tokio::test]
+async fn required_mfa_asks_a_factor_or_its_enrollment() {
+    use sid_core::models::security_policy::MfaEnforcement;
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    for mode in [EnforcementMode::Hard, EnforcementMode::Soft] {
+        let mut policy = SecurityPolicy::ce_default();
+        policy.auth.mfa_enforcement = MfaEnforcement::Required;
+        policy.enforcement.mode = mode;
+        assert_eq!(policy.auth.min_acr, AuthLevel::Basic);
+        assert!(policy.auth.required_amr.is_empty());
+        assert!(
+            matches!(
+                password_first_factor(&sign_in, profile.id, &policy).await,
+                FirstFactor::AwaitsSecondFactor { factors, enrollable, .. }
+                    if factors.is_empty() && enrollable == vec![StepUpMethod::Totp]
+            ),
+            "{mode:?}"
+        );
+    }
+    enrolled(storage.as_ref(), profile.id, CredentialType::Totp).await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.mfa_enforcement = MfaEnforcement::Required;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, .. } if factors == vec![StepUpMethod::Totp]
+    ));
+}
+
+// Regression: recovery codes left after the account disabled its TOTP are a
+// recovery mechanism, not an enabled factor: the password signs in again
+// rather than owing a factor the account no longer has.
+#[tokio::test]
+async fn recovery_codes_alone_are_no_enabled_factor() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Recovery).await;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &SecurityPolicy::ce_default()).await,
+        FirstFactor::Admitted(_)
+    ));
+}
+
+// Regression: under required MFA an account left with recovery codes alone
+// has no factor to be asked for and no established protection barring its
+// first one: the password sign-in is offered TOTP enrollment, not refused.
+#[tokio::test]
+async fn required_mfa_offers_enrollment_to_an_account_with_recovery_codes_alone() {
+    use sid_core::models::security_policy::MfaEnforcement;
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Recovery).await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.mfa_enforcement = MfaEnforcement::Required;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, enrollable, .. }
+            if factors.is_empty() && enrollable == vec![StepUpMethod::Totp]
+    ));
+}
+
+// Regression: under audit enforcement a policy part TOTP cannot meet (a
+// higher level) does not withhold the TOTP the account's protection owes:
+// the password sign-in awaits it.
+#[tokio::test]
+async fn an_audited_policy_still_offers_the_owed_totp() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Totp).await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.min_acr = AuthLevel::Elevated;
+    policy.enforcement.mode = EnforcementMode::Audit;
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &policy).await,
+        FirstFactor::AwaitsSecondFactor { factors, .. } if factors == vec![StepUpMethod::Totp]
+    ));
+}
+
+// A passkey ceremony that satisfies MFA admits an account with enabled TOTP
+// without a further factor; a password does not.
+#[tokio::test]
+async fn a_sufficient_passkey_needs_no_further_factor() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let profile = stored_profile(storage.as_ref()).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::Totp).await;
+    enrolled(storage.as_ref(), profile.id, CredentialType::WebAuthn).await;
+    let requirements = requirements().await;
+    let method = passkey(true);
+    let decision = sign_in
+        .first_factor(
+            profile.id,
+            None,
+            ("webauthn", method.auth_level(true), &method.amr()),
+            AttemptContext::default(),
+            &requirements,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(decision, FirstFactor::Admitted(_)));
+    assert!(matches!(
+        password_first_factor(&sign_in, profile.id, &SecurityPolicy::ce_default()).await,
+        FirstFactor::AwaitsSecondFactor { .. }
+    ));
+}
+
 /// A password sign-in of a principal nobody holds is started like any other
 /// and refused at its finish like a wrong password, each refusal counted
 /// against the principal until the lockout refuses the next start.

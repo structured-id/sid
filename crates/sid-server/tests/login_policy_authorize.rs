@@ -58,6 +58,9 @@ fn baseline() -> LoginRequirements {
         enforcement: EnforcementMode::Hard,
         new_device: sid_authn::anomaly::RuleReaction::StepUp,
         fence: None,
+        mfa: sid_core::models::security_policy::MfaEnforcement::Optional,
+        passkey_satisfies_mfa: true,
+        account_protection: AuthLevel::Basic,
     }
 }
 
@@ -121,6 +124,48 @@ async fn a_session_meeting_the_policy_is_authorized() {
     let (svc, _policy, token) = signed_in(0).await;
 
     authorize(&svc, &token).await.unwrap();
+}
+
+/// Regression: a second factor the account enabled after its session began
+/// is required at that session's next authorization, under optional MFA:
+/// the session's password authentication no longer suffices.
+#[tokio::test]
+async fn a_factor_enabled_later_asks_an_existing_session_to_step_up() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    let profile = test_profile();
+    let svc = TestServices::with_login_policy(
+        MockStorage::new()
+            .with_profile(profile.clone())
+            .with_client(test_client()),
+        HostPolicy::new(),
+    );
+    let mut session = common::authenticated_session(&profile, AuthLevel::Basic, 0);
+    session.amr = vec!["pwd".to_string()];
+    let token = common::stored_session_token(&svc, &profile, session).await;
+    authorize(&svc, &token).await.unwrap();
+
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                profile.id,
+                CredentialType::Totp,
+                CredentialData::new(b"seed".to_vec()),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+    let err = authorize(&svc, &token).await.unwrap_err();
+
+    assert_eq!(reason(&err).as_deref(), Some("STEP_UP_REQUIRED"));
+    assert_eq!(
+        preconditions(&err),
+        vec![(
+            "acr".to_string(),
+            AuthLevel::Standard.acr_value().to_string()
+        )]
+    );
 }
 
 /// A higher level required after the session began is asked for at the next
@@ -328,6 +373,46 @@ async fn an_unreadable_policy_issues_the_device_nothing() {
     redeem_device(&svc, &device_code)
         .await
         .expect("the approval stands once the policy is readable");
+}
+
+/// Regression: a device approved by a password-only session gets no tokens
+/// once the account enables a second factor before the device polls: the
+/// device's tokens report the approval's authentication, judged again at
+/// issuance.
+#[tokio::test]
+async fn a_factor_enabled_between_approval_and_poll_issues_the_device_nothing() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    let (svc, _policy, token) = signed_in_with_device_client().await;
+    let (user_code, device_code) = device_request(&svc).await;
+    approve_device(&svc, &user_code, &token).await.unwrap();
+
+    // The approver: the installation session's own token names its Profile.
+    let approver = sid_core::models::ProfileId::parse(
+        &svc.jwt
+            .validate_access_token(&token)
+            .unwrap()
+            .pid
+            .expect("an installation token names its Profile"),
+    )
+    .unwrap();
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                approver,
+                CredentialType::Totp,
+                CredentialData::new(b"seed".to_vec()),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+    let err = redeem_device(&svc, &device_code).await.unwrap_err();
+
+    let oauth_error = err
+        .get_details_error_info()
+        .and_then(|info| info.metadata.get("oauthError").cloned());
+    assert_eq!(oauth_error.as_deref(), Some("invalid_grant"), "{err:?}");
 }
 
 /// A session meeting the policy approves, and the device gets its tokens.

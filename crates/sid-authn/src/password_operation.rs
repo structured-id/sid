@@ -836,6 +836,41 @@ pub enum PasswordHistoryAuthority {
     Remote(Arc<dyn HistoryPreparation>),
 }
 
+/// Why an in-process history evaluator cannot start.
+#[derive(Debug, thiserror::Error)]
+pub enum HistoryAuthorityError {
+    #[error("history write cutoff: {0}")]
+    Cutoff(sid_core::Error),
+    #[error("history keys: {0}")]
+    Keys(#[from] crate::field_keys::FieldKeyError),
+}
+
+impl PasswordHistoryAuthority {
+    /// The evaluator in this process over `store`, its keys under the master
+    /// key file `master_key` and the versions `store` records. With `cutoff`,
+    /// the store's durable write cutoff is raised to it first, so epochs
+    /// created before it are replaced; an older cutoff lowers nothing.
+    pub async fn in_process(
+        store: Arc<dyn HistoryKeyStore>,
+        master_key: &std::path::Path,
+        crypto: Arc<dyn sid_crypto::CryptoPrimitives>,
+        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Self, HistoryAuthorityError> {
+        if let Some(cutoff) = cutoff {
+            store
+                .raise_write_cutoff(cutoff, audit("password_history.write_cutoff"))
+                .await
+                .map_err(HistoryAuthorityError::Cutoff)?;
+        }
+        let history_keys =
+            crate::field_keys::field_key_manager(store.as_ref(), master_key, crypto).await?;
+        Ok(Self::InProcess {
+            store,
+            history_keys,
+        })
+    }
+}
+
 impl<S, P> PasswordOperations<S, P>
 where
     S: ?Sized + CredentialStore + WorkStore + OperationResultStore,

@@ -1181,7 +1181,21 @@ CREATE TABLE IF NOT EXISTS device_authorization_codes (
     last_polled_at    TEXT,
     redeemed_session_id BLOB CHECK (length(redeemed_session_id) = 16) REFERENCES sessions(id) ON DELETE SET NULL,
     -- The resource the device requested a token for (RFC 8707).
-    resource_id       BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id)
+    resource_id       BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
+    -- The authentication of the session the user approved from, set with
+    -- authorized_by: the device's tokens report it.
+    authorizing_session_id BLOB CHECK (length(authorizing_session_id) = 16),
+    authenticated_at  TEXT,
+    amr               TEXT,
+    assurance_level   TEXT CHECK (assurance_level IN ('basic', 'standard')),
+    elevation_level   TEXT,
+    elevation_until   TEXT,
+    CHECK ((authorizing_session_id IS NULL AND authenticated_at IS NULL AND amr IS NULL
+            AND assurance_level IS NULL AND elevation_level IS NULL)
+        OR (authorizing_session_id IS NOT NULL AND authenticated_at IS NOT NULL
+            AND amr IS NOT NULL AND assurance_level IS NOT NULL)),
+    CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
+        OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_device_auth_device_code_hash ON device_authorization_codes(device_code_hash);
