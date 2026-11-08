@@ -112,6 +112,28 @@ jobs:
       # Client-facing packages also must not pull server or storage crates.
       - run: ci/check-dependency-isolation.sh all
 
+  engine-package:
+    name: Engine (packaged external consumer)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # Packages the engine closure, builds a fresh host against the archives
+      # only, checks its dependency graph and runs it.
+      - run: node ci/check-engine-package.ts
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest

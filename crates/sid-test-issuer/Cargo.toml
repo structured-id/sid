@@ -14,7 +14,7 @@ publish = false
 sid-server = { path = "../sid-server", default-features = false, features = ["embedded-dev"] }
 sid-core = { workspace = true }
 sid-keys = { workspace = true }
-sid-crypto = { workspace = true, features = ["std", "primitives"] }
+sid-crypto = { workspace = true, features = ["std", "primitives", "jwt"] }
 sid-plugin = { workspace = true }
 sid-authn = { workspace = true, features = ["password-operation"] }
 # A test client's own credential at the issuer, and the evaluator's RPC

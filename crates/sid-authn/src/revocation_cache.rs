@@ -85,6 +85,12 @@ pub struct RevocationCache {
     /// Milliseconds after `origin` until which the local maps may miss a
     /// revocation, or [`ALWAYS_COLD`] while not subscribed.
     cold_until: AtomicU64,
+    /// The listener whose subscription may warm the local maps; a stopped or
+    /// superseded listener's tasks no longer can. Every write of `cold_until`
+    /// that grants the right to answer from the maps happens under it, so a
+    /// generation check and its publication are one step; reads stay
+    /// lock-free.
+    listening: parking_lot::Mutex<u64>,
     /// Where revocations are committed and cold misses confirmed.
     record: Record,
     /// A publication was lost within a token lifetime (store-backed only):
@@ -99,6 +105,51 @@ impl std::fmt::Debug for RevocationCache {
             .field("sessions", &self.sessions.len())
             .field("max_token_lifetime", &self.max_token_lifetime)
             .finish_non_exhaustive()
+    }
+}
+
+/// The tasks receiving other processes' revocations and watching for lost
+/// publications ([`RevocationCache::listen`]). They run while it is held;
+/// dropping it aborts them, [`stop`](Self::stop) also waits until they ended
+/// and released what they hold. Either way the cache it fed confirms every
+/// local miss from then on: it no longer learns of revocations.
+#[must_use = "dropping the listener stops receiving revocations"]
+#[derive(Debug)]
+pub struct RevocationListener {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    cache: std::sync::Weak<RevocationCache>,
+    generation: u64,
+}
+
+impl RevocationListener {
+    /// Stop listening; returns once the tasks ended. Cancelled midway, every
+    /// task is already aborted and the rest still owned until dropped.
+    pub async fn stop(mut self) {
+        self.abort();
+        while let Some(task) = self.tasks.last_mut() {
+            // An aborted task ends as cancelled; only a panic is news.
+            if let Err(e) = task.await
+                && !e.is_cancelled()
+            {
+                tracing::warn!(error = %e, "revocation listener task ended abnormally");
+            }
+            self.tasks.pop();
+        }
+    }
+
+    fn abort(&self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        if let Some(cache) = self.cache.upgrade() {
+            cache.stop_listening(self.generation);
+        }
+    }
+}
+
+impl Drop for RevocationListener {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
 
@@ -143,6 +194,7 @@ impl RevocationCache {
             shared,
             origin: Instant::now(),
             cold_until: AtomicU64::new(ALWAYS_COLD),
+            listening: parking_lot::Mutex::new(0),
             record,
             gap: AtomicBool::new(false),
         }
@@ -241,11 +293,22 @@ impl RevocationCache {
     /// doing so: when the subscription ends, or cannot be opened at all, a
     /// task subscribes again, and local misses are confirmed until the
     /// subscription has covered a full token lifetime. Store-backed, a
-    /// heartbeat also watches for a lost publication.
-    pub async fn listen(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// heartbeat also watches for a lost publication. The tasks run while the
+    /// returned listener is held; it releases the cache and the store when it
+    /// stops or is dropped.
+    pub async fn listen(self: &Arc<Self>) -> RevocationListener {
+        // A new listener owns the maps from now on and starts cold: the one
+        // it replaces no longer feeds them, whether or not this subscribes.
+        let generation = {
+            let mut current = self.listening.lock();
+            // One generation per call; a u64 counter of listens does not wrap.
+            *current += 1;
+            self.cold_until.store(ALWAYS_COLD, Ordering::Release);
+            *current
+        };
         let first = match self.shared.subscribe(REVOCATION_CHANNEL).await {
             Ok(received) => {
-                self.warm_after_lifetime();
+                self.warm_after_lifetime(generation);
                 Some(received)
             }
             Err(e) => {
@@ -253,10 +316,10 @@ impl RevocationCache {
                 None
             }
         };
-        if let Record::Store(store) = &self.record {
+        let heartbeat = if let Record::Store(store) = &self.record {
             let cache = Arc::downgrade(self);
             let store = Arc::clone(store);
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let mut beat = tokio::time::interval(HEARTBEAT);
                 loop {
                     beat.tick().await;
@@ -271,10 +334,12 @@ impl RevocationCache {
                     );
                     cache.gap.store(gap, Ordering::Release);
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
         let cache = Arc::clone(self);
-        tokio::spawn(async move {
+        let subscription = tokio::spawn(async move {
             let mut received = first;
             loop {
                 if let Some(mut stream) = received.take() {
@@ -290,22 +355,42 @@ impl RevocationCache {
                 tokio::time::sleep(RESUBSCRIBE_DELAY).await;
                 match cache.shared.subscribe(REVOCATION_CHANNEL).await {
                     Ok(stream) => {
-                        cache.warm_after_lifetime();
+                        cache.warm_after_lifetime(generation);
                         received = Some(stream);
                     }
                     Err(e) => tracing::warn!(error = %e, "revocation resubscribe failed"),
                 }
             }
-        })
+        });
+        RevocationListener {
+            tasks: std::iter::once(subscription).chain(heartbeat).collect(),
+            cache: Arc::downgrade(self),
+            generation,
+        }
     }
 
-    /// Local answers become complete one token lifetime from now.
-    fn warm_after_lifetime(&self) {
+    /// Local answers become complete one token lifetime from now, while the
+    /// listener of `generation` is the current one.
+    fn warm_after_lifetime(&self, generation: u64) {
+        let current = self.listening.lock();
+        if *current != generation {
+            return;
+        }
         let now = millis(self.origin.elapsed());
         let until = now
             .checked_add(millis(self.max_token_lifetime))
             .unwrap_or(ALWAYS_COLD);
         self.cold_until.store(until, Ordering::Release);
+    }
+
+    /// The listener of `generation` stopped: if it is the current one, no
+    /// subscription warms the maps any more and every local miss is confirmed.
+    fn stop_listening(&self, generation: u64) {
+        let mut current = self.listening.lock();
+        if *current == generation {
+            *current += 1;
+            self.cold_until.store(ALWAYS_COLD, Ordering::Release);
+        }
     }
 
     fn apply(&self, revocation: &Revocation) {

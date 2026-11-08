@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let cache = sid_auth::shared_cache(config.cache_url()).await?;
     // Revocations made anywhere reach this process before it answers.
     let revocation = sid_auth::revocation_view(cache.clone());
-    revocation.listen().await;
+    let _revocation_listener = revocation.listen().await;
 
     // Issuer calls end within a bound, their whole answer included.
     let issuer_channel = sid_infra::deadline::issuer(grpc_channel.clone());

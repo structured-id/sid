@@ -58,7 +58,7 @@ async fn test_revocation_reaches_other_processes() {
         shared.clone(),
     ));
     let b = Arc::new(RevocationCache::new(Duration::from_secs(900), shared));
-    b.listen().await;
+    let _listening = b.listen().await;
 
     a.revoke_session("session-x".to_string()).await.unwrap();
     a.revoke_jti("jti-x".to_string(), Duration::from_secs(60))
@@ -83,7 +83,7 @@ async fn test_revocation_before_start_is_seen() {
         .unwrap();
 
     let late = Arc::new(RevocationCache::new(Duration::from_secs(900), shared));
-    late.listen().await;
+    let _listening = late.listen().await;
 
     assert!(revoked(&late, "any", "session-early").await);
     assert!(revoked(&late, "jti-early", "any").await);
@@ -100,7 +100,7 @@ async fn test_warm_process_answers_locally() {
         Duration::from_millis(20),
         shared.clone(),
     ));
-    cache.listen().await;
+    let _listening = cache.listen().await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     shared
@@ -198,6 +198,149 @@ fn recorded_in(
     Arc::new(RevocationCache::recorded_in(lifetime, shared, store))
 }
 
+/// A warm process whose listener stopped, or was dropped, no longer learns of
+/// revocations: from then on a local miss is confirmed in the shared cache,
+/// so a token another process revokes afterwards is refused.
+#[tokio::test]
+async fn test_a_stopped_listener_turns_the_cache_cold() {
+    for stop in [true, false] {
+        let shared: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+        let a = RevocationCache::new(Duration::from_millis(20), shared.clone());
+        let b = Arc::new(RevocationCache::new(Duration::from_millis(20), shared));
+        let listener = b.listen().await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!revoked(&b, "jti-late", "any").await, "warm and clean");
+        if stop {
+            listener.stop().await;
+        } else {
+            drop(listener);
+        }
+        a.revoke_jti("jti-late".to_string(), Duration::from_millis(20))
+            .await
+            .unwrap();
+        assert!(
+            revoked(&b, "jti-late", "any").await,
+            "a revocation after the listener {} is refused",
+            if stop { "stopped" } else { "was dropped" }
+        );
+    }
+}
+
+/// A shared cache whose first subscription succeeds and every later one
+/// fails, as a broker lost after a process started.
+struct LostAfterFirst {
+    inner: Arc<dyn CacheBackend>,
+    subscribed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl CacheBackend for LostAfterFirst {
+    async fn get(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        self.inner.get(key).await
+    }
+    async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<()> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> CacheResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn take(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        self.inner.take(key).await
+    }
+    async fn publish(&self, channel: &str, payload: &[u8]) -> CacheResult<()> {
+        self.inner.publish(channel, payload).await
+    }
+    async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        if self
+            .subscribed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(CacheError::Connection("lost".into()));
+        }
+        self.inner.subscribe(channel).await
+    }
+    async fn health_check(&self) -> CacheResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+/// A warm listener replaced by one whose subscription fails leaves no right
+/// to answer from the local maps: the new listener starts cold, and the old
+/// one's stop cannot restore it, so a later revocation is still refused.
+#[tokio::test]
+async fn test_a_replacing_listener_without_a_subscription_is_cold() {
+    let shared: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let a = RevocationCache::new(Duration::from_millis(20), shared.clone());
+    let b = Arc::new(RevocationCache::new(
+        Duration::from_millis(20),
+        Arc::new(LostAfterFirst {
+            inner: shared,
+            subscribed: std::sync::atomic::AtomicBool::new(false),
+        }),
+    ));
+    let first = b.listen().await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!revoked(&b, "jti-replaced", "any").await, "warm and clean");
+    let second = b.listen().await;
+    first.stop().await;
+    a.revoke_jti("jti-replaced".to_string(), Duration::from_millis(20))
+        .await
+        .unwrap();
+    assert!(
+        revoked(&b, "jti-replaced", "any").await,
+        "a revocation without a live subscription is refused"
+    );
+    second.stop().await;
+}
+
+/// A stop interrupted at its first wait leaves no task running: every task
+/// was aborted before the wait, and the listener still owns the rest.
+#[tokio::test]
+async fn test_an_interrupted_stop_leaves_no_task() {
+    let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
+    let cache = recorded_in(
+        &store,
+        Duration::from_secs(900),
+        Arc::new(InMemoryCacheBackend::new()),
+    );
+    let listener = cache.listen().await;
+    // The stop is polled once, then dropped wherever its wait stood.
+    let mut stop = Box::pin(listener.stop());
+    std::future::poll_fn(|cx| {
+        let polled = stop.as_mut().poll(cx);
+        std::task::Poll::Ready(polled.is_ready())
+    })
+    .await;
+    drop(stop);
+    drop(cache);
+    // The heartbeat holds the store until it ends: it must have been aborted
+    // with the rest, not left for its next beat.
+    assert!(
+        eventually(|| Arc::strong_count(&store) == 1).await,
+        "every task ended and released the store"
+    );
+}
+
+/// A stopped listener holds nothing: the cache and the store it read are
+/// released, so a host can close its database after its installation.
+#[tokio::test]
+async fn test_a_stopped_listener_releases_the_store() {
+    let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
+    let cache = recorded_in(
+        &store,
+        Duration::from_secs(900),
+        Arc::new(InMemoryCacheBackend::new()),
+    );
+    let listener = cache.listen().await;
+    listener.stop().await;
+    assert_eq!(Arc::strong_count(&cache), 1, "the cache is released");
+    drop(cache);
+    assert_eq!(Arc::strong_count(&store), 1, "the store is released");
+}
+
 /// An issuer's revocation is committed in its store: replicas that cannot
 /// reach the shared cache start, revoke and refuse revoked tokens, each
 /// confirming a local miss against the store.
@@ -206,8 +349,8 @@ async fn test_store_revocation_holds_without_the_cache() {
     let store = Arc::new(sid_plugin::InProcessCeremonyState::new());
     let a = recorded_in(&store, Duration::from_secs(900), Arc::new(DownCache));
     let b = recorded_in(&store, Duration::from_secs(900), Arc::new(DownCache));
-    a.listen().await;
-    b.listen().await;
+    let _a = a.listen().await;
+    let _b = b.listen().await;
 
     a.revoke_session("session-x".to_string()).await.unwrap();
     a.revoke_jti("jti-x".to_string(), Duration::from_secs(60))
@@ -238,7 +381,7 @@ async fn test_store_revocation_survives_an_empty_cache() {
         Duration::from_secs(900),
         Arc::new(InMemoryCacheBackend::new()),
     );
-    late.listen().await;
+    let _listening = late.listen().await;
     assert!(revoked(&late, "jti-early", "any").await);
 }
 
@@ -252,7 +395,7 @@ async fn test_a_lost_publication_makes_replicas_confirm() {
     // Longer than the heartbeat, as every real token lifetime is.
     let lifetime = HEARTBEAT * 3;
     let warm = recorded_in(&store, lifetime, shared.clone());
-    warm.listen().await;
+    let _listening = warm.listen().await;
     tokio::time::sleep(lifetime + Duration::from_millis(100)).await;
     assert!(!revoked(&warm, "jti-x", "any").await, "warm and clean");
 

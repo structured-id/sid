@@ -116,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let sessions = Arc::new(adapter(&key_file).await?);
+    let (sessions, _revocation_listener) = adapter(&key_file).await?;
+    let sessions = Arc::new(sessions);
     let api = match std::env::var("SID_UI_API_UPSTREAM") {
         Ok(api) => Some(
             tonic::transport::Endpoint::from_shared(api.clone())
@@ -173,8 +174,14 @@ fn api_routes() -> anyhow::Result<Vec<(String, String)>> {
 }
 
 /// The browser adapter the environment configures, with the client key at
-/// `key_file`.
-async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
+/// `key_file`, and the listener feeding its revocations, held as long as it
+/// serves.
+async fn adapter(
+    key_file: &str,
+) -> anyhow::Result<(
+    ApplicationSessions,
+    sid_authn::revocation_cache::RevocationListener,
+)> {
     let installation = required("SID_UI_INSTALLATION_URL")?;
     let issuer_grpc = required("SID_UI_ISSUER_GRPC")?;
     let cookie = required("SID_UI_SESSION_COOKIE")?;
@@ -226,8 +233,8 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         .context("the longest access-token lifetime is positive")?;
     let revocation = Arc::new(RevocationCache::new(lifetime, cache));
     // Revocations made anywhere reach this process before it answers.
-    revocation.listen().await;
-    Ok(ApplicationSessions::new(
+    let listener = revocation.listen().await;
+    let sessions = ApplicationSessions::new(
         Arc::new(client),
         Arc::new(IssuerDirectory::new(
             &installation,
@@ -241,7 +248,8 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         )),
         revocation,
         cookie,
-    ))
+    );
+    Ok((sessions, listener))
 }
 
 fn required(name: &str) -> anyhow::Result<String> {

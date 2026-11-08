@@ -25,4 +25,4 @@ thiserror = { workspace = true }
 # Import is checked against a real in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-sid-crypto = { workspace = true, features = ["primitives"] }
+sid-crypto = { workspace = true, features = ["primitives", "jwt"] }

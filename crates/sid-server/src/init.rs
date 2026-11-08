@@ -82,6 +82,9 @@ pub struct CeComponents {
     pub opaque_router: Arc<OpaqueRouter>,
     pub opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     pub revocation_cache: Arc<RevocationCache>,
+    /// Receives the other replicas' revocations into `revocation_cache`; it
+    /// stops when dropped, so it lives as long as the components.
+    pub revocation_listener: Arc<sid_authn::revocation_cache::RevocationListener>,
     pub feature_flags: FeatureFlagService,
     pub event_bus: Arc<dyn EventBus>,
     /// The bundled `nats-server` behind `event_bus` in embedded mode; it is
@@ -500,6 +503,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         revocation_cache,
         captcha_pow_key,
         sod_warnings,
+        revocation_listener,
         ..
     } = installation;
 
@@ -1041,6 +1045,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         opaque_router,
         opaque_zkpp,
         revocation_cache,
+        revocation_listener: Arc::new(revocation_listener),
         feature_flags,
         event_bus,
         embedded_nats: embedded_nats.map(Arc::new),

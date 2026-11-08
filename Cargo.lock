@@ -5906,6 +5906,7 @@ dependencies = [
  "p256",
  "p384",
  "p521",
+ "parking_lot",
  "pasta_curves",
  "pbkdf2",
  "phonenumber",

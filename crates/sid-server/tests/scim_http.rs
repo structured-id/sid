@@ -150,6 +150,8 @@ struct Replica {
     provisioning: ProvisioningServiceImpl,
     authz: AuthzServiceImpl,
     issuers: Arc<IssuerRegistry>,
+    /// Receives the other replicas' revocations as long as it lives.
+    _revocations: sid_authn::revocation_cache::RevocationListener,
 }
 
 impl Installation {
@@ -173,7 +175,7 @@ impl Installation {
             Duration::from_secs(900),
             self.cache.clone(),
         ));
-        revocation.listen().await;
+        let revocations = revocation.listen().await;
         let issuers = Arc::new(IssuerRegistry::new(
             storage.clone(),
             common::test_key_manager(),
@@ -260,6 +262,7 @@ impl Installation {
             provisioning,
             authz,
             issuers,
+            _revocations: revocations,
         }
     }
 }

@@ -134,7 +134,7 @@ async fn replica(deployment: &Deployment) -> String {
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap();
     let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
-    revocation.listen().await;
+    let listening = revocation.listen().await;
     let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
         Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),
@@ -164,6 +164,8 @@ async fn replica(deployment: &Deployment) -> String {
     .with_extra_routes(asset_routes(sid_ui_host::standalone(bundle).unwrap()));
     let upstream = HostUpstream::new(Arc::new(adapter), Some(channel));
     tokio::spawn(async move {
+        // The replica receives revocations as long as it serves.
+        let _listening = listening;
         sid_infra::http::serve_on(
             &proxy,
             upstream,

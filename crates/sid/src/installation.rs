@@ -76,6 +76,9 @@ pub struct Installation {
     /// The configured separation-of-duties warnings, for authorization
     /// management.
     pub sod_warnings: Arc<sid_authz::sod::SodService>,
+    /// Receives the other processes' revocations while it is held: a host
+    /// taking the installation apart keeps it as long as it serves.
+    pub revocation_listener: sid_authn::revocation_cache::RevocationListener,
 }
 
 /// Why an installation does not open. Nothing is served from a store that
@@ -154,7 +157,7 @@ impl Installation {
             settings.cache,
             storage.clone(),
         ));
-        revocation_cache.listen().await;
+        let revocation_listener = revocation_cache.listen().await;
         apply_management(storage.as_ref(), settings.management).await?;
 
         let organization = sid_authn::instance_org::ensure(storage.as_ref(), &domain)
@@ -229,7 +232,16 @@ impl Installation {
             revocation_cache,
             captcha_pow_key,
             sod_warnings: Arc::new(sid_authz::sod::SodService::new(settings.sod_warnings)),
+            revocation_listener,
         })
+    }
+
+    /// Stop what the installation runs on its own (receiving revocations);
+    /// on return it holds the host's store only through the components the
+    /// host still holds. Dropping the installation stops the same, without
+    /// waiting.
+    pub async fn close(self) {
+        self.revocation_listener.stop().await;
     }
 
     /// Authorization management of this installation, warning of the

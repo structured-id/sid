@@ -46,6 +46,9 @@ pasta_curves = { workspace = true }
 hmac = { workspace = true }
 sha1 = { workspace = true }
 
+# The revocation listener's generation, held while it publishes warmth.
+parking_lot = { workspace = true }
+
 # JWT (EdDSA / Ed25519)
 jsonwebtoken = { workspace = true }
 # Generates each OIDC issuer's Ed25519 signing key and its PKCS#8 encoding,
@@ -125,7 +128,7 @@ password-operation = [
 soft-authenticator = ["p256/ecdsa"]
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["primitives", "tls-aws-lc"] }
+sid-crypto = { workspace = true, features = ["primitives", "tls-aws-lc", "jwt"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 sid-pake-core = { workspace = true }
 sid-opaque-ke = { workspace = true }
