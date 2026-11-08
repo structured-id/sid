@@ -1361,6 +1361,24 @@ impl SecondFactors {
         let token = delivery
             .into_bearer_token()
             .ok_or_else(|| internal("open the stepped-up token", "not a bearer delivery"))?;
+        // A later step-up of the rotated token replaced and stopped it: that
+        // token is no longer deliverable, and handing it out would replace
+        // the client's current one with a revoked credential.
+        let rotated = sign_in
+            .jwt()
+            .validate_access_token(secrecy::ExposeSecret::expose_secret(&token))
+            .map_err(|e| internal("read the stepped-up token", e))?;
+        let replaced = sign_in
+            .revocation()
+            .is_revoked(&rotated.jti, &rotated.sid)
+            .await
+            .map_err(|e| SecondFactorError::Unavailable {
+                what: "token revocation",
+                cause: e.to_string(),
+            })?;
+        if replaced {
+            return Ok(None);
+        }
         // The stopped token stops before the step-up is reported: a first
         // attempt that committed but failed to revoke it, or ended before,
         // has it revoked here.

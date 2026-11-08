@@ -925,11 +925,27 @@ impl AuthServiceImpl {
         };
         let session_id = SessionId::parse(&claims.sid)
             .map_err(|e| internal("read session id of a verified token", e))?;
-        let session = self
+        let Some(session) = self
             .storage
             .get_session(session_id)
             .await
             .map_err(storage_failure)?
+        else {
+            // A pending context gone before its end reached this process (a
+            // completion that committed while its revocation was lost or is
+            // still in flight): it names the completion it may receive, as
+            // an ended one does; the native key is the request's own proof.
+            if pending {
+                return Ok(FactorRequest::Caller(FactorCaller::Completed(
+                    CompletedContext::Native {
+                        pending: session_id,
+                        key: None,
+                    },
+                )));
+            }
+            return Err(session_ended());
+        };
+        let session = Some(session)
             .filter(|session| session.profile_id == profile_id)
             .filter(|session| session.awaits_second_factor() == pending)
             .ok_or_else(session_ended)?;

@@ -8281,6 +8281,59 @@ async fn test_a_redelivered_step_up_stops_the_replaced_token() {
     assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{refused:?}");
 }
 
+/// Regression: a step-up whose rotated token a later step-up already replaced
+/// delivers nothing again: a delayed retry of the first one is refused rather
+/// than answered with the replaced token, which would overwrite the client's
+/// current token with a revoked credential.
+#[tokio::test]
+async fn test_a_superseded_step_up_is_not_delivered_again() {
+    use sid_core::models::credential::CredentialStatus;
+    let (svc, bearer) = recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Active).await;
+    let first = svc
+        .auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await
+        .unwrap()
+        .into_inner()
+        .new_session_token;
+    let second = svc
+        .auth
+        .complete_step_up(recovery_step_up("ZZZZ-ZZZZ-ZZZZ", &first))
+        .await
+        .expect("a step-up of the rotated token")
+        .into_inner()
+        .new_session_token;
+
+    let late = svc
+        .auth
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
+        .await;
+    assert!(
+        late.as_ref()
+            .map_or(true, |r| r.get_ref().new_session_token != first),
+        "the replaced token was delivered again: {late:?}"
+    );
+    let refused = late.expect_err("a superseded step-up delivers nothing");
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{refused:?}");
+    // The newest token still authenticates: its call is refused for the
+    // spent code, not for the token.
+    let spent = svc
+        .auth
+        .verify_recovery_code(authed_request(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB-CCCC".to_string(),
+            },
+            &second,
+        ))
+        .await
+        .expect_err("the code is spent");
+    assert_ne!(
+        tonic_types::StatusExt::get_details_error_info(&spent).map(|i| i.reason),
+        Some("TOKEN_INVALID".to_string()),
+        "refused as a spent code, not as a revoked token: {spent:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_complete_step_up_totp_wrong_code() {
     use sid_core::models::session::Session;

@@ -732,6 +732,63 @@ async fn a_native_completion_redelivers_its_first_generation() {
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 }
 
+/// Regression: a native completion committed, but the end of its pending
+/// context never reached another replica (its revocation was not recorded).
+/// The retry there still verifies as a pending context whose session is gone;
+/// it is answered from the completion with the same token and generation, as
+/// it would be once the revocation arrived. Before, it was refused as an
+/// ended sign-in and the committed session was unreachable.
+#[tokio::test]
+async fn a_native_completion_is_recovered_before_its_revocation_arrives() {
+    use common::native_client::{Binds, generation, proof, rpc_uri, with_proof};
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.expect("pending context"));
+    let recover = || {
+        let mut request = with_proof(
+            VerifyRecoveryCodeRequest {
+                code: "AAAA-BBBB".to_string(),
+            },
+            &proof(
+                &rpc_uri("VerifyRecoveryCode"),
+                Binds::Ceremony(pending_token.as_bytes()),
+            ),
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        request
+    };
+
+    svc.mock_storage.fail_admissions("revoked-session");
+    let _lost = svc.auth.verify_recovery_code(recover()).await;
+    svc.mock_storage.record_admissions();
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1, "it committed");
+
+    let replica = svc
+        .restarted_under(
+            std::sync::Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+            policy.clone(),
+        )
+        .await;
+    let again = replica
+        .auth
+        .verify_recovery_code(recover())
+        .await
+        .expect("the committed sign-in, delivered again");
+    assert!(generation(&again).is_some(), "with its first generation");
+    let repeat = replica
+        .auth
+        .verify_recovery_code(recover())
+        .await
+        .expect("delivered again");
+    assert_eq!(bearer(&repeat), bearer(&again));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+}
+
 /// A policy that names the method it requires (`otp`) is not met by a
 /// recovery code: none is offered, and one presented is refused before it
 /// is spent.

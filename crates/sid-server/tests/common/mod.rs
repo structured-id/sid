@@ -1650,6 +1650,17 @@ impl TestServices {
         Self::replica(self.mock_storage.clone(), cache).await
     }
 
+    /// [`Self::restarted_with`], deciding sign-ins under `login_policy` as
+    /// this replica does.
+    #[allow(dead_code)]
+    pub async fn restarted_under(
+        &self,
+        cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+        login_policy: Arc<dyn sid_authn::login_policy::LoginPolicySource>,
+    ) -> Self {
+        Self::replica_under(self.mock_storage.clone(), cache, Some(login_policy)).await
+    }
+
     /// Another replica over this one's database and cache, started now: a
     /// restart, or a replica added later.
     #[allow(dead_code)]
@@ -1662,6 +1673,15 @@ impl TestServices {
     async fn replica(
         storage: Arc<MockStorage>,
         cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    ) -> Self {
+        Self::replica_under(storage, cache, None).await
+    }
+
+    /// [`Self::replica`] under `login_policy` when given.
+    async fn replica_under(
+        storage: Arc<MockStorage>,
+        cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+        login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     ) -> Self {
         let opaque_router = stored_opaque_router(storage.as_ref()).await;
         let replica = Self::assemble(
@@ -1676,7 +1696,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
-                login_policy: None,
+                login_policy,
             },
         );
         let mut replica = replica;
