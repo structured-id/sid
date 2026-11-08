@@ -135,10 +135,12 @@ enum Proof {
 }
 
 /// An application's client of password registration: the ZKPP prover of
-/// each history shape it was asked for, under the CE policy.
+/// each history shape it was asked for, under the CE policy, and the
+/// password operations it started, each with its owner domain.
 #[derive(Default)]
 struct Client {
     provers: BTreeMap<usize, ZkppProver>,
+    operations: BTreeMap<uuid::Uuid, [u8; 32]>,
 }
 
 impl Client {
@@ -311,6 +313,10 @@ impl Served {
             .await?;
         let context = start.history.ok_or("the start names its operation")?;
         let operation = sid_authn::password_operation::operation_id(context.operation_id.as_ref())?;
+        client.operations.insert(
+            uuid::Uuid::from_bytes(*operation.as_bytes()),
+            array32(&context.owner_domain, "owner domain")?,
+        );
         let asked = sid_pake_core::client::history_request(
             &mut rng,
             base(&context.owner_domain, "owner domain")?,
@@ -534,7 +540,7 @@ impl AuthMailDelivery for HostMail {
 /// The installation's engine: the CE work it owes, assembled by the
 /// engine library with its in-process history evaluator, and the host's own
 /// `extra` handlers.
-fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
+fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, Failure> {
     let installation = &served.installation;
     let storage = installation.storage.clone();
     let mail: Arc<dyn AuthMailDelivery> = Arc::new(HostMail::default());
@@ -577,8 +583,15 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
         source: "engine-package-consumer".into(),
     })
     .expect("the CE work assembles");
+    // Admissions settle here, over the host's evaluator, once they are due.
+    if !handlers
+        .iter()
+        .any(|h| h.kind().as_str() == sid_core::models::password_history::ENROLLMENT_ADMISSION_KIND)
+    {
+        return Err("the CE work settles enrollment admissions in the host's process".into());
+    }
     handlers.extend(extra);
-    Engine::new(EngineParts {
+    Ok(Engine::new(EngineParts {
         storage,
         worker: format!("host-{}", uuid::Uuid::now_v7()),
         handlers,
@@ -589,7 +602,7 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Engine {
         },
         maintenance,
     })
-    .expect("the engine takes its handlers")
+    .expect("the engine takes its handlers"))
 }
 
 /// Owed (pending or claimed) work of the installation that is due now, by
@@ -608,12 +621,33 @@ async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> 
         .collect())
 }
 
+/// Whether `work` is the enrollment admission of one of `operations` as the
+/// engine records it: its kind, the operation's id, the operation and its
+/// owner domain in the payload, and the due time the admission sets.
+fn is_admission(
+    work: &sid_core::models::WorkSnapshot,
+    operations: &BTreeMap<uuid::Uuid, [u8; 32]>,
+) -> bool {
+    let record = &work.record;
+    let Some(owner_domain) = operations.get(&record.id.0) else {
+        return false;
+    };
+    let Ok(admission) = sid_core::models::EnrollmentAdmission::from_work(&work.payload) else {
+        return false;
+    };
+    record.kind.as_str() == sid_core::models::password_history::ENROLLMENT_ADMISSION_KIND
+        && admission.operation == record.id.0
+        && admission.owner_domain == *owner_domain
+        && admission.work().not_before == Some(record.not_before)
+}
+
 /// The installation's CE work (every kind but the host's own) as it stands:
-/// the kinds of the completed pieces, and the ids of the pieces scheduled
-/// for later (pending, not yet due). Refused when any piece ended, or is
-/// still owed while due, otherwise than completed.
+/// the kinds of the completed pieces, and the operations whose enrollment
+/// admission is scheduled (pending, not yet due). Refused when any other
+/// piece ended, or is owed, otherwise than completed.
 async fn ce_work_settled(
     storage: &dyn StorageBackend,
+    operations: &BTreeMap<uuid::Uuid, [u8; 32]>,
 ) -> Result<
     (
         std::collections::BTreeSet<String>,
@@ -633,7 +667,7 @@ async fn ce_work_settled(
             WorkState::Completed => {
                 completed.insert(record.kind.as_str().to_owned());
             }
-            WorkState::Pending if record.not_before > now => {
+            WorkState::Pending if record.not_before > now && is_admission(&work, operations) => {
                 scheduled.insert(record.id.0);
             }
             state => {
@@ -910,7 +944,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         due_work(storage.as_ref()).await?.len() > 1,
         "the installation owes CE work besides the host's",
     )?;
-    let running = engine(&served, vec![]).start();
+    let running = engine(&served, vec![])?.start();
     if tokio::time::timeout(Duration::from_secs(10), async {
         while due_work(storage.as_ref()).await.map(|w| w.len()).ok() != Some(1) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -923,7 +957,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         return Err(format!("the CE handlers settle the CE work; still owed: {owed:?}").into());
     }
     running.drain().await?;
-    let (completed, scheduled) = ce_work_settled(storage.as_ref()).await?;
+    let (completed, scheduled) = ce_work_settled(storage.as_ref(), &client.operations).await?;
     check(
         completed.contains(sid_core::models::event::EVENT_RELAY_KIND)
             && completed.contains(sid_core::models::SESSION_REVOCATION_KIND),
@@ -935,8 +969,8 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // operation can no longer commit; until then it is scheduled, and it
     // travels with the installation.
     check(
-        scheduled.len() == 3,
-        "each registration operation leaves its enrollment admission scheduled",
+        client.operations.len() == 3 && scheduled.iter().eq(client.operations.keys()),
+        "each registration operation leaves exactly its enrollment admission scheduled",
     )?;
     check(
         work_state(storage.as_ref(), &work).await? == WorkState::Pending,
@@ -969,7 +1003,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         work_state(source.backend().as_ref(), &work).await? == WorkState::Pending,
         "pending work survives the restart",
     )?;
-    let drained: Drained = engine(&reopened, vec![]).start().drain().await?;
+    let drained: Drained = engine(&reopened, vec![])?.start().drain().await?;
 
     // Snapshot: exported from the drained engine, imported into an
     // uninitialized store without serving, verified and opened as the same
@@ -1007,7 +1041,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // starts, its administrator signs in with the same password, and a keyed
     // command repeated there answers with what the source recorded.
     let target_storage = target.backend();
-    let running = engine(&restored, vec![Arc::new(Probe(kind))]).start();
+    let running = engine(&restored, vec![Arc::new(Probe(kind))])?.start();
     tokio::time::timeout(Duration::from_secs(10), async {
         while work_state(target_storage.as_ref(), &work).await.ok() != Some(WorkState::Completed) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1022,7 +1056,10 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "the restored installation owes no due work",
     )?;
     check(
-        ce_work_settled(target_storage.as_ref()).await?.1 == scheduled,
+        ce_work_settled(target_storage.as_ref(), &client.operations)
+            .await?
+            .1
+            == scheduled,
         "the restored installation keeps the source's scheduled work, every other piece completed",
     )?;
     let administrator = restored.administrator(PASSWORD).await?;
