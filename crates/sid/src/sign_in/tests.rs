@@ -449,3 +449,178 @@ fn refusal_converts_into_rules_error() {
         SignInError::Rules(SignInRefusal::Refused)
     ));
 }
+
+// ── Login requirements wiring ──────────
+//
+// The level and methods a sign-in's session records, judged by the login
+// requirements the installation's fixed policy states, with a client's own
+// as authorization adds them: what the auth flow decides for each method.
+
+use sid_authn::login_policy::LoginDecision;
+use sid_core::models::security_policy::EnforcementMode;
+
+/// The decision on a session signed in by `method` under `policy`, for
+/// `client` when given.
+async fn sign_in_decision(
+    policy: &SecurityPolicy,
+    client: Option<&sid_core::models::OAuth2Client>,
+    method: LoginMethod,
+) -> LoginDecision {
+    let now = chrono::Utc::now();
+    let probe = sid_authn::login_policy::local_authentication(
+        sid_core::models::ProfileId::generate(),
+        method.auth_level(policy.auth.passkey_satisfies_mfa),
+        &method.amr(),
+        now,
+    );
+    let mut requirements = FixedLoginPolicy::of(policy)
+        .requirements(None)
+        .await
+        .unwrap();
+    if let Some(client) = client {
+        requirements = requirements.with_client(client, None);
+    }
+    requirements.decide(&probe, now)
+}
+
+const PASSWORD: LoginMethod = LoginMethod::Password;
+
+fn passkey(user_verified: bool) -> LoginMethod {
+    LoginMethod::Passkey {
+        user_verified,
+        key_amr: "hwk",
+    }
+}
+
+/// Helper: construct a test OAuth2Client with specific overrides.
+fn test_client_with_acr(
+    name: &str,
+    required_acr: Option<sid_core::models::session::AuthLevel>,
+    enforcement_mode: EnforcementMode,
+) -> sid_core::models::OAuth2Client {
+    sid_core::models::OAuth2Client {
+        client_id: name.to_string(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
+        application_id: sid_core::models::ApplicationId::generate(),
+        default_resource: None,
+        application_type: sid_core::models::ApplicationType::Web,
+        client_secret_hash: None,
+        jwks: None,
+        redirect_uris: vec![],
+        allowed_scopes: vec![],
+        grant_types: vec![],
+        client_name: name.to_string(),
+        logo_uri: None,
+        active: true,
+        token_endpoint_auth_method: sid_core::models::TokenEndpointAuthMethod::None,
+        response_types: vec![],
+        subject_type: sid_core::models::SubjectType::Public,
+        sector_identifier_uri: None,
+        contacts: vec![],
+        client_id_issued_at: chrono::Utc::now(),
+        client_secret_expires_at: None,
+        registration_iat: None,
+        registration_access_token_hash: None,
+        required_acr,
+        required_amr: vec![],
+        enforcement_mode,
+        min_device_assurance: None,
+        require_verified_email: None,
+        require_verified_phone: None,
+        backchannel_logout_uri: None,
+        backchannel_logout_session_required: false,
+        post_logout_redirect_uris: vec![],
+        claim_mappings: vec![],
+        login_strategy: sid_core::models::LoginStrategy::LocalFirst,
+        show_federation_button: true,
+        federation_timeout_ms: 500,
+        unified_input: false,
+        org_id: None,
+        revision: 0,
+        created_at: chrono::Utc::now(),
+    }
+}
+
+fn standard(mode: EnforcementMode) -> SecurityPolicy {
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
+    policy.enforcement.mode = mode;
+    policy
+}
+
+// The CE baseline (Basic) admits a password sign-in.
+#[tokio::test]
+async fn a_password_sign_in_passes_the_baseline() {
+    let decision = sign_in_decision(&SecurityPolicy::ce_default(), None, PASSWORD).await;
+    assert!(matches!(decision, LoginDecision::Allow { audited } if audited.is_empty()));
+}
+
+// A Standard requirement asks a password sign-in (Basic) to step up to
+// Standard, naming the level.
+#[tokio::test]
+async fn a_password_sign_in_steps_up_to_a_standard_requirement() {
+    let decision = sign_in_decision(&standard(EnforcementMode::Hard), None, PASSWORD).await;
+    let LoginDecision::StepUp(unmet) = decision else {
+        panic!("a Basic sign-in passed a Standard requirement");
+    };
+    assert_eq!(
+        unmet.acr,
+        Some(sid_core::models::session::AuthLevel::Standard)
+    );
+}
+
+// A passkey that verified the user is Standard and meets it; one that did not
+// is a single factor and steps up.
+#[tokio::test]
+async fn a_passkey_meets_standard_only_with_user_verification() {
+    let policy = standard(EnforcementMode::Hard);
+    assert!(matches!(
+        sign_in_decision(&policy, None, passkey(true)).await,
+        LoginDecision::Allow { .. }
+    ));
+    assert!(matches!(
+        sign_in_decision(&policy, None, passkey(false)).await,
+        LoginDecision::StepUp(_)
+    ));
+}
+
+// Audit enforcement allows the unmet requirement and still reports it.
+#[tokio::test]
+async fn audit_enforcement_allows_and_reports() {
+    let decision = sign_in_decision(&standard(EnforcementMode::Audit), None, PASSWORD).await;
+    let LoginDecision::Allow { audited } = decision else {
+        panic!("audit enforcement refused");
+    };
+    assert!(!audited.is_empty());
+}
+
+// A client requiring Standard makes a password sign-in step up while a
+// verified passkey passes; a client asking less than the organization changes
+// nothing.
+#[tokio::test]
+async fn a_client_only_strengthens_the_requirement() {
+    let strict = test_client_with_acr(
+        "strict-app",
+        Some(sid_core::models::session::AuthLevel::Standard),
+        EnforcementMode::Hard,
+    );
+    let baseline = SecurityPolicy::ce_default();
+    assert!(matches!(
+        sign_in_decision(&baseline, Some(&strict), PASSWORD).await,
+        LoginDecision::StepUp(_)
+    ));
+    assert!(matches!(
+        sign_in_decision(&baseline, Some(&strict), passkey(true)).await,
+        LoginDecision::Allow { .. }
+    ));
+
+    let lenient = test_client_with_acr(
+        "lenient-app",
+        Some(sid_core::models::session::AuthLevel::Basic),
+        EnforcementMode::Audit,
+    );
+    assert!(matches!(
+        sign_in_decision(&standard(EnforcementMode::Hard), Some(&lenient), PASSWORD).await,
+        LoginDecision::StepUp(_)
+    ));
+}

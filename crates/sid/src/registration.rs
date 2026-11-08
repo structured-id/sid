@@ -532,6 +532,32 @@ impl Registration {
         }
         Ok(())
     }
+
+    /// Refuse to create an account for an upstream sign-in this installation
+    /// does not admit, as it refuses a self-registration: the registration
+    /// switch (`enabled`), then the effective enrollment policy, the
+    /// provider's verified email as the address a domain policy checks. An
+    /// upstream sign-in carries no invite.
+    pub async fn admit_upstream(
+        &self,
+        claims: &sid_core::models::MappedClaims,
+        enabled: bool,
+    ) -> Result<(), RegistrationError> {
+        if !enabled {
+            return Err(RegistrationError::NotEnabled);
+        }
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned).await?;
+        let email = claims
+            .has_verified_email()
+            .then_some(claims.email.as_deref())
+            .flatten();
+        match evaluate_enrollment(&policy, email, None) {
+            EnrollmentDecision::Allow => Ok(()),
+            EnrollmentDecision::Deny(reason) => {
+                Err(RegistrationError::Restricted(requirement(&reason)))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

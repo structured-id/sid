@@ -5,8 +5,7 @@
 //! the REST handlers.
 
 use crate::feature_flags::FeatureFlagService;
-use chrono::{Duration, Utc};
-use sid::sign_in::{AttemptContext, FirstFactor, FirstFactorSignedIn, LoginMethod};
+use sid::sign_in::{AttemptContext, FirstFactorSignedIn};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
@@ -23,7 +22,7 @@ use sid_authn::webauthn::WebAuthnServer;
 use sid_core::models::OidcIssuer;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{CredentialId, ProfileId, SessionId};
+use sid_core::models::{CredentialId, SessionId};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::context;
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
@@ -37,10 +36,10 @@ use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument, warn};
+use tracing::instrument;
 
 use super::native_session::NativeProof;
-use sid_authn::native_session::{NativePolicy, PROOF_METADATA, REFRESH_METADATA};
+use sid_authn::native_session::{PROOF_METADATA, REFRESH_METADATA};
 use sid_infra::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
     missing_field, not_configured, not_found, not_in_this_build, storage_failure,
@@ -54,12 +53,10 @@ use authorize::authorization_refusal;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use refusal::{
-    anomaly_unavailable, authentication_failed, ceremony_expired, enrollment_requirement,
-    mfa_not_enrolled, registration_restricted, session_ended, session_provisional,
-    step_up_required,
+    anomaly_unavailable, authentication_failed, ceremony_expired, mfa_not_enrolled,
+    registration_restricted, session_ended, session_provisional, step_up_required,
 };
 use sid::second_factor::{Enroller, FactorCaller};
-use sid_authn::sign_in_security::device_id as compute_device_id;
 use sign_in_security::sign_in_refusal;
 
 /// Extract User-Agent from gRPC metadata.
@@ -191,6 +188,18 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::Identity(e) => super::identity_service::refusal(e),
         E::Operation(e) => e.into_status(),
         E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
+/// The answer to a CAPTCHA solution that earned no pass.
+fn captcha_refusal(e: sid::sign_in::captcha::CaptchaSolveError) -> Status {
+    use sid::sign_in::captcha::CaptchaSolveError as E;
+    match e {
+        E::Rejected => invalid_field("token", "the CAPTCHA solution was not accepted"),
+        E::Expired => ceremony_expired("CAPTCHA"),
+        E::ProviderUnavailable(cause) => dependency_unavailable("CAPTCHA provider", cause),
+        E::GateUnavailable(cause) => anomaly_unavailable(cause),
         E::Internal => ApiError::internal().into(),
     }
 }
@@ -408,8 +417,6 @@ pub struct AuthServiceImpl {
     /// attempt counters, the security policy, the IdP session cookie and
     /// session delivery.
     sign_ins: sid::sign_in::SignIn,
-    /// Field encryption for credential secrets the server reads back (TOTP seeds).
-    key_manager: Arc<dyn sid_keys::KeyManager>,
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
@@ -424,35 +431,7 @@ pub struct AuthServiceImpl {
     end_sessions: sid::oauth::end_session::EndSessions,
 }
 
-/// How the sign-in rules judge one sign-in.
-#[derive(Clone, Copy)]
-enum Judging {
-    /// A new sign-in, recorded as evidence once admitted.
-    Record,
-    /// A repeat of a sign-in already admitted from `admitted_from`, recorded
-    /// as no further sign-in.
-    Repeat {
-        admitted_from: Option<std::net::IpAddr>,
-    },
-}
-
-/// The host's keyed operation an admitted sign-in completes: a repeat of it
-/// is answered with the same session (see
-/// [`AuthServiceImpl::complete_admitted_sign_in`]).
-pub struct AdmittedCompletion<'a> {
-    /// The operation's stable reference, its key.
-    pub operation: &'a str,
-    /// When the operation ends; nothing is delivered again after.
-    pub deadline: chrono::DateTime<Utc>,
-}
-
-impl AdmittedCompletion<'_> {
-    #[allow(clippy::result_large_err)]
-    fn key(&self) -> Result<sid_core::models::OperationKey, Status> {
-        sid_core::models::OperationKey::parse(self.operation)
-            .map_err(|e| internal("the admitted sign-in's operation reference", e))
-    }
-}
+pub use sid::sign_in::completions::AdmittedCompletion;
 
 /// What an upstream sign-in request tells about who completes it, read
 /// before its state is consumed.
@@ -461,6 +440,20 @@ pub(crate) struct UpstreamCeremony {
     client_ip: Option<std::net::IpAddr>,
     user_agent: Option<String>,
     captcha_pass: Option<String>,
+}
+
+impl UpstreamCeremony {
+    /// Who completes the sign-in, as the engine takes it.
+    fn completer(&self) -> sid::sign_in::completions::Completer<'_> {
+        sid::sign_in::completions::Completer {
+            client: self.client,
+            client_ip: self.client_ip,
+            context: AttemptContext {
+                captcha_pass: self.captcha_pass.as_deref(),
+                user_agent: self.user_agent.as_deref(),
+            },
+        }
+    }
 }
 
 impl AuthServiceImpl {
@@ -561,7 +554,7 @@ impl AuthServiceImpl {
             ),
             end_sessions: sid::oauth::end_session::EndSessions::new(
                 ceremonies.clone(),
-                key_manager.clone(),
+                key_manager,
             ),
             magic_link,
             otp,
@@ -574,7 +567,6 @@ impl AuthServiceImpl {
                 .ascii_serialization(),
             issuer,
             sign_ins,
-            key_manager,
             sign_in_origin: None,
             registration,
         }
@@ -693,19 +685,6 @@ impl AuthServiceImpl {
         self
     }
 
-    /// The login requirements of an authentication for `client_id` (none:
-    /// the organization's). A source that cannot state them refuses rather
-    /// than leaving the fixed baseline in their place.
-    async fn login_requirements(
-        &self,
-        client_id: Option<&str>,
-    ) -> Result<sid_authn::login_policy::LoginRequirements, Status> {
-        self.oauth
-            .login_requirements(client_id)
-            .await
-            .map_err(oauth_refusal)
-    }
-
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
     /// not enabled magic links. The answer does not depend on the address asked
     /// about.
@@ -714,135 +693,6 @@ impl AuthServiceImpl {
         self.magic_link
             .as_deref()
             .ok_or_else(|| not_configured("magic_links"))
-    }
-
-    /// Evaluate login security: anomaly detection, then the organization's
-    /// login requirements, on the level and `amr` methods the session being
-    /// created records.
-    ///
-    /// Called AFTER credential verification, BEFORE session creation.
-    /// Returns the policy fence the session commits under, or the refusal.
-    async fn evaluate_login_security(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        auth_method: &str,
-        (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
-        extras: AttemptContext<'_>,
-    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
-        self.evaluate_sign_in(
-            profile_id,
-            client_ip,
-            sid_authn::sign_in_security::AttemptAuthentication::Local {
-                method: auth_method,
-                assurance,
-                amr,
-            },
-            extras,
-            None,
-        )
-        .await
-    }
-
-    /// The same rules for a sign-in verified as `authentication`, under the
-    /// login requirements of `client_id` (none: the organization's). Returns
-    /// the policy fence the session commits under.
-    async fn evaluate_sign_in(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
-        extras: AttemptContext<'_>,
-        client_id: Option<&str>,
-    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
-        self.client_sign_in_rules(
-            profile_id,
-            client_ip,
-            (authentication, extras),
-            client_id,
-            Judging::Record,
-        )
-        .await
-    }
-
-    /// The same rules as [`Self::evaluate_sign_in`] for a repeat of a sign-in
-    /// already admitted and recorded from `admitted_from`: judged on its own
-    /// request, recorded as no further sign-in.
-    async fn check_sign_in(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        attempt: (
-            sid_authn::sign_in_security::AttemptAuthentication<'_>,
-            AttemptContext<'_>,
-        ),
-        client_id: Option<&str>,
-        admitted_from: Option<std::net::IpAddr>,
-    ) -> Result<(), Status> {
-        self.client_sign_in_rules(
-            profile_id,
-            client_ip,
-            attempt,
-            client_id,
-            Judging::Repeat { admitted_from },
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// The sign-in rules under `client_id`'s requirements, judged as
-    /// `judging` says.
-    async fn client_sign_in_rules(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        attempt: (
-            sid_authn::sign_in_security::AttemptAuthentication<'_>,
-            AttemptContext<'_>,
-        ),
-        client_id: Option<&str>,
-        judging: Judging,
-    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
-        let requirements = self.login_requirements(client_id).await?;
-        match judging {
-            Judging::Record => {
-                self.sign_ins
-                    .evaluate(profile_id, client_ip, attempt, &requirements)
-                    .await
-            }
-            Judging::Repeat { admitted_from } => {
-                self.sign_ins
-                    .check(profile_id, client_ip, attempt, &requirements, admitted_from)
-                    .await
-            }
-        }
-        .map_err(sign_in_refusal)?;
-        Ok(requirements.fence)
-    }
-
-    /// The same rules for a local sign-in that proved its first factor at
-    /// `assurance` with `amr`, under the organization's requirements: admitted,
-    /// or, when it owes the requirements or an anomaly rule's step-up and a
-    /// second factor the account has enrolled answers that, awaiting the factor.
-    async fn evaluate_first_factor(
-        &self,
-        profile_id: ProfileId,
-        client_ip: Option<std::net::IpAddr>,
-        auth_method: &str,
-        (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
-        extras: AttemptContext<'_>,
-    ) -> Result<FirstFactor, Status> {
-        let requirements = self.login_requirements(None).await?;
-        self.sign_ins
-            .first_factor(
-                profile_id,
-                client_ip,
-                (auth_method, assurance, amr),
-                extras,
-                &requirements,
-            )
-            .await
-            .map_err(sign_in_refusal)
     }
 
     /// The installation's public origin, which every URI a sender proof
@@ -962,57 +812,6 @@ impl AuthServiceImpl {
         })
     }
 
-    /// Complete a local first-factor sign-in as `admission` decided: the
-    /// session, or its pending context with the second factors that complete
-    /// it and, for a browser, the CSRF token the completion sends. A session
-    /// of a native client that proved the application key `native_key` gets
-    /// its refresh generation; a pending context gets none.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_first_factor(
-        &self,
-        profile: &sid_core::models::Profile,
-        method: LoginMethod,
-        device_id: Option<uuid::Uuid>,
-        client_ip: Option<std::net::IpAddr>,
-        client: CeremonyClient,
-        native_key: Option<&str>,
-        proved_by: Option<&sid_core::models::CredentialFence>,
-        admission: FirstFactor,
-    ) -> Result<FirstFactorSignedIn, Status> {
-        self.sign_ins
-            .complete_first_factor(
-                profile, method, device_id, client_ip, client, native_key, proved_by, admission,
-            )
-            .await
-            .map_err(sign_in_refusal)
-    }
-
-    /// Store `session` and deliver its credential to `client`: the browser
-    /// sign-in page gets the IdP session cookie, a fresh secret whose hash
-    /// the session stores, and no access token; a native client gets the
-    /// session's access token. `proved_by` is what the sign-in proved and
-    /// `policy` the login policy it was admitted under; both must still hold
-    /// when the session commits. A native client whose ceremony proved the
-    /// application key `native_key` also gets its refresh generation.
-    #[allow(clippy::too_many_arguments)]
-    async fn sign_in(
-        &self,
-        profile: &sid_core::models::Profile,
-        session: sid_core::models::Session,
-        client: CeremonyClient,
-        native_key: Option<&str>,
-        proved_by: Option<sid_core::models::SignInProof<'_>>,
-        policy: Option<sid_core::models::ActorFence>,
-        retained: Option<sid::sign_in::RetainedSignIn<'_>>,
-    ) -> Result<SignedIn, Status> {
-        self.sign_ins
-            .sign_in(
-                profile, session, client, native_key, proved_by, policy, retained,
-            )
-            .await
-            .map_err(sign_in_refusal)
-    }
-
     /// Who completes the upstream sign-in `request`: its client (a browser
     /// off the sign-in page completes nothing), address and device.
     #[allow(clippy::result_large_err)]
@@ -1039,35 +838,10 @@ impl AuthServiceImpl {
         profile: &sid_core::models::Profile,
         ceremony: &UpstreamCeremony,
     ) -> Result<SignedIn, Status> {
-        if !profile.status.can_authenticate() {
-            return Err(authentication_failed());
-        }
-        let policy = self
-            .evaluate_login_security(
-                profile.id,
-                ceremony.client_ip,
-                "upstream",
-                (sid_core::models::session::AuthLevel::Basic, &[]),
-                AttemptContext {
-                    captcha_pass: ceremony.captcha_pass.as_deref(),
-                    user_agent: ceremony.user_agent.as_deref(),
-                },
-            )
-            .await?;
-        let lifetime = match self.security_policy().session.max_lifetime_hours {
-            0 => Duration::hours(24),
-            hours => Duration::hours(i64::from(hours)),
-        };
-        let mut session =
-            sid_core::models::Session::new(profile.id, ceremony.client_ip, Utc::now() + lifetime);
-        session.device_id = ceremony.user_agent.as_deref().map(compute_device_id);
-        session.scopes = vec![
-            "openid".to_string(),
-            "profile".to_string(),
-            "email".to_string(),
-        ];
-        self.sign_in(profile, session, ceremony.client, None, None, policy, None)
+        self.sign_ins
+            .upstream_sign_in(self.oauth.login_policy(), profile, ceremony.completer())
             .await
+            .map_err(sign_in_refusal)
     }
 
     /// Sign `profile` in on the accepted evidence of an explicitly trusted
@@ -1099,237 +873,25 @@ impl AuthServiceImpl {
         client_id: &str,
         completion: Option<AdmittedCompletion<'_>>,
     ) -> Result<SignedIn, Status> {
-        if !profile.status.can_authenticate() || assignment.profile != profile.id {
-            return Err(authentication_failed());
-        }
-        // An operation past its end admits nothing, neither a repeat nor a
-        // new sign-in: its retained delivery is gone with it.
-        if completion
-            .as_ref()
-            .is_some_and(|c| c.deadline <= Utc::now())
-        {
-            return Err(authentication_failed());
-        }
-        // The rules this request meets now (address, lockout, anomalies and
-        // requirements), a repeat of a completed operation included: a
-        // retained credential is never delivered where the sign-in itself
-        // would be refused.
         let client_ip = self.client_ip(request)?;
         let user_agent = extract_user_agent(request.metadata());
-        let user_agent = user_agent.as_deref();
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let attempt =
-            || sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication);
-        let extras = || AttemptContext {
-            captcha_pass: captcha_pass.as_deref(),
-            user_agent,
-        };
-        // A repeat of an operation already committed is judged by the rules
-        // of its own request but records no further sign-in; the admission
-        // it repeats answers a CAPTCHA from the address it was made from.
-        if let Some(completion) = &completion
-            && let Some((delivery, session)) = self.admitted_session(completion, assignment).await?
-        {
-            self.check_sign_in(
-                profile.id,
-                client_ip,
-                (attempt(), extras()),
-                Some(client_id),
-                session.ip_address,
-            )
-            .await?;
-            return self
-                .deliver_admitted(delivery, &session, client_id, assignment)
-                .await;
-        }
-        let proved_by = Some(sid_core::models::SignInProof::Assignment(assignment));
-        let policy = self
-            .evaluate_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
-            .await?;
-        let lifetime = match self.security_policy().session.max_lifetime_hours {
-            0 => Duration::hours(24),
-            hours => Duration::hours(i64::from(hours)),
-        };
-        let mut session =
-            sid_core::models::Session::new(profile.id, client_ip, Utc::now() + lifetime);
-        session.device_id = user_agent.map(compute_device_id);
-        session.assurance_level = authentication.assurance_level;
-        session.elevation = authentication.elevation;
-        session.authenticated_at = authentication.authenticated_at;
-        session.amr = authentication.amr.clone();
-        session.scopes = vec![
-            "openid".to_string(),
-            "profile".to_string(),
-            "email".to_string(),
-        ];
-        let Some(completion) = completion else {
-            return self
-                .sign_in(
-                    profile,
-                    session,
-                    CeremonyClient::Browser,
-                    None,
-                    proved_by,
-                    policy,
-                    None,
-                )
-                .await;
-        };
-        // The delivery lives no longer than the operation, nor than the
-        // session it delivers.
-        let retained = sid::sign_in::RetainedSignIn {
-            keys: self.key_manager.as_ref(),
-            completion_key: completion.key()?,
-            context: self.admitted_context(&completion),
-            deadline: completion.deadline.min(session.expires_at),
-            inputs: sid::sign_in::admitted_inputs(assignment),
-        };
-        match self
-            .sign_in(
+        self.sign_ins
+            .admitted_sign_in(
+                self.oauth.login_policy(),
                 profile,
-                session,
-                CeremonyClient::Browser,
-                None,
-                proved_by,
-                policy,
-                Some(retained),
+                assignment,
+                authentication,
+                client_id,
+                completion,
+                client_ip,
+                AttemptContext {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
             )
             .await
-        {
-            // A concurrent repeat committed first: its session is this one.
-            // Anything else keeps its refusal.
-            Err(refused) => match self
-                .redeliver_admitted(&completion, client_id, assignment)
-                .await
-            {
-                Ok(Some(signed_in)) => Ok(signed_in),
-                Ok(None) | Err(_) => Err(refused),
-            },
-            Ok(signed_in) => Ok(signed_in),
-        }
-    }
-
-    /// The sealing context of an admitted sign-in's delivery: its operation
-    /// at this issuer.
-    fn admitted_context(&self, completion: &AdmittedCompletion<'_>) -> String {
-        format!("admitted-sign-in:{}:{}", self.issuer, completion.operation)
-    }
-
-    /// The sign-in `completion` already committed for `assignment`'s Profile,
-    /// delivered again: before the operation's deadline, while its session
-    /// lives, its Profile can sign in, `assignment` still holds and its
-    /// authentication meets `client_id`'s current requirements. None when
-    /// the operation has not committed; a refusal when it has but may not be
-    /// delivered again.
-    async fn redeliver_admitted(
-        &self,
-        completion: &AdmittedCompletion<'_>,
-        client_id: &str,
-        assignment: sid_core::models::PrincipalAssignmentFence,
-    ) -> Result<Option<SignedIn>, Status> {
-        match self.admitted_session(completion, assignment).await? {
-            Some((delivery, session)) => self
-                .deliver_admitted(delivery, &session, client_id, assignment)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// The live session `completion` committed under `assignment` and its
-    /// retained delivery; None when the operation has not committed; a
-    /// refusal when it has but under another assignment, or may not be
-    /// delivered again (see [`Self::redeliver_admitted`]).
-    async fn admitted_session(
-        &self,
-        completion: &AdmittedCompletion<'_>,
-        assignment: sid_core::models::PrincipalAssignmentFence,
-    ) -> Result<
-        Option<(
-            sid_authn::sign_in_delivery::RetainedDelivery,
-            sid_core::models::Session,
-        )>,
-        Status,
-    > {
-        let Some(record) = self
-            .storage
-            .get_operation_result(sid::sign_in::ADMITTED_NAMESPACE, &completion.key()?)
-            .await
-            .map_err(storage_failure)?
-        else {
-            return Ok(None);
-        };
-        if !record.matches(
-            sid::sign_in::ADMITTED_METHOD,
-            &sid::sign_in::admitted_inputs(assignment),
-            // The sign-in ceremony's own record, under no period.
-            None,
-        ) {
-            return Err(authentication_failed());
-        }
-        let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
-            self.key_manager.as_ref(),
-            &self.admitted_context(completion),
-            &record.completion.result,
-        )
-        .await
-        .map_err(|e| internal("open the retained sign-in delivery", e))?;
-        let now = Utc::now();
-        if delivery.deadline <= now {
-            return Err(authentication_failed());
-        }
-        // The commit is the whole sign-in: what it owes (its evictions'
-        // revocations) committed with it as owed work, so the same session
-        // is delivered again from the moment it committed.
-        let session = self
-            .storage
-            .get_session(delivery.session_id)
-            .await
-            .map_err(storage_failure)?
-            .filter(|session| !session.is_expired() && session.profile_id == assignment.profile)
-            .ok_or_else(authentication_failed)?;
-        self.storage
-            .get_profile(session.profile_id)
-            .await
-            .map_err(storage_failure)?
-            .filter(|profile| profile.status.can_authenticate())
-            .ok_or_else(authentication_failed)?;
-        Ok(Some((delivery, session)))
-    }
-
-    /// `session`'s retained `delivery`, while `assignment` still assigns the
-    /// session's Profile and its authentication meets `client_id`'s current
-    /// requirements: a retired or moved association delivers nothing again.
-    async fn deliver_admitted(
-        &self,
-        delivery: sid_authn::sign_in_delivery::RetainedDelivery,
-        session: &sid_core::models::Session,
-        client_id: &str,
-        assignment: sid_core::models::PrincipalAssignmentFence,
-    ) -> Result<SignedIn, Status> {
-        let current = self
-            .storage
-            .get_principal(assignment.principal)
-            .await
-            .map_err(storage_failure)?
-            .is_some_and(|p| {
-                p.assigned_profile_id == Some(session.profile_id)
-                    && p.assignment_revision == assignment.revision
-            });
-        if !current || assignment.profile != session.profile_id {
-            return Err(authentication_failed());
-        }
-        // The requirements the sign-in itself was weighed under, read now;
-        // the client's own are applied where the sign-in continues.
-        let requirements = self.login_requirements(Some(client_id)).await?;
-        if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
-            requirements.decide(session, Utc::now())
-        {
-            return Err(step_up_required(&unmet).into());
-        }
-        delivery
-            .signed_in(self.browser_cookie(), session)
-            .ok_or_else(authentication_failed)
+            .map_err(sign_in_refusal)
     }
 
     /// Refuse to create an account for an upstream sign-in this authority
@@ -1341,22 +903,11 @@ impl AuthServiceImpl {
         &self,
         claims: &sid_core::models::MappedClaims,
     ) -> Result<(), Status> {
-        if !self.feature_flags.is_registration_enabled().await {
-            return Err(not_configured("registration"));
-        }
-        let policy = sid::enrollment::effective(self.storage.as_ref(), self.registration.pinned())
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        self.registration
+            .admit_upstream(claims, enabled)
             .await
-            .map_err(storage_failure)?;
-        let email = claims
-            .has_verified_email()
-            .then_some(claims.email.as_deref())
-            .flatten();
-        match sid_core::enrollment::evaluate_enrollment(&policy, email, None) {
-            sid_core::enrollment::EnrollmentDecision::Allow => Ok(()),
-            sid_core::enrollment::EnrollmentDecision::Deny(reason) => {
-                Err(registration_restricted(enrollment_requirement(&reason)))
-            }
-        }
+            .map_err(registration_refusal)
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.
@@ -1493,49 +1044,29 @@ impl AuthService for AuthServiceImpl {
             .native_ceremony_key(native.as_ref(), login.as_bytes())
             .await?;
 
-        let verified = self
-            .sign_ins
-            .password_finish(&login, &req.credential_finalization, client_ip)
-            .await
-            .map_err(sign_in_refusal)?;
-        let profile = verified.account;
-        // Evaluate login security (anomaly detection + policy enforcement).
-        let method = LoginMethod::Password;
-        let admission = self
-            .evaluate_first_factor(
-                profile.id,
-                client_ip,
-                "opaque",
-                (
-                    method.auth_level(self.security_policy().auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                AttemptContext {
-                    captcha_pass: captcha_pass.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                },
-            )
-            .await?;
-
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
             enrollable_factors,
             browser_csrf,
         } = self
-            .complete_first_factor(
-                &profile,
-                method,
-                user_agent.as_deref().map(compute_device_id),
-                client_ip,
-                client,
+            .sign_ins
+            .password_sign_in(
+                self.oauth.login_policy(),
+                &login,
+                &req.credential_finalization,
+                sid::sign_in::completions::Completer {
+                    client,
+                    client_ip,
+                    context: AttemptContext {
+                        captcha_pass: captcha_pass.as_deref(),
+                        user_agent: user_agent.as_deref(),
+                    },
+                },
                 native_key.as_deref(),
-                Some(&verified.proved_by),
-                admission,
             )
-            .await?;
-
-        info!("OPAQUE login for profile {}", profile.id);
+            .await
+            .map_err(sign_in_refusal)?;
 
         signed_in.respond(|session_id, expires_in| OpaqueLoginFinishResponse {
             session_id: Some(session_id.into()),
@@ -1569,36 +1100,17 @@ impl AuthService for AuthServiceImpl {
         let req = request.into_inner();
         let exchange = sid_core::models::NativeExchange::from_bytes(&req.exchange)
             .ok_or_else(|| invalid_field("exchange", "must be 16 bytes"))?;
-        let policy = NativePolicy::from_session_policy(&self.security_policy().session)
-            .map_err(|e| internal("read the native session policy", e))?;
-
-        let refreshed = sid_authn::native_session::refresh(
-            self.storage.as_ref(),
-            self.key_manager.as_ref(),
-            self.oauth.dpop(),
-            &self.revocation_cache,
-            sid_authn::native_session::RefreshRequest {
-                proof: proof.proof(),
-                method: &proof.target().method,
-                url: &proof.target().uri,
-                credential: &credential,
-                exchange,
-            },
-            policy,
-        )
-        .await
-        .map_err(super::native_session::refusal)?;
-        // An account that can no longer authenticate gets no access token,
-        // however its session renewed.
-        let profile = self
-            .storage
-            .get_profile(refreshed.session.profile_id)
-            .await
-            .map_err(storage_failure)?
-            .filter(|p| p.status.can_authenticate())
-            .ok_or_else(session_ended)?;
         self.sign_ins
-            .native_access(&profile, &refreshed.session, Some(refreshed.set))
+            .refresh_native(
+                self.oauth.dpop(),
+                sid_authn::native_session::RefreshRequest {
+                    proof: proof.proof(),
+                    method: &proof.target().method,
+                    url: &proof.target().uri,
+                    credential: &credential,
+                    exchange,
+                },
+            )
             .await
             .map_err(sign_in_refusal)?
             .respond(|session_id, expires_in| RefreshNativeSessionResponse {
@@ -2470,42 +1982,11 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<VerifyCaptchaResponse>, Status> {
         let remote_ip = self.client_ip(&request)?;
         let req = request.into_inner();
-
-        // The provider's own error text stays in the log.
-        let rejected = || invalid_field("token", "the CAPTCHA solution was not accepted");
-        let result = self
-            .sign_ins
-            .captcha_provider()
-            .verify(&req.challenge_id, &req.token, remote_ip.as_ref())
-            .await
-            .map_err(|e| match e {
-                sid_authn::captcha::CaptchaError::Expired => ceremony_expired("CAPTCHA"),
-                sid_authn::captcha::CaptchaError::ProviderError(e) => {
-                    dependency_unavailable("CAPTCHA provider", e)
-                }
-                sid_authn::captcha::CaptchaError::NotConfigured => {
-                    internal("verify CAPTCHA", "provider not configured")
-                }
-                e => {
-                    warn!(error = %e, "CAPTCHA solution rejected");
-                    rejected()
-                }
-            })?;
-
-        if !result.success {
-            return Err(rejected());
-        }
-
-        // The solution counts once, and only for a challenge a sign-in was
-        // asked; the pass answers that sign-in's retry.
         let bypass_token = self
             .sign_ins
-            .captcha_gate()
-            .solved(&req.challenge_id)
+            .solve_captcha(&req.challenge_id, &req.token, remote_ip)
             .await
-            .map_err(anomaly_unavailable)?
-            .ok_or_else(|| ceremony_expired("CAPTCHA"))?;
-
+            .map_err(captcha_refusal)?;
         Ok(Response::new(VerifyCaptchaResponse {
             verified: true,
             redirect_to: None,
