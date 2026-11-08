@@ -351,6 +351,43 @@ async fn a_password_account_signs_in_over_the_network() {
     );
 }
 
+/// An account with an enrolled authenticator owes it at sign-in: the finish
+/// answers the pending context and the factor, and a code of the returned
+/// seed completes the sign-in with the session.
+#[tokio::test]
+async fn an_enrolled_authenticator_completes_the_sign_in() {
+    use sid_proto::sid::v1::{StepUpMethod, VerifyTotpRequest};
+    let issuer = TestIssuer::start(Setup::default()).await;
+    let profile = issuer.password_account(USER, PASSWORD).await;
+    let seed = issuer.enroll_totp(&profile).await;
+    let finish = issuer.start_password_login(USER, PASSWORD).await;
+    let answered = auth_client(&issuer)
+        .opaque_login_finish(finish)
+        .await
+        .expect("the pending context");
+    let pending = answered
+        .metadata()
+        .get("authorization")
+        .expect("the pending context's token")
+        .clone();
+    assert_eq!(
+        answered.into_inner().second_factors,
+        [StepUpMethod::Totp as i32]
+    );
+
+    let mut verify = tonic::Request::new(VerifyTotpRequest {
+        code: crate::totp_code(&seed),
+    });
+    verify.metadata_mut().insert("authorization", pending);
+    let completed = auth_client(&issuer)
+        .verify_totp(verify)
+        .await
+        .expect("the completed sign-in")
+        .into_inner();
+    assert!(completed.verified);
+    assert!(completed.session_id.is_some());
+}
+
 /// Replicas of one installation share its state: a sign-in started at one
 /// finishes at the other, and an issuer started again on the store after a
 /// restart still knows the account.

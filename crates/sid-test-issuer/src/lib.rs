@@ -96,6 +96,13 @@ fn audit(action: &str) -> sid_core::models::MutationContext {
     AuditEntry::system(action, "test-issuer").into()
 }
 
+/// The code an authenticator holding `seed` shows now (RFC 6238 as the
+/// issuer verifies it), for a client signing in to an account
+/// [`TestIssuer::enroll_totp`] protected.
+pub fn totp_code(seed: &[u8]) -> String {
+    sid_authn::generate_current_totp(seed)
+}
+
 /// The field-encryption key manager of the test installation.
 fn key_manager() -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
@@ -644,6 +651,36 @@ impl TestIssuer {
             .await
             .expect("profile lookup")
             .expect("the registered profile")
+    }
+
+    /// Enroll an authenticator app for `profile`: an active TOTP credential
+    /// stored as enrollment stores it, its seed sealed under the account's
+    /// TOTP context with the installation's field key. Returns the seed, from
+    /// which a client computes the codes (RFC 6238, SHA-1, 6 digits, 30 s).
+    /// The account's sign-ins then owe this factor.
+    pub async fn enroll_totp(&self, profile: &Profile) -> Vec<u8> {
+        use sid_core::models::{Credential, CredentialData, CredentialType};
+        let seed = sid_authn::generate_secret();
+        let sealed = sid_authn::sealed_secret::seal(
+            key_manager().as_ref(),
+            &sid_authn::sealed_secret::totp_context(profile.id),
+            &seed,
+        )
+        .await
+        .expect("seal the TOTP seed");
+        self.storage
+            .create_credential(
+                &Credential::new(
+                    profile.id,
+                    CredentialType::Totp,
+                    CredentialData::new(sealed),
+                    None,
+                ),
+                audit("credential.totp_enrolled"),
+            )
+            .await
+            .expect("store the TOTP credential");
+        seed
     }
 
     /// Start a password sign-in of `principal` and answer the issuer's
