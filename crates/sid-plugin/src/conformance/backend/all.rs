@@ -120,6 +120,13 @@ macro_rules! __storage_conformance {
             $crate::__storage_scenarios!($setup [$(super::$finish)?],browser_session:
                 test_ending_a_session_ends_what_it_authenticated
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],ceremony_commit:
+                test_a_mutation_consumes_its_ceremony
+                test_a_changed_or_absent_ceremony_completes_nothing
+                test_an_expired_ceremony_completes_nothing
+                test_concurrent_completions_commit_once
+                test_a_completed_command_is_answered_before_its_ceremony
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],cleanup:
                 test_delete_outbound_dlq_entry
                 test_cleanup_expired_device_auth_codes
@@ -148,6 +155,17 @@ macro_rules! __storage_conformance {
                 test_device_auth_decided_once
                 test_device_poll_interval
                 test_device_code_redeemed_once
+            );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],device_enrollment:
+                test_a_new_device_is_enrolled_with_its_key
+                test_an_existing_device_is_enrolled_only_as_found
+                test_a_rotation_replaces_only_the_binding_it_found
+                test_a_revoked_key_is_replaced_only_by_an_enrollment_that_found_it
+                test_an_enrollment_without_current_authority_commits_nothing
+                test_a_revocation_holds_only_under_a_live_sign_in
+                test_a_rotation_racing_a_revocation_settles
+                test_concurrent_finishes_bind_once
+                test_a_retried_finish_is_answered_by_its_outcome
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],directory:
                 test_directory_user_create_stores_everything

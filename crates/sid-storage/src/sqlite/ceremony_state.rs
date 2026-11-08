@@ -32,6 +32,36 @@ fn deadline(now: i64, ttl: Duration) -> SidResult<i64> {
         })
 }
 
+/// Remove `ceremony` inside a mutation's write transaction, while it is live
+/// and exactly as read; otherwise `Error::Expired`, and the mutation commits
+/// nothing. The write transaction holds SQLite's write lock, so no other
+/// consumer runs between the check and the removal.
+pub(crate) async fn consume_in_tx(
+    tx: &mut super::WriteTx,
+    ceremony: &sid_core::models::CeremonyConsumption,
+) -> SidResult<()> {
+    let removed = sqlx::query(
+        "DELETE FROM ceremony_states
+         WHERE namespace = ? AND state_key = ? AND value = ? AND expires_at_ms > ?",
+    )
+    .bind(ceremony.namespace)
+    .bind(&ceremony.key)
+    .bind(&ceremony.stored)
+    .bind(now_ms())
+    .execute(&mut **tx)
+    .await
+    .map_err(failure("consume ceremony state"))?
+    .rows_affected();
+    if removed == 1 {
+        Ok(())
+    } else {
+        Err(SidError::Expired(format!(
+            "ceremony {}:{} is no longer pending",
+            ceremony.namespace, ceremony.key
+        )))
+    }
+}
+
 type CeremonyQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
 
 impl SqliteBackend {

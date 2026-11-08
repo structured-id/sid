@@ -149,12 +149,23 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
             login_policy::check_fence(tx, epoch)?
         }
         Some(sid_core::models::ActorFence::Authority(basis)) => rbac::check_authority(tx, &basis)?,
+        Some(sid_core::models::ActorFence::Session {
+            session,
+            profile,
+            fresh_until,
+        }) => session::check_fence(tx, session, profile, fresh_until)?,
         None => {}
     }
     // Then the completion: a keyed command another commit already completed
     // commits nothing, not even its audit or work.
     if let Some(completion) = &ctx.operation {
         operation::record(tx, completion)?;
+    }
+    // The ceremony it completes, once: a retry of a committed command was
+    // answered above, and a ceremony gone or changed meanwhile completes
+    // nothing.
+    if let Some(ceremony) = &ctx.ceremony {
+        ceremony::consume(tx, ceremony)?;
     }
     audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
     for owed in &ctx.work {

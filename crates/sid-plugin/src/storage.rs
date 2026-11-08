@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::anomaly_event::AnomalyEventRecord;
 use sid_core::models::consent::{ConsentId, ConsentRecord};
-use sid_core::models::device_attestation::{DeviceAttestation, DeviceAttestationId};
+use sid_core::models::device_attestation::{
+    DeviceAttestation, DeviceAttestationId, DeviceEnrollment,
+};
 use sid_core::models::machine_user::MachineUserStatus;
 use sid_core::models::organization::OrgId;
 use sid_core::models::provisioning_connector::{
@@ -1185,25 +1187,20 @@ pub trait StorageBackend:
 
     // === DEVICE ATTESTATION OPERATIONS ===
 
-    /// Store a device's attestation. It replaces only a revoked one (a new
-    /// enrollment after revocation); a device with a live attestation is
-    /// `Conflict`.
-    async fn create_device_attestation(
+    /// Commit a finished device-key ceremony as one transaction: the target
+    /// is as the ceremony found it (a new device is created, an existing one
+    /// is still the owner's and has no live key and no binding other than
+    /// the revoked one it had, a rotated one still holds exactly `current`
+    /// of `current_key`); the binding is stored, a rotation retiring the old
+    /// one; and `ctx` (its fence, normally the owner's sign-in, and the
+    /// ceremony it consumes) commits with it. A target changed meanwhile is
+    /// `Conflict`, a removed device `NotFound`, a fence that no longer holds
+    /// `Fenced`; nothing commits then.
+    async fn commit_device_enrollment(
         &self,
-        attestation: &DeviceAttestation,
+        enrollment: &DeviceEnrollment,
         ctx: MutationContext,
     ) -> Result<()>;
-
-    /// Replace the key of a device's live attestation, leaving it unverified.
-    /// False when there is none: a revoked key is never replaced.
-    async fn rotate_device_attestation(
-        &self,
-        device_id: DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        ctx: MutationContext,
-    ) -> Result<bool>;
 
     /// Revoke a device's live attestation and, in the same transaction, stop
     /// counting the device as hardware-attested. False when there is none.
@@ -1219,7 +1216,8 @@ pub trait StorageBackend:
         id: DeviceAttestationId,
     ) -> Result<Option<DeviceAttestation>>;
 
-    /// Get a device attestation by device ID.
+    /// The key binding of a device, live or revoked: a device holds at most
+    /// one, read by its device.
     async fn get_device_attestation_by_device_id(
         &self,
         device_id: DeviceId,

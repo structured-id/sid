@@ -81,6 +81,46 @@ fn principal_write_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// Fail with `Fenced` unless `profile` can still sign in and `session` is
+/// still its live sign-in, fresh until `fresh_until` when given. The write
+/// transaction holds the database write lock: nothing changes them before the
+/// commit.
+async fn check_session_fence(
+    tx: &mut WriteTx,
+    session: sid_core::models::SessionId,
+    profile: sid_core::models::ProfileId,
+    fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> SidResult<()> {
+    let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
+    let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM profiles WHERE id = ?")
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+    if !status.is_some_and(|s| {
+        s.parse::<sid_core::models::ProfileStatus>()
+            .is_ok_and(|s| s.can_authenticate())
+    }) {
+        return Err(fenced("belongs to an account that can no longer sign in"));
+    }
+    let row = sqlx::query("SELECT expires_at FROM sessions WHERE id = ? AND profile_id = ?")
+        .bind(session)
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+    let now = chrono::Utc::now();
+    match &row {
+        Some(row) if dt_col(row, "expires_at")? > now => {}
+        _ => return Err(fenced("ended")),
+    }
+    if fresh_until.is_some_and(|until| now >= until) {
+        return Err(fenced("is no longer fresh"));
+    }
+    Ok(())
+}
+
 /// SQLite storage backend (sqlx-based).
 ///
 /// Uses WAL mode for concurrent read access. All writes are serialized
@@ -215,12 +255,23 @@ impl SqliteBackend {
             Some(sid_core::models::ActorFence::Authority(basis)) => {
                 rbac::check_authority_in_tx(&mut tx, &basis).await?
             }
+            Some(sid_core::models::ActorFence::Session {
+                session,
+                profile,
+                fresh_until,
+            }) => check_session_fence(&mut tx, session, profile, fresh_until).await?,
             None => {}
         }
         // Then the completion: a keyed command another commit already
         // completed commits nothing, not even its audit or work.
         if let Some(operation) = &ctx.operation {
             operation::record_in_tx(&mut tx, operation).await?;
+        }
+        // The ceremony it completes, once: a retry of a committed command
+        // was answered above, and a ceremony gone or changed meanwhile
+        // completes nothing.
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
         }
         SqliteAuditLog::log_in_conn(&mut tx, chain_id, ctx.audit)
             .await
@@ -237,10 +288,15 @@ impl SqliteBackend {
     /// its completion, so a retry after a later change does not apply it
     /// then; there is no audit or owed work for a change that did not happen.
     pub async fn commit_unchanged(mut tx: WriteTx, ctx: &MutationContext) -> SidResult<()> {
-        let Some(operation) = &ctx.operation else {
+        if ctx.operation.is_none() && ctx.ceremony.is_none() {
             return Ok(());
-        };
-        operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(operation) = &ctx.operation {
+            operation::record_in_tx(&mut tx, operation).await?;
+        }
+        if let Some(ceremony) = &ctx.ceremony {
+            ceremony_state::consume_in_tx(&mut tx, ceremony).await?;
+        }
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
@@ -254,7 +310,7 @@ impl SqliteBackend {
         chain_id: &str,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        if rows > 0 || !ctx.work.is_empty() || ctx.operation.is_some() {
+        if rows > 0 || !ctx.work.is_empty() || ctx.operation.is_some() || ctx.ceremony.is_some() {
             Self::commit_mutation(tx, chain_id, ctx).await?;
         }
         Ok(rows)
@@ -2111,31 +2167,12 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
-    async fn create_device_attestation(
+    async fn commit_device_enrollment(
         &self,
-        attestation: &sid_core::models::DeviceAttestation,
-        audit: MutationContext,
+        enrollment: &sid_core::models::DeviceEnrollment,
+        ctx: MutationContext,
     ) -> SidResult<()> {
-        self.create_device_attestation_impl(attestation, audit)
-            .await
-    }
-
-    async fn rotate_device_attestation(
-        &self,
-        device_id: sid_core::models::DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.rotate_device_attestation_impl(
-            device_id,
-            device_public_key,
-            attestation_object,
-            attestation_certificate,
-            audit,
-        )
-        .await
+        self.commit_device_enrollment_impl(enrollment, ctx).await
     }
 
     async fn revoke_device_attestation(

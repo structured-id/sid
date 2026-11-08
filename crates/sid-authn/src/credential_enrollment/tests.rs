@@ -106,6 +106,45 @@ fn stale_session_refuses() {
     );
 }
 
+/// A device key raises no assurance: a fresh basic session of a
+/// password-only account binds one, a strongly protected account's still
+/// binds one at basic (possession establishes nothing stronger), and a
+/// provisional or stale session binds none.
+#[test]
+fn a_device_key_binds_at_its_own_assurance() {
+    let strong = credentials(&[CredentialType::Opaque, CredentialType::WebAuthn]);
+    let basic = credentials(&[CredentialType::Opaque]);
+    for account in [&basic, &strong] {
+        assert_eq!(
+            check_binding(
+                &session(AuthLevel::Basic, 5),
+                account,
+                AuthLevel::Basic,
+                true,
+                Utc::now()
+            ),
+            Ok(())
+        );
+    }
+    let provisional = Session::new_provisional(ProfileId::generate(), None);
+    assert_eq!(
+        check_binding(&provisional, &basic, AuthLevel::Basic, true, Utc::now()),
+        Err(EnrollmentRefusal::Provisional)
+    );
+    assert_eq!(
+        check_binding(
+            &session(AuthLevel::Basic, 61),
+            &basic,
+            AuthLevel::Basic,
+            true,
+            Utc::now()
+        ),
+        Err(EnrollmentRefusal::Stale {
+            required: AuthLevel::Basic
+        })
+    );
+}
+
 /// Mailbox possession never binds a credential, whatever the account holds.
 #[test]
 fn provisional_session_refuses() {

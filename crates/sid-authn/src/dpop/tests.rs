@@ -955,3 +955,18 @@ async fn test_resource_proof_by_another_key_rejected() {
         .unwrap_err();
     assert!(matches!(err, DPopError::KeyMismatch));
 }
+
+/// A JWK member outside the base64url and curve-name alphabet is refused,
+/// never written unescaped into the canonical form a thumbprint hashes and a
+/// device key is stored in.
+#[test]
+fn test_canonical_jwk_refuses_members_outside_its_alphabet() {
+    let jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "b0K7RgRe5\",\"injected\":\"1",
+        "y": TEST_JWK_Y,
+    });
+    assert!(canonical_jwk(&jwk).is_err());
+    assert!(compute_jwk_thumbprint(&jwk).is_err());
+}

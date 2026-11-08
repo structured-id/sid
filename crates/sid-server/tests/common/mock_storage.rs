@@ -4785,22 +4785,16 @@ impl StorageBackend for MockStorage {
     }
 
     // === DEVICE ATTESTATION — stubs ===
-    async fn create_device_attestation(
+    /// Device enrollment is not modelled here: it is refused rather than
+    /// reported as committed.
+    async fn commit_device_enrollment(
         &self,
-        _att: &sid_core::models::DeviceAttestation,
-        _audit: MutationContext,
+        _enrollment: &sid_core::models::DeviceEnrollment,
+        _ctx: MutationContext,
     ) -> SidResult<()> {
-        Ok(())
-    }
-    async fn rotate_device_attestation(
-        &self,
-        _device_id: DeviceId,
-        _device_public_key: &[u8],
-        _attestation_object: Option<&[u8]>,
-        _attestation_certificate: Option<&[u8]>,
-        _audit: MutationContext,
-    ) -> SidResult<bool> {
-        Ok(false)
+        Err(sid_core::Error::Storage(
+            "device enrollment is not supported by the mock store".into(),
+        ))
     }
     async fn revoke_device_attestation(
         &self,

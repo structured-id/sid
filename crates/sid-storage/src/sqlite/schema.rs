@@ -1622,11 +1622,10 @@ CREATE TABLE IF NOT EXISTS device_attestations (
     format                  TEXT NOT NULL,
     key_storage             TEXT NOT NULL,
     status                  TEXT NOT NULL,
-    device_public_key       BLOB NOT NULL,
+    public_jwk              TEXT NOT NULL,
     attestation_object      BLOB,
     attestation_certificate BLOB,
     aaguid                  TEXT,
-    credential_id           TEXT,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     revoked_at              TEXT

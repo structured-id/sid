@@ -6,7 +6,7 @@ fn make_attestation() -> DeviceAttestation {
         ProfileId::generate(),
         DeviceAttestationFormat::Apple,
         KeyStorageType::SecureEnclave,
-        vec![0x04, 0x01, 0x02, 0x03], // fake DER public key
+        r#"{"crv":"Ed25519","kty":"OKP","x":"test"}"#.to_string(),
     )
 }
 
@@ -20,26 +20,7 @@ fn test_new_ce_defaults() {
     assert!(a.attestation_object.is_none());
     assert!(a.attestation_certificate.is_none());
     assert!(a.aaguid.is_none());
-    assert!(a.credential_id.is_none());
     assert!(a.revoked_at.is_none());
-}
-
-#[test]
-fn test_rotate_key() {
-    let mut a = make_attestation();
-    a.attestation_object = Some(vec![0xAA, 0xBB]);
-    a.attestation_certificate = Some(vec![0xCC]);
-    a.status = AttestationStatus::Verified;
-
-    let old_updated = a.updated_at;
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    a.rotate_key(vec![0x04, 0x05, 0x06]);
-
-    assert_eq!(a.device_public_key, vec![0x04, 0x05, 0x06]);
-    assert_eq!(a.status, AttestationStatus::Unverified);
-    assert!(a.attestation_object.is_none());
-    assert!(a.attestation_certificate.is_none());
-    assert!(a.updated_at >= old_updated);
 }
 
 #[test]
@@ -122,7 +103,6 @@ fn test_format_serde_roundtrip() {
 fn test_attestation_serde_roundtrip() {
     let mut a = make_attestation();
     a.aaguid = Some("2fc0579f-8113-47ea-b116-bb5a8db9202a".into());
-    a.credential_id = Some("cred_test_123".into());
     a.attestation_object = Some(vec![0xDE, 0xAD]);
 
     let json = serde_json::to_string(&a).unwrap();
@@ -133,7 +113,7 @@ fn test_attestation_serde_roundtrip() {
         parsed.aaguid.as_deref(),
         Some("2fc0579f-8113-47ea-b116-bb5a8db9202a")
     );
-    assert_eq!(parsed.credential_id.as_deref(), Some("cred_test_123"));
+    assert_eq!(parsed.public_jwk, a.public_jwk);
     assert_eq!(
         parsed.attestation_object.as_deref(),
         Some(&[0xDE, 0xAD][..])
@@ -142,8 +122,8 @@ fn test_attestation_serde_roundtrip() {
 
 #[test]
 fn test_id_unique() {
-    let id1 = DeviceAttestationId::new();
-    let id2 = DeviceAttestationId::new();
+    let id1 = DeviceAttestationId::generate();
+    let id2 = DeviceAttestationId::generate();
     assert_ne!(id1, id2);
 }
 
@@ -154,7 +134,7 @@ fn test_software_key_not_hardware() {
         ProfileId::generate(),
         DeviceAttestationFormat::None,
         KeyStorageType::Software,
-        vec![0x01],
+        r#"{"crv":"Ed25519","kty":"OKP","x":"soft"}"#.to_string(),
     );
     assert!(!a.is_hardware_backed());
     assert_eq!(a.format, DeviceAttestationFormat::None);

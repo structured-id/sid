@@ -24,6 +24,20 @@ pub struct MutationContext {
     /// same transaction: when it changed since, the backend commits nothing
     /// and returns `Error::Fenced`.
     pub fence: Option<ActorFence>,
+    /// The ceremony state the mutation completes, removed in the same
+    /// transaction: when it is no longer live and exactly as read, the
+    /// backend commits nothing and returns `Error::Expired`.
+    pub ceremony: Option<CeremonyConsumption>,
+}
+
+/// Ceremony state a mutation consumes: its namespace and key and the stored
+/// form it was read in, so the mutation completes exactly that ceremony
+/// once, whichever replica finishes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CeremonyConsumption {
+    pub namespace: &'static str,
+    pub key: String,
+    pub stored: Vec<u8>,
 }
 
 /// An acting principal as it stood when its request was authorized.
@@ -43,6 +57,14 @@ pub enum ActorFence {
     LoginPolicy { epoch: i64 },
     /// The administrative authority that authorized the write.
     Authority(super::AuthorityBasis),
+    /// A Profile's own sign-in: the write holds only while `session` is
+    /// still `profile`'s and unexpired, the Profile can still sign in, and,
+    /// when `fresh_until` is given, the commit happens before it.
+    Session {
+        session: super::SessionId,
+        profile: super::ProfileId,
+        fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+    },
 }
 
 impl MutationContext {
@@ -55,6 +77,12 @@ impl MutationContext {
     /// Add work the mutation owes.
     pub fn with_work(mut self, work: NewWork) -> Self {
         self.work.push(work);
+        self
+    }
+
+    /// Consume `ceremony` in the same transaction.
+    pub fn consuming(mut self, ceremony: CeremonyConsumption) -> Self {
+        self.ceremony = Some(ceremony);
         self
     }
 
@@ -85,6 +113,7 @@ impl From<AuditEntry> for MutationContext {
             work: Vec::new(),
             operation: None,
             fence: None,
+            ceremony: None,
         }
     }
 }

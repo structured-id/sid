@@ -29,8 +29,8 @@ use super::audit::{ip_of, ip_value};
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
     get_bytes, get_count, get_id, get_int, get_opt_bytes, get_opt_id, get_opt_text, get_opt_time,
-    get_opt_uuid, get_text, get_texts, get_time, get_uuid, opt_text, opt_time, opt_uuid,
-    profile::profile_value, texts, time, uuid,
+    get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid, opt_text, opt_time,
+    opt_uuid, profile::profile_value, texts, time, uuid,
 };
 
 const SESSION: &str = "s.id AS id, s.profile_id AS profile_id, s.client_id AS client_id,
@@ -583,6 +583,49 @@ fn claim_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
         Params::default().with("id", session_value(id)),
     )?;
     claim_first(tx, &rows)
+}
+
+/// Fail with `Fenced` unless `profile` can still sign in and `session` is
+/// still its live sign-in, fresh until `fresh_until` when given. Both nodes
+/// are held for the commit: a sign-out or a status change committed
+/// meanwhile conflicts with this transaction.
+pub(super) fn check_fence(
+    tx: &Statements<'_>,
+    session: SessionId,
+    profile: ProfileId,
+    fresh_until: Option<DateTime<Utc>>,
+) -> SidResult<()> {
+    let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
+    let owner = tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node, p.status AS status",
+        Params::default().with("id", profile_value(profile)),
+    )?;
+    let can_sign_in = match owner.first() {
+        Some(row) => {
+            get_parsed::<sid_core::models::ProfileStatus>(row, "status")?.can_authenticate()
+        }
+        None => false,
+    };
+    if !super::hold_first(tx, &owner)? || !can_sign_in {
+        return Err(fenced("belongs to an account that can no longer sign in"));
+    }
+    let now = Utc::now();
+    let live = tx.run(
+        "MATCH (s:SidSession) WHERE s.id = $id AND s.profile_id = $profile
+             AND s.expires_at > $now
+         RETURN id(s) AS node",
+        Params::default()
+            .with("id", session_value(session))
+            .with("profile", profile_value(profile))
+            .with("now", time(now)),
+    )?;
+    if !super::hold_first(tx, &live)? {
+        return Err(fenced("ended"));
+    }
+    if fresh_until.is_some_and(|until| now >= until) {
+        return Err(fenced("is no longer fresh"));
+    }
+    Ok(())
 }
 
 impl CoordinodeBackend {

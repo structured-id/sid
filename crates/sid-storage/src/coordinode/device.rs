@@ -10,10 +10,10 @@
 use chrono::Utc;
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId, DeviceAuthDecision,
-    DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption, DeviceId, DevicePoll,
-    DeviceTrustChange, MutationContext, ProfileId, ProjectId, RefreshToken, ResourceId, Session,
-    SessionId,
+    AttestationStatus, Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId,
+    DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
+    DeviceEnrollment, DeviceId, DevicePoll, DeviceTrustChange, EnrollmentTarget, MutationContext,
+    ProfileId, ProjectId, RefreshToken, ResourceId, Session, SessionId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -31,10 +31,9 @@ const DEVICE: &str = "d.id AS id, d.profile_id AS profile_id, d.display_name AS 
 
 const ATTESTATION: &str = "a.id AS id, a.device_id AS device_id, a.profile_id AS profile_id,
     a.format AS format, a.key_storage AS key_storage, a.status AS status,
-    a.device_public_key AS device_public_key, a.attestation_object AS attestation_object,
+    a.public_jwk AS public_jwk, a.attestation_object AS attestation_object,
     a.attestation_certificate AS attestation_certificate, a.aaguid AS aaguid,
-    a.credential_id AS credential_id, a.created_at AS created_at,
-    a.updated_at AS updated_at, a.revoked_at AS revoked_at";
+    a.created_at AS created_at, a.updated_at AS updated_at, a.revoked_at AS revoked_at";
 
 const AUTH: &str = "c.id AS id, c.client_id AS client_id,
     c.device_code_hash AS device_code_hash, c.user_code AS user_code, c.scope AS scope,
@@ -103,21 +102,118 @@ fn get_device(tx: &Statements<'_>, device_id: DeviceId) -> SidResult<Option<Devi
     rows.first().map(device).transpose()
 }
 
+/// Create device `d` for its owner, claimed: a deletion of the owner that read
+/// its devices before this commit conflicts with it rather than leaving the
+/// device behind.
+fn create(tx: &Statements<'_>, d: &Device) -> SidResult<()> {
+    let owner = tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
+        Params::default().with("id", bin(d.profile_id.as_bytes())),
+    )?;
+    if !claim_first(tx, &owner)? {
+        return Err(SidError::NotFound(format!("profile {}", d.profile_id)));
+    }
+    if get_device(tx, d.id)?.is_some() {
+        return Err(SidError::Conflict("device already exists".into()));
+    }
+    insert_device(tx, d)
+}
+
+/// Create device `d`'s node.
+fn insert_device(tx: &Statements<'_>, d: &Device) -> SidResult<()> {
+    tx.run(
+        "CREATE (d:SidDevice {id: $id, profile_id: $profile_id,
+            display_name: $display_name, device_type: $device_type, os_info: $os_info,
+            assurance: $assurance, trusted: $trusted,
+            hardware_attested: $hardware_attested, fingerprint_hash: $fingerprint_hash,
+            last_ip_geo: $last_ip_geo, first_seen_at: $first_seen_at,
+            last_seen_at: $last_seen_at})",
+        Params::default()
+            .with("id", bin(d.id.as_bytes()))
+            .with("profile_id", bin(d.profile_id.as_bytes()))
+            .with("display_name", opt_text(d.display_name.as_deref()))
+            .with("device_type", Value::String(d.device_type.as_str().into()))
+            .with("os_info", opt_text(d.os_info.as_deref()))
+            .with("assurance", Value::String(d.assurance.as_str().into()))
+            .with("trusted", Value::Bool(d.trusted))
+            .with("hardware_attested", Value::Bool(d.hardware_attested))
+            .with("fingerprint_hash", opt_text(d.fingerprint_hash.as_deref()))
+            .with("last_ip_geo", opt_text(d.last_ip_geo.as_deref()))
+            .with("first_seen_at", time(d.first_seen_at))
+            .with("last_seen_at", time(d.last_seen_at)),
+    )?;
+    Ok(())
+}
+
+/// Hold `device` for the commit and check that `owner` still holds it: a
+/// removed device is `NotFound`, another Profile's `Conflict`.
+fn owned_device(tx: &Statements<'_>, device: DeviceId, owner: ProfileId) -> SidResult<()> {
+    let rows = tx.run(
+        "MATCH (d:SidDevice) WHERE d.id = $id RETURN id(d) AS node, d.profile_id AS profile_id",
+        Params::default().with("id", bin(device.as_bytes())),
+    )?;
+    if !hold_first(tx, &rows)? {
+        return Err(SidError::NotFound(format!("device {device}")));
+    }
+    if id(&rows[0], "profile_id", ProfileId::from_slice)? != owner {
+        return Err(SidError::Conflict(format!(
+            "device {device} is another profile's"
+        )));
+    }
+    Ok(())
+}
+
 // === Attestations ===
+
+/// Create attestation `a`'s node.
+fn insert_attestation(tx: &Statements<'_>, a: &DeviceAttestation) -> SidResult<()> {
+    tx.run(
+        "CREATE (a:SidDeviceAttestation {id: $id, device_id: $device_id,
+        profile_id: $profile_id, format: $format, key_storage: $key_storage,
+        status: $status, public_jwk: $public_jwk,
+        attestation_object: $attestation_object,
+        attestation_certificate: $attestation_certificate, aaguid: $aaguid,
+        created_at: $created_at, updated_at: $updated_at, revoked_at: $revoked_at})",
+        Params::default()
+            .with("id", bin(a.id.as_bytes()))
+            .with("device_id", bin(a.device_id.as_bytes()))
+            .with("profile_id", bin(a.profile_id.as_bytes()))
+            .with("format", Value::String(a.format.as_str().into()))
+            .with("key_storage", Value::String(a.key_storage.as_str().into()))
+            .with("status", Value::String(a.status.as_str().into()))
+            .with("public_jwk", Value::String(a.public_jwk.clone()))
+            .with(
+                "attestation_object",
+                a.attestation_object
+                    .clone()
+                    .map_or(Value::Null, Value::Binary),
+            )
+            .with(
+                "attestation_certificate",
+                a.attestation_certificate
+                    .clone()
+                    .map_or(Value::Null, Value::Binary),
+            )
+            .with("aaguid", opt_text(a.aaguid.as_deref()))
+            .with("created_at", time(a.created_at))
+            .with("updated_at", time(a.updated_at))
+            .with("revoked_at", opt_time(a.revoked_at)),
+    )?;
+    Ok(())
+}
 
 fn attestation(row: &Row) -> SidResult<DeviceAttestation> {
     Ok(DeviceAttestation {
-        id: DeviceAttestationId(get_uuid(row, "id")?),
+        id: id(row, "id", DeviceAttestationId::from_slice)?,
         device_id: id(row, "device_id", DeviceId::from_slice)?,
         profile_id: id(row, "profile_id", ProfileId::from_slice)?,
         format: get_parsed(row, "format")?,
         key_storage: get_parsed(row, "key_storage")?,
         status: get_parsed(row, "status")?,
-        device_public_key: get_bytes(row, "device_public_key")?,
+        public_jwk: get_text(row, "public_jwk")?,
         attestation_object: get_opt_bytes(row, "attestation_object")?,
         attestation_certificate: get_opt_bytes(row, "attestation_certificate")?,
         aaguid: get_opt_text(row, "aaguid")?,
-        credential_id: get_opt_text(row, "credential_id")?,
         created_at: get_time(row, "created_at")?,
         updated_at: get_time(row, "updated_at")?,
         revoked_at: get_opt_time(row, "revoked_at")?,
@@ -209,41 +305,8 @@ impl CoordinodeBackend {
 
     pub(super) async fn create_device(&self, d: &Device, ctx: MutationContext) -> SidResult<()> {
         let d = d.clone();
-        self.mutate(format!("device:{}", d.id), ctx, move |tx| {
-            let owner = tx.run(
-                "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
-                Params::default().with("id", bin(d.profile_id.as_bytes())),
-            )?;
-            if !claim_first(tx, &owner)? {
-                return Err(SidError::NotFound(format!("profile {}", d.profile_id)));
-            }
-            if get_device(tx, d.id)?.is_some() {
-                return Err(SidError::Conflict("device already exists".into()));
-            }
-            tx.run(
-                "CREATE (d:SidDevice {id: $id, profile_id: $profile_id,
-                    display_name: $display_name, device_type: $device_type, os_info: $os_info,
-                    assurance: $assurance, trusted: $trusted,
-                    hardware_attested: $hardware_attested, fingerprint_hash: $fingerprint_hash,
-                    last_ip_geo: $last_ip_geo, first_seen_at: $first_seen_at,
-                    last_seen_at: $last_seen_at})",
-                Params::default()
-                    .with("id", bin(d.id.as_bytes()))
-                    .with("profile_id", bin(d.profile_id.as_bytes()))
-                    .with("display_name", opt_text(d.display_name.as_deref()))
-                    .with("device_type", Value::String(d.device_type.as_str().into()))
-                    .with("os_info", opt_text(d.os_info.as_deref()))
-                    .with("assurance", Value::String(d.assurance.as_str().into()))
-                    .with("trusted", Value::Bool(d.trusted))
-                    .with("hardware_attested", Value::Bool(d.hardware_attested))
-                    .with("fingerprint_hash", opt_text(d.fingerprint_hash.as_deref()))
-                    .with("last_ip_geo", opt_text(d.last_ip_geo.as_deref()))
-                    .with("first_seen_at", time(d.first_seen_at))
-                    .with("last_seen_at", time(d.last_seen_at)),
-            )?;
-            Ok(())
-        })
-        .await
+        self.mutate(format!("device:{}", d.id), ctx, move |tx| create(tx, &d))
+            .await
     }
 
     pub(super) async fn rename_device(
@@ -391,110 +454,88 @@ impl CoordinodeBackend {
 
     // === Attestations ===
 
-    pub(super) async fn create_device_attestation(
+    pub(super) async fn commit_device_enrollment(
         &self,
-        a: &DeviceAttestation,
+        enrollment: &DeviceEnrollment,
         ctx: MutationContext,
     ) -> SidResult<()> {
-        let a = a.clone();
-        self.mutate(
-            format!("device_attestation:{}", a.device_id),
-            ctx,
-            move |tx| {
-                // One attestation per device: a revoked one is replaced by the
-                // new enrollment, a live one refuses it.
-                if let Some(stored) =
-                    attestations_where(tx, "a.device_id = $value", bin(a.device_id.as_bytes()))?
-                        .pop()
-                {
-                    if stored.status.as_str() != "revoked" {
-                        return Err(SidError::Conflict(
-                            "device already has a live attestation".into(),
-                        ));
+        let enrollment = enrollment.clone();
+        let device_id = enrollment.target.device();
+        // A retry of a finish that committed is answered by its outcome
+        // before anything it changed is judged again.
+        let mut ctx = ctx;
+        let operation = ctx.operation.take();
+        self.mutate(format!("device_attestation:{device_id}"), ctx, move |tx| {
+            if let Some(operation) = &operation {
+                super::operation::record(tx, operation)?;
+            }
+            // The acting sign-in (`ctx.fence`) is held when the mutation
+            // finalizes. The target as the ceremony found it; the binding node is
+            // written below, so a concurrent change of it conflicts.
+            let binding =
+                attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop();
+            let changed =
+                || SidError::Conflict("the device's key changed since the ceremony started".into());
+            match &enrollment.target {
+                EnrollmentTarget::NewDevice(device) => {
+                    if device.profile_id != enrollment.profile_id {
+                        return Err(SidError::Validation("device of another profile".into()));
                     }
-                    tx.run(
-                        "MATCH (a:SidDeviceAttestation) WHERE a.device_id = $id DETACH DELETE a",
-                        Params::default().with("id", bin(a.device_id.as_bytes())),
-                    )?;
+                    create(tx, device)?;
                 }
-                tx.run(
-                    "CREATE (a:SidDeviceAttestation {id: $id, device_id: $device_id,
-                    profile_id: $profile_id, format: $format, key_storage: $key_storage,
-                    status: $status, device_public_key: $device_public_key,
-                    attestation_object: $attestation_object,
-                    attestation_certificate: $attestation_certificate, aaguid: $aaguid,
-                    credential_id: $credential_id, created_at: $created_at,
-                    updated_at: $updated_at, revoked_at: $revoked_at})",
-                    Params::default()
-                        .with("id", uuid(&a.id.0))
-                        .with("device_id", bin(a.device_id.as_bytes()))
-                        .with("profile_id", bin(a.profile_id.as_bytes()))
-                        .with("format", Value::String(a.format.as_str().into()))
-                        .with("key_storage", Value::String(a.key_storage.as_str().into()))
-                        .with("status", Value::String(a.status.as_str().into()))
-                        .with(
-                            "device_public_key",
-                            Value::Binary(a.device_public_key.clone()),
-                        )
-                        .with(
-                            "attestation_object",
-                            a.attestation_object
-                                .clone()
-                                .map_or(Value::Null, Value::Binary),
-                        )
-                        .with(
-                            "attestation_certificate",
-                            a.attestation_certificate
-                                .clone()
-                                .map_or(Value::Null, Value::Binary),
-                        )
-                        .with("aaguid", opt_text(a.aaguid.as_deref()))
-                        .with("credential_id", opt_text(a.credential_id.as_deref()))
-                        .with("created_at", time(a.created_at))
-                        .with("updated_at", time(a.updated_at))
-                        .with("revoked_at", opt_time(a.revoked_at)),
-                )?;
-                Ok(())
-            },
-        )
-        .await
-    }
+                EnrollmentTarget::ExistingDevice { revoked, .. } => {
+                    owned_device(tx, device_id, enrollment.profile_id)?;
+                    let unchanged = match (&binding, revoked) {
+                        (None, None) => true,
+                        (Some(stored), Some(expected)) => {
+                            stored.id == *expected && stored.status.as_str() == "revoked"
+                        }
+                        _ => false,
+                    };
+                    if !unchanged {
+                        return Err(changed());
+                    }
+                }
+                EnrollmentTarget::Rotation {
+                    current,
+                    current_key,
+                    ..
+                } => {
+                    owned_device(tx, device_id, enrollment.profile_id)?;
+                    let unchanged = binding.as_ref().is_some_and(|stored| {
+                        stored.id == *current
+                            && stored.status.as_str() != "revoked"
+                            && &stored.public_jwk == current_key
+                    });
+                    if !unchanged {
+                        return Err(changed());
+                    }
+                }
+            }
 
-    pub(super) async fn rotate_device_attestation(
-        &self,
-        device_id: DeviceId,
-        device_public_key: &[u8],
-        attestation_object: Option<&[u8]>,
-        attestation_certificate: Option<&[u8]>,
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let (key, object, certificate) = (
-            device_public_key.to_vec(),
-            attestation_object.map(<[u8]>::to_vec),
-            attestation_certificate.map(<[u8]>::to_vec),
-        );
-        self.transaction(move |tx| {
-            let rows = tx.run(
-                "MATCH (a:SidDeviceAttestation) WHERE a.device_id = $id AND a.status <> 'revoked'
-                 SET a.device_public_key = $key, a.attestation_object = $object,
-                     a.attestation_certificate = $certificate, a.status = 'unverified',
-                     a.updated_at = $now
-                 RETURN a.id AS id",
+            // The new binding over the old one; the device is
+            // hardware-attested only by verified hardware evidence.
+            tx.run(
+                "MATCH (a:SidDeviceAttestation) WHERE a.device_id = $id DETACH DELETE a",
+                Params::default().with("id", bin(device_id.as_bytes())),
+            )?;
+            let mut attestation = enrollment.attestation.clone();
+            attestation.device_id = device_id;
+            attestation.profile_id = enrollment.profile_id;
+            insert_attestation(tx, &attestation)?;
+            tx.run(
+                "MATCH (d:SidDevice) WHERE d.id = $id SET d.hardware_attested = $attested",
                 Params::default()
                     .with("id", bin(device_id.as_bytes()))
-                    .with("key", Value::Binary(key.clone()))
-                    .with("object", object.clone().map_or(Value::Null, Value::Binary))
                     .with(
-                        "certificate",
-                        certificate.clone().map_or(Value::Null, Value::Binary),
-                    )
-                    .with("now", time(Utc::now())),
+                        "attested",
+                        Value::Bool(
+                            attestation.status == AttestationStatus::Verified
+                                && attestation.is_hardware_backed(),
+                        ),
+                    ),
             )?;
-            if rows.is_empty() {
-                return Ok(Decision::Abandon(false));
-            }
-            finalize(tx, &format!("device_attestation:{device_id}"), ctx.clone())?;
-            Ok(Decision::Commit(true))
+            Ok(())
         })
         .await
     }
@@ -532,7 +573,7 @@ impl CoordinodeBackend {
         &self,
         id: DeviceAttestationId,
     ) -> SidResult<Option<DeviceAttestation>> {
-        self.read(move |tx| Ok(attestations_where(tx, "a.id = $value", uuid(&id.0))?.pop()))
+        self.read(move |tx| Ok(attestations_where(tx, "a.id = $value", bin(id.as_bytes()))?.pop()))
             .await
     }
 
@@ -541,11 +582,7 @@ impl CoordinodeBackend {
         device_id: DeviceId,
     ) -> SidResult<Option<DeviceAttestation>> {
         self.read(move |tx| {
-            Ok(
-                attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?
-                    .into_iter()
-                    .find(|a| a.status.as_str() != "revoked"),
-            )
+            Ok(attestations_where(tx, "a.device_id = $value", bin(device_id.as_bytes()))?.pop())
         })
         .await
     }
@@ -559,7 +596,12 @@ impl CoordinodeBackend {
             // Newest first.
             Ok(super::sorted_page(
                 all,
-                |a| (std::cmp::Reverse(a.created_at), std::cmp::Reverse(a.id.0)),
+                |a| {
+                    (
+                        std::cmp::Reverse(a.created_at),
+                        std::cmp::Reverse(*a.id.as_uuid()),
+                    )
+                },
                 0,
                 u64::MAX,
             ))

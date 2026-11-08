@@ -67,11 +67,31 @@ pub fn check_enrollment<O>(
     passkey_satisfies_mfa: bool,
     now: DateTime<Utc>,
 ) -> Result<(), EnrollmentRefusal> {
+    check_binding(
+        session,
+        active,
+        credential_assurance(credential_type, passkey_satisfies_mfa),
+        passkey_satisfies_mfa,
+        now,
+    )
+}
+
+/// Check that `session` may bind a key used at `assurance` (a device key,
+/// whose possession alone raises no assurance) to an account whose active
+/// credentials are `active`, at `now`.
+pub fn check_binding<O>(
+    session: &Session<O>,
+    active: &[Credential<O>],
+    assurance: AuthLevel,
+    passkey_satisfies_mfa: bool,
+    now: DateTime<Utc>,
+) -> Result<(), EnrollmentRefusal> {
+    // A provisional session, a sign-in still owing its second factor among
+    // them, binds nothing here.
     if session.is_provisional {
         return Err(EnrollmentRefusal::Provisional);
     }
-    let required = established_assurance(active, passkey_satisfies_mfa)
-        .min(credential_assurance(credential_type, passkey_satisfies_mfa));
+    let required = established_assurance(active, passkey_satisfies_mfa).min(assurance);
     if session.assurance_at(now) < required {
         return Err(EnrollmentRefusal::Insufficient { required });
     }
@@ -187,6 +207,74 @@ pub async fn authorize(
         passkey_satisfies_mfa,
         Utc::now(),
     )?)
+}
+
+/// Refuse unless `session`, the stored own sign-in of `profile`, may bind a
+/// key used at `assurance` now (see [`check_binding`]); the session as it
+/// stands. A ceremony calls it at its start and again at its finish.
+pub async fn authorize_binding(
+    storage: &dyn sid_plugin::StorageBackend,
+    profile: ProfileId,
+    session: SessionId,
+    assurance: AuthLevel,
+    passkey_satisfies_mfa: bool,
+) -> Result<Session, EnrollmentError> {
+    let session = current_session(storage, profile, session).await?;
+    let active = active_credentials(storage, profile).await?;
+    check_binding(
+        &session,
+        &active,
+        assurance,
+        passkey_satisfies_mfa,
+        Utc::now(),
+    )?;
+    Ok(session)
+}
+
+/// `profile`'s sign-in `session` as it stands now: unexpired, and of an
+/// account that can still sign in. A sign-in ended since, or whose account
+/// was suspended or closed, is no authority, for a result already recorded
+/// as much as for a new change.
+pub async fn current_session(
+    storage: &dyn sid_plugin::StorageBackend,
+    profile: ProfileId,
+    session: SessionId,
+) -> Result<Session, EnrollmentError> {
+    let session = storage
+        .get_session(session)
+        .await
+        .map_err(EnrollmentError::Storage)?
+        .filter(|s| s.profile_id == profile && !s.is_expired())
+        .ok_or(EnrollmentError::SessionInvalid)?;
+    let account = storage
+        .get_profile(profile)
+        .await
+        .map_err(EnrollmentError::Storage)?;
+    if !account.is_some_and(|p| p.status.can_authenticate()) {
+        return Err(EnrollmentError::SessionInvalid);
+    }
+    Ok(session)
+}
+
+/// The fence a change made under `session` commits under: the sign-in still
+/// live and its account still able to sign in.
+pub fn sign_in_fence(session: &Session) -> sid_core::models::ActorFence {
+    sid_core::models::ActorFence::Session {
+        session: session.id,
+        profile: session.profile_id,
+        fresh_until: None,
+    }
+}
+
+/// The fence a binding authorized under `session` commits under: as
+/// [`sign_in_fence`], and within the binding freshness window
+/// [`check_binding`] admitted it in.
+pub fn binding_fence(session: &Session) -> sid_core::models::ActorFence {
+    sid_core::models::ActorFence::Session {
+        session: session.id,
+        profile: session.profile_id,
+        fresh_until: Some(session.authenticated_at + chrono::Duration::hours(FULL_TRUST_HOURS)),
+    }
 }
 
 /// Refuse unless `pending` may bind the account's first second factor now,

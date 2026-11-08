@@ -5772,11 +5772,16 @@ version = "0.2.23"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "jsonwebtoken",
+ "serde_json",
  "sid-auth",
  "sid-authn",
  "sid-core",
  "sid-crypto",
  "sid-infra",
+ "sid-keys",
  "sid-plugin",
  "sid-proto",
  "sid-serve",
@@ -6052,9 +6057,9 @@ dependencies = [
 
 [[package]]
 name = "sid-ids"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c0d7e5f83d7def4a919be854085be767e4056b3ff69f6ed3f6ae9bdde3a7239"
+checksum = "98175ee8b0cc4e58600f084db3817906fe03913a0dd8e563f668c6d2081c092f"
 dependencies = [
  "serde",
  "sqlx",
@@ -6063,9 +6068,9 @@ dependencies = [
 
 [[package]]
 name = "sid-ids-proto"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dbddb5ba2ed333235b2c8003708660990b4c2cb366dd7e1ea10861f8028ff63"
+checksum = "49e06fa7d772e10f8927293c2cbfab2117d814c11de4d64b59b0ccd87f98d833"
 dependencies = [
  "prost",
  "prost-build",
@@ -7092,6 +7097,7 @@ dependencies = [
  "chrono",
  "hex",
  "ipnet",
+ "jsonwebtoken",
  "opentelemetry",
  "prost",
  "prost-types",
