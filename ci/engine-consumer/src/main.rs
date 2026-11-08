@@ -16,8 +16,12 @@ use secrecy::{ExposeSecret, SecretString};
 use sid::admin::Admin;
 use sid::auth_mail::{AuthMailDelivery, MailError, OwedMail};
 use sid::authorization::{Authorization, InstallationAdministrator};
+use sid::devices::{DeviceKeys, KeyCaller, LocalAccess};
 use sid::lifecycle::{Drained, Engine, EngineParts};
+use sid::machines::Machines;
+use sid::oauth::{OAuth, OAuthParts};
 use sid::password_operation::PasswordOperations;
+use sid::projects::Projects;
 use sid::registration::Registration;
 use sid::sign_in::completions::Completer;
 use sid::sign_in::{AttemptContext, SignIn, SignInParts};
@@ -43,7 +47,16 @@ use sid_pake_core::prover::ZkppProver;
 use sid_pake_core::types::CE_DEFAULT_POLICY;
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
+use sid_proto::sid::v1::attestation::{
+    DeviceEnrollmentChallenge, DeviceEnrollmentPurpose, FinishDeviceEnrollmentRequest,
+    GetDeviceAttestationRequest, RevokeDeviceKeyRequest, RotateDeviceKeyRequest,
+    StartDeviceEnrollmentRequest,
+};
 use sid_proto::sid::v1::authn::{OpaqueZkppRegistrationFinishRequest, PasswordRegistrationProof};
+use sid_proto::sid::v1::{
+    AddMachineCredentialRequest, CreateMachineUserRequest, CreateProjectRequest,
+    MachineCredentialType, RevokeMachineCredentialRequest, SetResourceAccessRequest,
+};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -125,6 +138,10 @@ struct Served {
     /// in the host's process, over the host's database (`history`).
     passwords: PasswordOperations,
     history: Arc<HistoryEvaluation>,
+    projects: Projects,
+    machines: Machines,
+    oauth: OAuth,
+    devices: DeviceKeys,
 }
 
 /// Whether a registration's finish carries the client's proof.
@@ -158,6 +175,65 @@ impl Client {
             slot.insert(ZkppProver::new(params, pk, shape));
         }
         Ok(&self.provers[&history_domains])
+    }
+}
+
+/// A device's own signing key, as the device's client holds it.
+struct DeviceKey {
+    private: jsonwebtoken::EncodingKey,
+    jwk: serde_json::Value,
+}
+
+impl DeviceKey {
+    /// An Ed25519 key from its PKCS#8 private and SPKI public PEM.
+    fn ed25519(private_pem: &[u8], public_pem: &str) -> Result<Self, Failure> {
+        use base64::Engine;
+        let body: String = public_pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        let der = base64::engine::general_purpose::STANDARD.decode(body)?;
+        // The raw 32-byte public key ends the SPKI DER.
+        let start = der.len().checked_sub(32).ok_or("an Ed25519 key")?;
+        let raw = &der[start..];
+        Ok(Self {
+            private: jsonwebtoken::EncodingKey::from_ed_pem(private_pem)?,
+            jwk: serde_json::json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw),
+            }),
+        })
+    }
+
+    fn thumbprint(&self) -> Result<String, Failure> {
+        Ok(sid_authn::device_key_proof::stored_key_thumbprint(
+            &self.jwk.to_string(),
+        )?)
+    }
+
+    /// This key's proof over `challenge` at `issuer` for `purpose`, naming
+    /// `key` as the proposed key.
+    fn proof(
+        &self,
+        challenge: &DeviceEnrollmentChallenge,
+        issuer: &str,
+        purpose: &str,
+        key: &str,
+    ) -> Result<String, Failure> {
+        use base64::Engine;
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.typ = Some(sid_authn::device_key_proof::DEVICE_KEY_PROOF_TYPE.to_owned());
+        header.jwk = Some(serde_json::from_value(self.jwk.clone())?);
+        let device: sid_ids::DeviceId = sid_ids_proto::required(challenge.device_id.as_ref())?;
+        let claims = serde_json::json!({
+            "chl": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge.challenge),
+            "purpose": purpose,
+            "iss": issuer,
+            "dev": device.to_string(),
+            "key": key,
+        });
+        Ok(jsonwebtoken::encode(&header, &claims, &self.private)?)
     }
 }
 
@@ -245,7 +321,7 @@ impl Served {
                 cache.clone(),
                 Duration::from_secs(60),
             )),
-            geoip: Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
+            geoip: Arc::new(sid_authn::geoip::GeoIpChain::empty(cache.clone())),
             captcha_gate: sid_authn::captcha::CaptchaGate::new(
                 ceremonies,
                 installation.key_manager.clone(),
@@ -264,7 +340,30 @@ impl Served {
                 installation.revocation_cache.clone(),
             ),
         );
+        let oauth = OAuth::new(OAuthParts {
+            storage: storage.clone(),
+            oauth2: Arc::new(sid_authn::oauth2::OAuth2Server::new(jwt.clone())),
+            jwt: jwt.clone(),
+            issuers: installation.issuers.clone(),
+            installation_org: installation.organization.id,
+            authz: Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
+            revocation: installation.revocation_cache.clone(),
+            cascade: cascade.clone(),
+            cache,
+            login_policy: Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(
+                &SecurityPolicy::ce_default(),
+            )),
+            installation_url: ISSUER.to_owned(),
+        });
         Ok(Self {
+            projects: Projects::new(storage.clone(), installation.issuer.clone()),
+            machines: Machines::new(
+                storage.clone(),
+                installation.revocation_cache.clone(),
+                installation.organization.id,
+            ),
+            oauth,
+            devices: DeviceKeys::new(storage.clone(), installation.key_manager.clone()),
             admin: Admin::new(storage.clone(), cascade, installation.key_manager.clone()),
             authorization: installation.authorization(sid_authz::cedar::CedarService::new()),
             registration: Registration::new(
@@ -466,6 +565,10 @@ impl Served {
             registration,
             passwords,
             history,
+            projects,
+            machines,
+            oauth,
+            devices,
         } = self;
         drop((
             jwt,
@@ -476,7 +579,38 @@ impl Served {
             passwords,
             history,
         ));
+        drop((projects, machines, oauth, devices));
         installation.close().await;
+    }
+
+    /// A token the machine user `client_id` obtains for itself with its
+    /// client secret (RFC 6749 §4.4) for the installation's authorization
+    /// API.
+    async fn machine_token(
+        &self,
+        client_id: &str,
+        secret: &str,
+    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, Failure> {
+        let request = sid_proto::sid::v1::OAuth2TokenRequest {
+            grant_type: "client_credentials".into(),
+            client_id: Some(client_id.to_owned()),
+            client_secret: Some(secret.to_owned()),
+            scope: Some(sid_core::models::authz::AUTHZ_CHECK.into()),
+            issuer_handle: self.installation.issuer.handle.to_string(),
+            resource: vec![
+                self.installation
+                    .authorization_api
+                    .indicator
+                    .as_str()
+                    .to_owned(),
+            ],
+            ..Default::default()
+        };
+        let target = sid_authn::resource::RequestTarget {
+            method: "POST".into(),
+            uri: format!("{ISSUER}/oauth2/token"),
+        };
+        Ok(self.oauth.token(&request, None, None, &target).await?)
     }
 
     async fn administrator(&self, password: &[u8]) -> Result<InstallationAdministrator, Failure> {
@@ -933,6 +1067,290 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "a revoked session's token is refused",
     )?;
 
+    // Projects and machine identities: the administrator creates a project
+    // and a machine user in it; a user without the role creates neither.
+    check(
+        served
+            .projects
+            .create_project(
+                &guest,
+                operation(storage.as_ref(), "guest-project").await?,
+                CreateProjectRequest {
+                    name: "denied".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err(),
+        "a user without the role creates no project",
+    )?;
+    let project = served
+        .projects
+        .create_project(
+            &root,
+            operation(storage.as_ref(), "create-project").await?,
+            CreateProjectRequest {
+                name: "orders".into(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let machine = served
+        .machines
+        .create_machine_user(
+            &root,
+            operation(storage.as_ref(), "create-machine").await?,
+            CreateMachineUserRequest {
+                project_id: project.id.clone(),
+                display_name: "orders-worker".into(),
+                ..Default::default()
+            },
+        )
+        .await?
+        .machine_user
+        .ok_or("the created machine user")?;
+    check(
+        served
+            .machines
+            .create_machine_user(
+                &guest,
+                operation(storage.as_ref(), "guest-machine").await?,
+                CreateMachineUserRequest {
+                    project_id: project.id.clone(),
+                    display_name: "denied".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err(),
+        "a user without the role creates no machine user",
+    )?;
+    let added = served
+        .machines
+        .add_machine_credential(
+            &root,
+            operation(storage.as_ref(), "machine-secret").await?,
+            AddMachineCredentialRequest {
+                machine_user_id: machine.id.clone(),
+                credential_type: MachineCredentialType::ClientSecret as i32,
+                ..Default::default()
+            },
+        )
+        .await?;
+    let kid = added.credential.ok_or("the added credential")?.kid;
+    let api = &served.installation.authorization_api;
+    check(
+        served
+            .machine_token(&machine.client_id, &added.client_secret)
+            .await
+            .is_err(),
+        "a machine user without access to a resource gets no token for it",
+    )?;
+    served
+        .projects
+        .set_resource_access(
+            &root,
+            operation(storage.as_ref(), "machine-access").await?,
+            SetResourceAccessRequest {
+                client_id: machine.client_id.clone(),
+                resource_id: Some(api.id.into()),
+                scopes: vec![sid_core::models::authz::AUTHZ_CHECK.into()],
+            },
+        )
+        .await?;
+    let issued = served
+        .machine_token(&machine.client_id, &added.client_secret)
+        .await?;
+    let verifier = sid_authn::resource_token::ResourceTokenVerifier::new(
+        served.installation.issuers.clone(),
+        served.installation.issuer.clone(),
+        api.indicator.clone(),
+    )
+    .await?;
+    let machine_claims = verifier.verify(&issued.access_token).await?;
+    // The resource's verifier holds the installation's issuers: it lets go
+    // before the host closes the store.
+    drop(verifier);
+    let machine_id: sid_ids::MachineUserId = sid_ids_proto::required(machine.id.as_ref())?;
+    check(
+        machine_claims.sub == machine_id.to_string()
+            && !sid_authn::caller::check_revocation(
+                &served.installation.revocation_cache,
+                &machine_claims,
+            )
+            .await?,
+        "the machine user's own token verifies at the resource as the machine user",
+    )?;
+    check(
+        served
+            .machine_token(&machine.client_id, "not-the-secret")
+            .await
+            .is_err(),
+        "a wrong client secret gets no token",
+    )?;
+    // Revoking the credential stops its issued token and every new one.
+    served
+        .machines
+        .revoke_machine_credential(
+            &root,
+            RevokeMachineCredentialRequest {
+                machine_user_id: machine.id.clone(),
+                kid,
+            },
+        )
+        .await?;
+    check(
+        sid_authn::caller::check_revocation(&served.installation.revocation_cache, &machine_claims)
+            .await?
+            && served
+                .machine_token(&machine.client_id, &added.client_secret)
+                .await
+                .is_err(),
+        "a revoked machine credential stops its token and obtains no new one",
+    )?;
+
+    // Device keys: the owner's own sign-in enrolls a new device's key through
+    // the ceremony and rotates it with both keys' proofs; a proof by another
+    // key binds nothing, a revoked sign-in starts nothing, and a revoked key
+    // is no longer live.
+    let issuer = served.installation.issuer.canonical_url.clone();
+    let first_key = DeviceKey::ed25519(
+        include_bytes!("../keys/device_a_ed25519_private.pem"),
+        include_str!("../keys/device_a_ed25519_public.pem"),
+    )?;
+    let second_key = DeviceKey::ed25519(
+        include_bytes!("../keys/device_b_ed25519_private.pem"),
+        include_str!("../keys/device_b_ed25519_public.pem"),
+    )?;
+    let owner = KeyCaller::from(&root);
+    let enroll = || StartDeviceEnrollmentRequest {
+        purpose: DeviceEnrollmentPurpose::Enroll as i32,
+        device_type: sid_proto::sid::v1::identity::DeviceType::Desktop as i32,
+        display_name: Some("Laptop".into()),
+        ..Default::default()
+    };
+    check(
+        served
+            .devices
+            .start_enrollment(
+                &mut LocalAccess(&guest),
+                &KeyCaller::from(&guest),
+                &issuer,
+                enroll(),
+            )
+            .await
+            .is_err(),
+        "a revoked sign-in starts no device-key ceremony",
+    )?;
+    let challenge = served
+        .devices
+        .start_enrollment(&mut LocalAccess(&root), &owner, &issuer, enroll())
+        .await?;
+    let finish = |proof: String| FinishDeviceEnrollmentRequest {
+        enrollment_id: challenge.enrollment_id.clone(),
+        proof,
+        ..Default::default()
+    };
+    check(
+        served
+            .devices
+            .finish_enrollment(
+                &mut LocalAccess(&root),
+                &owner,
+                Some(operation(storage.as_ref(), "enroll-foreign").await?),
+                finish(second_key.proof(
+                    &challenge,
+                    &issuer,
+                    "enroll",
+                    &first_key.thumbprint()?,
+                )?),
+            )
+            .await
+            .is_err(),
+        "a proof by another key binds nothing",
+    )?;
+    served
+        .devices
+        .finish_enrollment(
+            &mut LocalAccess(&root),
+            &owner,
+            Some(operation(storage.as_ref(), "enroll-device").await?),
+            finish(first_key.proof(&challenge, &issuer, "enroll", &first_key.thumbprint()?)?),
+        )
+        .await?;
+    let device = challenge.device_id.clone();
+    let live_key = || async {
+        served
+            .devices
+            .get_attestation(
+                &mut LocalAccess(&root),
+                &owner,
+                GetDeviceAttestationRequest {
+                    device_id: device.clone(),
+                },
+            )
+            .await
+            .ok()
+            .map(|a| a.public_jwk)
+    };
+    check(
+        live_key()
+            .await
+            .and_then(|k| sid_authn::device_key_proof::stored_key_thumbprint(&k).ok())
+            == Some(first_key.thumbprint()?),
+        "the enrolled device's live key is the proven one",
+    )?;
+    let rotation = served
+        .devices
+        .start_enrollment(
+            &mut LocalAccess(&root),
+            &owner,
+            &issuer,
+            StartDeviceEnrollmentRequest {
+                purpose: DeviceEnrollmentPurpose::Rotate as i32,
+                device_id: device.clone(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let next = second_key.thumbprint()?;
+    served
+        .devices
+        .rotate_key(
+            &mut LocalAccess(&root),
+            &owner,
+            Some(operation(storage.as_ref(), "rotate-device").await?),
+            RotateDeviceKeyRequest {
+                enrollment_id: rotation.enrollment_id.clone(),
+                new_key_proof: second_key.proof(&rotation, &issuer, "rotate-new", &next)?,
+                current_key_proof: first_key.proof(&rotation, &issuer, "rotate-current", &next)?,
+                ..Default::default()
+            },
+        )
+        .await?;
+    check(
+        live_key()
+            .await
+            .and_then(|k| sid_authn::device_key_proof::stored_key_thumbprint(&k).ok())
+            == Some(next),
+        "a rotation approved by the current key installs the new one",
+    )?;
+    served
+        .devices
+        .revoke_key(
+            &mut LocalAccess(&root),
+            &owner,
+            Some(operation(storage.as_ref(), "revoke-device").await?),
+            RevokeDeviceKeyRequest {
+                device_id: device.clone(),
+            },
+        )
+        .await?;
+    check(
+        live_key().await.is_none(),
+        "a revoked device key is no longer live",
+    )?;
+
     // The CE work the installation committed so far (event relays of the
     // registrations, the guest's session revocation) is settled by the CE
     // handlers the engine assembles; the host's own work, which no handler
@@ -1063,6 +1481,25 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "the restored installation keeps the source's scheduled work, every other piece completed",
     )?;
     let administrator = restored.administrator(PASSWORD).await?;
+    let (restored_root, _) = restored.password_sign_in(ROOT, PASSWORD).await?;
+    check(
+        restored
+            .machine_token(&machine.client_id, &added.client_secret)
+            .await
+            .is_err()
+            && restored
+                .devices
+                .get_attestation(
+                    &mut LocalAccess(&restored_root),
+                    &KeyCaller::from(&restored_root),
+                    GetDeviceAttestationRequest {
+                        device_id: device.clone(),
+                    },
+                )
+                .await
+                .is_err(),
+        "a revocation made before the snapshot holds after the restore",
+    )?;
     let again = restored
         .authorization
         .create_role(&administrator, create, request())
