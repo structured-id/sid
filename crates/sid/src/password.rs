@@ -882,6 +882,21 @@ impl<'a> PasswordResets<'a> {
                 return None;
             }
         };
+        // A reset proves the mailbox, not an enabled second factor: an account
+        // with established protection is not signed in by it.
+        let requirements = match requirements
+            .for_account(self.sign_in().storage().as_ref(), profile_id)
+            .await
+        {
+            Ok(requirements) => requirements,
+            Err(e) => {
+                info!(
+                    "Password reset completed for profile {}; sign-in not admitted: {}",
+                    profile_id, e
+                );
+                return None;
+            }
+        };
         let now = chrono::Utc::now();
         let probe = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
         match requirements.decide(&probe, now) {

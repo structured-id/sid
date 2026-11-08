@@ -413,11 +413,30 @@ impl SignIn {
         (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
         requirements: &LoginRequirements,
     ) -> Result<(), SignInError> {
+        let requirements = self.for_account(requirements, profile_id).await?;
         let attempt = attempt(client_ip, authentication, context);
         Ok(
-            sid_authn::sign_in_security::evaluate(&Rules(self), &profile_id, attempt, requirements)
-                .await?,
+            sid_authn::sign_in_security::evaluate(
+                &Rules(self),
+                &profile_id,
+                attempt,
+                &requirements,
+            )
+            .await?,
         )
+    }
+
+    /// `requirements` for a sign-in of `profile_id`, with the protection its
+    /// active credentials establish here, the credential owner.
+    pub async fn for_account(
+        &self,
+        requirements: &LoginRequirements,
+        profile_id: ProfileId,
+    ) -> Result<LoginRequirements, SignInError> {
+        Ok(requirements
+            .clone()
+            .for_account(self.storage.as_ref(), profile_id)
+            .await?)
     }
 
     /// The same rules for a repeat of a sign-in already admitted and
@@ -431,12 +450,13 @@ impl SignIn {
         requirements: &LoginRequirements,
         admitted_from: Option<IpAddr>,
     ) -> Result<(), SignInError> {
+        let requirements = self.for_account(requirements, profile_id).await?;
         let attempt = attempt(client_ip, authentication, context);
         Ok(sid_authn::sign_in_security::check(
             &Rules(self),
             &profile_id,
             attempt,
-            requirements,
+            &requirements,
             admitted_from,
         )
         .await?)
@@ -1067,7 +1087,12 @@ impl SignIn {
             .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
             .ok_or(SignInError::AuthenticationFailed)?;
         let now = Utc::now();
-        let requirements = organization_requirements(login_policy).await?;
+        let requirements = self
+            .for_account(
+                &organization_requirements(login_policy).await?,
+                pending.profile_id,
+            )
+            .await?;
         if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
             let mut completed = pending.clone();
             completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);

@@ -58,6 +58,9 @@ fn baseline() -> LoginRequirements {
         enforcement: EnforcementMode::Hard,
         new_device: sid_authn::anomaly::RuleReaction::StepUp,
         fence: None,
+        mfa: sid_core::models::security_policy::MfaEnforcement::Optional,
+        passkey_satisfies_mfa: true,
+        account_protection: AuthLevel::Basic,
     }
 }
 
@@ -121,6 +124,48 @@ async fn a_session_meeting_the_policy_is_authorized() {
     let (svc, _policy, token) = signed_in(0).await;
 
     authorize(&svc, &token).await.unwrap();
+}
+
+/// Regression: a second factor the account enabled after its session began
+/// is required at that session's next authorization, under optional MFA:
+/// the session's password authentication no longer suffices.
+#[tokio::test]
+async fn a_factor_enabled_later_asks_an_existing_session_to_step_up() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    let profile = test_profile();
+    let svc = TestServices::with_login_policy(
+        MockStorage::new()
+            .with_profile(profile.clone())
+            .with_client(test_client()),
+        HostPolicy::new(),
+    );
+    let mut session = common::authenticated_session(&profile, AuthLevel::Basic, 0);
+    session.amr = vec!["pwd".to_string()];
+    let token = common::stored_session_token(&svc, &profile, session).await;
+    authorize(&svc, &token).await.unwrap();
+
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                profile.id,
+                CredentialType::Totp,
+                CredentialData::new(b"seed".to_vec()),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+    let err = authorize(&svc, &token).await.unwrap_err();
+
+    assert_eq!(reason(&err).as_deref(), Some("STEP_UP_REQUIRED"));
+    assert_eq!(
+        preconditions(&err),
+        vec![(
+            "acr".to_string(),
+            AuthLevel::Standard.acr_value().to_string()
+        )]
+    );
 }
 
 /// A higher level required after the session began is asked for at the next

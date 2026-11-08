@@ -245,10 +245,14 @@ impl OAuth {
         // client's own and the level the relying party asks for, each only
         // strengthening.
         let acr = request.acr_values.as_deref().and_then(requested_acr);
+        // With the account's own enabled protection: a session admitted
+        // before its second factor was enabled authorizes no code without it.
         let requirements = self
             .login_requirements(Some(&request.client_id))
             .await?
-            .with_client(client, acr);
+            .with_client(client, acr)
+            .for_account(self.storage.as_ref(), profile_id)
+            .await?;
         match requirements.decide(session, Utc::now()) {
             LoginDecision::Allow { audited } => {
                 if !audited.is_empty() {

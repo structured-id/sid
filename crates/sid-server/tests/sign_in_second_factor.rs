@@ -62,6 +62,9 @@ fn requiring(amr: &[&str]) -> LoginRequirements {
         enforcement: EnforcementMode::Hard,
         new_device: sid_authn::anomaly::RuleReaction::StepUp,
         fence: None,
+        mfa: sid_core::models::security_policy::MfaEnforcement::Optional,
+        passkey_satisfies_mfa: true,
+        account_protection: AuthLevel::Basic,
     }
 }
 

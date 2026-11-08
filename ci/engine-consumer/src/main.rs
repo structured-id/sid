@@ -1669,19 +1669,29 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         "a first second factor comes with recovery codes",
     )?;
     let failed = |e: &SecondFactorError| matches!(e, SecondFactorError::AuthenticationFailed);
-    // Under login requirements a password alone does not meet: standard
-    // assurance.
-    let policy = sid_authn::login_policy::FixedLoginPolicy::of(&{
-        let mut policy = SecurityPolicy::ce_default();
-        policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-        policy
-    });
+    // The CE baseline makes MFA optional: setup is voluntary, the enabled
+    // protection is not skippable.
+    let policy = sid_authn::login_policy::FixedLoginPolicy::of(&SecurityPolicy::ce_default());
     let pending = served
         .password_first_factor(&policy, GUEST, PASSWORD)
         .await?;
     check(
         !pending.second_factors.is_empty(),
-        "under a policy requiring it, the password alone completes no sign-in",
+        "under optional MFA, once TOTP is enabled the password alone completes no sign-in",
+    )?;
+    // A policy requiring MFA asks an account without a factor to enroll one,
+    // not for a factor it does not have.
+    let required = sid_authn::login_policy::FixedLoginPolicy::of(&{
+        let mut policy = SecurityPolicy::ce_default();
+        policy.auth.mfa_enforcement = sid_core::models::security_policy::MfaEnforcement::Required;
+        policy
+    });
+    let unenrolled = served
+        .password_first_factor(&required, ROOT, PASSWORD)
+        .await?;
+    check(
+        unenrolled.second_factors.is_empty() && !unenrolled.enrollable_factors.is_empty(),
+        "under required MFA an account without a factor is offered its enrollment",
     )?;
     let pending_session = || async {
         Ok::<_, Failure>(

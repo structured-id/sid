@@ -11,7 +11,65 @@ fn requirements(min_acr: AuthLevel, enforcement: EnforcementMode) -> LoginRequir
         enforcement,
         new_device: RuleReaction::StepUp,
         fence: None,
+        mfa: MfaEnforcement::Optional,
+        passkey_satisfies_mfa: true,
+        account_protection: AuthLevel::Basic,
     }
+}
+
+// Regression: a policy requiring MFA asks a password-only authentication to
+// step up to standard assurance, however low its own minimum and with no
+// method required; optional MFA does not.
+#[test]
+fn required_mfa_needs_standard_whatever_the_minimum() {
+    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let mut r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
+    r.mfa = MfaEnforcement::Required;
+    assert_eq!(
+        r.decide(&password, Utc::now()),
+        LoginDecision::StepUp(Unmet {
+            acr: Some(AuthLevel::Standard),
+            ..Unmet::default()
+        })
+    );
+    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], ChronoDuration::zero());
+    assert!(matches!(
+        r.decide(&with_otp, Utc::now()),
+        LoginDecision::Allow { .. }
+    ));
+    r.mfa = MfaEnforcement::Optional;
+    assert!(matches!(
+        r.decide(&password, Utc::now()),
+        LoginDecision::Allow { .. }
+    ));
+}
+
+// Regression: an account's enabled protection is required of its sign-in
+// under optional MFA and is not waived by audit enforcement, which still
+// waives the policy's own unmet requirements.
+#[test]
+fn enabled_account_protection_is_not_waived() {
+    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let mut r = requirements(AuthLevel::Basic, EnforcementMode::Audit);
+    r.account_protection = AuthLevel::Standard;
+    assert_eq!(
+        r.decide(&password, Utc::now()),
+        LoginDecision::StepUp(Unmet {
+            acr: Some(AuthLevel::Standard),
+            ..Unmet::default()
+        })
+    );
+    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], ChronoDuration::zero());
+    assert!(matches!(
+        r.decide(&with_otp, Utc::now()),
+        LoginDecision::Allow { .. }
+    ));
+    let mut policy_only = requirements(AuthLevel::Standard, EnforcementMode::Audit);
+    policy_only.account_protection = AuthLevel::Basic;
+    assert!(matches!(
+        policy_only.decide(&password, Utc::now()),
+        LoginDecision::Allow { .. }
+    ));
 }
 
 /// A session authenticated `ago` before now at `level` with `amr`.
@@ -223,6 +281,8 @@ async fn the_fixed_source_states_its_policy() {
     policy.auth.min_acr = AuthLevel::Standard;
     policy.auth.required_amr = vec!["otp".into()];
     policy.enforcement.mode = EnforcementMode::Hard;
+    policy.auth.mfa_enforcement = MfaEnforcement::Required;
+    policy.auth.passkey_satisfies_mfa = false;
     let source = FixedLoginPolicy::of(&policy);
     for client in [None, Some("a-client")] {
         let r = source.requirements(client).await.unwrap();
@@ -231,6 +291,9 @@ async fn the_fixed_source_states_its_policy() {
         assert_eq!(r.max_authentication_age, None);
         assert_eq!(r.enforcement, EnforcementMode::Hard);
         assert_eq!(r.fence, None);
+        assert_eq!(r.mfa, MfaEnforcement::Required);
+        assert!(!r.passkey_satisfies_mfa);
+        assert_eq!(r.account_protection, AuthLevel::Basic);
     }
 }
 

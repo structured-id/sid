@@ -413,7 +413,12 @@ impl SignIn {
         }
         // The requirements the sign-in itself was weighed under, read now;
         // the client's own are applied where the sign-in continues.
-        let requirements = requirements_for(login_policy, Some(client_id)).await?;
+        let requirements = self
+            .for_account(
+                &requirements_for(login_policy, Some(client_id)).await?,
+                session.profile_id,
+            )
+            .await?;
         if let LoginDecision::StepUp(unmet) = requirements.decide(session, Utc::now()) {
             return Err(SignInRefusal::StepUp(unmet).into());
         }

@@ -91,7 +91,9 @@ impl OAuth {
             let requirements = self
                 .login_requirements(Some(&auth.client_id))
                 .await?
-                .with_client(&client, None);
+                .with_client(&client, None)
+                .for_account(self.storage.as_ref(), profile_id)
+                .await?;
             match requirements.decide(&session, now) {
                 LoginDecision::Allow { audited } => {
                     if !audited.is_empty() {
