@@ -11,20 +11,25 @@ use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::credential_enrollment::EnrollmentError;
 use sid_authn::login_policy::{LoginPolicySource, Unmet};
 use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
+use sid_authn::second_factor::pending::CompletedContext;
+use sid_authn::second_factor::{
+    FactorCeremonies, FactorError, FactorSpend, RECOVERY_CODE_AMR, TOTP_AMR,
+};
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
 use sid_authn::webauthn::{AssertionPurpose, AssertionResponse, WebAuthnServer};
 use sid_core::Error as SidError;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::session::{AuthLevel, SessionDecayLevel};
 use sid_core::models::{
-    AuditEntry, Credential, CredentialData, CredentialId, CredentialType, MutationContext,
-    OperationContext, ProfileId, Session, SessionId,
+    AuditEntry, Credential, CredentialId, CredentialType, MutationContext, OperationContext,
+    ProfileId, Session, SessionId,
 };
+use sid_plugin::CredentialStore;
 use sid_proto::sid::v1::{
     CompleteStepUpRequest, CompleteStepUpResponse, DeleteMfaCredentialRequest,
     DeleteMfaCredentialResponse, FinishTotpEnrollmentResponse, GenerateRecoveryCodesRequest,
-    GenerateRecoveryCodesResponse, StepUpChallenge, StepUpMethod, TotpAlgorithm,
-    TotpEnrollmentChallenge, complete_step_up_request, step_up_challenge,
+    GenerateRecoveryCodesResponse, StepUpChallenge, StepUpMethod, TotpEnrollmentChallenge,
+    complete_step_up_request, step_up_challenge,
 };
 use tracing::{info, warn};
 
@@ -130,17 +135,35 @@ fn internal(operation: &'static str, cause: impl std::fmt::Display) -> SecondFac
     SecondFactorError::Internal
 }
 
-/// A TOTP code is exactly six ASCII digits (RFC 6238 §5.3 with the default
-/// `Digit` of 6); anything else is a malformed request, not a wrong code.
-fn require_totp_code_format(code: &str) -> Result<(), SecondFactorError> {
-    if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(())
-    } else {
-        Err(SecondFactorError::InvalidField {
-            field: "code",
-            reason: "six digits".to_string(),
-        })
+impl From<FactorError> for SecondFactorError {
+    fn from(e: FactorError) -> Self {
+        match e {
+            FactorError::InvalidField { field, reason } => Self::InvalidField { field, reason },
+            FactorError::AlreadyEnrolled => Self::AlreadyEnrolled,
+            FactorError::NotEnrolled(what) => Self::NotEnrolled(what),
+            FactorError::Expired(what) => Self::Expired(what),
+            FactorError::AuthenticationFailed => Self::AuthenticationFailed,
+            FactorError::Unavailable { what, cause } => Self::Unavailable { what, cause },
+            FactorError::RecoveryCodesIssued(id) => Self::RecoveryCodesIssued(id),
+            FactorError::Operation(e) => Self::Operation(e),
+            FactorError::State(e) => Self::SignIn(SignInError::from(e)),
+            FactorError::Store(e) => Self::Store(e),
+            e @ (FactorError::Sealed(_) | FactorError::Corrupt(_)) => {
+                internal("a second-factor credential", e)
+            }
+        }
     }
+}
+
+/// A TOTP code is exactly six ASCII digits; anything else is a malformed
+/// request, not a wrong code.
+fn require_totp_code_format(code: &str) -> Result<(), SecondFactorError> {
+    Ok(sid_authn::second_factor::require_totp_code_format(code)?)
+}
+
+/// The store of `sign_in`'s accounts' credentials.
+fn credentials(sign_in: &SignIn) -> &dyn CredentialStore<Owner = ProfileId> {
+    sign_in.storage().as_ref()
 }
 
 /// The namespace of committed step-ups, whose results are their rotated
@@ -196,7 +219,7 @@ pub enum FactorCaller {
     Pending(Session, CeremonyClient),
     /// A pending context its client proves that is no longer live: it may
     /// only receive again the sign-in its completion committed.
-    Completed(crate::sign_in::CompletedContext),
+    Completed(CompletedContext),
     /// An installation session stepping up.
     StepUp(Session),
 }
@@ -206,7 +229,7 @@ pub enum FactorCaller {
 async fn redelivered(
     sign_in: &SignIn,
     login_policy: &dyn LoginPolicySource,
-    completed: &crate::sign_in::CompletedContext,
+    completed: &CompletedContext,
 ) -> Result<SignedIn, SecondFactorError> {
     sign_in
         .redeliver_second_factor(login_policy, completed)
@@ -237,25 +260,16 @@ async fn live_caller(
     sign_in: &SignIn,
     caller: FactorCaller,
     native_key: Option<&str>,
-) -> Result<Result<LiveCaller, crate::sign_in::CompletedContext>, SecondFactorError> {
+) -> Result<Result<LiveCaller, CompletedContext>, SecondFactorError> {
     let (pending, client) = match caller {
         FactorCaller::Completed(completed) => return Ok(Err(completed)),
         FactorCaller::StepUp(session) => return Ok(Ok(LiveCaller::StepUp(session))),
         FactorCaller::Pending(pending, client) => (pending, client),
     };
-    let live = sign_in
-        .storage()
-        .get_session(pending.id)
+    Ok(sign_in
+        .live_pending(pending, client, native_key)
         .await?
-        .filter(|s| {
-            s.profile_id == pending.profile_id && s.awaits_second_factor() && !s.is_expired()
-        });
-    match live {
-        Some(live) => Ok(Ok(LiveCaller::Pending(live, client))),
-        None => crate::sign_in::CompletedContext::of(&pending, client, native_key)
-            .map(Err)
-            .ok_or(SecondFactorError::SessionEnded),
-    }
+        .map(|live| LiveCaller::Pending(live, client)))
 }
 
 /// A spent recovery code: the session it authenticated, the codes left
@@ -266,22 +280,20 @@ pub struct RecoveryCodeSpent {
     pub signed_in: Option<SignedIn>,
 }
 
-/// How long a started enrollment or step-up may be finished.
+/// How long a started step-up may be finished.
 const CEREMONY_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The second factors of one installation, with the ceremonies started and
 /// not yet finished.
 pub struct SecondFactors {
     webauthn: Arc<WebAuthnServer>,
-    /// The issuer whose events announce enrolled factors and spent codes.
+    /// The issuer whose step-up deliveries are sealed to it.
     issuer: String,
-    /// The caller's own pending TOTP enrollment: the profile and its seed.
-    totp_enrollments: ChallengeStore<(ProfileId, Vec<u8>)>,
+    /// The ceremonies every authority shares: TOTP and recovery codes.
+    ceremonies: FactorCeremonies<ProfileId>,
     /// The passkey ceremony of a pending step-up, keyed by session and
     /// step-up challenge: only a completion on the same session consumes it.
     step_ups: ChallengeStore<String>,
-    /// The TOTP steps already accepted, on any path.
-    totp_replay: sid_authn::TotpReplayGuard,
 }
 
 impl SecondFactors {
@@ -293,20 +305,14 @@ impl SecondFactors {
     ) -> Self {
         Self {
             webauthn,
-            issuer,
-            totp_enrollments: ChallengeStore::new(
-                ceremonies.clone(),
-                keys.clone(),
-                "totp-enrollment",
-                CEREMONY_TTL,
-            ),
             step_ups: ChallengeStore::new(
                 ceremonies.clone(),
-                keys,
+                keys.clone(),
                 "webauthn-step-up",
                 CEREMONY_TTL,
             ),
-            totp_replay: sid_authn::TotpReplayGuard::new(ceremonies),
+            ceremonies: FactorCeremonies::new(issuer.clone(), "profile", ceremonies, keys),
+            issuer,
         }
     }
 
@@ -318,21 +324,10 @@ impl SecondFactors {
         secret: &[u8],
         code: &str,
     ) -> Result<(), SecondFactorError> {
-        let step =
-            sid_authn::totp_step(secret, code).ok_or(SecondFactorError::AuthenticationFailed)?;
-        let first = self
-            .totp_replay
-            .first_use(profile_id, step)
-            .await
-            .map_err(|e| SecondFactorError::Unavailable {
-                what: "TOTP replay record",
-                cause: e.to_string(),
-            })?;
-        if first {
-            Ok(())
-        } else {
-            Err(SecondFactorError::AuthenticationFailed)
-        }
+        Ok(self
+            .ceremonies
+            .accept_totp(profile_id, secret, code)
+            .await?)
     }
 
     /// Refuse unless `enroller` may bind a new TOTP authenticator now.
@@ -372,40 +367,10 @@ impl SecondFactors {
         sign_in: &SignIn,
         profile_id: ProfileId,
     ) -> Result<Option<(Credential, sid_authn::sealed_secret::Opened)>, SecondFactorError> {
-        let storage = sign_in.storage();
-        let credential = storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
-            .await?
-            .into_iter()
-            .find(|c| c.status.is_active());
-        let Some(mut credential) = credential else {
-            return Ok(None);
-        };
-        let mut opened = sid_authn::sealed_secret::open(
-            sign_in.keys(),
-            &sid_authn::sealed_secret::totp_context(profile_id),
-            credential.data.expose(),
-        )
-        .await
-        .map_err(|e| internal("open TOTP seed", e))?;
-        if let Some(resealed) = opened.resealed.take() {
-            // Not applied when another reader resealed it first or it was
-            // revoked meanwhile; the use that follows is conditional on the
-            // credential still being active.
-            let applied = storage
-                .reseal_credential_data(
-                    credential.id,
-                    credential.data.expose(),
-                    &resealed,
-                    AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
-                        .into(),
-                )
-                .await?;
-            if applied {
-                credential.data = CredentialData::new(resealed);
-            }
-        }
-        Ok(Some((credential, opened)))
+        Ok(self
+            .ceremonies
+            .active_totp_seed(credentials(sign_in), sign_in.keys(), profile_id)
+            .await?)
     }
 
     /// Record an authentication on the active session `id`: `authenticate`
@@ -478,52 +443,11 @@ impl SecondFactors {
         sign_in: &SignIn,
         profile_id: ProfileId,
         code: &str,
-    ) -> Result<(crate::sign_in::FactorSpend, i32), SecondFactorError> {
-        use subtle::ConstantTimeEq;
-        let input_hash = sid_authn::hash_code(&sid_authn::normalize_code(code));
-        let set = sign_in
-            .storage()
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
-            .await?
-            .into_iter()
-            .find(|c| c.status.is_active())
-            .ok_or(SecondFactorError::NotEnrolled("recovery code set"))?;
-        let mut hashes: Vec<String> = serde_json::from_slice(set.data.expose())
-            .map_err(|e| internal("read recovery code set", e))?;
-        let mut matched = None;
-        for (i, stored) in hashes.iter().enumerate() {
-            if bool::from(input_hash.as_bytes().ct_eq(stored.as_bytes())) {
-                matched = Some(i);
-            }
-        }
-        let Some(index) = matched else {
-            return Err(SecondFactorError::AuthenticationFailed);
-        };
-        hashes.remove(index);
-        let left =
-            serde_json::to_vec(&hashes).map_err(|e| internal("write recovery code set", e))?;
-        // A spent code is security-relevant (it may mean the account is
-        // compromised); the spend owes the event, a spend that did not
-        // commit owes nothing.
-        let used = Event::new(&self.issuer, event_types::MFA_RECOVERY_CODE_USED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "remaining": hashes.len(),
-                "needs_regeneration": hashes.len() <= 3,
-            }));
-        let remaining = i32::try_from(hashes.len())
-            .map_err(|e| internal("count remaining recovery codes", e))?;
-        Ok((
-            crate::sign_in::FactorSpend {
-                spend: sid_core::models::CredentialSpend {
-                    credential: set.id,
-                    read: set.data.expose().to_vec(),
-                    left,
-                },
-                owes: used.relay(),
-            },
-            remaining,
-        ))
+    ) -> Result<(FactorSpend, i32), SecondFactorError> {
+        Ok(self
+            .ceremonies
+            .recovery_spend(credentials(sign_in), profile_id, code)
+            .await?)
     }
 
     /// Start enrolling a TOTP authenticator for `enroller`: a new seed and
@@ -537,16 +461,6 @@ impl SecondFactors {
         let profile_id = enroller.profile_id();
         self.totp_authority(sign_in, enroller).await?;
         let storage = sign_in.storage();
-        if storage
-            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
-            .await?
-            .iter()
-            .any(|c| c.status.is_active())
-        {
-            return Err(SecondFactorError::AlreadyEnrolled);
-        }
-
-        let secret = sid_authn::generate_secret();
         // The account name of the otpauth URI: email, else username.
         let profile = storage
             .get_profile(profile_id)
@@ -558,24 +472,10 @@ impl SecondFactors {
             .map(|e| e.email.clone())
             .or_else(|| profile.username.clone())
             .unwrap_or_else(|| profile.id.to_string());
-        // The caller's own pending enrollment: both steps are authenticated
-        // as this profile, and a new start replaces the old.
-        self.totp_enrollments
-            .insert(
-                &format!("totp:{}", profile_id),
-                &(profile_id, secret.clone()),
-            )
-            .await
-            .map_err(SignInError::from)?;
-        Ok(TotpEnrollmentChallenge {
-            issuer: "StructuredID".to_string(),
-            account_name,
-            shared_secret: secret,
-            algorithm: TotpAlgorithm::Sha1.into(),
-            digits: sid_authn::TOTP_DIGITS,
-            period_seconds: u32::try_from(sid_authn::TOTP_PERIOD)
-                .expect("the TOTP period is a few seconds"),
-        })
+        Ok(self
+            .ceremonies
+            .totp_enrollment_start(credentials(sign_in), profile_id, account_name)
+            .await?)
     }
 
     /// Finish the enrollment with a code from the new authenticator, spent
@@ -589,84 +489,25 @@ impl SecondFactors {
     ) -> Result<FinishTotpEnrollmentResponse, SecondFactorError> {
         let profile_id = enroller.profile_id();
         require_totp_code_format(code)?;
-        // Another profile's pending enrollment never matches, and reads as
-        // expired.
-        let secret = self
-            .totp_enrollments
-            .take(&format!("totp:{}", profile_id))
-            .await
-            .map_err(SignInError::from)?
-            .filter(|(enrolled, _)| *enrolled == profile_id)
-            .map(|(_, secret)| secret)
-            .ok_or(SecondFactorError::Expired("TOTP enrollment"))?;
+        let secret = self.ceremonies.take_totp_enrollment(profile_id).await?;
         // The account may have changed since the start.
         self.totp_authority(sign_in, enroller).await?;
-        self.accept_totp(profile_id, &secret, code).await?;
-
-        // The seed is stored only sealed, bound to this profile.
-        let sealed = sid_authn::sealed_secret::seal(
-            sign_in.keys(),
-            &sid_authn::sealed_secret::totp_context(profile_id),
-            &secret,
-        )
-        .await
-        .map_err(|e| internal("seal TOTP seed", e))?;
-        let credential = Credential::new(
-            profile_id,
-            CredentialType::Totp,
-            CredentialData::new(sealed),
-            Some("TOTP Authenticator".to_string()),
-        );
-        let credential_id = credential.id;
-        let storage = sign_in.storage();
-        let first_mfa = !storage
-            .get_credentials_by_profile(profile_id, None)
-            .await?
-            .into_iter()
-            .any(|c| {
-                matches!(
-                    c.credential_type,
-                    CredentialType::Totp | CredentialType::WebAuthn
-                ) && c.status.is_active()
-                    && c.id != credential_id
-            });
-        let enrolled = Event::new(&self.issuer, event_types::MFA_ENROLLED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "method": "totp",
-                "credential_id": credential_id.0.to_string(),
-                "first_mfa": first_mfa,
-            }));
-        // The first factor comes with recovery codes, stored with it: a
-        // factor without its codes could not be enrolled again to get them.
-        let (recovery_codes, recovery_set) = if first_mfa {
-            let (plaintext, hashes) = sid_authn::generate_recovery_codes();
-            let data =
-                serde_json::to_vec(&hashes).map_err(|e| internal("encode recovery codes", e))?;
-            let set = Credential::new(
+        let enrolled = self
+            .ceremonies
+            .enroll_totp(
+                credentials(sign_in),
+                sign_in.keys(),
                 profile_id,
-                CredentialType::Recovery,
-                CredentialData::new(data),
-                Some("Recovery Codes".to_string()),
-            );
-            (plaintext, Some(set))
-        } else {
-            (vec![], None)
-        };
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "credential.totp_enrolled",
-            credential_id.0.to_string(),
-        ))
-        .with_work(enrolled.relay());
-        storage
-            .enroll_credential(&credential, recovery_set.as_ref(), ctx)
+                &secret,
+                code,
+            )
             .await?;
-        info!("TOTP enrolled for profile {}", profile_id);
         Ok(FinishTotpEnrollmentResponse {
-            credential_id: crate::wire::stored_id::<sid_ids::CredentialId, _>(credential_id.0)
-                .map_err(|e| internal("stored identifier", e))?,
-            recovery_codes,
+            credential_id: crate::wire::stored_id::<sid_ids::CredentialId, _>(
+                enrolled.credential_id.0,
+            )
+            .map_err(|e| internal("stored identifier", e))?,
+            recovery_codes: enrolled.recovery_codes,
         })
     }
 
@@ -697,37 +538,33 @@ impl SecondFactors {
         let identity = profile_id.to_string();
         sign_in.refuse_if_locked(&identity).await?;
 
-        // The active TOTP credential only; a revoked one never verifies.
-        let (totp, secret) = self
-            .active_totp_seed(sign_in, profile_id)
-            .await?
-            .ok_or(SecondFactorError::NotEnrolled("TOTP authenticator"))?;
-        if let Err(refused) = self.accept_totp(profile_id, &secret.secret, code).await {
-            sign_in.record_failed_login(&identity, client_ip).await?;
-            return Err(refused);
-        }
-        // The use is recorded only on a credential still active: one revoked
-        // since it was read neither verifies nor comes back.
-        let storage = sign_in.storage();
-        if !storage
-            .mark_credential_used(
-                totp.id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "credential.mfa_verified",
-                    totp.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await?
+        // The active TOTP credential only, its use recorded only while it is
+        // still active; a wrong code counts against the sign-in budget.
+        match self
+            .ceremonies
+            .verify_totp(credentials(sign_in), sign_in.keys(), profile_id, code)
+            .await
         {
-            return Err(SecondFactorError::AuthenticationFailed);
+            Ok(()) => {}
+            Err(FactorError::AuthenticationFailed) => {
+                sign_in.record_failed_login(&identity, client_ip).await?;
+                return Err(SecondFactorError::AuthenticationFailed);
+            }
+            Err(e) => return Err(e.into()),
         }
+        let storage = sign_in.storage();
 
         let session_id = match caller {
             LiveCaller::Pending(pending, client) => {
                 let signed_in = sign_in
-                    .complete_second_factor(login_policy, pending, "otp", client, native_key, None)
+                    .complete_second_factor(
+                        login_policy,
+                        pending,
+                        TOTP_AMR,
+                        client,
+                        native_key,
+                        None,
+                    )
                     .await?;
                 info!("TOTP completed the sign-in of profile {}", profile_id);
                 return Ok(signed_in);
@@ -748,7 +585,7 @@ impl SecondFactors {
                 .into(),
                 |active| {
                     active.elevate(AuthLevel::Standard);
-                    active.add_amr("otp");
+                    active.add_amr(TOTP_AMR);
                 },
             )
             .await?;
@@ -801,55 +638,16 @@ impl SecondFactors {
         )
         .await?;
         let operation = operation.ok_or(SecondFactorError::ContextRequired)?;
-        let command = KeyedCommand::by_profile::<
-            sid_proto::keyed::authn::auth_service::GenerateRecoveryCodes,
-        >(profile_id, operation, request);
-        if let Some(recorded) = command.completed(&**storage).await? {
-            return Err(SecondFactorError::RecoveryCodesIssued(recorded));
-        }
-
-        let (plaintext, hashes) = sid_authn::generate_recovery_codes();
-        let data = serde_json::to_vec(&hashes).map_err(|e| internal("encode recovery codes", e))?;
-        // The new set takes the old one's place in one transaction: old
-        // codes never stay valid beside the new ones, and a failure leaves
-        // the old set usable rather than none.
-        let credential = Credential::new(
-            profile_id,
-            CredentialType::Recovery,
-            CredentialData::new(data),
-            Some("Recovery Codes".to_string()),
-        );
-        let generated = Event::new(&self.issuer, event_types::MFA_ENROLLED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "method": "recovery",
-                "credential_id": credential.id.0.to_string(),
-                "regenerated": true,
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "credential.recovery_codes_generated",
-            credential.id.0.to_string(),
-        ))
-        .with_work(generated.relay())
-        .with_operation(command.completion(credential.id.0.as_bytes().to_vec()));
-        match storage.replace_credential(&credential, ctx).await {
-            Ok(()) => {}
-            // Another attempt of this command committed first: its set is
-            // the issued one.
-            Err(SidError::OperationCompleted(_)) => {
-                return Err(SecondFactorError::RecoveryCodesIssued(
-                    command.committed_elsewhere(&**storage).await?,
-                ));
-            }
-            Err(e) => return Err(e.into()),
-        }
-        info!(
-            "Recovery codes generated for profile {} ({} codes)",
-            profile_id,
-            plaintext.len()
-        );
-        Ok(GenerateRecoveryCodesResponse { codes: plaintext })
+        let command = self
+            .ceremonies
+            .command::<sid_proto::keyed::authn::auth_service::GenerateRecoveryCodes>(
+                profile_id, operation, request,
+            );
+        let codes = self
+            .ceremonies
+            .regenerate_recovery_codes(credentials(sign_in), &**storage, profile_id, command)
+            .await?;
+        Ok(GenerateRecoveryCodesResponse { codes })
     }
 
     /// Spend a recovery code for `caller`: a sign-in's pending context is
@@ -871,7 +669,7 @@ impl SecondFactors {
         if code.is_empty() {
             return Err(SecondFactorError::MissingField("code"));
         }
-        let amr = crate::sign_in::RECOVERY_CODE_AMR;
+        let amr = RECOVERY_CODE_AMR;
         // A context whose completion committed receives that sign-in again;
         // the code presented is not judged and nothing more is spent.
         let caller = match live_caller(sign_in, caller, native_key).await? {
@@ -962,18 +760,7 @@ impl SecondFactors {
             .get_session(signed_in.session_id)
             .await?
             .ok_or(SecondFactorError::SessionEnded)?;
-        let left = match storage
-            .get_credentials_by_profile(session.profile_id, Some(CredentialType::Recovery))
-            .await?
-            .into_iter()
-            .find(|c| c.status.is_active())
-        {
-            Some(set) => serde_json::from_slice::<Vec<String>>(set.data.expose())
-                .map_err(|e| internal("read recovery code set", e))?
-                .len(),
-            None => 0,
-        };
-        i32::try_from(left).map_err(|e| internal("count remaining recovery codes", e))
+        Ok(sid_authn::second_factor::codes_left(credentials(sign_in), session.profile_id).await?)
     }
 
     /// The step-up methods the installation session `verified` stands for
@@ -1120,7 +907,7 @@ impl SecondFactors {
                     .await?
                     .ok_or(SecondFactorError::NotEnrolled("TOTP authenticator"))?;
                 self.accept_totp(profile_id, &secret.secret, &code).await?;
-                (vec!["otp"], AuthLevel::Standard)
+                (vec![TOTP_AMR], AuthLevel::Standard)
             }
             StepUpMethod::RecoveryCode => {
                 let Some(complete_step_up_request::Proof::RecoveryCode(code)) = request.proof
@@ -1131,7 +918,7 @@ impl SecondFactors {
                 // elevation not stored spends nothing, and a spent code
                 // never stays reusable.
                 spend = Some(self.recovery_spend(sign_in, profile_id, &code).await?.0);
-                (vec![crate::sign_in::RECOVERY_CODE_AMR], AuthLevel::Standard)
+                (vec![RECOVERY_CODE_AMR], AuthLevel::Standard)
             }
             StepUpMethod::Webauthn => {
                 let Some(complete_step_up_request::Proof::WebauthnAssertion(assertion)) =

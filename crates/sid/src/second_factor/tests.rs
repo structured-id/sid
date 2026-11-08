@@ -91,7 +91,7 @@ async fn recovery_code_is_spent_only_with_its_effect() {
         .create_session(&session, AuditEntry::system("test", "session").into())
         .await
         .unwrap();
-    let record = |spend: crate::sign_in::FactorSpend, id: SessionId| {
+    let record = |spend: FactorSpend, id: SessionId| {
         let factors = &factors;
         let sign_in = &sign_in;
         async move {

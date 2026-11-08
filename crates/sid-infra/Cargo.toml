@@ -39,6 +39,8 @@ prost-types = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 sid-ids = { workspace = true, features = ["std", "serde"], optional = true }
 sid-ids-proto = { workspace = true, optional = true }
+# The recovery-code set a retried generation names (`authn-grpc`).
+uuid = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
@@ -85,6 +87,7 @@ authn-grpc = [
     "dep:chrono",
     "dep:url",
     "dep:sid-ids",
+    "dep:uuid",
 ]
 # The password operation's refusals and the history evaluator's RPC
 # adapter, both sides.

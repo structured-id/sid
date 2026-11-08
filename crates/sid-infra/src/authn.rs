@@ -9,6 +9,7 @@ pub mod credential_enrollment;
 pub mod operation;
 pub mod own_token;
 pub mod resource;
+pub mod second_factor;
 pub mod sign_in_refusal;
 
 #[cfg(feature = "password-operation")]

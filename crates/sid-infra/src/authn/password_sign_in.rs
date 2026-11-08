@@ -25,6 +25,15 @@ impl From<PasswordSignInError> for SignInStatus {
     }
 }
 
+/// A pending second-factor context's refusal, for a host of
+/// [`sid_authn::second_factor::pending::PendingSignInHost`] that answers
+/// with a status.
+impl From<sid_authn::second_factor::pending::PendingError> for SignInStatus {
+    fn from(e: sid_authn::second_factor::pending::PendingError) -> Self {
+        Self(e.into_status())
+    }
+}
+
 impl From<SignInStatus> for Status {
     fn from(e: SignInStatus) -> Self {
         e.0

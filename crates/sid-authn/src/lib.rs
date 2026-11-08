@@ -80,6 +80,8 @@ pub mod resource_token;
 pub mod revocation_cache;
 pub mod revocation_cascade;
 pub mod sealed_secret;
+#[cfg(feature = "keyed")]
+pub mod second_factor;
 pub mod service_auth;
 pub mod session_limit;
 pub mod session_revocation;
