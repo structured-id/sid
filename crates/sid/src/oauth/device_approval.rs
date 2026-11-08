@@ -70,6 +70,7 @@ impl OAuth {
             .ok_or(DeviceApprovalError::NotCurrent)?;
 
         let mut fence = None;
+        let mut decision = DeviceAuthDecision::Deny;
         if request.approve {
             let session_id = SessionId::parse(&verified.claims.sid).map_err(|e| {
                 tracing::error!(error = %e, "read session id of a verified token");
@@ -107,13 +108,13 @@ impl OAuth {
                 LoginDecision::StepUp(unmet) => return Err(DeviceApprovalError::StepUp(unmet)),
             }
             fence = requirements.fence;
+            // The device's tokens report the authentication approved under,
+            // and are issued only while it is still admitted.
+            decision = DeviceAuthDecision::Authorize {
+                profile: profile_id,
+                authentication: session.grant_authentication(),
+            };
         }
-
-        let decision = if request.approve {
-            DeviceAuthDecision::Authorize(profile_id)
-        } else {
-            DeviceAuthDecision::Deny
-        };
         let mut ctx: MutationContext = AuditEntry::user(
             profile_id.to_string(),
             "device_authorization.submit",

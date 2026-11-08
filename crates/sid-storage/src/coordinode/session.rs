@@ -117,6 +117,53 @@ fn elevation_params(params: Params, elevation: Option<Elevation>) -> Params {
         .with("elevation_until", opt_time(elevation.map(|e| e.until)))
 }
 
+/// The authentication a grant carries, read from its
+/// `authorizing_session_id` through `elevation_until` properties; none when
+/// it carries none (a device authorization not yet approved).
+pub(super) fn opt_grant_authentication(row: &Row) -> SidResult<Option<GrantAuthentication>> {
+    let Some(session) = get_opt_id(row, "authorizing_session_id")? else {
+        return Ok(None);
+    };
+    Ok(Some(GrantAuthentication {
+        session,
+        authenticated_at: get_time(row, "authenticated_at")?,
+        amr: get_texts(row, "amr")?,
+        assurance_level: level(row, "assurance_level")?,
+        elevation: elevation(row)?,
+    }))
+}
+
+/// `params` with `authentication` bound as `authorizing`, `authenticated_at`,
+/// `amr`, `assurance_level`, `elevation_level` and `elevation_until`, all
+/// null without one; levels a grant cannot hold are refused.
+pub(super) fn grant_authentication_params(
+    params: Params,
+    authentication: Option<&GrantAuthentication>,
+) -> SidResult<Params> {
+    if let Some(a) = authentication {
+        check_levels(a.assurance_level, a.elevation)?;
+    }
+    Ok(elevation_params(
+        params
+            .with(
+                "authorizing",
+                authentication.map_or(Value::Null, |a| session_value(a.session)),
+            )
+            .with(
+                "authenticated_at",
+                opt_time(authentication.map(|a| a.authenticated_at)),
+            )
+            .with("amr", authentication.map_or(Value::Null, |a| texts(&a.amr)))
+            .with(
+                "assurance_level",
+                authentication.map_or(Value::Null, |a| {
+                    Value::String(a.assurance_level.as_str().into())
+                }),
+            ),
+        authentication.and_then(|a| a.elevation),
+    ))
+}
+
 pub(super) fn session(row: &Row) -> SidResult<Session> {
     Ok(Session {
         id: get_id(row, "id")?,
@@ -1244,8 +1291,6 @@ fn session_grants(tx: &Statements<'_>, id: SessionId) -> SidResult<SessionGrants
 
 /// Store `code` in `tx` as given, its redemption included.
 fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
-    let auth = &code.authentication;
-    check_levels(auth.assurance_level, auth.elevation)?;
     tx.run(
         "CREATE (a:SidAuthCode {code_hash: $hash, profile_id: $profile_id,
             client_id: $client_id, redirect_uri: $redirect_uri, scopes: $scopes,
@@ -1255,7 +1300,7 @@ fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
             authenticated_at: $authenticated_at, amr: $amr,
             assurance_level: $assurance_level, elevation_level: $elevation_level,
             elevation_until: $elevation_until})",
-        elevation_params(
+        grant_authentication_params(
             Params::default()
                 .with("hash", Value::Binary(code.code_hash.clone()))
                 .with("profile_id", profile_value(code.profile_id))
@@ -1271,16 +1316,9 @@ fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
                     "session_id",
                     code.session_id.map_or(Value::Null, session_value),
                 )
-                .with("resource_id", uuid(code.resource.as_uuid()))
-                .with("authorizing", session_value(auth.session))
-                .with("authenticated_at", time(auth.authenticated_at))
-                .with("amr", texts(&auth.amr))
-                .with(
-                    "assurance_level",
-                    Value::String(auth.assurance_level.as_str().into()),
-                ),
-            auth.elevation,
-        ),
+                .with("resource_id", uuid(code.resource.as_uuid())),
+            Some(&code.authentication),
+        )?,
     )?;
     Ok(())
 }

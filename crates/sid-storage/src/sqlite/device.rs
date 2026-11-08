@@ -8,8 +8,8 @@ use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
         Device, DeviceAuthCodeId, DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode,
-        DeviceCodeRedemption, DeviceId, DevicePoll, DeviceTrustChange, MutationContext, ProfileId,
-        RefreshToken, Session, SessionId,
+        DeviceCodeRedemption, DeviceId, DevicePoll, DeviceTrustChange, GrantAuthentication,
+        MutationContext, ProfileId, RefreshToken, Session, SessionId,
     },
 };
 
@@ -48,7 +48,48 @@ fn row_to_device_auth(row: &sqlx::sqlite::SqliteRow) -> SidResult<DeviceAuthoriz
         authorized_at: dt_col_opt(row, "authorized_at")?,
         last_polled_at: dt_col_opt(row, "last_polled_at")?,
         redeemed_session_id: col(row, "redeemed_session_id")?,
+        authorized_with: approval_col(row)?,
     })
+}
+
+/// The approval's authentication, stored with the decision; none before it.
+fn approval_col(row: &sqlx::sqlite::SqliteRow) -> SidResult<Option<GrantAuthentication>> {
+    let Some(session) = col::<Option<SessionId>>(row, "authorizing_session_id")? else {
+        return Ok(None);
+    };
+    Ok(Some(GrantAuthentication {
+        session,
+        authenticated_at: dt_col(row, "authenticated_at")?,
+        amr: super::auth::words(row, "amr")?,
+        assurance_level: super::session::auth_level(
+            "assurance_level",
+            &col::<String>(row, "assurance_level")?,
+        )?,
+        elevation: super::session::elevation_col(row)?,
+    }))
+}
+
+/// `query` with the approval's authentication bound to its six columns
+/// (`authorizing_session_id` through `elevation_until`), all null without one.
+fn bind_approval<'q>(
+    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+    authentication: Option<&GrantAuthentication>,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    query
+        .bind(authentication.map(|a| a.session))
+        .bind(authentication.map(|a| fmt_dt(&a.authenticated_at)))
+        .bind(authentication.map(|a| a.amr.join(" ")))
+        .bind(authentication.map(|a| a.assurance_level.as_str()))
+        .bind(
+            authentication
+                .and_then(|a| a.elevation)
+                .map(|e| e.level.as_str()),
+        )
+        .bind(
+            authentication
+                .and_then(|a| a.elevation)
+                .map(|e| fmt_dt(&e.until)),
+        )
 }
 
 /// RFC 8628 §3.5: each slow_down adds 5 seconds to the polling interval.
@@ -233,11 +274,13 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        sqlx::query(
+        let insert = sqlx::query(
             "INSERT INTO device_authorization_codes (id, client_id, device_code_hash, user_code,
                 scope, status, authorized_by, project_id, interval_secs, created_at, expires_at,
-                authorized_at, last_polled_at, redeemed_session_id, resource_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                authorized_at, last_polled_at, redeemed_session_id, resource_id,
+                authorizing_session_id, authenticated_at, amr, assurance_level, elevation_level,
+                elevation_until)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(code.id.0)
         .bind(&code.client_id)
@@ -253,10 +296,12 @@ impl SqliteBackend {
         .bind(fmt_dt_opt(code.authorized_at))
         .bind(fmt_dt_opt(code.last_polled_at))
         .bind(code.redeemed_session_id)
-        .bind(code.resource)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("device authorization", e))?;
+        .bind(code.resource);
+        let insert = bind_approval(insert, code.authorized_with.as_ref());
+        insert
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("device authorization", e))?;
         Self::commit_mutation(tx, &format!("device_auth:{}", code.id.0), audit).await
     }
 
@@ -304,26 +349,35 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let now = fmt_dt(&chrono::Utc::now());
-        let (status, authorized_by, authorized_at) = match decision {
-            DeviceAuthDecision::Authorize(profile_id) => {
-                ("authorized", Some(profile_id), Some(now.clone()))
-            }
-            DeviceAuthDecision::Deny => ("denied", None, None),
+        let (status, authorized_by, authorized_at, authentication) = match &decision {
+            DeviceAuthDecision::Authorize {
+                profile,
+                authentication,
+            } => (
+                "authorized",
+                Some(*profile),
+                Some(now.clone()),
+                Some(authentication),
+            ),
+            DeviceAuthDecision::Deny => ("denied", None, None, None),
         };
         let mut tx = self.begin_write().await?;
-        let decided = sqlx::query(
-            "UPDATE device_authorization_codes SET status = ?, authorized_by = ?, authorized_at = ?
+        let update = sqlx::query(
+            "UPDATE device_authorization_codes SET status = ?, authorized_by = ?, authorized_at = ?,
+                authorizing_session_id = ?, authenticated_at = ?, amr = ?, assurance_level = ?,
+                elevation_level = ?, elevation_until = ?
              WHERE id = ? AND status = 'pending' AND expires_at > ?",
         )
         .bind(status)
         .bind(authorized_by)
-        .bind(authorized_at)
-        .bind(id.0)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("decide device authorization: {e}")))?
-        .rows_affected()
+        .bind(authorized_at);
+        let decided = bind_approval(update, authentication)
+            .bind(id.0)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("decide device authorization: {e}")))?
+            .rows_affected()
             == 1;
         if !decided {
             return Ok(false);

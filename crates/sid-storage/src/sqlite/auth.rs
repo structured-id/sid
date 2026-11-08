@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, insert_error, uuid_col};
 
 /// Space-separated words of a text column.
-fn words(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<Vec<String>> {
+pub(super) fn words(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<Vec<String>> {
     let raw: String = col(row, name)?;
     Ok(raw.split_whitespace().map(String::from).collect())
 }

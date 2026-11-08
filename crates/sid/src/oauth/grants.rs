@@ -216,23 +216,7 @@ impl GrantHost for ProfileGrant<'_> {
         client: &OAuth2Client,
         session: &sid_core::models::Session,
     ) -> Result<(), OAuthError> {
-        let requirements = self
-            .oauth
-            .login_requirements(Some(&client.client_id))
-            .await?
-            .with_client(client, None)
-            .for_account(self.oauth.storage.as_ref(), session.profile_id)
-            .await?;
-        match requirements.decide(session, Utc::now()) {
-            sid_authn::login_policy::LoginDecision::Allow { .. } => Ok(()),
-            sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
-                info!(client = %client.client_id, ?unmet, "Grant no longer admitted by the login requirements");
-                Err(OAuthError::token(
-                    TokenError::InvalidGrant,
-                    "the grant's authentication no longer meets the login requirements",
-                ))
-            }
-        }
+        self.oauth.admitted_grant(client, session).await.map(|_| ())
     }
 
     async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, OAuthError> {
@@ -249,6 +233,33 @@ impl GrantHost for ProfileGrant<'_> {
 }
 
 impl OAuth {
+    /// Whether the login requirements in force for `client`, with the
+    /// account protection `session`'s owner has now, still admit the
+    /// authentication `session` reports: their fence, which the issuance
+    /// commits under, or `invalid_grant` once they ask for more.
+    async fn admitted_grant(
+        &self,
+        client: &OAuth2Client,
+        session: &sid_core::models::Session,
+    ) -> Result<Option<sid_core::models::ActorFence>, OAuthError> {
+        let requirements = self
+            .login_requirements(Some(&client.client_id))
+            .await?
+            .with_client(client, None)
+            .for_account(self.storage.as_ref(), session.profile_id)
+            .await?;
+        match requirements.decide(session, Utc::now()) {
+            sid_authn::login_policy::LoginDecision::Allow { .. } => Ok(requirements.fence),
+            sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
+                info!(client = %client.client_id, ?unmet, "Grant no longer admitted by the login requirements");
+                Err(OAuthError::token(
+                    TokenError::InvalidGrant,
+                    "the grant's authentication no longer meets the login requirements",
+                ))
+            }
+        }
+    }
+
     /// A token request (RFC 6749 §3.2): the grant its `grant_type` names.
     /// `authorization` is the request's `Authorization` value (HTTP Basic),
     /// `client_ip` its client address, `proof_target` the request as
@@ -682,15 +693,17 @@ impl OAuth {
                 "the approving account no longer exists",
             )
         })?;
-        // The approval was judged under the application's requirements; the
-        // tokens are issued only while those can still be read, and commit
-        // under their fence.
-        let fence = self
-            .login_requirements(Some(&client.client_id))
-            .await?
-            .fence;
+        // The device's session reports the authentication approved under; the
+        // tokens are issued only while the requirements in force, with the
+        // account's protection now, still admit it, and commit under their
+        // fence.
+        let approved = code
+            .authorized_with
+            .as_ref()
+            .ok_or_else(|| internal("storage", "an approved device code has no authentication"))?;
         let mut session =
-            sid_core::models::Session::new(profile.id, None, Utc::now() + Duration::hours(24));
+            sid_core::models::Session::new(profile.id, None, Utc::now() + Duration::hours(24))
+                .with_grant_authentication(approved);
         session.client_id = Some(client.client_id.clone());
         session.scopes = code
             .scope
@@ -699,6 +712,7 @@ impl OAuth {
             .split_whitespace()
             .map(String::from)
             .collect();
+        let fence = self.admitted_grant(&client, &session).await?;
         let sub = self.subject_for(&issuer, profile.id, &client).await?;
         let (primary_email, primary_phone) = self.primary_contacts(profile.id).await?;
         let signer = self.issuer_signer(&issuer).await?;

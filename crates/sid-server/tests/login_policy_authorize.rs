@@ -375,6 +375,46 @@ async fn an_unreadable_policy_issues_the_device_nothing() {
         .expect("the approval stands once the policy is readable");
 }
 
+/// Regression: a device approved by a password-only session gets no tokens
+/// once the account enables a second factor before the device polls: the
+/// device's tokens report the approval's authentication, judged again at
+/// issuance.
+#[tokio::test]
+async fn a_factor_enabled_between_approval_and_poll_issues_the_device_nothing() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    let (svc, _policy, token) = signed_in_with_device_client().await;
+    let (user_code, device_code) = device_request(&svc).await;
+    approve_device(&svc, &user_code, &token).await.unwrap();
+
+    // The approver: the installation session's own token names its Profile.
+    let approver = sid_core::models::ProfileId::parse(
+        &svc.jwt
+            .validate_access_token(&token)
+            .unwrap()
+            .pid
+            .expect("an installation token names its Profile"),
+    )
+    .unwrap();
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                approver,
+                CredentialType::Totp,
+                CredentialData::new(b"seed".to_vec()),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+    let err = redeem_device(&svc, &device_code).await.unwrap_err();
+
+    let oauth_error = err
+        .get_details_error_info()
+        .and_then(|info| info.metadata.get("oauthError").cloned());
+    assert_eq!(oauth_error.as_deref(), Some("invalid_grant"), "{err:?}");
+}
+
 /// A session meeting the policy approves, and the device gets its tokens.
 #[tokio::test]
 async fn a_device_approval_meeting_the_policy_issues_tokens() {

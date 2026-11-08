@@ -1171,12 +1171,39 @@ pub struct DeviceAuthRow {
     pub authorized_at: Option<DateTime<Utc>>,
     pub last_polled_at: Option<DateTime<Utc>>,
     pub redeemed_session_id: Option<SessionId>,
+    pub authorizing_session_id: Option<SessionId>,
+    pub authenticated_at: Option<DateTime<Utc>>,
+    pub amr: Option<String>,
+    pub assurance_level: Option<String>,
+    pub elevation_level: Option<String>,
+    pub elevation_until: Option<DateTime<Utc>>,
 }
 
 impl DeviceAuthRow {
+    /// The approval's authentication, stored whole with the decision.
+    fn approval(&self) -> SidResult<Option<sid_core::models::GrantAuthentication>> {
+        let (Some(session), Some(authenticated_at), Some(amr), Some(assurance_level)) = (
+            self.authorizing_session_id,
+            self.authenticated_at,
+            self.amr.as_deref(),
+            self.assurance_level.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(sid_core::models::GrantAuthentication {
+            session,
+            authenticated_at,
+            amr: split_ws(amr),
+            assurance_level: auth_level("assurance_level", assurance_level)?,
+            elevation: elevation(self.elevation_level.clone(), self.elevation_until)?,
+        }))
+    }
+
     /// An unknown status is an error, never a pending request.
     pub fn into_domain(self) -> SidResult<CoreDeviceAuth> {
+        let authorized_with = self.approval()?;
         Ok(CoreDeviceAuth {
+            authorized_with,
             id: DeviceAuthCodeId(self.id),
             client_id: self.client_id,
             device_code_hash: self.device_code_hash,

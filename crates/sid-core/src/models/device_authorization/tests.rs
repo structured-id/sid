@@ -11,6 +11,17 @@ fn make_device_auth() -> DeviceAuthorizationCode {
     )
 }
 
+/// The authentication of a fresh password session.
+fn approval() -> crate::models::GrantAuthentication {
+    crate::models::GrantAuthentication {
+        session: crate::models::SessionId::generate(),
+        authenticated_at: Utc::now(),
+        amr: vec!["pwd".into()],
+        assurance_level: crate::models::AuthLevel::Basic,
+        elevation: None,
+    }
+}
+
 #[test]
 fn test_new_defaults() {
     let da = make_device_auth();
@@ -34,7 +45,7 @@ fn test_as_pending_returns_none_for_authorized() {
     let mut da = make_device_auth();
     da.as_pending()
         .unwrap()
-        .authorize(super::super::ProfileId::generate());
+        .authorize(super::super::ProfileId::generate(), approval());
     assert!(da.as_pending().is_none());
 }
 
@@ -56,9 +67,13 @@ fn test_as_pending_returns_none_for_expired() {
 fn test_authorize_via_gateway() {
     let mut da = make_device_auth();
     let profile_id = super::super::ProfileId::generate();
-    da.as_pending().unwrap().authorize(profile_id);
+    let authentication = approval();
+    da.as_pending()
+        .unwrap()
+        .authorize(profile_id, authentication.clone());
     assert_eq!(da.status(), DeviceAuthStatus::Authorized);
     assert_eq!(da.authorized_by, Some(profile_id));
+    assert_eq!(da.authorized_with, Some(authentication));
     assert!(da.authorized_at.is_some());
 }
 

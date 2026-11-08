@@ -4,7 +4,7 @@
 use chrono::Utc;
 use sid_core::models::{
     DeviceAuthCodeId, DeviceAuthDecision, DeviceAuthorizationCode, DeviceCodeRedemption,
-    DevicePoll, MutationContext, RefreshToken, Session, SessionId,
+    DevicePoll, GrantAuthentication, MutationContext, RefreshToken, Session, SessionId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -17,6 +17,25 @@ fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
     move |e| SidError::Storage(format!("{what}: {e}"))
 }
 
+/// `query` with the approval's authentication bound to its six columns
+/// (`authorizing_session_id` through `elevation_until`), all null without one.
+fn bind_approval<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    authentication: Option<&GrantAuthentication>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    query
+        .bind(authentication.map(|a| a.session))
+        .bind(authentication.map(|a| a.authenticated_at))
+        .bind(authentication.map(|a| a.amr.join(" ")))
+        .bind(authentication.map(|a| a.assurance_level.as_str()))
+        .bind(
+            authentication
+                .and_then(|a| a.elevation)
+                .map(|e| e.level.as_str()),
+        )
+        .bind(authentication.and_then(|a| a.elevation).map(|e| e.until))
+}
+
 impl PostgresBackend {
     pub(super) async fn create_device_auth_code_impl(
         &self,
@@ -24,12 +43,14 @@ impl PostgresBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
-        sqlx::query(
+        let insert = sqlx::query(
             "INSERT INTO device_authorization_codes (id, client_id, device_code_hash, user_code,
                 scope, project_id, expires_at, interval_secs, status,
                 authorized_by, authorized_at, last_polled_at, created_at, redeemed_session_id,
-                resource_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                resource_id, authorizing_session_id, authenticated_at, amr, assurance_level,
+                elevation_level, elevation_until)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21)",
         )
         .bind(code.id.0)
         .bind(&code.client_id)
@@ -45,10 +66,11 @@ impl PostgresBackend {
         .bind(code.last_polled_at)
         .bind(code.created_at)
         .bind(code.redeemed_session_id)
-        .bind(code.resource)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| super::insert_error("device authorization", e))?;
+        .bind(code.resource);
+        bind_approval(insert, code.authorized_with.as_ref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| super::insert_error("device authorization", e))?;
         Self::audit_in_tx(&mut tx, &format!("device_auth:{}", code.id.0), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(())
@@ -60,23 +82,29 @@ impl PostgresBackend {
         decision: DeviceAuthDecision,
         ctx: MutationContext,
     ) -> SidResult<bool> {
-        let (status, authorized_by) = match decision {
-            DeviceAuthDecision::Authorize(profile_id) => ("authorized", Some(profile_id)),
-            DeviceAuthDecision::Deny => ("denied", None),
+        let (status, authorized_by, authentication) = match &decision {
+            DeviceAuthDecision::Authorize {
+                profile,
+                authentication,
+            } => ("authorized", Some(*profile), Some(authentication)),
+            DeviceAuthDecision::Deny => ("denied", None, None),
         };
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
-        let decided = sqlx::query(
+        let update = sqlx::query(
             "UPDATE device_authorization_codes SET status = $2, authorized_by = $3,
-                authorized_at = CASE WHEN $3::UUID IS NULL THEN NULL ELSE NOW() END
+                authorized_at = CASE WHEN $3::UUID IS NULL THEN NULL ELSE NOW() END,
+                authorizing_session_id = $4, authenticated_at = $5, amr = $6,
+                assurance_level = $7, elevation_level = $8, elevation_until = $9
              WHERE id = $1 AND status = 'pending' AND expires_at > NOW()",
         )
         .bind(id.0)
         .bind(status)
-        .bind(authorized_by)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage("decide device authorization"))?
-        .rows_affected()
+        .bind(authorized_by);
+        let decided = bind_approval(update, authentication)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("decide device authorization"))?
+            .rows_affected()
             == 1;
         if !decided {
             return Ok(false);

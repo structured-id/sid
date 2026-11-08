@@ -4999,7 +4999,10 @@ impl StorageBackend for MockStorage {
         let code = inner.device_codes.get_mut(&id).expect("checked above");
         let pending = code.as_pending().expect("checked above");
         match decision {
-            DeviceAuthDecision::Authorize(profile_id) => pending.authorize(profile_id),
+            DeviceAuthDecision::Authorize {
+                profile,
+                authentication,
+            } => pending.authorize(profile, authentication),
             DeviceAuthDecision::Deny => pending.deny(),
         }
         Ok(true)
