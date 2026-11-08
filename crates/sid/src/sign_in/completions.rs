@@ -101,38 +101,43 @@ impl SignIn {
     }
 
     /// Sign `profile` in after an upstream identity provider verified the
-    /// user, as every other sign-in completes: only an active Profile, after
-    /// the sign-in rules under the organization's requirements, with a
-    /// session of this authority's lifetime and limit. The provider, not
-    /// SID, verified the user: the session names no `amr` method (RFC 8176
-    /// §1) and has basic assurance.
+    /// user, as every first factor completes: only an active Profile, after
+    /// the sign-in rules under the organization's requirements and the
+    /// account's enabled protection, with a session of this authority's
+    /// lifetime and limit, or its pending context when a second factor is
+    /// owed. The provider, not SID, verified the user: the session names no
+    /// `amr` method (RFC 8176 §1) and has basic assurance.
     pub async fn upstream_sign_in(
         &self,
         login_policy: &dyn LoginPolicySource,
         profile: &Profile,
         completer: Completer<'_>,
-    ) -> Result<SignedIn, SignInError> {
+    ) -> Result<FirstFactorSignedIn, SignInError> {
         if !profile.status.can_authenticate() {
             return Err(SignInError::AuthenticationFailed);
         }
-        let authentication = AttemptAuthentication::Local {
-            method: "upstream",
-            assurance: AuthLevel::Basic,
-            amr: &[],
-        };
-        let policy = self
-            .admitted_by_rules(
-                login_policy,
+        let method = LoginMethod::Upstream;
+        let requirements = organization_requirements(login_policy).await?;
+        let admission = self
+            .first_factor(
                 profile.id,
                 completer.client_ip,
-                (authentication, completer.context),
-                None,
+                (method.name(), AuthLevel::Basic, &method.amr()),
+                completer.context,
+                &requirements,
             )
             .await?;
-        let mut session = self.new_session(profile.id, completer.client_ip);
-        session.device_id = completer.context.user_agent.map(device_id);
-        self.sign_in(profile, session, completer.client, None, None, policy, None)
-            .await
+        self.complete_first_factor(
+            profile,
+            method,
+            completer.context.user_agent.map(device_id),
+            completer.client_ip,
+            completer.client,
+            None,
+            None,
+            admission,
+        )
+        .await
     }
 
     /// Sign `profile` in on the accepted evidence of an explicitly trusted

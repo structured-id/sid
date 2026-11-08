@@ -46,10 +46,12 @@ async fn upstream_sign_in_stores_a_basic_session_without_amr() {
     let id = stored_profile(storage.as_ref(), "alice").await;
     let profile = storage.get_profile(id).await.unwrap().unwrap();
 
-    let signed_in = sign_in
+    let completed = sign_in
         .upstream_sign_in(&fixed_policy(), &profile, browser())
         .await
         .unwrap();
+    assert!(completed.second_factors.is_empty());
+    let signed_in = completed.signed_in;
 
     assert!(matches!(signed_in.delivery, Delivery::Cookie(_)));
     let session = storage
@@ -61,6 +63,51 @@ async fn upstream_sign_in_stores_a_basic_session_without_amr() {
     assert_eq!(session.assurance_level, AuthLevel::Basic);
     assert!(session.amr.is_empty());
     assert_eq!(session.ip_address, Some(CLIENT_IP));
+}
+
+// Regression: an account whose enabled protection asks for its second factor
+// gets, after the provider's sign-in, the pending context that factor
+// completes, with the CSRF token its browser completes it with. Before, the
+// owed factor refused the upstream sign-in outright and the account could
+// no longer sign in that way at all.
+#[tokio::test]
+async fn upstream_sign_in_of_a_protected_account_awaits_its_second_factor() {
+    use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType};
+    use sid_plugin::CredentialStore as _;
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let id = stored_profile(storage.as_ref(), "erin").await;
+    let profile = storage.get_profile(id).await.unwrap().unwrap();
+    storage
+        .create_credential(
+            &Credential::new(
+                id,
+                CredentialType::Totp,
+                CredentialData::new(vec![7; 32]),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+
+    let pending = sign_in
+        .upstream_sign_in(&fixed_policy(), &profile, browser())
+        .await
+        .expect("the pending context, not a refusal");
+
+    assert_eq!(
+        pending.second_factors,
+        [i32::from(sid_proto::sid::v1::authn::StepUpMethod::Totp)]
+    );
+    assert!(pending.browser_csrf.is_some());
+    let session = storage
+        .get_session(pending.signed_in.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(session.awaits_second_factor());
+    assert!(session.amr.is_empty());
 }
 
 // An account that can no longer authenticate gets no upstream session,

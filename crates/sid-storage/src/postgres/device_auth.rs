@@ -163,6 +163,22 @@ impl PostgresBackend {
         ctx: MutationContext,
     ) -> SidResult<DeviceCodeRedemption> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The approving session holds until this commits: a sign-out either
+        // waits for the redemption or is seen by it, and one that came first
+        // leaves the device nothing to redeem.
+        if let Some(approver) = session.authenticated_by {
+            let live: Option<i32> =
+                sqlx::query_scalar("SELECT 1 FROM sessions WHERE id = $1 FOR SHARE")
+                    .bind(approver)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage("read the approving session"))?;
+            if live.is_none() {
+                return Err(SidError::NotFound(
+                    "the session that approved the device ended".into(),
+                ));
+            }
+        }
         // The session goes first (the code references it); a redemption that
         // does not apply rolls it back with the transaction.
         super::session::write(&mut tx, session).await?;

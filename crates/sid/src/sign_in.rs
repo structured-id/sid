@@ -138,6 +138,9 @@ pub enum LoginMethod {
         user_verified: bool,
         key_amr: &'static str,
     },
+    /// An upstream identity provider verified the user: SID verified no
+    /// method itself.
+    Upstream,
 }
 
 impl LoginMethod {
@@ -148,6 +151,16 @@ impl LoginMethod {
             Self::Passkey { user_verified, .. } => {
                 implied_auth_level("webauthn", passkey_satisfies_mfa, user_verified)
             }
+            Self::Upstream => AuthLevel::Basic,
+        }
+    }
+
+    /// The method name the sign-in rules weigh.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Password => "opaque",
+            Self::Passkey { .. } => "webauthn",
+            Self::Upstream => "upstream",
         }
     }
 
@@ -162,6 +175,8 @@ impl LoginMethod {
                 .iter()
                 .map(|m| m.to_string())
                 .collect(),
+            // RFC 8176 §1: only methods SID itself verified are named.
+            Self::Upstream => Vec::new(),
         }
     }
 }

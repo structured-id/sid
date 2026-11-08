@@ -334,9 +334,11 @@ async fn a_suspended_profile_is_not_signed_in() {
     );
 }
 
-// Regression: the sign-in security rules apply to an upstream sign-in. A
-// policy requiring more than basic assurance refuses it: SID verified no
-// method of its own.
+// Regression: the sign-in security rules apply to an upstream sign-in. SID
+// verified no method of its own, so a policy requiring more than basic
+// assurance opens no session: an account without a factor gets the pending
+// context that only enrolls its first one, as after a password (the MFA
+// enrollment lifecycle), never a full session.
 #[tokio::test]
 async fn the_security_policy_applies_to_an_upstream_sign_in() {
     let mut policy = SecurityPolicy::ce_default();
@@ -344,15 +346,23 @@ async fn the_security_policy_applies_to_an_upstream_sign_in() {
     let s = setup_on(storage().await, EnrollmentMode::Open, Some(policy)).await;
     let sub = format!("user-{}", uuid::Uuid::now_v7());
     let state = s.started(&sub).await;
-    let refused = s
+    let answered = s
         .service
         .handle_upstream_callback(s.callback(state, None))
         .await
-        .unwrap_err();
+        .expect("the pending context")
+        .into_inner();
+    let Some(handle_upstream_callback_response::Result::Success(pending)) = answered.result else {
+        panic!("a sign-in result: {answered:?}");
+    };
+    assert!(pending.second_factors.is_empty());
     assert_eq!(
-        common::error_reason(&refused).as_deref(),
-        Some("STEP_UP_REQUIRED")
+        pending.enrollable_factors,
+        [sid_proto::sid::v1::authn::StepUpMethod::Totp as i32]
     );
+    let session_id = sid_ids_proto::required(pending.session_id.as_ref()).unwrap();
+    let session = s.storage.get_session(session_id).await.unwrap().unwrap();
+    assert!(session.awaits_second_factor(), "no full session");
 }
 
 // Regression (#242): an installation that admits no self-registration

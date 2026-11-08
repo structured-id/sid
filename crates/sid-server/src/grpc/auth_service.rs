@@ -972,16 +972,16 @@ impl AuthServiceImpl {
     }
 
     /// Sign `profile` in after an upstream identity provider verified the
-    /// user, as every other sign-in completes: only an active Profile, after
+    /// user, as every first factor completes: only an active Profile, after
     /// the sign-in security rules for this client, with a session of this
-    /// authority's lifetime and limit. The provider, not SID, verified the
-    /// user: the session names no `amr` method (RFC 8176 §1) and has basic
-    /// assurance.
+    /// authority's lifetime and limit, or its pending context with the
+    /// second factor it owes. The provider, not SID, verified the user: the
+    /// session names no `amr` method (RFC 8176 §1) and has basic assurance.
     pub(crate) async fn complete_upstream_sign_in(
         &self,
         profile: &sid_core::models::Profile,
         ceremony: &UpstreamCeremony,
-    ) -> Result<SignedIn, Status> {
+    ) -> Result<FirstFactorSignedIn, Status> {
         self.sign_ins
             .upstream_sign_in(self.oauth.login_policy(), profile, ceremony.completer())
             .await

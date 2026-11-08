@@ -757,6 +757,14 @@ impl OAuth {
         {
             Ok(redemption) => redemption,
             Err(SidError::Fenced(_)) => return Err(OAuthError::PolicyChanged),
+            // The approving session ended before the device redeemed: the
+            // approval admits nothing more (RFC 6749 §5.2).
+            Err(SidError::NotFound(_)) => {
+                return Err(OAuthError::token(
+                    TokenError::InvalidGrant,
+                    "the session that approved the device ended",
+                ));
+            }
             Err(e) => return Err(e.into()),
         };
         match redemption {

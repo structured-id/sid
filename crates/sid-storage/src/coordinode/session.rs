@@ -628,7 +628,7 @@ fn claim_live_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
 }
 
 /// Whether session `id` exists, claimed as [`claim_live_session`] claims it.
-fn claim_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
+pub(super) fn claim_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
     let rows = tx.run(
         "MATCH (s:SidSession) WHERE s.id = $id RETURN id(s) AS node",
         Params::default().with("id", session_value(id)),
