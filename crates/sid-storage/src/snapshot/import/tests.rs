@@ -1,5 +1,36 @@
 use super::*;
 
+/// Regression: the record a resumed import is recognized by is the same for
+/// a snapshot and that snapshot read back from its own JSON, whose maps
+/// iterate in another order. Before, the digest was taken over the
+/// serialization as it came, so reopening an identical archive could give
+/// another fingerprint and refuse the resume as an initialized target.
+#[test]
+fn a_reread_snapshot_resumes_under_the_same_record() {
+    use sid_core::models::{Invite, InviteCreator, InviteId, ProfileId};
+    let crypto = sid_crypto::RustCryptoPrimitives::new();
+    let mut snapshot = Snapshot::new("test");
+    snapshot.invites.push(Invite {
+        id: InviteId::generate(),
+        code: "ABCDEFGH".into(),
+        created_by: InviteCreator::Profile(ProfileId::generate()),
+        created_by_name: "admin".into(),
+        metadata: (0..32)
+            .map(|i| (format!("field-{i}"), i.to_string()))
+            .collect(),
+        max_uses: 1,
+        use_count: 0,
+        expires_at: None,
+        active: true,
+        created_at: chrono::Utc::now(),
+    });
+    let reread = Snapshot::parse(&snapshot.to_json().unwrap()).unwrap();
+    assert_eq!(
+        import_record(&snapshot, &crypto).unwrap().fingerprint,
+        import_record(&reread, &crypto).unwrap().fingerprint
+    );
+}
+
 /// A snapshot whose assignments depend on each other in a cycle cannot have
 /// come from a store; it is refused instead of imported in some order.
 #[test]
