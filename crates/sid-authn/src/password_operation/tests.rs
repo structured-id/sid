@@ -633,9 +633,10 @@ async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
             .unwrap()
             .expect("the admission is owed");
     assert_eq!(
-        (commit_deadline(op.expires_at) + sid_core::models::password_history::REPLICA_CLOCK_SKEW)
-            .timestamp_micros(),
-        cleanup.not_before.timestamp_micros()
+        sid_core::models::password_history::stored_instant(
+            commit_deadline(op.expires_at) + sid_core::models::password_history::REPLICA_CLOCK_SKEW
+        ),
+        cleanup.not_before
     );
 }
 

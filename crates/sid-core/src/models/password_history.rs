@@ -703,9 +703,10 @@ impl KeyArchive {
     }
 }
 
-/// A history write cutoff as stores keep it, to the microsecond: rounded up,
-/// so storing it never lets an epoch created just before it through.
-pub fn write_cutoff_instant(not_before: DateTime<Utc>) -> DateTime<Utc> {
+/// A lower bound as stores keep instants, to the microsecond: rounded up, so
+/// storing a write cutoff never lets an epoch created just before it through
+/// and storing a due time never makes work due before it.
+pub fn stored_instant(not_before: DateTime<Utc>) -> DateTime<Utc> {
     match not_before.timestamp_subsec_nanos() % 1000 {
         0 => not_before,
         nanos => not_before + chrono::Duration::nanoseconds(i64::from(1000 - nanos)),
@@ -874,7 +875,9 @@ impl EnrollmentAdmission {
         let payload = serde_json::to_vec(self).expect("an admission serializes");
         let mut work = crate::models::NewWork::new(kind, payload);
         work.id = crate::models::WorkId(self.operation);
-        work.not_before = Some(commit_deadline(self.expires_at) + REPLICA_CLOCK_SKEW);
+        work.not_before = Some(stored_instant(
+            commit_deadline(self.expires_at) + REPLICA_CLOCK_SKEW,
+        ));
         work.max_attempts = ENROLLMENT_ADMISSION_ATTEMPTS;
         work
     }

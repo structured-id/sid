@@ -263,7 +263,7 @@ async fn raise_cutoff(
     which: Cutoff,
     not_before: chrono::DateTime<chrono::Utc>,
 ) -> SidResult<(chrono::DateTime<chrono::Utc>, bool)> {
-    let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+    let not_before = sid_core::models::password_history::stored_instant(not_before);
     if let Some(current) = read_cutoff(tx, which).await?
         && current >= not_before
     {
