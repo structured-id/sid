@@ -444,6 +444,132 @@ async fn a_lost_factor_is_no_first_enrollment() {
     assert_eq!(svc.mock_storage.sessions_of(profile), 0);
 }
 
+/// A recovery code set of `codes` for `profile`.
+async fn recovery_codes(svc: &TestServices, profile: ProfileId, codes: &[&str]) {
+    let hashes: Vec<String> = codes
+        .iter()
+        .map(|code| sid_authn::hash_code(&sid_authn::normalize_code(code)))
+        .collect();
+    let set = Credential::new(
+        profile,
+        CredentialType::Recovery,
+        CredentialData::new(serde_json::to_vec(&hashes).unwrap()),
+        None,
+    );
+    svc.storage
+        .create_credential(&set, AuditEntry::system("test", "recovery").into())
+        .await
+        .unwrap();
+}
+
+/// The recovery codes `profile` has left.
+async fn codes_left(svc: &TestServices, profile: ProfileId) -> usize {
+    let set = svc
+        .storage
+        .get_credentials_by_profile(profile, Some(CredentialType::Recovery))
+        .await
+        .unwrap()
+        .remove(0);
+    serde_json::from_slice::<Vec<String>>(set.data.expose())
+        .unwrap()
+        .len()
+}
+
+/// VerifyRecoveryCode with `code`, presenting `token`.
+async fn recover_with_token(
+    svc: &TestServices,
+    token: &str,
+    code: &str,
+) -> Result<Response<MfaVerifyResponse>, Status> {
+    svc.auth
+        .verify_recovery_code(with_token(
+            token,
+            VerifyRecoveryCodeRequest {
+                code: code.to_string(),
+            },
+        ))
+        .await
+}
+
+/// Regression: an account whose TOTP authenticator is enrolled but lost
+/// completes its password sign-in with a recovery code, recorded as `mca`,
+/// the code spent once; a retry of the completion, whose response was lost,
+/// spends nothing more and signs in no second session. Before, a recovery
+/// code was accepted only on an already completed session, so the pending
+/// sign-in could not be completed at all.
+#[tokio::test]
+async fn a_pending_sign_in_is_completed_by_a_recovery_code() {
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, profile) = services(Some(&seed)).await;
+    // The account's enabled TOTP is what the sign-in owes.
+    policy.set(Some(requiring(&[])));
+    recovery_codes(&svc, profile, &["AAAA-BBBB", "CCCC-DDDD"]).await;
+
+    let first = native_sign_in(&svc).await.expect("pending context");
+    let pending_token = bearer(&first);
+    assert_eq!(
+        first.into_inner().second_factors,
+        [StepUpMethod::Totp as i32, StepUpMethod::RecoveryCode as i32]
+    );
+
+    let wrong = recover_with_token(&svc, &pending_token, "EEEE-FFFF")
+        .await
+        .unwrap_err();
+    assert_eq!(wrong.code(), Code::Unauthenticated, "{wrong:?}");
+
+    let completed = recover_with_token(&svc, &pending_token, "AAAA-BBBB")
+        .await
+        .expect("the recovery code completes the sign-in");
+    let token = bearer(&completed);
+    let claims = svc.jwt.validate_access_token(&token).unwrap();
+    assert!(claims.amr.iter().any(|m| m == "pwd"), "{:?}", claims.amr);
+    assert!(claims.amr.iter().any(|m| m == "mca"), "{:?}", claims.amr);
+    assert!(!claims.amr.iter().any(|m| m == "otp"), "{:?}", claims.amr);
+    assert_eq!(completed.into_inner().remaining_codes, Some(1));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+
+    for code in ["AAAA-BBBB", "CCCC-DDDD"] {
+        assert!(
+            recover_with_token(&svc, &pending_token, code)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+    assert_eq!(codes_left(&svc, profile).await, 1, "a retry spends no code");
+}
+
+/// A policy that names the method it requires (`otp`) is not met by a
+/// recovery code: none is offered, and one presented is refused before it
+/// is spent.
+#[tokio::test]
+async fn a_recovery_code_meets_no_policy_naming_another_method() {
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, profile) = services(Some(&seed)).await;
+    recovery_codes(&svc, profile, &["AAAA-BBBB"]).await;
+
+    let first = native_sign_in(&svc).await.expect("pending context");
+    let pending_token = bearer(&first);
+    assert_eq!(
+        first.into_inner().second_factors,
+        [StepUpMethod::Totp as i32]
+    );
+    let refused = recover_with_token(&svc, &pending_token, "AAAA-BBBB")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&refused).as_deref(),
+        Some("STEP_UP_REQUIRED"),
+        "{refused:?}"
+    );
+    assert_eq!(codes_left(&svc, profile).await, 1, "the refused code stays");
+    assert_eq!(
+        svc.mock_storage.sessions_of(profile),
+        1,
+        "only the pending context"
+    );
+}
+
 /// A sign-in counts as successful evidence for later ones (the address's
 /// reputation) only once its second factor completed it, never while it
 /// waits. Before, a sign-in completed this way recorded none.

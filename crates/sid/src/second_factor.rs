@@ -23,7 +23,7 @@ use sid_core::models::{
 use sid_proto::sid::v1::{
     CompleteStepUpRequest, CompleteStepUpResponse, DeleteMfaCredentialRequest,
     DeleteMfaCredentialResponse, FinishTotpEnrollmentResponse, GenerateRecoveryCodesRequest,
-    GenerateRecoveryCodesResponse, MfaVerifyResponse, StepUpChallenge, StepUpMethod, TotpAlgorithm,
+    GenerateRecoveryCodesResponse, StepUpChallenge, StepUpMethod, TotpAlgorithm,
     TotpEnrollmentChallenge, complete_step_up_request, step_up_challenge,
 };
 use tracing::{info, warn};
@@ -179,6 +179,14 @@ impl FactorCaller {
             Self::Pending(session, _) | Self::StepUp(session) => session.profile_id,
         }
     }
+}
+
+/// A spent recovery code: the session it authenticated, the codes left
+/// and, for a completed sign-in, its delivery.
+pub struct RecoveryCodeSpent {
+    pub session_id: SessionId,
+    pub remaining: i32,
+    pub signed_in: Option<SignedIn>,
 }
 
 /// How long a started enrollment or step-up may be finished.
@@ -738,52 +746,99 @@ impl SecondFactors {
         Ok(GenerateRecoveryCodesResponse { codes: plaintext })
     }
 
-    /// Spend a recovery code on the installation session `verified` stands
-    /// for: the method is recorded on it (recovery grants no elevation, so
-    /// no new token is delivered).
+    /// Spend a recovery code for `caller`: a sign-in's pending context is
+    /// completed into its session, as by a TOTP code, when the requirements
+    /// `login_policy` states accept the code's method, checked before the
+    /// code is spent (with the refresh generation of `native_key` when a
+    /// native client proved one); an installation session has the method
+    /// recorded (recovery grants it no elevation, so no new token). A wrong
+    /// code completing a sign-in spends the account's sign-in budget.
     pub async fn verify_recovery_code(
         &self,
         sign_in: &SignIn,
-        verified: &Verified,
+        login_policy: &dyn LoginPolicySource,
+        caller: FactorCaller,
+        client_ip: Option<std::net::IpAddr>,
+        native_key: Option<&str>,
         code: &str,
-    ) -> Result<MfaVerifyResponse, SecondFactorError> {
-        // A second factor authenticates the IdP session, never an
-        // application's session.
-        verified.require_installation()?;
-        let profile_id = verified.caller.profile_id;
+    ) -> Result<RecoveryCodeSpent, SecondFactorError> {
+        let profile_id = caller.profile_id();
         if code.is_empty() {
             return Err(SecondFactorError::MissingField("code"));
         }
-        let session_id = token_session(verified)?;
-        let remaining = i32::try_from(
-            self.consume_recovery_code(sign_in, profile_id, code)
-                .await?,
-        )
-        .map_err(|e| internal("count remaining recovery codes", e))?;
-        self.authenticate_session(
-            sign_in,
-            session_id,
-            AuditEntry::user(
-                profile_id.to_string(),
-                "session.recovery_code_used",
-                session_id.to_string(),
-            )
-            .into(),
-            // RFC 8176 `mca`: a multiple-channel authenticator.
-            |active| active.add_amr("mca"),
-        )
-        .await?;
+        let amr = crate::sign_in::RECOVERY_CODE_AMR;
+        let (pending, client) = match caller {
+            FactorCaller::Pending(pending, client) => (pending, client),
+            FactorCaller::StepUp(session) => {
+                let remaining = self.spend_recovery_code(sign_in, profile_id, code).await?;
+                self.authenticate_session(
+                    sign_in,
+                    session.id,
+                    AuditEntry::user(
+                        profile_id.to_string(),
+                        "session.recovery_code_used",
+                        session.id.to_string(),
+                    )
+                    .into(),
+                    |active| active.add_amr(amr),
+                )
+                .await?;
+                return Ok(RecoveryCodeSpent {
+                    session_id: session.id,
+                    remaining,
+                    signed_in: None,
+                });
+            }
+        };
+        let identity = profile_id.to_string();
+        sign_in.refuse_if_locked(&identity).await?;
+        // Nothing is spent on a completion that cannot happen: a pending
+        // context completed or ended since (a retry whose answer was lost),
+        // a policy refusing the method, a replaced first factor. The
+        // completion checks them again at commit.
+        let pending = sign_in
+            .storage()
+            .get_session(pending.id)
+            .await?
+            .filter(|s| s.profile_id == profile_id && s.awaits_second_factor() && !s.is_expired())
+            .ok_or(SecondFactorError::SessionEnded)?;
+        sign_in
+            .second_factor_requirements(login_policy, &pending, amr)
+            .await?;
+        sign_in.first_factor_fence(&pending).await?;
+        let remaining = match self.spend_recovery_code(sign_in, profile_id, code).await {
+            Ok(remaining) => remaining,
+            Err(SecondFactorError::AuthenticationFailed) => {
+                sign_in.record_failed_login(&identity, client_ip).await?;
+                return Err(SecondFactorError::AuthenticationFailed);
+            }
+            Err(e) => return Err(e),
+        };
+        let signed_in = sign_in
+            .complete_second_factor(login_policy, pending, amr, client, native_key)
+            .await?;
         info!(
-            "Recovery code used for profile {} ({} remaining)",
+            "A recovery code completed the sign-in of profile {} ({} remaining)",
             profile_id, remaining
         );
-        Ok(MfaVerifyResponse {
-            verified: true,
-            session_id: Some(session_id.into()),
-            expires_in: None,
-            redirect_to: None,
-            remaining_codes: Some(remaining),
+        Ok(RecoveryCodeSpent {
+            session_id: signed_in.session_id,
+            remaining,
+            signed_in: Some(signed_in),
         })
+    }
+
+    /// Spend one of the profile's recovery codes; how many remain.
+    async fn spend_recovery_code(
+        &self,
+        sign_in: &SignIn,
+        profile_id: ProfileId,
+        code: &str,
+    ) -> Result<i32, SecondFactorError> {
+        let remaining = self
+            .consume_recovery_code(sign_in, profile_id, code)
+            .await?;
+        i32::try_from(remaining).map_err(|e| internal("count remaining recovery codes", e))
     }
 
     /// The step-up methods the installation session `verified` stands for

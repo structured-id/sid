@@ -1802,31 +1802,99 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
             && second_claims.amr.iter().any(|m| m == "otp"),
         "the next code completes the sign-in with the second factor recorded",
     )?;
-    // A recovery code is spent once on the signed-in session.
-    let verified = sid_authn::caller::Verified {
-        claims: served
-            .jwt
-            .validate_access_token(guest_token.expose_secret())?,
-        caller: guest.clone(),
-        source: sid_authn::caller::TokenSource::Installation,
-    };
-    let code = enrolled.recovery_codes.first().ok_or("a recovery code")?;
-    let spent = served
-        .factors
-        .verify_recovery_code(&served.sign_in, &verified, code)
+    // The authenticator is lost: a password sign-in awaiting it is offered
+    // the recovery codes, one completes it with `mca` recorded, and a retry
+    // of that completion, whose answer was lost, spends nothing more.
+    let lost = served
+        .password_first_factor(&policy, GUEST, PASSWORD)
         .await?;
     check(
-        spent.remaining_codes == i32::try_from(enrolled.recovery_codes.len() - 1).ok(),
-        "a recovery code is spent, one fewer remains",
+        lost.second_factors
+            .contains(&(sid_proto::sid::v1::StepUpMethod::RecoveryCode as i32)),
+        "a sign-in awaiting an enabled factor is offered the recovery codes",
+    )?;
+    let lost_session = served
+        .installation
+        .storage
+        .get_session(lost.signed_in.session_id)
+        .await?
+        .ok_or("the pending sign-in")?;
+    let codes = &enrolled.recovery_codes;
+    let recover = |pending: sid_core::models::Session, code: &str| {
+        let code = code.to_owned();
+        let policy = &policy;
+        let served = &served;
+        async move {
+            served
+                .factors
+                .verify_recovery_code(
+                    &served.sign_in,
+                    policy,
+                    FactorCaller::Pending(
+                        pending,
+                        sid_authn::sign_in_delivery::CeremonyClient::Native,
+                    ),
+                    None,
+                    None,
+                    &code,
+                )
+                .await
+        }
+    };
+    let recovered = recover(lost_session.clone(), &codes[0]).await?;
+    let (recovered_caller, recovered_token) =
+        served.bearer(recovered.signed_in.ok_or("the completed sign-in")?.delivery)?;
+    let recovered_claims = served
+        .jwt
+        .validate_access_token(recovered_token.expose_secret())?;
+    check(
+        recovered_caller.profile_id == guest.profile_id
+            && recovered_claims.amr.iter().any(|m| m == "mca")
+            && recovered.remaining == i32::try_from(codes.len() - 1)?,
+        "a recovery code completes the pending sign-in, recorded as mca, spent",
     )?;
     refused(
-        served
-            .factors
-            .verify_recovery_code(&served.sign_in, &verified, code)
-            .await,
+        recover(lost_session, &codes[1]).await,
+        |e| matches!(e, SecondFactorError::SessionEnded),
+        "a retried completion completes nothing more",
+    )?;
+    // A recovery code is spent once on a signed-in session.
+    let signed_in_session = served
+        .installation
+        .storage
+        .get_session(sid_core::models::SessionId::parse(&guest.session_id)?)
+        .await?
+        .ok_or("the guest's session")?;
+    let step_up = |code: &str| {
+        let code = code.to_owned();
+        let session = signed_in_session.clone();
+        let policy = &policy;
+        let served = &served;
+        async move {
+            served
+                .factors
+                .verify_recovery_code(
+                    &served.sign_in,
+                    policy,
+                    FactorCaller::StepUp(session),
+                    None,
+                    None,
+                    &code,
+                )
+                .await
+        }
+    };
+    let spent = step_up(&codes[1]).await?;
+    check(
+        spent.signed_in.is_none() && spent.remaining == i32::try_from(codes.len() - 2)?,
+        "the retry spent no code: the next one is spent, one fewer remains",
+    )?;
+    refused(
+        step_up(&codes[1]).await,
         failed,
         "a spent recovery code is refused",
     )?;
+    drop(guest_token);
 
     // A passkey: the guest binds one under its two-factor sign-in and from
     // then on signs in with it alone, naming its account or letting the

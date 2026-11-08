@@ -256,6 +256,10 @@ pub struct SignInParts {
 /// How long a started password sign-in may be finished.
 const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// The method a recovery code records: RFC 8176 `mca`, a multiple-channel
+/// authenticator.
+pub const RECOVERY_CODE_AMR: &str = "mca";
+
 /// Signing users in for one authority.
 pub struct SignIn {
     storage: Arc<dyn StorageBackend>,
@@ -540,6 +544,20 @@ impl SignIn {
                 .any(|c| c.status.is_active())
         {
             factors.push(StepUpMethod::Totp);
+        }
+        // Recovery codes complete the sign-in of an account whose enabled
+        // factor is unavailable: they are its fallback, never the account's
+        // only protection, and only where the requirements accept them.
+        if requirements.account_protection > AuthLevel::Basic
+            && requirements.met_with(first, AuthLevel::Standard, RECOVERY_CODE_AMR, now)
+            && self
+                .storage
+                .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
+                .await?
+                .iter()
+                .any(|c| c.status.is_active())
+        {
+            factors.push(StepUpMethod::RecoveryCode);
         }
         Ok(factors)
     }
@@ -1069,6 +1087,32 @@ impl SignIn {
         Ok(signed_in)
     }
 
+    /// The requirements `login_policy` states now, with the account's
+    /// protection, when `pending` completed by the second factor `method`
+    /// would meet them; the step-up they ask otherwise. A factor spent on
+    /// the completion is checked here before it is spent.
+    pub async fn second_factor_requirements(
+        &self,
+        login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
+        pending: &Session,
+        method: &str,
+    ) -> Result<LoginRequirements, SignInError> {
+        let now = Utc::now();
+        let requirements = self
+            .for_account(
+                &organization_requirements(login_policy).await?,
+                pending.profile_id,
+            )
+            .await?;
+        if !requirements.met_with(pending, AuthLevel::Standard, method, now) {
+            let mut completed = pending.clone();
+            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
+            completed.amr.push(method.to_string());
+            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
+        }
+        Ok(requirements)
+    }
+
     /// Complete `pending` with the verified second factor `method` (RFC
     /// 8176): the login requirements `login_policy` states now are met by
     /// the completed authentication, the first factor's credential still
@@ -1089,20 +1133,9 @@ impl SignIn {
             .await?
             .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
             .ok_or(SignInError::AuthenticationFailed)?;
-        let now = Utc::now();
         let requirements = self
-            .for_account(
-                &organization_requirements(login_policy).await?,
-                pending.profile_id,
-            )
+            .second_factor_requirements(login_policy, &pending, method)
             .await?;
-        if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
-            let mut completed = pending.clone();
-            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
-            completed.amr.push(method.to_string());
-            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
-        }
-
         let proved_by = self.first_factor_fence(&pending).await?;
 
         let mut session = self.new_session(profile.id, pending.ip_address);
