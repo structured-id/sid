@@ -215,6 +215,15 @@ pub async fn verify(
     let cutoff = chrono::Utc::now();
     moved.ceremony.retain_live_at(cutoff);
     held.ceremony.retain_live_at(cutoff);
+    // A claim belongs to a worker of the store it was made in: every import
+    // restores claimed work at rest, so both sides are compared at rest.
+    for work in moved
+        .durable_work
+        .iter_mut()
+        .chain(held.durable_work.iter_mut())
+    {
+        work.record = work.at_rest();
+    }
     compare_contents(&moved, &held, &mut counts, &mut issues)?;
 
     let passed = counts.iter().all(|c| c.matches) && issues.is_empty();

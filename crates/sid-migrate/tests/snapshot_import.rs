@@ -2187,6 +2187,45 @@ async fn operation_resource_bindings_survive_migration() {
     );
 }
 
+/// Regression: work a stopped source still holds claimed (its worker gone)
+/// is restored due again, its claim dropped as every import does, and the
+/// restored store still verifies against its source.
+#[tokio::test]
+async fn work_claimed_at_the_source_verifies_once_restored() {
+    use sid_core::models::{NewWork, WorkKind, WorkState};
+    use sid_plugin::WorkStore;
+
+    let source = installation(&sid_core::models::Organization::implicit_community(
+        "sid.example.com",
+    ))
+    .await;
+    let kind = WorkKind::new("snapshot_probe").unwrap();
+    let work = NewWork::new(kind.clone(), vec![]);
+    source.enqueue_work(&work, 10).await.unwrap();
+    let claimed = source
+        .claim_work(
+            &[kind],
+            "gone-worker",
+            1,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let target = uninitialized().await;
+    import(&target, &export(&source).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        target.get_work(work.id).await.unwrap().unwrap().state,
+        WorkState::Pending,
+        "the source's claim does not travel"
+    );
+    let verified = verify(&source, &target).await.unwrap();
+    assert!(verified.passed, "{verified}");
+}
+
 /// A keyed command completed before a migration is still completed after it:
 /// the retry finds the recorded result and executes nothing on the target.
 #[tokio::test]
