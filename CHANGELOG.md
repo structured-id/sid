@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.25](https://github.com/structured-id/sid/compare/v0.2.24...v0.2.25) - 2026-11-08
+
+### Other
+
+- *(authn)* shared second-factor mechanism ([#537](https://github.com/structured-id/sid/pull/537))
+
 ## [0.2.24](https://github.com/structured-id/sid/compare/v0.2.23...v0.2.24) - 2026-11-08
 
 ### Added
