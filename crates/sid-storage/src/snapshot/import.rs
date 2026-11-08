@@ -242,7 +242,9 @@ fn import_record(
         key: OperationKey::parse(&snapshot.metadata.snapshot_id.to_string())
             .map_err(|e| invalid(format!("snapshot id: {e}")))?,
         method: IMPORT_METHOD.to_owned(),
-        fingerprint: crypto.sha256(&snapshot.to_json()?).to_vec(),
+        // Over the canonical form: a snapshot read again from its archive
+        // keeps the record its first import attempt bound.
+        fingerprint: crypto.sha256(&snapshot.canonical_json()?).to_vec(),
         period: None,
         resource: snapshot.metadata.snapshot_id,
     })
