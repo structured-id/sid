@@ -41,6 +41,8 @@ rand = "0.10"
 jsonwebtoken = "11"
 base64 = "0.23"
 serde_json = "1"
+# The client's PKCE challenge (RFC 7636 §4.2).
+sha2 = "0.11"
 # The host's own CoordiNode database.
 coordinode-embed = { version = "0.9", optional = true }
 async-trait = "0.1"

@@ -34,6 +34,7 @@ use sid::{Installation, InstallationSettings};
 use sid_authn::caller::Caller;
 use sid_authn::caller::CallerError;
 use sid_authn::jwt::JwtService;
+use sid_authn::oauth2::TokenError;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::opaque_zkpp::setup::{ZkppSettings, spawn_zkpp_server};
 use sid_authn::password_operation::{HistoryEvaluation, PasswordHistoryAuthority};
@@ -70,6 +71,10 @@ const ISSUER: &str = "https://id.sid.example.com";
 const WORK_KIND: &str = "host_probe";
 const ROOT: &str = "root@sid.example.com";
 const GUEST: &str = "guest@sid.example.com";
+/// The redirect URI of the host's own single-page application.
+const REDIRECT: &str = "https://app.sid.example.com/callback";
+/// The host application's own API, the resource its tokens are for.
+const API: &str = "https://api.sid.example.com/orders";
 
 /// `result` is the refusal `expected` names; success or any other failure
 /// (a store error, a misconfiguration) fails the run.
@@ -636,6 +641,98 @@ impl Served {
         self.oauth.token(&request, None, None, &target).await
     }
 
+    /// The authorization code `caller`'s sign-in grants `client_id` for
+    /// `openid` at the host's redirect URI, bound to the PKCE challenge of
+    /// `verifier` (RFC 7636 §4.2, S256).
+    async fn authorization_code(
+        &self,
+        caller: &Caller,
+        client_id: &str,
+        verifier: &str,
+    ) -> Result<String, Failure> {
+        use base64::Engine;
+        use sha2::Digest;
+        let request = sid_proto::sid::v1::OAuth2AuthorizeRequest {
+            client_id: client_id.to_owned(),
+            redirect_uri: REDIRECT.into(),
+            response_type: "code".into(),
+            scope: Some("openid".into()),
+            state: Some("host-state".into()),
+            nonce: Some(uuid::Uuid::now_v7().to_string()),
+            code_challenge: Some(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(sha2::Sha256::digest(verifier.as_bytes())),
+            ),
+            code_challenge_method: Some("S256".into()),
+            issuer_handle: self.installation.issuer.handle.to_string(),
+            resource: vec![API.into()],
+            ..Default::default()
+        };
+        let (client, issuer) = self.oauth.authorize_client(&request, None).await?;
+        let session = self
+            .installation
+            .storage
+            .get_session(sid_core::models::SessionId::parse(&caller.session_id)?)
+            .await?
+            .ok_or("the caller's session")?;
+        let answer = self
+            .oauth
+            .authorize_with(&client, &issuer, &session, request)
+            .await?;
+        match answer.result {
+            Some(sid_proto::sid::v1::o_auth2_authorize_response::Result::AuthorizationCode(
+                code,
+            )) => Ok(code),
+            other => Err(format!("no authorization code: {other:?}").into()),
+        }
+    }
+
+    /// `client_id` redeems `code` with its PKCE `verifier`.
+    async fn redeem(
+        &self,
+        client_id: &str,
+        code: &str,
+        verifier: &str,
+    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, OAuthError> {
+        self.token(sid_proto::sid::v1::OAuth2TokenRequest {
+            grant_type: "authorization_code".into(),
+            code: Some(code.to_owned()),
+            redirect_uri: Some(REDIRECT.into()),
+            client_id: Some(client_id.to_owned()),
+            code_verifier: Some(verifier.to_owned()),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// `client_id` exchanges `refresh_token` for new tokens.
+    async fn refresh(
+        &self,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, OAuthError> {
+        self.token(sid_proto::sid::v1::OAuth2TokenRequest {
+            grant_type: "refresh_token".into(),
+            refresh_token: Some(refresh_token.to_owned()),
+            client_id: Some(client_id.to_owned()),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// A token request to the installation's issuer.
+    async fn token(
+        &self,
+        mut request: sid_proto::sid::v1::OAuth2TokenRequest,
+    ) -> Result<sid_proto::sid::v1::OAuth2TokenResponse, OAuthError> {
+        request.issuer_handle = self.installation.issuer.handle.to_string();
+        let target = sid_authn::resource::RequestTarget {
+            method: "POST".into(),
+            uri: format!("{ISSUER}/oauth2/token"),
+        };
+        self.oauth.token(&request, None, None, &target).await
+    }
+
     async fn administrator(&self, password: &[u8]) -> Result<InstallationAdministrator, Failure> {
         let (caller, _) = self.password_sign_in(ROOT, password).await?;
         Ok(self
@@ -1170,7 +1267,12 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         served
             .machine_token(&machine.client_id, &added.client_secret)
             .await,
-        |e| matches!(e, OAuthError::Target(_)),
+        |e| {
+            matches!(
+                e,
+                OAuthError::Target(sid_authn::target::TargetRefusal::NotPermitted)
+            )
+        },
         "a machine user without access to a resource gets no token for it",
     )?;
     served
@@ -1269,7 +1371,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                 enroll(),
             )
             .await,
-        |e| matches!(e, DeviceKeyError::Denied | DeviceKeyError::Enrollment(_)),
+        |e| matches!(e, DeviceKeyError::Denied),
         "a revoked sign-in starts no device-key ceremony",
     )?;
     let challenge = served
@@ -1380,6 +1482,103 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     check(
         live_key().await?.is_none(),
         "a revoked device key is no longer live",
+    )?;
+
+    // OAuth: a public application's client gets an authorization code under
+    // the administrator's sign-in, redeems it once with its PKCE verifier,
+    // and refreshes; a redeemed code and a rotated refresh token are refused.
+    let app = served
+        .projects
+        .create_application(
+            &root,
+            operation(storage.as_ref(), "create-app").await?,
+            sid_proto::sid::v1::CreateApplicationRequest {
+                project_id: project.id.clone(),
+                name: "orders-app".into(),
+                client: Some(sid_proto::sid::v1::ClientRoleSettings {
+                    r#type: sid_proto::sid::v1::ApplicationType::Spa as i32,
+                    redirect_uris: vec![REDIRECT.into()],
+                    ..Default::default()
+                }),
+                resource: Some(sid_proto::sid::v1::ResourceRoleSettings {
+                    indicator: API.into(),
+                    scopes: vec!["orders.read".into()],
+                }),
+                ..Default::default()
+            },
+        )
+        .await?
+        .response
+        .application
+        .ok_or("the created application")?;
+    let api_resource = app.resource.ok_or("the application's resource")?;
+    let app = app.client.ok_or("the application's client")?;
+    served
+        .projects
+        .set_resource_access(
+            &root,
+            operation(storage.as_ref(), "app-access").await?,
+            SetResourceAccessRequest {
+                client_id: app.client_id.clone(),
+                resource_id: api_resource.id.clone(),
+                scopes: vec!["orders.read".into()],
+            },
+        )
+        .await?;
+    let verifier = {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
+    };
+    let code = served
+        .authorization_code(&root, &app.client_id, &verifier)
+        .await?;
+    let redeemed = served.redeem(&app.client_id, &code, &verifier).await?;
+    check(
+        !redeemed.access_token.is_empty()
+            && redeemed.refresh_token.is_some()
+            && redeemed.id_token.is_some(),
+        "the code redeems once for access, refresh and ID tokens",
+    )?;
+    let invalid_grant = |e: &OAuthError| matches!(e, OAuthError::Token { error, .. } if *error == TokenError::InvalidGrant);
+    let rotated = redeemed.refresh_token.clone().ok_or("a refresh token")?;
+    let second = served.refresh(&app.client_id, &rotated).await?;
+    let current = second
+        .refresh_token
+        .clone()
+        .ok_or("a rotated refresh token")?;
+    check(current != rotated, "a refresh rotates the refresh token")?;
+    // A client that lost the answer retries within the rotation's grace
+    // window and is answered; after it, the rotated token is a replay.
+    served.refresh(&app.client_id, &rotated).await?;
+    println!("verified: a refresh retried within its grace window is answered");
+    tokio::time::sleep(Duration::from_secs(
+        (sid_core::models::refresh_token::DEFAULT_GRACE_WINDOW_SECS + 1).try_into()?,
+    ))
+    .await;
+    refused(
+        served.refresh(&app.client_id, &rotated).await,
+        invalid_grant,
+        "a rotated refresh token presented after its grace window is refused",
+    )?;
+    refused(
+        served.refresh(&app.client_id, &current).await,
+        invalid_grant,
+        "the replay ends its family: the current refresh token is refused too",
+    )?;
+    refused(
+        served.redeem(&app.client_id, &code, &verifier).await,
+        invalid_grant,
+        "a redeemed code is refused",
+    )?;
+    let fresh_code = served
+        .authorization_code(&root, &app.client_id, &verifier)
+        .await?;
+    refused(
+        served
+            .redeem(&app.client_id, &fresh_code, "not-the-verifier")
+            .await,
+        invalid_grant,
+        "a code redeemed without its PKCE verifier is refused",
     )?;
 
     // The CE work the installation committed so far (event relays of the
