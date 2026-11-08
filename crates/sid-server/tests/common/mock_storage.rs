@@ -1052,7 +1052,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         not_before: chrono::DateTime<chrono::Utc>,
         audit: AuditEntry,
     ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.key_write_cutoff {
             Some(current) if current >= not_before => Ok(current),
@@ -2248,7 +2248,7 @@ impl CredentialStore for MockStorage {
         not_before: chrono::DateTime<chrono::Utc>,
         ctx: MutationContext,
     ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.history_write_cutoff {
             Some(current) if current >= not_before => Ok(current),

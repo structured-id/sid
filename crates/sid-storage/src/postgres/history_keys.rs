@@ -795,7 +795,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         not_before: DateTime<Utc>,
         audit: AuditEntry,
     ) -> SidResult<DateTime<Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut tx = self.begin().await?;
         let current: Option<DateTime<Utc>> =
             sqlx::query_scalar("SELECT not_before FROM history_key_write_cutoff FOR UPDATE")
