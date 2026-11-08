@@ -25,6 +25,10 @@ use sid_authn::password_sign_in::{
     OpenedPassword, PasswordSignInError, PasswordSignInHost, PendingSignIn, Started, Verified,
 };
 use sid_authn::revocation_cache::RevocationCache;
+use sid_authn::second_factor::pending::{
+    CommitError, CompletedContext, Completion, FirstFactorProofs, PendingError, PendingSignInHost,
+};
+use sid_authn::second_factor::{FactorError, FactorSpend};
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::sign_in_security::{
     AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost, implied_auth_level,
@@ -34,9 +38,9 @@ use sid_core::models::event::{Event, event_types};
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
-    ActorFence, AuditEntry, Credential, CredentialData, CredentialFence, CredentialType,
-    MutationContext, OperationCompletion, OperationKey, PrincipalAssignmentFence, Profile,
-    ProfileId, Session, SessionEnd, SessionId, SignInProof,
+    ActorFence, AuditEntry, Credential, CredentialData, CredentialFence, MutationContext,
+    OperationCompletion, OperationKey, PrincipalAssignmentFence, Profile, ProfileId, Session,
+    SessionEnd, SessionId, SignInProof,
 };
 use sid_ids::OpaqueLoginId;
 use sid_plugin::CredentialStore;
@@ -103,6 +107,15 @@ impl From<SignInRefusal> for SignInError {
 fn internal(operation: &'static str, cause: impl std::fmt::Display) -> SignInError {
     tracing::error!(operation, error = %cause, "internal failure");
     SignInError::Internal
+}
+
+/// A failed read of the factors a sign-in offers: only the store answers
+/// there.
+fn factor_failure(e: FactorError) -> SignInError {
+    match e {
+        FactorError::Store(e) => SignInError::Store(e),
+        other => internal("read the account's second factors", other),
+    }
 }
 
 /// What the rules weigh beside the authentication: the pass earned by
@@ -181,31 +194,6 @@ impl LoginMethod {
     }
 }
 
-/// The credential a pending second-factor context's first factor proved: its
-/// id and the SHA-256 of the data it held then.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct FirstFactorProof {
-    credential: uuid::Uuid,
-    digest: [u8; 32],
-}
-
-impl FirstFactorProof {
-    fn of(fence: &CredentialFence) -> Self {
-        use sha2::Digest;
-        Self {
-            credential: fence.id.0,
-            digest: sha2::Sha256::digest(fence.data.expose()).into(),
-        }
-    }
-
-    /// Whether `credential` is the one proved, holding the same data.
-    fn proves(&self, credential: &Credential) -> bool {
-        use sha2::Digest;
-        let digest: [u8; 32] = sha2::Sha256::digest(credential.data.expose()).into();
-        credential.id.0 == self.credential && digest == self.digest
-    }
-}
-
 /// A completed first-factor sign-in: its credential, and when it is a
 /// pending context the second factors that complete it or may be enrolled
 /// first (`StepUpMethod` values) with a browser's CSRF token.
@@ -273,87 +261,6 @@ pub struct SignInParts {
 /// How long a started password sign-in may be finished.
 const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The method a recovery code records: RFC 8176 `mca`, a multiple-channel
-/// authenticator.
-pub const RECOVERY_CODE_AMR: &str = "mca";
-
-/// A single-use secret a second factor spends (a recovery code): spent in
-/// the commit of the effect it pays for, with the work its spend owes, or
-/// not at all.
-pub struct FactorSpend {
-    pub spend: sid_core::models::CredentialSpend,
-    pub owes: sid_core::models::NewWork,
-}
-
-impl FactorSpend {
-    /// `ctx`, also spending this.
-    pub fn into_context(self, ctx: MutationContext) -> MutationContext {
-        ctx.spending(self.spend).with_work(self.owes)
-    }
-}
-
-/// The namespace of second-factor completions, whose results are their
-/// deliveries sealed for a lost response.
-pub const SECOND_FACTOR_NAMESPACE: &str = "second-factor-sign-in";
-
-/// The method a second-factor completion records.
-pub const SECOND_FACTOR_METHOD: &str = "complete_second_factor";
-
-/// A sign-in's pending second-factor context as its client proves it,
-/// whether or not it has completed: the context names the completion whose
-/// result a retry after a lost response receives, and nothing else.
-#[derive(Clone, PartialEq, Eq)]
-pub enum CompletedContext {
-    /// The sign-in page's context: the hash of its cookie's secret and the
-    /// CSRF token it was given (both checked by the browser adapter).
-    Browser {
-        secret: sid_core::models::BrowserSecretHash,
-        csrf: String,
-    },
-    /// A native client's context and the application key a fresh proof of
-    /// this request bound to it, when the client proves one.
-    Native {
-        pending: SessionId,
-        key: Option<String>,
-    },
-}
-
-impl CompletedContext {
-    /// The context `client` completes `pending` from, with the key
-    /// `native_key` a native client proved; `None` for a browser context
-    /// that holds no cookie binding.
-    pub fn of(pending: &Session, client: CeremonyClient, native_key: Option<&str>) -> Option<Self> {
-        match client {
-            CeremonyClient::Browser => Some(Self::Browser {
-                secret: pending.browser_secret_hash?,
-                csrf: pending.browser_csrf.as_ref().map(BrowserCsrf::encode)?,
-            }),
-            CeremonyClient::Native => Some(Self::Native {
-                pending: pending.id,
-                key: native_key.map(str::to_owned),
-            }),
-        }
-    }
-
-    /// The key of the completion this context names.
-    fn key(&self) -> Result<OperationKey, SignInError> {
-        let key = match self {
-            Self::Browser { secret, .. } => format!("browser:{}", hex::encode(secret.as_bytes())),
-            Self::Native { pending, .. } => format!("native:{pending}"),
-        };
-        OperationKey::parse(&key).map_err(|e| internal("name a second-factor completion", e))
-    }
-
-    /// What a retry must present again: the CSRF token a browser context
-    /// was given, the application key a native client proved.
-    fn inputs(&self) -> Vec<u8> {
-        match self {
-            Self::Browser { csrf, .. } => csrf.as_bytes().to_vec(),
-            Self::Native { key, .. } => key.as_deref().unwrap_or_default().as_bytes().to_vec(),
-        }
-    }
-}
-
 /// The pending second-factor context a sign-in completes: it ends in the
 /// session's commit, which spends what its factor spends.
 struct Completing<'a> {
@@ -389,7 +296,7 @@ pub struct SignIn {
     /// The credential each pending second-factor context's first factor
     /// proved, keyed by the context: its completion commits only while that
     /// credential is unchanged.
-    first_factor_proofs: ChallengeStore<Option<FirstFactorProof>>,
+    first_factor_proofs: FirstFactorProofs,
 }
 
 impl SignIn {
@@ -403,12 +310,7 @@ impl SignIn {
                 "opaque-login",
                 LOGIN_TTL,
             ),
-            first_factor_proofs: ChallengeStore::new(
-                ceremonies,
-                parts.keys.clone(),
-                "first-factor-proof",
-                LOGIN_TTL,
-            ),
+            first_factor_proofs: FirstFactorProofs::new(ceremonies, parts.keys.clone(), LOGIN_TTL),
             opaque: parts.opaque,
             keys: parts.keys,
             storage: parts.storage,
@@ -612,12 +514,27 @@ impl SignIn {
         };
         let now = Utc::now();
         let first = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
-        let factors = self
-            .second_factors(profile_id, requirements, &first, now)
-            .await?;
+        let credentials: &dyn CredentialStore<Owner = ProfileId> = self.storage.as_ref();
+        let factors = sid_authn::second_factor::offered_factors(
+            credentials,
+            profile_id,
+            requirements,
+            &first,
+            now,
+        )
+        .await
+        .map_err(factor_failure)?;
         let enrollable = if factors.is_empty() {
-            self.enrollable_factors(profile_id, requirements, &first, now)
-                .await?
+            sid_authn::second_factor::enrollable_factors(
+                credentials,
+                profile_id,
+                requirements,
+                &first,
+                self.policy.auth.passkey_satisfies_mfa,
+                now,
+            )
+            .await
+            .map_err(factor_failure)?
         } else {
             Vec::new()
         };
@@ -628,74 +545,6 @@ impl SignIn {
             factors,
             enrollable,
             fence: requirements.fence,
-        })
-    }
-
-    /// The second factors `profile_id` has enrolled that complete `first`
-    /// under `requirements`.
-    async fn second_factors(
-        &self,
-        profile_id: ProfileId,
-        requirements: &LoginRequirements,
-        first: &Session,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Vec<StepUpMethod>, SignInError> {
-        let mut factors = Vec::new();
-        if requirements.met_with(first, AuthLevel::Standard, "otp", now)
-            && self
-                .storage
-                .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
-                .await?
-                .iter()
-                .any(|c| c.status.is_active())
-        {
-            factors.push(StepUpMethod::Totp);
-        }
-        // Recovery codes complete the sign-in of an account whose enabled
-        // factor is unavailable: they are its fallback, never the account's
-        // only protection, and only where the requirements accept them.
-        if requirements.account_protection > AuthLevel::Basic
-            && requirements.met_with(first, AuthLevel::Standard, RECOVERY_CODE_AMR, now)
-            && self
-                .storage
-                .get_credentials_by_profile(profile_id, Some(CredentialType::Recovery))
-                .await?
-                .iter()
-                .any(|c| c.status.is_active())
-        {
-            factors.push(StepUpMethod::RecoveryCode);
-        }
-        Ok(factors)
-    }
-
-    /// The factors `profile_id` may enroll first to complete `first` under
-    /// `requirements`: none on an account with established protection, whose
-    /// lost factor goes through recovery.
-    async fn enrollable_factors(
-        &self,
-        profile_id: ProfileId,
-        requirements: &LoginRequirements,
-        first: &Session,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Vec<StepUpMethod>, SignInError> {
-        if !requirements.met_with(first, AuthLevel::Standard, "otp", now) {
-            return Ok(Vec::new());
-        }
-        let active: Vec<_> = self
-            .storage
-            .get_credentials_by_profile(profile_id, None)
-            .await?
-            .into_iter()
-            .filter(|c| c.status.is_active())
-            .collect();
-        let established = sid_authn::credential_enrollment::established_assurance(
-            &active,
-            self.policy.auth.passkey_satisfies_mfa,
-        );
-        Ok(if established == AuthLevel::Basic {
-            vec![StepUpMethod::Totp]
-        } else {
-            Vec::new()
         })
     }
 
@@ -1062,14 +911,7 @@ impl SignIn {
                 session.device_id = device_id;
                 // Kept for as long as the context lives; a completion that
                 // finds none completes nothing.
-                let kept = self
-                    .first_factor_proofs
-                    .insert_until(
-                        &session.id.to_string(),
-                        &proved_by.map(FirstFactorProof::of),
-                        session.expires_at,
-                    )
-                    .await?;
+                let kept = self.first_factor_proofs.keep(&session, proved_by).await?;
                 if !kept {
                     return Err(SignInError::Expired);
                 }
@@ -1133,25 +975,10 @@ impl SignIn {
         &self,
         pending: &Session,
     ) -> Result<Option<CredentialFence>, SignInError> {
-        let proof = self
+        Ok(self
             .first_factor_proofs
-            .read(&pending.id.to_string())
-            .await?
-            .ok_or(SignInError::SessionEnded)?;
-        let Some(proof) = proof else {
-            return Ok(None);
-        };
-        let credential = self
-            .storage
-            .get_credentials_by_profile(pending.profile_id, None)
-            .await?
-            .into_iter()
-            .find(|c| c.status.is_active() && proof.proves(c))
-            .ok_or(SignInError::Fenced)?;
-        Ok(Some(CredentialFence {
-            id: credential.id,
-            data: credential.data,
-        }))
+            .fence(self.storage.as_ref(), pending)
+            .await?)
     }
 
     /// How long a full session lives: the policy's absolute lifetime, a day
@@ -1249,20 +1076,42 @@ impl SignIn {
         pending: &Session,
         method: &str,
     ) -> Result<LoginRequirements, SignInError> {
-        let now = Utc::now();
-        let requirements = self
-            .for_account(
-                &organization_requirements(login_policy).await?,
-                pending.profile_id,
-            )
-            .await?;
-        if !requirements.met_with(pending, AuthLevel::Standard, method, now) {
-            let mut completed = pending.clone();
-            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
-            completed.amr.push(method.to_string());
-            return Err(SignInRefusal::StepUp(requirements.unmet(&completed, now)).into());
+        sid_authn::second_factor::pending::second_factor_requirements(
+            &self.pending_host(login_policy),
+            pending,
+            method,
+        )
+        .await
+    }
+
+    /// `pending` as it stands now when it is still a live context of its
+    /// account; otherwise the context `client` proves (with `native_key`),
+    /// which may only receive again the sign-in its completion committed.
+    pub async fn live_pending(
+        &self,
+        pending: Session,
+        client: CeremonyClient,
+        native_key: Option<&str>,
+    ) -> Result<Result<Session, CompletedContext>, SignInError> {
+        Ok(sid_authn::second_factor::pending::live_pending(
+            self.storage.as_ref(),
+            pending,
+            client,
+            native_key,
+        )
+        .await?)
+    }
+
+    /// This authority as the host of its pending second-factor contexts,
+    /// under the requirements `login_policy` states.
+    fn pending_host<'a>(
+        &'a self,
+        login_policy: &'a dyn sid_authn::login_policy::LoginPolicySource,
+    ) -> PendingHost<'a> {
+        PendingHost {
+            sign_in: self,
+            login_policy,
         }
-        Ok(requirements)
     }
 
     /// Complete `pending` with the verified second factor `method` (RFC
@@ -1281,89 +1130,15 @@ impl SignIn {
         native_key: Option<&str>,
         spend: Option<FactorSpend>,
     ) -> Result<SignedIn, SignInError> {
-        let profile = self
-            .storage
-            .get_profile(pending.profile_id)
-            .await?
-            .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
-            .ok_or(SignInError::AuthenticationFailed)?;
-        let requirements = self
-            .second_factor_requirements(login_policy, &pending, method)
-            .await?;
-        let proved_by = self.first_factor_fence(&pending).await?;
-
-        let mut session = self.new_session(profile.id, pending.ip_address);
-        session.device_id = pending.device_id;
-        session.user_agent = pending.user_agent.clone();
-        session.assurance_level = pending.assurance_level.max(AuthLevel::Standard);
-        session.amr = pending.amr.clone();
-        if !session.amr.iter().any(|m| m == method) {
-            session.amr.push(method.to_string());
-        }
-        // The authentication began with the first factor.
-        session.authenticated_at = pending.authenticated_at;
-        // The delivery commits with the session, sealed to the context the
-        // client completed from, and is kept while either may still be used:
-        // a retry of that context after a lost response receives it again.
-        let completed = CompletedContext::of(&pending, client, native_key);
-        let retained = match &completed {
-            Some(completed) => Some(RetainedSignIn {
-                keys: self.keys.as_ref(),
-                namespace: SECOND_FACTOR_NAMESPACE,
-                method: SECOND_FACTOR_METHOD,
-                completion_key: completed.key()?,
-                context: self.second_factor_context(completed)?,
-                deadline: pending.expires_at.min(session.expires_at),
-                inputs: completed.inputs(),
-            }),
-            None => None,
-        };
-        // The pending context ends in the session's own commit: of concurrent
-        // completions one signs in, and one ended meanwhile completes nothing
-        // more; it is answered with the completion that committed.
-        let committed = self
-            .complete_pending(
-                &profile,
-                (
-                    &pending,
-                    &SessionEnd::new(
-                        sid_core::models::RevocationReason::SignInCompleted,
-                        pending.profile_id.to_string(),
-                    ),
-                ),
-                session,
-                client,
-                native_key,
-                proved_by.as_ref().map(SignInProof::Credential),
-                requirements.fence,
-                (spend, retained),
-            )
-            .await;
-        let signed_in = match (committed, &completed) {
-            (Err(SignInError::Fenced), Some(completed)) => {
-                match self
-                    .redeliver_second_factor(login_policy, completed)
-                    .await?
-                {
-                    Some(signed_in) => return Ok(signed_in),
-                    None => return Err(SignInError::Fenced),
-                }
-            }
-            (committed, _) => committed?,
-        };
-        // Recorded from the address the rules judged at the first factor.
-        self.record_completed(profile.id, pending.ip_address).await;
-        Ok(signed_in)
-    }
-
-    /// The sealing context of a second-factor completion's delivery: the
-    /// completion this context names at this issuer.
-    fn second_factor_context(&self, completed: &CompletedContext) -> Result<String, SignInError> {
-        Ok(format!(
-            "second-factor-sign-in:{}:{}",
-            self.issuer,
-            completed.key()?.as_str()
-        ))
+        sid_authn::second_factor::pending::complete_second_factor(
+            &self.pending_host(login_policy),
+            pending,
+            method,
+            client,
+            native_key,
+            spend,
+        )
+        .await
     }
 
     /// The sign-in the second factor of `completed` already completed,
@@ -1379,54 +1154,24 @@ impl SignIn {
         login_policy: &dyn sid_authn::login_policy::LoginPolicySource,
         completed: &CompletedContext,
     ) -> Result<Option<SignedIn>, SignInError> {
-        let Some(record) = self
-            .storage
-            .get_operation_result(SECOND_FACTOR_NAMESPACE, &completed.key()?)
-            .await?
-        else {
-            return Ok(None);
-        };
-        // A completion of this context presented with another CSRF token or
-        // proved by another key is not this client's.
-        if !record.matches(SECOND_FACTOR_METHOD, &completed.inputs(), None) {
-            return Err(SignInError::AuthenticationFailed);
-        }
-        let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
-            self.keys.as_ref(),
-            &self.second_factor_context(completed)?,
-            &record.completion.result,
+        sid_authn::second_factor::pending::redeliver_second_factor(
+            &self.pending_host(login_policy),
+            completed,
         )
         .await
-        .map_err(|e| internal("open the retained sign-in delivery", e))?;
-        if delivery.deadline <= Utc::now() {
-            return Ok(None);
-        }
-        let ended = || SignInError::SessionEnded;
-        let session = self
-            .storage
-            .get_session(delivery.session_id)
-            .await?
-            .filter(|session| !session.is_expired())
-            .ok_or_else(ended)?;
-        self.storage
-            .get_profile(session.profile_id)
-            .await?
-            .filter(|profile| profile.status.can_authenticate())
-            .ok_or_else(ended)?;
-        let requirements = self
-            .for_account(
-                &organization_requirements(login_policy).await?,
-                session.profile_id,
-            )
-            .await?;
-        if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
-            requirements.decide(&session, Utc::now())
-        {
-            return Err(SignInRefusal::StepUp(unmet).into());
-        }
-        // The first generation is handed out again only while it is the
-        // session's current one: a client that already renewed with it
-        // received it, and its retired credentials are never delivered.
+    }
+
+    /// Whether the native delivery `delivery` retained for `session` may be
+    /// handed out again: its first generation still the session's current
+    /// one (a client that already renewed with it received it, and retired
+    /// credentials are never delivered), and its access token not replaced
+    /// and stopped by a later step-up, which would replace the client's
+    /// current token with a revoked one.
+    async fn native_deliverable(
+        &self,
+        delivery: &sid_authn::sign_in_delivery::RetainedDelivery,
+        session: &Session,
+    ) -> Result<bool, SignInError> {
         if let Some(credential) = delivery.refresh_credential() {
             let current = self
                 .storage
@@ -1439,33 +1184,27 @@ impl SignIn {
                         && generation.state == sid_core::models::NativeGenerationState::Current
                 });
             if !current {
-                return Err(ended());
+                return Ok(false);
             }
         }
-        // A later step-up replaced and stopped the access token: handing it
-        // out again would replace the client's current one with a revoked
-        // credential.
-        if let Some(token) = delivery.bearer_token() {
-            let claims = self
-                .jwt()
-                .validate_access_token(secrecy::ExposeSecret::expose_secret(token))
-                .map_err(|_| ended())?;
-            if self
-                .revocation()
-                .is_revoked(&claims.jti, &claims.sid)
-                .await
-                .map_err(|e| SignInError::Unavailable {
-                    what: "token revocation",
-                    cause: e.to_string(),
-                })?
-            {
-                return Err(ended());
-            }
-        }
-        delivery
-            .signed_in(&self.cookie, &session)
-            .map(Some)
-            .ok_or_else(ended)
+        let Some(token) = delivery.bearer_token() else {
+            return Ok(true);
+        };
+        let Ok(claims) = self
+            .jwt()
+            .validate_access_token(secrecy::ExposeSecret::expose_secret(token))
+        else {
+            return Ok(false);
+        };
+        let revoked = self
+            .revocation()
+            .is_revoked(&claims.jti, &claims.sid)
+            .await
+            .map_err(|e| SignInError::Unavailable {
+                what: "token revocation",
+                cause: e.to_string(),
+            })?;
+        Ok(!revoked)
     }
 
     /// Store a sign-in's pending second-factor context and deliver its
@@ -1918,6 +1657,135 @@ impl PasswordSignInHost for Passwords<'_> {
 
     async fn account(&self, owner: &ProfileId) -> Result<Option<Profile>, SignInError> {
         Ok(self.sign_in.storage.get_profile(*owner).await?)
+    }
+}
+
+impl From<PendingError> for SignInError {
+    fn from(e: PendingError) -> Self {
+        match e {
+            PendingError::SessionEnded => Self::SessionEnded,
+            PendingError::Fenced => Self::Fenced,
+            PendingError::StepUp(unmet) => SignInRefusal::StepUp(unmet).into(),
+            PendingError::AuthenticationFailed => Self::AuthenticationFailed,
+            PendingError::State(e) => Self::Ceremony(e),
+            PendingError::Store(e) => Self::Store(e),
+            e @ (PendingError::Sealed(_) | PendingError::Internal(_)) => {
+                internal("a second-factor completion", e)
+            }
+        }
+    }
+}
+
+/// A local Profile's pending second-factor context under the requirements
+/// `login_policy` states.
+struct PendingHost<'a> {
+    sign_in: &'a SignIn,
+    login_policy: &'a dyn sid_authn::login_policy::LoginPolicySource,
+}
+
+#[async_trait::async_trait]
+impl PendingSignInHost for PendingHost<'_> {
+    type Owner = ProfileId;
+    type Error = SignInError;
+
+    fn credentials(&self) -> &dyn CredentialStore<Owner = ProfileId> {
+        self.sign_in.storage.as_ref()
+    }
+
+    fn grants(&self) -> &dyn sid_plugin::GrantStore<Owner = ProfileId> {
+        self.sign_in.storage.as_ref()
+    }
+
+    fn operations(&self) -> &dyn sid_plugin::OperationResultStore {
+        self.sign_in.storage.as_ref()
+    }
+
+    fn keys(&self) -> &dyn sid_keys::KeyManager {
+        self.sign_in.keys.as_ref()
+    }
+
+    fn cookie(&self) -> &BrowserCookie {
+        &self.sign_in.cookie
+    }
+
+    fn proofs(&self) -> &FirstFactorProofs {
+        &self.sign_in.first_factor_proofs
+    }
+
+    fn issuer(&self) -> &str {
+        &self.sign_in.issuer
+    }
+
+    async fn requirements(&self, owner: ProfileId) -> Result<LoginRequirements, SignInError> {
+        self.sign_in
+            .for_account(&organization_requirements(self.login_policy).await?, owner)
+            .await
+    }
+
+    async fn can_sign_in(&self, owner: ProfileId) -> Result<bool, SignInError> {
+        Ok(self
+            .sign_in
+            .storage
+            .get_profile(owner)
+            .await?
+            .is_some_and(|profile| profile.status.can_authenticate()))
+    }
+
+    fn new_session(&self, owner: ProfileId, ip_address: Option<IpAddr>) -> Session {
+        self.sign_in.new_session(owner, ip_address)
+    }
+
+    async fn commit(
+        &self,
+        completion: Completion<'_, ProfileId>,
+    ) -> Result<SignedIn, CommitError<SignInError>> {
+        let profile = self
+            .sign_in
+            .storage
+            .get_profile(completion.pending.profile_id)
+            .await
+            .map_err(SignInError::from)?
+            .filter(|profile| profile.status.can_authenticate())
+            .ok_or(SignInError::AuthenticationFailed)?;
+        let retained = completion.retained.map(|retained| RetainedSignIn {
+            keys: self.sign_in.keys.as_ref(),
+            namespace: retained.namespace,
+            method: retained.method,
+            completion_key: retained.completion_key,
+            context: retained.context,
+            deadline: retained.deadline,
+            inputs: retained.inputs,
+        });
+        match self
+            .sign_in
+            .complete_pending(
+                &profile,
+                (completion.pending, &completion.end),
+                completion.session,
+                completion.client,
+                completion.native_key,
+                completion.proved_by.as_ref().map(SignInProof::Credential),
+                completion.policy,
+                (completion.spend, retained),
+            )
+            .await
+        {
+            Ok(signed_in) => Ok(signed_in),
+            Err(SignInError::Fenced) => Err(CommitError::Fenced),
+            Err(e) => Err(CommitError::Other(e)),
+        }
+    }
+
+    async fn bearer_deliverable(
+        &self,
+        delivery: &sid_authn::sign_in_delivery::RetainedDelivery,
+        session: &Session,
+    ) -> Result<bool, SignInError> {
+        self.sign_in.native_deliverable(delivery, session).await
+    }
+
+    async fn record_completed(&self, owner: ProfileId, ip_address: Option<IpAddr>) {
+        self.sign_in.record_completed(owner, ip_address).await;
     }
 }
 

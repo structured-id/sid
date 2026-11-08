@@ -424,20 +424,23 @@ impl Session {
             authenticated_by: None,
         }
     }
+}
 
-    /// The pending context of a sign-in that proved its first factor (at
-    /// `assurance`, with `amr`) while the login requirements still need a
-    /// second: provisional, for [`PENDING_SECOND_FACTOR_TTL_MINUTES`], its
-    /// only scope [`SECOND_FACTOR_SCOPE`]. It authorizes nothing but
-    /// completing that sign-in.
+impl<O> Session<O> {
+    /// The pending context of a sign-in of `owner` that proved its first
+    /// factor (at `assurance`, with `amr`) while the login requirements
+    /// still need a second: provisional, for
+    /// [`PENDING_SECOND_FACTOR_TTL_MINUTES`], its only scope
+    /// [`SECOND_FACTOR_SCOPE`]. It authorizes nothing but completing that
+    /// sign-in.
     pub fn new_awaiting_second_factor(
-        profile_id: ProfileId,
+        owner: O,
         ip_address: Option<IpAddr>,
         assurance: AuthLevel,
         amr: Vec<String>,
     ) -> Self {
         let mut session = Self::new(
-            profile_id,
+            owner,
             ip_address,
             Utc::now() + chrono::Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES),
         );

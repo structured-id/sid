@@ -57,7 +57,7 @@ use refusal::{
     registration_restricted, session_ended, session_provisional, step_up_required,
 };
 use sid::second_factor::{Enroller, FactorCaller};
-use sid::sign_in::CompletedContext;
+use sid_authn::second_factor::pending::CompletedContext;
 
 /// What a second-factor verification presents: who verifies the factor,
 /// or the browser's own session a completion already installed.

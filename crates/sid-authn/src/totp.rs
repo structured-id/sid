@@ -118,12 +118,16 @@ impl TotpReplayGuard {
         Self { admissions }
     }
 
-    /// Record the use of the code at `step` for `profile_id`, once across
-    /// every replica. `false` when it was already used; an unreachable store
-    /// is an error, never a pass.
-    pub async fn first_use(&self, profile_id: ProfileId, step: u64) -> sid_core::Result<bool> {
+    /// Record the use of the code at `step` for the account `owner`, once
+    /// across every replica. `false` when it was already used; an unreachable
+    /// store is an error, never a pass.
+    pub async fn first_use(
+        &self,
+        owner: impl std::fmt::Display,
+        step: u64,
+    ) -> sid_core::Result<bool> {
         self.admissions
-            .admit_once("totp-used", &format!("{profile_id}:{step}"), TOTP_USED_TTL)
+            .admit_once("totp-used", &format!("{owner}:{step}"), TOTP_USED_TTL)
             .await
     }
 }
