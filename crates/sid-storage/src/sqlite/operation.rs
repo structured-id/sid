@@ -406,6 +406,32 @@ fn bound(column: &str, value: i64) -> SidResult<u64> {
 
 #[async_trait]
 impl OperationResultStore for SqliteBackend {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        // A retired period has no row and a number at most the last issued.
+        let mut tx = self.begin_write().await?;
+        let dropped = sqlx::query(
+            "DELETE FROM operation_resources
+             WHERE method = ? AND period IS NOT NULL
+               AND period <= (SELECT issued_through FROM operation_period_state WHERE id = 1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM operation_periods p
+                   WHERE p.period = operation_resources.period)
+               AND NOT EXISTS (
+                   SELECT 1 FROM operation_results o
+                   WHERE o.namespace = operation_resources.namespace
+                     AND o.op_key = operation_resources.op_key)",
+        )
+        .bind(method)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("drop unfinished operation resources: {e}")))?
+        .rows_affected();
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+        Ok(dropped)
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         let (acceptance, retention, capacity, result_bytes): (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT acceptance_seconds, retention_seconds, capacity, result_bytes

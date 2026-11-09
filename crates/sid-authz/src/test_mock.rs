@@ -380,6 +380,9 @@ impl sid_plugin::OperationResultStore for MockStorage {
     ) -> Result<uuid::Uuid> {
         unimplemented!()
     }
+    async fn drop_unfinished_bindings(&self, _: &str) -> Result<u64> {
+        unimplemented!()
+    }
     async fn export_operation_resources(
         &self,
     ) -> Result<Vec<sid_core::models::OperationResourceBinding>> {

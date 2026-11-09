@@ -76,7 +76,9 @@ pub(crate) struct TemplateVar {
 /// write of the store left it.
 #[derive(Debug, Clone)]
 pub(crate) struct Effective {
-    pub(crate) content: StoredContent,
+    /// `None` when nothing answers on the channel: its customization was
+    /// removed and the channel has no default.
+    pub(crate) content: Option<StoredContent>,
     /// Whether a customization answers rather than the default.
     pub(crate) customized: bool,
     /// The locales the template has, `en` always among them.
@@ -445,7 +447,7 @@ impl TemplateStore {
         .await
         .map_err(|e| store_error("store a template customization", e))?;
         let effective = Effective {
-            content: content.clone(),
+            content: Some(content.clone()),
             customized: true,
             locales: locales_in(&mut tx, template_id).await?,
         };
@@ -494,10 +496,15 @@ impl TemplateStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| store_error("remove a template customization", e))?;
-        let (content, customized) = self
+        // A channel with no default answers with nothing once its last
+        // customization is gone; the removal still commits.
+        let (content, customized) = match self
             .effective_in(&mut tx, template_id, channel, locale)
             .await?
-            .ok_or_else(|| TemplateStoreError::NotFound(template_id.to_string()))?;
+        {
+            Some((content, customized)) => (Some(content), customized),
+            None => (None, false),
+        };
         let effective = Effective {
             content,
             customized,

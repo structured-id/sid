@@ -41,7 +41,7 @@ sid-crypto = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "json", "ipnet"], optional = true }
 # SQLite's C API, for the SQL functions SID registers on its connections. The
 # version sqlx links: one SQLite library per binary.
-libsqlite3-sys = { version = "0.37", optional = true }
+libsqlite3-sys = { version = "0.39", optional = true }
 # The host's CoordiNode database and its value type.
 coordinode-embed = { version = "0.9", optional = true }
 coordinode-core = { version = "0.9", optional = true }

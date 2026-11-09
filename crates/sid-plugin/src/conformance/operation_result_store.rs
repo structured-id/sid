@@ -241,6 +241,39 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
     assert!(left.contains(&kept) && left.contains(&unbounded) && left.contains(&expired));
 }
 
+/// Completions carried from another store under one period, imported
+/// concurrently, all land: importing never deadlocks two imports of one
+/// period.
+pub async fn concurrent_imports_under_one_period_all_land(store: &dyn OperationResultStore) {
+    let period = store
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let records: Vec<_> = (0..16)
+        .map(|_| sid_core::models::OperationRecord {
+            completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
+                .in_period(period),
+            completed_at: chrono::Utc::now(),
+        })
+        .collect();
+    let imported =
+        futures::future::join_all(records.iter().map(|r| store.import_operation_result(r))).await;
+    for outcome in imported {
+        assert!(outcome.expect("an import under a shared period"));
+    }
+    for record in &records {
+        assert!(
+            store
+                .get_operation_result(&ns, &record.completion.key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
 /// A completion whose result is larger than the policy keeps is refused as
 /// exhausted and writes nothing, with or without a period; one exactly at
 /// the limit is recorded.
@@ -479,6 +512,19 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     let unfinished = key();
     let begun = in_period(&unfinished);
     store.bind_operation_resource(&begun).await.unwrap();
+    // A send bound in the period and never completed, and one bound in the
+    // next period: once the first period is retired, its owner drops the
+    // first; the other is still needed.
+    let sent = OperationResourceBinding {
+        period: Some(first.period),
+        ..proposal(&ns, &key(), "send")
+    };
+    store.bind_operation_resource(&sent).await.unwrap();
+    let sending = OperationResourceBinding {
+        period: Some(next.period),
+        ..proposal(&ns, &key(), "send")
+    };
+    store.bind_operation_resource(&sending).await.unwrap();
     let mut unissued_binding = in_period(&key());
     unissued_binding.period = Some(OperationPeriod::new(i64::MAX as u64));
     assert_eq!(
@@ -545,6 +591,20 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     assert!(
         bindings.contains(&begun),
         "an unfinished creation's binding is kept to reconcile it"
+    );
+    assert!(store.drop_unfinished_bindings("send").await.unwrap() >= 1);
+    let bindings = store.export_operation_resources().await.unwrap();
+    assert!(
+        !bindings.contains(&sent),
+        "an unfinished send under a retired period stayed"
+    );
+    assert!(
+        bindings.contains(&sending),
+        "a send under an admitted period was dropped"
+    );
+    assert!(
+        bindings.contains(&begun),
+        "another method's unfinished binding was dropped"
     );
     // Carried to another store, that binding still holds its key there,
     // although no command runs under its retired period any more.

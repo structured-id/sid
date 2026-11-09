@@ -517,6 +517,7 @@ mod operation_result_store {
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
         an_oversized_result_is_refused,
+        concurrent_imports_under_one_period_all_land,
     );
 
     /// A store of its own with a period capacity of 8.

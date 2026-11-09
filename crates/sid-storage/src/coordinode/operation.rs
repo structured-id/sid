@@ -536,6 +536,42 @@ impl CoordinodeBackend {
 
 #[async_trait]
 impl OperationResultStore for CoordinodeBackend {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        let method = method.to_owned();
+        self.transaction(move |tx| {
+            let rows = tx.run(
+                &format!(
+                    "MATCH (o:SidOperation) WHERE o.bound = true AND o.completed = false
+                       AND o.b_method = $method
+                     RETURN {FIELDS}"
+                ),
+                Params::default().with("method", Value::String(method.clone())),
+            )?;
+            let last = issued_through(tx)?;
+            let mut admitted = Admitted::default();
+            let mut dropped = 0;
+            for row in &rows {
+                let mut entry = entry(row)?;
+                let Some(period) = entry.binding.as_ref().and_then(|(b, _)| b.period) else {
+                    continue;
+                };
+                // Retired: issued, and no longer admitted.
+                if column(period)? > last || admitted.get(tx, period)? {
+                    continue;
+                }
+                entry.binding = None;
+                save(tx, &entry)?;
+                dropped += 1;
+            }
+            Ok(if dropped == 0 {
+                Decision::Abandon(0)
+            } else {
+                Decision::Commit(dropped)
+            })
+        })
+        .await
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         self.transaction(|tx| {
             let rows = tx.run(STATE, Params::default())?;

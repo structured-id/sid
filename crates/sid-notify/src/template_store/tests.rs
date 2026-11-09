@@ -253,7 +253,7 @@ async fn test_a_change_answers_with_what_it_left() {
         .await
         .unwrap();
     assert!(written.customized);
-    assert_eq!(written.content.subject, "French");
+    assert_eq!(written.content.unwrap().subject, "French");
     assert_eq!(written.locales, ["en", "fr"]);
 
     let reset = store
@@ -263,8 +263,40 @@ async fn test_a_change_answers_with_what_it_left() {
         .await
         .unwrap();
     assert!(reset.customized, "the en customization answers");
-    assert_eq!(reset.content.subject, "English");
+    assert_eq!(reset.content.unwrap().subject, "English");
     assert_eq!(reset.locales, ["en"]);
+}
+
+/// Regression: resetting the only customization of a channel with no default
+/// (SMS here) was refused and rolled back, so it could not be removed. The
+/// removal commits and the channel answers with nothing.
+#[tokio::test]
+async fn test_a_channel_without_a_default_can_be_reset() {
+    let store = store().await;
+    let sms = StoredContent {
+        sms_body: "Code {code}".into(),
+        ..content("")
+    };
+    store
+        .update_template("security_alert", Channel::Sms, "en", sms, alone)
+        .await
+        .unwrap();
+    let left = store
+        .reset_template("security_alert", Channel::Sms, "en", |left, _| {
+            (left.clone(), None)
+        })
+        .await
+        .expect("the reset commits");
+    assert!(left.content.is_none());
+    assert!(!left.customized);
+    assert!(
+        store
+            .get_template("security_alert", Channel::Sms, "en")
+            .await
+            .unwrap()
+            .is_none(),
+        "the SMS customization stayed"
+    );
 }
 
 /// Customizing one template, channel and locale twice keeps one row, the

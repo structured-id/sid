@@ -367,6 +367,13 @@ async fn keep_operations(
             () = &mut stopped => return,
             _ = ticks.tick() => {
                 sid_authn::operation::upkeep(operations.as_ref(), chrono::Utc::now()).await;
+                // A test send whose outcome was never recorded holds its
+                // binding; once its period is retired no attempt can send
+                // again, and nothing is left to reconcile.
+                let method = <keyed::SendTestNotification as sid_proto::KeyedMethod>::METHOD;
+                if let Err(e) = operations.drop_unfinished_bindings(method).await {
+                    warn!(error = %e, "unfinished test send bindings not dropped");
+                }
             }
         }
     }
@@ -516,8 +523,10 @@ fn channel_to_proto(ch: &Channel) -> i32 {
 }
 
 /// Build proto NotificationTemplate from store data.
+/// `content` is `None` for a channel nothing answers on (a removed
+/// customization with no default for its channel).
 fn build_proto_template(
-    content: &StoredContent,
+    content: Option<&StoredContent>,
     customized: bool,
     meta: &crate::template_store::TemplateMeta,
     channel: Channel,
@@ -533,11 +542,11 @@ fn build_proto_template(
         channels: meta.channels.iter().map(channel_to_proto).collect(),
         trigger: meta.trigger.clone(),
         customized,
-        updated_at: Some(prost_types::Timestamp {
+        updated_at: content.map(|content| prost_types::Timestamp {
             seconds: content.updated_at.timestamp(),
             nanos: content.updated_at.timestamp_subsec_nanos() as i32,
         }),
-        content: Some(admin::TemplateContent {
+        content: content.map(|content| admin::TemplateContent {
             channel: channel as i32,
             locale: locale.to_string(),
             subject: content.subject.clone(),
@@ -635,7 +644,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             .map_err(store_refusal)?;
 
         Ok(tonic::Response::new(build_proto_template(
-            &content,
+            Some(&content),
             customized,
             meta,
             channel,
@@ -680,7 +689,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
                 self.store
                     .update_template(&req.template_id, channel, &locale, stored, |left, meta| {
                         let answer = build_proto_template(
-                            &left.content,
+                            left.content.as_ref(),
                             left.customized,
                             meta,
                             channel,
@@ -724,7 +733,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
                 self.store
                     .reset_template(&req.template_id, channel, locale, |left, meta| {
                         let answer = build_proto_template(
-                            &left.content,
+                            left.content.as_ref(),
                             left.customized,
                             meta,
                             channel,

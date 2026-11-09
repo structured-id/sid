@@ -386,11 +386,22 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
         .begin()
         .await
         .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+    // A carried completion counts toward its period's capacity here too,
+    // whatever the count. The count is written first, so the period's row is
+    // held for writing from the start: a shared hold upgraded later would
+    // deadlock two imports under one period. A duplicate rolls it back.
     if let Some(period) = c.period {
-        match admit(&mut tx, column(period)?, true).await {
-            Ok(()) => {}
-            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
-            Err(e) => return Err(e),
+        let counted: Option<i64> = sqlx::query_scalar(
+            "UPDATE operation_periods SET recorded = recorded + 1 WHERE period = $1
+             RETURNING period",
+        )
+        .bind(column(period)?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        if counted.is_none() {
+            // Retired or never issued here: refused anyway.
+            return Ok(false);
         }
     }
     let inserted = sqlx::query(
@@ -411,20 +422,14 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
     .rows_affected();
-    // A carried completion counts toward its period's capacity here too.
-    if inserted == 1
-        && let Some(period) = c.period
-    {
-        sqlx::query("UPDATE operation_periods SET recorded = recorded + 1 WHERE period = $1")
-            .bind(column(period)?)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if inserted == 0 {
+        // The key is completed here already: the count rolls back with it.
+        return Ok(false);
     }
     tx.commit()
         .await
         .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
-    Ok(inserted == 1)
+    Ok(true)
 }
 
 pub(super) async fn get(
@@ -929,8 +934,33 @@ async fn import_resource(pool: &PgPool, binding: &OperationResourceBinding) -> S
     Ok(inserted == 1)
 }
 
+/// Drop the bindings of `method` under retired periods that hold no
+/// completion: a retired period has no row and a number at most the last
+/// issued.
+async fn drop_unfinished(pool: &PgPool, method: &str) -> SidResult<u64> {
+    let dropped = sqlx::query(
+        "DELETE FROM operation_resources r
+         WHERE r.method = $1 AND r.period IS NOT NULL
+           AND r.period <= (SELECT issued_through FROM operation_period_state)
+           AND NOT EXISTS (SELECT 1 FROM operation_periods p WHERE p.period = r.period)
+           AND NOT EXISTS (
+               SELECT 1 FROM operation_results o
+               WHERE o.namespace = r.namespace AND o.op_key = r.op_key)",
+    )
+    .bind(method)
+    .execute(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("drop unfinished operation resources: {e}")))?
+    .rows_affected();
+    Ok(dropped)
+}
+
 #[async_trait]
 impl OperationResultStore for PgOperationStore {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        drop_unfinished(&self.pool, method).await
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         period_policy(&self.pool).await
     }
@@ -1028,6 +1058,10 @@ impl OperationResultStore for PgOperationStore {
 
 #[async_trait]
 impl OperationResultStore for PostgresBackend {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        drop_unfinished(&self.pool, method).await
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         period_policy(&self.pool).await
     }
