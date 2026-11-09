@@ -17,10 +17,12 @@ use sid_server::grpc::governance_service::GovernanceServiceImpl;
 use std::sync::Arc;
 use tonic::{Code, Request};
 
+/// `msg` from the bearer of `token`, named as a new command.
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

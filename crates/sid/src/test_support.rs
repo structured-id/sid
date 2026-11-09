@@ -101,6 +101,47 @@ pub(crate) async fn stored_credential(
     credential
 }
 
+/// An installation administrator signed in as `profile`.
+pub(crate) fn administrator(profile: ProfileId) -> sid_authn::caller::Caller {
+    let now = chrono::Utc::now().timestamp();
+    sid_authn::caller::Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
+        sub: profile.to_string(),
+        pid: Some(profile.to_string()),
+        iss: "https://sid.example.com".into(),
+        aud: vec!["https://sid.example.com".into()],
+        client_id: None,
+        exp: now + 300,
+        iat: now,
+        auth_time: now,
+        acr: "standard".into(),
+        scope: "openid".into(),
+        roles: sid_authn::account_roles::ADMIN_ROLE_CLAIM.into(),
+        sid: uuid::Uuid::now_v7().to_string(),
+        amr: vec!["pwd".into()],
+        jti: uuid::Uuid::now_v7().to_string(),
+        cnf: None,
+        act: None,
+    })
+    .unwrap()
+}
+
+/// The operation context of a keyed call named `key`, under the store's
+/// current period.
+pub(crate) async fn operation(
+    storage: &dyn StorageBackend,
+    key: &str,
+) -> sid_core::models::OperationContext {
+    let period = storage
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    sid_core::models::OperationContext::new(
+        sid_core::models::OperationKey::parse(key).unwrap(),
+        period,
+    )
+}
+
 pub(crate) fn fixed_policy() -> sid_authn::login_policy::FixedLoginPolicy {
     sid_authn::login_policy::FixedLoginPolicy::of(
         &sid_core::models::security_policy::SecurityPolicy::ce_default(),

@@ -1175,6 +1175,57 @@ async fn test_upstream_provider_creation_retry_answers_with_its_provider() {
     );
 }
 
+/// The email provider is configured, configured again, then the first
+/// change's lost response is retried: the retry answers as the first change
+/// did and the later configuration stays.
+#[tokio::test]
+async fn test_email_settings_retry_keeps_a_later_change() {
+    use sid_proto::sid::v1::admin::EmailSettings;
+    use sid_proto::sid::v1::admin::realm_service_server::RealmService;
+    let svc = TestServices::new(MockStorage::new());
+    let realm = sid_server::grpc::realm_service::RealmServiceImpl::new(
+        svc.storage.clone(),
+        svc.jwt.clone(),
+        svc.revocation_cache.clone(),
+        common::test_key_manager(),
+    );
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let settings = |host: &str| EmailSettings {
+        smtp_host: host.into(),
+        smtp_port: 587,
+        from_address: "noreply@sid.example.com".into(),
+        password: "smtp-secret".into(),
+        ..Default::default()
+    };
+
+    let first = realm
+        .update_email_settings(keyed(settings("a.sid.example.com"), &token, Some("op-a")))
+        .await
+        .unwrap()
+        .into_inner();
+    realm
+        .update_email_settings(keyed(settings("b.sid.example.com"), &token, Some("op-b")))
+        .await
+        .unwrap();
+    let retry = realm
+        .update_email_settings(keyed(settings("a.sid.example.com"), &token, Some("op-a")))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        svc.storage
+            .get_email_provider_config()
+            .await
+            .unwrap()
+            .unwrap()
+            .smtp_host,
+        "b.sid.example.com",
+        "the retry wrote the first configuration over the later one"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {
