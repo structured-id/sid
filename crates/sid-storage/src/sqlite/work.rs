@@ -16,6 +16,34 @@ fn storage(e: sqlx::Error) -> SidError {
     SidError::Storage(e.to_string())
 }
 
+/// A claim's sweep of open work past its validity.
+const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner = NULL,
+        lease_until = NULL, updated_at = ?
+     WHERE kind IN (SELECT value FROM json_each(?))
+       AND state IN ('pending', 'claimed')
+       AND expires_at IS NOT NULL AND expires_at <= ?";
+
+/// A claim's sweep of work abandoned on its last attempt. The open-state
+/// term repeats what `state = 'claimed'` implies: SQLite takes a partial
+/// index only for a query naming its condition, and without it this and
+/// [`DUE_SQL`] scan every ended item under the write lock.
+const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
+        lease_until = NULL, updated_at = ?,
+        last_error = COALESCE(last_error, 'lease expired on the last attempt')
+     WHERE kind IN (SELECT value FROM json_each(?))
+       AND state IN ('pending', 'claimed')
+       AND state = 'claimed' AND lease_until <= ?
+       AND attempts >= max_attempts";
+
+/// The work a claim takes: pending past its time, or claimed with a lapsed
+/// lease (the open-state term as in [`ABANDONED_SQL`]).
+const DUE_SQL: &str = "SELECT id FROM durable_work
+     WHERE kind IN (SELECT value FROM json_each(?))
+       AND state IN ('pending', 'claimed')
+       AND ((state = 'pending' AND not_before <= ?)
+            OR (state = 'claimed' AND lease_until <= ?))
+     ORDER BY not_before LIMIT ?";
+
 /// Store `work` inside `tx`, the transaction of the state change that owes
 /// it. Returns `false` when work with its id already exists; refuses with
 /// `ResourceExhausted` when `capacity` open items of its kind are stored.
@@ -111,50 +139,31 @@ impl WorkStore for SqliteBackend {
             .map_err(storage)?;
 
         // Past its validity: expired, never attempted again.
-        sqlx::query(
-            "UPDATE durable_work SET state = 'expired', lease_owner = NULL,
-                lease_until = NULL, updated_at = ?
-             WHERE kind IN (SELECT value FROM json_each(?))
-               AND state IN ('pending', 'claimed')
-               AND expires_at IS NOT NULL AND expires_at <= ?",
-        )
-        .bind(&now_s)
-        .bind(&kinds_json)
-        .bind(&now_s)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
+        sqlx::query(EXPIRE_SQL)
+            .bind(&now_s)
+            .bind(&kinds_json)
+            .bind(&now_s)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
 
         // Abandoned by a worker on its last attempt: failed.
-        sqlx::query(
-            "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
-                lease_until = NULL, updated_at = ?,
-                last_error = COALESCE(last_error, 'lease expired on the last attempt')
-             WHERE kind IN (SELECT value FROM json_each(?))
-               AND state = 'claimed' AND lease_until <= ?
-               AND attempts >= max_attempts",
-        )
-        .bind(&now_s)
-        .bind(&kinds_json)
-        .bind(&now_s)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
+        sqlx::query(ABANDONED_SQL)
+            .bind(&now_s)
+            .bind(&kinds_json)
+            .bind(&now_s)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
 
-        let due: Vec<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT id FROM durable_work
-             WHERE kind IN (SELECT value FROM json_each(?))
-               AND ((state = 'pending' AND not_before <= ?)
-                    OR (state = 'claimed' AND lease_until <= ?))
-             ORDER BY not_before LIMIT ?",
-        )
-        .bind(&kinds_json)
-        .bind(&now_s)
-        .bind(&now_s)
-        .bind(i64::from(limit))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(storage)?;
+        let due: Vec<uuid::Uuid> = sqlx::query_scalar(DUE_SQL)
+            .bind(&kinds_json)
+            .bind(&now_s)
+            .bind(&now_s)
+            .bind(i64::from(limit))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage)?;
 
         let mut claimed = Vec::with_capacity(due.len());
         for id in due {
@@ -361,6 +370,9 @@ impl WorkStore for SqliteBackend {
         Ok(dropped)
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 /// The work record in `row`.
 fn record(row: &sqlx::sqlite::SqliteRow) -> SidResult<WorkRecord> {
