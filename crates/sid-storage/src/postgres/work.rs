@@ -74,9 +74,12 @@ async fn insert_work_in_tx(
     if exists {
         return Ok(false);
     }
+    // The count the triggers keep, not a count of the rows: reading every
+    // open item made each admission as slow as the backlog was long. Under
+    // the kind's lock no other insert of the kind can raise it meanwhile;
+    // concurrent completions only lower it.
     let open: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM durable_work
-         WHERE kind = $1 AND state IN ('pending', 'claimed')",
+        "SELECT COALESCE(SUM(open), 0)::BIGINT FROM durable_work_open WHERE kind = $1",
     )
     .bind(work.kind.as_str())
     .fetch_one(&mut *tx)
@@ -154,6 +157,47 @@ async fn enqueue(pool: &PgPool, work: &NewWork, capacity: u64) -> SidResult<bool
     Ok(inserted)
 }
 
+/// A claim's sweep of open work past its validity, through the expiry index.
+const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner = NULL,
+        lease_until = NULL, updated_at = NOW()
+     WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
+       AND expires_at IS NOT NULL AND expires_at <= NOW()";
+
+/// A claim's sweep of work abandoned on its last attempt, through the lease
+/// index.
+const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
+        lease_until = NULL, updated_at = NOW(),
+        last_error = COALESCE(last_error, 'lease expired on the last attempt')
+     WHERE kind = ANY($1) AND state = 'claimed' AND lease_until <= NOW()
+       AND attempts >= max_attempts";
+
+/// The work a claim takes. Each kind gives its first `limit` unlocked items
+/// from the due and the lease indexes, locked as they are read, so the read
+/// is bounded by kinds times the limit whatever the backlog (one index
+/// ordered across several kinds would sort every open item) and concurrent
+/// claims step past each other's rows instead of all waiting for the first
+/// ones. The earliest `limit` of them are claimed; the rest are released at
+/// commit. The ids are an array the update looks up by key: joined as a
+/// relation, the planner hashed the whole table to find 32 rows.
+const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts = w.attempts + 1,
+        generation = w.generation + 1, lease_owner = $2,
+        lease_until = NOW() + make_interval(secs => $3), updated_at = NOW()
+     WHERE w.id = ANY (ARRAY(SELECT c.id FROM (
+           SELECT due.id, due.not_before FROM unnest($1::text[]) k(kind)
+           CROSS JOIN LATERAL (SELECT id, not_before FROM durable_work
+               WHERE kind = k.kind AND state = 'pending' AND not_before <= NOW()
+               ORDER BY not_before LIMIT $4 FOR UPDATE SKIP LOCKED) due
+           UNION ALL
+           SELECT lapsed.id, lapsed.not_before FROM unnest($1::text[]) k(kind)
+           CROSS JOIN LATERAL (SELECT id, not_before FROM durable_work
+               WHERE kind = k.kind AND state = 'claimed' AND lease_until <= NOW()
+               ORDER BY lease_until LIMIT $4 FOR UPDATE SKIP LOCKED) lapsed
+         ) c
+         ORDER BY c.not_before
+         LIMIT $4))
+     RETURNING w.id, w.kind, w.payload, w.attempts, w.max_attempts,
+        w.generation, w.expires_at";
+
 async fn claim(
     pool: &PgPool,
     kinds: &[WorkKind],
@@ -165,50 +209,25 @@ async fn claim(
     let storage = |e: sqlx::Error| SidError::Storage(format!("claim work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
     // Past its validity: expired, never attempted again.
-    sqlx::query(
-        "UPDATE durable_work SET state = 'expired', lease_owner = NULL,
-            lease_until = NULL, updated_at = NOW()
-         WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
-           AND expires_at IS NOT NULL AND expires_at <= NOW()",
-    )
-    .bind(&kinds)
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
+    sqlx::query(EXPIRE_SQL)
+        .bind(&kinds)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
     // Abandoned by a worker on its last attempt: failed.
-    sqlx::query(
-        "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
-            lease_until = NULL, updated_at = NOW(),
-            last_error = COALESCE(last_error, 'lease expired on the last attempt')
-         WHERE kind = ANY($1) AND state = 'claimed' AND lease_until <= NOW()
-           AND attempts >= max_attempts",
-    )
-    .bind(&kinds)
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    let rows = sqlx::query(
-        "UPDATE durable_work w SET state = 'claimed', attempts = w.attempts + 1,
-            generation = w.generation + 1, lease_owner = $2,
-            lease_until = NOW() + make_interval(secs => $3), updated_at = NOW()
-         FROM (SELECT id FROM durable_work
-               WHERE kind = ANY($1)
-                 AND ((state = 'pending' AND not_before <= NOW())
-                      OR (state = 'claimed' AND lease_until <= NOW()))
-               ORDER BY not_before
-               LIMIT $4
-               FOR UPDATE SKIP LOCKED) due
-         WHERE w.id = due.id
-         RETURNING w.id, w.kind, w.payload, w.attempts, w.max_attempts,
-            w.generation, w.expires_at",
-    )
-    .bind(&kinds)
-    .bind(worker)
-    .bind(lease.as_secs_f64())
-    .bind(i64::from(limit))
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(storage)?;
+    sqlx::query(ABANDONED_SQL)
+        .bind(&kinds)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+    let rows = sqlx::query(CLAIM_SQL)
+        .bind(&kinds)
+        .bind(worker)
+        .bind(lease.as_secs_f64())
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
     tx.commit().await.map_err(storage)?;
     rows.iter()
         .map(|row| {

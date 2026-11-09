@@ -22,7 +22,58 @@ CREATE TABLE IF NOT EXISTS durable_work (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Open work only: what workers scan and what admission counts.
-CREATE INDEX IF NOT EXISTS idx_durable_work_open
+-- One index per question a claim asks, each read by kind and time: due
+-- pending work, claimed work whose lease ran out, open work past its expiry.
+CREATE INDEX IF NOT EXISTS idx_durable_work_due
     ON durable_work (kind, not_before)
-    WHERE state IN ('pending', 'claimed');
+    WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_durable_work_lease
+    ON durable_work (kind, lease_until)
+    WHERE state = 'claimed';
+CREATE INDEX IF NOT EXISTS idx_durable_work_expiry
+    ON durable_work (kind, expires_at)
+    WHERE state IN ('pending', 'claimed') AND expires_at IS NOT NULL;
+
+-- Open items per kind, which admission reads instead of counting rows. Split
+-- into shards by the work's id, so completions of one kind do not all wait
+-- on one counter row; admission sums the shards under its kind's lock.
+CREATE TABLE IF NOT EXISTS durable_work_open (
+    kind TEXT NOT NULL,
+    shard SMALLINT NOT NULL,
+    open BIGINT NOT NULL,
+    PRIMARY KEY (kind, shard)
+);
+
+-- Kept by triggers on every write that opens or ends work, so no write path
+-- can leave the count behind.
+CREATE OR REPLACE FUNCTION durable_work_count_open() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' AND OLD.state IN ('pending', 'claimed') THEN
+        INSERT INTO durable_work_open (kind, shard, open)
+        VALUES (OLD.kind, get_byte(uuid_send(OLD.id), 15) % 16, -1)
+        ON CONFLICT (kind, shard) DO UPDATE SET open = durable_work_open.open - 1;
+    END IF;
+    IF TG_OP <> 'DELETE' AND NEW.state IN ('pending', 'claimed') THEN
+        INSERT INTO durable_work_open (kind, shard, open)
+        VALUES (NEW.kind, get_byte(uuid_send(NEW.id), 15) % 16, 1)
+        ON CONFLICT (kind, shard) DO UPDATE SET open = durable_work_open.open + 1;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Only writes that change whether an item is open touch the count: a claim
+-- or a retry keeps it open and fires nothing.
+CREATE OR REPLACE TRIGGER durable_work_opened
+    AFTER INSERT ON durable_work FOR EACH ROW
+    WHEN (NEW.state IN ('pending', 'claimed'))
+    EXECUTE FUNCTION durable_work_count_open();
+CREATE OR REPLACE TRIGGER durable_work_open_changed
+    AFTER UPDATE OF state ON durable_work FOR EACH ROW
+    WHEN ((OLD.state IN ('pending', 'claimed')) <> (NEW.state IN ('pending', 'claimed')))
+    EXECUTE FUNCTION durable_work_count_open();
+CREATE OR REPLACE TRIGGER durable_work_closed
+    AFTER DELETE ON durable_work FOR EACH ROW
+    WHEN (OLD.state IN ('pending', 'claimed'))
+    EXECUTE FUNCTION durable_work_count_open();

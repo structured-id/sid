@@ -70,6 +70,131 @@ async fn owed_work_of_concurrent_mutations_respects_its_capacity() {
     assert_eq!(open, 1);
 }
 
+/// The plan of `sql` with the claim's parameters bound for `kinds`.
+async fn plan(pool: &PgPool, sql: &str, kinds: &[&str]) -> String {
+    // Built from this module's own statement constants, no outside input.
+    let explained = sqlx::AssertSqlSafe(format!("EXPLAIN {sql}"));
+    let mut query = sqlx::query_scalar::<_, String>(explained).bind(kinds);
+    if sql.contains("$2") {
+        query = query.bind("worker").bind(60.0_f64).bind(32_i64);
+    }
+    query.fetch_all(pool).await.unwrap().join("\n")
+}
+
+/// Every statement a claim runs reads its own index by kind and time, not
+/// every open item: with thousands of items owed, the sweeps read each open
+/// row and the due read sorted them all to take 32, so the claim loop slowed
+/// with the backlog and bounded the drain.
+#[tokio::test]
+async fn a_claim_reads_only_due_work_through_its_indexes() {
+    let pool = pool().await;
+    let kinds = [fresh_kind(), fresh_kind()];
+    for kind in &kinds {
+        sqlx::query(
+            "INSERT INTO durable_work (id, kind, payload, max_attempts, not_before)
+             SELECT gen_random_uuid(), $1, '\\x00', 7, NOW() - (g || ' ms')::interval
+             FROM generate_series(1, 3000) g",
+        )
+        .bind(kind.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("ANALYZE durable_work")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
+    for (name, sql, index) in [
+        ("expire", EXPIRE_SQL, "idx_durable_work_expiry"),
+        ("abandoned", ABANDONED_SQL, "idx_durable_work_lease"),
+        ("due", CLAIM_SQL, "idx_durable_work_due"),
+    ] {
+        let plan = plan(&pool, sql, &kinds).await;
+        assert!(plan.contains(index), "{name}: {plan}");
+        assert!(!plan.contains("Seq Scan on durable_work"), "{name}: {plan}");
+    }
+    let claim = plan(&pool, CLAIM_SQL, &kinds).await;
+    assert!(claim.contains("idx_durable_work_lease"), "{claim}");
+}
+
+/// The open count admission reads follows every transition of the work:
+/// claimed and retried work stays open, completed, failed and expired work
+/// leaves it, so capacity is admitted without counting the rows.
+#[tokio::test]
+async fn the_open_count_follows_each_transition() {
+    let pool = pool().await;
+    let store = PgWorkStore::new(pool.clone());
+    let kind = fresh_kind();
+    let open = async || -> i64 {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(open), 0)::BIGINT FROM durable_work_open WHERE kind = $1",
+        )
+        .bind(kind.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let lease = Duration::from_secs(60);
+    for _ in 0..4 {
+        store
+            .enqueue_work(&NewWork::new(kind.clone(), vec![]), 100)
+            .await
+            .unwrap();
+    }
+    let mut expiring = NewWork::new(kind.clone(), vec![]);
+    expiring.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    store.enqueue_work(&expiring, 100).await.unwrap();
+    assert_eq!(open().await, 5);
+
+    // The expired one leaves at the claim's sweep; claimed ones stay open.
+    let claimed = store
+        .claim_work(std::slice::from_ref(&kind), "w", 4, lease)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 4);
+    assert_eq!(open().await, 4);
+
+    let retry = WorkFailure {
+        error: "retry".into(),
+        retry_at: Some(chrono::Utc::now()),
+        ambiguous: false,
+        on_dead: None,
+    };
+    assert!(
+        store
+            .fail_work(claimed[0].id, claimed[0].generation, &retry)
+            .await
+            .unwrap()
+    );
+    assert_eq!(open().await, 4, "a retried item stays open");
+    let dead = WorkFailure {
+        retry_at: None,
+        ..retry
+    };
+    assert!(
+        store
+            .fail_work(claimed[1].id, claimed[1].generation, &dead)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .complete_work(claimed[2].id, claimed[2].generation, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(open().await, 2);
+    // A repeated outcome under a stale generation changes nothing.
+    assert!(
+        !store
+            .complete_work(claimed[2].id, claimed[2].generation, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(open().await, 2);
+}
+
 /// A host's own state change and the work it owes commit together through
 /// `owe_in_tx`: rolled back, neither is stored; committed, the work is.
 #[tokio::test]

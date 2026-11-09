@@ -23,26 +23,25 @@ const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner
        AND state IN ('pending', 'claimed')
        AND expires_at IS NOT NULL AND expires_at <= ?";
 
-/// A claim's sweep of work abandoned on its last attempt. The open-state
-/// term repeats what `state = 'claimed'` implies: SQLite takes a partial
-/// index only for a query naming its condition, and without it this and
-/// [`DUE_SQL`] scan every ended item under the write lock.
+/// A claim's sweep of work abandoned on its last attempt, through the lease
+/// index. SQLite takes a partial index only for a query naming its
+/// condition.
 const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
         lease_until = NULL, updated_at = ?,
         last_error = COALESCE(last_error, 'lease expired on the last attempt')
      WHERE kind IN (SELECT value FROM json_each(?))
-       AND state IN ('pending', 'claimed')
        AND state = 'claimed' AND lease_until <= ?
        AND attempts >= max_attempts";
 
-/// The work a claim takes: pending past its time, or claimed with a lapsed
-/// lease (the open-state term as in [`ABANDONED_SQL`]).
-const DUE_SQL: &str = "SELECT id FROM durable_work
-     WHERE kind IN (SELECT value FROM json_each(?))
-       AND state IN ('pending', 'claimed')
-       AND ((state = 'pending' AND not_before <= ?)
-            OR (state = 'claimed' AND lease_until <= ?))
+/// One kind's first due pending items, read in order from the due index.
+const DUE_SQL: &str = "SELECT id, not_before FROM durable_work
+     WHERE kind = ? AND state = 'pending' AND not_before <= ?
      ORDER BY not_before LIMIT ?";
+
+/// One kind's first claimed items whose lease ran out, from the lease index.
+const LAPSED_SQL: &str = "SELECT id, not_before FROM durable_work
+     WHERE kind = ? AND state = 'claimed' AND lease_until <= ?
+     ORDER BY lease_until LIMIT ?";
 
 /// Store `work` inside `tx`, the transaction of the state change that owes
 /// it. Returns `false` when work with its id already exists; refuses with
@@ -62,14 +61,14 @@ pub(crate) async fn insert_work_in_tx(
     if exists {
         return Ok(false);
     }
-    let open: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM durable_work
-         WHERE kind = ? AND state IN ('pending', 'claimed')",
-    )
-    .bind(work.kind.as_str())
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(storage)?;
+    // The count the triggers keep, not a count of the rows: reading every
+    // open item made each admission as slow as the backlog was long.
+    let open: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(open), 0) FROM durable_work_open WHERE kind = ?")
+            .bind(work.kind.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage)?;
     if u64::try_from(open).unwrap_or(u64::MAX) >= capacity {
         return Err(SidError::ResourceExhausted(format!(
             "durable work queue full ({capacity} open items)"
@@ -156,14 +155,27 @@ impl WorkStore for SqliteBackend {
             .await
             .map_err(storage)?;
 
-        let due: Vec<uuid::Uuid> = sqlx::query_scalar(DUE_SQL)
-            .bind(&kinds_json)
-            .bind(&now_s)
-            .bind(&now_s)
-            .bind(i64::from(limit))
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(storage)?;
+        // Each kind's first candidates from its indexes, merged by time: the
+        // read is bounded by kinds times the limit whatever the backlog.
+        let mut candidates: Vec<(uuid::Uuid, String)> = Vec::new();
+        for kind in kinds {
+            for sql in [DUE_SQL, LAPSED_SQL] {
+                candidates.extend(
+                    sqlx::query_as::<_, (uuid::Uuid, String)>(sql)
+                        .bind(kind.as_str())
+                        .bind(&now_s)
+                        .bind(i64::from(limit))
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(storage)?,
+                );
+            }
+        }
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        let due = candidates
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|(id, _)| id);
 
         let mut claimed = Vec::with_capacity(due.len());
         for id in due {

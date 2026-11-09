@@ -116,6 +116,24 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION durable_work_count_open() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' AND OLD.state IN ('pending', 'claimed') THEN
+        INSERT INTO durable_work_open (kind, shard, open)
+        VALUES (OLD.kind, get_byte(uuid_send(OLD.id), 15) % 16, -1)
+        ON CONFLICT (kind, shard) DO UPDATE SET open = durable_work_open.open - 1;
+    END IF;
+    IF TG_OP <> 'DELETE' AND NEW.state IN ('pending', 'claimed') THEN
+        INSERT INTO durable_work_open (kind, shard, open)
+        VALUES (NEW.kind, get_byte(uuid_send(NEW.id), 15) % 16, 1)
+        ON CONFLICT (kind, shard) DO UPDATE SET open = durable_work_open.open + 1;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 CREATE FUNCTION update_updated_at_column() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -280,6 +298,13 @@ CREATE TABLE durable_work (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT durable_work_max_attempts_check CHECK ((max_attempts > 0)),
     CONSTRAINT durable_work_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE durable_work_open (
+    kind text NOT NULL,
+    shard smallint NOT NULL,
+    open bigint NOT NULL,
+    CONSTRAINT durable_work_open_pkey PRIMARY KEY (kind, shard)
 );
 
 CREATE TABLE email_policy_activations (
@@ -1649,7 +1674,11 @@ CREATE INDEX idx_devices_fingerprint ON devices USING btree (profile_id, fingerp
 
 CREATE INDEX idx_devices_profile_id ON devices USING btree (profile_id);
 
-CREATE INDEX idx_durable_work_open ON durable_work USING btree (kind, not_before) WHERE (state = ANY (ARRAY['pending'::text, 'claimed'::text]));
+CREATE INDEX idx_durable_work_due ON durable_work USING btree (kind, not_before) WHERE (state = 'pending'::text);
+
+CREATE INDEX idx_durable_work_expiry ON durable_work USING btree (kind, expires_at) WHERE ((state = ANY (ARRAY['pending'::text, 'claimed'::text])) AND (expires_at IS NOT NULL));
+
+CREATE INDEX idx_durable_work_lease ON durable_work USING btree (kind, lease_until) WHERE (state = 'claimed'::text);
 
 CREATE INDEX idx_entity_attributes_entity_id ON entity_attributes USING btree (entity_id);
 
@@ -1845,6 +1874,12 @@ CREATE RULE profiles_view_no_insert AS
 
 CREATE RULE profiles_view_no_update AS
     ON UPDATE TO profiles_view DO INSTEAD NOTHING;
+
+CREATE TRIGGER durable_work_closed AFTER DELETE ON durable_work FOR EACH ROW WHEN ((old.state = ANY (ARRAY['pending'::text, 'claimed'::text]))) EXECUTE FUNCTION durable_work_count_open();
+
+CREATE TRIGGER durable_work_open_changed AFTER UPDATE OF state ON durable_work FOR EACH ROW WHEN (((old.state = ANY (ARRAY['pending'::text, 'claimed'::text])) <> (new.state = ANY (ARRAY['pending'::text, 'claimed'::text])))) EXECUTE FUNCTION durable_work_count_open();
+
+CREATE TRIGGER durable_work_opened AFTER INSERT ON durable_work FOR EACH ROW WHEN ((new.state = ANY (ARRAY['pending'::text, 'claimed'::text]))) EXECUTE FUNCTION durable_work_count_open();
 
 CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed BEFORE INSERT OR UPDATE ON instance_secrets FOR EACH ROW EXECUTE FUNCTION refuse_admin_claim_when_centrally_managed();
 

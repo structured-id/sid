@@ -838,8 +838,43 @@ CREATE TABLE IF NOT EXISTS durable_work (
     updated_at   TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_durable_work_open
-    ON durable_work (kind, not_before) WHERE state IN ('pending', 'claimed');
+-- One index per question a claim asks, each read by kind and time.
+CREATE INDEX IF NOT EXISTS idx_durable_work_due
+    ON durable_work (kind, not_before) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_durable_work_lease
+    ON durable_work (kind, lease_until) WHERE state = 'claimed';
+CREATE INDEX IF NOT EXISTS idx_durable_work_expiry
+    ON durable_work (kind, expires_at)
+    WHERE state IN ('pending', 'claimed') AND expires_at IS NOT NULL;
+
+-- Open items per kind, which admission reads instead of counting rows; kept
+-- by triggers on every write that opens or ends work.
+CREATE TABLE IF NOT EXISTS durable_work_open (
+    kind TEXT PRIMARY KEY,
+    open INTEGER NOT NULL
+) STRICT;
+
+CREATE TRIGGER IF NOT EXISTS durable_work_opened AFTER INSERT ON durable_work
+    WHEN NEW.state IN ('pending', 'claimed')
+BEGIN
+    INSERT INTO durable_work_open (kind, open) VALUES (NEW.kind, 1)
+    ON CONFLICT (kind) DO UPDATE SET open = durable_work_open.open + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS durable_work_open_changed AFTER UPDATE OF state ON durable_work
+    WHEN (OLD.state IN ('pending', 'claimed')) <> (NEW.state IN ('pending', 'claimed'))
+BEGIN
+    INSERT INTO durable_work_open (kind, open)
+    VALUES (NEW.kind, CASE WHEN NEW.state IN ('pending', 'claimed') THEN 1 ELSE -1 END)
+    ON CONFLICT (kind) DO UPDATE SET open = durable_work_open.open + excluded.open;
+END;
+
+CREATE TRIGGER IF NOT EXISTS durable_work_closed AFTER DELETE ON durable_work
+    WHEN OLD.state IN ('pending', 'claimed')
+BEGIN
+    INSERT INTO durable_work_open (kind, open) VALUES (OLD.kind, -1)
+    ON CONFLICT (kind) DO UPDATE SET open = durable_work_open.open - 1;
+END;
 
 --------------------------------------------------------------------------------
 -- instance_secrets (sealed secrets every replica shares; written once)
