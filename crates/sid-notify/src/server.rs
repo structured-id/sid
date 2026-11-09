@@ -244,6 +244,11 @@ impl NotifyServer {
         .map_err(|e| anyhow::anyhow!("delivery runner: {e}"))?;
         let waker = runner.waker();
         let runner_handle = tokio::spawn(runner.run(stopped.clone().wait()));
+        let upkeep_handle = tokio::spawn(keep_operations(
+            self.operations.clone(),
+            std::time::Duration::from_secs(60),
+            stopped.clone().wait(),
+        ));
 
         // Every fact is owed to this service as addressed work, kept by the
         // bus until settled; an event is settled only once its routing job is
@@ -325,6 +330,7 @@ impl NotifyServer {
             consumed.push(handle.await);
         }
         let ran = runner_handle.await;
+        let kept = upkeep_handle.await;
         // The platform source's connection lives until its consumer stopped.
         drop(platform);
         served?;
@@ -332,6 +338,7 @@ impl NotifyServer {
             result.map_err(|e| anyhow::anyhow!("NATS consumer task failed: {e}"))?;
         }
         ran.map_err(|e| anyhow::anyhow!("delivery runner task failed: {e}"))?;
+        kept.map_err(|e| anyhow::anyhow!("operation upkeep task failed: {e}"))?;
 
         info!("sid-notify shutdown complete");
         Ok(())
@@ -340,6 +347,28 @@ impl NotifyServer {
     /// Get a reference to the dispatcher (for testing).
     pub fn dispatcher(&self) -> &Arc<NotificationDispatcher> {
         &self.dispatcher
+    }
+}
+
+/// Every `every` until `stopped`: retires this service's operation periods
+/// past their retention with their completions, and drops expired ones, so
+/// keyed command results stay bounded. Idempotent on every replica.
+async fn keep_operations(
+    operations: Arc<PgOperationStore>,
+    every: std::time::Duration,
+    stopped: impl std::future::Future<Output = ()>,
+) {
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticks.tick().await;
+    tokio::pin!(stopped);
+    loop {
+        tokio::select! {
+            () = &mut stopped => return,
+            _ = ticks.tick() => {
+                sid_authn::operation::upkeep(operations.as_ref(), chrono::Utc::now()).await;
+            }
+        }
     }
 }
 

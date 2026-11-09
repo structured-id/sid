@@ -1140,6 +1140,54 @@ async fn test_a_test_send_retry_without_an_outcome_sends_nothing() {
     );
 }
 
+/// Regression: this service's command results were never retired, so they
+/// grew without bound. Once its retention passed, the running upkeep
+/// retires a period with its results and a command named with it is no
+/// longer admitted.
+#[tokio::test]
+async fn test_upkeep_retires_periods_past_their_retention() {
+    let pool = crate::test_db::pool().await;
+    let operations = crate::test_db::operations(&pool).await;
+    let period = operations
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    operations.admit_operation_period(period).await.unwrap();
+    // The period stopped accepting a day ago, past an hour's retention.
+    sqlx::query("UPDATE operation_period_state SET retention_seconds = 3600")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE operation_periods SET accepted_until = now() - interval '1 day'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let upkeep = tokio::spawn(super::keep_operations(
+        operations.clone(),
+        std::time::Duration::from_millis(20),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    stop.send(()).unwrap();
+    upkeep.await.unwrap();
+
+    assert!(
+        operations
+            .export_operation_periods()
+            .await
+            .unwrap()
+            .active
+            .is_empty(),
+        "the period past its retention stayed"
+    );
+    assert!(operations.admit_operation_period(period).await.is_err());
+}
+
 /// A keyed template call without its operation context is refused before
 /// any effect, and the period a command is named under comes from this
 /// service's own store.
