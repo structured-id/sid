@@ -165,6 +165,43 @@ async fn test_decision_retry_answers_as_the_decision() {
     );
 }
 
+/// A temporary role is granted, its response is lost and the retry comes
+/// after its expiry: the retry answers with the assignment the grant made,
+/// not as an expiry no longer in the future.
+#[tokio::test]
+async fn test_temporary_role_retry_after_its_expiry_answers_the_grant() {
+    let f = fixture().await;
+    let until = chrono::Utc::now() + chrono::Duration::milliseconds(300);
+    let grant = || GrantTemporaryRoleRequest {
+        profile_id: Some(f.member.into()),
+        project_id: Some(ProjectId::SYSTEM.into()),
+        role: "reviewer".into(),
+        justification: "incident review".into(),
+        expires_at: Some(to_timestamp(until)),
+    };
+    let first = f
+        .authorization
+        .grant_temporary_role(
+            &f.admin,
+            operation(f.storage.as_ref(), "op-short").await,
+            grant(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let retry = f
+        .authorization
+        .grant_temporary_role(
+            &f.admin,
+            operation(f.storage.as_ref(), "op-short").await,
+            grant(),
+        )
+        .await
+        .expect("the retry answers with the grant it made");
+    assert_eq!(retry, first);
+}
+
 /// A temporary role's grant is retried after its response was lost: the
 /// retry answers with the assignment it made and grants no second one.
 #[tokio::test]

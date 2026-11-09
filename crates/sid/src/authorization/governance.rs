@@ -332,7 +332,6 @@ impl Authorization {
         let expires_dt = u32::try_from(expires_at.nanos)
             .ok()
             .and_then(|nanos| chrono::DateTime::from_timestamp(expires_at.seconds, nanos))
-            .filter(|at| *at > chrono::Utc::now())
             .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))?;
         let command = KeyedCommand::by_profile::<keyed::GrantTemporaryRole>(
             administrator_id,
@@ -341,6 +340,11 @@ impl Authorization {
         );
         command
             .execute(&*self.storage, || async {
+                // Only a new grant must end in the future: a retry of a
+                // completed one answers with it even after its expiry.
+                if expires_dt <= chrono::Utc::now() {
+                    return Err(invalid_field("expires_at", "not a timestamp in the future").into());
+                }
                 self.existing_profile(profile_id).await?;
                 let role = self
                     .project_role(req.project_id.as_ref(), "role", &req.role)
