@@ -16,17 +16,22 @@ use crate::routing::RoutingTable;
 use crate::template::TemplateEngine;
 use crate::template_store::TemplateStore;
 
+use prost::Message;
 use sid_auth::receiver::Receiver;
 use sid_authn::event_relay::{EventDeliveryHandler, EventFanoutHandler, EventRelayHandler};
+use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
+use sid_infra::authn::operation::{OperationContextLayer, OperationPeriods, context};
 use sid_infra::grpc_error::ErrorReason;
+use sid_infra::grpc_error::IntoStatus;
 use sid_infra::grpc_error::refuse::{
-    dependency_unavailable, internal, invalid_field, missing_field, not_configured, not_found,
+    dependency_unavailable, invalid_field, missing_field, not_configured, not_found,
     storage_failure,
 };
-use sid_plugin::WorkStore;
 use sid_plugin::notification::NotificationChannel;
-use sid_storage::PgWorkStore;
+use sid_plugin::{OperationResultStore, WorkStore};
+use sid_proto::keyed::admin::notification_template_service as keyed;
+use sid_storage::{PgOperationStore, PgWorkStore};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Server as TonicServer;
@@ -40,6 +45,9 @@ pub struct NotifyServer {
     /// Delivery jobs: routing, per-channel deliveries, dead-letter alerts.
     jobs: Arc<dyn WorkStore>,
     store: Arc<TemplateStore>,
+    /// The completions of the template API's keyed commands and the periods
+    /// they are named under, in this service's database.
+    operations: Arc<PgOperationStore>,
     resolver: Arc<RecipientResolver>,
     /// Admits the template API's calls (`crate::access`).
     receiver: Arc<Receiver>,
@@ -99,9 +107,17 @@ impl NotifyServer {
             .await
             .map_err(|e| anyhow::anyhow!("delivery job store init failed: {e}"))?;
         let jobs: Arc<dyn WorkStore> = Arc::new(jobs);
+        // The template commands' results and periods live with the templates
+        // they change, so each commits with its change.
+        let operations = PgOperationStore::new(pool.clone());
+        operations
+            .ensure_schema()
+            .await
+            .map_err(|e| anyhow::anyhow!("operation result store init failed: {e}"))?;
+        let operations = Arc::new(operations);
 
         let store = Arc::new(
-            TemplateStore::new(&routing, engine, Some(pool))
+            TemplateStore::new(&routing, engine, pool)
                 .await
                 .map_err(|e| anyhow::anyhow!("template store init failed: {e}"))?,
         );
@@ -130,6 +146,7 @@ impl NotifyServer {
             routing,
             jobs,
             store,
+            operations,
             resolver,
             receiver,
         })
@@ -261,6 +278,7 @@ impl NotifyServer {
         let template_svc = NotificationTemplateServiceImpl::new(
             self.dispatcher.clone(),
             self.store.clone(),
+            self.operations.clone(),
             self.resolver.clone(),
         );
         let mut services = sid_serve::Services::new();
@@ -271,9 +289,21 @@ impl NotifyServer {
                 &self.receiver,
             ))
             .await;
+        // The periods the template commands are named under, from the store
+        // that admits them: open to every caller, a period grants nothing.
+        services
+            .add(
+                sid_proto::sid::v1::operation_service_server::OperationServiceServer::new(
+                    OperationPeriods::new(self.operations.clone()),
+                ),
+            )
+            .await;
         let (routes, health) = services.into_parts();
         let grpc_server = TonicServer::builder()
             .accept_http1(true)
+            // A keyed call without its operation context is refused here,
+            // before any handler.
+            .layer(OperationContextLayer)
             .add_routes(routes)
             .serve_with_shutdown(self.config.grpc_bind, stopped.wait());
 
@@ -321,6 +351,8 @@ impl NotifyServer {
 pub struct NotificationTemplateServiceImpl {
     dispatcher: Arc<NotificationDispatcher>,
     store: Arc<crate::template_store::TemplateStore>,
+    /// The completions of the keyed template commands.
+    operations: Arc<PgOperationStore>,
     /// The caller's own address for a test send.
     resolver: Arc<RecipientResolver>,
 }
@@ -329,11 +361,13 @@ impl NotificationTemplateServiceImpl {
     pub(crate) fn new(
         dispatcher: Arc<NotificationDispatcher>,
         store: Arc<crate::template_store::TemplateStore>,
+        operations: Arc<PgOperationStore>,
         resolver: Arc<RecipientResolver>,
     ) -> Self {
         Self {
             dispatcher,
             store,
+            operations,
             resolver,
         }
     }
@@ -404,8 +438,47 @@ fn template_not_found(template_id: &str) -> tonic::Status {
 fn store_refusal(e: TemplateStoreError) -> tonic::Status {
     match e {
         TemplateStoreError::NotFound(id) => template_not_found(&id),
-        TemplateStoreError::Database(cause) => storage_failure(sid_core::Error::Storage(cause)),
+        TemplateStoreError::Store(e) => storage_failure(e),
     }
+}
+
+/// A keyed template command's refusal, its own (a key used for another
+/// command, a period no longer admitted) included.
+struct Refusal(tonic::Status);
+
+impl From<OperationError> for Refusal {
+    fn from(e: OperationError) -> Self {
+        Self(e.into_status())
+    }
+}
+
+impl From<tonic::Status> for Refusal {
+    fn from(status: tonic::Status) -> Self {
+        Self(status)
+    }
+}
+
+/// The status a keyed template command answers with when it has no result.
+fn command_refusal(e: CommandError<Refusal>) -> tonic::Status {
+    e.refusal().0
+}
+
+/// How a template change's failure ends its command: an unknown template is
+/// refused; a store failure (another attempt's completion among them) is
+/// resolved by the command.
+fn effect(e: TemplateStoreError) -> Effect<Refusal> {
+    match e {
+        TemplateStoreError::NotFound(id) => Effect::Refused(Refusal(template_not_found(&id))),
+        TemplateStoreError::Store(e) => Effect::Store(e),
+    }
+}
+
+/// The key namespace of the admitted caller of `request`: its issuer and
+/// subject, so one caller's keys never name another's commands.
+#[allow(clippy::result_large_err)]
+fn caller_namespace<T>(request: &tonic::Request<T>) -> Result<String, tonic::Status> {
+    let claims = &sid_auth::receiver::admitted(request)?.claims;
+    Ok(format!("{}#{}", claims.iss, claims.sub))
 }
 
 /// Convert internal Channel to proto i32 value.
@@ -478,7 +551,8 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         let summaries = self
             .store
             .list_templates(channel_filter, req.customized_only)
-            .await;
+            .await
+            .map_err(store_refusal)?;
 
         let templates = summaries
             .into_iter()
@@ -522,9 +596,14 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             .store
             .get_template(&req.template_id, channel, locale)
             .await
+            .map_err(store_refusal)?
             .ok_or_else(|| template_not_found(&req.template_id))?;
 
-        let available_locales = self.store.available_locales(&req.template_id).await;
+        let available_locales = self
+            .store
+            .available_locales(&req.template_id)
+            .await
+            .map_err(store_refusal)?;
 
         Ok(tonic::Response::new(build_proto_template(
             &content,
@@ -541,49 +620,53 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::UpdateTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::NotificationTemplate>, tonic::Status>
     {
+        let namespace = caller_namespace(&request)?;
+        let operation = context(&request)?;
         let req = request.into_inner();
-        let proto_content = req.content.ok_or_else(|| missing_field("content"))?;
-
+        let proto_content = req
+            .content
+            .clone()
+            .ok_or_else(|| missing_field("content"))?;
         let channel = proto_channel_to_internal(proto_content.channel)?;
         let locale = if proto_content.locale.is_empty() {
-            "en"
+            "en".to_string()
         } else {
-            &proto_content.locale
+            proto_content.locale.clone()
         };
-
-        let stored = StoredContent {
-            subject: proto_content.subject,
-            html_body: proto_content.html_body,
-            text_body: proto_content.text_body,
-            sms_body: proto_content.sms_body,
-            push_title: proto_content.push_title,
-            push_body: proto_content.push_body,
-            push_action_url: proto_content.push_action_url,
-            updated_at: chrono::Utc::now(),
-        };
-
-        self.store
-            .update_template(&req.template_id, channel, locale, stored)
+        // A retry of a completed change answers with the template as that
+        // change left it and never writes it over a later change.
+        let command = KeyedCommand::of::<keyed::UpdateTemplate>(namespace, operation, &req);
+        command
+            .execute(self.operations.as_ref(), || async {
+                let stored = StoredContent {
+                    subject: proto_content.subject,
+                    html_body: proto_content.html_body,
+                    text_body: proto_content.text_body,
+                    sms_body: proto_content.sms_body,
+                    push_title: proto_content.push_title,
+                    push_body: proto_content.push_body,
+                    push_action_url: proto_content.push_action_url,
+                    updated_at: chrono::Utc::now(),
+                };
+                self.store
+                    .update_template(&req.template_id, channel, &locale, stored, |left, meta| {
+                        let answer = build_proto_template(
+                            &left.content,
+                            left.customized,
+                            meta,
+                            channel,
+                            &locale,
+                            left.locales.clone(),
+                        );
+                        let completion = command.completion(answer.encode_to_vec());
+                        (answer, Some(completion))
+                    })
+                    .await
+                    .map_err(effect)
+            })
             .await
-            .map_err(store_refusal)?;
-
-        // Return the updated template.
-        let (content, customized, meta) = self
-            .store
-            .get_template(&req.template_id, channel, locale)
-            .await
-            .ok_or_else(|| internal("update_template", "template missing after update"))?;
-
-        let available_locales = self.store.available_locales(&req.template_id).await;
-
-        Ok(tonic::Response::new(build_proto_template(
-            &content,
-            customized,
-            meta,
-            channel,
-            locale,
-            available_locales,
-        )))
+            .map(tonic::Response::new)
+            .map_err(command_refusal)
     }
 
     async fn reset_template(
@@ -591,6 +674,8 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::ResetTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::NotificationTemplate>, tonic::Status>
     {
+        let namespace = caller_namespace(&request)?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let channel = if req.channel == 0 {
             Channel::Email
@@ -602,29 +687,30 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         } else {
             &req.locale
         };
-
-        self.store
-            .reset_template(&req.template_id, channel, locale)
+        // A retry of a completed reset answers as the reset did and never
+        // removes a customization made after it.
+        let command = KeyedCommand::of::<keyed::ResetTemplate>(namespace, operation, &req);
+        command
+            .execute(self.operations.as_ref(), || async {
+                self.store
+                    .reset_template(&req.template_id, channel, locale, |left, meta| {
+                        let answer = build_proto_template(
+                            &left.content,
+                            left.customized,
+                            meta,
+                            channel,
+                            locale,
+                            left.locales.clone(),
+                        );
+                        let completion = command.completion(answer.encode_to_vec());
+                        (answer, Some(completion))
+                    })
+                    .await
+                    .map_err(effect)
+            })
             .await
-            .map_err(store_refusal)?;
-
-        // Return the default template.
-        let (content, customized, meta) = self
-            .store
-            .get_template(&req.template_id, channel, locale)
-            .await
-            .ok_or_else(|| internal("reset_template", "template missing after reset"))?;
-
-        let available_locales = self.store.available_locales(&req.template_id).await;
-
-        Ok(tonic::Response::new(build_proto_template(
-            &content,
-            customized,
-            meta,
-            channel,
-            locale,
-            available_locales,
-        )))
+            .map(tonic::Response::new)
+            .map_err(command_refusal)
     }
 
     async fn preview_template(
@@ -648,6 +734,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             .store
             .get_template(&req.template_id, channel, locale)
             .await
+            .map_err(store_refusal)?
             .ok_or_else(|| template_not_found(&req.template_id))?;
 
         // Build variables: merge defaults from meta with user-provided sample_data.
@@ -679,8 +766,20 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         // The call is admitted: its verified subject names the test's
         // recipient when no Profile can be learned for it.
         let subject = sid_auth::receiver::admitted(&request)?.claims.sub.clone();
+        let namespace = caller_namespace(&request)?;
+        let operation = context(&request)?;
         let authorization = request.metadata().get("authorization").cloned();
         let req = request.into_inner();
+        let command = KeyedCommand::of::<keyed::SendTestNotification>(namespace, operation, &req);
+        // A completed send answers as it did and sends nothing more.
+        if command
+            .completed(self.operations.as_ref())
+            .await
+            .map_err(|e| e.into_status())?
+            .is_some()
+        {
+            return Ok(tonic::Response::new(()));
+        }
         let channel = if req.channel == 0 {
             Channel::Email
         } else {
@@ -696,6 +795,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             .store
             .get_template(&req.template_id, channel, locale)
             .await
+            .map_err(store_refusal)?
             .ok_or_else(|| template_not_found(&req.template_id))?;
 
         // Build sample variables for rendering.
@@ -748,10 +848,38 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             event_type: format!("sid.admin.test_notification.{}", req.template_id),
         };
 
+        // The message leaves this store, so the command is bound before it is
+        // sent: only its first attempt sends. A later attempt without a
+        // recorded completion cannot know whether the first one's message was
+        // accepted, and answers so rather than sending it again.
+        if !command
+            .first_attempt(self.operations.as_ref())
+            .await
+            .map_err(|e| e.into_status())?
+        {
+            return match command.completed(self.operations.as_ref()).await {
+                Ok(Some(_)) => Ok(tonic::Response::new(())),
+                Ok(None) => Err(OperationError::OutcomeUnknown.into_status()),
+                Err(e) => Err(e.into_status()),
+            };
+        }
         self.dispatcher
             .deliver_to_channel(channel_id, &recipient, &message)
             .await
             .map_err(|e| dependency_unavailable(channel_id, e))?;
+        // Accepted: a retry answers with this.
+        let recorded =
+            sid_core::models::MutationContext::from(sid_core::models::AuditEntry::admin(
+                recipient.profile_id.clone(),
+                "notification_template.test_send",
+                req.template_id.clone(),
+            ))
+            .with_operation(command.completion(().encode_to_vec()));
+        if let Err(e) = self.operations.record_outcome(recorded).await {
+            // The message was accepted; only its record is missing, and a
+            // retry answers that its outcome is unknown.
+            warn!(error = %e, "test send accepted but its completion was not recorded");
+        }
         Ok(tonic::Response::new(()))
     }
 }

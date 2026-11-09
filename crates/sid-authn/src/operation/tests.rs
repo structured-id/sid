@@ -198,6 +198,35 @@ async fn test_resource_id_is_allocated_once_per_command() {
     assert_ne!(theirs.resource_id(&storage).await.unwrap(), id);
 }
 
+/// A command with an effect outside its store learns whether it is the
+/// first attempt: exactly one of concurrent attempts is, and none after it,
+/// so a later attempt never repeats an effect the first may have made.
+#[tokio::test]
+async fn test_only_the_first_attempt_of_a_command_is_first() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
+    let context = OperationContext::new(OperationKey::parse("k-send").unwrap(), period);
+    let command = || KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("p"));
+
+    let (first, second) = (command(), command());
+    let (a, b) = tokio::join!(
+        first.first_attempt(&storage),
+        second.first_attempt(&storage)
+    );
+    assert_ne!(
+        a.unwrap(),
+        b.unwrap(),
+        "exactly one concurrent attempt is the first"
+    );
+    assert!(!command().first_attempt(&storage).await.unwrap());
+
+    let other = KeyedCommand::of::<CreateProject>("profile:a", context, &create("q"));
+    assert!(matches!(
+        other.first_attempt(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
+}
+
 /// A command named with a period the store retired binds nothing.
 #[tokio::test]
 async fn test_resource_id_under_a_retired_period_is_refused() {

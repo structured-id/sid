@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Persistent template storage with PostgreSQL overlay on in-memory defaults.
+//! Template storage: the shipped defaults with the administrators'
+//! customizations from this service's PostgreSQL database over them.
 //!
-//! Default CE templates are loaded in-memory at startup. Admin customizations
-//! are stored in PostgreSQL and overlaid on top. Reset = delete DB row (revert
-//! to default). Without `SID_NOTIFY_DATABASE_URL`, operates in-memory only.
+//! Every read takes the customizations from the database, so each replica
+//! answers with what was committed. A change and the completion of the
+//! keyed command that made it commit in one transaction. Reset deletes the
+//! customization, so the default answers again.
 
 use crate::routing::RoutingTable;
 use crate::template::{NotificationTemplate as InternalTemplate, TemplateEngine};
 use chrono::{DateTime, Utc};
+use sid_core::models::OperationCompletion;
+use sqlx::PgConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -68,55 +72,49 @@ pub(crate) struct TemplateVar {
     pub(crate) example: String,
 }
 
-/// Key for custom override lookup.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OverrideKey {
-    template_id: String,
-    channel: Channel,
-    locale: String,
+/// What a template answers with for one channel and locale, as one read or
+/// write of the store left it.
+#[derive(Debug, Clone)]
+pub(crate) struct Effective {
+    pub(crate) content: StoredContent,
+    /// Whether a customization answers rather than the default.
+    pub(crate) customized: bool,
+    /// The locales the template has, `en` always among them.
+    pub(crate) locales: Vec<String>,
 }
 
-/// Persistent template store with default overlay.
+/// The template store: shipped defaults, customizations in the database.
 pub(crate) struct TemplateStore {
     /// In-memory default templates (CE shipped).
     defaults: Vec<TemplateMeta>,
     /// Default content by (template_id, channel).
     default_content: HashMap<(String, Channel), StoredContent>,
-    /// Custom overrides from PostgreSQL (cached in memory).
-    overrides: RwLock<HashMap<OverrideKey, StoredContent>>,
-    /// PostgreSQL pool (None = in-memory only).
-    pool: Option<sqlx::PgPool>,
+    /// This service's database, holding the customizations.
+    pool: sqlx::PgPool,
     /// Reference to template engine for rendering.
     engine: Arc<RwLock<TemplateEngine>>,
 }
 
 impl TemplateStore {
-    /// Create a new template store from routing table and optional DB pool.
+    /// The store over `pool`, its tables created when absent.
     pub(crate) async fn new(
         _routing: &RoutingTable,
         engine: Arc<RwLock<TemplateEngine>>,
-        pool: Option<sqlx::PgPool>,
+        pool: sqlx::PgPool,
     ) -> Result<Self, sqlx::Error> {
-        // Run migrations if DB is available.
-        if let Some(ref pool) = pool {
-            sqlx::migrate!("./migrations").run(pool).await?;
-        }
-
-        // Build default template metadata from engine + routing.
+        sqlx::migrate!("./migrations").run(&pool).await?;
         let (defaults, default_content) = Self::build_defaults(&engine).await;
-
-        let mut store = Self {
+        Ok(Self {
             defaults,
             default_content,
-            overrides: RwLock::new(HashMap::new()),
             pool,
             engine,
-        };
+        })
+    }
 
-        // Load custom overrides from DB.
-        store.load_overrides().await?;
-
-        Ok(store)
+    /// The metadata of the shipped template `template_id`.
+    pub(crate) fn meta(&self, template_id: &str) -> Option<&TemplateMeta> {
+        self.defaults.iter().find(|m| m.template_id == template_id)
     }
 
     /// Build default template metadata and content from the in-memory engine.
@@ -295,289 +293,246 @@ impl TemplateStore {
         (metas, contents)
     }
 
-    /// Load custom overrides from PostgreSQL into memory.
-    async fn load_overrides(&mut self) -> Result<(), sqlx::Error> {
-        let Some(ref pool) = self.pool else {
-            return Ok(());
-        };
-
-        let rows = sqlx::query_as::<_, OverrideRow>(
-            "SELECT template_id, channel, locale, subject, html_body, text_body,
-                    sms_body, push_title, push_body, push_action_url, updated_at
-             FROM notification_template_overrides",
-        )
-        .fetch_all(pool)
-        .await?;
-
-        let mut overrides = self.overrides.write().await;
-        for row in rows {
-            let Some(channel) = Channel::from_i32(row.channel as i32) else {
-                continue;
-            };
-            overrides.insert(
-                OverrideKey {
-                    template_id: row.template_id,
-                    channel,
-                    locale: row.locale,
-                },
-                StoredContent {
-                    subject: row.subject,
-                    html_body: row.html_body,
-                    text_body: row.text_body,
-                    sms_body: row.sms_body,
-                    push_title: row.push_title,
-                    push_body: row.push_body,
-                    push_action_url: row.push_action_url,
-                    updated_at: row.updated_at,
-                },
-            );
-        }
-
-        Ok(())
-    }
-
     /// List all templates with customization status.
     pub(crate) async fn list_templates(
         &self,
         channel_filter: Option<Channel>,
         customized_only: bool,
-    ) -> Vec<TemplateSummary> {
-        let overrides = self.overrides.read().await;
-        let mut result = Vec::new();
+    ) -> Result<Vec<TemplateSummary>, TemplateStoreError> {
+        // The latest customization of each customized template.
+        let customized: HashMap<String, DateTime<Utc>> =
+            sqlx::query_as::<_, (String, DateTime<Utc>)>(
+                "SELECT template_id, max(updated_at) FROM notification_template_overrides
+             GROUP BY template_id",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| store_error("list template customizations", e))?
+            .into_iter()
+            .collect();
 
+        let mut result = Vec::new();
         for meta in &self.defaults {
-            // Filter by channel if specified.
             if let Some(ch) = channel_filter
                 && !meta.channels.contains(&ch)
             {
                 continue;
             }
-
-            // Check if any override exists for this template.
-            let is_customized = overrides.keys().any(|k| k.template_id == meta.template_id);
-
-            if customized_only && !is_customized {
+            let updated_at = customized.get(&meta.template_id).copied();
+            if customized_only && updated_at.is_none() {
                 continue;
             }
-
-            // Find the latest updated_at from overrides (if any).
-            let updated_at = overrides
-                .iter()
-                .filter(|(k, _)| k.template_id == meta.template_id)
-                .map(|(_, v)| v.updated_at)
-                .max();
-
             result.push(TemplateSummary {
                 template_id: meta.template_id.clone(),
                 name: meta.name.clone(),
                 description: meta.description.clone(),
                 channels: meta.channels.clone(),
                 trigger: meta.trigger.clone(),
-                customized: is_customized,
+                customized: updated_at.is_some(),
                 updated_at,
             });
         }
-
-        result
+        Ok(result)
     }
 
-    /// Get template content for a specific channel + locale.
-    /// Returns (content, is_customized, meta).
+    /// Template content for a channel and locale: its customization in that
+    /// locale, else its `en` customization, else the default; `None` for a
+    /// template this service does not ship.
     pub(crate) async fn get_template(
         &self,
         template_id: &str,
         channel: Channel,
         locale: &str,
-    ) -> Option<(StoredContent, bool, &TemplateMeta)> {
-        let meta = self
-            .defaults
-            .iter()
-            .find(|m| m.template_id == template_id)?;
-        let overrides = self.overrides.read().await;
-
-        // Try exact locale match in overrides.
-        let key = OverrideKey {
-            template_id: template_id.to_string(),
-            channel,
-            locale: locale.to_string(),
+    ) -> Result<Option<(StoredContent, bool, &TemplateMeta)>, TemplateStoreError> {
+        let Some(meta) = self.meta(template_id) else {
+            return Ok(None);
         };
-        if let Some(content) = overrides.get(&key) {
-            return Some((content.clone(), true, meta));
-        }
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| store_error("read a template", e))?;
+        Ok(self
+            .effective_in(&mut conn, template_id, channel, locale)
+            .await?
+            .map(|(content, customized)| (content, customized, meta)))
+    }
 
-        // Fallback to "en" locale in overrides.
-        if locale != "en" {
-            let en_key = OverrideKey {
-                template_id: template_id.to_string(),
-                channel,
-                locale: "en".to_string(),
-            };
-            if let Some(content) = overrides.get(&en_key) {
-                return Some((content.clone(), true, meta));
-            }
-        }
+    /// The locales template `template_id` has, `en` always among them.
+    pub(crate) async fn available_locales(
+        &self,
+        template_id: &str,
+    ) -> Result<Vec<String>, TemplateStoreError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| store_error("read template locales", e))?;
+        locales_in(&mut conn, template_id).await
+    }
 
-        // Fallback to default content.
-        self.default_content
+    /// The content `template_id` answers with on `channel` in `locale`, read
+    /// in `conn`, and whether a customization answers.
+    async fn effective_in(
+        &self,
+        conn: &mut PgConnection,
+        template_id: &str,
+        channel: Channel,
+        locale: &str,
+    ) -> Result<Option<(StoredContent, bool)>, TemplateStoreError> {
+        if let Some(content) = override_in(conn, template_id, channel, locale).await? {
+            return Ok(Some((content, true)));
+        }
+        if locale != "en"
+            && let Some(content) = override_in(conn, template_id, channel, "en").await?
+        {
+            return Ok(Some((content, true)));
+        }
+        Ok(self
+            .default_content
             .get(&(template_id.to_string(), channel))
-            .map(|c| (c.clone(), false, meta))
+            .map(|c| (c.clone(), false)))
     }
 
-    /// Get available locales for a template.
-    pub(crate) async fn available_locales(&self, template_id: &str) -> Vec<String> {
-        let overrides = self.overrides.read().await;
-        let mut locales: Vec<String> = overrides
-            .keys()
-            .filter(|k| k.template_id == template_id)
-            .map(|k| k.locale.clone())
-            .collect();
-
-        // Always include "en" as default.
-        if !locales.contains(&"en".to_string()) {
-            locales.push("en".to_string());
-        }
-        locales.sort();
-        locales.dedup();
-        locales
-    }
-
-    /// Update (UPSERT) template content for a specific channel + locale.
-    pub(crate) async fn update_template(
+    /// Customize `template_id` on `channel` in `locale` with `content`. In
+    /// the same transaction, `complete` receives what the template answers
+    /// with after the change and gives the caller's answer with the
+    /// completion of the keyed command making it, which commits with the
+    /// change; `None` commits the change alone.
+    pub(crate) async fn update_template<R>(
         &self,
         template_id: &str,
         channel: Channel,
         locale: &str,
         content: StoredContent,
-    ) -> Result<(), TemplateStoreError> {
-        // Verify template exists.
-        if !self.defaults.iter().any(|m| m.template_id == template_id) {
-            return Err(TemplateStoreError::NotFound(template_id.to_string()));
-        }
-
-        // Persist to DB if available.
-        if let Some(ref pool) = self.pool {
-            sqlx::query(
-                "INSERT INTO notification_template_overrides
-                     (template_id, channel, locale, subject, html_body, text_body,
-                      sms_body, push_title, push_body, push_action_url, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                 ON CONFLICT (template_id, channel, locale) DO UPDATE SET
-                     subject = EXCLUDED.subject,
-                     html_body = EXCLUDED.html_body,
-                     text_body = EXCLUDED.text_body,
-                     sms_body = EXCLUDED.sms_body,
-                     push_title = EXCLUDED.push_title,
-                     push_body = EXCLUDED.push_body,
-                     push_action_url = EXCLUDED.push_action_url,
-                     updated_at = EXCLUDED.updated_at",
-            )
-            .bind(template_id)
-            .bind(channel.as_i16())
-            .bind(locale)
-            .bind(&content.subject)
-            .bind(&content.html_body)
-            .bind(&content.text_body)
-            .bind(&content.sms_body)
-            .bind(&content.push_title)
-            .bind(&content.push_body)
-            .bind(&content.push_action_url)
-            .bind(content.updated_at)
-            .execute(pool)
+        complete: impl FnOnce(&Effective, &TemplateMeta) -> (R, Option<OperationCompletion>),
+    ) -> Result<R, TemplateStoreError> {
+        let meta = self
+            .meta(template_id)
+            .ok_or_else(|| TemplateStoreError::NotFound(template_id.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|e| TemplateStoreError::Database(e.to_string()))?;
-        }
-
-        // Update in-memory cache.
-        let key = OverrideKey {
-            template_id: template_id.to_string(),
-            channel,
-            locale: locale.to_string(),
+            .map_err(|e| store_error("begin a template change", e))?;
+        sqlx::query(
+            "INSERT INTO notification_template_overrides
+                 (template_id, channel, locale, subject, html_body, text_body,
+                  sms_body, push_title, push_body, push_action_url, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (template_id, channel, locale) DO UPDATE SET
+                 subject = EXCLUDED.subject,
+                 html_body = EXCLUDED.html_body,
+                 text_body = EXCLUDED.text_body,
+                 sms_body = EXCLUDED.sms_body,
+                 push_title = EXCLUDED.push_title,
+                 push_body = EXCLUDED.push_body,
+                 push_action_url = EXCLUDED.push_action_url,
+                 updated_at = EXCLUDED.updated_at",
+        )
+        .bind(template_id)
+        .bind(channel.as_i16())
+        .bind(locale)
+        .bind(&content.subject)
+        .bind(&content.html_body)
+        .bind(&content.text_body)
+        .bind(&content.sms_body)
+        .bind(&content.push_title)
+        .bind(&content.push_body)
+        .bind(&content.push_action_url)
+        .bind(content.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| store_error("store a template customization", e))?;
+        let effective = Effective {
+            content: content.clone(),
+            customized: true,
+            locales: locales_in(&mut tx, template_id).await?,
         };
-        self.overrides.write().await.insert(key, content);
-
-        // Also update the TemplateEngine if this is the email channel for "en" locale,
-        // so NATS dispatch uses the updated content immediately.
-        if channel == Channel::Email
-            && locale == "en"
-            && let Some(override_content) = self.overrides.read().await.get(&OverrideKey {
-                template_id: template_id.to_string(),
-                channel: Channel::Email,
-                locale: "en".to_string(),
-            })
-        {
-            let mut engine = self.engine.write().await;
-            engine.register(InternalTemplate {
-                name: template_id.to_string(),
-                subject: if override_content.subject.is_empty() {
-                    None
-                } else {
-                    Some(override_content.subject.clone())
-                },
-                body_html: override_content.html_body.clone(),
-                body_text: override_content.text_body.clone(),
-                default_priority: sid_plugin::notification::NotificationPriority::Transactional,
-            });
+        let (answer, completion) = complete(&effective, meta);
+        if let Some(completion) = completion {
+            sid_storage::PgOperationStore::record_in_tx(&mut tx, &completion)
+                .await
+                .map_err(TemplateStoreError::Store)?;
         }
+        tx.commit()
+            .await
+            .map_err(|e| store_error("commit a template change", e))?;
 
-        Ok(())
+        // The engine delivery renders from takes the email `en` content.
+        if channel == Channel::Email && locale == "en" {
+            self.render_from(template_id, &content).await;
+        }
+        Ok(answer)
     }
 
-    /// Reset template to default for a specific channel + locale (delete override).
-    pub(crate) async fn reset_template(
+    /// Remove the customization of `template_id` on `channel` in `locale`,
+    /// so its `en` customization or its default answers again; `complete`
+    /// as for [`Self::update_template`].
+    pub(crate) async fn reset_template<R>(
         &self,
         template_id: &str,
         channel: Channel,
         locale: &str,
-    ) -> Result<(), TemplateStoreError> {
-        // Verify template exists.
-        if !self.defaults.iter().any(|m| m.template_id == template_id) {
-            return Err(TemplateStoreError::NotFound(template_id.to_string()));
-        }
-
-        // Delete from DB.
-        if let Some(ref pool) = self.pool {
-            sqlx::query(
-                "DELETE FROM notification_template_overrides
-                 WHERE template_id = $1 AND channel = $2 AND locale = $3",
-            )
-            .bind(template_id)
-            .bind(channel.as_i16())
-            .bind(locale)
-            .execute(pool)
+        complete: impl FnOnce(&Effective, &TemplateMeta) -> (R, Option<OperationCompletion>),
+    ) -> Result<R, TemplateStoreError> {
+        let meta = self
+            .meta(template_id)
+            .ok_or_else(|| TemplateStoreError::NotFound(template_id.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|e| TemplateStoreError::Database(e.to_string()))?;
-        }
-
-        // Remove from in-memory cache.
-        let key = OverrideKey {
-            template_id: template_id.to_string(),
-            channel,
-            locale: locale.to_string(),
+            .map_err(|e| store_error("begin a template reset", e))?;
+        sqlx::query(
+            "DELETE FROM notification_template_overrides
+             WHERE template_id = $1 AND channel = $2 AND locale = $3",
+        )
+        .bind(template_id)
+        .bind(channel.as_i16())
+        .bind(locale)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| store_error("remove a template customization", e))?;
+        let (content, customized) = self
+            .effective_in(&mut tx, template_id, channel, locale)
+            .await?
+            .ok_or_else(|| TemplateStoreError::NotFound(template_id.to_string()))?;
+        let effective = Effective {
+            content,
+            customized,
+            locales: locales_in(&mut tx, template_id).await?,
         };
-        self.overrides.write().await.remove(&key);
+        let (answer, completion) = complete(&effective, meta);
+        if let Some(completion) = completion {
+            sid_storage::PgOperationStore::record_in_tx(&mut tx, &completion)
+                .await
+                .map_err(TemplateStoreError::Store)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| store_error("commit a template reset", e))?;
 
-        // Restore default in TemplateEngine.
         if channel == Channel::Email
             && locale == "en"
             && let Some(default_content) = self
                 .default_content
                 .get(&(template_id.to_string(), channel))
         {
-            let mut engine = self.engine.write().await;
-            engine.register(InternalTemplate {
-                name: template_id.to_string(),
-                subject: if default_content.subject.is_empty() {
-                    None
-                } else {
-                    Some(default_content.subject.clone())
-                },
-                body_html: default_content.html_body.clone(),
-                body_text: default_content.text_body.clone(),
-                default_priority: sid_plugin::notification::NotificationPriority::Transactional,
-            });
+            self.render_from(template_id, default_content).await;
         }
+        Ok(answer)
+    }
 
-        Ok(())
+    /// Have the engine delivery renders from use `content` for `template_id`.
+    async fn render_from(&self, template_id: &str, content: &StoredContent) {
+        self.engine.write().await.register(InternalTemplate {
+            name: template_id.to_string(),
+            subject: (!content.subject.is_empty()).then(|| content.subject.clone()),
+            body_html: content.html_body.clone(),
+            body_text: content.text_body.clone(),
+            default_priority: sid_plugin::notification::NotificationPriority::Transactional,
+        });
     }
 
     /// Render template with variables for preview.
@@ -626,16 +581,19 @@ pub(crate) enum TemplateStoreError {
     #[error("template not found: {0}")]
     NotFound(String),
 
-    #[error("database error: {0}")]
-    Database(String),
+    /// The store failed, or the keyed command's completion was refused
+    /// (already completed by another attempt, a period no longer admitted).
+    #[error(transparent)]
+    Store(sid_core::Error),
 }
 
-/// Row type for sqlx query.
+fn store_error(operation: &str, e: sqlx::Error) -> TemplateStoreError {
+    TemplateStoreError::Store(sid_core::Error::Storage(format!("{operation}: {e}")))
+}
+
+/// A customization's content.
 #[derive(sqlx::FromRow)]
 struct OverrideRow {
-    template_id: String,
-    channel: i16,
-    locale: String,
     subject: String,
     html_body: String,
     text_body: String,
@@ -644,6 +602,57 @@ struct OverrideRow {
     push_body: String,
     push_action_url: String,
     updated_at: DateTime<Utc>,
+}
+
+/// The customization of `template_id` on `channel` in `locale`, read in
+/// `conn`.
+async fn override_in(
+    conn: &mut PgConnection,
+    template_id: &str,
+    channel: Channel,
+    locale: &str,
+) -> Result<Option<StoredContent>, TemplateStoreError> {
+    let row = sqlx::query_as::<_, OverrideRow>(
+        "SELECT subject, html_body, text_body, sms_body, push_title, push_body,
+                push_action_url, updated_at
+         FROM notification_template_overrides
+         WHERE template_id = $1 AND channel = $2 AND locale = $3",
+    )
+    .bind(template_id)
+    .bind(channel.as_i16())
+    .bind(locale)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| store_error("read a template customization", e))?;
+    Ok(row.map(|row| StoredContent {
+        subject: row.subject,
+        html_body: row.html_body,
+        text_body: row.text_body,
+        sms_body: row.sms_body,
+        push_title: row.push_title,
+        push_body: row.push_body,
+        push_action_url: row.push_action_url,
+        updated_at: row.updated_at,
+    }))
+}
+
+/// The locales `template_id` is customized in, read in `conn`, with `en`,
+/// sorted.
+async fn locales_in(
+    conn: &mut PgConnection,
+    template_id: &str,
+) -> Result<Vec<String>, TemplateStoreError> {
+    let mut locales: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT locale FROM notification_template_overrides WHERE template_id = $1",
+    )
+    .bind(template_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| store_error("read template locales", e))?;
+    locales.push("en".to_string());
+    locales.sort();
+    locales.dedup();
+    Ok(locales)
 }
 
 #[cfg(test)]
