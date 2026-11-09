@@ -116,6 +116,11 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
     }
     let claim = plan(&pool, CLAIM_SQL, &kinds).await;
     assert!(claim.contains("idx_durable_work_lease"), "{claim}");
+    let sweep = plan(&pool, SWEEP_DUE_SQL, &kinds).await;
+    for index in ["idx_durable_work_expiry", "idx_durable_work_lease"] {
+        assert!(sweep.contains(index), "{sweep}");
+    }
+    assert!(!sweep.contains("Seq Scan on durable_work"), "{sweep}");
 }
 
 /// The open count admission reads follows every transition of the work:
@@ -242,6 +247,57 @@ async fn a_completion_owing_its_kind_beside_an_enqueue_commits_both() {
         completion.await.unwrap().expect("the completion commits"),
         "the completion was fenced"
     );
+}
+
+/// An id in the open-count shard of `of`.
+fn in_shard_of(of: WorkId) -> WorkId {
+    let mut bytes = *uuid::Uuid::now_v7().as_bytes();
+    bytes[15] = of.0.as_bytes()[15];
+    WorkId(uuid::Uuid::from_bytes(bytes))
+}
+
+/// Completions owing work of each other's kinds (A owes B, B owes A), each
+/// child in the other parent's count shard, all commit: each takes the
+/// locks of its own kind and its children's kinds in one order before its
+/// state change. Locking only the children's kinds, each held its parent's
+/// shard and waited for the shard the other held, and one was aborted as a
+/// deadlock.
+#[tokio::test]
+async fn completions_owing_each_others_kinds_commit() {
+    let pool = pool().await;
+    let store = PgWorkStore::new(pool.clone());
+    for _ in 0..12 {
+        let (a, b) = (fresh_kind(), fresh_kind());
+        let parent_a = NewWork::new(a.clone(), vec![]);
+        let parent_b = NewWork::new(b.clone(), vec![]);
+        store.enqueue_work(&parent_a, 100).await.unwrap();
+        store.enqueue_work(&parent_b, 100).await.unwrap();
+        let claimed = store
+            .claim_work(&[a.clone(), b.clone()], "w", 2, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        let complete = |parent: &ClaimedWork, child_kind: &WorkKind, shard_of: WorkId| {
+            let store = PgWorkStore::new(pool.clone());
+            let (id, generation) = (parent.id, parent.generation);
+            let mut child = NewWork::new(child_kind.clone(), vec![]);
+            child.id = in_shard_of(shard_of);
+            tokio::spawn(async move {
+                store
+                    .complete_work_owing(id, generation, None, &[child], 100)
+                    .await
+            })
+        };
+        let (of_a, of_b) = if claimed[0].kind == a {
+            (&claimed[0], &claimed[1])
+        } else {
+            (&claimed[1], &claimed[0])
+        };
+        let first = complete(of_a, &b, parent_b.id);
+        let second = complete(of_b, &a, parent_a.id);
+        assert!(first.await.unwrap().expect("A's completion commits"));
+        assert!(second.await.unwrap().expect("B's completion commits"));
+    }
 }
 
 /// A host's own state change and the work it owes commit together through

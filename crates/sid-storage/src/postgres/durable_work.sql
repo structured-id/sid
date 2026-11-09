@@ -45,10 +45,11 @@ CREATE TABLE IF NOT EXISTS durable_work_open (
 );
 
 -- Kept by triggers on every write that opens or ends work, so no write path
--- can leave the count behind. A transaction that takes kinds' admission
--- locks takes them before any write firing these triggers, the order an
--- enqueue holds them: a shard held while waiting for a kind's lock would
--- deadlock with an enqueue holding that lock while waiting for the shard.
+-- can leave the count behind. A transaction whose writes touch the count of
+-- more than one kind, or insert beside another such write, first takes the
+-- admission lock of every kind it touches, in one order, as an enqueue
+-- does: shards are then only waited for under those locks, so no two
+-- transactions can each hold a shard the other waits for.
 CREATE OR REPLACE FUNCTION durable_work_count_open() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN

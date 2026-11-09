@@ -117,14 +117,7 @@ async fn insert_work_in_tx(
 /// or with a mutation, never each see room and pass the capacity between
 /// them.
 async fn lock_kind(tx: &mut PgConnection, kind: &WorkKind) -> SidResult<()> {
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtextextended('sid.durable_work.capacity:' || $1, 0))",
-    )
-    .bind(kind.as_str())
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| SidError::Storage(format!("lock work kind: {e}")))?;
-    Ok(())
+    lock_kinds(tx, [kind.as_str()]).await
 }
 
 /// Store the work a business mutation owes inside its transaction `tx`,
@@ -145,13 +138,41 @@ pub(crate) async fn insert_owed_work_in_tx(
 
 /// Take the admission lock of each kind `works` hold, in the kinds' order.
 async fn lock_kinds_of(tx: &mut PgConnection, works: &[NewWork]) -> SidResult<()> {
-    let mut kinds: Vec<&WorkKind> = works.iter().map(|w| &w.kind).collect();
-    kinds.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    lock_kinds(tx, works.iter().map(|w| w.kind.as_str())).await
+}
+
+/// Take the admission locks of `kinds`, each once, in the kinds' order. A
+/// transaction whose writes touch the open count of more than one kind (or
+/// of one kind beside an insert) takes them before any such write: the
+/// count's shards are then only ever waited for under the kinds' locks,
+/// which are taken in one order, so two such transactions cannot each hold
+/// a shard the other waits for.
+async fn lock_kinds<'a>(
+    tx: &mut PgConnection,
+    kinds: impl IntoIterator<Item = &'a str>,
+) -> SidResult<()> {
+    let mut kinds: Vec<&str> = kinds.into_iter().collect();
+    kinds.sort_unstable();
     kinds.dedup();
     for kind in kinds {
-        lock_kind(tx, kind).await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('sid.durable_work.capacity:' || $1, 0))",
+        )
+        .bind(kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock work kind: {e}")))?;
     }
     Ok(())
+}
+
+/// The kind of stored work `id`; kinds never change.
+async fn kind_of(tx: &mut PgConnection, id: WorkId) -> SidResult<Option<String>> {
+    sqlx::query_scalar("SELECT kind FROM durable_work WHERE id = $1")
+        .bind(id.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("find work: {e}")))
 }
 
 async fn enqueue(pool: &PgPool, work: &NewWork, capacity: u64) -> SidResult<bool> {
@@ -168,6 +189,15 @@ const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner
         lease_until = NULL, updated_at = NOW()
      WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
        AND expires_at IS NOT NULL AND expires_at <= NOW()";
+
+/// Whether a claim has anything to sweep: open work past its expiry or work
+/// abandoned on its last attempt, asked through the sweeps' own indexes.
+const SWEEP_DUE_SQL: &str = "SELECT EXISTS (SELECT 1 FROM durable_work
+         WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
+           AND expires_at IS NOT NULL AND expires_at <= NOW())
+     OR EXISTS (SELECT 1 FROM durable_work
+         WHERE kind = ANY($1) AND state = 'claimed' AND lease_until <= NOW()
+           AND attempts >= max_attempts)";
 
 /// A claim's sweep of work abandoned on its last attempt, through the lease
 /// index.
@@ -217,18 +247,30 @@ async fn claim(
     kinds.dedup();
     let storage = |e: sqlx::Error| SidError::Storage(format!("claim work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
-    // Past its validity: expired, never attempted again.
-    sqlx::query(EXPIRE_SQL)
+    // The sweeps end several items at once, each updating its kind's open
+    // count: when there is something to sweep, the kinds' locks come first
+    // ([`lock_kinds`]). Asked through the same indexes, so a claim with
+    // nothing to sweep, the usual case, takes no lock.
+    let sweep: bool = sqlx::query_scalar(SWEEP_DUE_SQL)
         .bind(&kinds)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(storage)?;
-    // Abandoned by a worker on its last attempt: failed.
-    sqlx::query(ABANDONED_SQL)
-        .bind(&kinds)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
+    if sweep {
+        lock_kinds(&mut tx, kinds.iter().copied()).await?;
+        // Past its validity: expired, never attempted again.
+        sqlx::query(EXPIRE_SQL)
+            .bind(&kinds)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        // Abandoned by a worker on its last attempt: failed.
+        sqlx::query(ABANDONED_SQL)
+            .bind(&kinds)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+    }
     let rows = sqlx::query(CLAIM_SQL)
         .bind(&kinds)
         .bind(worker)
@@ -274,12 +316,10 @@ async fn complete(
     Ok(done == 1)
 }
 
-/// Complete claimed work `id` and store `owed` in one transaction. Each
-/// child kind's admission lock is taken first, in order, and then the
-/// parent's row: completing the parent updates its kind's open count, and
-/// an enqueue takes its kind's lock before the count, so a completion
-/// holding a count shard while waiting for a lock would deadlock with an
-/// enqueue holding that lock while waiting for the shard.
+/// Complete claimed work `id` and store `owed` in one transaction. The
+/// parent's completion updates its kind's open count and each child's
+/// insert its own kind's: the locks of all those kinds are taken first, in
+/// order ([`lock_kinds`]), then the parent's row.
 async fn complete_owing(
     pool: &PgPool,
     id: WorkId,
@@ -290,7 +330,18 @@ async fn complete_owing(
 ) -> SidResult<bool> {
     let storage = |e: sqlx::Error| SidError::Storage(format!("complete work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
-    lock_kinds_of(&mut tx, owed).await?;
+    if !owed.is_empty() {
+        let Some(parent) = kind_of(&mut tx, id).await? else {
+            return Ok(false);
+        };
+        lock_kinds(
+            &mut tx,
+            owed.iter()
+                .map(|w| w.kind.as_str())
+                .chain([parent.as_str()]),
+        )
+        .await?;
+    }
     let done = sqlx::query(
         "UPDATE durable_work SET state = 'completed', result = $3, lease_owner = NULL,
             lease_until = NULL, updated_at = NOW()
@@ -319,6 +370,14 @@ async fn fail(
 ) -> SidResult<bool> {
     let storage = |e: sqlx::Error| SidError::Storage(format!("fail work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
+    // A failure that may owe its alert touches two kinds' open counts: their
+    // locks first, in order ([`lock_kinds`]).
+    if let Some(alert) = &failure.on_dead {
+        let Some(parent) = kind_of(&mut tx, id).await? else {
+            return Ok(false);
+        };
+        lock_kinds(&mut tx, [parent.as_str(), alert.kind.as_str()]).await?;
+    }
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE durable_work SET
             state = CASE WHEN $4::timestamptz IS NULL OR attempts >= max_attempts
