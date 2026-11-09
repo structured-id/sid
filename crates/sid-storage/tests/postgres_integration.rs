@@ -1449,6 +1449,7 @@ macro_rules! work_store_conformance {
             expired_and_future_are_not_claimed,
             abandoned_last_attempt_fails,
             concurrent_claims_do_not_overlap,
+            a_kind_named_twice_claims_each_item_once,
             export_import_round_trip,
             completion_commits_with_follow_up_work,
             stale_completion_owes_nothing,

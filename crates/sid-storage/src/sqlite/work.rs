@@ -157,12 +157,16 @@ impl WorkStore for SqliteBackend {
 
         // Each kind's first candidates from its indexes, merged by time: the
         // read is bounded by kinds times the limit whatever the backlog.
+        // A set: a kind named twice gave its items twice, claimed twice.
+        let mut distinct: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
         let mut candidates: Vec<(uuid::Uuid, String)> = Vec::new();
-        for kind in kinds {
+        for kind in distinct {
             for sql in [DUE_SQL, LAPSED_SQL] {
                 candidates.extend(
                     sqlx::query_as::<_, (uuid::Uuid, String)>(sql)
-                        .bind(kind.as_str())
+                        .bind(kind)
                         .bind(&now_s)
                         .bind(i64::from(limit))
                         .fetch_all(&mut *tx)

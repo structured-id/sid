@@ -136,14 +136,20 @@ pub(crate) async fn insert_owed_work_in_tx(
     works: &[NewWork],
     capacity: u64,
 ) -> SidResult<()> {
+    lock_kinds_of(tx, works).await?;
+    for work in works {
+        insert_work_in_tx(tx, work, capacity).await?;
+    }
+    Ok(())
+}
+
+/// Take the admission lock of each kind `works` hold, in the kinds' order.
+async fn lock_kinds_of(tx: &mut PgConnection, works: &[NewWork]) -> SidResult<()> {
     let mut kinds: Vec<&WorkKind> = works.iter().map(|w| &w.kind).collect();
     kinds.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
     kinds.dedup();
     for kind in kinds {
         lock_kind(tx, kind).await?;
-    }
-    for work in works {
-        insert_work_in_tx(tx, work, capacity).await?;
     }
     Ok(())
 }
@@ -205,7 +211,10 @@ async fn claim(
     limit: u32,
     lease: std::time::Duration,
 ) -> SidResult<Vec<ClaimedWork>> {
-    let kinds: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
+    // A set: a kind named twice would give its candidates twice.
+    let mut kinds: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
     let storage = |e: sqlx::Error| SidError::Storage(format!("claim work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
     // Past its validity: expired, never attempted again.
@@ -265,10 +274,12 @@ async fn complete(
     Ok(done == 1)
 }
 
-/// Complete claimed work `id` and store `owed` in one transaction. The
-/// parent's row is locked first, then each child kind's admission lock in
-/// order: the order a mutation takes its rows and then its owed work's
-/// kinds, so neither waits on the other in a cycle.
+/// Complete claimed work `id` and store `owed` in one transaction. Each
+/// child kind's admission lock is taken first, in order, and then the
+/// parent's row: completing the parent updates its kind's open count, and
+/// an enqueue takes its kind's lock before the count, so a completion
+/// holding a count shard while waiting for a lock would deadlock with an
+/// enqueue holding that lock while waiting for the shard.
 async fn complete_owing(
     pool: &PgPool,
     id: WorkId,
@@ -279,6 +290,7 @@ async fn complete_owing(
 ) -> SidResult<bool> {
     let storage = |e: sqlx::Error| SidError::Storage(format!("complete work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
+    lock_kinds_of(&mut tx, owed).await?;
     let done = sqlx::query(
         "UPDATE durable_work SET state = 'completed', result = $3, lease_owner = NULL,
             lease_until = NULL, updated_at = NOW()

@@ -534,6 +534,22 @@ pub async fn concurrent_claims_do_not_overlap(store: &dyn WorkStore) {
     assert_eq!(seen, ids, "some work was not claimed by anyone");
 }
 
+/// The kinds a claim names are a set: a kind named twice yields each of its
+/// items once. Read twice, one item was claimed twice in one call, its
+/// first claim already stale and its attempts counted twice.
+pub async fn a_kind_named_twice_claims_each_item_once(store: &dyn WorkStore) {
+    let kind = unique_kind("twice");
+    let item = work(&kind);
+    store.enqueue_work(&item, 10).await.unwrap();
+    let claimed = store
+        .claim_work(&[kind.clone(), kind], "w", 2, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "{claimed:?}");
+    assert_eq!(claimed[0].id, item.id);
+    assert_eq!(claimed[0].attempt, 1);
+}
+
 /// Export carries every piece of work with its payload and outcome; import
 /// stores it as it was, except that a claim does not travel (claimed work is
 /// due again, or failed if that claim was its last attempt), and importing

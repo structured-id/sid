@@ -195,6 +195,55 @@ async fn the_open_count_follows_each_transition() {
     assert_eq!(open().await, 2);
 }
 
+/// A completion owing work of its own kind takes the kind's admission lock
+/// before its state change touches the open count, the order an enqueue
+/// takes them: an enqueue holding the lock whose item falls in the
+/// completed item's count shard and the completion both commit. Taken the
+/// other way, the completion held the shard while waiting for the lock the
+/// enqueue held while waiting for the shard, and one of them was aborted as
+/// a deadlock.
+#[tokio::test]
+async fn a_completion_owing_its_kind_beside_an_enqueue_commits_both() {
+    let pool = pool().await;
+    let store = PgWorkStore::new(pool.clone());
+    let kind = fresh_kind();
+    let parent = NewWork::new(kind.clone(), vec![]);
+    store.enqueue_work(&parent, 100).await.unwrap();
+    let claimed = store
+        .claim_work(std::slice::from_ref(&kind), "w", 1, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    // The enqueue holds the kind's lock first, as it does before inserting.
+    let mut enqueue = pool.begin().await.unwrap();
+    lock_kind(&mut enqueue, &kind).await.unwrap();
+    let completion = {
+        let store = PgWorkStore::new(pool.clone());
+        let (id, generation) = (claimed[0].id, claimed[0].generation);
+        let child = NewWork::new(kind.clone(), vec![]);
+        tokio::spawn(async move {
+            store
+                .complete_work_owing(id, generation, None, &[child], 100)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // An item in the parent's count shard.
+    let mut bytes = *uuid::Uuid::now_v7().as_bytes();
+    bytes[15] = parent.id.0.as_bytes()[15];
+    let mut same_shard = NewWork::new(kind.clone(), vec![]);
+    same_shard.id = WorkId(uuid::Uuid::from_bytes(bytes));
+    insert_work_in_tx(&mut enqueue, &same_shard, 100)
+        .await
+        .expect("the enqueue commits");
+    enqueue.commit().await.unwrap();
+    assert!(
+        completion.await.unwrap().expect("the completion commits"),
+        "the completion was fenced"
+    );
+}
+
 /// A host's own state change and the work it owes commit together through
 /// `owe_in_tx`: rolled back, neither is stored; committed, the work is.
 #[tokio::test]
