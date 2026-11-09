@@ -296,15 +296,18 @@ pub async fn an_oversized_result_is_refused(store: &dyn OperationResultStore) {
     }
 }
 
-/// A period holds at most the policy's capacity of completions: past it a
-/// new key is refused as exhausted and writes nothing, while a completed key
-/// still answers as completed and resolves; a fresh period admits again.
-/// Needs a store of its own whose harness set a capacity of at most 64.
+/// A period never holds more than the policy's capacity of completions,
+/// however its commits are spread: a writer past it is refused as exhausted
+/// and writes nothing, while a completed key still answers as completed and
+/// resolves; a fresh period admits again. A store may split the capacity
+/// over parts of a period, so a part may fill before the whole; most of the
+/// capacity is still used when many keys arrive. Needs a store of its own
+/// whose harness set a capacity of at most 8.
 pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultStore) {
     use chrono::{Duration, Utc};
 
     let capacity = store.operation_period_policy().await.unwrap().capacity;
-    assert!(capacity <= 64, "the harness sets a small capacity");
+    assert!(capacity <= 8, "the harness sets a small capacity");
     let now = Utc::now();
     let period = store
         .current_operation_period(now, Duration::minutes(1))
@@ -318,44 +321,41 @@ pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultSt
                 .in_period(period),
         )
     };
-    // More concurrent writers than the period holds: exactly its capacity
-    // commit, the rest are refused as exhausted and write nothing.
-    let keys: Vec<OperationKey> = (0..capacity + 4).map(|_| key()).collect();
-    let outcomes = futures::future::join_all(
-        keys.iter()
-            .map(|key| store.record_outcome(keyed(key, period))),
-    )
-    .await;
+    // Far more writers than the period holds, sixteen at a time.
     let mut kept = Vec::new();
-    for (key, outcome) in keys.iter().zip(outcomes) {
-        match outcome {
-            Ok(()) => kept.push(key.clone()),
-            Err(Error::ResourceExhausted(_)) => {
-                assert!(
-                    store
-                        .get_operation_result(&ns, key)
-                        .await
-                        .unwrap()
-                        .is_none()
-                );
+    let mut refused = 0;
+    for _ in 0..16 {
+        let keys: Vec<OperationKey> = (0..16).map(|_| key()).collect();
+        let outcomes = futures::future::join_all(
+            keys.iter()
+                .map(|key| store.record_outcome(keyed(key, period))),
+        )
+        .await;
+        for (key, outcome) in keys.iter().zip(outcomes) {
+            match outcome {
+                Ok(()) => kept.push(key.clone()),
+                Err(Error::ResourceExhausted(_)) => {
+                    refused += 1_u32;
+                    assert!(
+                        store
+                            .get_operation_result(&ns, key)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "a refused completion was written"
+                    );
+                }
+                Err(e) => panic!("{e:?}"),
             }
-            Err(e) => panic!("{e:?}"),
         }
     }
-    assert_eq!(kept.len() as u64, capacity, "the period held its capacity");
-    let late = key();
-    let err = store
-        .record_outcome(keyed(&late, period))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+    let held = kept.len() as u64;
+    assert!(held <= capacity, "the period held {held} of {capacity}");
     assert!(
-        store
-            .get_operation_result(&ns, &late)
-            .await
-            .unwrap()
-            .is_none()
+        held * 2 >= capacity,
+        "the period held only {held} of {capacity}"
     );
+    assert!(refused > 0);
     let err = store
         .record_outcome(keyed(&kept[0], period))
         .await
@@ -375,7 +375,18 @@ pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultSt
         .unwrap()
         .period;
     assert!(fresh > period);
-    store.record_outcome(keyed(&late, fresh)).await.unwrap();
+    let mut admitted = false;
+    for _ in 0..256 {
+        match store.record_outcome(keyed(&key(), fresh)).await {
+            Ok(()) => {
+                admitted = true;
+                break;
+            }
+            Err(Error::ResourceExhausted(_)) => {}
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert!(admitted, "a fresh period admits again");
 }
 
 /// The life of the periods keyed commands are admitted under, in one
