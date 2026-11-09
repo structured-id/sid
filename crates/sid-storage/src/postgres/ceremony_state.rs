@@ -12,7 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
-    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, OwedWork,
+    SingleUseAdmissions,
 };
 
 use super::PostgresBackend;
@@ -165,6 +166,86 @@ impl CeremonyStateStore for PostgresBackend {
         .await
         .map_err(failure("store ceremony state"))?;
         Ok(())
+    }
+
+    async fn put_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+        owed: OwedWork<'_>,
+    ) -> SidResult<()> {
+        // The state row first, then the work's kind lock: the order a
+        // mutation consuming a ceremony takes them in.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(failure("store ceremony state"))?;
+        sqlx::query(
+            "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
+             VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4))
+             ON CONFLICT (namespace, state_key) DO UPDATE SET
+                 value = EXCLUDED.value,
+                 expires_at = clock_timestamp() + make_interval(secs => $4)",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(value)
+        .bind(seconds(ttl))
+        .execute(&mut *tx)
+        .await
+        .map_err(failure("store ceremony state"))?;
+        super::work::insert_owed_work_in_tx(
+            &mut tx,
+            std::slice::from_ref(owed.work),
+            owed.capacity,
+        )
+        .await?;
+        tx.commit().await.map_err(failure("store ceremony state"))?;
+        Ok(())
+    }
+
+    async fn replace_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+        owed: OwedWork<'_>,
+    ) -> SidResult<bool> {
+        let mut tx = self
+            .lock_state(namespace, key, "replace ceremony state")
+            .await?;
+        let replaced = sqlx::query(
+            "UPDATE ceremony_states
+             SET value = $4, expires_at = clock_timestamp() + make_interval(secs => $5)
+             WHERE namespace = $1 AND state_key = $2 AND value = $3 AND expires_at > clock_timestamp()",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(expected)
+        .bind(value)
+        .bind(seconds(ttl))
+        .execute(&mut *tx)
+        .await
+        .map_err(failure("replace ceremony state"))?
+        .rows_affected();
+        if replaced != 1 {
+            return Ok(false);
+        }
+        super::work::insert_owed_work_in_tx(
+            &mut tx,
+            std::slice::from_ref(owed.work),
+            owed.capacity,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(failure("replace ceremony state"))?;
+        Ok(true)
     }
 
     async fn take_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {

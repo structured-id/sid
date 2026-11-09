@@ -732,7 +732,6 @@ pub async fn issue_code(
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
-            work: storage.clone(),
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     )
@@ -1032,7 +1031,6 @@ fn auth_service_keyed(
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
-            work: storage.clone(),
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));

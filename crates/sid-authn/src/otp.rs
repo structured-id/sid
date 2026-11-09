@@ -26,7 +26,7 @@ use argon2::{
 use chrono::{DateTime, SubsecRound, Utc};
 use rand::RngExt;
 use sid_core::models::{NewWork, WorkKind};
-use sid_plugin::{CeremonyStateStore, WorkStore};
+use sid_plugin::{CeremonyStateStore, OwedWork};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -111,11 +111,11 @@ pub enum CodeDestination<'a> {
     None,
 }
 
-/// How requested codes are owed their email: the durable work store, the
-/// keys sealing each code to its issue, and the bound of open mails.
+/// How requested codes are owed their email: the keys sealing each code to
+/// its issue, and the bound of open mails. The mail's work commits with the
+/// session in the ceremony state store, which keeps both.
 pub struct CodeDelivery {
     pub keys: Arc<dyn sid_keys::KeyManager>,
-    pub work: Arc<dyn WorkStore>,
     pub capacity: u64,
 }
 
@@ -169,6 +169,15 @@ fn store_error(what: &str) -> impl Fn(sid_core::Error) -> OtpError + '_ {
     move |e| OtpError::Internal(format!("{what}: {e}"))
 }
 
+/// A refused write of a session with its mail: the mail queue full is
+/// `Busy`, anything else internal.
+fn owing_error(e: sid_core::Error) -> OtpError {
+    match e {
+        sid_core::Error::ResourceExhausted(e) => OtpError::Busy(e),
+        e => OtpError::Internal(format!("store the session with its email: {e}")),
+    }
+}
+
 /// OTP session service over the ceremony state every replica shares.
 pub struct OtpService {
     ceremonies: Arc<dyn CeremonyStateStore>,
@@ -203,23 +212,19 @@ impl OtpService {
         };
         let (session, code) = self.issue(session_id, target, destination).await?;
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
-        let key = session_id.to_string();
+        let email = Self::email(session_id, &session);
+        // The session and its mail commit together: a code is never stored
+        // without the work sending it, nor that work without its code.
         self.ceremonies
-            .put_ceremony_state(SESSIONS, &key, &data, OTP_RETENTION)
+            .put_ceremony_state_owing(
+                SESSIONS,
+                &session_id.to_string(),
+                &data,
+                OTP_RETENTION,
+                self.owed(&email),
+            )
             .await
-            .map_err(store_error("store session"))?;
-        if let Err(e) = self.owe_email(session_id, &session).await {
-            // Not answered as requested, so its session must not linger as
-            // a code nobody was sent.
-            let read = Read {
-                bytes: data,
-                session,
-            };
-            if let Err(end) = self.end(&key, &read).await {
-                tracing::warn!(session_id = %session_id, "an unsent code's session stays until it expires: {end}");
-            }
-            return Err(e);
-        }
+            .map_err(owing_error)?;
         Ok((Self::requested(session_id), code))
     }
 
@@ -270,17 +275,24 @@ impl OtpService {
             .issue(*session_id, &previous.target, previous.destination.clone())
             .await?;
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
+        let email = Self::email(*session_id, &session);
+        // The new code replaces the current one only with its mail owed: a
+        // refused admission leaves the current code and its mail in place.
         if !self
             .ceremonies
-            .replace_ceremony_state(SESSIONS, &key, &current.bytes, &data, OTP_RETENTION)
+            .replace_ceremony_state_owing(
+                SESSIONS,
+                &key,
+                &current.bytes,
+                &data,
+                OTP_RETENTION,
+                self.owed(&email),
+            )
             .await
-            .map_err(store_error("replace session"))?
+            .map_err(owing_error)?
         {
             return Ok(None);
         }
-        // A failed admission leaves the new code unsent: the caller is told,
-        // and may resend again.
-        self.owe_email(*session_id, &session).await?;
         Ok(Some((Self::requested(*session_id), code)))
     }
 
@@ -380,15 +392,11 @@ impl OtpService {
         ))
     }
 
-    /// Store the work emailing `session`'s current code. A session with no
+    /// The work emailing `session`'s current code. A session with no
     /// destination owes the same work, which sends nothing: admission, its
     /// refusal at capacity and its cost are alike for every address, so none
     /// of them tells whether an account exists.
-    async fn owe_email(
-        &self,
-        session_id: Uuid,
-        session: &StoredOtpSession,
-    ) -> Result<(), OtpError> {
+    fn email(session_id: Uuid, session: &StoredOtpSession) -> NewWork {
         let mut payload = session_id.as_bytes().to_vec();
         payload.extend_from_slice(session.issue.as_bytes());
         let mut email = NewWork::new(
@@ -397,15 +405,14 @@ impl OtpService {
         );
         email.expires_at = Some(session.expires_at);
         email.max_attempts = EMAIL_ATTEMPTS;
-        match self
-            .delivery
-            .work
-            .enqueue_work(&email, self.delivery.capacity)
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(sid_core::Error::ResourceExhausted(e)) => Err(OtpError::Busy(e)),
-            Err(e) => Err(OtpError::Internal(format!("owe the code's email: {e}"))),
+        email
+    }
+
+    /// `email` admitted within the bound of open mails.
+    fn owed<'a>(&self, email: &'a NewWork) -> OwedWork<'a> {
+        OwedWork {
+            work: email,
+            capacity: self.delivery.capacity,
         }
     }
 

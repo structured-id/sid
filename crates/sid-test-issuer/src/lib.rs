@@ -910,7 +910,6 @@ fn auth_service(
             storage.clone(),
             sid_authn::otp::CodeDelivery {
                 keys: keys.clone(),
-                work: storage.clone(),
                 capacity: sid_plugin::OWED_WORK_CAPACITY,
             },
         )),

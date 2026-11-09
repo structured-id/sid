@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use sid_plugin::WorkStore;
 use sid_storage::sqlite::SqliteBackend;
 
 /// One installation's shared store: its ceremony state and its durable
@@ -19,7 +20,6 @@ fn replica_with(store: &Arc<SqliteBackend>, capacity: u64) -> OtpService {
         store.clone(),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            work: store.clone(),
             capacity,
         },
     )
@@ -259,12 +259,10 @@ async fn expired_code_is_refused() {
 /// so neither the request limit nor the attempt limit can fail open.
 #[tokio::test]
 async fn unreachable_store_fails_closed() {
-    let store = store().await;
     let service = OtpService::new(
         Arc::new(crate::test_support::DownCeremonies),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            work: store,
             capacity: 10,
         },
     );
@@ -367,6 +365,31 @@ impl CeremonyStateStore for ResendDuringVerify {
             .replace_ceremony_state(n, k, expected, v, ttl)
             .await
     }
+    async fn put_ceremony_state_owing(
+        &self,
+        n: &str,
+        k: &str,
+        v: &[u8],
+        ttl: Duration,
+        owed: sid_plugin::OwedWork<'_>,
+    ) -> sid_core::Result<()> {
+        self.inner
+            .put_ceremony_state_owing(n, k, v, ttl, owed)
+            .await
+    }
+    async fn replace_ceremony_state_owing(
+        &self,
+        n: &str,
+        k: &str,
+        expected: &[u8],
+        v: &[u8],
+        ttl: Duration,
+        owed: sid_plugin::OwedWork<'_>,
+    ) -> sid_core::Result<bool> {
+        self.inner
+            .replace_ceremony_state_owing(n, k, expected, v, ttl, owed)
+            .await
+    }
     async fn count_in_window(&self, n: &str, k: &str, window: Duration) -> sid_core::Result<u64> {
         if n == ATTEMPTS
             && let Some((other, session)) = self.resend.lock().await.take()
@@ -403,7 +426,6 @@ async fn code_replaced_during_its_verification_does_not_sign_in() {
         racing.clone(),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            work: inner.clone(),
             capacity: 100,
         },
     );
@@ -591,6 +613,38 @@ async fn resent_code_replaces_the_current_one() {
     assert!(matches!(
         service
             .verify_otp(&result.session_id, &second)
+            .await
+            .unwrap(),
+        OtpVerifyResult::Success { .. }
+    ));
+}
+
+/// A resend refused because the mail queue is full changes nothing: the
+/// current code still signs in and its mail is still owed. It once replaced
+/// the code first and then failed to owe the new one's mail, leaving a code
+/// nobody would ever send in place of the one already on its way.
+#[tokio::test]
+async fn resend_refused_for_capacity_keeps_the_current_code() {
+    let store = store().await;
+    let service = replica_with(&store, 1);
+    let (result, first) = request(&service, "full@example.com").await.unwrap();
+
+    let refused = service.resend_otp(&result.session_id).await;
+
+    assert!(matches!(refused, Err(OtpError::Busy(_))), "{refused:?}");
+    let owed = owed_mails(&store).await;
+    assert_eq!(owed.len(), 1, "only the current code's mail is owed");
+    assert!(
+        service
+            .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
+            .await
+            .unwrap()
+            .is_some(),
+        "the current code's mail still sends it"
+    );
+    assert!(matches!(
+        service
+            .verify_otp(&result.session_id, &first)
             .await
             .unwrap(),
         OtpVerifyResult::Success { .. }

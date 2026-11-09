@@ -47,7 +47,7 @@ pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
 pub use ceremony_state::{
     CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, InProcessCeremonyState,
-    SingleUseAdmissions,
+    OwedWork, SingleUseAdmissions,
 };
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;

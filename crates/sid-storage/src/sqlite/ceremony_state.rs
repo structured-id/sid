@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
-    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, OwedWork,
+    SingleUseAdmissions,
 };
 
 use super::SqliteBackend;
@@ -164,6 +165,69 @@ impl CeremonyStateStore for SqliteBackend {
         })
         .await?;
         Ok(())
+    }
+
+    async fn put_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+        owed: OwedWork<'_>,
+    ) -> SidResult<()> {
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (namespace, state_key) DO UPDATE SET
+                 value = excluded.value, expires_at_ms = excluded.expires_at_ms",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(value)
+        .bind(deadline(now_ms(), ttl)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(failure("store ceremony state"))?;
+        super::work::insert_work_in_tx(&mut tx, owed.work, owed.capacity).await?;
+        tx.commit().await.map_err(failure("store ceremony state"))?;
+        Ok(())
+    }
+
+    async fn replace_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+        owed: OwedWork<'_>,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        // Read holding the write lock, as `ceremony_write` does.
+        let now = now_ms();
+        let replaced = sqlx::query(
+            "UPDATE ceremony_states SET value = ?, expires_at_ms = ?
+             WHERE namespace = ? AND state_key = ? AND value = ? AND expires_at_ms > ?",
+        )
+        .bind(value)
+        .bind(deadline(now, ttl)?)
+        .bind(namespace)
+        .bind(key)
+        .bind(expected)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(failure("replace ceremony state"))?
+        .rows_affected();
+        if replaced != 1 {
+            return Ok(false);
+        }
+        super::work::insert_work_in_tx(&mut tx, owed.work, owed.capacity).await?;
+        tx.commit()
+            .await
+            .map_err(failure("replace ceremony state"))?;
+        Ok(true)
     }
 
     async fn take_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {

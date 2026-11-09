@@ -105,7 +105,6 @@ async fn pending_mail(
         svc.storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: common::test_key_manager(),
-            work: svc.storage.clone(),
             capacity: 10,
         },
     )

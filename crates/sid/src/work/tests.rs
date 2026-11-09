@@ -33,7 +33,6 @@ fn parts(storage: Arc<dyn StorageBackend>, links: bool) -> CeWorkParts {
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: keys(),
-            work: storage.clone(),
             capacity: 100,
         },
     ));

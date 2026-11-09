@@ -72,7 +72,6 @@ async fn codes() -> (Arc<OtpService>, Arc<sid_storage::sqlite::SqliteBackend>) {
         store.clone(),
         CodeDelivery {
             keys: keys(),
-            work: store.clone(),
             capacity: 100,
         },
     ));
