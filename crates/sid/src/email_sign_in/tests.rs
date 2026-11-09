@@ -7,10 +7,9 @@ use crate::test_support::{fixed_policy, keys, sign_in, storage};
 
 fn codes(storage: Arc<dyn StorageBackend>) -> OtpService {
     OtpService::new(
-        storage.clone(),
+        storage,
         sid_authn::otp::CodeDelivery {
             keys: keys(),
-            work: storage,
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     )

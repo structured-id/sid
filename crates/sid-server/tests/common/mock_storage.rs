@@ -1694,6 +1694,52 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
             .replace_ceremony_state(namespace, key, expected, value, ttl)
             .await
     }
+    // The double keeps state and work apart, so it orders the two writes and
+    // undoes the first when the second fails; the real stores commit both in
+    // one transaction (the backend conformance suite holds them to it).
+    async fn put_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+        owed: sid_plugin::OwedWork<'_>,
+    ) -> SidResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .enqueue(owed.work, owed.capacity)?;
+        if let Err(e) = self.put_ceremony_state(namespace, key, value, ttl).await {
+            self.inner.lock().unwrap().work.remove(&owed.work.id);
+            return Err(e);
+        }
+        Ok(())
+    }
+    async fn replace_ceremony_state_owing(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: std::time::Duration,
+        owed: sid_plugin::OwedWork<'_>,
+    ) -> SidResult<bool> {
+        if !self
+            .ceremonies
+            .replace_ceremony_state(namespace, key, expected, value, ttl)
+            .await?
+        {
+            return Ok(false);
+        }
+        let owing = self.inner.lock().unwrap().enqueue(owed.work, owed.capacity);
+        if let Err(e) = owing {
+            self.ceremonies
+                .replace_ceremony_state(namespace, key, value, expected, ttl)
+                .await?;
+            return Err(e);
+        }
+        Ok(true)
+    }
     async fn count_in_window(
         &self,
         namespace: &str,

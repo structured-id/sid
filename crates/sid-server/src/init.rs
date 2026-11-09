@@ -713,7 +713,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: key_manager.clone(),
-            work: storage.clone(),
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));

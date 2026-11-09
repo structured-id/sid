@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sid_core::Result;
+use sid_core::models::NewWork;
 
 /// Single-use admissions: the atomic replay record a verifier needs to
 /// accept a one-time value (a proof's `jti`) exactly once across every
@@ -70,6 +71,42 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
         ttl: Duration,
     ) -> Result<bool>;
 
+    /// Hold `value` under `key` as [`Self::put_ceremony_state`] does, with the
+    /// durable work `owed` in the same commit: both are stored or neither.
+    /// Refuses `ResourceExhausted`, storing nothing, when `owed`'s kind is
+    /// full. A store keeping no durable work beside its ceremony state
+    /// refuses rather than store the state alone.
+    async fn put_ceremony_state_owing(
+        &self,
+        _namespace: &str,
+        _key: &str,
+        _value: &[u8],
+        _ttl: Duration,
+        _owed: OwedWork<'_>,
+    ) -> Result<()> {
+        Err(sid_core::Error::Internal(
+            "this ceremony state store keeps no durable work".into(),
+        ))
+    }
+
+    /// [`Self::replace_ceremony_state`] with the durable work `owed` in the
+    /// same commit: `false`, storing neither, when the state is no longer
+    /// `expected`; `ResourceExhausted`, the state left as it was, when
+    /// `owed`'s kind is full.
+    async fn replace_ceremony_state_owing(
+        &self,
+        _namespace: &str,
+        _key: &str,
+        _expected: &[u8],
+        _value: &[u8],
+        _ttl: Duration,
+        _owed: OwedWork<'_>,
+    ) -> Result<bool> {
+        Err(sid_core::Error::Internal(
+            "this ceremony state store keeps no durable work".into(),
+        ))
+    }
+
     /// Count one more event under `key` and return the count in its window:
     /// the first event opens a window of `window` from now, events within it
     /// add to it, and the first event after it ends opens a new one at 1.
@@ -103,6 +140,14 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
             "this ceremony state store does not transfer its records".into(),
         ))
     }
+}
+
+/// Durable work a ceremony state write owes, admitted while its kind holds
+/// fewer than `capacity` open items.
+#[derive(Debug, Clone, Copy)]
+pub struct OwedWork<'a> {
+    pub work: &'a NewWork,
+    pub capacity: u64,
 }
 
 /// Live ceremony records with their deadlines, as a transfer carries them.

@@ -126,6 +126,11 @@ macro_rules! __storage_conformance {
                 test_an_expired_ceremony_completes_nothing
                 test_concurrent_completions_commit_once
                 test_a_completed_command_is_answered_before_its_ceremony
+                test_a_ceremony_state_commits_with_its_owed_work
+                test_a_ceremony_state_refused_for_capacity_stores_neither
+                test_a_replacement_commits_with_its_owed_work
+                test_a_replacement_refused_for_capacity_keeps_the_state
+                test_concurrent_replacements_owe_once
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],cleanup:
                 test_delete_outbound_dlq_entry

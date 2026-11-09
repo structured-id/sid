@@ -878,7 +878,6 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: installation.key_manager.clone(),
-            work: storage.clone(),
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
