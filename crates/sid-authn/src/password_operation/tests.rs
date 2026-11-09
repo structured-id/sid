@@ -1004,6 +1004,215 @@ async fn a_comparison_window_selects_without_deleting() {
     );
 }
 
+/// The window through whole changes, each proved and checked and committed
+/// as a host commits it: five accepted at depth 5; at depth 3 a password
+/// outside the window (the fourth newest) is accepted and one inside it
+/// refused, and every accepted password stays stored; raised to 5 again, the
+/// retained passwords the deeper window reaches are refused once more and
+/// one beyond it accepted. Depth deletes nothing at any step.
+#[tokio::test]
+async fn a_depth_edit_compares_its_window_through_committed_changes() {
+    use crate::opaque::{OpaqueRouter, PallasOpaque};
+    use crate::opaque_zkpp::ZkppConfig;
+    use group::GroupEncoding;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
+    use sid_core::models::{CredentialData, Profile};
+    use sid_opaque_ke::{
+        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
+    };
+    use sid_pake_core::{
+        binding::operation_context,
+        circuit::{CircuitShape, ZKPP_K},
+        history::{blind_request, history_input, random_blind},
+        keygen::{generate_params, generate_pk},
+        pallas_opaque::PallasCipherSuite,
+        prover::{HistoryEvaluation, ZkppProver},
+        types::CE_DEFAULT_POLICY,
+        verifier::ZkppVerifier,
+    };
+    use sid_plugin::crypto::OpaqueOperations;
+
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let ctx = || MutationContext::from(AuditEntry::system("test", "change"));
+    let profile = Profile::new(Some("depth-edit"));
+    storage.create_profile(&profile, ctx()).await.unwrap();
+    let password = Credential::new(
+        profile.id,
+        CredentialType::Opaque,
+        b"initial".to_vec(),
+        None,
+    );
+    storage.create_credential(&password, ctx()).await.unwrap();
+
+    // One epoch throughout: every comparison is in one domain.
+    let primary = Box::new(PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let providers = [(
+        CurveId::Pallas,
+        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
+    )]
+    .into();
+    let router = OpaqueRouter::new(primary, providers, setup);
+    let shape = CircuitShape {
+        policy: CE_DEFAULT_POLICY,
+        history_domains: 1,
+    };
+    let params = generate_params(ZKPP_K);
+    let pk = generate_pk(&params, shape).unwrap();
+    let verifier = ZkppVerifier::new(params.clone(), pk.get_vk().clone(), shape);
+    let prover = ZkppProver::new(params, pk, shape);
+    let zkpp =
+        Arc::new(ZkppOpaqueServer::new(&router, vec![verifier], ZkppConfig::default()).unwrap());
+
+    // A change of the profile's password to `new` under `depth`, start to
+    // commit, as the client and the host run it.
+    let change_to = async |depth: u32, new: &[u8]| -> Result<(), PasswordOperationError> {
+        let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(5));
+        let ops = ops.with_history_depth(depth, MAX_HISTORY_DEPTH).unwrap();
+        let start =
+            ClientRegistration::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), new).unwrap();
+        let request = start.message.serialize().to_vec();
+        let blind =
+            pallas::Scalar::from_repr(start.state.serialize()[..32].try_into().unwrap()).unwrap();
+        let prepared = ops
+            .prepare(
+                &zkpp,
+                change(),
+                OperationOwner::Existing(profile.id),
+                profile.id.to_string(),
+                Some(request.clone()),
+            )
+            .await?;
+        let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+        let d = pallas::Base::from_repr(prepared.context.owner_domain.clone().try_into().unwrap())
+            .unwrap();
+        let r = random_blind(UnwrapErr(SysRng));
+        let b = blind_request(history_input(d, new), r).to_bytes();
+        let answers = evaluation.evaluate(&id, &b).await?;
+        let history = HistoryEvaluation {
+            d,
+            domains: prepared
+                .context
+                .domains
+                .iter()
+                .map(|x| {
+                    pallas::Base::from_repr(x.comparison_domain.clone().try_into().unwrap())
+                        .unwrap()
+                })
+                .collect(),
+            r,
+            evaluations: answers
+                .iter()
+                .map(|a| {
+                    pallas::Affine::from_bytes(&a.evaluated_element.clone().try_into().unwrap())
+                        .unwrap()
+                })
+                .collect(),
+        };
+        let proof = prover
+            .prove(
+                new,
+                blind,
+                &operation_context(id.as_bytes(), &request),
+                &history,
+            )
+            .unwrap();
+        let proof = PasswordRegistrationProof {
+            zkpp_proof: proof.snark_proof.0,
+            instances: proof
+                .instances
+                .iter()
+                .map(|x| x.to_repr().to_vec())
+                .collect(),
+            evaluation_proofs: answers.into_iter().map(|a| a.proof.unwrap()).collect(),
+        };
+        let record = start
+            .state
+            .finish(
+                &mut UnwrapErr(SysRng),
+                new,
+                RegistrationResponse::deserialize(prepared.registration_response.as_ref().unwrap())
+                    .unwrap(),
+                ClientRegistrationFinishParameters::default(),
+            )
+            .unwrap()
+            .message
+            .serialize()
+            .to_vec();
+        let done = match ops
+            .finish(
+                Arc::clone(&zkpp),
+                &id,
+                "change",
+                &record,
+                Some(proof),
+                allowed,
+            )
+            .await
+        {
+            Ok(Finish::Ready(done)) => *done,
+            Ok(Finish::Completed(_)) => panic!("a fresh change completed already"),
+            Err(StepError::Operation(refused)) => return Err(refused),
+            Err(other) => panic!("{other:?}"),
+        };
+        let current = storage.get_credential(password.id).await.unwrap().unwrap();
+        let mut changed = current.clone();
+        changed.data = CredentialData::new(record);
+        assert!(
+            storage
+                .change_password(
+                    password.id,
+                    current.data.expose(),
+                    &changed,
+                    done.history.as_ref(),
+                    ctx()
+                )
+                .await
+                .unwrap()
+        );
+        Ok(())
+    };
+    let retained = async || {
+        storage
+            .get_password_history(profile.id)
+            .await
+            .unwrap()
+            .entries
+            .len()
+    };
+    let reused = |result: Result<(), PasswordOperationError>| {
+        assert!(
+            matches!(result, Err(PasswordOperationError::Reused)),
+            "{result:?}"
+        );
+    };
+
+    for p in [
+        b"Depth-Pw-1!",
+        b"Depth-Pw-2!",
+        b"Depth-Pw-3!",
+        b"Depth-Pw-4!",
+        b"Depth-Pw-5!",
+    ] {
+        change_to(5, p).await.unwrap();
+    }
+    assert_eq!(retained().await, 5);
+
+    // Depth 3 compares 5, 4, 3: the second newest-but-three is accepted,
+    // and nothing is deleted by the lower depth.
+    change_to(3, b"Depth-Pw-2!").await.unwrap();
+    assert_eq!(retained().await, 6, "a lower depth deleted nothing");
+    reused(change_to(3, b"Depth-Pw-4!").await);
+    assert_eq!(retained().await, 6);
+
+    // Raised to 5 the window is 2, 5, 4, 3, 2 again: 3 is refused, 1 is
+    // beyond it and accepted.
+    reused(change_to(5, b"Depth-Pw-3!").await);
+    change_to(5, b"Depth-Pw-1!").await.unwrap();
+    assert_eq!(retained().await, 7, "every accepted password is kept");
+}
+
 /// An active epoch made under KSF parameters the server no longer uses, or
 /// before an operator's cutoff, is replaced when its owner's next operation
 /// is prepared, from the revision after the one the credential service
