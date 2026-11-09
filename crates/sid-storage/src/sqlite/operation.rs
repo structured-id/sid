@@ -20,16 +20,60 @@ use super::{SqliteBackend, WriteTx, fmt_dt};
 /// the key, this one must commit nothing: `OperationCompleted`; a completion
 /// past its retention no longer holds the key and is consumed with its
 /// binding. A key a creation bound completes only that creation's command:
-/// another is refused as `OperationKeyReused`. A keyed command's period is
-/// admitted first; the write transaction serializes it with every
-/// retirement and every binding.
+/// another is refused as `OperationKeyReused`. A keyed command takes its
+/// place in its admitted period first; the write transaction serializes it
+/// with every retirement and every binding. A result larger than the policy
+/// keeps, or a full period, is `ResourceExhausted`.
 pub(super) async fn record_in_tx(
     tx: &mut WriteTx,
     operation: &OperationCompletion,
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
+    let size = i64::try_from(operation.result.len()).unwrap_or(i64::MAX);
+    let (capacity, limit): (i64, i64) =
+        sqlx::query_as("SELECT capacity, result_bytes FROM operation_period_state WHERE id = 1")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation result limits: {e}")))?;
     if let Some(period) = period {
         admit(tx, period).await?;
+    }
+    if size > limit {
+        return Err(SidError::ResourceExhausted(format!(
+            "operation result larger than {limit} bytes"
+        )));
+    }
+    if let Some(period) = period {
+        let placed = sqlx::query(
+            "UPDATE operation_periods SET recorded = recorded + 1
+             WHERE period = ? AND recorded < ?",
+        )
+        .bind(period)
+        .bind(capacity)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?
+        .rows_affected();
+        if placed == 0 {
+            // A completed key answers as completed, full period or not.
+            let completed: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM operation_results
+                 WHERE namespace = ? AND op_key = ?
+                   AND (retain_until_ms IS NULL OR retain_until_ms > ?)",
+            )
+            .bind(&operation.namespace)
+            .bind(operation.key.as_str())
+            .bind(Utc::now().timestamp_millis())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
+            if completed.is_some() {
+                return Err(SidError::OperationCompleted(operation.key.as_str().into()));
+            }
+            return Err(SidError::ResourceExhausted(format!(
+                "operation period full ({capacity} completions)"
+            )));
+        }
     }
     let now = Utc::now();
     consume_expired(
@@ -250,14 +294,11 @@ pub(super) async fn export(pool: &SqlitePool) -> SidResult<Vec<OperationRecord>>
 
 /// Store an exported completion; one named with a period this store does
 /// not admit is not taken, as its command is refused here anyway.
-pub(super) async fn import(pool: &SqlitePool, record: &OperationRecord) -> SidResult<bool> {
+pub(super) async fn import(backend: &SqliteBackend, record: &OperationRecord) -> SidResult<bool> {
     let c = &record.completion;
+    let mut tx = backend.begin_write().await?;
     if let Some(period) = c.period {
-        let mut conn = pool
-            .acquire()
-            .await
-            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        match admit(&mut conn, column(period)?).await {
+        match admit(&mut tx, column(period)?).await {
             Ok(()) => {}
             Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
             Err(e) => return Err(e),
@@ -278,10 +319,23 @@ pub(super) async fn import(pool: &SqlitePool, record: &OperationRecord) -> SidRe
     .bind(fmt_dt(&record.completed_at))
     .bind(c.period.map(column).transpose()?)
     .bind(c.retain_until.map(|t| t.timestamp_millis()))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
     .rows_affected();
+    // A carried completion counts toward its period's capacity here too.
+    if inserted == 1
+        && let Some(period) = c.period
+    {
+        sqlx::query("UPDATE operation_periods SET recorded = recorded + 1 WHERE period = ?")
+            .bind(column(period)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
     Ok(inserted == 1)
 }
 
@@ -342,11 +396,20 @@ fn seconds(column: &str, value: i64) -> SidResult<Duration> {
         .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
 }
 
+/// A stored positive bound.
+fn bound(column: &str, value: i64) -> SidResult<u64> {
+    u64::try_from(value)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
+}
+
 #[async_trait]
 impl OperationResultStore for SqliteBackend {
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
-        let (acceptance, retention): (i64, i64) = sqlx::query_as(
-            "SELECT acceptance_seconds, retention_seconds FROM operation_period_state WHERE id = 1",
+        let (acceptance, retention, capacity, result_bytes): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT acceptance_seconds, retention_seconds, capacity, result_bytes
+                 FROM operation_period_state WHERE id = 1",
         )
         .fetch_optional(&self.pool)
         .await
@@ -355,6 +418,8 @@ impl OperationResultStore for SqliteBackend {
         Ok(OperationPeriodPolicy {
             acceptance: seconds("acceptance_seconds", acceptance)?,
             retention: seconds("retention_seconds", retention)?,
+            capacity: bound("capacity", capacity)?,
+            result_bytes: bound("result_bytes", result_bytes)?,
         })
     }
 
@@ -603,7 +668,7 @@ impl OperationResultStore for SqliteBackend {
     }
 
     async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
-        import(&self.pool, record).await
+        import(self, record).await
     }
 
     async fn bind_operation_resource(

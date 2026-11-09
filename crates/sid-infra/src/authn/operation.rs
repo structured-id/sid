@@ -131,6 +131,13 @@ impl IntoStatus for OperationError {
                 "retry the operation with the same key",
             )
             .into(),
+            // Nothing was committed: an explicit limit, never an internal
+            // failure the caller would retry with the same key.
+            OperationError::Exhausted(why) => {
+                ApiError::new(ErrorReason::QuotaExceeded, "the command was not committed")
+                    .with_quota_violation("operation_capacity", why)
+                    .into()
+            }
             OperationError::Store(e) => {
                 tracing::warn!(error = %e, "operation store failed");
                 ApiError::internal().into()

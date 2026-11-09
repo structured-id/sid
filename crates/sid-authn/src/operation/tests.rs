@@ -79,6 +79,47 @@ async fn test_completed_resolves_retry_and_refuses_reuse() {
     assert_eq!(other_actor.completed(&storage).await.unwrap(), None);
 }
 
+/// Regression: a commit refused for room the store does not have reached
+/// the caller as an internal failure. A result larger than the store keeps
+/// is answered as exhausted, and its effect is not committed.
+#[tokio::test]
+async fn test_a_result_too_large_to_keep_is_exhausted_and_commits_nothing() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let limit = storage
+        .operation_period_policy()
+        .await
+        .unwrap()
+        .result_bytes;
+    let context = OperationContext::new(
+        OperationKey::parse("k-large").unwrap(),
+        period(&storage).await,
+    );
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    let project = Project::new("p", None);
+    let outcome = command
+        .execute(&storage, || async {
+            let ctx: MutationContext = AuditEntry::system("test", "project").into();
+            storage
+                .create_project(
+                    &project,
+                    ctx.with_operation(command.completion(vec![0; limit as usize + 1])),
+                )
+                .await
+                .map_err(Effect::<()>::Store)?;
+            Ok(sid_proto::sid::v1::projects::Project::default())
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(CommandError::Operation(OperationError::Exhausted(_)))
+        ),
+        "{outcome:?}"
+    );
+    assert!(storage.get_project(project.id).await.unwrap().is_none());
+    assert_eq!(command.completed(&storage).await.unwrap(), None);
+}
+
 /// A command named by its method's own canonical inputs is the same command
 /// for the same inputs and conflicts with other ones, and its completion
 /// names the method and the period like any keyed command's.

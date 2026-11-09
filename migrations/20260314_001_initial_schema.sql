@@ -417,11 +417,16 @@ CREATE TABLE operation_period_state (
     issued_through bigint DEFAULT 0 NOT NULL,
     acceptance_seconds bigint DEFAULT 3600 NOT NULL,
     retention_seconds bigint DEFAULT 86400 NOT NULL,
+    -- Completions one period holds, and the largest result one keeps.
+    capacity bigint DEFAULT 100000 NOT NULL,
+    result_bytes bigint DEFAULT 65536 NOT NULL,
     CONSTRAINT operation_period_state_pkey PRIMARY KEY (id),
     CONSTRAINT operation_period_state_id_check CHECK (id),
     CONSTRAINT operation_period_state_issued_through_check CHECK (issued_through >= 0),
     CONSTRAINT operation_period_state_acceptance_check CHECK (acceptance_seconds > 0),
-    CONSTRAINT operation_period_state_retention_check CHECK (retention_seconds >= 0)
+    CONSTRAINT operation_period_state_retention_check CHECK (retention_seconds >= 0),
+    CONSTRAINT operation_period_state_capacity_check CHECK (capacity > 0),
+    CONSTRAINT operation_period_state_result_bytes_check CHECK (result_bytes > 0)
 );
 
 INSERT INTO operation_period_state (id) VALUES (true);
@@ -430,8 +435,11 @@ CREATE TABLE operation_periods (
     period bigint NOT NULL,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
     accepted_until timestamp with time zone NOT NULL,
+    -- Completions committed under the period.
+    recorded bigint DEFAULT 0 NOT NULL,
     CONSTRAINT operation_periods_pkey PRIMARY KEY (period),
-    CONSTRAINT operation_periods_period_check CHECK (period > 0)
+    CONSTRAINT operation_periods_period_check CHECK (period > 0),
+    CONSTRAINT operation_periods_recorded_check CHECK (recorded >= 0)
 );
 
 CREATE TABLE operation_results (
@@ -1814,6 +1822,8 @@ CREATE INDEX idx_upstream_providers_display ON upstream_providers USING btree (d
 CREATE INDEX idx_upstream_providers_enabled ON upstream_providers USING btree (enabled) WHERE (enabled = true);
 
 CREATE INDEX operation_results_retain_until ON operation_results USING btree (retain_until) WHERE (retain_until IS NOT NULL);
+
+CREATE INDEX operation_results_period ON operation_results USING btree (period) WHERE (period IS NOT NULL);
 
 CREATE UNIQUE INDEX organizations_one_instance ON organizations USING btree (is_instance) WHERE is_instance;
 

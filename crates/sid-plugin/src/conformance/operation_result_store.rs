@@ -241,6 +241,143 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
     assert!(left.contains(&kept) && left.contains(&unbounded) && left.contains(&expired));
 }
 
+/// A completion whose result is larger than the policy keeps is refused as
+/// exhausted and writes nothing, with or without a period; one exactly at
+/// the limit is recorded.
+pub async fn an_oversized_result_is_refused(store: &dyn OperationResultStore) {
+    let limit = usize::try_from(store.operation_period_policy().await.unwrap().result_bytes)
+        .expect("a result limit within memory");
+    let period = store
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let sized = |key: &OperationKey, size: usize, period| {
+        let completion =
+            OperationCompletion::new(&ns, key.clone(), "keyed", b"inputs", vec![7; size]);
+        MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
+            match period {
+                Some(period) => completion.in_period(period),
+                None => completion,
+            },
+        )
+    };
+    for named in [Some(period), None] {
+        let (over, at) = (key(), key());
+        let err = store
+            .record_outcome(sized(&over, limit + 1, named))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+        assert!(
+            store
+                .get_operation_result(&ns, &over)
+                .await
+                .unwrap()
+                .is_none(),
+            "a refused completion was written"
+        );
+        store
+            .record_outcome(sized(&at, limit, named))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_operation_result(&ns, &at)
+                .await
+                .unwrap()
+                .expect("recorded")
+                .completion
+                .result
+                .len(),
+            limit
+        );
+    }
+}
+
+/// A period holds at most the policy's capacity of completions: past it a
+/// new key is refused as exhausted and writes nothing, while a completed key
+/// still answers as completed and resolves; a fresh period admits again.
+/// Needs a store of its own whose harness set a capacity of at most 64.
+pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultStore) {
+    use chrono::{Duration, Utc};
+
+    let capacity = store.operation_period_policy().await.unwrap().capacity;
+    assert!(capacity <= 64, "the harness sets a small capacity");
+    let now = Utc::now();
+    let period = store
+        .current_operation_period(now, Duration::minutes(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let keyed = |key: &OperationKey, period| {
+        MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
+            OperationCompletion::new(&ns, key.clone(), "keyed", b"inputs", b"done".to_vec())
+                .in_period(period),
+        )
+    };
+    // More concurrent writers than the period holds: exactly its capacity
+    // commit, the rest are refused as exhausted and write nothing.
+    let keys: Vec<OperationKey> = (0..capacity + 4).map(|_| key()).collect();
+    let outcomes = futures::future::join_all(
+        keys.iter()
+            .map(|key| store.record_outcome(keyed(key, period))),
+    )
+    .await;
+    let mut kept = Vec::new();
+    for (key, outcome) in keys.iter().zip(outcomes) {
+        match outcome {
+            Ok(()) => kept.push(key.clone()),
+            Err(Error::ResourceExhausted(_)) => {
+                assert!(
+                    store
+                        .get_operation_result(&ns, key)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!(kept.len() as u64, capacity, "the period held its capacity");
+    let late = key();
+    let err = store
+        .record_outcome(keyed(&late, period))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+    assert!(
+        store
+            .get_operation_result(&ns, &late)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let err = store
+        .record_outcome(keyed(&kept[0], period))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::OperationCompleted(_)), "{err:?}");
+    assert!(
+        store
+            .get_operation_result(&ns, &kept[0])
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let fresh = store
+        .current_operation_period(now + Duration::minutes(2), Duration::minutes(1))
+        .await
+        .unwrap()
+        .period;
+    assert!(fresh > period);
+    store.record_outcome(keyed(&late, fresh)).await.unwrap();
+}
+
 /// The life of the periods keyed commands are admitted under, in one
 /// scenario because periods are shared by the whole store: it works in a
 /// window a month back that no other caller names.

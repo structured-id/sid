@@ -122,7 +122,22 @@ mod operation_result_store {
         a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
+        an_oversized_result_is_refused,
     );
+
+    /// A store of its own with a period capacity of 8.
+    #[tokio::test]
+    async fn a_full_period_refuses_new_completions() {
+        let backend = setup().await;
+        sqlx::query("UPDATE operation_period_state SET capacity = 8 WHERE id = 1")
+            .execute(backend.pool())
+            .await
+            .unwrap();
+        sid_plugin::conformance::operation_result_store::a_full_period_refuses_new_completions(
+            &backend,
+        )
+        .await;
+    }
 }
 
 // ─── Ceremony state conformance ───

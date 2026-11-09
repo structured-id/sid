@@ -1767,6 +1767,8 @@ impl sid_plugin::OperationResultStore for MockStorage {
         Ok(sid_core::models::OperationPeriodPolicy {
             acceptance: chrono::Duration::hours(1),
             retention: chrono::Duration::days(1),
+            capacity: 100_000,
+            result_bytes: 65_536,
         })
     }
     async fn current_operation_period(

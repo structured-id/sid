@@ -25,6 +25,11 @@ pub enum OperationError {
     /// read back: the caller retries with the same context.
     #[error("the command's outcome is unknown")]
     OutcomeUnknown,
+    /// The commit needed room the store does not have (a completion this
+    /// large, another in a full period, more owed work): nothing was
+    /// committed. A new command needs a new key.
+    #[error("capacity exhausted: {0}")]
+    Exhausted(String),
     /// The store failed.
     #[error("operation store: {0}")]
     Store(sid_core::Error),
@@ -439,6 +444,7 @@ impl KeyedCommand {
             sid_core::Error::OperationPeriodRefused(refusal) => {
                 Err(OperationError::PeriodRefused(refusal))
             }
+            sid_core::Error::ResourceExhausted(why) => Err(OperationError::Exhausted(why)),
             e => match self.completed(storage).await {
                 Ok(Some(result)) => Ok(result),
                 _ => {

@@ -33,7 +33,8 @@ use super::{
 /// The store's period state: the last period issued and the policy.
 const STATE: &str = "MATCH (s:SidOperationState) WHERE s.id = 1
     RETURN s.issued_through AS issued_through, s.acceptance_seconds AS acceptance,
-           s.retention_seconds AS retention";
+           s.retention_seconds AS retention, s.capacity AS capacity,
+           s.result_bytes AS result_bytes";
 
 /// Every property of a key's node, as `RETURN` lists them.
 const FIELDS: &str = "o.slot AS slot, o.namespace AS namespace, o.key AS key,
@@ -43,14 +44,15 @@ const FIELDS: &str = "o.slot AS slot, o.namespace AS namespace, o.key AS key,
     o.b_period AS b_period, o.b_resource AS b_resource, o.b_at AS b_at";
 
 /// Create the period state of an empty store: nothing issued yet, commands
-/// accepted for an hour, completions kept a day after.
+/// accepted for an hour, completions kept a day after, at most 100000 of
+/// them per period and 64 KiB per result.
 pub(super) fn init_state(tx: &Statements<'_>) -> SidResult<Decision<()>> {
     if !tx.run(STATE, Params::default())?.is_empty() {
         return Ok(Decision::Abandon(()));
     }
     tx.run(
         "CREATE (s:SidOperationState {id: 1, issued_through: 0, acceptance_seconds: 3600,
-            retention_seconds: 86400})",
+            retention_seconds: 86400, capacity: 100000, result_bytes: 65536})",
         Params::default(),
     )?;
     Ok(Decision::Commit(()))
@@ -332,12 +334,80 @@ fn issued_through(tx: &Statements<'_>) -> SidResult<i64> {
     get_int(row, "issued_through")
 }
 
+/// The stored limits of the policy: completions per period, bytes per result.
+fn limits(tx: &Statements<'_>) -> SidResult<(i64, i64)> {
+    let rows = tx.run(STATE, Params::default())?;
+    let row = rows
+        .first()
+        .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
+    Ok((get_int(row, "capacity")?, get_int(row, "result_bytes")?))
+}
+
+/// Count a completion into admitted `period`: the write to its node makes
+/// concurrent commits under it, and its retirement mark, conflict and run
+/// again, so the count never passes `capacity`.
+fn take_place(tx: &Statements<'_>, period: OperationPeriod, capacity: i64) -> SidResult<()> {
+    let number = column(period)?;
+    let rows = tx.run(
+        "MATCH (p:SidOperationPeriod) WHERE p.period = $period
+         RETURN p.retired AS retired, p.recorded AS recorded",
+        Params::default().with("period", Value::Int(number)),
+    )?;
+    let Some(row) = rows.first() else {
+        return Err(SidError::OperationPeriodRefused(
+            if number <= issued_through(tx)? {
+                OperationPeriodRefusal::Retired
+            } else {
+                OperationPeriodRefusal::NotIssued
+            },
+        ));
+    };
+    if get_bool(row, "retired")? {
+        return Err(SidError::OperationPeriodRefused(
+            OperationPeriodRefusal::Retired,
+        ));
+    }
+    let recorded = get_int(row, "recorded")?;
+    if recorded >= capacity {
+        return Err(SidError::ResourceExhausted(format!(
+            "operation period full ({capacity} completions)"
+        )));
+    }
+    tx.run(
+        "MATCH (p:SidOperationPeriod) WHERE p.period = $period SET p.recorded = $recorded",
+        Params::default()
+            .with("period", Value::Int(number))
+            .with("recorded", Value::Int(recorded + 1)),
+    )?;
+    Ok(())
+}
+
 /// Record `operation` in the open transaction `tx`. A key completed already
 /// commits nothing: `OperationCompleted`. A key a creation bound completes
 /// only that creation's command: another is refused as `OperationKeyReused`.
+/// A result larger than the policy keeps, or a full period, is
+/// `ResourceExhausted`.
 pub(super) fn record(tx: &Statements<'_>, operation: &OperationCompletion) -> SidResult<()> {
-    if let Some(period) = operation.period {
-        admit(tx, period)?;
+    let (capacity, limit) = limits(tx)?;
+    // The period's admission comes first, as for every commit; its own write
+    // stands for the hold another commit takes.
+    if let Some(period) = operation.period
+        && let Err(e) = take_place(tx, period, capacity)
+    {
+        // A completed key answers as completed, full period or not.
+        if matches!(e, SidError::ResourceExhausted(_)) {
+            let mut entry = load(tx, &operation.namespace, &operation.key)?;
+            settle(tx, &mut entry, Utc::now(), &mut Admitted::default())?;
+            if entry.completion.is_some() {
+                return Err(SidError::OperationCompleted(operation.key.as_str().into()));
+            }
+        }
+        return Err(e);
+    }
+    if i64::try_from(operation.result.len()).unwrap_or(i64::MAX) > limit {
+        return Err(SidError::ResourceExhausted(format!(
+            "operation result larger than {limit} bytes"
+        )));
     }
     let now = Utc::now();
     let mut entry = load(tx, &operation.namespace, &operation.key)?;
@@ -418,6 +488,14 @@ fn seconds(name: &str, value: i64) -> SidResult<Duration> {
         .ok_or_else(|| SidError::Storage(format!("{name}: {value}")))
 }
 
+/// A stored positive bound.
+fn bound(name: &str, value: i64) -> SidResult<u64> {
+    u64::try_from(value)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| SidError::Storage(format!("{name}: {value}")))
+}
+
 /// The issued period `row` holds.
 fn issued(row: &Row) -> SidResult<IssuedOperationPeriod> {
     Ok(IssuedOperationPeriod {
@@ -459,6 +537,8 @@ impl OperationResultStore for CoordinodeBackend {
             Ok(Decision::Abandon(OperationPeriodPolicy {
                 acceptance: seconds("acceptance", get_int(row, "acceptance")?)?,
                 retention: seconds("retention", get_int(row, "retention")?)?,
+                capacity: bound("capacity", get_int(row, "capacity")?)?,
+                result_bytes: bound("result_bytes", get_int(row, "result_bytes")?)?,
             }))
         })
         .await
@@ -498,7 +578,7 @@ impl OperationResultStore for CoordinodeBackend {
             )?;
             tx.run(
                 "CREATE (p:SidOperationPeriod {period: $next, issued_at: $now,
-                    accepted_until: $until, retired: false})",
+                    accepted_until: $until, retired: false, recorded: 0})",
                 Params::default()
                     .with("next", Value::Int(next))
                     .with("now", time(now))
@@ -598,7 +678,7 @@ impl OperationResultStore for CoordinodeBackend {
                 }
                 tx.run(
                     "CREATE (p:SidOperationPeriod {period: $period, issued_at: $issued_at,
-                        accepted_until: $until, retired: false})",
+                        accepted_until: $until, retired: false, recorded: 0})",
                     Params::default()
                         .with("period", Value::Int(period))
                         .with("issued_at", time(record.issued_at))
@@ -709,8 +789,10 @@ impl OperationResultStore for CoordinodeBackend {
         self.transaction(move |tx| {
             // One under a period this store does not admit is not taken: its
             // command is refused here anyway.
+            // A carried completion counts toward its period's capacity here
+            // too, whatever the count.
             if let Some(period) = record.completion.period {
-                match admit(tx, period) {
+                match take_place(tx, period, i64::MAX) {
                     Ok(()) => {}
                     Err(SidError::OperationPeriodRefused(_)) => {
                         return Ok(Decision::Abandon(false));

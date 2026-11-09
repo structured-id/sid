@@ -147,11 +147,15 @@ pub struct IssuedOperationPeriod {
 
 /// The policy a store issues and retires periods under, the same for every
 /// replica: a period accepts new commands for `acceptance` from its issue,
-/// and its commands are kept for retries `retention` past that.
+/// and its commands are kept for retries `retention` past that. A period
+/// holds at most `capacity` completions and a completion's result at most
+/// `result_bytes`; a commit beyond either is refused before it takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationPeriodPolicy {
     pub acceptance: chrono::Duration,
     pub retention: chrono::Duration,
+    pub capacity: u64,
+    pub result_bytes: u64,
 }
 
 /// A period still admitted, as its store holds it.
