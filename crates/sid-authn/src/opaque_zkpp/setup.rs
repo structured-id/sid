@@ -16,6 +16,28 @@ use crate::opaque::OpaqueRouter;
 /// for good when keygen fails, so password operations report unavailable.
 pub type ZkppSlot = Arc<ArcSwap<Option<Arc<ZkppOpaqueServer>>>>;
 
+/// The name password operations are reported under on the gRPC health
+/// service: SERVING once the ZKPP server can serve them, for a deployment's
+/// readiness to follow when it serves them.
+pub const PASSWORD_OPERATIONS_HEALTH: &str = "sid.authn.password-operations";
+
+/// Whether the ZKPP server became ready: resolved once, when its slot holds
+/// the server or keygen failed.
+#[derive(Clone)]
+pub struct ZkppReady(tokio::sync::watch::Receiver<Option<bool>>);
+
+impl ZkppReady {
+    /// True once the slot holds the server; false when keygen failed, which
+    /// leaves password operations unavailable for this process's lifetime.
+    pub async fn wait(mut self) -> bool {
+        match self.0.wait_for(Option::is_some).await {
+            Ok(ready) => ready.unwrap_or(false),
+            // The keygen task ended without an answer: it never became ready.
+            Err(_) => false,
+        }
+    }
+}
+
 /// Proof settings: whether proofs are verified at all, and what is required.
 /// Made only by [`ZkppSettings::parse`], so required proofs never come with
 /// verification disabled.
@@ -113,8 +135,10 @@ pub fn spawn_zkpp_server(
     router: &Arc<OpaqueRouter>,
     settings: &ZkppSettings,
     cache_dir: &Path,
-) -> sid_core::Result<ZkppSlot> {
+) -> sid_core::Result<(ZkppSlot, ZkppReady)> {
     let slot: ZkppSlot = Arc::new(ArcSwap::from_pointee(None));
+    let (answer, readiness) = tokio::sync::watch::channel(None);
+    let readiness = ZkppReady(readiness);
     let unverified = ZkppOpaqueServer::new(
         router,
         vec![],
@@ -125,10 +149,16 @@ pub fn spawn_zkpp_server(
     );
     if !settings.enabled {
         match unverified {
-            Ok(server) => slot.store(Arc::new(Some(Arc::new(server)))),
-            Err(e) => tracing::warn!("password operations unavailable: {e}"),
+            Ok(server) => {
+                slot.store(Arc::new(Some(Arc::new(server))));
+                answer.send_replace(Some(true));
+            }
+            Err(e) => {
+                tracing::warn!("password operations unavailable: {e}");
+                answer.send_replace(Some(false));
+            }
         }
-        return Ok(slot);
+        return Ok((slot, readiness));
     }
     unverified?;
 
@@ -141,7 +171,7 @@ pub fn spawn_zkpp_server(
     .ok_or_else(|| sid_core::Error::Internal("unknown ZKPP policy version".into()))?;
     let cache_path = cache_dir.join("zkpp");
     tracing::info!(
-        "ZKPP verifying keys preparing in background (k={}) — non-ZKPP traffic is served meanwhile",
+        "ZKPP verifying keys preparing in background (k={}): non-ZKPP traffic is served meanwhile",
         sid_pake_core::circuit::ZKPP_K
     );
     let ready = slot.clone();
@@ -176,7 +206,7 @@ pub fn spawn_zkpp_server(
                 .collect::<Result<Vec<_>, _>>()
         })
         .await;
-        match result {
+        let served = match result {
             Ok(Ok(verifiers)) => match ZkppOpaqueServer::new(&router, verifiers, config.clone()) {
                 Ok(server) => {
                     ready.store(Arc::new(Some(Arc::new(server))));
@@ -186,20 +216,27 @@ pub fn spawn_zkpp_server(
                         config.require_proof,
                         config.policy_version
                     );
+                    true
                 }
-                Err(e) => tracing::error!("ZKPP: {e} — password operations remain unavailable"),
+                Err(e) => {
+                    tracing::error!("ZKPP: {e}: password operations remain unavailable");
+                    false
+                }
             },
-            Ok(Err(e)) => tracing::warn!(
-                "ZKPP keygen failed: {:?} — password operations remain unavailable",
-                e
-            ),
-            Err(e) => tracing::error!(
-                "ZKPP keygen task panicked: {} — password operations remain unavailable",
-                e
-            ),
-        }
+            Ok(Err(e)) => {
+                tracing::warn!("ZKPP keygen failed: {e:?}: password operations remain unavailable");
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    "ZKPP keygen task panicked: {e}: password operations remain unavailable"
+                );
+                false
+            }
+        };
+        answer.send_replace(Some(served));
     });
-    Ok(slot)
+    Ok((slot, readiness))
 }
 
 #[cfg(test)]
