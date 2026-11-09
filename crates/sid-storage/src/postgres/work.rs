@@ -246,6 +246,40 @@ async fn complete(
     Ok(done == 1)
 }
 
+/// Complete claimed work `id` and store `owed` in one transaction. The
+/// parent's row is locked first, then each child kind's admission lock in
+/// order: the order a mutation takes its rows and then its owed work's
+/// kinds, so neither waits on the other in a cycle.
+async fn complete_owing(
+    pool: &PgPool,
+    id: WorkId,
+    generation: i64,
+    result: Option<&str>,
+    owed: &[NewWork],
+    capacity: u64,
+) -> SidResult<bool> {
+    let storage = |e: sqlx::Error| SidError::Storage(format!("complete work: {e}"));
+    let mut tx = pool.begin().await.map_err(storage)?;
+    let done = sqlx::query(
+        "UPDATE durable_work SET state = 'completed', result = $3, lease_owner = NULL,
+            lease_until = NULL, updated_at = NOW()
+         WHERE id = $1 AND generation = $2 AND state = 'claimed'",
+    )
+    .bind(id.0)
+    .bind(generation)
+    .bind(result)
+    .execute(&mut *tx)
+    .await
+    .map_err(storage)?
+    .rows_affected();
+    if done != 1 {
+        return Ok(false);
+    }
+    insert_owed_work_in_tx(&mut tx, owed, capacity).await?;
+    tx.commit().await.map_err(storage)?;
+    Ok(true)
+}
+
 async fn fail(
     pool: &PgPool,
     id: WorkId,
@@ -398,6 +432,17 @@ macro_rules! work_store_over_pool {
                 result: Option<&str>,
             ) -> SidResult<bool> {
                 complete(&self.pool, id, generation, result).await
+            }
+
+            async fn complete_work_owing(
+                &self,
+                id: WorkId,
+                generation: i64,
+                result: Option<&str>,
+                owed: &[NewWork],
+                capacity: u64,
+            ) -> SidResult<bool> {
+                complete_owing(&self.pool, id, generation, result, owed, capacity).await
             }
 
             async fn fail_work(

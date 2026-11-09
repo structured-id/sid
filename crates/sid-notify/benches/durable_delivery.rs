@@ -157,6 +157,158 @@ impl NotificationChannel for Immediate {
     }
 }
 
+/// A store recording the latency of each call the runner and handlers make,
+/// and how many items each claim returned: where a drain's time goes. The
+/// runner claims from one loop, so the summed claim time against the
+/// drain's wall time tells whether that loop bounds it.
+struct Timed {
+    inner: Arc<dyn WorkStore>,
+    calls: std::sync::Mutex<std::collections::HashMap<&'static str, Vec<Duration>>>,
+    claimed: std::sync::Mutex<Vec<usize>>,
+}
+
+impl Timed {
+    fn new(inner: Arc<dyn WorkStore>) -> Self {
+        Self {
+            inner,
+            calls: Default::default(),
+            claimed: Default::default(),
+        }
+    }
+
+    fn record(&self, call: &'static str, took: Duration) {
+        self.calls
+            .lock()
+            .unwrap()
+            .entry(call)
+            .or_default()
+            .push(took);
+    }
+
+    /// Each call's count, total and P50/P99, the claim loop's share of
+    /// `wall`, and the items per claim.
+    fn report(&self, mode: &str, wall: Duration) {
+        let calls = std::mem::take(&mut *self.calls.lock().unwrap());
+        let mut names: Vec<_> = calls.keys().copied().collect();
+        names.sort_unstable();
+        for name in names {
+            let mut samples = calls[name].clone();
+            samples.sort_unstable();
+            let total: Duration = samples.iter().sum();
+            let at = |q: usize| samples[(samples.len() * q / 1000).min(samples.len() - 1)];
+            println!(
+                "{mode:<10} {name:<9} n={:<6} total={total:>9.3?} share={:>5.1}% p50={:>9.3?} p99={:>9.3?}",
+                samples.len(),
+                100.0 * total.as_secs_f64() / wall.as_secs_f64(),
+                at(500),
+                at(990),
+            );
+        }
+        let claimed = std::mem::take(&mut *self.claimed.lock().unwrap());
+        let items: usize = claimed.iter().sum();
+        let empty = claimed.iter().filter(|n| **n == 0).count();
+        println!(
+            "{mode:<10} claims    {} claims, {items} items, {:.2} per claim, {empty} empty",
+            claimed.len(),
+            items as f64 / claimed.len().max(1) as f64,
+        );
+    }
+}
+
+#[async_trait]
+impl WorkStore for Timed {
+    async fn enqueue_work(
+        &self,
+        work: &sid_core::models::NewWork,
+        capacity: u64,
+    ) -> sid_core::Result<bool> {
+        let started = Instant::now();
+        let done = self.inner.enqueue_work(work, capacity).await;
+        self.record("enqueue", started.elapsed());
+        done
+    }
+
+    async fn claim_work(
+        &self,
+        kinds: &[sid_core::models::WorkKind],
+        worker: &str,
+        limit: u32,
+        lease: Duration,
+    ) -> sid_core::Result<Vec<sid_core::models::ClaimedWork>> {
+        let started = Instant::now();
+        let claimed = self.inner.claim_work(kinds, worker, limit, lease).await;
+        self.record("claim", started.elapsed());
+        if let Ok(items) = &claimed {
+            self.claimed.lock().unwrap().push(items.len());
+        }
+        claimed
+    }
+
+    async fn complete_work(
+        &self,
+        id: sid_core::models::WorkId,
+        generation: i64,
+        result: Option<&str>,
+    ) -> sid_core::Result<bool> {
+        let started = Instant::now();
+        let done = self.inner.complete_work(id, generation, result).await;
+        self.record("complete", started.elapsed());
+        done
+    }
+
+    async fn complete_work_owing(
+        &self,
+        id: sid_core::models::WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[sid_core::models::NewWork],
+        capacity: u64,
+    ) -> sid_core::Result<bool> {
+        let started = Instant::now();
+        let done = self
+            .inner
+            .complete_work_owing(id, generation, result, owed, capacity)
+            .await;
+        self.record("complete+", started.elapsed());
+        done
+    }
+
+    async fn fail_work(
+        &self,
+        id: sid_core::models::WorkId,
+        generation: i64,
+        failure: &sid_core::models::WorkFailure,
+    ) -> sid_core::Result<bool> {
+        let started = Instant::now();
+        let done = self.inner.fail_work(id, generation, failure).await;
+        self.record("fail", started.elapsed());
+        done
+    }
+
+    async fn get_work(
+        &self,
+        id: sid_core::models::WorkId,
+    ) -> sid_core::Result<Option<sid_core::models::WorkRecord>> {
+        self.inner.get_work(id).await
+    }
+
+    async fn purge_ended_work(
+        &self,
+        kind: &sid_core::models::WorkKind,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> sid_core::Result<u64> {
+        self.inner.purge_ended_work(kind, before).await
+    }
+
+    async fn export_work(&self) -> sid_core::Result<Vec<sid_core::models::WorkSnapshot>> {
+        self.inner.export_work().await
+    }
+
+    async fn import_work(&self, work: &sid_core::models::WorkSnapshot) -> sid_core::Result<bool> {
+        self.inner.import_work(work).await
+    }
+}
+
 /// P50, P99 and P999 of `samples`.
 fn report(mode: &str, what: &str, mut samples: Vec<Duration>) {
     samples.sort_unstable();
@@ -194,7 +346,6 @@ fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
         Arc::new(RouteHandler::new(
             RoutingTable::default_ce_rules(),
             source.clone(),
-            store.clone(),
             CAPACITY,
         )),
         Arc::new(PlanHandler::new(store.clone(), CAPACITY)),
@@ -236,14 +387,17 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     }
     let sent = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let timed = Arc::new(Timed::new(store.clone()));
+    let timed_store: Arc<dyn WorkStore> = timed.clone();
     let started = Instant::now();
-    let runner = runner(&store, &sent);
+    let runner = runner(&timed_store, &sent);
     // Woken after each acceptance, as the notifier's consumer does.
     let waker = runner.waker();
     let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
     let done = sent.reach(owed * FAN_OUT).await;
     // The accepted ones of `accept` drain with the backlog.
     rate(mode, "drain", owed, done - started);
+    timed.report(mode, done - started);
 
     let mut samples = Vec::with_capacity(SINGLES);
     for _ in 0..SINGLES {

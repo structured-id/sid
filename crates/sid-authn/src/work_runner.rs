@@ -18,6 +18,14 @@ use tokio::task::JoinSet;
 pub enum WorkOutcome {
     /// Done: recorded completed, with what it produced (a provider receipt).
     Done(Option<String>),
+    /// Done, owing `follow_up` (the next stage of the work), admitted under
+    /// `capacity` in the commit that records it completed. Children whose
+    /// kind is full leave the work owed and are retried as `Retry`.
+    DoneWith {
+        result: Option<String>,
+        follow_up: Vec<NewWork>,
+        capacity: u64,
+    },
     /// Not done this time; tried again on the handler's schedule until
     /// attempts run out.
     Retry(String),
@@ -222,6 +230,26 @@ async fn attempt(storage: &dyn WorkStore, handler: &dyn WorkHandler, work: &Clai
                 .await;
             return report(work, recorded);
         }
+        WorkOutcome::DoneWith {
+            result,
+            follow_up,
+            capacity,
+        } => match storage
+            .complete_work_owing(
+                work.id,
+                work.generation,
+                result.as_deref(),
+                &follow_up,
+                capacity,
+            )
+            .await
+        {
+            // Nothing was written: the work stays owed and is tried again.
+            Err(sid_core::Error::ResourceExhausted(e)) => {
+                (format!("storing the next stage: {e}"), false, true)
+            }
+            recorded => return report(work, recorded),
+        },
         WorkOutcome::Retry(error) => (error, false, true),
         WorkOutcome::Ambiguous(error) => (error, true, true),
         WorkOutcome::Permanent(error) => (error, false, false),

@@ -102,7 +102,7 @@ impl WorkState {
 }
 
 /// Work to enqueue with a state change.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewWork {
     pub id: WorkId,
     pub kind: WorkKind,

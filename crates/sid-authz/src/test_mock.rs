@@ -102,6 +102,16 @@ impl sid_plugin::WorkStore for MockStorage {
     async fn complete_work(&self, _: WorkId, _: i64, _: Option<&str>) -> Result<bool> {
         unimplemented!()
     }
+    async fn complete_work_owing(
+        &self,
+        _: WorkId,
+        _: i64,
+        _: Option<&str>,
+        _: &[NewWork],
+        _: u64,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
     async fn fail_work(&self, _: WorkId, _: i64, _: &WorkFailure) -> Result<bool> {
         unimplemented!()
     }

@@ -6968,6 +6968,45 @@ impl sid_plugin::WorkStore for MockStorage {
         Ok(claimed)
     }
 
+    async fn complete_work_owing(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[NewWork],
+        capacity: u64,
+    ) -> SidResult<bool> {
+        // One lock over both: the children and the completion land together
+        // or, undone on a refusal, not at all.
+        let mut inner = self.inner.lock().unwrap();
+        let claimed = inner
+            .work
+            .get(&id)
+            .is_some_and(|(r, _, _)| r.generation == generation && r.state == WorkState::Claimed);
+        if !claimed {
+            return Ok(false);
+        }
+        let mut stored = Vec::new();
+        for work in owed {
+            match inner.enqueue(work, capacity) {
+                Ok(true) => stored.push(work.id),
+                Ok(false) => {}
+                Err(e) => {
+                    for child in stored {
+                        inner.work.remove(&child);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let (r, _, until) = inner.work.get_mut(&id).expect("checked above");
+        r.state = WorkState::Completed;
+        r.result = result.map(str::to_string);
+        r.updated_at = chrono::Utc::now();
+        *until = None;
+        Ok(true)
+    }
+
     async fn complete_work(
         &self,
         id: WorkId,

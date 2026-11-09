@@ -217,6 +217,41 @@ impl WorkStore for SqliteBackend {
         Ok(done == 1)
     }
 
+    async fn complete_work_owing(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[NewWork],
+        capacity: u64,
+    ) -> SidResult<bool> {
+        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let done = sqlx::query(
+            "UPDATE durable_work SET state = 'completed', result = ?, lease_owner = NULL,
+                lease_until = NULL, updated_at = ?
+             WHERE id = ? AND generation = ? AND state = 'claimed'",
+        )
+        .bind(result)
+        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(id.0)
+        .bind(generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if done != 1 {
+            return Ok(false);
+        }
+        for work in owed {
+            insert_work_in_tx(&mut tx, work, capacity).await?;
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     async fn fail_work(
         &self,
         id: WorkId,
