@@ -277,21 +277,18 @@ async fn zkpp_server(
     installation: &Installation,
     cache: &Path,
 ) -> Result<Arc<ZkppOpaqueServer>, Failure> {
-    let slot = spawn_zkpp_server(
+    let (slot, ready) = spawn_zkpp_server(
         &installation.opaque_router,
         &ZkppSettings::parse(None, None, None)?,
         cache,
     )?;
-    Ok(tokio::time::timeout(Duration::from_secs(300), async {
-        loop {
-            if let Some(server) = Option::clone(&slot.load_full()) {
-                return server;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| "the ZKPP verifying keys are made")?)
+    let made = tokio::time::timeout(Duration::from_secs(300), ready.wait())
+        .await
+        .map_err(|_| "the ZKPP verifying keys are made in time")?;
+    if !made {
+        return Err("the ZKPP verifying keys could not be made".into());
+    }
+    Ok(Option::clone(&slot.load_full()).ok_or("the ready ZKPP server is in its slot")?)
 }
 
 fn array32(bytes: &[u8], what: &str) -> Result<[u8; 32], Failure> {
