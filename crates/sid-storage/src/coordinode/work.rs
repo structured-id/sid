@@ -233,6 +233,39 @@ impl WorkStore for CoordinodeBackend {
         .await
     }
 
+    async fn complete_work_owing(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[NewWork],
+        capacity: u64,
+    ) -> SidResult<bool> {
+        let (result, owed) = (result.map(str::to_owned), owed.to_vec());
+        self.transaction(move |tx| {
+            let rows = tx.run(
+                "MATCH (w:SidWork) WHERE w.id = $id AND w.generation = $generation
+                   AND w.state = 'claimed'
+                 SET w.state = 'completed', w.result = $result, w.lease_owner = null,
+                     w.lease_until = null, w.updated_at = $now
+                 RETURN w.id AS id",
+                Params::default()
+                    .with("id", id_value(id))
+                    .with("generation", Value::Int(generation))
+                    .with("result", opt_text(result.as_deref()))
+                    .with("now", time(chrono::Utc::now())),
+            )?;
+            if rows.is_empty() {
+                return Ok(Decision::Abandon(false));
+            }
+            for work in &owed {
+                insert(tx, work, capacity)?;
+            }
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
     async fn fail_work(
         &self,
         id: WorkId,

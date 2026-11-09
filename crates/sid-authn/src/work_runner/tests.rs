@@ -158,6 +158,81 @@ async fn test_runner_wakes_for_new_work() {
     handle.await.unwrap();
 }
 
+fn follow_up_kind() -> WorkKind {
+    WorkKind::new("test.work.next").unwrap()
+}
+
+/// Work done with a next stage completes with it in one commit: the parent
+/// completed, the child pending.
+#[tokio::test]
+async fn test_runner_commits_the_next_stage_with_the_completion() {
+    let storage = storage().await;
+    let id = enqueue(storage.as_ref(), 3).await;
+    let child = NewWork::new(follow_up_kind(), b"next".to_vec());
+    let probe = Probe::new(
+        WorkOutcome::DoneWith {
+            result: Some("staged".into()),
+            follow_up: vec![child.clone()],
+            capacity: 10,
+        },
+        Duration::ZERO,
+    );
+    let runner = WorkRunner::new(Arc::clone(&storage), "w", vec![probe], fast_config()).unwrap();
+    let (stop, handle) = start(runner);
+
+    wait_for_state(storage.as_ref(), id, WorkState::Completed).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let record = storage.get_work(id).await.unwrap().unwrap();
+    assert_eq!(record.result.as_deref(), Some("staged"));
+    let child = storage.get_work(child.id).await.unwrap().unwrap();
+    assert_eq!(child.state, WorkState::Pending);
+}
+
+/// A next stage whose kind is full leaves the work owed: recorded as a retry
+/// with the refusal, never completed without its child and never left
+/// claimed.
+#[tokio::test]
+async fn test_runner_retries_a_next_stage_refused_for_capacity() {
+    let storage = storage().await;
+    storage
+        .enqueue_work(&NewWork::new(follow_up_kind(), vec![]), 1)
+        .await
+        .unwrap();
+    let id = enqueue(storage.as_ref(), 2).await;
+    let child = NewWork::new(follow_up_kind(), b"next".to_vec());
+    let probe = Probe::new(
+        WorkOutcome::DoneWith {
+            result: None,
+            follow_up: vec![child.clone()],
+            capacity: 1,
+        },
+        Duration::ZERO,
+    );
+    let runner = WorkRunner::new(
+        Arc::clone(&storage),
+        "w",
+        vec![probe.clone()],
+        fast_config(),
+    )
+    .unwrap();
+    let (stop, handle) = start(runner);
+
+    wait_for_state(storage.as_ref(), id, WorkState::Failed).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let record = storage.get_work(id).await.unwrap().unwrap();
+    assert_eq!(record.attempts, 2, "each refusal was a retried attempt");
+    assert!(
+        record
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("storing the next stage")),
+        "{record:?}"
+    );
+    assert!(storage.get_work(child.id).await.unwrap().is_none());
+}
+
 /// A failing handler is retried after a backoff, and the work ends failed
 /// with its error once attempts run out.
 #[tokio::test]

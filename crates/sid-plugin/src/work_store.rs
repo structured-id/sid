@@ -50,6 +50,22 @@ pub trait WorkStore: Send + Sync {
         result: Option<&str>,
     ) -> Result<bool>;
 
+    /// Record claimed work done, as [`Self::complete_work`] does, with the
+    /// follow-up work `owed` admitted under each kind's `capacity` in the
+    /// same commit: both are stored or neither. Returns `false`, writing
+    /// nothing, when `generation` is no longer the current claim; refuses
+    /// with `Error::ResourceExhausted`, writing nothing and leaving the claim
+    /// as it was, when a child finds its kind full. A child already stored is
+    /// accepted again whatever the load, as by [`Self::enqueue_work`].
+    async fn complete_work_owing(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[NewWork],
+        capacity: u64,
+    ) -> Result<bool>;
+
     /// Record a failed attempt: the work is due again at `failure.retry_at`,
     /// or failed (dead-letter) when that is `None` or no attempts remain, in
     /// which case `failure.on_dead` is enqueued in the same transaction.

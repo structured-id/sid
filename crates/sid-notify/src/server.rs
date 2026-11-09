@@ -190,7 +190,6 @@ impl NotifyServer {
             Arc::new(delivery::RouteHandler::new(
                 self.routing.clone(),
                 self.resolver.clone(),
-                Arc::clone(&self.jobs),
                 self.config.job_capacity,
             )),
             Arc::new(delivery::PlanHandler::new(

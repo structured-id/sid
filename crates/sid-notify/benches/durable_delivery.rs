@@ -256,6 +256,23 @@ impl WorkStore for Timed {
         done
     }
 
+    async fn complete_work_owing(
+        &self,
+        id: sid_core::models::WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[sid_core::models::NewWork],
+        capacity: u64,
+    ) -> sid_core::Result<bool> {
+        let started = Instant::now();
+        let done = self
+            .inner
+            .complete_work_owing(id, generation, result, owed, capacity)
+            .await;
+        self.record("complete+", started.elapsed());
+        done
+    }
+
     async fn fail_work(
         &self,
         id: sid_core::models::WorkId,
@@ -329,7 +346,6 @@ fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
         Arc::new(RouteHandler::new(
             RoutingTable::default_ce_rules(),
             source.clone(),
-            store.clone(),
             CAPACITY,
         )),
         Arc::new(PlanHandler::new(store.clone(), CAPACITY)),

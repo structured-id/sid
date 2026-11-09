@@ -102,16 +102,88 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
     }
 }
 
-fn route_handler(
+fn route_handler(resolver: impl RecipientSource + 'static) -> RouteHandler {
+    RouteHandler::new(RoutingTable::default_ce_rules(), Arc::new(resolver), 1_000)
+}
+
+/// Record `outcome` of `work` as the runner does: the outcome as recorded,
+/// a next stage refused for room becoming a retry.
+async fn settle(
     store: &Arc<dyn WorkStore>,
-    resolver: impl RecipientSource + 'static,
-) -> RouteHandler {
-    RouteHandler::new(
-        RoutingTable::default_ce_rules(),
-        Arc::new(resolver),
-        Arc::clone(store),
-        1_000,
-    )
+    work: &ClaimedWork,
+    outcome: WorkOutcome,
+) -> WorkOutcome {
+    let retry = |error: String| async move {
+        store
+            .fail_work(
+                work.id,
+                work.generation,
+                &sid_core::models::WorkFailure {
+                    error: error.clone(),
+                    ambiguous: false,
+                    retry_at: Some(Utc::now()),
+                    on_dead: None,
+                },
+            )
+            .await
+            .unwrap();
+        WorkOutcome::Retry(error)
+    };
+    match outcome {
+        WorkOutcome::Done(result) => {
+            store
+                .complete_work(work.id, work.generation, result.as_deref())
+                .await
+                .unwrap();
+            WorkOutcome::Done(result)
+        }
+        WorkOutcome::DoneWith {
+            result,
+            follow_up,
+            capacity,
+        } => match store
+            .complete_work_owing(
+                work.id,
+                work.generation,
+                result.as_deref(),
+                &follow_up,
+                capacity,
+            )
+            .await
+        {
+            Err(sid_core::Error::ResourceExhausted(e)) => retry(e).await,
+            recorded => {
+                recorded.unwrap();
+                WorkOutcome::DoneWith {
+                    result,
+                    follow_up,
+                    capacity,
+                }
+            }
+        },
+        WorkOutcome::Retry(error) => retry(error).await,
+        other => other,
+    }
+}
+
+/// What a done outcome produced, `None` for any other outcome.
+fn result_of(outcome: &WorkOutcome) -> Option<&str> {
+    match outcome {
+        WorkOutcome::Done(result) | WorkOutcome::DoneWith { result, .. } => result.as_deref(),
+        _ => None,
+    }
+}
+
+/// The routing job of `event`, accepted and claimed as a runner claims it.
+async fn routing(store: &Arc<dyn WorkStore>, event: &Event) -> ClaimedWork {
+    accept_event(store.as_ref(), event, 1_000).await.unwrap();
+    store
+        .claim_work(&[kind(ROUTE)], "w", 100, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|work| work.id == route_job_id(event))
+        .expect("the routing job is claimed")
 }
 
 /// The standalone source, which keeps every routed recipient.
@@ -185,31 +257,14 @@ async fn carry_out_plans(store: &Arc<dyn WorkStore>, handler: &PlanHandler) -> V
     let mut outcomes = Vec::new();
     for plan in plans {
         let outcome = handler.handle(&plan).await;
-        match &outcome {
-            WorkOutcome::Done(result) => {
-                store
-                    .complete_work(plan.id, plan.generation, result.as_deref())
-                    .await
-                    .unwrap();
-            }
-            WorkOutcome::Retry(error) => {
-                store
-                    .fail_work(
-                        plan.id,
-                        plan.generation,
-                        &sid_core::models::WorkFailure {
-                            error: error.clone(),
-                            ambiguous: false,
-                            retry_at: Some(Utc::now()),
-                            on_dead: None,
-                        },
-                    )
-                    .await
-                    .unwrap();
-            }
-            other => panic!("unexpected plan outcome {other:?}"),
-        }
-        outcomes.push(outcome);
+        assert!(
+            matches!(
+                outcome,
+                WorkOutcome::Done(_) | WorkOutcome::DoneWith { .. } | WorkOutcome::Retry(_)
+            ),
+            "unexpected plan outcome {outcome:?}"
+        );
+        outcomes.push(settle(store, &plan, outcome).await);
     }
     outcomes
 }
@@ -263,16 +318,14 @@ async fn test_accept_event_refused_when_full() {
 #[tokio::test]
 async fn test_same_id_from_two_sources_is_two_notifications() {
     let store = store().await;
-    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let handler = route_handler(RecipientResolver::without_identity());
     let first = security_event();
     let mut second = first.clone();
     second.source = "sid-other".into();
     for event in [&first, &second] {
-        let work = claimed(ROUTE, serde_json::to_vec(event).unwrap());
-        assert_eq!(
-            handler.handle(&work).await,
-            WorkOutcome::Done(Some("2 deliveries planned".into()))
-        );
+        let work = routing(&store, event).await;
+        let outcome = settle(&store, &work, handler.handle(&work).await).await;
+        assert_eq!(result_of(&outcome), Some("2 deliveries planned"));
     }
     carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
     let deliveries = store
@@ -289,19 +342,19 @@ async fn test_same_id_from_two_sources_is_two_notifications() {
 #[tokio::test]
 async fn test_route_fans_out_once() {
     let store = store().await;
-    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let handler = route_handler(RecipientResolver::without_identity());
     let event = security_event();
-    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
+    let work = routing(&store, &event).await;
 
-    assert_eq!(
-        handler.handle(&work).await,
-        WorkOutcome::Done(Some("2 deliveries planned".into()))
-    );
-    handler.handle(&work).await;
+    let outcome = settle(&store, &work, handler.handle(&work).await).await;
+    assert_eq!(result_of(&outcome), Some("2 deliveries planned"));
+    // A repeat by the same, now ended, claim owes nothing.
+    settle(&store, &work, handler.handle(&work).await).await;
     let plans = PlanHandler::new(Arc::clone(&store), 1_000);
+    let outcomes = carry_out_plans(&store, &plans).await;
     assert_eq!(
-        carry_out_plans(&store, &plans).await,
-        [WorkOutcome::Done(Some("2 deliveries".into()))],
+        outcomes.iter().map(result_of).collect::<Vec<_>>(),
+        [Some("2 deliveries")],
         "a repeated routing stored its plan twice"
     );
 
@@ -337,33 +390,48 @@ async fn test_route_fans_out_once() {
 async fn test_partial_fan_out_finishes_after_a_rule_change() {
     let store = store().await;
     let event = security_event();
-    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
+    let work = routing(&store, &event).await;
+    let routed = route_handler(RecipientResolver::without_identity())
+        .handle(&work)
+        .await;
     assert!(matches!(
-        route_handler(&store, RecipientResolver::without_identity())
-            .handle(&work)
-            .await,
-        WorkOutcome::Done(_)
+        settle(&store, &work, routed).await,
+        WorkOutcome::DoneWith { .. }
     ));
 
-    // Room for one delivery only: the plan stores the first and stays owed.
+    // Room for one delivery only, a plan of two: the whole plan does not fit
+    // its first attempt, which stores nothing and stays owed; the next stores
+    // the first delivery and stays owed, so a plan larger than the room
+    // still advances.
     let cramped = PlanHandler::new(Arc::clone(&store), 1);
-    assert!(matches!(
-        carry_out_plans(&store, &cramped).await.as_slice(),
-        [WorkOutcome::Retry(_)]
-    ));
+    for stored in [0, 1] {
+        assert!(matches!(
+            carry_out_plans(&store, &cramped).await.as_slice(),
+            [WorkOutcome::Retry(_)]
+        ));
+        let mut deliveries = 0;
+        for channel in ["email", "webhook"] {
+            let id = delivery_job_id(&event, "security_alert", channel);
+            if store.get_work(id).await.unwrap().is_some() {
+                deliveries += 1;
+            }
+        }
+        assert_eq!(deliveries, stored);
+    }
 
     // The rules change: routing the event again now matches nothing, and
     // owes nothing new.
-    let silent = RouteHandler::new(RoutingTable::new(), standalone(), Arc::clone(&store), 1_000);
+    let silent = RouteHandler::new(RoutingTable::new(), standalone(), 1_000);
     assert_eq!(
         silent.handle(&work).await,
         WorkOutcome::Done(Some("no routing rule".into()))
     );
 
     let roomy = PlanHandler::new(Arc::clone(&store), 1_000);
+    let outcomes = carry_out_plans(&store, &roomy).await;
     assert_eq!(
-        carry_out_plans(&store, &roomy).await,
-        [WorkOutcome::Done(Some("2 deliveries".into()))]
+        outcomes.iter().map(result_of).collect::<Vec<_>>(),
+        [Some("2 deliveries")]
     );
     for channel in ["email", "webhook"] {
         let id = delivery_job_id(&event, "security_alert", channel);
@@ -378,8 +446,7 @@ async fn test_partial_fan_out_finishes_after_a_rule_change() {
 /// service each end the routing job the right way.
 #[tokio::test]
 async fn test_route_outcomes() {
-    let store = store().await;
-    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let handler = route_handler(RecipientResolver::without_identity());
     let quiet = Event::new("src", event_types::FEDERATION_SYNC_COMPLETED);
     assert_eq!(
         handler
@@ -393,7 +460,6 @@ async fn test_route_outcomes() {
     ));
 
     let unreachable = route_handler(
-        &store,
         RecipientResolver::with_identity("http://127.0.0.1:1")
             .await
             .unwrap(),
@@ -465,10 +531,14 @@ async fn test_deliver_outcomes() {
 #[tokio::test]
 async fn test_host_source_decides_the_recipient() {
     let (store, other) = (store().await, store().await);
-    let host = route_handler(&store, HostSource::new(Ok(owner()), Ok(true)));
+    let host = route_handler(HostSource::new(Ok(owner()), Ok(true)));
     let event = security_event();
-    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
-    assert!(matches!(host.handle(&work).await, WorkOutcome::Done(_)));
+    let work = routing(&store, &event).await;
+    let outcome = settle(&store, &work, host.handle(&work).await).await;
+    assert!(
+        matches!(outcome, WorkOutcome::DoneWith { .. }),
+        "{outcome:?}"
+    );
     carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
     let deliveries = store
         .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
@@ -487,22 +557,21 @@ async fn test_host_source_decides_the_recipient() {
         );
     }
 
-    let down = route_handler(
-        &other,
-        HostSource::new(
-            Err(ResolveError::Unavailable("lookup down".into())),
-            Ok(true),
-        ),
-    );
-    assert!(matches!(down.handle(&work).await, WorkOutcome::Retry(_)));
+    let down = route_handler(HostSource::new(
+        Err(ResolveError::Unavailable("lookup down".into())),
+        Ok(true),
+    ));
+    let pending = routing(&other, &event).await;
+    let outcome = settle(&other, &pending, down.handle(&pending).await).await;
+    assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
     assert!(
         other.get_work(plan_job_id(&event)).await.unwrap().is_none(),
         "a plan was stored without a recipient"
     );
-    let gone = route_handler(
-        &other,
-        HostSource::new(Err(ResolveError::ProfileGone("no owner".into())), Ok(true)),
-    );
+    let gone = route_handler(HostSource::new(
+        Err(ResolveError::ProfileGone("no owner".into())),
+        Ok(true),
+    ));
     assert!(matches!(
         gone.handle(&work).await,
         WorkOutcome::Permanent(_)
@@ -570,7 +639,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
         .await
         .unwrap();
     let handlers: Vec<Arc<dyn WorkHandler>> = vec![
-        Arc::new(route_handler(&store, RecipientResolver::without_identity())),
+        Arc::new(route_handler(RecipientResolver::without_identity())),
         Arc::new(PlanHandler::new(Arc::clone(&store), 1_000)),
         Arc::new(DeliverHandler::new(
             dispatcher(&[Arc::clone(&email), webhook]),

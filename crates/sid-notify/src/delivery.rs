@@ -196,24 +196,18 @@ pub struct RouteHandler {
     kind: WorkKind,
     routing: RoutingTable,
     resolver: Arc<dyn RecipientSource>,
-    store: Arc<dyn WorkStore>,
     capacity: u64,
 }
 
 impl RouteHandler {
     /// Route accepted events by `routing` to the recipients `resolver`
-    /// names, storing plans in `store` within `capacity` open items.
-    pub fn new(
-        routing: RoutingTable,
-        resolver: Arc<dyn RecipientSource>,
-        store: Arc<dyn WorkStore>,
-        capacity: u64,
-    ) -> Self {
+    /// names, each plan owed with its routing's completion within `capacity`
+    /// open items.
+    pub fn new(routing: RoutingTable, resolver: Arc<dyn RecipientSource>, capacity: u64) -> Self {
         Self {
             kind: kind(ROUTE),
             routing,
             resolver,
-            store,
             capacity,
         }
     }
@@ -271,15 +265,17 @@ impl WorkHandler for RouteHandler {
             Ok(payload) => payload,
             Err(e) => return WorkOutcome::Permanent(format!("route plan: {e}")),
         };
-        // Stored whole, under an id of the event alone: the store keeps the
-        // first plan, so this event's deliveries are fixed when this first
-        // succeeds and a retry under other rules owes the same.
+        // Stored whole, under an id of the event alone, in the commit that
+        // ends this routing: the store keeps the first plan, so this event's
+        // deliveries are fixed when this first succeeds and a retry under
+        // other rules owes the same.
         let mut job = NewWork::new(kind(PLAN), payload);
         job.id = plan_job_id(&plan.event);
         job.max_attempts = MAX_ATTEMPTS;
-        match self.store.enqueue_work(&job, self.capacity).await {
-            Ok(_) => WorkOutcome::Done(Some(format!("{planned} deliveries planned"))),
-            Err(e) => WorkOutcome::Retry(format!("storing the plan: {e}")),
+        WorkOutcome::DoneWith {
+            result: Some(format!("{planned} deliveries planned")),
+            follow_up: vec![job],
+            capacity: self.capacity,
         }
     }
 }
@@ -323,6 +319,7 @@ impl WorkHandler for PlanHandler {
             Ok(plan) => plan,
             Err(e) => return WorkOutcome::Permanent(format!("malformed plan: {e}")),
         };
+        let mut deliveries = Vec::with_capacity(plan.deliveries.len());
         for planned in &plan.deliveries {
             let job = DeliveryJob {
                 event: plan.event.clone(),
@@ -338,13 +335,27 @@ impl WorkHandler for PlanHandler {
             let mut delivery = NewWork::new(kind(DELIVER), payload);
             delivery.id = delivery_job_id(&plan.event, &planned.template, &planned.channel);
             delivery.max_attempts = MAX_ATTEMPTS;
-            // A delivery stored by an earlier attempt is kept as it is, with
-            // its own outcome; the plan stays owed until the rest are stored.
-            if let Err(e) = self.store.enqueue_work(&delivery, self.capacity).await {
+            deliveries.push(delivery);
+        }
+        let result = Some(format!("{} deliveries", plan.deliveries.len()));
+        // The first attempt owes every delivery with the plan's completion.
+        // One after it (the room was short, or the attempt was lost) stores
+        // them one at a time, so a plan larger than the room still advances
+        // as deliveries end: a delivery stored before is kept as it is, with
+        // its own outcome, and the plan stays owed until the rest are stored.
+        if work.attempt <= 1 {
+            return WorkOutcome::DoneWith {
+                result,
+                follow_up: deliveries,
+                capacity: self.capacity,
+            };
+        }
+        for delivery in &deliveries {
+            if let Err(e) = self.store.enqueue_work(delivery, self.capacity).await {
                 return WorkOutcome::Retry(format!("storing delivery: {e}"));
             }
         }
-        WorkOutcome::Done(Some(format!("{} deliveries", plan.deliveries.len())))
+        WorkOutcome::Done(result)
     }
 }
 

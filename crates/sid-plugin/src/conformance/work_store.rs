@@ -617,3 +617,126 @@ pub async fn export_import_round_trip(store: &dyn WorkStore) {
     assert!(!states.contains(&WorkState::Claimed), "a claim travelled");
     assert!(states.contains(&WorkState::Completed) && states.contains(&WorkState::Failed));
 }
+
+/// A claimed parent and its `kind`.
+async fn claimed_parent(store: &dyn WorkStore, scenario: &str) -> sid_core::models::ClaimedWork {
+    let kind = unique_kind(scenario);
+    store.enqueue_work(&work(&kind), 10).await.unwrap();
+    store
+        .claim_work(&[kind], "w", 1, LEASE)
+        .await
+        .unwrap()
+        .pop()
+        .expect("the parent is claimed")
+}
+
+/// A completion owing follow-up work commits both: the parent completed with
+/// its result, every child pending.
+pub async fn completion_commits_with_follow_up_work(store: &dyn WorkStore) {
+    let parent = claimed_parent(store, "owing_parent").await;
+    let children = unique_kind("owing_child");
+    let owed = [work(&children), work(&children)];
+
+    assert!(
+        store
+            .complete_work_owing(parent.id, parent.generation, Some("planned"), &owed, 10)
+            .await
+            .unwrap()
+    );
+
+    let record = store.get_work(parent.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Completed);
+    assert_eq!(record.result.as_deref(), Some("planned"));
+    for child in &owed {
+        let record = store.get_work(child.id).await.unwrap().unwrap();
+        assert_eq!(record.state, WorkState::Pending);
+    }
+}
+
+/// A completion by a stale claim writes neither the completion nor the
+/// children: the current holder still owns the parent.
+pub async fn stale_completion_owes_nothing(store: &dyn WorkStore) {
+    let parent = claimed_parent(store, "owing_stale").await;
+    let child = work(&unique_kind("owing_stale_child"));
+
+    assert!(
+        !store
+            .complete_work_owing(parent.id, parent.generation + 1, None, from_ref(&child), 10)
+            .await
+            .unwrap()
+    );
+
+    let record = store.get_work(parent.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Claimed);
+    assert!(store.get_work(child.id).await.unwrap().is_none());
+}
+
+/// A completion whose children find their kind full writes nothing and the
+/// parent stays claimed, resumable by its holder; a child already stored is
+/// accepted again however full its kind is.
+pub async fn completion_refused_for_capacity_owes_nothing(store: &dyn WorkStore) {
+    let parent = claimed_parent(store, "owing_full").await;
+    let children = unique_kind("owing_full_child");
+    let stored = work(&children);
+    store.enqueue_work(&stored, 1).await.unwrap();
+    let fresh = work(&children);
+
+    let refused = store
+        .complete_work_owing(
+            parent.id,
+            parent.generation,
+            None,
+            &[stored.clone(), fresh.clone()],
+            1,
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(Error::ResourceExhausted(_))),
+        "{refused:?}"
+    );
+    let record = store.get_work(parent.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Claimed);
+    assert_eq!(record.generation, parent.generation);
+    assert!(store.get_work(fresh.id).await.unwrap().is_none());
+    assert!(
+        store
+            .complete_work_owing(parent.id, parent.generation, None, from_ref(&stored), 1)
+            .await
+            .unwrap(),
+        "a child already stored was refused at capacity"
+    );
+}
+
+/// Parents completing at once, each owing a child of one kind, never pass
+/// that kind's capacity: exactly the capacity is accepted, every other parent
+/// is refused and stays claimed.
+pub async fn concurrent_completions_hold_capacity(store: &dyn WorkStore) {
+    let parents_kind = unique_kind("owing_race");
+    for _ in 0..8 {
+        store.enqueue_work(&work(&parents_kind), 10).await.unwrap();
+    }
+    let parents = store
+        .claim_work(&[parents_kind], "w", 8, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(parents.len(), 8);
+    let children = unique_kind("owing_race_child");
+    let owed: Vec<NewWork> = parents.iter().map(|_| work(&children)).collect();
+
+    let results = futures::future::join_all(parents.iter().zip(&owed).map(|(parent, child)| {
+        store.complete_work_owing(parent.id, parent.generation, None, from_ref(child), 3)
+    }))
+    .await;
+
+    let accepted = results.iter().filter(|r| matches!(r, Ok(true))).count();
+    assert_eq!(accepted, 3, "{results:?}");
+    for (parent, result) in parents.iter().zip(&results) {
+        let record = store.get_work(parent.id).await.unwrap().unwrap();
+        match result {
+            Ok(true) => assert_eq!(record.state, WorkState::Completed),
+            Err(Error::ResourceExhausted(_)) => assert_eq!(record.state, WorkState::Claimed),
+            other => panic!("{other:?}"),
+        }
+    }
+}

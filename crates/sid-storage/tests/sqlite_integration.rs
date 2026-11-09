@@ -588,6 +588,10 @@ mod work_store {
         abandoned_last_attempt_fails,
         concurrent_claims_do_not_overlap,
         export_import_round_trip,
+        completion_commits_with_follow_up_work,
+        stale_completion_owes_nothing,
+        completion_refused_for_capacity_owes_nothing,
+        concurrent_completions_hold_capacity,
     );
 }
 
