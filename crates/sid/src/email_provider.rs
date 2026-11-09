@@ -8,14 +8,17 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use prost::Message;
 use secrecy::{ExposeSecret, SecretBox};
 use sid_authn::caller::{Caller, CallerError};
+use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
-    AuditEntry, EmailProviderConfig, MutationContext, SmtpAuthMethod, SmtpEncryption,
-    XOAuth2Config, XOAuth2Provider,
+    AuditEntry, EmailProviderConfig, MutationContext, OperationContext, SmtpAuthMethod,
+    SmtpEncryption, XOAuth2Config, XOAuth2Provider,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::realm_service as keyed;
 use sid_proto::sid::v1::admin::{
     EmailSettings, SmtpAuthType, SmtpEncryptionType, XoAuth2ProviderType,
 };
@@ -44,6 +47,10 @@ pub enum EmailProviderError {
     /// The caller is not admitted.
     #[error(transparent)]
     Caller(#[from] CallerError),
+    /// The keyed command conflicts, is refused its period or its outcome is
+    /// unknown.
+    #[error(transparent)]
+    Operation(#[from] OperationError),
     /// The store failed.
     #[error("store: {0}")]
     Store(#[from] SidError),
@@ -57,6 +64,18 @@ pub enum EmailProviderError {
     /// No email provider is configured.
     #[error("no email provider is configured")]
     NotConfigured,
+}
+
+impl From<EmailProviderError> for Effect<EmailProviderError> {
+    fn from(e: EmailProviderError) -> Self {
+        Self::Refused(e)
+    }
+}
+
+impl From<CommandError<EmailProviderError>> for EmailProviderError {
+    fn from(e: CommandError<EmailProviderError>) -> Self {
+        e.refusal()
+    }
 }
 
 impl From<ProviderError> for EmailProviderError {
@@ -199,59 +218,82 @@ impl EmailProvider {
     }
 
     /// Replace the settings. An empty credential keeps the stored one
-    /// (an update without rotation).
+    /// (an update without rotation). A retry of a completed change answers
+    /// with the settings that change left and never writes them over a later
+    /// change.
     pub async fn update(
         &self,
         caller: &Caller,
+        operation: OperationContext,
         req: EmailSettings,
     ) -> Result<EmailSettings, EmailProviderError> {
         caller.require_admin()?;
-        let existing = self.load().await?;
-        let auth_type = auth_from_proto(req.auth_type);
-        let password = if req.password.is_empty() {
-            existing
-                .as_ref()
-                .map(|c| SecretBox::new(Box::new(c.password.expose_secret().clone())))
-                .unwrap_or_else(|| SecretBox::new(Box::new(String::new())))
-        } else {
-            SecretBox::new(Box::new(req.password.clone()))
+        // The command's inputs leave the credentials out: the record keeps
+        // only a digest of its inputs, and a digest of a secret would let
+        // anyone holding it test guesses of the secret the store seals.
+        let fingerprinted = EmailSettings {
+            password: String::new(),
+            xoauth2_client_secret: String::new(),
+            xoauth2_service_account_key: String::new(),
+            ..req.clone()
         };
-        let xoauth2 = if auth_type == SmtpAuthMethod::XOAuth2 {
-            let existing_xoauth2 = existing.as_ref().and_then(|c| c.xoauth2.as_ref());
-            Some(
-                xoauth2_config_from_proto(&req, existing_xoauth2).ok_or_else(|| {
-                    EmailProviderError::InvalidField {
-                        field: "xoauth2_provider",
-                        reason: "required when auth_type is XOAUTH2".into(),
-                    }
-                })?,
-            )
-        } else {
-            None
-        };
-        let cfg = EmailProviderConfig {
-            smtp_host: req.smtp_host.clone(),
-            smtp_port: req.smtp_port as u16,
-            from_address: req.from_address.clone(),
-            from_display_name: req.from_display_name.clone(),
-            reply_to: req.reply_to.clone(),
-            encryption: encryption_from_proto(req.encryption),
-            auth_type,
-            username: req.username.clone(),
-            password,
-            xoauth2,
-        };
-        let audit: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "email_provider_config.update",
-            "email_provider_config",
-        )
-        .into();
-        self.storage
-            .upsert_email_provider_config(&self.sealed(&cfg).await?, audit)
-            .await?;
-        info!(host = %cfg.smtp_host, port = cfg.smtp_port, auth = ?cfg.auth_type, "Email provider config updated");
-        Ok(config_to_proto(&cfg))
+        let command = KeyedCommand::by_profile::<keyed::UpdateEmailSettings>(
+            caller.profile_id,
+            operation,
+            &fingerprinted,
+        );
+        command
+            .execute(&*self.storage, || async {
+                let existing = self.load().await?;
+                let auth_type = auth_from_proto(req.auth_type);
+                let password = if req.password.is_empty() {
+                    existing
+                        .as_ref()
+                        .map(|c| SecretBox::new(Box::new(c.password.expose_secret().clone())))
+                        .unwrap_or_else(|| SecretBox::new(Box::new(String::new())))
+                } else {
+                    SecretBox::new(Box::new(req.password.clone()))
+                };
+                let xoauth2 = if auth_type == SmtpAuthMethod::XOAuth2 {
+                    let existing_xoauth2 = existing.as_ref().and_then(|c| c.xoauth2.as_ref());
+                    Some(
+                        xoauth2_config_from_proto(&req, existing_xoauth2).ok_or_else(|| {
+                            EmailProviderError::InvalidField {
+                                field: "xoauth2_provider",
+                                reason: "required when auth_type is XOAUTH2".into(),
+                            }
+                        })?,
+                    )
+                } else {
+                    None
+                };
+                let cfg = EmailProviderConfig {
+                    smtp_host: req.smtp_host.clone(),
+                    smtp_port: req.smtp_port as u16,
+                    from_address: req.from_address.clone(),
+                    from_display_name: req.from_display_name.clone(),
+                    reply_to: req.reply_to.clone(),
+                    encryption: encryption_from_proto(req.encryption),
+                    auth_type,
+                    username: req.username.clone(),
+                    password,
+                    xoauth2,
+                };
+                let response = config_to_proto(&cfg);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "email_provider_config.update",
+                    "email_provider_config",
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage
+                    .upsert_email_provider_config(&self.sealed(&cfg).await?, audit)
+                    .await?;
+                info!(host = %cfg.smtp_host, port = cfg.smtp_port, auth = ?cfg.auth_type, "Email provider config updated");
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<EmailProviderError>::refusal)
     }
 }
 

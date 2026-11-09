@@ -32,9 +32,11 @@ fn attacker_smtp() -> EmailSettings {
     }
 }
 
+/// `msg` with header `name` set to `value`, named as a new command.
 fn with_header<T>(msg: T, name: &'static str, value: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut().insert(name, value.parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 
