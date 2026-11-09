@@ -300,6 +300,28 @@ impl TemplateEngine {
     }
 }
 
+/// Render one message for `event` from template text: `subject`, `body`
+/// and `body_text` take the same event context as a registered template.
+pub(crate) fn render_message(
+    subject: Option<&str>,
+    body: &str,
+    body_text: &str,
+    event: &Event,
+    priority: NotificationPriority,
+) -> Result<RenderedMessage, TemplateError> {
+    let hbs = TemplateEngine::new().hbs;
+    let ctx = build_context(event);
+    Ok(RenderedMessage {
+        subject: subject
+            .map(|s| render_handlebars(&hbs, s, &ctx))
+            .transpose()?,
+        body: render_handlebars(&hbs, body, &ctx)?,
+        body_text: Some(render_handlebars(&hbs, body_text, &ctx)?),
+        priority,
+        event_type: event.event_type.clone(),
+    })
+}
+
 impl Default for TemplateEngine {
     fn default() -> Self {
         Self::new()

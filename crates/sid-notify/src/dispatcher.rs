@@ -1,54 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Notification channels and message rendering.
+//! Notification channels.
 //!
-//! Holds the registered delivery channels and renders messages from the
-//! shared template engine, the one administrators customize. Routing,
-//! retries and outcomes belong to the durable delivery jobs
-//! (see [`crate::delivery`]).
+//! Holds the registered delivery channels. Rendering reads the stored
+//! templates when a delivery runs (see [`crate::delivery`]); routing, retries
+//! and outcomes belong to the durable delivery jobs.
 
-use crate::template::{TemplateEngine, TemplateError};
-use sid_core::models::event::Event;
 use sid_plugin::notification::{
-    DeliveryError, DeliveryReceipt, NotificationChannel, NotificationPriority, Recipient,
-    RenderedMessage,
+    DeliveryError, DeliveryReceipt, NotificationChannel, Recipient, RenderedMessage,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-/// Registered channels plus the template engine they render from.
+/// Registered channels.
+#[derive(Default)]
 pub struct NotificationDispatcher {
     channels: HashMap<String, Arc<dyn NotificationChannel>>,
-    templates: Arc<RwLock<TemplateEngine>>,
 }
 
 impl NotificationDispatcher {
-    /// A dispatcher rendering from `templates`, the engine the template
-    /// store keeps customizations in.
-    pub fn new(templates: Arc<RwLock<TemplateEngine>>) -> Self {
-        Self {
-            channels: HashMap::new(),
-            templates,
-        }
+    /// A dispatcher with no channel registered yet.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register a notification channel.
     pub fn register_channel(&mut self, channel: Arc<dyn NotificationChannel>) {
         self.channels
             .insert(channel.channel_id().to_string(), channel);
-    }
-
-    /// Render `template` for `event`.
-    pub async fn render(
-        &self,
-        template: &str,
-        event: &Event,
-        priority: NotificationPriority,
-    ) -> Result<RenderedMessage, TemplateError> {
-        self.templates
-            .read()
-            .await
-            .render(template, event, priority)
     }
 
     /// Get registered channel IDs.
