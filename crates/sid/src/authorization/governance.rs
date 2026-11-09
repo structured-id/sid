@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! CE governance: one-step access requests a Profile makes for a role its
 //! project defines, decided by the installation's administrator, and
-//! temporary roles that end on their expiry.
+//! temporary roles that end on their expiry. Each is a keyed operation: its
+//! change, audit and completion commit together and a retry answers with
+//! what the first attempt recorded.
 
+use prost::Message;
 use sid_authn::caller::Caller;
+use sid_authn::operation::{CommandError, KeyedCommand};
 use sid_authz::admin::Administrator;
 use sid_core::models::{
     AccessRequest, AccessRequestId, AccessRequestStatus as DomainStatus, AssignmentProvenance,
-    AuditEntry, AuthzPrincipal, ProfileId, ProjectId, Role, RoleAssignment,
-    RoleAssignmentPrincipal,
+    AuditEntry, AuthzPrincipal, MutationContext, OperationContext, ProfileId, ProjectId, Role,
+    RoleAssignment, RoleAssignmentPrincipal,
 };
+use sid_proto::keyed::authz::governance_service as keyed;
 use sid_proto::sid::v1::authz::{
     AccessRequestDetail, AccessRequestMessage, AccessRequestResponse, AccessRequestStatus,
     DecideRequestRequest, DecideRequestResponse, GrantTemporaryRoleRequest,
@@ -69,10 +74,12 @@ impl Authorization {
     }
 
     /// Request a role for `requester_profile_id`: the caller's own Profile,
-    /// or any for an administrator.
+    /// or any for an administrator. A retry of a completed request answers
+    /// with the request it made and makes no second one.
     pub async fn request_access(
         &self,
         caller: &Caller,
+        operation: OperationContext,
         req: AccessRequestMessage,
     ) -> Result<AccessRequestResponse, AuthorizationError> {
         let requester_id: ProfileId =
@@ -81,60 +88,68 @@ impl Authorization {
         if req.requested_role.is_empty() {
             return Err(AuthorizationError::MissingField("requested_role"));
         }
-        self.existing_profile(requester_id).await?;
-        // A request names a role the project defines.
-        let role = self
-            .project_role(
-                req.project_id.as_ref(),
-                "requested_role",
-                &req.requested_role,
-            )
-            .await?;
-
-        let mut access_req = AccessRequest::new(requester_id, role.project_id, &role.key);
-        if !req.justification.is_empty() {
-            access_req.justification = Some(req.justification);
-        }
         // Whole hours, at least one; a duration that is not positive is
         // refused, never replaced by another.
-        if let Some(duration) = req.requested_duration {
-            if duration.seconds < 0
-                || duration.nanos < 0
-                || (duration.seconds == 0 && duration.nanos == 0)
-            {
-                return Err(invalid_field(
-                    "requested_duration",
-                    "not a positive duration",
-                ));
+        let requested_duration_hours = match req.requested_duration {
+            Some(duration) => {
+                if duration.seconds < 0
+                    || duration.nanos < 0
+                    || (duration.seconds == 0 && duration.nanos == 0)
+                {
+                    return Err(invalid_field(
+                        "requested_duration",
+                        "not a positive duration",
+                    ));
+                }
+                Some(
+                    u32::try_from((duration.seconds / 3600).max(1))
+                        .map_err(|_| invalid_field("requested_duration", "too long"))?,
+                )
             }
-            let hours = u32::try_from((duration.seconds / 3600).max(1))
-                .map_err(|_| invalid_field("requested_duration", "too long"))?;
-            access_req.requested_duration_hours = Some(hours);
-        }
-        access_req.expires_at =
-            Some(chrono::Utc::now() + chrono::Duration::days(DEFAULT_REQUEST_EXPIRY_DAYS));
-        let created_at = access_req.created_at;
-
-        self.storage
-            .create_access_request(
-                &access_req,
-                AuditEntry::user(
+            None => None,
+        };
+        let command =
+            KeyedCommand::by_profile::<keyed::RequestAccess>(caller.profile_id, operation, &req);
+        command
+            .execute(&*self.storage, || async {
+                self.existing_profile(requester_id).await?;
+                // A request names a role the project defines.
+                let role = self
+                    .project_role(
+                        req.project_id.as_ref(),
+                        "requested_role",
+                        &req.requested_role,
+                    )
+                    .await?;
+                let mut access_req = AccessRequest::new(requester_id, role.project_id, &role.key);
+                if !req.justification.is_empty() {
+                    access_req.justification = Some(req.justification.clone());
+                }
+                access_req.requested_duration_hours = requested_duration_hours;
+                access_req.expires_at =
+                    Some(chrono::Utc::now() + chrono::Duration::days(DEFAULT_REQUEST_EXPIRY_DAYS));
+                let response = AccessRequestResponse {
+                    request_id: Some(access_req.id.into()),
+                    status: status_to_proto(DomainStatus::Pending),
+                    created_at: Some(to_timestamp(access_req.created_at)),
+                };
+                let audit = MutationContext::from(AuditEntry::user(
                     caller.profile_id.to_string(),
                     "governance.access_request.create",
                     access_req.id.to_string(),
-                )
-                .into(),
-            )
-            .await?;
-        info!(
-            "Access request {} created by {} for role '{}'",
-            access_req.id, requester_id, req.requested_role
-        );
-        Ok(AccessRequestResponse {
-            request_id: Some(access_req.id.into()),
-            status: status_to_proto(DomainStatus::Pending),
-            created_at: Some(to_timestamp(created_at)),
-        })
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage
+                    .create_access_request(&access_req, audit)
+                    .await?;
+                info!(
+                    "Access request {} created by {} for role '{}'",
+                    access_req.id, requester_id, req.requested_role
+                );
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<AuthorizationError>::refusal)
     }
 
     pub async fn list_pending_requests(
@@ -185,109 +200,125 @@ impl Authorization {
     }
 
     /// Approve or deny a pending request; an approval and the role it grants
-    /// are one write.
+    /// are one write. A retry of a completed decision answers as that
+    /// decision did, not as a request already decided, and grants nothing
+    /// again.
     pub async fn decide_request(
         &self,
         admin: &InstallationAdministrator,
+        operation: OperationContext,
         req: DecideRequestRequest,
     ) -> Result<DecideRequestResponse, AuthorizationError> {
         let reviewer_id = admin.caller().profile_id;
         let request_id: AccessRequestId = wire_id(req.request_id.as_ref(), "request_id")?;
-        let mut access_req = self
-            .storage
-            .get_access_request(request_id)
-            .await?
-            .ok_or(AuthorizationError::AccessRequestNotFound(request_id))?;
+        let command =
+            KeyedCommand::by_profile::<keyed::DecideRequest>(reviewer_id, operation, &req);
+        command
+            .execute(&*self.storage, || async {
+                let mut access_req = self
+                    .storage
+                    .get_access_request(request_id)
+                    .await?
+                    .ok_or(AuthorizationError::AccessRequestNotFound(request_id))?;
 
-        if access_req.check_expired() {
-            // Recording the expiry loses to a decision made meanwhile; either
-            // way this request can no longer be decided here.
-            self.storage
-                .decide_access_request(
-                    &access_req,
-                    AuditEntry::admin(
+                if access_req.check_expired() {
+                    // Recording the expiry loses to a decision made
+                    // meanwhile; either way this request can no longer be
+                    // decided here.
+                    let response = DecideRequestResponse {
+                        request_id: Some(request_id.into()),
+                        status: status_to_proto(DomainStatus::Expired),
+                    };
+                    let audit = MutationContext::from(AuditEntry::admin(
                         "system".to_string(),
                         "governance.access_request.expired",
                         request_id.to_string(),
+                    ))
+                    .with_operation(command.completion(response.encode_to_vec()));
+                    self.storage
+                        .decide_access_request(&access_req, audit)
+                        .await?;
+                    return Ok(response);
+                }
+
+                let comment = (!req.reason.is_empty()).then(|| req.reason.clone());
+                let decided = if req.approved {
+                    access_req.approve(reviewer_id, comment)
+                } else {
+                    access_req.deny(reviewer_id, comment)
+                };
+                decided.map_err(|_| AuthorizationError::AlreadyDecided(request_id))?;
+
+                let new_status = access_req.status;
+                let response = DecideRequestResponse {
+                    request_id: Some(request_id.into()),
+                    status: status_to_proto(new_status),
+                };
+                let audit = MutationContext::from(AuditEntry::admin(
+                    reviewer_id.to_string(),
+                    if req.approved {
+                        "governance.access_request.approved"
+                    } else {
+                        "governance.access_request.denied"
+                    },
+                    request_id.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+
+                let decided = if new_status == DomainStatus::Approved {
+                    // A role that can no longer be assigned leaves the
+                    // request pending.
+                    let role = self
+                        .storage
+                        .list_roles(access_req.project_id)
+                        .await?
+                        .into_iter()
+                        .find(|r| r.key == access_req.role_key)
+                        .ok_or_else(|| {
+                            AuthorizationError::RequestedRoleDeleted(access_req.role_key.clone())
+                        })?;
+                    // The approving installation administrator grants it as
+                    // root of its scope; the record names that reviewer.
+                    let mut grant = RoleAssignment::new(
+                        RoleAssignmentPrincipal::Profile(access_req.requester_id),
+                        role.id,
                     )
-                    .into(),
-                )
-                .await?;
-            return Ok(DecideRequestResponse {
-                request_id: Some(request_id.into()),
-                status: status_to_proto(DomainStatus::Expired),
-            });
-        }
-
-        let comment = (!req.reason.is_empty()).then(|| req.reason.clone());
-        let decided = if req.approved {
-            access_req.approve(reviewer_id, comment)
-        } else {
-            access_req.deny(reviewer_id, comment)
-        };
-        decided.map_err(|_| AuthorizationError::AlreadyDecided(request_id))?;
-
-        let new_status = access_req.status;
-        let audit = AuditEntry::admin(
-            reviewer_id.to_string(),
-            if req.approved {
-                "governance.access_request.approved"
-            } else {
-                "governance.access_request.denied"
-            },
-            request_id.to_string(),
-        )
-        .into();
-
-        let decided = if new_status == DomainStatus::Approved {
-            // A role that can no longer be assigned leaves the request pending.
-            let role = self
-                .storage
-                .list_roles(access_req.project_id)
-                .await?
-                .into_iter()
-                .find(|r| r.key == access_req.role_key)
-                .ok_or_else(|| {
-                    AuthorizationError::RequestedRoleDeleted(access_req.role_key.clone())
-                })?;
-            // The approving installation administrator grants it as root of
-            // its scope; the record names that reviewer.
-            let mut grant = RoleAssignment::new(
-                RoleAssignmentPrincipal::Profile(access_req.requester_id),
-                role.id,
-            )
-            .granted(AssignmentProvenance {
-                granted_by: format!("user:{reviewer_id}"),
-                basis: None,
-                depends_on: None,
-                ceiling: None,
-            });
-            grant.expires_at = access_req.role_expires_at();
-            self.storage
-                .approve_access_request(&access_req, &grant, audit)
-                .await
-        } else {
-            self.storage.decide_access_request(&access_req, audit).await
-        }?;
-        // Another reviewer decided first: this decision grants nothing.
-        if !decided {
-            return Err(AuthorizationError::AlreadyDecided(request_id));
-        }
-        info!(
-            "Access request {} {:?} for {} (role '{}')",
-            request_id, new_status, access_req.requester_id, access_req.role_key
-        );
-        Ok(DecideRequestResponse {
-            request_id: Some(request_id.into()),
-            status: status_to_proto(new_status),
-        })
+                    .granted(AssignmentProvenance {
+                        granted_by: format!("user:{reviewer_id}"),
+                        basis: None,
+                        depends_on: None,
+                        ceiling: None,
+                    });
+                    grant.expires_at = access_req.role_expires_at();
+                    self.storage
+                        .approve_access_request(&access_req, &grant, audit)
+                        .await
+                } else {
+                    self.storage.decide_access_request(&access_req, audit).await
+                }?;
+                // Another reviewer decided first: this decision grants
+                // nothing.
+                if !decided {
+                    return Err(AuthorizationError::AlreadyDecided(request_id).into());
+                }
+                info!(
+                    "Access request {} {:?} for {} (role '{}')",
+                    request_id, new_status, access_req.requester_id, access_req.role_key
+                );
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<AuthorizationError>::refusal)
     }
 
     /// The project role itself until the expiry, granted by the
     /// installation's administrator through the common administration core.
+    /// A retry of a completed grant answers with the assignment it made and
+    /// grants no second one.
     pub async fn grant_temporary_role(
         &self,
         admin: &InstallationAdministrator,
+        operation: OperationContext,
         req: GrantTemporaryRoleRequest,
     ) -> Result<GrantTemporaryRoleResponse, AuthorizationError> {
         let administrator_id = admin.caller().profile_id;
@@ -301,41 +332,55 @@ impl Authorization {
         let expires_dt = u32::try_from(expires_at.nanos)
             .ok()
             .and_then(|nanos| chrono::DateTime::from_timestamp(expires_at.seconds, nanos))
-            .filter(|at| *at > chrono::Utc::now())
             .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))?;
-
-        self.existing_profile(profile_id).await?;
-        let role = self
-            .project_role(req.project_id.as_ref(), "role", &req.role)
-            .await?;
-
-        let mut assignment =
-            RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id);
-        assignment.expires_at = Some(expires_dt);
-        let assignment_id = assignment.id;
-        self.administration()
-            .assign(
-                &Administrator::Root(AuthzPrincipal::Profile(administrator_id)),
-                assignment,
-                AuditEntry::admin(
-                    administrator_id.to_string(),
-                    "governance.temporary_role.grant",
-                    assignment_id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            // The grantor is the root of its scope: no administrative
-            // refusal applies, and a failed grant is the store's.
-            .map_err(AuthorizationError::Store)?;
-        info!(
-            "Temporary role '{}' granted to {} until {}",
-            req.role, profile_id, expires_dt
+        let command = KeyedCommand::by_profile::<keyed::GrantTemporaryRole>(
+            administrator_id,
+            operation,
+            &req,
         );
-        Ok(GrantTemporaryRoleResponse {
-            assignment_id: Some(assignment_id.into()),
-            expires_at: Some(to_timestamp(expires_dt)),
-        })
+        command
+            .execute(&*self.storage, || async {
+                // Only a new grant must end in the future: a retry of a
+                // completed one answers with it even after its expiry.
+                if expires_dt <= chrono::Utc::now() {
+                    return Err(invalid_field("expires_at", "not a timestamp in the future").into());
+                }
+                self.existing_profile(profile_id).await?;
+                let role = self
+                    .project_role(req.project_id.as_ref(), "role", &req.role)
+                    .await?;
+
+                let mut assignment =
+                    RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id);
+                assignment.expires_at = Some(expires_dt);
+                let assignment_id = assignment.id;
+                let response = GrantTemporaryRoleResponse {
+                    assignment_id: Some(assignment_id.into()),
+                    expires_at: Some(to_timestamp(expires_dt)),
+                };
+                // The grantor is the root of its scope: no administrative
+                // refusal applies, and a failed grant is the store's.
+                self.administration()
+                    .assign_recording(
+                        &Administrator::Root(AuthzPrincipal::Profile(administrator_id)),
+                        assignment,
+                        AuditEntry::admin(
+                            administrator_id.to_string(),
+                            "governance.temporary_role.grant",
+                            assignment_id.to_string(),
+                        )
+                        .into(),
+                        |_| Some(command.completion(response.encode_to_vec())),
+                    )
+                    .await?;
+                info!(
+                    "Temporary role '{}' granted to {} until {}",
+                    req.role, profile_id, expires_dt
+                );
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<AuthorizationError>::refusal)
     }
 }
 

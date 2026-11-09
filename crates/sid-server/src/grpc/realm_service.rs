@@ -16,6 +16,7 @@ use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{EmailProviderConfig, SmtpAuthMethod, SmtpEncryption};
 use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
 use sid_infra::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, not_configured, not_in_this_build,
     storage_failure,
@@ -41,6 +42,7 @@ pub struct RealmServiceImpl {
 fn refusal(e: EmailProviderError) -> Status {
     match e {
         EmailProviderError::Caller(e) => e.into_status(),
+        EmailProviderError::Operation(e) => e.into_status(),
         EmailProviderError::Store(e) => storage_failure(e),
         EmailProviderError::Internal => ApiError::internal().into(),
         EmailProviderError::InvalidField { field, reason } => invalid_field(field, reason),
@@ -151,8 +153,9 @@ impl RealmService for RealmServiceImpl {
         request: Request<EmailSettings>,
     ) -> Result<Response<EmailSettings>, Status> {
         let caller = self.caller(&request).await?;
+        let operation = context(&request)?;
         self.email
-            .update(&caller, request.into_inner())
+            .update(&caller, operation, request.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)

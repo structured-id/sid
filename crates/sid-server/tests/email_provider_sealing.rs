@@ -18,11 +18,13 @@ use sid_server::grpc::realm_service::RealmServiceImpl;
 use std::sync::Arc;
 use tonic::Request;
 
+/// `msg` from an administrator, named as a new command.
 fn admin<T>(msg: T) -> Request<T> {
     let token = issue_admin_token(&test_jwt(), sid_core::models::ProfileId::generate());
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

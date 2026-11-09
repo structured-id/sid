@@ -35,16 +35,19 @@ async fn setup() -> (FlowActionServiceImpl, Arc<dyn StorageBackend>, String) {
         .ensure_system_project(AuditEntry::system("test", "setup").into())
         .await
         .expect("system project");
+    common::adopt_operation_period(storage.as_ref()).await;
     let jwt = test_jwt();
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let svc = FlowActionServiceImpl::new(storage.clone(), jwt, common::test_revocation());
     (svc, storage, token)
 }
 
+/// `msg` from the bearer of `token`, named as a new command.
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

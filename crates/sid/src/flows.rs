@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Runtime configuration of the sign-in flows of a project: which steps run
 //! and their parameters, the flow timeout, and the webhook actions at the
-//! pipeline's hook points. Every operation is instance administration.
+//! pipeline's hook points. Every operation is instance administration. A
+//! keyed operation commits its change, audit and completion together and
+//! answers a retry with what the first attempt recorded.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use prost::Message;
 use sid_authn::caller::{Caller, CallerError};
+use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
     ActionConfig, ActionOnError, ActionPoint, ActionType, AuditEntry, FlowAction, FlowActionId,
-    FlowConfig, FlowType, MutationContext, StepConfig,
+    FlowConfig, FlowType, MutationContext, OperationContext, StepConfig,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::{flow_action_service, flow_config_service};
 use sid_proto::sid::v1::{self as pb};
 
 use crate::wire::{FieldError, json_object_to_struct, struct_to_json, to_timestamp, wire_id};
@@ -26,6 +31,10 @@ pub enum FlowError {
     /// The caller is not admitted.
     #[error(transparent)]
     Caller(#[from] CallerError),
+    /// The keyed command conflicts, is refused its period or its outcome is
+    /// unknown.
+    #[error(transparent)]
+    Operation(#[from] OperationError),
     /// The store failed.
     #[error("store: {0}")]
     Store(#[from] SidError),
@@ -44,6 +53,18 @@ pub enum FlowError {
     /// The record changed since it was read.
     #[error("changed concurrently")]
     ChangedConcurrently,
+}
+
+impl From<FlowError> for Effect<FlowError> {
+    fn from(e: FlowError) -> Self {
+        Self::Refused(e)
+    }
+}
+
+impl From<CommandError<FlowError>> for FlowError {
+    fn from(e: CommandError<FlowError>) -> Self {
+        e.refusal()
+    }
 }
 
 impl From<FieldError> for FlowError {
@@ -105,15 +126,23 @@ impl Flows {
         Ok(config_to_proto(&config))
     }
 
-    /// Replace a flow's configuration; a timeout of 0 is the default.
+    /// Replace a flow's configuration; a timeout of 0 is the default. A
+    /// retry of a completed save answers with the configuration that save
+    /// wrote and never writes it over a later save.
     pub async fn save_config(
         &self,
         caller: &Caller,
+        operation: OperationContext,
         req: pb::SaveFlowConfigRequest,
     ) -> Result<pb::FlowConfig, FlowError> {
         caller.require_admin()?;
         let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
         let flow_type = flow_type_from_proto(req.flow_type)?;
+        let command = KeyedCommand::by_profile::<flow_config_service::SaveFlowConfig>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let steps: HashMap<String, StepConfig> = req.steps.iter().map(step_from_proto).collect();
         let config = FlowConfig {
             project_id,
@@ -125,14 +154,20 @@ impl Flows {
             },
             updated_at: chrono::Utc::now(),
         };
-        let audit: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "flow_config.save",
-            format!("{project_id}:{flow_type}"),
-        )
-        .into();
-        self.storage.save_flow_config(&config, audit).await?;
-        Ok(config_to_proto(&config))
+        command
+            .execute(&*self.storage, || async {
+                let response = config_to_proto(&config);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "flow_config.save",
+                    format!("{project_id}:{flow_type}"),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage.save_flow_config(&config, audit).await?;
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<FlowError>::refusal)
     }
 
     pub async fn list_configs(
@@ -148,12 +183,20 @@ impl Flows {
         })
     }
 
+    /// Create an action. A retry of a completed creation answers with the
+    /// action it created and creates no second one.
     pub async fn create_action(
         &self,
         caller: &Caller,
+        operation: OperationContext,
         req: pb::CreateFlowActionRequest,
     ) -> Result<pb::FlowAction, FlowError> {
         caller.require_admin()?;
+        let command = KeyedCommand::by_profile::<flow_action_service::CreateFlowAction>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
         let flow_type = flow_type_from_proto(req.flow_type)?;
         let action_point = action_point_from_proto(req.action_point)?;
@@ -182,14 +225,20 @@ impl Flows {
             created_at: now,
             updated_at: now,
         };
-        let audit: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "flow_action.create",
-            action.id.to_string(),
-        )
-        .into();
-        self.storage.create_flow_action(&action, audit).await?;
-        Ok(action_to_proto(&action))
+        command
+            .execute(&*self.storage, || async {
+                let response = action_to_proto(&action);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "flow_action.create",
+                    action.id.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage.create_flow_action(&action, audit).await?;
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<FlowError>::refusal)
     }
 
     pub async fn action(
@@ -231,55 +280,68 @@ impl Flows {
     }
 
     /// Change the fields given of an action at the revision read: a stale
-    /// copy never re-enables a disabled action or recreates a deleted one.
+    /// copy never re-enables a disabled action or recreates a deleted one. A
+    /// retry of a completed change answers with the action as that change
+    /// left it and never writes it over a later change.
     pub async fn update_action(
         &self,
         caller: &Caller,
+        operation: OperationContext,
         req: pb::UpdateFlowActionRequest,
     ) -> Result<pb::FlowAction, FlowError> {
         caller.require_admin()?;
-        let mut action = self
-            .scoped_action(
-                req.project_id.as_ref(),
-                req.flow_type,
-                req.action_id.as_ref(),
-            )
-            .await?;
-        if let Some(name) = req.name {
-            if name.is_empty() {
-                return Err(invalid("name", "empty"));
-            }
-            action.name = name;
-        }
-        if let Some(point) = req.action_point {
-            action.action_point = action_point_from_proto(point)?;
-        }
-        if let Some(pb::update_flow_action_request::Config::Webhook(ref wh)) = req.config {
-            let config = webhook_from_proto(wh);
-            config.validate().map_err(|why| invalid("webhook", why))?;
-            action.config = config;
-        }
-        if let Some(order) = req.order {
-            action.order = order;
-        }
-        if let Some(on_error) = req.on_error {
-            action.on_error = on_error_from_proto(on_error)?;
-        }
-        if let Some(enabled) = req.enabled {
-            action.enabled = enabled;
-        }
-        action.updated_at = chrono::Utc::now();
-        let audit: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "flow_action.update",
-            action.id.to_string(),
-        )
-        .into();
-        if !self.storage.update_flow_action(&action, audit).await? {
-            return Err(FlowError::ChangedConcurrently);
-        }
-        action.revision += 1;
-        Ok(action_to_proto(&action))
+        let command = KeyedCommand::by_profile::<flow_action_service::UpdateFlowAction>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
+        command
+            .execute(&*self.storage, || async {
+                let mut action = self
+                    .scoped_action(
+                        req.project_id.as_ref(),
+                        req.flow_type,
+                        req.action_id.as_ref(),
+                    )
+                    .await?;
+                if let Some(name) = &req.name {
+                    if name.is_empty() {
+                        return Err(invalid("name", "empty").into());
+                    }
+                    action.name = name.clone();
+                }
+                if let Some(point) = req.action_point {
+                    action.action_point = action_point_from_proto(point)?;
+                }
+                if let Some(pb::update_flow_action_request::Config::Webhook(ref wh)) = req.config {
+                    let config = webhook_from_proto(wh);
+                    config.validate().map_err(|why| invalid("webhook", why))?;
+                    action.config = config;
+                }
+                if let Some(order) = req.order {
+                    action.order = order;
+                }
+                if let Some(on_error) = req.on_error {
+                    action.on_error = on_error_from_proto(on_error)?;
+                }
+                if let Some(enabled) = req.enabled {
+                    action.enabled = enabled;
+                }
+                action.updated_at = chrono::Utc::now();
+                let response = action_to_proto(&action);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "flow_action.update",
+                    action.id.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                if !self.storage.update_flow_action(&action, audit).await? {
+                    return Err(FlowError::ChangedConcurrently.into());
+                }
+                Ok(response)
+            })
+            .await
+            .map_err(CommandError::<FlowError>::refusal)
     }
 
     pub async fn delete_action(

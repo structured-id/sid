@@ -8,6 +8,7 @@ use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
 use sid_infra::grpc_error::refuse::{
     changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
 };
@@ -24,6 +25,7 @@ use tracing::instrument;
 fn refusal(e: FlowError) -> Status {
     match e {
         FlowError::Caller(e) => e.into_status(),
+        FlowError::Operation(e) => e.into_status(),
         FlowError::Store(e) => storage_failure(e),
         FlowError::MissingField(field) => missing_field(field),
         FlowError::InvalidField { field, reason } => invalid_field(field, reason),
@@ -111,9 +113,10 @@ impl FlowConfigService for FlowConfigServiceImpl {
         req: Request<pb::SaveFlowConfigRequest>,
     ) -> Result<Response<pb::FlowConfig>, Status> {
         let caller = self.0.caller(&req).await?;
+        let operation = context(&req)?;
         self.0
             .flows
-            .save_config(&caller, req.into_inner())
+            .save_config(&caller, operation, req.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
@@ -142,9 +145,10 @@ impl FlowActionService for FlowActionServiceImpl {
         req: Request<pb::CreateFlowActionRequest>,
     ) -> Result<Response<pb::FlowAction>, Status> {
         let caller = self.0.caller(&req).await?;
+        let operation = context(&req)?;
         self.0
             .flows
-            .create_action(&caller, req.into_inner())
+            .create_action(&caller, operation, req.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
@@ -184,9 +188,10 @@ impl FlowActionService for FlowActionServiceImpl {
         req: Request<pb::UpdateFlowActionRequest>,
     ) -> Result<Response<pb::FlowAction>, Status> {
         let caller = self.0.caller(&req).await?;
+        let operation = context(&req)?;
         self.0
             .flows
-            .update_action(&caller, req.into_inner())
+            .update_action(&caller, operation, req.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)

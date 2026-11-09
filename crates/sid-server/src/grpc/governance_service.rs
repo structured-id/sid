@@ -10,6 +10,7 @@ use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
 use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::context;
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::governance_service_server::GovernanceService;
 use sid_proto::sid::v1::authz::{
@@ -66,8 +67,9 @@ impl GovernanceService for GovernanceServiceImpl {
         request: Request<AccessRequestMessage>,
     ) -> Result<Response<AccessRequestResponse>, Status> {
         let caller = self.caller(&request).await?;
+        let operation = context(&request)?;
         self.authorization
-            .request_access(&caller, request.into_inner())
+            .request_access(&caller, operation, request.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
@@ -92,8 +94,9 @@ impl GovernanceService for GovernanceServiceImpl {
         request: Request<DecideRequestRequest>,
     ) -> Result<Response<DecideRequestResponse>, Status> {
         let admin = self.admin(&request).await?;
+        let operation = context(&request)?;
         self.authorization
-            .decide_request(&admin, request.into_inner())
+            .decide_request(&admin, operation, request.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
@@ -105,8 +108,9 @@ impl GovernanceService for GovernanceServiceImpl {
         request: Request<GrantTemporaryRoleRequest>,
     ) -> Result<Response<GrantTemporaryRoleResponse>, Status> {
         let admin = self.admin(&request).await?;
+        let operation = context(&request)?;
         self.authorization
-            .grant_temporary_role(&admin, request.into_inner())
+            .grant_temporary_role(&admin, operation, request.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
