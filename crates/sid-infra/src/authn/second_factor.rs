@@ -8,13 +8,16 @@ use sid_authn::browser_session::{BrowserCookie, BrowserCsrf, CSRF_HEADER};
 use sid_authn::login_policy::Unmet;
 use sid_authn::second_factor::FactorError;
 use sid_authn::second_factor::pending::{CompletedContext, PendingError};
-use sid_core::models::Session;
+use sid_core::models::{CredentialId, Session};
 use sid_plugin::GrantStore;
 use tonic::Status;
 use tonic::metadata::MetadataMap;
 
+use super::operation::Effect;
 use super::sign_in_refusal::{authentication_failed, ceremony_expired};
-use crate::grpc_error::refuse::{dependency_unavailable, internal, invalid_field, storage_failure};
+use crate::grpc_error::refuse::{
+    dependency_unavailable, internal, invalid_field, not_found, storage_failure,
+};
 use crate::grpc_error::{ApiError, ErrorReason, IntoStatus};
 
 /// TOKEN_EXPIRED: the session the call acts on has ended or expired; the
@@ -85,6 +88,44 @@ pub fn recovery_codes_issued(recorded: &[u8]) -> Status {
     .into()
 }
 
+/// CREDENTIAL_NOT_FOUND for `id`: also the answer for a credential the caller
+/// does not own, so a foreign id reveals nothing.
+pub fn credential_not_found(id: CredentialId) -> Status {
+    not_found(
+        ErrorReason::CredentialNotFound,
+        "Credential",
+        id.0.to_string(),
+    )
+}
+
+/// INVALID_STATE: the credential `id` is the account's last way to sign in
+/// and stays; another is added first.
+pub fn last_sign_in_method(id: CredentialId) -> Status {
+    ApiError::new(
+        ErrorReason::InvalidState,
+        "the account's last way to sign in cannot be removed; add another first",
+    )
+    .with_precondition(
+        "LAST_PRIMARY_CREDENTIAL",
+        id.0.to_string(),
+        "the account has no other active primary credential",
+    )
+    .into()
+}
+
+/// A second-factor step inside a keyed command's effect: a store failure
+/// stays the store's, for the command to resolve against a concurrent
+/// attempt; any other refusal is answered with its status.
+impl From<FactorError> for Effect {
+    fn from(e: FactorError) -> Self {
+        match e {
+            FactorError::Store(e) => Self::Store(e),
+            FactorError::Operation(e) => Self::Operation(e),
+            e => Self::Refused(e.into_status()),
+        }
+    }
+}
+
 impl IntoStatus for FactorError {
     fn into_status(self) -> Status {
         match self {
@@ -93,6 +134,8 @@ impl IntoStatus for FactorError {
             FactorError::NotEnrolled(what) => mfa_not_enrolled(what),
             FactorError::Expired(ceremony) => ceremony_expired(ceremony),
             FactorError::AuthenticationFailed => authentication_failed(),
+            FactorError::CredentialNotFound(id) => credential_not_found(id),
+            FactorError::LastSignInMethod(id) => last_sign_in_method(id),
             FactorError::Unavailable { what, cause } => dependency_unavailable(what, cause),
             FactorError::RecoveryCodesIssued(recorded) => recovery_codes_issued(&recorded),
             FactorError::Operation(e) => e.into_status(),

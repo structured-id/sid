@@ -10,7 +10,8 @@ use tracing::{error, warn};
 
 // The sign-in and second-factor refusals every authority answers alike.
 pub(super) use sid_infra::authn::second_factor::{
-    mfa_not_enrolled, recovery_codes_issued, session_ended, step_up_required, totp_already_enrolled,
+    credential_not_found, mfa_not_enrolled, recovery_codes_issued, session_ended, step_up_required,
+    totp_already_enrolled,
 };
 pub(super) use sid_infra::authn::sign_in_refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, too_many_attempts,

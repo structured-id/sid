@@ -20,9 +20,9 @@ use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
 use sid_authn::webauthn::WebAuthnServer;
 use sid_core::models::OidcIssuer;
+use sid_core::models::SessionId;
 use sid_core::models::principal::PrincipalType;
 use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{CredentialId, SessionId};
 use sid_infra::authn::ceremony::Respond;
 use sid_infra::authn::operation::context;
 use sid_infra::authn::password_operation::{ClientListener, PasswordHistoryEvaluatorImpl};
@@ -53,9 +53,9 @@ use authorize::authorization_refusal;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use refusal::{
-    anomaly_unavailable, authentication_failed, ceremony_expired, mfa_not_enrolled,
-    recovery_codes_issued, registration_restricted, session_ended, session_provisional,
-    step_up_required, totp_already_enrolled,
+    anomaly_unavailable, authentication_failed, ceremony_expired, credential_not_found,
+    mfa_not_enrolled, recovery_codes_issued, registration_restricted, session_ended,
+    session_provisional, step_up_required, totp_already_enrolled,
 };
 use sid::second_factor::{Enroller, FactorCaller};
 use sid_authn::second_factor::pending::CompletedContext;
@@ -153,16 +153,6 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
             internal("request email code", e)
         }
     }
-}
-
-/// CREDENTIAL_NOT_FOUND for `id`: also the answer for a credential the caller
-/// does not own, so a foreign id reveals nothing.
-fn credential_not_found(id: CredentialId) -> Status {
-    not_found(
-        ErrorReason::CredentialNotFound,
-        "Credential",
-        id.0.to_string(),
-    )
 }
 
 /// The answer to a refused or failed self-registration.
