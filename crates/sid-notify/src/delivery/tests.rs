@@ -442,6 +442,68 @@ async fn test_partial_fan_out_finishes_after_a_rule_change() {
     }
 }
 
+// A plan larger than the room finishes under that same room: with space for
+// one delivery, the plan stores one, waits while it is open, stores the
+// other once the first has ended, and completes, without storing a delivery
+// twice or touching the result of the one already done.
+#[tokio::test]
+async fn test_plan_larger_than_the_room_finishes_under_the_same_room() {
+    let store = store().await;
+    let event = security_event();
+    let work = routing(&store, &event).await;
+    let routed = route_handler(RecipientResolver::without_identity())
+        .handle(&work)
+        .await;
+    settle(&store, &work, routed).await;
+
+    let cramped = PlanHandler::new(Arc::clone(&store), 1);
+    // The first attempt owes both with its completion and is refused whole;
+    // the next stores one delivery and stays owed.
+    for _ in 0..2 {
+        assert!(matches!(
+            carry_out_plans(&store, &cramped).await.as_slice(),
+            [WorkOutcome::Retry(_)]
+        ));
+    }
+    let open = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(open.len(), 1, "one delivery fits the room");
+    let first = &open[0];
+    assert!(
+        store
+            .complete_work(first.id, first.generation, Some("sent first"))
+            .await
+            .unwrap()
+    );
+
+    let outcomes = carry_out_plans(&store, &cramped).await;
+    assert_eq!(
+        outcomes.iter().map(result_of).collect::<Vec<_>>(),
+        [Some("2 deliveries")]
+    );
+    let left = store
+        .claim_work(&[kind(PLAN)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "the plan is still owed after it finished");
+
+    let done = store.get_work(first.id).await.unwrap().unwrap();
+    assert_eq!(done.state, WorkState::Completed);
+    assert_eq!(done.result.as_deref(), Some("sent first"));
+    let second = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1, "the other delivery is owed once");
+    assert_ne!(second[0].id, first.id);
+    let planned: Vec<WorkId> = ["email", "webhook"]
+        .map(|channel| delivery_job_id(&event, "security_alert", channel))
+        .into();
+    assert!(planned.contains(&first.id) && planned.contains(&second[0].id));
+}
+
 /// Events without a rule, malformed events and an unreachable identity
 /// service each end the routing job the right way.
 #[tokio::test]
