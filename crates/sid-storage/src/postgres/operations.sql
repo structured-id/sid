@@ -1,6 +1,15 @@
 -- Keyed command completions and the periods they are admitted under, for a
 -- host keeping its own tables in its own database; the engine's schema holds
 -- the same tables.
+
+-- The digest of the schema that made these tables; tables of another schema
+-- are refused, not kept.
+CREATE TABLE IF NOT EXISTS operation_schema (
+    id boolean DEFAULT true NOT NULL,
+    digest bytea NOT NULL,
+    CONSTRAINT operation_schema_pkey PRIMARY KEY (id),
+    CONSTRAINT operation_schema_id_check CHECK (id)
+);
 CREATE TABLE IF NOT EXISTS operation_period_state (
     id boolean DEFAULT true NOT NULL,
     issued_through bigint DEFAULT 0 NOT NULL,

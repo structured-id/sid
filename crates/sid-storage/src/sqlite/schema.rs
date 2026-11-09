@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The SQLite schema of a database file.
 //!
-//! A schema change edits this schema in place, raises
-//! [`super::migrations::SCHEMA_VERSION`], and a file of another version is
+//! A schema change edits this schema in place, which changes its version
+//! ([`super::migrations::version_of`]), and a file of another version is
 //! recreated, not migrated. Foreign keys and WAL are connection options, not
 //! part of it.
 //!

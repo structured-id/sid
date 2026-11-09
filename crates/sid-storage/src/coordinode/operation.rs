@@ -47,7 +47,15 @@ const FIELDS: &str = "o.slot AS slot, o.namespace AS namespace, o.key AS key,
 /// accepted for an hour, completions kept a day after, at most 100000 of
 /// them per period and 64 KiB per result.
 pub(super) fn init_state(tx: &Statements<'_>) -> SidResult<Decision<()>> {
-    if !tx.run(STATE, Params::default())?.is_empty() {
+    if let Some(row) = tx.run(STATE, Params::default())?.first() {
+        // A store written before the policy held its bounds lacks them, and
+        // its periods their counts: refused at opening, not at a commit.
+        if get_opt_int(row, "capacity")?.is_none() || get_opt_int(row, "result_bytes")?.is_none() {
+            return Err(SidError::Storage(
+                "the operation period state predates this schema; the store must be recreated"
+                    .into(),
+            ));
+        }
         return Ok(Decision::Abandon(()));
     }
     tx.run(

@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The schema of a SQLite database file.
 //!
-//! A file records its schema version in `PRAGMA user_version`. An empty file
-//! gets the schema in one `BEGIN IMMEDIATE` transaction, so a second process
-//! opening it waits for the first and finds it current. A file of any other
-//! version or shape is refused unchanged, never recreated: before the first
-//! release such a file is recreated by its owner, not migrated.
+//! A file records its schema version in `PRAGMA user_version`: a digest of
+//! the schema's text ([`version_of`]), so every change to the schema is a new
+//! version. An empty file gets the schema in one `BEGIN IMMEDIATE`
+//! transaction, so a second process opening it waits for the first and finds
+//! it current. A file of any other version or shape is refused unchanged,
+//! never recreated: before the first release such a file is recreated by its
+//! owner, not migrated.
 
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::{SqliteConnection, SqlitePool};
 
-/// The version of [`super::schema::SCHEMA`]. Raised with every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 26;
+/// The version a file of `schema` records: the first 31 bits of the SHA-256
+/// of its text, never 0 (the version of an empty file).
+pub(crate) fn version_of(schema: &str) -> i64 {
+    let digest = sid_core::models::operation::fingerprint(schema.as_bytes());
+    let bits = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) & 0x7fff_ffff;
+    i64::from(bits.max(1))
+}
 
 /// Give the empty file behind `pool` the schema, or check that it has it.
 pub(crate) async fn prepare(pool: &SqlitePool, schema: &'static str) -> SidResult<()> {
+    let current = version_of(schema);
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
@@ -24,11 +32,11 @@ pub(crate) async fn prepare(pool: &SqlitePool, schema: &'static str) -> SidResul
         .await
         .map_err(storage("read schema version"))?;
     match version {
-        SCHEMA_VERSION => return Ok(()),
+        v if v == current => return Ok(()),
         0 if is_empty(&mut tx).await? => {}
         v => {
             return Err(SidError::InvalidState(format!(
-                "the SQLite file has schema version {v}, this build serves {SCHEMA_VERSION}; \
+                "the SQLite file has schema version {v}, this build serves {current}; \
                  it is left unchanged"
             )));
         }
@@ -37,9 +45,9 @@ pub(crate) async fn prepare(pool: &SqlitePool, schema: &'static str) -> SidResul
         .execute(&mut *tx)
         .await
         .map_err(storage("create schema"))?;
-    // A PRAGMA takes no bound parameter; the version is an integer constant.
+    // A PRAGMA takes no bound parameter; the version is an integer.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "PRAGMA user_version = {SCHEMA_VERSION}"
+        "PRAGMA user_version = {current}"
     )))
     .execute(&mut *tx)
     .await

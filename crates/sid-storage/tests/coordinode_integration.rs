@@ -733,6 +733,33 @@ mod principal_store {
     );
 }
 
+/// Regression: a store whose operation period state was written before the
+/// policy held its bounds opened, then failed every keyed commit. It is
+/// refused at opening.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_refuses_operation_state_of_an_earlier_schema() {
+    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
+    let host = db.clone();
+    tokio::task::spawn_blocking(move || {
+        host.execute_cypher_shared(
+            "CREATE (s:SidOperationState {id: 1, issued_through: 0, acceptance_seconds: 3600,
+                retention_seconds: 86400})",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("a host write");
+    })
+    .await
+    .unwrap();
+    let refused = CoordinodeBackend::new(db).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Storage(_))),
+        "an earlier operation state was taken"
+    );
+}
+
 /// A store holding records that break a constraint SID relies on (written
 /// past SID, here two profiles with one username) is refused at opening:
 /// SID never serves without the uniqueness its writers rely on.

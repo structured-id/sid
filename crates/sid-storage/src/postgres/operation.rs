@@ -35,21 +35,56 @@ impl PgOperationStore {
         Self { pool }
     }
 
-    /// Create the operation tables if they do not exist. Replicas starting
-    /// together take turns under a transaction-scoped advisory lock:
-    /// concurrent `CREATE ... IF NOT EXISTS` of one name collides in the
-    /// catalog.
+    /// Create the operation tables if they do not exist, recording the
+    /// digest of the schema that made them; tables another schema made are
+    /// refused unchanged (`CREATE ... IF NOT EXISTS` would keep them as they
+    /// are). Replicas starting together take turns under a
+    /// transaction-scoped advisory lock: concurrent `CREATE ... IF NOT
+    /// EXISTS` of one name collides in the catalog.
     pub async fn ensure_schema(&self) -> SidResult<()> {
         let schema_error = |e: sqlx::Error| SidError::Storage(format!("operation schema: {e}"));
+        let digest = sid_core::models::operation::fingerprint(SCHEMA.as_bytes());
         let mut tx = self.pool.begin().await.map_err(schema_error)?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sid.operations.schema'))")
             .execute(&mut *tx)
             .await
             .map_err(schema_error)?;
+        let existing: bool =
+            sqlx::query_scalar("SELECT to_regclass('operation_period_state') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(schema_error)?;
+        let recorded: Option<Vec<u8>> =
+            if sqlx::query_scalar::<_, bool>("SELECT to_regclass('operation_schema') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(schema_error)?
+            {
+                sqlx::query_scalar("SELECT digest FROM operation_schema")
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(schema_error)?
+            } else {
+                None
+            };
+        if existing && recorded.as_deref() != Some(digest.as_slice()) {
+            return Err(SidError::InvalidState(
+                "the operation tables were made by another schema; the database must be \
+                 recreated"
+                    .into(),
+            ));
+        }
         sqlx::raw_sql(SCHEMA)
             .execute(&mut *tx)
             .await
             .map_err(schema_error)?;
+        sqlx::query(
+            "INSERT INTO operation_schema (id, digest) VALUES (true, $1) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&digest)
+        .execute(&mut *tx)
+        .await
+        .map_err(schema_error)?;
         tx.commit().await.map_err(schema_error)?;
         Ok(())
     }

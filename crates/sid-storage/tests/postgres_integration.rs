@@ -259,6 +259,40 @@ macro_rules! host_operation_result_store {
     )*};
 }
 
+/// Regression: a host's operation tables made by an earlier schema were kept
+/// as they were (`CREATE ... IF NOT EXISTS`), and its keyed commits failed on
+/// the first new column. They are refused at the schema check, unchanged.
+#[tokio::test]
+async fn host_operation_tables_of_another_schema_are_refused() {
+    let schema = format!("ops_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(setup().await.pool())
+        .await
+        .unwrap();
+    let pool = schema_pool(&schema).await;
+    sqlx::raw_sql(
+        "CREATE TABLE operation_period_state (id boolean PRIMARY KEY, issued_through bigint);
+         INSERT INTO operation_period_state VALUES (true, 0);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let refused = sid_storage::PgOperationStore::new(pool.clone())
+        .ensure_schema()
+        .await;
+    let kept: bool = sqlx::query_scalar("SELECT to_regclass('operation_schema') IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::InvalidState(_))),
+        "{refused:?}"
+    );
+    assert!(kept, "the refused database was changed");
+}
+
 /// A host replica starting on a current schema takes no lock on the
 /// operation tables: its `ensure_schema` finishes while a serving replica's
 /// completion write is open on both. Bug prevented: `CREATE INDEX IF NOT

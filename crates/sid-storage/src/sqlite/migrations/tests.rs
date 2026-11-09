@@ -70,8 +70,26 @@ async fn an_empty_file_gets_the_schema() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
     prepare(&pool, SCHEMA).await.unwrap();
-    assert_eq!(version(&pool).await, SCHEMA_VERSION);
+    assert_eq!(version(&pool).await, version_of(SCHEMA));
     assert!(has_table(&pool, "history_key_epochs").await);
+}
+
+/// Regression: a schema change kept the version, so a file created by the
+/// previous schema was taken as current and failed on its first use of a new
+/// column. A file of any other schema text is refused unchanged.
+#[tokio::test]
+async fn a_file_of_a_changed_schema_is_refused() {
+    const BEFORE: &str = "CREATE TABLE operation_periods (period INTEGER PRIMARY KEY);";
+    const AFTER: &str = "CREATE TABLE operation_periods (period INTEGER PRIMARY KEY,
+        recorded INTEGER NOT NULL DEFAULT 0);";
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    prepare(&pool, BEFORE).await.unwrap();
+
+    let err = prepare(&pool, AFTER).await.unwrap_err();
+    assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
+    assert_eq!(version(&pool).await, version_of(BEFORE));
+    assert_ne!(version_of(BEFORE), version_of(AFTER));
 }
 
 /// Reopening a current file keeps its data and changes nothing.
@@ -86,7 +104,7 @@ async fn reopening_keeps_the_data() {
     let pool = open(&path).await;
     prepare(&pool, SCHEMA).await.unwrap();
     prepare(&pool, SCHEMA).await.unwrap();
-    assert_eq!(version(&pool).await, SCHEMA_VERSION);
+    assert_eq!(version(&pool).await, version_of(SCHEMA));
     assert!(has_profile(&pool, 1).await);
 }
 
@@ -112,7 +130,7 @@ async fn an_unversioned_file_is_refused_unchanged() {
 /// A file of another version, older or newer, is refused unchanged.
 #[tokio::test]
 async fn a_file_of_another_version_is_refused_unchanged() {
-    for other in [1, SCHEMA_VERSION + 1] {
+    for other in [1, version_of(SCHEMA) + 1] {
         let (_dir, path) = scratch();
         let pool = open(&path).await;
         prepare(&pool, SCHEMA).await.unwrap();
@@ -147,7 +165,7 @@ async fn an_interrupted_creation_leaves_the_file_and_resumes() {
     assert!(!has_table(&pool, "extra").await, "the change rolled back");
 
     prepare(&pool, SCHEMA).await.unwrap();
-    assert_eq!(version(&pool).await, SCHEMA_VERSION);
+    assert_eq!(version(&pool).await, version_of(SCHEMA));
 }
 
 /// A row whose policy evidence disagrees is refused on insert and on update;
@@ -211,5 +229,5 @@ async fn concurrent_starters_create_once() {
     ra.unwrap();
     rb.unwrap();
     rc.unwrap();
-    assert_eq!(version(&a).await, SCHEMA_VERSION);
+    assert_eq!(version(&a).await, version_of(SCHEMA));
 }
