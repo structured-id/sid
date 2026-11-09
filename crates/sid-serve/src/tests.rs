@@ -149,6 +149,109 @@ async fn test_shutdown_reports_not_serving_and_drains_within_interval() {
     );
 }
 
+/// A capability reported by its readiness is NOT_SERVING until the readiness
+/// answers true, then SERVING, while the overall status (what liveness reads)
+/// is SERVING throughout; one whose readiness answers false stays
+/// NOT_SERVING.
+#[tokio::test]
+async fn test_capability_is_serving_once_ready() {
+    let (listener, addr) = listener().await;
+    let (ready, readiness) = tokio::sync::oneshot::channel::<bool>();
+    let mut services = echo_services().await;
+    services
+        .report_ready("test.capability", async move {
+            readiness.await.unwrap_or(false)
+        })
+        .await;
+    services
+        .report_ready("test.failed", std::future::ready(false))
+        .await;
+    let server = tokio::spawn(serve(
+        listener,
+        services,
+        std::future::pending(),
+        Duration::from_secs(1),
+    ));
+    let mut client = client(addr).await;
+    assert_eq!(status(&mut client, "").await, Ok(ServingStatus::Serving));
+    assert_eq!(
+        status(&mut client, "test.capability").await,
+        Ok(ServingStatus::NotServing)
+    );
+
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: "test.capability".to_string(),
+        })
+        .await
+        .expect("watch the capability")
+        .into_inner();
+    assert_eq!(
+        watch.message().await.unwrap().unwrap().status(),
+        ServingStatus::NotServing
+    );
+    ready.send(true).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), watch.message())
+        .await
+        .expect("a status change once ready")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.status(), ServingStatus::Serving);
+    assert_eq!(
+        status(&mut client, "test.failed").await,
+        Ok(ServingStatus::NotServing)
+    );
+    server.abort();
+}
+
+/// A readiness answering after shutdown began does not report the capability
+/// SERVING again: a stopping process takes no new traffic.
+#[tokio::test]
+async fn test_late_readiness_does_not_undo_shutdown() {
+    let (listener, addr) = listener().await;
+    let (ready, readiness) = tokio::sync::oneshot::channel::<bool>();
+    let (shut, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let mut services = Services::new();
+    services
+        .report_ready("test.capability", async move {
+            readiness.await.unwrap_or(false)
+        })
+        .await;
+    // The open watch keeps the server draining while the readiness answers.
+    let server = tokio::spawn(serve(
+        listener,
+        services,
+        async {
+            shutdown.await.ok();
+        },
+        Duration::from_secs(5),
+    ));
+    let mut client = client(addr).await;
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: "test.capability".to_string(),
+        })
+        .await
+        .expect("watch the capability")
+        .into_inner();
+    assert_eq!(
+        watch.message().await.unwrap().unwrap().status(),
+        ServingStatus::NotServing
+    );
+    shut.send(()).unwrap();
+    // Shutdown reports the overall status first; give it time to finish.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ready.send(true).unwrap();
+    // Shutdown may report NOT_SERVING again; SERVING never follows it.
+    let watched = async {
+        while let Ok(Some(message)) = watch.message().await {
+            assert_ne!(message.status(), ServingStatus::Serving);
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_millis(500), watched).await;
+    server.abort();
+}
+
 /// A listener that fails is the process's error, never a clean exit, both
 /// before shutdown and while draining.
 #[tokio::test]

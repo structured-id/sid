@@ -138,6 +138,36 @@ async fn test_ce_server_serves_every_ce_service() {
     assert!(not_serving.is_empty(), "not served: {not_serving:?}");
 }
 
+/// Password operations are reported on their own name and turn SERVING once
+/// the ZKPP verifying keys are ready, which a deployment's readiness follows;
+/// the overall status a liveness probe reads is SERVING from the start.
+#[tokio::test]
+async fn test_password_operations_are_reported_once_ready() {
+    let name = sid_authn::opaque_zkpp::setup::PASSWORD_OPERATIONS_HEALTH;
+    let data_dir = tempfile::tempdir().expect("data directory");
+    let port = free_port();
+    let mut server = start(env!("CARGO_BIN_EXE_sid"), data_dir.path(), port, &[]);
+    let mut client = connect(&mut server, port).await;
+    assert_eq!(status(&mut client, "").await, ServingStatus::Serving);
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: name.to_string(),
+        })
+        .await
+        .expect("watch password operations")
+        .into_inner();
+    let ready = tokio::time::timeout(STARTUP_LIMIT, async {
+        while let Some(message) = watch.message().await.expect("status message") {
+            if message.status() == ServingStatus::Serving {
+                return;
+            }
+        }
+        panic!("the stream ended before password operations were ready");
+    })
+    .await;
+    assert!(ready.is_ok(), "password operations never became ready");
+}
+
 /// On SIGTERM the server reports NOT_SERVING, so the load balancer stops
 /// routing to it, and ends within the drain interval even though a stream is
 /// still open (deployment rules, scale-in and rolling update).

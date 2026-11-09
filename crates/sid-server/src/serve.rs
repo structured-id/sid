@@ -158,6 +158,16 @@ impl CeServices {
             ))
             .await;
 
+        // Password operations are served once the ZKPP keys are ready; a
+        // deployment's readiness names them when it serves them.
+        services
+            .services
+            .report_ready(
+                sid_authn::opaque_zkpp::setup::PASSWORD_OPERATIONS_HEALTH,
+                c.zkpp_ready.clone().wait(),
+            )
+            .await;
+
         // The VOPRF evaluator of password history, when it runs in this
         // process; a split deployment serves it from its own.
         if let Some(evaluator) = c.auth_svc.history_evaluator() {

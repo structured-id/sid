@@ -79,6 +79,9 @@ pub struct CeComponents {
     pub webauthn: Arc<WebAuthnServer>,
     pub opaque_router: Arc<OpaqueRouter>,
     pub opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
+    /// When `opaque_zkpp` can serve password operations, reported on the
+    /// health service under their own name.
+    pub zkpp_ready: sid_authn::opaque_zkpp::setup::ZkppReady,
     pub revocation_cache: Arc<RevocationCache>,
     /// Receives the other replicas' revocations into `revocation_cache`; it
     /// stops when dropped, so it lives as long as the components.
@@ -526,7 +529,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
 
     // ── ZKPP ──
     let zkpp_cache_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| ".sid-data".to_string());
-    let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
+    let (opaque_zkpp, zkpp_ready) = init_zkpp(&opaque_router, &zkpp_cache_dir);
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;
@@ -1044,6 +1047,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         webauthn,
         opaque_router,
         opaque_zkpp,
+        zkpp_ready,
         revocation_cache,
         revocation_listener: Arc::new(revocation_listener),
         feature_flags,
@@ -1455,7 +1459,10 @@ fn zkpp_settings(
 fn init_zkpp(
     router: &Arc<OpaqueRouter>,
     cache_dir: &str,
-) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
+) -> (
+    Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
+    sid_authn::opaque_zkpp::setup::ZkppReady,
+) {
     let settings = zkpp_settings(
         std::env::var("SID_ZKPP_ENABLED"),
         std::env::var("SID_ZKPP_SKIP_PROOF"),

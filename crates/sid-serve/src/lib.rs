@@ -49,6 +49,7 @@ impl Services {
             health: Health {
                 reporter,
                 names: Vec::new(),
+                stopping: Default::default(),
             },
         }
     }
@@ -67,6 +68,39 @@ impl Services {
         self.health.reporter.set_serving::<S>().await;
         self.health.names.push(S::NAME);
         self.routes.add_service(svc);
+        self
+    }
+
+    /// Reports `name` NOT_SERVING until `ready` resolves true, then SERVING:
+    /// a capability these services serve only once it is prepared, for a
+    /// deployment's readiness probe to name. A capability that never becomes
+    /// ready stays NOT_SERVING; the overall status is not affected, so a slow
+    /// preparation does not fail a liveness probe. After shutdown began it is
+    /// never reported SERVING again.
+    pub async fn report_ready(
+        &mut self,
+        name: &'static str,
+        ready: impl Future<Output = bool> + Send + 'static,
+    ) -> &mut Self {
+        self.health
+            .reporter
+            .set_service_status(name, ServingStatus::NotServing)
+            .await;
+        self.health.names.push(name);
+        let reporter = self.health.reporter.clone();
+        let stopping = self.health.stopping.clone();
+        tokio::spawn(async move {
+            if ready.await {
+                // Under the same lock as shutdown's: once it reported
+                // NOT_SERVING, this answer comes too late to change it.
+                let stopping = stopping.lock().await;
+                if !*stopping {
+                    reporter
+                        .set_service_status(name, ServingStatus::Serving)
+                        .await;
+                }
+            }
+        });
         self
     }
 
@@ -97,6 +131,8 @@ pub struct Health {
     reporter: HealthReporter,
     /// Every service reported serving, reported NOT_SERVING at shutdown.
     names: Vec<&'static str>,
+    /// Set by shutdown; a readiness answering after it reports nothing.
+    stopping: std::sync::Arc<tokio::sync::Mutex<bool>>,
 }
 
 impl Health {
@@ -112,6 +148,8 @@ impl Health {
 
     /// The overall status and every reported service turn NOT_SERVING.
     pub async fn not_serving(&self) {
+        let mut stopping = self.stopping.lock().await;
+        *stopping = true;
         for name in std::iter::once("").chain(self.names.iter().copied()) {
             self.reporter
                 .set_service_status(name, ServingStatus::NotServing)

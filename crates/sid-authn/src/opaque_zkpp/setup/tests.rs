@@ -49,6 +49,25 @@ fn disabled_verifiers_need_an_explicit_skip() {
     assert!(!settings.enabled && !settings.config.require_proof);
 }
 
+/// Readiness resolves once with the keygen's answer: true when the slot
+/// holds the server, false when keygen failed or its task ended without an
+/// answer, never true by default.
+#[tokio::test]
+async fn readiness_follows_the_keygen_answer() {
+    for (answer, expected) in [(Some(true), true), (Some(false), false)] {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let ready = ZkppReady(receiver);
+        let waiting = tokio::spawn(ready.clone().wait());
+        sender.send_replace(answer);
+        assert_eq!(waiting.await.unwrap(), expected);
+        // A late reader gets the same answer.
+        assert_eq!(ready.wait().await, expected);
+    }
+    let (sender, receiver) = tokio::sync::watch::channel(None::<bool>);
+    drop(sender);
+    assert!(!ZkppReady(receiver).wait().await);
+}
+
 /// A policy version is an unsigned number naming a known policy; anything
 /// else is refused, never silently replaced by another policy.
 #[test]
