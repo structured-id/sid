@@ -110,6 +110,7 @@ async fn test_customized_template_reaches_delivery() {
                 push_action_url: String::new(),
                 updated_at: chrono::Utc::now(),
             },
+            |_, _| ((), None),
         )
         .await
         .unwrap();
@@ -242,14 +243,17 @@ async fn grpc_service_with(
     for channel in channels {
         dispatcher.register_channel(channel);
     }
+    let pool = crate::test_db::pool().await;
+    let operations = crate::test_db::operations(&pool).await;
     let store = Arc::new(
-        crate::template_store::TemplateStore::new(&routing, engine, None)
+        crate::template_store::TemplateStore::new(&routing, engine, pool)
             .await
             .unwrap(),
     );
     NotificationTemplateServiceImpl::new(
         Arc::new(dispatcher),
         store,
+        operations,
         Arc::new(RecipientResolver::without_identity()),
     )
 }
@@ -352,120 +356,6 @@ async fn test_grpc_get_template_not_found() {
 }
 
 #[tokio::test]
-async fn test_grpc_update_and_get() {
-    let svc = test_grpc_service().await;
-
-    // Update security_alert email template.
-    let update_req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "security_alert".into(),
-        content: Some(sid_proto::sid::v1::admin::TemplateContent {
-            channel: 1,
-            locale: "en".into(),
-            subject: "CUSTOM: Security Alert".into(),
-            html_body: "<p>Custom body</p>".into(),
-            text_body: "Custom body".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-        }),
-    });
-    let resp = svc.update_template(update_req).await.unwrap();
-    let tmpl = resp.into_inner();
-    assert!(tmpl.customized);
-    assert_eq!(tmpl.content.unwrap().subject, "CUSTOM: Security Alert");
-
-    // Get should return the custom version.
-    let get_req = call(sid_proto::sid::v1::admin::GetTemplateRequest {
-        template_id: "security_alert".into(),
-        channel: 1,
-        locale: "en".into(),
-    });
-    let got = svc.get_template(get_req).await.unwrap().into_inner();
-    assert!(got.customized);
-    assert_eq!(got.content.unwrap().subject, "CUSTOM: Security Alert");
-}
-
-#[tokio::test]
-async fn test_grpc_update_nonexistent_fails() {
-    let svc = test_grpc_service().await;
-    let req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "nonexistent".into(),
-        content: Some(sid_proto::sid::v1::admin::TemplateContent {
-            channel: 1,
-            locale: "en".into(),
-            subject: "x".into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-        }),
-    });
-    let err = svc.update_template(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::NotFound);
-    assert_eq!(reason(&err).as_deref(), Some("TEMPLATE_NOT_FOUND"));
-}
-
-#[tokio::test]
-async fn test_grpc_update_missing_content_fails() {
-    let svc = test_grpc_service().await;
-    let req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "security_alert".into(),
-        content: None,
-    });
-    let err = svc.update_template(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert_eq!(reason(&err).as_deref(), Some("REQUIRED_FIELD_MISSING"));
-}
-
-#[tokio::test]
-async fn test_grpc_reset_reverts_to_default() {
-    let svc = test_grpc_service().await;
-
-    // First customize.
-    let update_req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "new_session".into(),
-        content: Some(sid_proto::sid::v1::admin::TemplateContent {
-            channel: 1,
-            locale: "en".into(),
-            subject: "Temporary".into(),
-            html_body: "<p>Temp</p>".into(),
-            text_body: "Temp".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-        }),
-    });
-    svc.update_template(update_req).await.unwrap();
-
-    // Reset.
-    let reset_req = call(sid_proto::sid::v1::admin::ResetTemplateRequest {
-        template_id: "new_session".into(),
-        channel: 1,
-        locale: "en".into(),
-    });
-    let resp = svc.reset_template(reset_req).await.unwrap();
-    let tmpl = resp.into_inner();
-    assert!(!tmpl.customized);
-    assert!(tmpl.content.unwrap().subject.contains("New login"));
-}
-
-#[tokio::test]
-async fn test_grpc_reset_nonexistent_fails() {
-    let svc = test_grpc_service().await;
-    let req = call(sid_proto::sid::v1::admin::ResetTemplateRequest {
-        template_id: "nonexistent".into(),
-        channel: 1,
-        locale: "en".into(),
-    });
-    let err = svc.reset_template(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::NotFound);
-}
-
-#[tokio::test]
 async fn test_grpc_preview_with_sample_data() {
     let svc = test_grpc_service().await;
     let mut sample_data = std::collections::BTreeMap::new();
@@ -536,21 +426,25 @@ async fn test_grpc_list_customized_only_after_update() {
     assert!(resp.into_inner().templates.is_empty());
 
     // Customize one template.
-    let update_req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "cert_expiry".into(),
-        content: Some(sid_proto::sid::v1::admin::TemplateContent {
-            channel: 1,
-            locale: "en".into(),
-            subject: "Custom cert".into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-        }),
-    });
-    svc.update_template(update_req).await.unwrap();
+    svc.store
+        .update_template(
+            "cert_expiry",
+            Channel::Email,
+            "en",
+            StoredContent {
+                subject: "Custom cert".into(),
+                html_body: String::new(),
+                text_body: String::new(),
+                sms_body: String::new(),
+                push_title: String::new(),
+                push_body: String::new(),
+                push_action_url: String::new(),
+                updated_at: chrono::Utc::now(),
+            },
+            |_, _| ((), None),
+        )
+        .await
+        .unwrap();
 
     // After update: exactly 1 customized.
     let req2 = call(sid_proto::sid::v1::admin::ListTemplatesRequest {
@@ -602,27 +496,6 @@ async fn test_grpc_preview_uses_default_examples_without_sample_data() {
     );
 }
 
-#[tokio::test]
-async fn test_grpc_update_unspecified_channel_fails() {
-    let svc = test_grpc_service().await;
-    let req = call(sid_proto::sid::v1::admin::UpdateTemplateRequest {
-        template_id: "security_alert".into(),
-        content: Some(sid_proto::sid::v1::admin::TemplateContent {
-            channel: 0, // UNSPECIFIED
-            locale: "en".into(),
-            subject: "x".into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-        }),
-    });
-    let err = svc.update_template(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
 /// A handler reached without its receiver has no admitted call: a test send
 /// is refused rather than sent for nobody.
 #[tokio::test]
@@ -637,28 +510,43 @@ async fn test_grpc_send_test_without_the_receiver_is_refused() {
 
 // ── Served behind the receiver, with tokens of a real issuer ──
 
-/// The template service served behind a receiver of `api`, on a loopback
-/// port; its client and the task serving it.
+/// A template service served as the server serves it, on a loopback port.
+struct Served {
+    client: NotificationTemplateServiceClient<tonic::transport::Channel>,
+    /// The connection the client uses, for the other services served beside.
+    channel: tonic::transport::Channel,
+    /// Its operation results and periods.
+    operations: Arc<PgOperationStore>,
+    _serving: tokio::task::JoinHandle<()>,
+}
+
+/// `svc` served behind a receiver of `api`, beside the operation service of
+/// its store and behind the operation context check, as the server serves
+/// it.
 async fn served(
     svc: NotificationTemplateServiceImpl,
     api: &sid_auth::config::ReceiverConfig,
-) -> (
-    NotificationTemplateServiceClient<tonic::transport::Channel>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> Served {
     let receiver = Arc::new(
         Receiver::connect("sid-notify", api)
             .await
             .expect("receiver"),
     );
+    let operations = svc.operations.clone();
     let routes = tonic::service::Routes::new(crate::access::guarded(
         NotificationTemplateServiceServer::new(svc),
         &receiver,
-    ));
+    ))
+    .add_service(
+        sid_proto::sid::v1::operation_service_server::OperationServiceServer::new(
+            OperationPeriods::new(operations.clone()),
+        ),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let serving = tokio::spawn(async move {
         tonic::transport::Server::builder()
+            .layer(OperationContextLayer)
             .add_routes(routes)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
@@ -667,7 +555,40 @@ async fn served(
     let channel = tonic::transport::Channel::from_shared(address)
         .unwrap()
         .connect_lazy();
-    (NotificationTemplateServiceClient::new(channel), serving)
+    Served {
+        client: NotificationTemplateServiceClient::new(channel.clone()),
+        channel,
+        operations,
+        _serving: serving,
+    }
+}
+
+impl Served {
+    /// `inner` from the bearer of `token`, named as the command `key` under
+    /// the period this service's store issues: the same key names a retry.
+    async fn named<T>(&self, inner: T, token: &str, key: &str) -> tonic::Request<T> {
+        let period = self
+            .operations
+            .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .period;
+        let mut req = bearer(inner, token);
+        sid_infra::authn::operation::insert_context(
+            req.metadata_mut(),
+            &sid_core::models::OperationContext::new(
+                sid_core::models::OperationKey::parse(key).unwrap(),
+                period,
+            ),
+        );
+        req
+    }
+
+    /// `inner` from the bearer of `token`, named as a new command.
+    async fn new_command<T>(&self, inner: T, token: &str) -> tonic::Request<T> {
+        self.named(inner, token, &uuid::Uuid::now_v7().to_string())
+            .await
+    }
 }
 
 /// `inner` carrying `token` as its bearer.
@@ -717,19 +638,22 @@ fn send_test_email(recipient: &str) -> sid_proto::sid::v1::admin::SendTestNotifi
 #[tokio::test]
 async fn test_the_installation_administrator_manages_templates() {
     let i = installation().await;
-    let (mut client, _serving) = served(test_grpc_service().await, &i.api).await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
     let token = i.issuer.token(&admin, API, None).await.token;
 
-    let listed = client
+    let listed = s
+        .client
         .list_templates(bearer(Default::default(), &token))
         .await
         .expect("an administrator lists templates")
         .into_inner();
     assert_eq!(listed.templates.len(), 10);
-    let updated = client
-        .update_template(bearer(customize("Admin's alert"), &token))
+    let req = s.new_command(customize("Admin's alert"), &token).await;
+    let updated = s
+        .client
+        .update_template(req)
         .await
         .expect("an administrator customizes a template")
         .into_inner();
@@ -741,25 +665,25 @@ async fn test_the_installation_administrator_manages_templates() {
 #[tokio::test]
 async fn test_a_user_without_the_action_is_denied_and_changes_nothing() {
     let i = installation().await;
-    let (mut client, _serving) = served(test_grpc_service().await, &i.api).await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
     let user = i.issuer.profile().await;
     let token = i.issuer.token(&user, API, None).await.token;
 
-    let err = client
+    let err = s
+        .client
         .list_templates(bearer(Default::default(), &token))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    let err = client
-        .update_template(bearer(customize("Hacked"), &token))
-        .await
-        .unwrap_err();
+    let req = s.new_command(customize("Hacked"), &token).await;
+    let err = s.client.update_template(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
     let admin_token = i.issuer.token(&admin, API, None).await.token;
-    let customized = client
+    let customized = s
+        .client
         .list_templates(bearer(customized_only(), &admin_token))
         .await
         .unwrap()
@@ -775,7 +699,7 @@ async fn test_a_user_without_the_action_is_denied_and_changes_nothing() {
 #[tokio::test]
 async fn test_a_reader_reads_but_does_not_change_or_send() {
     let i = installation().await;
-    let (mut client, _serving) = served(test_grpc_service().await, &i.api).await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
     let reader = i.issuer.profile().await;
     let role = i
         .issuer
@@ -784,26 +708,26 @@ async fn test_a_reader_reads_but_does_not_change_or_send() {
     i.issuer.grant(&reader, &role, API).await;
     let token = i.issuer.token(&reader, API, None).await.token;
 
-    client
+    s.client
         .list_templates(bearer(Default::default(), &token))
         .await
         .expect("a reader lists templates");
-    let err = client
-        .reset_template(bearer(
+    let req = s
+        .new_command(
             sid_proto::sid::v1::admin::ResetTemplateRequest {
                 template_id: "security_alert".into(),
                 channel: 1,
                 locale: "en".into(),
             },
             &token,
-        ))
-        .await
-        .unwrap_err();
+        )
+        .await;
+    let err = s.client.reset_template(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    let err = client
-        .send_test_notification(bearer(send_test_email("test@sid.example.com"), &token))
-        .await
-        .unwrap_err();
+    let req = s
+        .new_command(send_test_email("test@sid.example.com"), &token)
+        .await;
+    let err = s.client.send_test_notification(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
@@ -813,7 +737,11 @@ async fn test_a_reader_reads_but_does_not_change_or_send() {
 #[tokio::test]
 async fn test_a_token_of_another_purpose_is_unauthenticated() {
     let i = installation().await;
-    let (mut client, _serving) = served(test_grpc_service().await, &i.api).await;
+    let Served {
+        mut client,
+        _serving,
+        ..
+    } = served(test_grpc_service().await, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
 
@@ -864,26 +792,28 @@ async fn test_a_token_of_another_purpose_is_unauthenticated() {
 #[tokio::test]
 async fn test_an_ended_session_is_refused_warm_and_cold() {
     let i = installation().await;
-    let (mut warm, _serving) = served(test_grpc_service().await, &i.api).await;
+    let mut warm = served(test_grpc_service().await, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
     let issued = i.issuer.token(&admin, API, None).await;
-    warm.list_templates(bearer(Default::default(), &issued.token))
+    warm.client
+        .list_templates(bearer(Default::default(), &issued.token))
         .await
         .expect("admitted before the sign-out");
 
     i.issuer.end(&issued.session).await;
     let err = warm
+        .client
         .list_templates(bearer(Default::default(), &issued.token))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 
-    let (mut cold, _serving_cold) = served(test_grpc_service().await, &i.api).await;
-    let err = cold
-        .update_template(bearer(customize("After sign-out"), &issued.token))
-        .await
-        .unwrap_err();
+    let mut cold = served(test_grpc_service().await, &i.api).await;
+    let req = cold
+        .new_command(customize("After sign-out"), &issued.token)
+        .await;
+    let err = cold.client.update_template(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -894,19 +824,19 @@ async fn test_without_the_issuer_calls_are_unavailable_and_change_nothing() {
     let mut i = installation().await;
     let svc = test_grpc_service().await;
     let store = svc.store.clone();
-    let (mut client, _serving) = served(svc, &i.api).await;
+    let mut s = served(svc, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
     let token = i.issuer.token(&admin, API, None).await.token;
 
     i.issuer.stop().await;
-    let err = client
-        .update_template(bearer(customize("While the issuer is down"), &token))
-        .await
-        .unwrap_err();
+    let req = s
+        .new_command(customize("While the issuer is down"), &token)
+        .await;
+    let err = s.client.update_template(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unavailable);
     assert!(
-        store.list_templates(None, true).await.is_empty(),
+        store.list_templates(None, true).await.unwrap().is_empty(),
         "a change without a decision took effect"
     );
 }
@@ -922,25 +852,31 @@ async fn test_test_sends_are_refused_with_their_reasons() {
     i.issuer.administrator(&admin).await;
     let token = i.issuer.token(&admin, API, None).await.token;
 
-    let (mut unreachable, _a) = served(test_grpc_service().await, &i.api).await;
+    let mut unreachable = served(test_grpc_service().await, &i.api).await;
     // Regression: without a recipient the test went to a placeholder address.
+    let req = unreachable.new_command(send_test_email(""), &token).await;
     let err = unreachable
-        .send_test_notification(bearer(send_test_email(""), &token))
+        .client
+        .send_test_notification(req)
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(reason(&err).as_deref(), Some("REQUIRED_FIELD_MISSING"));
     // Regression: a channel that did not accept the message was answered OK.
+    let req = unreachable
+        .new_command(send_test_email("test@sid.example.com"), &token)
+        .await;
     let err = unreachable
-        .send_test_notification(bearer(send_test_email("test@sid.example.com"), &token))
+        .client
+        .send_test_notification(req)
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unavailable);
     assert_eq!(reason(&err).as_deref(), Some("DEPENDENCY_UNAVAILABLE"));
     assert!(sid_infra::grpc_error::extract_retry_delay(&err).is_some());
     // security_alert has no SMS template (email-only default).
-    let err = unreachable
-        .send_test_notification(bearer(
+    let req = unreachable
+        .new_command(
             sid_proto::sid::v1::admin::SendTestNotificationRequest {
                 template_id: "security_alert".into(),
                 channel: 2,
@@ -948,22 +884,301 @@ async fn test_test_sends_are_refused_with_their_reasons() {
                 recipient: "+1234567890".into(),
             },
             &token,
-        ))
+        )
+        .await;
+    let err = unreachable
+        .client
+        .send_test_notification(req)
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);
     assert_eq!(reason(&err).as_deref(), Some("TEMPLATE_NOT_FOUND"));
 
     // Regression: a channel that is not enabled was answered OK.
-    let (mut none, _b) = served(grpc_service_with(vec![]).await, &i.api).await;
-    let err = none
-        .send_test_notification(bearer(send_test_email("test@sid.example.com"), &token))
-        .await
-        .unwrap_err();
+    let mut none = served(grpc_service_with(vec![]).await, &i.api).await;
+    let req = none
+        .new_command(send_test_email("test@sid.example.com"), &token)
+        .await;
+    let err = none.client.send_test_notification(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert_eq!(reason(&err).as_deref(), Some("FEATURE_NOT_CONFIGURED"));
     let (_, _, metadata) = sid_infra::grpc_error::extract_error_info(&err).unwrap();
     assert_eq!(metadata.get("feature").map(String::as_str), Some("email"));
+}
+
+/// An email channel that counts what it is asked to send and answers each
+/// delivery as `accepts` says.
+struct Counting {
+    sent: std::sync::atomic::AtomicUsize,
+    accepts: bool,
+}
+
+#[tonic::async_trait]
+impl NotificationChannel for Counting {
+    fn channel_id(&self) -> &str {
+        "email"
+    }
+
+    async fn deliver(
+        &self,
+        _: &sid_plugin::notification::Recipient,
+        _: &sid_plugin::notification::RenderedMessage,
+    ) -> Result<sid_plugin::notification::DeliveryReceipt, sid_plugin::notification::DeliveryError>
+    {
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.accepts {
+            Ok(sid_plugin::notification::DeliveryReceipt {
+                message_id: "m-1".into(),
+                channel: "email".into(),
+                timestamp: chrono::Utc::now(),
+                provider: "test".into(),
+            })
+        } else {
+            Err(sid_plugin::notification::DeliveryError::Ambiguous(
+                "no reply".into(),
+            ))
+        }
+    }
+
+    async fn health(
+        &self,
+    ) -> Result<sid_plugin::notification::ChannelHealth, sid_plugin::notification::DeliveryError>
+    {
+        Ok(sid_plugin::notification::ChannelHealth {
+            healthy: true,
+            message: None,
+            last_success: None,
+        })
+    }
+}
+
+fn counting(accepts: bool) -> Arc<Counting> {
+    Arc::new(Counting {
+        sent: std::sync::atomic::AtomicUsize::new(0),
+        accepts,
+    })
+}
+
+/// An installation's administrator and its token for the account API.
+async fn administrator(i: &Installation) -> String {
+    let admin = i.issuer.profile().await;
+    i.issuer.administrator(&admin).await;
+    i.issuer.token(&admin, API, None).await.token
+}
+
+fn reset(template_id: &str) -> sid_proto::sid::v1::admin::ResetTemplateRequest {
+    sid_proto::sid::v1::admin::ResetTemplateRequest {
+        template_id: template_id.into(),
+        channel: 1,
+        locale: "en".into(),
+    }
+}
+
+fn get_alert() -> sid_proto::sid::v1::admin::GetTemplateRequest {
+    sid_proto::sid::v1::admin::GetTemplateRequest {
+        template_id: "security_alert".into(),
+        channel: 1,
+        locale: "en".into(),
+    }
+}
+
+/// A change answers with the template it left, reads answer with it, a reset
+/// answers with the default again; an unknown template, a change without
+/// content and one on no channel are refused with their reasons.
+#[tokio::test]
+async fn test_template_changes_answer_with_their_effect() {
+    let i = installation().await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
+    let token = administrator(&i).await;
+
+    let req = s
+        .new_command(customize("CUSTOM: Security Alert"), &token)
+        .await;
+    let changed = s.client.update_template(req).await.unwrap().into_inner();
+    assert!(changed.customized);
+    assert_eq!(changed.content.unwrap().subject, "CUSTOM: Security Alert");
+    let got = s
+        .client
+        .get_template(bearer(get_alert(), &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(got.customized);
+    assert_eq!(got.content.unwrap().subject, "CUSTOM: Security Alert");
+
+    let req = s.new_command(reset("security_alert"), &token).await;
+    let reset_to = s.client.reset_template(req).await.unwrap().into_inner();
+    assert!(!reset_to.customized);
+    assert!(reset_to.content.unwrap().subject.contains("Security Alert"));
+
+    let mut unknown = customize("x");
+    unknown.template_id = "nonexistent".into();
+    let req = s.new_command(unknown, &token).await;
+    let err = s.client.update_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(reason(&err).as_deref(), Some("TEMPLATE_NOT_FOUND"));
+    let req = s.new_command(reset("nonexistent"), &token).await;
+    let err = s.client.reset_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    let mut empty = customize("x");
+    empty.content = None;
+    let req = s.new_command(empty, &token).await;
+    let err = s.client.update_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(reason(&err).as_deref(), Some("REQUIRED_FIELD_MISSING"));
+
+    let mut nowhere = customize("x");
+    nowhere.content.as_mut().unwrap().channel = 0;
+    let req = s.new_command(nowhere, &token).await;
+    let err = s.client.update_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// Regression: a change applied again on its retry. Change A, change B,
+/// then A's lost response is retried: the retry answers as A did and B
+/// stays.
+#[tokio::test]
+async fn test_a_change_retry_keeps_a_later_change() {
+    let i = installation().await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
+    let token = administrator(&i).await;
+
+    let req = s.named(customize("A"), &token, "op-a").await;
+    let first = s.client.update_template(req).await.unwrap().into_inner();
+    let req = s.named(customize("B"), &token, "op-b").await;
+    s.client.update_template(req).await.unwrap();
+    let req = s.named(customize("A"), &token, "op-a").await;
+    let retry = s.client.update_template(req).await.unwrap().into_inner();
+
+    assert_eq!(retry, first);
+    let got = s
+        .client
+        .get_template(bearer(get_alert(), &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        got.content.unwrap().subject,
+        "B",
+        "the retry wrote A over the later change"
+    );
+}
+
+/// Regression: a reset applied again on its retry. A customization is reset,
+/// customized again, then the reset's lost response is retried: the retry
+/// answers as the reset did and the later customization stays.
+#[tokio::test]
+async fn test_a_reset_retry_keeps_a_later_customization() {
+    let i = installation().await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
+    let token = administrator(&i).await;
+
+    let req = s.new_command(customize("Before"), &token).await;
+    s.client.update_template(req).await.unwrap();
+    let req = s.named(reset("security_alert"), &token, "op-reset").await;
+    let first = s.client.reset_template(req).await.unwrap().into_inner();
+    let req = s.new_command(customize("After"), &token).await;
+    s.client.update_template(req).await.unwrap();
+    let req = s.named(reset("security_alert"), &token, "op-reset").await;
+    let retry = s.client.reset_template(req).await.unwrap().into_inner();
+
+    assert_eq!(retry, first);
+    let got = s
+        .client
+        .get_template(bearer(get_alert(), &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(got.customized, "the retry removed the later customization");
+    assert_eq!(got.content.unwrap().subject, "After");
+}
+
+/// Regression: a test send went out again on its retry. A send the channel
+/// accepted, retried after its response was lost, answers as it did and
+/// sends nothing more.
+#[tokio::test]
+async fn test_a_test_send_retry_sends_once() {
+    let i = installation().await;
+    let channel = counting(true);
+    let mut s = served(grpc_service_with(vec![channel.clone()]).await, &i.api).await;
+    let token = administrator(&i).await;
+
+    for _ in 0..2 {
+        let req = s
+            .named(send_test_email("test@sid.example.com"), &token, "op-send")
+            .await;
+        s.client.send_test_notification(req).await.unwrap();
+    }
+    assert_eq!(channel.sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A send whose outcome was not established (the channel gave no answer)
+/// is not sent again by its retry, which answers that its outcome is
+/// unknown; the administrator sends again as a new command.
+#[tokio::test]
+async fn test_a_test_send_retry_without_an_outcome_sends_nothing() {
+    let i = installation().await;
+    let channel = counting(false);
+    let mut s = served(grpc_service_with(vec![channel.clone()]).await, &i.api).await;
+    let token = administrator(&i).await;
+
+    let req = s
+        .named(send_test_email("test@sid.example.com"), &token, "op-lost")
+        .await;
+    let err = s.client.send_test_notification(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unavailable);
+    let req = s
+        .named(send_test_email("test@sid.example.com"), &token, "op-lost")
+        .await;
+    let err = s.client.send_test_notification(req).await.unwrap_err();
+    assert_eq!(reason(&err).as_deref(), Some("OPERATION_OUTCOME_UNKNOWN"));
+    assert_eq!(
+        channel.sent.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the retry sent the message again"
+    );
+}
+
+/// A keyed template call without its operation context is refused before
+/// any effect, and the period a command is named under comes from this
+/// service's own store.
+#[tokio::test]
+async fn test_template_commands_are_named_under_this_services_periods() {
+    let i = installation().await;
+    let mut s = served(test_grpc_service().await, &i.api).await;
+    let token = administrator(&i).await;
+
+    let err = s
+        .client
+        .update_template(bearer(customize("Unnamed"), &token))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(reason(&err).as_deref(), Some("REQUIRED_FIELD_MISSING"));
+    let got = s
+        .client
+        .get_template(bearer(get_alert(), &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!got.customized, "an unnamed change took effect");
+
+    let period = sid_proto::sid::v1::operation_service_client::OperationServiceClient::new(
+        s.channel.clone(),
+    )
+    .get_operation_period(sid_proto::sid::v1::GetOperationPeriodRequest {})
+    .await
+    .unwrap()
+    .into_inner()
+    .period;
+    let issued = s
+        .operations
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    assert_eq!(period, issued.get());
 }
 
 /// Every refusal of the served template API, without a token and as the

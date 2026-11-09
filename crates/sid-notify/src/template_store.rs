@@ -657,9 +657,3 @@ async fn locales_in(
 
 #[cfg(test)]
 mod tests;
-
-/// PostgreSQL integration tests.
-/// Require: `cd sid && docker compose -f docker-compose.test.yml up -d` (port 54399).
-/// Each test uses a unique template_id suffix to avoid parallel test interference.
-#[cfg(test)]
-mod pg_tests;

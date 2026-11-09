@@ -31,6 +31,9 @@ pub(crate) mod template_store;
 #[path = "../../../tests/support/crypto.rs"]
 mod test_crypto;
 
+#[cfg(test)]
+mod test_db;
+
 pub use config::NotifyConfig;
 pub use dispatcher::NotificationDispatcher;
 pub use recipient::{RecipientSource, ResolveError};
