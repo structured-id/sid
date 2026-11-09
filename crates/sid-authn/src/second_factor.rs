@@ -14,12 +14,14 @@ use serde::de::DeserializeOwned;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
-    AuditEntry, Credential, CredentialData, CredentialId, CredentialSpend, CredentialType,
-    MutationContext, NewWork, Session,
+    AuditEntry, Credential, CredentialData, CredentialId, CredentialRevocation, CredentialSpend,
+    CredentialType, MutationContext, NewWork, OperationCompletion, Session,
 };
 use sid_keys::KeyManager;
 use sid_plugin::{CredentialStore, OperationResultStore};
-use sid_proto::sid::v1::{StepUpMethod, TotpAlgorithm, TotpEnrollmentChallenge};
+use sid_proto::sid::v1::{
+    DeleteMfaCredentialResponse, StepUpMethod, TotpAlgorithm, TotpEnrollmentChallenge,
+};
 
 use crate::challenge_store::{ChallengeStore, ChallengeStoreError};
 use crate::login_policy::LoginRequirements;
@@ -74,6 +76,13 @@ pub enum FactorError {
     /// The factor does not verify; one answer whatever the reason.
     #[error("authentication failed")]
     AuthenticationFailed,
+    /// The account has no active credential of this id: another account's,
+    /// a removed one or none, answered alike.
+    #[error("credential not found")]
+    CredentialNotFound(CredentialId),
+    /// The credential is the account's last way to sign in and stays.
+    #[error("the account's last way to sign in stays")]
+    LastSignInMethod(CredentialId),
     /// A dependency cannot answer now; the client retries.
     #[error("{what} unavailable: {cause}")]
     Unavailable { what: &'static str, cause: String },
@@ -492,6 +501,97 @@ impl<O: FactorOwner> FactorCeremonies<O> {
         );
         Ok(plaintext)
     }
+
+    /// Remove `owner`'s second factor `credential` of `kind` (from
+    /// [`removable_factor`]): revoked, its record kept for the audit, in one
+    /// commit with the event announcing it and `completion`, the keyed
+    /// command's record of the response it is given. One removed meanwhile
+    /// reads as not found; the account's last way to sign in stays. The host
+    /// has checked that the caller may remove a factor of `kind` and runs
+    /// this inside its keyed command, so a retry gets the recorded response.
+    pub async fn remove_factor(
+        &self,
+        credentials: &dyn CredentialStore<Owner = O>,
+        owner: O,
+        credential: CredentialId,
+        kind: CredentialType,
+        completion: impl FnOnce(&DeleteMfaCredentialResponse) -> OperationCompletion,
+    ) -> Result<DeleteMfaCredentialResponse, FactorError> {
+        let name = factor_name(kind).ok_or_else(not_a_factor)?;
+        let response = DeleteMfaCredentialResponse {
+            deleted: true,
+            credential_type: name.to_string(),
+        };
+        let disabled = Event::new(&self.issuer, event_types::MFA_DISABLED)
+            .with_subject(self.subject(owner))
+            .with_data(serde_json::json!({
+                "credential_type": name,
+                "credential_id": credential.0.to_string(),
+            }));
+        let ctx = MutationContext::from(AuditEntry::user(
+            owner.to_string(),
+            "credential.mfa_deleted",
+            credential.0.to_string(),
+        ))
+        .with_work(disabled.relay())
+        .with_operation(completion(&response));
+        // The event commits only with a revocation that happened.
+        match credentials.revoke_credential(credential, ctx).await? {
+            CredentialRevocation::Revoked => {}
+            CredentialRevocation::AlreadyGone => {
+                return Err(FactorError::CredentialNotFound(credential));
+            }
+            CredentialRevocation::LastPrimary => {
+                return Err(FactorError::LastSignInMethod(credential));
+            }
+        }
+        tracing::info!(
+            "{} removed for {} {} ({})",
+            name,
+            self.account_kind,
+            owner,
+            credential.0
+        );
+        Ok(response)
+    }
+}
+
+/// What a second factor of `kind` is called in its removal's response and
+/// event; none for a credential that is not a second factor.
+fn factor_name(kind: CredentialType) -> Option<&'static str> {
+    match kind {
+        CredentialType::Totp => Some("totp"),
+        CredentialType::WebAuthn => Some("webauthn"),
+        CredentialType::Recovery => Some("recovery"),
+        _ => None,
+    }
+}
+
+fn not_a_factor() -> FactorError {
+    FactorError::InvalidField {
+        field: "credential_id",
+        reason: "not a second factor (TOTP, passkey or recovery codes)".to_string(),
+    }
+}
+
+/// The kind of `owner`'s active second factor `credential`, which the host
+/// checks its caller may remove before [`FactorCeremonies::remove_factor`].
+/// Another account's credential and a removed one read as not found, so a
+/// foreign id reveals nothing; a password is not a second factor.
+pub async fn removable_factor<O: Send + Sync>(
+    credentials: &dyn CredentialStore<Owner = O>,
+    owner: O,
+    credential: CredentialId,
+) -> Result<CredentialType, FactorError> {
+    let kind = credentials
+        .get_credentials_by_profile(owner, None)
+        .await?
+        .into_iter()
+        .find(|c| c.id == credential && c.status.is_active())
+        .map(|c| c.credential_type)
+        .ok_or(FactorError::CredentialNotFound(credential))?;
+    factor_name(kind).ok_or_else(not_a_factor)?;
+    Ok(kind)
 }
 
 /// The kept pending TOTP enrollment of `owner`.
