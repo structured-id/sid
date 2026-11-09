@@ -973,6 +973,15 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         prep: &sid_core::models::HistoryPreparation,
         audit: AuditEntry,
     ) -> SidResult<Vec<KeyEpoch>> {
+        if !prep
+            .window
+            .iter()
+            .all(|epoch| prep.live.live.contains(epoch))
+        {
+            return Err(sid_core::Error::Validation(
+                "the comparison window names an epoch outside the live set".into(),
+            ));
+        }
         let mut inner = self.inner.lock().unwrap();
         let domain = prep.owner_domain;
         inner.refuse_purged(&domain)?;
@@ -1017,7 +1026,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
             .into_iter()
             .filter(|e| {
                 e.status == HistoryEpochUse::Active
-                    || (e.status == HistoryEpochUse::CompareOnly && prep.live.live.contains(&e.id))
+                    || (e.status == HistoryEpochUse::CompareOnly && prep.window.contains(&e.id))
             })
             .collect();
         selected.sort_by_key(|e| (e.status != HistoryEpochUse::Active, e.created_at, e.id));
@@ -6767,7 +6776,7 @@ impl MockStorageInner {
         // retired by the evaluator's preparation, not here.
         history
             .entries
-            .retain(|e| e.seq > seq - i64::from(commit.depth));
+            .retain(|e| e.seq > seq - i64::from(commit.retention));
         // Age retention: the newest (this commit's) always stays.
         if let Some(before) = commit.expires_before(chrono::Utc::now()) {
             history

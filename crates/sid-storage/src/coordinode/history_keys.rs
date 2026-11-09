@@ -517,6 +517,15 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
         prep: &HistoryPreparation,
         audit: AuditEntry,
     ) -> SidResult<Vec<KeyEpoch>> {
+        if !prep
+            .window
+            .iter()
+            .all(|epoch| prep.live.live.contains(epoch))
+        {
+            return Err(SidError::Validation(
+                "the comparison window names an epoch outside the live set".into(),
+            ));
+        }
         let prep = prep.clone();
         self.backend
             .transaction(move |tx| {
@@ -566,7 +575,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
                 // Retire what no live set at or after its replacement and no
                 // pending operation still needs; its key is kept.
                 let recorded_live: BTreeSet<HistoryEpochId> = recorded_live.into_iter().collect();
-                let live: BTreeSet<HistoryEpochId> = prep.live.live.iter().copied().collect();
+                let window: BTreeSet<HistoryEpochId> = prep.window.iter().copied().collect();
                 let mut selected = Vec::new();
                 for s in epochs {
                     let mut epoch = s.epoch;
@@ -580,7 +589,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
                     }
                     let chosen = match epoch.status {
                         HistoryEpochUse::Active => true,
-                        HistoryEpochUse::CompareOnly => live.contains(&epoch.id),
+                        HistoryEpochUse::CompareOnly => window.contains(&epoch.id),
                         HistoryEpochUse::Retired => false,
                     };
                     if chosen {

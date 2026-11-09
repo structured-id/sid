@@ -412,7 +412,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         epochs,
         entries: checked.new_entries,
         evidence,
-        depth: 1,
+        retention: 1,
         max_age_days: 0,
     };
     assert!(
@@ -593,7 +593,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         epochs,
         entries: checked.new_entries,
         evidence,
-        depth: 1,
+        retention: 1,
         max_age_days: 0,
     };
     assert!(
@@ -921,9 +921,10 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     emptied
         .validate()
         .expect("a compare-only epoch without entries is a valid history");
-    // Every live epoch is a domain each proved operation must evaluate; past
-    // the verifier's limit no operation could succeed and age entries out, so
-    // such an archive is refused. At the limit it is accepted.
+    // An operation evaluates only the epochs holding its comparison window,
+    // but every live epoch stays in the lifecycle: past the deepest window
+    // plus the active epoch no retention could produce the archive, so it is
+    // refused. At the limit it is accepted.
     let with_live = async |extra: usize| {
         let mut wide = archive.clone();
         for seq in (3..).take(extra) {
@@ -950,11 +951,11 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
             .sort_by_key(|e| (std::cmp::Reverse(e.seq), e.epoch));
         wide
     };
-    let limit = sid_core::models::password_history::MAX_HISTORY_DOMAINS;
+    let limit = sid_core::models::password_history::MAX_LIVE_HISTORY_DOMAINS;
     assert!(with_live(limit - 2).await.validate().is_ok());
     assert!(
         with_live(limit - 1).await.validate().is_err(),
-        "an archive needing more history domains than a proof holds was accepted"
+        "an archive with more live epochs than any retention holds was accepted"
     );
     // Only epochs a proof must evaluate count: an emptied compare-only epoch
     // beside a full set is never selected, and the next preparation retires it.
@@ -1221,7 +1222,7 @@ async fn password_history_survives_migration() {
             operation: uuid::Uuid::now_v7(),
             policy_version: 1,
         },
-        depth: 24,
+        retention: 24,
         max_age_days: 0,
     };
     assert!(

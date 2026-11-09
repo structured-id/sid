@@ -241,7 +241,7 @@ fn commit(depth: u32) -> HistoryCommit {
             operation: Uuid::now_v7(),
             policy_version: 1,
         },
-        depth,
+        retention: depth,
         max_age_days: 0,
     }
 }

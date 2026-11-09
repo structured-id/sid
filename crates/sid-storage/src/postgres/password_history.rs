@@ -412,7 +412,7 @@ pub(super) async fn apply_in_tx(
     // retired by the evaluator, from the live set, never by this commit.
     sqlx::query("DELETE FROM password_history_entries WHERE owner_id = $1 AND seq <= $2")
         .bind(owner)
-        .bind(seq - i64::from(commit.depth))
+        .bind(seq - i64::from(commit.retention))
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;

@@ -519,6 +519,12 @@ impl HistoryKeyStore for PgHistoryKeyStore {
     ) -> SidResult<Vec<KeyEpoch>> {
         let owner_domain = prep.owner_domain.as_slice();
         let live: Vec<Uuid> = prep.live.live.iter().map(|e| e.0).collect();
+        let window: Vec<Uuid> = prep.window.iter().map(|e| e.0).collect();
+        if !window.iter().all(|epoch| live.contains(epoch)) {
+            return Err(SidError::Validation(
+                "the comparison window names an epoch outside the live set".into(),
+            ));
+        }
         let mut tx = self.begin().await?;
         lock_owner(&mut tx, &prep.owner_domain).await?;
         let foreign: i64 = sqlx::query_scalar(
@@ -608,7 +614,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
              ORDER BY status <> 'active', created_at, id"
         ))
         .bind(owner_domain)
-        .bind(&live)
+        .bind(&window)
         .fetch_all(&mut *tx)
         .await
         .map_err(storage("selection"))?;

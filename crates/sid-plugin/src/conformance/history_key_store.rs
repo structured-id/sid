@@ -70,10 +70,24 @@ fn live(revision: i64, live: &[HistoryEpochId], settled: &[Uuid]) -> HistoryLive
     }
 }
 
+/// Prepare `operation` with a comparison window of the whole live set.
 async fn prepare(
     store: &dyn HistoryKeyStore,
     owner_domain: [u8; 32],
     live: HistoryLiveSet,
+    operation: Uuid,
+    expires_at: chrono::DateTime<Utc>,
+) -> sid_core::Result<Vec<HistoryEpochId>> {
+    let window = live.live.clone();
+    prepare_window(store, owner_domain, live, window, operation, expires_at).await
+}
+
+/// Prepare `operation` comparing with the entries of the `window` epochs.
+async fn prepare_window(
+    store: &dyn HistoryKeyStore,
+    owner_domain: [u8; 32],
+    live: HistoryLiveSet,
+    window: Vec<HistoryEpochId>,
     operation: Uuid,
     expires_at: chrono::DateTime<Utc>,
 ) -> sid_core::Result<Vec<HistoryEpochId>> {
@@ -82,6 +96,7 @@ async fn prepare(
             &HistoryPreparation {
                 owner_domain,
                 live,
+                window,
                 operation,
                 expires_at,
                 now: Utc::now(),
@@ -268,6 +283,64 @@ pub async fn epoch_rotation(store: &dyn HistoryKeyStore) {
         "a rotation naming a replaced epoch changes nothing"
     );
     assert_eq!(store.get_key_epochs(&domain).await.unwrap().epochs.len(), 2);
+}
+
+/// A preparation selects the active epoch and the epochs of its comparison
+/// window only; a live epoch outside the window is neither selected nor
+/// retired, so a later, deeper window and a restore still find its key. A
+/// window naming an epoch outside the live set is refused.
+pub async fn window_selects_without_retiring(store: &dyn HistoryKeyStore) {
+    let domain = owner();
+    let later = Utc::now() + chrono::Duration::minutes(15);
+    let old = store
+        .ensure_epoch(&new_epoch(domain, 51), audit())
+        .await
+        .unwrap();
+    let current = store
+        .rotate_epoch(&new_epoch(domain, 52), old.id, 2, audit())
+        .await
+        .unwrap();
+    let held = live(2, &[old.id], &[]);
+
+    // The old epoch holds only entries outside this operation's window.
+    let selected = prepare_window(store, domain, held.clone(), vec![], Uuid::now_v7(), later)
+        .await
+        .unwrap();
+    assert_eq!(selected, vec![current.id], "only the active epoch");
+    let kept = store.get_key_epochs(&domain).await.unwrap();
+    assert_eq!(
+        kept.epochs
+            .iter()
+            .find(|e| e.id == old.id)
+            .map(|e| e.status),
+        Some(HistoryEpochUse::CompareOnly),
+        "a live epoch outside the window was retired"
+    );
+
+    // A deeper window reaches it again.
+    let deeper = prepare_window(
+        store,
+        domain,
+        held.clone(),
+        vec![old.id],
+        Uuid::now_v7(),
+        later,
+    )
+    .await
+    .unwrap();
+    assert_eq!(deeper, vec![current.id, old.id]);
+
+    let err = prepare_window(
+        store,
+        domain,
+        live(2, &[old.id], &[]),
+        vec![current.id],
+        Uuid::now_v7(),
+        later,
+    )
+    .await
+    .expect_err("a window epoch outside the live set");
+    assert!(matches!(err, sid_core::Error::Validation(_)), "{err:?}");
 }
 
 /// The lifecycle the credential service's live sets drive:

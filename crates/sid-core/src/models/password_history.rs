@@ -15,14 +15,19 @@ use uuid::Uuid;
 use crate::models::ProfileId;
 use crate::{Error, Result};
 
-/// Depth of retained history when the policy sets none: the last verified password.
+/// Comparison depth and retention when the policy sets none: the last
+/// verified password, as CE keeps it.
 pub const DEFAULT_HISTORY_DEPTH: u32 = 1;
-/// The deepest retained history any policy may set.
+/// The deepest comparison depth, and the most accepted passwords retained,
+/// any policy may set.
 pub const MAX_HISTORY_DEPTH: u32 = 24;
 /// The most comparison domains one operation may require: the active epoch
-/// and the rotated ones that still hold entries. Each is a proof slot and a
-/// KSF run, so the bound caps both.
+/// and the rotated ones holding entries of its comparison window. Each is a
+/// proof slot and a KSF run, so the bound caps both.
 pub const MAX_HISTORY_DOMAINS: usize = 3;
+/// The most domains an owner's live set may name: every retained entry under
+/// an epoch of its own, beside the active one.
+pub const MAX_LIVE_HISTORY_DOMAINS: usize = MAX_HISTORY_DEPTH as usize + 1;
 /// The most Argon2 passes a history epoch may ask for, so a check's KSF time
 /// is bounded before it runs, as its memory is. RFC 9106 §4 recommends one
 /// or three passes; new epochs use three.
@@ -301,6 +306,54 @@ impl<O> PasswordHistory<O> {
     pub fn entries_of(&self, epoch: HistoryEpochId) -> impl Iterator<Item = &HistoryEntry> {
         self.entries.iter().filter(move |e| e.epoch == epoch)
     }
+
+    /// The comparison window of depth `depth`: the identities `(epoch, seq)`
+    /// of the newest `min(depth, available)` accepted passwords, by committed
+    /// sequence, across epochs. Newest first. Entries outside it stay
+    /// retained; depth selects, it never deletes.
+    pub fn window(&self, depth: u32) -> Vec<(HistoryEpochId, i64)> {
+        let mut seqs: Vec<i64> = self.entries.iter().map(|e| e.seq).collect();
+        seqs.sort_unstable_by(|a, b| b.cmp(a));
+        seqs.dedup();
+        seqs.truncate(depth as usize);
+        let mut window: Vec<(HistoryEpochId, i64)> = self
+            .entries
+            .iter()
+            .filter(|e| seqs.contains(&e.seq))
+            .map(|e| (e.epoch, e.seq))
+            .collect();
+        window.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        window
+    }
+
+    /// The epochs an operation comparing with `window` uses, in the order it
+    /// lists them: the active one first, then each other epoch holding an
+    /// entry of the window. The client cannot choose these.
+    pub fn window_epochs(&self, window: &[(HistoryEpochId, i64)]) -> Vec<&HistoryEpoch<O>> {
+        let mut epochs: Vec<&HistoryEpoch<O>> = self.active_epoch().into_iter().collect();
+        epochs.extend(self.epochs.iter().filter(|e| {
+            e.status != HistoryEpochUse::Active && window.iter().any(|(epoch, _)| *epoch == e.id)
+        }));
+        epochs
+    }
+
+    /// This history as an operation comparing with `window` sees it: every
+    /// epoch, and only the window's entries.
+    pub fn restricted_to(&self, window: &[(HistoryEpochId, i64)]) -> Self
+    where
+        O: Clone,
+    {
+        Self {
+            revision: self.revision,
+            epochs: self.epochs.clone(),
+            entries: self
+                .entries
+                .iter()
+                .filter(|e| window.contains(&(e.epoch, e.seq)))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 /// An owner's epochs as the evaluator reads them: every epoch not retired,
@@ -355,13 +408,18 @@ impl HistoryLiveSet {
 }
 
 /// One operation's preparation as the evaluator records it: the owner's live
-/// set the credential service sent, and the operation that will use the
-/// selected epochs until it settles or `expires_at`.
+/// set the credential service sent, the epochs of the operation's comparison
+/// window, and the operation that will use the selected epochs until it
+/// settles or `expires_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryPreparation {
     /// The owner's history input domain.
     pub owner_domain: [u8; 32],
     pub live: HistoryLiveSet,
+    /// The epochs holding an entry of the operation's comparison window,
+    /// sorted, without duplicates: a subset of `live.live`. Only these are
+    /// selected beside the active epoch; the live set alone keeps the others.
+    pub window: Vec<HistoryEpochId>,
     pub operation: Uuid,
     /// When the operation can no longer use its epochs: past it nothing of the
     /// operation is evaluated again.
@@ -478,10 +536,9 @@ impl HistoryArchive {
         }
         // A compare-only epoch without entries is valid: it is never selected,
         // and the evaluator retires it at the owner's next preparation, from
-        // the credential service's live set. Every required epoch (the active
-        // one and each compare-only one holding an entry) is a domain each
-        // proved operation evaluates; past the limit no operation succeeds,
-        // so nothing could age entries out.
+        // the credential service's live set. Every live epoch (the active one
+        // and each compare-only one holding an entry) is named in each
+        // preparation's live set, which holds at most this many.
         let live = ids
             .iter()
             .filter(|(id, status)| match status {
@@ -490,9 +547,9 @@ impl HistoryArchive {
                 HistoryEpochUse::Retired => false,
             })
             .count();
-        if live > MAX_HISTORY_DOMAINS {
+        if live > MAX_LIVE_HISTORY_DOMAINS {
             return Err(Error::Validation(
-                "history archive needs more history domains than a proof holds".into(),
+                "history archive has more live history domains than a preparation names".into(),
             ));
         }
         Ok(())
@@ -732,11 +789,12 @@ pub struct HistoryCommit<O = ProfileId> {
     /// Entries of the accepted password, one per epoch it is written under.
     pub entries: Vec<(HistoryEpochId, [u8; 32])>,
     pub evidence: HistoryEvidence,
-    /// How many accepted passwords to retain, newest first, 1..=24.
-    pub depth: u32,
+    /// How many accepted passwords to retain, newest first, 1..=24: the
+    /// stored window, apart from the comparison depth, which never deletes.
+    pub retention: u32,
     /// Accepted passwords older than this many days, counted from their
     /// acceptance, are dropped too; the one this commit accepts, the newest,
-    /// always stays. 0 keeps every entry `depth` keeps.
+    /// always stays. 0 keeps every entry `retention` keeps.
     #[serde(default)]
     pub max_age_days: u32,
 }
@@ -744,9 +802,9 @@ pub struct HistoryCommit<O = ProfileId> {
 impl<O> HistoryCommit<O> {
     /// Refuse a commit that could not be stored as stated.
     pub fn validate(&self) -> Result<()> {
-        if !(1..=MAX_HISTORY_DEPTH).contains(&self.depth) {
+        if !(1..=MAX_HISTORY_DEPTH).contains(&self.retention) {
             return Err(Error::Validation(format!(
-                "password history depth must be 1..={MAX_HISTORY_DEPTH}"
+                "password history retention must be 1..={MAX_HISTORY_DEPTH}"
             )));
         }
         if self.entries.is_empty() {
