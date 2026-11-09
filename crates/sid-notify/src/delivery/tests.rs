@@ -22,6 +22,8 @@ struct ScriptedChannel {
     id: &'static str,
     answer: fn() -> Result<DeliveryReceipt, DeliveryError>,
     sent: Mutex<Vec<(String, Option<String>)>>,
+    /// The body of each message, in order.
+    bodies: Mutex<Vec<String>>,
 }
 
 impl ScriptedChannel {
@@ -30,6 +32,7 @@ impl ScriptedChannel {
             id,
             answer,
             sent: Mutex::new(Vec::new()),
+            bodies: Mutex::new(Vec::new()),
         })
     }
 }
@@ -58,6 +61,7 @@ impl NotificationChannel for ScriptedChannel {
             recipient.email.clone().unwrap_or_default(),
             message.subject.clone(),
         ));
+        self.bodies.lock().unwrap().push(message.body.clone());
         (self.answer)()
     }
 
@@ -74,9 +78,25 @@ async fn store() -> Arc<dyn WorkStore> {
     Arc::new(SqliteBackend::new_in_memory().await.unwrap())
 }
 
+/// The template store of a fresh schema, holding no customization.
+async fn templates() -> Arc<TemplateStore> {
+    templates_on(crate::test_db::pool().await).await
+}
+
+async fn templates_on(pool: sqlx::PgPool) -> Arc<TemplateStore> {
+    Arc::new(
+        TemplateStore::new(
+            &RoutingTable::default_ce_rules(),
+            Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates())),
+            pool,
+        )
+        .await
+        .unwrap(),
+    )
+}
+
 fn dispatcher(channels: &[Arc<ScriptedChannel>]) -> Arc<NotificationDispatcher> {
-    let engine = Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates()));
-    let mut dispatcher = NotificationDispatcher::new(engine);
+    let mut dispatcher = NotificationDispatcher::new();
     for channel in channels {
         dispatcher.register_channel(Arc::clone(channel) as Arc<dyn NotificationChannel>);
     }
@@ -560,6 +580,7 @@ async fn test_deliver_outcomes() {
     let busy = ScriptedChannel::new("busy", || Err(DeliveryError::Failed("421".into())));
     let handler = DeliverHandler::new(
         dispatcher(&[Arc::clone(&email), rejected, lost, busy]),
+        templates().await,
         standalone(),
     );
 
@@ -585,6 +606,122 @@ async fn test_deliver_outcomes() {
         handler.handle(&job("sms")).await,
         WorkOutcome::Permanent(_)
     ));
+}
+
+/// Content customizing `security_alert` with `subject`, `html` and `sms`.
+fn customized(subject: &str, html: &str, sms: &str) -> crate::template_store::StoredContent {
+    crate::template_store::StoredContent {
+        subject: subject.into(),
+        html_body: html.into(),
+        text_body: html.into(),
+        sms_body: sms.into(),
+        push_title: String::new(),
+        push_body: String::new(),
+        push_action_url: String::new(),
+        updated_at: Utc::now(),
+    }
+}
+
+fn alone(
+    _: &crate::template_store::Effective,
+    _: &crate::template_store::TemplateMeta,
+) -> ((), Option<sid_core::models::OperationCompletion>) {
+    ((), None)
+}
+
+/// Regression: delivery rendered from the engine of the process that took a
+/// customization, so another instance (or the same one after a restart)
+/// delivered the shipped default. A customization committed through one
+/// instance is delivered by another over the same database, rendered for
+/// the event.
+#[tokio::test]
+async fn test_another_instance_delivers_a_committed_customization() {
+    let pool = crate::test_db::pool().await;
+    let (one, other) = (templates_on(pool.clone()).await, templates_on(pool).await);
+    one.update_template(
+        "security_alert",
+        crate::template_store::Channel::Email,
+        "en",
+        customized("Custom: {{event_type}}", "<p>custom</p>", ""),
+        alone,
+    )
+    .await
+    .unwrap();
+    let email = ScriptedChannel::new("email", accepted);
+    let handler = DeliverHandler::new(dispatcher(&[Arc::clone(&email)]), other, standalone());
+    assert!(matches!(
+        handler.handle(&delivery_to(owner(), "email")).await,
+        WorkOutcome::Done(_)
+    ));
+    assert_eq!(
+        email.sent.lock().unwrap()[0].1.as_deref(),
+        Some("Custom: sid.security.brute_force.v1"),
+        "the shipped default was delivered"
+    );
+}
+
+/// Regression: only the email `en` customization ever reached delivery. An
+/// SMS customization is delivered on the SMS channel; a localized one to a
+/// recipient of that locale, the `en` one to another recipient.
+#[tokio::test]
+async fn test_channel_and_locale_customizations_are_delivered() {
+    let templates = templates().await;
+    for (channel, locale, content) in [
+        (
+            crate::template_store::Channel::Sms,
+            "en",
+            customized("", "", "SMS {{event_type}}"),
+        ),
+        (
+            crate::template_store::Channel::Email,
+            "en",
+            customized("English", "<p>en</p>", ""),
+        ),
+        (
+            crate::template_store::Channel::Email,
+            "fr",
+            customized("Français", "<p>fr</p>", ""),
+        ),
+    ] {
+        templates
+            .update_template("security_alert", channel, locale, content, alone)
+            .await
+            .unwrap();
+    }
+    let (email, sms) = (
+        ScriptedChannel::new("email", accepted),
+        ScriptedChannel::new("sms", accepted),
+    );
+    let handler = DeliverHandler::new(
+        dispatcher(&[Arc::clone(&email), Arc::clone(&sms)]),
+        templates,
+        standalone(),
+    );
+    let french = Recipient {
+        locale: "fr".into(),
+        ..owner()
+    };
+    for (recipient, channel) in [(owner(), "sms"), (french, "email"), (owner(), "email")] {
+        assert!(matches!(
+            handler.handle(&delivery_to(recipient, channel)).await,
+            WorkOutcome::Done(_)
+        ));
+    }
+    assert_eq!(
+        sms.bodies.lock().unwrap()[0],
+        "SMS sid.security.brute_force.v1"
+    );
+    let subjects: Vec<_> = email
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, s)| s.clone())
+        .collect();
+    assert_eq!(
+        subjects,
+        [Some("Français".to_string()), Some("English".to_string())]
+    );
 }
 
 /// A host's source decides the recipient: the plan carries the recipient the
@@ -654,6 +791,7 @@ async fn test_delivery_rechecks_the_recipient_before_sending() {
         let source = Arc::new(HostSource::new(Ok(owner()), still));
         let handler = DeliverHandler::new(
             dispatcher(&[Arc::clone(&email)]),
+            templates().await,
             Arc::clone(&source) as Arc<dyn RecipientSource>,
         );
         let outcome = handler.handle(&delivery_to(owner(), "email")).await;
@@ -672,6 +810,7 @@ async fn test_delivery_rechecks_the_recipient_before_sending() {
     let source = Arc::new(HostSource::new(Ok(owner()), Ok(true)));
     let handler = DeliverHandler::new(
         dispatcher(&[Arc::clone(&email)]),
+        templates().await,
         Arc::clone(&source) as Arc<dyn RecipientSource>,
     );
     assert!(matches!(
@@ -705,6 +844,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
         Arc::new(PlanHandler::new(Arc::clone(&store), 1_000)),
         Arc::new(DeliverHandler::new(
             dispatcher(&[Arc::clone(&email), webhook]),
+            templates().await,
             standalone(),
         )),
         Arc::new(EventRelayHandler::new(

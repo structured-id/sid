@@ -16,13 +16,15 @@
 use crate::dispatcher::NotificationDispatcher;
 use crate::recipient::{RecipientSource, ResolveError};
 use crate::routing::RoutingTable;
+use crate::template::render_message;
+use crate::template_store::{Channel, TemplateStore};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::{Event, WorkRecipient, event_types};
 use sid_core::models::{ClaimedWork, NewWork, WorkId, WorkKind};
 use sid_plugin::event_bus::{Delivery, DurableConsumer, EventBusResult, Settlement};
-use sid_plugin::notification::{DeliveryError, NotificationPriority, Recipient};
+use sid_plugin::notification::{DeliveryError, NotificationPriority, Recipient, RenderedMessage};
 use sid_plugin::{EventBus, WorkStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -363,21 +365,63 @@ impl WorkHandler for PlanHandler {
 pub struct DeliverHandler {
     kind: WorkKind,
     dispatcher: Arc<NotificationDispatcher>,
+    templates: Arc<TemplateStore>,
     recipients: Arc<dyn RecipientSource>,
 }
 
 impl DeliverHandler {
     /// Deliver through `dispatcher`'s channels to recipients `recipients`
-    /// still confirms.
+    /// still confirms, rendered from `templates` as stored when it delivers.
     pub fn new(
         dispatcher: Arc<NotificationDispatcher>,
+        templates: Arc<TemplateStore>,
         recipients: Arc<dyn RecipientSource>,
     ) -> Self {
         Self {
             kind: kind(DELIVER),
             dispatcher,
+            templates,
             recipients,
         }
+    }
+
+    /// `job`'s message: the stored content for its template, channel and
+    /// recipient's locale, rendered for its event. A channel's own fields
+    /// when the content has them, else the email ones.
+    async fn render(&self, job: &DeliveryJob) -> Result<RenderedMessage, WorkOutcome> {
+        let channel = Channel::of_delivery(&job.channel).unwrap_or(Channel::Email);
+        let content = match self
+            .templates
+            .delivery_content(&job.template, channel, &job.recipient.locale)
+            .await
+        {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                return Err(WorkOutcome::Permanent(format!(
+                    "render: template not found: {}",
+                    job.template
+                )));
+            }
+            Err(e) => return Err(WorkOutcome::Retry(format!("read the template: {e}"))),
+        };
+        let nonempty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        let (subject, body, text) = match channel {
+            Channel::Sms if !content.sms_body.is_empty() => {
+                (None, content.sms_body.clone(), content.sms_body.clone())
+            }
+            Channel::Push if !content.push_body.is_empty() => (
+                nonempty(&content.push_title),
+                content.push_body.clone(),
+                content.push_body.clone(),
+            ),
+            _ => (
+                nonempty(&content.subject),
+                content.html_body.clone(),
+                content.text_body.clone(),
+            ),
+        };
+        render_message(subject.as_deref(), &body, &text, &job.event, job.priority)
+            .map_err(|e| WorkOutcome::Permanent(format!("render: {e}")))
     }
 }
 
@@ -414,13 +458,9 @@ impl WorkHandler for DeliverHandler {
             Err(e @ ResolveError::ProfileGone(_)) => return WorkOutcome::Permanent(e.to_string()),
             Err(e @ ResolveError::Unavailable(_)) => return WorkOutcome::Retry(e.to_string()),
         }
-        let message = match self
-            .dispatcher
-            .render(&job.template, &job.event, job.priority)
-            .await
-        {
+        let message = match self.render(&job).await {
             Ok(message) => message,
-            Err(e) => return WorkOutcome::Permanent(format!("render: {e}")),
+            Err(outcome) => return outcome,
         };
         match self
             .dispatcher

@@ -85,7 +85,7 @@ fn test_database_url() -> String {
 }
 
 /// A template an administrator customizes through the API is the one
-/// delivery renders: both use one engine.
+/// delivery renders: both read the store's database.
 #[tokio::test]
 async fn test_customized_template_reaches_delivery() {
     use crate::template_store::{Channel, StoredContent};
@@ -114,22 +114,14 @@ async fn test_customized_template_reaches_delivery() {
         )
         .await
         .unwrap();
-    let event = sid_core::models::event::Event::new(
-        "src",
-        sid_core::models::event::event_types::SECURITY_BRUTE_FORCE,
-    );
-    let message = server
-        .dispatcher
-        .render(
-            "security_alert",
-            &event,
-            sid_plugin::notification::NotificationPriority::Critical,
-        )
+    let content = server
+        .store
+        .delivery_content("security_alert", Channel::Email, "en")
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a shipped template");
     assert_eq!(
-        message.subject.as_deref(),
-        Some(subject.as_str()),
+        content.subject, subject,
         "delivery rendered a template other than the customized one"
     );
 }
@@ -239,7 +231,7 @@ async fn grpc_service_with(
 ) -> NotificationTemplateServiceImpl {
     let routing = RoutingTable::default_ce_rules();
     let engine = Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates()));
-    let mut dispatcher = NotificationDispatcher::new(Arc::clone(&engine));
+    let mut dispatcher = NotificationDispatcher::new();
     for channel in channels {
         dispatcher.register_channel(channel);
     }

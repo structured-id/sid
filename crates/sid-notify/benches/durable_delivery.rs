@@ -33,6 +33,7 @@ use sid_notify::delivery::{
 };
 use sid_notify::{
     NotificationDispatcher, RecipientSource, ResolveError, RoutingTable, TemplateEngine,
+    TemplateStore,
 };
 use sid_plugin::WorkStore;
 use sid_plugin::event_bus::EventBus;
@@ -330,11 +331,14 @@ fn rate(mode: &str, what: &str, items: usize, took: Duration) {
     );
 }
 
-/// A runner over `store` delivering to channels counting into `sent`.
-fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
-    let mut dispatcher = NotificationDispatcher::new(Arc::new(tokio::sync::RwLock::new(
-        TemplateEngine::with_default_ce_templates(),
-    )));
+/// A runner over `store` delivering to channels counting into `sent`,
+/// rendering from `templates` as the service does.
+fn runner(
+    store: &Arc<dyn WorkStore>,
+    sent: &Arc<Progress>,
+    templates: &Arc<TemplateStore>,
+) -> WorkRunner {
+    let mut dispatcher = NotificationDispatcher::new();
     for id in ["email", "webhook"] {
         dispatcher.register_channel(Arc::new(Immediate {
             id,
@@ -349,7 +353,11 @@ fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
             CAPACITY,
         )),
         Arc::new(PlanHandler::new(store.clone(), CAPACITY)),
-        Arc::new(DeliverHandler::new(Arc::new(dispatcher), source)),
+        Arc::new(DeliverHandler::new(
+            Arc::new(dispatcher),
+            templates.clone(),
+            source,
+        )),
     ];
     WorkRunner::new(
         store.clone(),
@@ -364,8 +372,20 @@ fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
     .unwrap()
 }
 
-/// `accept`, `drain` and `deliver` over `store`.
+/// `accept`, `drain` and `deliver` over `store`; every delivery reads its
+/// template from the service's own PostgreSQL database.
 async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
+    let templates = Arc::new(
+        TemplateStore::new(
+            &RoutingTable::default_ce_rules(),
+            Arc::new(tokio::sync::RwLock::new(
+                TemplateEngine::with_default_ce_templates(),
+            )),
+            fresh_database("sid_notify_bench_templates").await,
+        )
+        .await
+        .unwrap(),
+    );
     let mut samples = Vec::with_capacity(ACCEPTS);
     let mut owed = 0;
     for _ in 0..ACCEPTS {
@@ -390,7 +410,7 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     let timed = Arc::new(Timed::new(store.clone()));
     let timed_store: Arc<dyn WorkStore> = timed.clone();
     let started = Instant::now();
-    let runner = runner(&timed_store, &sent);
+    let runner = runner(&timed_store, &sent, &templates);
     // Woken after each acceptance, as the notifier's consumer does.
     let waker = runner.waker();
     let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
@@ -415,26 +435,31 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     running.await.unwrap();
 }
 
-/// A store of its own on a fresh PostgreSQL database.
-async fn postgres() -> Arc<dyn WorkStore> {
+/// A pool on `name`, created empty on the bench server.
+async fn fresh_database(name: &str) -> sqlx::PgPool {
     let server = postgres_url();
     let admin = sqlx::PgPool::connect(&format!("{server}/sid"))
         .await
         .expect("bench PostgreSQL unreachable; start docker-compose.test.yml");
-    sqlx::query("DROP DATABASE IF EXISTS sid_notify_bench WITH (FORCE)")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("CREATE DATABASE sid_notify_bench")
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
         .execute(&admin)
         .await
         .unwrap();
     admin.close().await;
-    let store = sid_storage::PgWorkStore::new(
-        sqlx::PgPool::connect(&format!("{server}/sid_notify_bench"))
-            .await
-            .unwrap(),
-    );
+    sqlx::PgPool::connect(&format!("{server}/{name}"))
+        .await
+        .unwrap()
+}
+
+/// A store of its own on a fresh PostgreSQL database.
+async fn postgres() -> Arc<dyn WorkStore> {
+    let store = sid_storage::PgWorkStore::new(fresh_database("sid_notify_bench").await);
     store.ensure_schema().await.unwrap();
     Arc::new(store)
 }

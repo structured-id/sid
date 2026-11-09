@@ -40,3 +40,4 @@ pub use recipient::{RecipientSource, ResolveError};
 pub use routing::{RoutingRule, RoutingTable};
 pub use server::NotifyServer;
 pub use template::TemplateEngine;
+pub use template_store::TemplateStore;

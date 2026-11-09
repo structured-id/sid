@@ -8,7 +8,7 @@
 //! customization, so the default answers again.
 
 use crate::routing::RoutingTable;
-use crate::template::{NotificationTemplate as InternalTemplate, TemplateEngine};
+use crate::template::TemplateEngine;
 use chrono::{DateTime, Utc};
 use sid_core::models::OperationCompletion;
 use sqlx::PgConnection;
@@ -37,6 +37,17 @@ impl Channel {
 
     pub(crate) fn as_i16(self) -> i16 {
         self as i16
+    }
+
+    /// The channel a delivery's channel id names; `None` for one no
+    /// template has content for.
+    pub(crate) fn of_delivery(channel_id: &str) -> Option<Self> {
+        match channel_id {
+            "email" => Some(Self::Email),
+            "sms" => Some(Self::Sms),
+            "push" | "web_push" => Some(Self::Push),
+            _ => None,
+        }
     }
 }
 
@@ -86,20 +97,20 @@ pub(crate) struct Effective {
 }
 
 /// The template store: shipped defaults, customizations in the database.
-pub(crate) struct TemplateStore {
+pub struct TemplateStore {
     /// In-memory default templates (CE shipped).
     defaults: Vec<TemplateMeta>,
     /// Default content by (template_id, channel).
     default_content: HashMap<(String, Channel), StoredContent>,
     /// This service's database, holding the customizations.
     pool: sqlx::PgPool,
-    /// Reference to template engine for rendering.
+    /// The shipped templates, rendered when nothing customizes them.
     engine: Arc<RwLock<TemplateEngine>>,
 }
 
 impl TemplateStore {
     /// The store over `pool`, its tables created when absent.
-    pub(crate) async fn new(
+    pub async fn new(
         _routing: &RoutingTable,
         engine: Arc<RwLock<TemplateEngine>>,
         pool: sqlx::PgPool,
@@ -360,6 +371,56 @@ impl TemplateStore {
             .map(|(content, customized)| (content, customized, meta)))
     }
 
+    /// The content a delivery of `template_id` on `channel` to a recipient
+    /// of `locale` renders, read from the database when it delivers: the
+    /// channel's customization in that locale, else in `en`; a channel
+    /// without its own renders the email one the same way; else the shipped
+    /// default. `None` for a template nothing ships.
+    pub(crate) async fn delivery_content(
+        &self,
+        template_id: &str,
+        channel: Channel,
+        locale: &str,
+    ) -> Result<Option<StoredContent>, TemplateStoreError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| store_error("read a template for delivery", e))?;
+        let mut tried = Vec::with_capacity(4);
+        for candidate in [
+            (channel, locale),
+            (channel, "en"),
+            (Channel::Email, locale),
+            (Channel::Email, "en"),
+        ] {
+            if tried.contains(&candidate) {
+                continue;
+            }
+            tried.push(candidate);
+            if let Some(content) =
+                override_in(&mut conn, template_id, candidate.0, candidate.1).await?
+            {
+                return Ok(Some(content));
+            }
+        }
+        Ok(self
+            .engine
+            .read()
+            .await
+            .get(template_id)
+            .map(|t| StoredContent {
+                subject: t.subject.clone().unwrap_or_default(),
+                html_body: t.body_html.clone(),
+                text_body: t.body_text.clone(),
+                sms_body: String::new(),
+                push_title: String::new(),
+                push_body: String::new(),
+                push_action_url: String::new(),
+                updated_at: Utc::now(),
+            }))
+    }
+
     /// The locales template `template_id` has, `en` always among them.
     pub(crate) async fn available_locales(
         &self,
@@ -460,11 +521,6 @@ impl TemplateStore {
         tx.commit()
             .await
             .map_err(|e| store_error("commit a template change", e))?;
-
-        // The engine delivery renders from takes the email `en` content.
-        if channel == Channel::Email && locale == "en" {
-            self.render_from(template_id, &content).await;
-        }
         Ok(answer)
     }
 
@@ -519,27 +575,7 @@ impl TemplateStore {
         tx.commit()
             .await
             .map_err(|e| store_error("commit a template reset", e))?;
-
-        if channel == Channel::Email
-            && locale == "en"
-            && let Some(default_content) = self
-                .default_content
-                .get(&(template_id.to_string(), channel))
-        {
-            self.render_from(template_id, default_content).await;
-        }
         Ok(answer)
-    }
-
-    /// Have the engine delivery renders from use `content` for `template_id`.
-    async fn render_from(&self, template_id: &str, content: &StoredContent) {
-        self.engine.write().await.register(InternalTemplate {
-            name: template_id.to_string(),
-            subject: (!content.subject.is_empty()).then(|| content.subject.clone()),
-            body_html: content.html_body.clone(),
-            body_text: content.text_body.clone(),
-            default_priority: sid_plugin::notification::NotificationPriority::Transactional,
-        });
     }
 
     /// Render template with variables for preview.

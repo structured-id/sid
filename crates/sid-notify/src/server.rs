@@ -60,9 +60,10 @@ impl NotifyServer {
     /// Connects to PostgreSQL if `database_url` is configured.
     pub async fn new(config: NotifyConfig) -> anyhow::Result<Self> {
         let routing = RoutingTable::default_ce_rules();
-        // One engine: the template API customizes it and delivery renders from it.
+        // The shipped templates; customizations are read from the database
+        // by the template API and by every delivery.
         let engine = Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates()));
-        let mut dispatcher = NotificationDispatcher::new(Arc::clone(&engine));
+        let mut dispatcher = NotificationDispatcher::new();
 
         // Register enabled channels.
         if config.smtp_enabled {
@@ -215,6 +216,7 @@ impl NotifyServer {
             )),
             Arc::new(delivery::DeliverHandler::new(
                 self.dispatcher.clone(),
+                self.store.clone(),
                 self.resolver.clone(),
             )),
             // This service's own facts (dead-letter alerts) are relayed as
