@@ -507,6 +507,118 @@ async fn ksf_admission_bounds_memory_and_wait() {
     );
 }
 
+/// The KSF jobs a check runs, measured by the memory it must reserve: with a
+/// budget of exactly one KSF, a check running one job passes and one needing
+/// two is refused before any KSF starts. Three passwords in one domain cost
+/// one KSF; a selected domain holding only passwords outside the comparison
+/// window costs none.
+#[tokio::test]
+async fn a_check_runs_one_ksf_per_compared_domain() {
+    let (evaluator, owner, old) = owner_with_epoch().await;
+    let current = evaluator
+        .new_epoch(owner_domain(&INSTALLATION, owner), KSF)
+        .await
+        .unwrap();
+    // One KSF's memory (64 KiB rounds up to 1 MiB) and no more.
+    let one_ksf = || HistoryChecker::new(KsfAdmission::new(1, Duration::from_secs(5)));
+
+    // Three accepted passwords under the current epoch, all compared.
+    let mut entries = Vec::new();
+    for i in 0..3u8 {
+        let (domains, evaluation, public) =
+            run_operation(&evaluator, owner, &current, &[b'c', i]).await;
+        let history = snapshot(owner, &current, entries.clone());
+        let accepted = checker()
+            .check(
+                &public,
+                request(
+                    owner,
+                    &domains,
+                    &[current.epoch.descriptor()],
+                    &relayed(&evaluation),
+                    &history,
+                ),
+            )
+            .await
+            .unwrap();
+        entries.push(accepted.new_entries[0].1);
+    }
+    let three = snapshot(owner, &current, entries.clone());
+    assert_eq!(three.window(3).len(), 3);
+    let (domains, evaluation, public) = run_operation(&evaluator, owner, &current, b"new").await;
+    one_ksf()
+        .check(
+            &public,
+            request(
+                owner,
+                &domains,
+                &[current.epoch.descriptor()],
+                &relayed(&evaluation),
+                &three.restricted_to(&three.window(3)),
+            ),
+        )
+        .await
+        .expect("three passwords in one domain cost one KSF");
+
+    // An older epoch's password beside them: selected with the current
+    // epoch, it costs a second KSF while compared, and none once the window
+    // leaves it out.
+    let mut both = three.clone();
+    let mut older = snapshot(owner, &old, vec![[9; 32]]);
+    older.entries[0].seq = 0;
+    both.epochs.extend(older.epochs);
+    both.entries.extend(older.entries);
+    let descriptors = [current.epoch.descriptor(), old.epoch.descriptor()];
+    let d = pallas::Base::from_repr(owner_domain(&INSTALLATION, owner)).unwrap();
+    let r = relation::random_blind(rand::rng());
+    let b = relation::blind_request(relation::history_input(d, b"new"), r).to_bytes();
+    let domains: Vec<_> = descriptors.iter().map(OperationDomain::of).collect();
+    let evaluation = evaluator
+        .evaluate(
+            &b,
+            &owner_domain(&INSTALLATION, owner),
+            &[
+                (current.epoch.id, current.key.clone()),
+                (old.epoch.id, old.key.clone()),
+            ],
+            OPERATION,
+        )
+        .await
+        .unwrap();
+    let public = client_inputs(b"new", owner, r, &domains, &evaluation);
+    let proofs = relayed(&evaluation);
+    assert_eq!(
+        one_ksf()
+            .check(
+                &public,
+                request(
+                    owner,
+                    &domains,
+                    &descriptors,
+                    &proofs,
+                    &both.restricted_to(&both.window(4)),
+                ),
+            )
+            .await
+            .unwrap_err(),
+        HistoryCheckError::Ksf,
+        "two compared domains need two KSFs"
+    );
+    one_ksf()
+        .check(
+            &public,
+            request(
+                owner,
+                &domains,
+                &descriptors,
+                &proofs,
+                &both.restricted_to(&both.window(3)),
+            ),
+        )
+        .await
+        .expect("a domain holding only passwords outside the window costs no KSF");
+}
+
 /// The KSF's work is bounded before it starts, like its memory: an epoch
 /// asking for more passes than any accepted epoch uses is refused at once
 /// instead of holding a blocking worker for as long as it asks.
