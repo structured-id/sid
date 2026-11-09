@@ -105,6 +105,13 @@ pub trait OperationResultStore: Send + Sync {
     /// effect outside this store.
     async fn bind_operation_resource(&self, proposal: &OperationResourceBinding) -> Result<Uuid>;
 
+    /// Drop the bindings of `method` made under periods since retired and
+    /// holding no completion: commands of that method can no longer run
+    /// again, and their owner keeps nothing to reconcile from them (a message
+    /// a provider was asked to send). A creation's unfinished binding is kept
+    /// unless its owner asks. Returns how many were dropped.
+    async fn drop_unfinished_bindings(&self, method: &str) -> Result<u64>;
+
     /// Every binding still held, to carry to another store with the
     /// completions: a creation resumed after a migration must find its
     /// identifier.

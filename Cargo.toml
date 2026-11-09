@@ -269,6 +269,15 @@ sid-i18n = { path = "crates/sid-i18n" }
 [patch.crates-io]
 sid-opaque-ke = { path = "crates/sid-opaque-ke" }
 sid-voprf = { path = "crates/sid-voprf" }
+# sqlx 0.9.0 caps libsqlite3-sys below 0.38; the SQLite fixed for
+# RUSTSEC-2026-0459 (CVE-2026-119375) is libsqlite3-sys 0.39, which sqlx main
+# admits (launchbadge/sqlx#4502) and no release does yet. Removed when one does.
+sqlx = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+sqlx-core = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+sqlx-macros = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
 
 # Line tables keep file:line in panics and backtraces at a fraction of full
 # debuginfo. Build scripts and proc-macros get the same setting, so a crate

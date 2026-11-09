@@ -53,4 +53,5 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# sqlx main until a release admits the fixed SQLite (see [patch] in Cargo.toml).
+allow-git = ["https://github.com/launchbadge/sqlx"]

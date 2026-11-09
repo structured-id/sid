@@ -53,6 +53,11 @@ const FORBIDDEN = [
   "ring",
 ];
 
+// sqlx from its main branch until a sqlx release admits the SQLite the
+// engine links (see the workspace [patch] section).
+const SQLX = ["sqlx", "sqlx-core", "sqlx-macros", "sqlx-macros-core", "sqlx-postgres", "sqlx-sqlite"];
+const SQLX_GIT = "https://github.com/launchbadge/sqlx";
+
 type Metadata = {
   packages: {
     name: string;
@@ -85,7 +90,15 @@ function main(): void {
     // The ZKPP crate lives in its own workspace (the zkpp submodule); the
     // engine resolves it by version, as its consumers will.
     const patch = "patch.crates-io.sid-pake-core.path='zkpp/crates/sid-pake-core'";
-    run(root, env, "cargo", "package", "--locked", "--no-verify", "--config", patch, ...ENGINE.flatMap((p) => ["-p", p]));
+    // Packaging resolves against the registry, not the workspace [patch]:
+    // sqlx from its main branch is named here as well.
+    const sqlx = SQLX.flatMap((name) => [
+      "--config",
+      `patch.crates-io.${name}.git='${SQLX_GIT}'`,
+      "--config",
+      `patch.crates-io.${name}.branch='main'`,
+    ]);
+    run(root, env, "cargo", "package", "--locked", "--no-verify", "--config", patch, ...sqlx, ...ENGINE.flatMap((p) => ["-p", p]));
     run(join(root, "zkpp"), { ...env, CARGO_TARGET_DIR: join(work, "zkpp-target") }, "cargo", "package", "--locked", "--no-verify", "-p", "sid-pake-core");
 
     const unpacked = join(work, "crates");
@@ -131,6 +144,10 @@ function main(): void {
     cpSync(join(root, "ci/engine-consumer"), consumer, { recursive: true });
     const manifest = join(consumer, "Cargo.toml");
     const patches = [...sources].map(([name, dir]) => `${name} = { path = ${JSON.stringify(dir)} }`);
+    // A host takes sqlx from its main branch as the engine workspace does.
+    for (const name of SQLX) {
+      patches.push(`${name} = { git = ${JSON.stringify(SQLX_GIT)}, branch = "main" }`);
+    }
     writeFileSync(manifest, `${readFileSync(manifest, "utf8")}\n[patch.crates-io]\n${patches.join("\n")}\n`);
 
     // Each host store the engine supports, as its own build: a host

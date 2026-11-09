@@ -187,7 +187,33 @@ mod operation_result_store {
         a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
+        an_oversized_result_is_refused,
+        concurrent_imports_under_one_period_all_land,
     );
+}
+
+/// A host's store of its own with a period capacity of 8: the engine's
+/// tables are the same ([`host_operation_tables_match_the_engine_schema`]).
+#[tokio::test]
+async fn a_full_period_refuses_new_completions() {
+    let (store, schema) = host_operation_store().await;
+    let pool = schema_pool(&schema).await;
+    sqlx::query("UPDATE operation_period_state SET capacity = 8")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let outcome = tokio::spawn(async move {
+        sid_plugin::conformance::operation_result_store::a_full_period_refuses_new_completions(
+            &store,
+        )
+        .await
+    })
+    .await;
+    drop_schema(&schema).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
 }
 
 /// A host's operation store in a schema of its own that holds nothing else,
@@ -232,6 +258,40 @@ macro_rules! host_operation_result_store {
             }
         }
     )*};
+}
+
+/// Regression: a host's operation tables made by an earlier schema were kept
+/// as they were (`CREATE ... IF NOT EXISTS`), and its keyed commits failed on
+/// the first new column. They are refused at the schema check, unchanged.
+#[tokio::test]
+async fn host_operation_tables_of_another_schema_are_refused() {
+    let schema = format!("ops_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(setup().await.pool())
+        .await
+        .unwrap();
+    let pool = schema_pool(&schema).await;
+    sqlx::raw_sql(
+        "CREATE TABLE operation_period_state (id boolean PRIMARY KEY, issued_through bigint);
+         INSERT INTO operation_period_state VALUES (true, 0);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let refused = sid_storage::PgOperationStore::new(pool.clone())
+        .ensure_schema()
+        .await;
+    let kept: bool = sqlx::query_scalar("SELECT to_regclass('operation_schema') IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::InvalidState(_))),
+        "{refused:?}"
+    );
+    assert!(kept, "the refused database was changed");
 }
 
 /// A host replica starting on a current schema takes no lock on the
@@ -317,6 +377,8 @@ mod host_operation_result_store {
         a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
+        an_oversized_result_is_refused,
+        concurrent_imports_under_one_period_all_land,
     );
 }
 

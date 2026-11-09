@@ -79,6 +79,47 @@ async fn test_completed_resolves_retry_and_refuses_reuse() {
     assert_eq!(other_actor.completed(&storage).await.unwrap(), None);
 }
 
+/// Regression: a commit refused for room the store does not have reached
+/// the caller as an internal failure. A result larger than the store keeps
+/// is answered as exhausted, and its effect is not committed.
+#[tokio::test]
+async fn test_a_result_too_large_to_keep_is_exhausted_and_commits_nothing() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let limit = storage
+        .operation_period_policy()
+        .await
+        .unwrap()
+        .result_bytes;
+    let context = OperationContext::new(
+        OperationKey::parse("k-large").unwrap(),
+        period(&storage).await,
+    );
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    let project = Project::new("p", None);
+    let outcome = command
+        .execute(&storage, || async {
+            let ctx: MutationContext = AuditEntry::system("test", "project").into();
+            storage
+                .create_project(
+                    &project,
+                    ctx.with_operation(command.completion(vec![0; limit as usize + 1])),
+                )
+                .await
+                .map_err(Effect::<()>::Store)?;
+            Ok(sid_proto::sid::v1::projects::Project::default())
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(CommandError::Operation(OperationError::Exhausted(_)))
+        ),
+        "{outcome:?}"
+    );
+    assert!(storage.get_project(project.id).await.unwrap().is_none());
+    assert_eq!(command.completed(&storage).await.unwrap(), None);
+}
+
 /// A command named by its method's own canonical inputs is the same command
 /// for the same inputs and conflicts with other ones, and its completion
 /// names the method and the period like any keyed command's.
@@ -196,6 +237,35 @@ async fn test_resource_id_is_allocated_once_per_command() {
     // Another caller's key of the same name is another command.
     let theirs = KeyedCommand::of::<CreateProject>("profile:b", context, &create("p"));
     assert_ne!(theirs.resource_id(&storage).await.unwrap(), id);
+}
+
+/// A command with an effect outside its store learns whether it is the
+/// first attempt: exactly one of concurrent attempts is, and none after it,
+/// so a later attempt never repeats an effect the first may have made.
+#[tokio::test]
+async fn test_only_the_first_attempt_of_a_command_is_first() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
+    let context = OperationContext::new(OperationKey::parse("k-send").unwrap(), period);
+    let command = || KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("p"));
+
+    let (first, second) = (command(), command());
+    let (a, b) = tokio::join!(
+        first.first_attempt(&storage),
+        second.first_attempt(&storage)
+    );
+    assert_ne!(
+        a.unwrap(),
+        b.unwrap(),
+        "exactly one concurrent attempt is the first"
+    );
+    assert!(!command().first_attempt(&storage).await.unwrap());
+
+    let other = KeyedCommand::of::<CreateProject>("profile:a", context, &create("q"));
+    assert!(matches!(
+        other.first_attempt(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
 }
 
 /// A command named with a period the store retired binds nothing.

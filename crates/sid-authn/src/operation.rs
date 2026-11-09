@@ -25,6 +25,11 @@ pub enum OperationError {
     /// read back: the caller retries with the same context.
     #[error("the command's outcome is unknown")]
     OutcomeUnknown,
+    /// The commit needed room the store does not have (a completion this
+    /// large, another in a full period, more owed work): nothing was
+    /// committed. A new command needs a new key.
+    #[error("capacity exhausted: {0}")]
+    Exhausted(String),
     /// The store failed.
     #[error("operation store: {0}")]
     Store(sid_core::Error),
@@ -118,6 +123,29 @@ impl KeyedCommand {
         &self,
         storage: &(impl OperationResultStore + ?Sized),
     ) -> Result<uuid::Uuid, OperationError> {
+        Ok(self.bind(storage).await?.1)
+    }
+
+    /// Whether this attempt is the command's first, for a command whose
+    /// effect lies outside `storage` (a message a provider accepts): the
+    /// first attempt binds the command durably before that effect, and every
+    /// later one, concurrent or after a lost reply, finds the binding. A
+    /// later attempt without a recorded completion cannot know whether the
+    /// first made its effect and must not make it again.
+    pub async fn first_attempt(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+    ) -> Result<bool, OperationError> {
+        let (proposed, bound) = self.bind(storage).await?;
+        Ok(proposed == bound)
+    }
+
+    /// Bind this command to a fresh identifier: the one proposed and the one
+    /// the store holds for it.
+    async fn bind(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+    ) -> Result<(uuid::Uuid, uuid::Uuid), OperationError> {
         let proposal = sid_core::models::OperationResourceBinding {
             namespace: self.namespace.clone(),
             key: self.key.clone(),
@@ -126,7 +154,7 @@ impl KeyedCommand {
             period: self.period,
             resource: uuid::Uuid::now_v7(),
         };
-        storage
+        let bound = storage
             .bind_operation_resource(&proposal)
             .await
             .map_err(|e| match e {
@@ -135,7 +163,8 @@ impl KeyedCommand {
                     OperationError::PeriodRefused(refusal)
                 }
                 e => OperationError::Store(e),
-            })
+            })?;
+        Ok((proposal.resource, bound))
     }
 
     /// A correlation key of this command, the same for every attempt of it,
@@ -415,6 +444,7 @@ impl KeyedCommand {
             sid_core::Error::OperationPeriodRefused(refusal) => {
                 Err(OperationError::PeriodRefused(refusal))
             }
+            sid_core::Error::ResourceExhausted(why) => Err(OperationError::Exhausted(why)),
             e => match self.completed(storage).await {
                 Ok(Some(result)) => Ok(result),
                 _ => {

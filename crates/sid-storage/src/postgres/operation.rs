@@ -35,21 +35,56 @@ impl PgOperationStore {
         Self { pool }
     }
 
-    /// Create the operation tables if they do not exist. Replicas starting
-    /// together take turns under a transaction-scoped advisory lock:
-    /// concurrent `CREATE ... IF NOT EXISTS` of one name collides in the
-    /// catalog.
+    /// Create the operation tables if they do not exist, recording the
+    /// digest of the schema that made them; tables another schema made are
+    /// refused unchanged (`CREATE ... IF NOT EXISTS` would keep them as they
+    /// are). Replicas starting together take turns under a
+    /// transaction-scoped advisory lock: concurrent `CREATE ... IF NOT
+    /// EXISTS` of one name collides in the catalog.
     pub async fn ensure_schema(&self) -> SidResult<()> {
         let schema_error = |e: sqlx::Error| SidError::Storage(format!("operation schema: {e}"));
+        let digest = sid_core::models::operation::fingerprint(SCHEMA.as_bytes());
         let mut tx = self.pool.begin().await.map_err(schema_error)?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sid.operations.schema'))")
             .execute(&mut *tx)
             .await
             .map_err(schema_error)?;
+        let existing: bool =
+            sqlx::query_scalar("SELECT to_regclass('operation_period_state') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(schema_error)?;
+        let recorded: Option<Vec<u8>> =
+            if sqlx::query_scalar::<_, bool>("SELECT to_regclass('operation_schema') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(schema_error)?
+            {
+                sqlx::query_scalar("SELECT digest FROM operation_schema")
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(schema_error)?
+            } else {
+                None
+            };
+        if existing && recorded.as_deref() != Some(digest.as_slice()) {
+            return Err(SidError::InvalidState(
+                "the operation tables were made by another schema; the database must be \
+                 recreated"
+                    .into(),
+            ));
+        }
         sqlx::raw_sql(SCHEMA)
             .execute(&mut *tx)
             .await
             .map_err(schema_error)?;
+        sqlx::query(
+            "INSERT INTO operation_schema (id, digest) VALUES (true, $1) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&digest)
+        .execute(&mut *tx)
+        .await
+        .map_err(schema_error)?;
         tx.commit().await.map_err(schema_error)?;
         Ok(())
     }
@@ -70,16 +105,39 @@ impl PgOperationStore {
 /// the key, this one must commit nothing: `OperationCompleted`; a completion
 /// past its retention no longer holds the key and is consumed with its
 /// binding. A key a creation bound completes only that creation's command:
-/// another is refused as `OperationKeyReused`. A keyed command's period is
-/// admitted first: its row is held shared until the commit, so a retirement
-/// waits for this transaction or refuses it.
+/// another is refused as `OperationKeyReused`. A keyed command takes its
+/// place in its period first ([`take_place`]); a result larger than the
+/// policy keeps, or a full period, is `ResourceExhausted`.
 pub(super) async fn record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operation: &OperationCompletion,
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
-    if let Some(period) = period {
-        admit(tx, period, true).await?;
+    let size = i64::try_from(operation.result.len()).unwrap_or(i64::MAX);
+    match period {
+        Some(period) => {
+            if let Err(e) = take_place(tx, period, size).await {
+                // A completed key answers as completed, full period or not.
+                return Err(
+                    if matches!(e, SidError::ResourceExhausted(_))
+                        && completed(tx, operation).await?
+                    {
+                        SidError::OperationCompleted(operation.key.as_str().into())
+                    } else {
+                        e
+                    },
+                );
+            }
+        }
+        None => {
+            let limit: i64 = sqlx::query_scalar("SELECT result_bytes FROM operation_period_state")
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("operation result limit: {e}")))?;
+            if size > limit {
+                return Err(too_large(limit));
+            }
+        }
     }
     lock_key(tx, &operation.namespace, &operation.key).await?;
     consume_expired(tx, &operation.namespace, &operation.key).await?;
@@ -118,6 +176,71 @@ pub(super) async fn record_in_tx(
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
+}
+
+/// Count a completion of `size` bytes into admitted `period` on `tx`. The
+/// period's row stays locked until the commit, so commits under one period
+/// take their places in turn, a retirement waits for them or refuses them,
+/// and the count never passes the policy's capacity on any replica.
+async fn take_place(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    period: i64,
+    size: i64,
+) -> SidResult<()> {
+    let placed: Option<i64> = sqlx::query_scalar(
+        "UPDATE operation_periods p SET recorded = p.recorded + 1
+         FROM operation_period_state s
+         WHERE p.period = $1 AND p.recorded < s.capacity AND $2 <= s.result_bytes
+         RETURNING p.period",
+    )
+    .bind(period)
+    .bind(size)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if placed.is_some() {
+        return Ok(());
+    }
+    // Why not, read once the commit is refused anyway.
+    let (recorded, capacity, limit): (Option<i64>, i64, i64) = sqlx::query_as(
+        "SELECT p.recorded, s.capacity, s.result_bytes
+         FROM operation_period_state s
+         LEFT JOIN operation_periods p ON p.period = $1",
+    )
+    .bind(period)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if recorded.is_none() {
+        return admit(tx, period, false).await;
+    }
+    if size > limit {
+        return Err(too_large(limit));
+    }
+    Err(SidError::ResourceExhausted(format!(
+        "operation period full ({capacity} completions)"
+    )))
+}
+
+/// Whether `operation`'s key holds a completion still kept.
+async fn completed(
+    conn: &mut sqlx::PgConnection,
+    operation: &OperationCompletion,
+) -> SidResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM operation_results
+             WHERE namespace = $1 AND op_key = $2
+               AND (retain_until IS NULL OR retain_until > NOW()))",
+    )
+    .bind(&operation.namespace)
+    .bind(operation.key.as_str())
+    .fetch_one(conn)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation result: {e}")))
+}
+
+fn too_large(limit: i64) -> SidError {
+    SidError::ResourceExhausted(format!("operation result larger than {limit} bytes"))
 }
 
 /// Serialize the transactions that decide who holds `key` in `namespace`: a
@@ -263,11 +386,22 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
         .begin()
         .await
         .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+    // A carried completion counts toward its period's capacity here too,
+    // whatever the count. The count is written first, so the period's row is
+    // held for writing from the start: a shared hold upgraded later would
+    // deadlock two imports under one period. A duplicate rolls it back.
     if let Some(period) = c.period {
-        match admit(&mut tx, column(period)?, true).await {
-            Ok(()) => {}
-            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
-            Err(e) => return Err(e),
+        let counted: Option<i64> = sqlx::query_scalar(
+            "UPDATE operation_periods SET recorded = recorded + 1 WHERE period = $1
+             RETURNING period",
+        )
+        .bind(column(period)?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        if counted.is_none() {
+            // Retired or never issued here: refused anyway.
+            return Ok(false);
         }
     }
     let inserted = sqlx::query(
@@ -288,10 +422,14 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
     .rows_affected();
+    if inserted == 0 {
+        // The key is completed here already: the count rolls back with it.
+        return Ok(false);
+    }
     tx.commit()
         .await
         .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
-    Ok(inserted == 1)
+    Ok(true)
 }
 
 pub(super) async fn get(
@@ -565,16 +703,28 @@ fn seconds(column: &str, value: i64) -> SidResult<Duration> {
         .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
 }
 
+/// A stored positive bound.
+fn bound(column: &str, value: i64) -> SidResult<u64> {
+    u64::try_from(value)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
+}
+
 async fn period_policy(pool: &PgPool) -> SidResult<OperationPeriodPolicy> {
-    let (acceptance, retention): (i64, i64) =
-        sqlx::query_as("SELECT acceptance_seconds, retention_seconds FROM operation_period_state")
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| SidError::Storage(format!("operation period policy: {e}")))?
-            .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
+    let (acceptance, retention, capacity, result_bytes): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT acceptance_seconds, retention_seconds, capacity, result_bytes
+         FROM operation_period_state",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period policy: {e}")))?
+    .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
     Ok(OperationPeriodPolicy {
         acceptance: seconds("acceptance_seconds", acceptance)?,
         retention: seconds("retention_seconds", retention)?,
+        capacity: bound("capacity", capacity)?,
+        result_bytes: bound("result_bytes", result_bytes)?,
     })
 }
 
@@ -784,8 +934,33 @@ async fn import_resource(pool: &PgPool, binding: &OperationResourceBinding) -> S
     Ok(inserted == 1)
 }
 
+/// Drop the bindings of `method` under retired periods that hold no
+/// completion: a retired period has no row and a number at most the last
+/// issued.
+async fn drop_unfinished(pool: &PgPool, method: &str) -> SidResult<u64> {
+    let dropped = sqlx::query(
+        "DELETE FROM operation_resources r
+         WHERE r.method = $1 AND r.period IS NOT NULL
+           AND r.period <= (SELECT issued_through FROM operation_period_state)
+           AND NOT EXISTS (SELECT 1 FROM operation_periods p WHERE p.period = r.period)
+           AND NOT EXISTS (
+               SELECT 1 FROM operation_results o
+               WHERE o.namespace = r.namespace AND o.op_key = r.op_key)",
+    )
+    .bind(method)
+    .execute(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("drop unfinished operation resources: {e}")))?
+    .rows_affected();
+    Ok(dropped)
+}
+
 #[async_trait]
 impl OperationResultStore for PgOperationStore {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        drop_unfinished(&self.pool, method).await
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         period_policy(&self.pool).await
     }
@@ -883,6 +1058,10 @@ impl OperationResultStore for PgOperationStore {
 
 #[async_trait]
 impl OperationResultStore for PostgresBackend {
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        drop_unfinished(&self.pool, method).await
+    }
+
     async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
         period_policy(&self.pool).await
     }

@@ -1767,6 +1767,8 @@ impl sid_plugin::OperationResultStore for MockStorage {
         Ok(sid_core::models::OperationPeriodPolicy {
             acceptance: chrono::Duration::hours(1),
             retention: chrono::Duration::days(1),
+            capacity: 100_000,
+            result_bytes: 65_536,
         })
     }
     async fn current_operation_period(
@@ -1953,6 +1955,26 @@ impl sid_plugin::OperationResultStore for MockStorage {
                 Ok(proposal.resource)
             }
         }
+    }
+    async fn drop_unfinished_bindings(&self, method: &str) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let last = inner.operation_periods_issued;
+        let retired: Vec<_> = inner
+            .operation_resources
+            .iter()
+            .filter(|(slot, b)| {
+                b.method == method
+                    && b.period.is_some_and(|p| {
+                        p.get() <= last && !inner.operation_periods.contains_key(&p.get())
+                    })
+                    && !inner.operations.contains_key(*slot)
+            })
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        for slot in &retired {
+            inner.operation_resources.remove(slot);
+        }
+        Ok(retired.len() as u64)
     }
     async fn export_operation_resources(
         &self,

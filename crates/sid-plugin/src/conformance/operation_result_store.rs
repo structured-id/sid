@@ -241,6 +241,187 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
     assert!(left.contains(&kept) && left.contains(&unbounded) && left.contains(&expired));
 }
 
+/// Completions carried from another store under one period, imported
+/// concurrently, all land: importing never deadlocks two imports of one
+/// period.
+pub async fn concurrent_imports_under_one_period_all_land(store: &dyn OperationResultStore) {
+    let period = store
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let records: Vec<_> = (0..16)
+        .map(|_| sid_core::models::OperationRecord {
+            completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
+                .in_period(period),
+            completed_at: chrono::Utc::now(),
+        })
+        .collect();
+    let imported =
+        futures::future::join_all(records.iter().map(|r| store.import_operation_result(r))).await;
+    for outcome in imported {
+        assert!(outcome.expect("an import under a shared period"));
+    }
+    for record in &records {
+        assert!(
+            store
+                .get_operation_result(&ns, &record.completion.key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+/// A completion whose result is larger than the policy keeps is refused as
+/// exhausted and writes nothing, with or without a period; one exactly at
+/// the limit is recorded.
+pub async fn an_oversized_result_is_refused(store: &dyn OperationResultStore) {
+    let limit = usize::try_from(store.operation_period_policy().await.unwrap().result_bytes)
+        .expect("a result limit within memory");
+    let period = store
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let sized = |key: &OperationKey, size: usize, period| {
+        let completion =
+            OperationCompletion::new(&ns, key.clone(), "keyed", b"inputs", vec![7; size]);
+        MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
+            match period {
+                Some(period) => completion.in_period(period),
+                None => completion,
+            },
+        )
+    };
+    for named in [Some(period), None] {
+        let (over, at) = (key(), key());
+        let err = store
+            .record_outcome(sized(&over, limit + 1, named))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+        assert!(
+            store
+                .get_operation_result(&ns, &over)
+                .await
+                .unwrap()
+                .is_none(),
+            "a refused completion was written"
+        );
+        store
+            .record_outcome(sized(&at, limit, named))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_operation_result(&ns, &at)
+                .await
+                .unwrap()
+                .expect("recorded")
+                .completion
+                .result
+                .len(),
+            limit
+        );
+    }
+}
+
+/// A period never holds more than the policy's capacity of completions,
+/// however its commits are spread: a writer past it is refused as exhausted
+/// and writes nothing, while a completed key still answers as completed and
+/// resolves; a fresh period admits again. A store may split the capacity
+/// over parts of a period, so a part may fill before the whole; most of the
+/// capacity is still used when many keys arrive. Needs a store of its own
+/// whose harness set a capacity of at most 8.
+pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultStore) {
+    use chrono::{Duration, Utc};
+
+    let capacity = store.operation_period_policy().await.unwrap().capacity;
+    assert!(capacity <= 8, "the harness sets a small capacity");
+    let now = Utc::now();
+    let period = store
+        .current_operation_period(now, Duration::minutes(1))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    let keyed = |key: &OperationKey, period| {
+        MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
+            OperationCompletion::new(&ns, key.clone(), "keyed", b"inputs", b"done".to_vec())
+                .in_period(period),
+        )
+    };
+    // Far more writers than the period holds, sixteen at a time.
+    let mut kept = Vec::new();
+    let mut refused = 0;
+    for _ in 0..16 {
+        let keys: Vec<OperationKey> = (0..16).map(|_| key()).collect();
+        let outcomes = futures::future::join_all(
+            keys.iter()
+                .map(|key| store.record_outcome(keyed(key, period))),
+        )
+        .await;
+        for (key, outcome) in keys.iter().zip(outcomes) {
+            match outcome {
+                Ok(()) => kept.push(key.clone()),
+                Err(Error::ResourceExhausted(_)) => {
+                    refused += 1_u32;
+                    assert!(
+                        store
+                            .get_operation_result(&ns, key)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "a refused completion was written"
+                    );
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+    }
+    let held = kept.len() as u64;
+    assert!(held <= capacity, "the period held {held} of {capacity}");
+    assert!(
+        held * 2 >= capacity,
+        "the period held only {held} of {capacity}"
+    );
+    assert!(refused > 0);
+    let err = store
+        .record_outcome(keyed(&kept[0], period))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::OperationCompleted(_)), "{err:?}");
+    assert!(
+        store
+            .get_operation_result(&ns, &kept[0])
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let fresh = store
+        .current_operation_period(now + Duration::minutes(2), Duration::minutes(1))
+        .await
+        .unwrap()
+        .period;
+    assert!(fresh > period);
+    let mut admitted = false;
+    for _ in 0..256 {
+        match store.record_outcome(keyed(&key(), fresh)).await {
+            Ok(()) => {
+                admitted = true;
+                break;
+            }
+            Err(Error::ResourceExhausted(_)) => {}
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert!(admitted, "a fresh period admits again");
+}
+
 /// The life of the periods keyed commands are admitted under, in one
 /// scenario because periods are shared by the whole store: it works in a
 /// window a month back that no other caller names.
@@ -331,6 +512,19 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     let unfinished = key();
     let begun = in_period(&unfinished);
     store.bind_operation_resource(&begun).await.unwrap();
+    // A send bound in the period and never completed, and one bound in the
+    // next period: once the first period is retired, its owner drops the
+    // first; the other is still needed.
+    let sent = OperationResourceBinding {
+        period: Some(first.period),
+        ..proposal(&ns, &key(), "send")
+    };
+    store.bind_operation_resource(&sent).await.unwrap();
+    let sending = OperationResourceBinding {
+        period: Some(next.period),
+        ..proposal(&ns, &key(), "send")
+    };
+    store.bind_operation_resource(&sending).await.unwrap();
     let mut unissued_binding = in_period(&key());
     unissued_binding.period = Some(OperationPeriod::new(i64::MAX as u64));
     assert_eq!(
@@ -397,6 +591,20 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     assert!(
         bindings.contains(&begun),
         "an unfinished creation's binding is kept to reconcile it"
+    );
+    assert!(store.drop_unfinished_bindings("send").await.unwrap() >= 1);
+    let bindings = store.export_operation_resources().await.unwrap();
+    assert!(
+        !bindings.contains(&sent),
+        "an unfinished send under a retired period stayed"
+    );
+    assert!(
+        bindings.contains(&sending),
+        "a send under an admitted period was dropped"
+    );
+    assert!(
+        bindings.contains(&begun),
+        "another method's unfinished binding was dropped"
     );
     // Carried to another store, that binding still holds its key there,
     // although no command runs under its retired period any more.

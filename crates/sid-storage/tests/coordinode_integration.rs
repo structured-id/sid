@@ -516,7 +516,31 @@ mod operation_result_store {
         a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
+        an_oversized_result_is_refused,
+        concurrent_imports_under_one_period_all_land,
     );
+
+    /// A store of its own with a period capacity of 8.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_period_refuses_new_completions() {
+        let harness::Store(backend, db) = store().await;
+        tokio::task::spawn_blocking(move || {
+            db.execute_cypher_shared(
+                "MATCH (s:SidOperationState) WHERE s.id = 1 SET s.capacity = 8",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a host write");
+        })
+        .await
+        .unwrap();
+        sid_plugin::conformance::operation_result_store::a_full_period_refuses_new_completions(
+            &backend,
+        )
+        .await;
+    }
 }
 
 /// Run ceremony state conformance `scenario`; each one uses namespaces of
@@ -707,6 +731,33 @@ mod principal_store {
         other_type_resolves_nobody,
         other_key_revision_resolves_nobody,
         released_principal_resolves_nobody,
+    );
+}
+
+/// Regression: a store whose operation period state was written before the
+/// policy held its bounds opened, then failed every keyed commit. It is
+/// refused at opening.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_refuses_operation_state_of_an_earlier_schema() {
+    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
+    let host = db.clone();
+    tokio::task::spawn_blocking(move || {
+        host.execute_cypher_shared(
+            "CREATE (s:SidOperationState {id: 1, issued_through: 0, acceptance_seconds: 3600,
+                retention_seconds: 86400})",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("a host write");
+    })
+    .await
+    .unwrap();
+    let refused = CoordinodeBackend::new(db).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Storage(_))),
+        "an earlier operation state was taken"
     );
 }
 
