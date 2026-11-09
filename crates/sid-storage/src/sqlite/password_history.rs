@@ -361,7 +361,7 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
     // retired by the evaluator, from the live set, never by this commit.
     sqlx::query("DELETE FROM password_history_entries WHERE owner_id = ? AND seq <= ?")
         .bind(owner)
-        .bind(seq - i64::from(commit.depth))
+        .bind(seq - i64::from(commit.retention))
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;
@@ -961,6 +961,16 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         audit: AuditEntry,
     ) -> SidResult<Vec<KeyEpoch>> {
         let owner_domain = prep.owner_domain.as_slice();
+        let window = sorted_live(&prep.window);
+        if !prep
+            .window
+            .iter()
+            .all(|epoch| prep.live.live.contains(epoch))
+        {
+            return Err(SidError::Validation(
+                "the comparison window names an epoch outside the live set".into(),
+            ));
+        }
         let mut tx = self.begin_write().await?;
         refuse_purged(&mut tx, owner_domain).await?;
         for epoch in &prep.live.live {
@@ -1047,7 +1057,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         .await
         .map_err(storage("epoch retirement"))?;
         // The active epoch and the compare-only epochs of this preparation's
-        // live set.
+        // comparison window.
         let rows = sqlx::query(concat!(
             "SELECT ",
             key_epoch_columns!(),
@@ -1064,7 +1074,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             .filter(|epoch| match epoch {
                 Ok(epoch) => {
                     epoch.status == HistoryEpochUse::Active
-                        || live.binary_search(&epoch.id.0).is_ok()
+                        || window.binary_search(&epoch.id.0).is_ok()
                 }
                 Err(_) => true,
             })

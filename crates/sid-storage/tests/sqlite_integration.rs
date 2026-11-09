@@ -329,6 +329,7 @@ history_key_store!(
     ensures_of_a_known_owner_agree,
     owner_domains_are_separate,
     epoch_rotation,
+    window_selects_without_retiring,
     lifecycle_follows_the_live_set,
     stale_live_set_cannot_retire,
     key_archive_round_trip,

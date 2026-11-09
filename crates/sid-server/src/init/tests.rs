@@ -595,7 +595,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
             operation: uuid::Uuid::now_v7(),
             policy_version: 1,
         },
-        depth: 3,
+        retention: 3,
         max_age_days: 0,
     };
     let next = |data: &[u8]| {

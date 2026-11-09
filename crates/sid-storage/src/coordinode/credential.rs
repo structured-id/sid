@@ -556,7 +556,7 @@ pub(super) fn apply_history(tx: &Statements<'_>, commit: &HistoryCommit) -> SidR
     tx.run(
         "MATCH (h:SidHistoryEntry) WHERE h.owner_id = $owner AND h.seq <= $oldest
          DETACH DELETE h",
-        params().with("oldest", Value::Int(seq - i64::from(commit.depth))),
+        params().with("oldest", Value::Int(seq - i64::from(commit.retention))),
     )?;
     // Age retention, under the same revision fence: older accepted passwords
     // go, the newest (this commit's) always stays.

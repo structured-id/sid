@@ -108,7 +108,7 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
             operation: uuid::Uuid::now_v7(),
             policy_version: 1,
         },
-        depth: 3,
+        retention: 3,
         max_age_days: 0,
     };
     assert!(

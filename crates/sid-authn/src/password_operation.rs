@@ -71,7 +71,9 @@ pub use relayed::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
+use sid_core::models::password_history::MAX_HISTORY_DEPTH;
 use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
+use sid_core::models::password_history::MAX_LIVE_HISTORY_DOMAINS;
 use sid_core::models::password_history::commit_deadline;
 use sid_core::models::{
     AuditEntry, Credential, CredentialType, EnrollmentAdmission, EnrollmentCleanup, HistoryCommit,
@@ -187,6 +189,12 @@ pub struct PendingOperation<O, P> {
     pub epochs: Vec<HistoryEpochDescriptor>,
     /// The owner's history revision the selection was made at.
     pub history_revision: i64,
+    /// The comparison depth in force when the operation was prepared; a
+    /// later depth edit does not change this operation.
+    pub depth: u32,
+    /// The accepted passwords this operation compares with, `(epoch, seq)`,
+    /// newest first: the newest `depth` of the history it read.
+    pub window: Vec<(HistoryEpochId, i64)>,
     pub policy_version: u32,
     /// The OPRF credential identifier of the password this operation installs:
     /// the key under which its registration request is evaluated and, once
@@ -363,7 +371,11 @@ pub struct PasswordOperations<S: ?Sized + CredentialStore, P> {
     proof_permits: Arc<Semaphore>,
     ops: ChallengeStore<PendingOperation<S::Owner, P>>,
     installation: [u8; 16],
+    /// How many of the owner's newest accepted passwords a new one is
+    /// compared with.
     depth: u32,
+    /// How many accepted passwords a commit keeps; never cut by `depth`.
+    retention: u32,
     /// First enrollments admitted and not yet ended, across replicas.
     enrollment_capacity: u64,
 }
@@ -401,8 +413,8 @@ impl LiveDomains {
 
 /// What the credential service asks the evaluator to admit: the operation,
 /// its owner by history input domain, what it does to the owner's history,
-/// until when it can commit, who its evaluations are charged to, and the
-/// owner's live history domains.
+/// until when it can commit, who its evaluations are charged to, the
+/// owner's live history domains and the domains of its comparison window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryAdmission {
     pub id: PasswordOperationId,
@@ -411,6 +423,9 @@ pub struct HistoryAdmission {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub charge_key: String,
     pub live: LiveDomains,
+    /// The domains holding an entry of the operation's comparison window,
+    /// sorted, without duplicates: a subset of `live.domains`.
+    pub window: Vec<[u8; 32]>,
 }
 
 impl HistoryAdmission {
@@ -432,15 +447,22 @@ impl HistoryAdmission {
                     value: op.as_bytes().to_vec(),
                 })
                 .collect(),
+            comparison_domains: self.window.iter().map(|d| d.to_vec()).collect(),
         })
     }
 
     /// The admission a preparation request carries, decoded; the evaluator
     /// checks each live domain against the owner's epochs.
     pub fn of_request(req: &PreparePasswordHistoryRequest) -> Result<Self, PasswordOperationError> {
-        if req.live_comparison_domains.len() > MAX_HISTORY_DOMAINS {
+        if req.live_comparison_domains.len() > MAX_LIVE_HISTORY_DOMAINS {
             return Err(invalid_field(
                 "live_comparison_domains",
+                "more domains than history retains",
+            ));
+        }
+        if req.comparison_domains.len() > MAX_HISTORY_DOMAINS {
+            return Err(invalid_field(
+                "comparison_domains",
                 "more domains than an operation holds",
             ));
         }
@@ -458,6 +480,21 @@ impl HistoryAdmission {
             .map(|d| array32(d, "live_comparison_domains"))
             .collect::<Result<Vec<_>, _>>()?;
         domains.sort_unstable();
+        let mut window = req
+            .comparison_domains
+            .iter()
+            .map(|d| array32(d, "comparison_domains"))
+            .collect::<Result<Vec<_>, _>>()?;
+        window.sort_unstable();
+        if window.windows(2).any(|w| w[0] == w[1]) {
+            return Err(invalid_field("comparison_domains", "a domain named twice"));
+        }
+        if !window.iter().all(|d| domains.binary_search(d).is_ok()) {
+            return Err(invalid_field(
+                "comparison_domains",
+                "a domain outside the live set",
+            ));
+        }
         let settled = req
             .settled_operations
             .iter()
@@ -481,6 +518,7 @@ impl HistoryAdmission {
                 domains,
                 settled,
             },
+            window,
         })
     }
 }
@@ -950,8 +988,29 @@ where
             ),
             installation: installation.into().0,
             depth: DEFAULT_HISTORY_DEPTH,
+            retention: DEFAULT_HISTORY_DEPTH,
             enrollment_capacity: ENROLLMENT_CAPACITY,
         }
+    }
+
+    /// The same, comparing a new password with the owner's newest `depth`
+    /// accepted passwords and keeping `retention` of them, each 1..=24. The
+    /// two are independent: a lower depth compares fewer and deletes none.
+    pub fn with_history_depth(
+        mut self,
+        depth: u32,
+        retention: u32,
+    ) -> Result<Self, PasswordOperationError> {
+        let range = 1..=MAX_HISTORY_DEPTH;
+        if !range.contains(&depth) {
+            return Err(invalid_field("depth", "1 to 24 accepted passwords"));
+        }
+        if !range.contains(&retention) {
+            return Err(invalid_field("retention", "1 to 24 accepted passwords"));
+        }
+        self.depth = depth;
+        self.retention = retention;
+        Ok(self)
     }
 
     /// The same, admitting at most `capacity` open first enrollments.
@@ -1040,6 +1099,8 @@ where
             owner_domain: owner_domain(&self.installation, owner),
             epochs: Vec::new(),
             history_revision: 0,
+            depth: self.depth,
+            window: Vec::new(),
             policy_version: zkpp.config().policy_version,
             credential_identifier: rand::random(),
             registration_request: None,
@@ -1083,6 +1144,16 @@ where
                 Err(e) => return Err(internal(e)),
             }
         }
+        // The window is taken now and kept with the operation, so a depth
+        // edit applies to later operations only.
+        let window = history.window(op.depth);
+        let mut window_domains: Vec<[u8; 32]> = history
+            .window_epochs(&window)
+            .iter()
+            .filter(|e| window.iter().any(|(epoch, _)| *epoch == e.id))
+            .map(|e| OperationDomain::of(&e.descriptor()).comparison_domain)
+            .collect();
+        window_domains.sort_unstable();
         let epochs = self
             .evaluator
             .prepare(&HistoryAdmission {
@@ -1092,12 +1163,13 @@ where
                 expires_at,
                 charge_key: charge_key(&actor),
                 live: LiveDomains::of(&history),
+                window: window_domains,
             })
             .await?;
         // The evaluator chose the epochs; the credential service, which
-        // reads the entries, accepts only a complete selection whose known
-        // epochs keep the descriptions it recorded.
-        if !selection_is_complete(kind, &epochs, &history) {
+        // reads the entries, accepts only the selection its window requires,
+        // whose known epochs keep the descriptions it recorded.
+        if !selection_is_complete(kind, &epochs, &history, &window) {
             warn!(
                 "password operation {} got a history selection its history does not require",
                 op.id
@@ -1106,6 +1178,7 @@ where
         }
         op.epochs = epochs;
         op.history_revision = history.revision;
+        op.window = window;
         self.store(&op).await?;
         let context = PasswordHistoryContext {
             operation_id: Some(op.id.into()),
@@ -1479,13 +1552,16 @@ where
         if history.revision != op.history_revision {
             return Err(PasswordOperationError::HistoryChanged);
         }
-        if !selection_is_complete(op.kind, &op.epochs, &history) {
+        if !selection_is_complete(op.kind, &op.epochs, &history, &op.window) {
             warn!(
                 "password operation {} has a history selection its history does not require",
                 op.id
             );
             return Err(internal("history selection does not match the history"));
         }
+        // Compared with the window the operation was prepared with, never
+        // with retained passwords outside it.
+        let history = history.restricted_to(&op.window);
         let checked = self
             .checker
             .check(
@@ -1518,7 +1594,7 @@ where
                 operation: op.id.into_uuid(),
                 policy_version: op.policy_version,
             },
-            depth: self.depth,
+            retention: self.retention,
             // The purpose sets the installation's age retention as it commits.
             max_age_days: 0,
         };
@@ -1533,11 +1609,12 @@ where
 }
 
 /// Whether `epochs`, the evaluator's selection for an operation of `kind`,
-/// is what `history` requires: one epoch for a decoy; for a new owner one
-/// epoch and no history yet; for an existing owner each epoch once, the
-/// operation's active epoch first (the history's active epoch, or a
-/// replacement the history does not know yet), every epoch that retains an
-/// entry, and every epoch the history knows with the description it
+/// is what `history` and the operation's comparison `window` require: one
+/// epoch for a decoy; for a new owner one epoch and no history yet; for an
+/// existing owner each epoch once, the operation's active epoch first (the
+/// history's active epoch, or a replacement the history does not know yet),
+/// every epoch holding an entry of the window and no other epoch holding
+/// entries, and every epoch the history knows with the description it
 /// recorded. An epoch the history knows without entries may be named (it was
 /// emptied after the evaluator last heard of it); one it does not know may
 /// only be the new active epoch.
@@ -1545,6 +1622,7 @@ fn selection_is_complete<O>(
     kind: OwnerKind,
     epochs: &[HistoryEpochDescriptor],
     history: &PasswordHistory<O>,
+    window: &[(HistoryEpochId, i64)],
 ) -> bool {
     let once = epochs
         .iter()
@@ -1568,12 +1646,16 @@ fn selection_is_complete<O>(
             let active = history
                 .active_epoch()
                 .is_none_or(|a| epochs[0].id == a.id || recorded(epochs[0].id).is_none());
-            let complete = history
-                .epochs
+            let in_window = |id: HistoryEpochId| window.iter().any(|(epoch, _)| *epoch == id);
+            let complete = window
                 .iter()
-                .filter(|r| history.entries_of(r.id).next().is_some())
-                .all(|r| epochs.iter().any(|e| e.id == r.id));
-            described && active && complete
+                .all(|(epoch, _)| epochs.iter().any(|e| e.id == *epoch));
+            // Beside the active epoch, an epoch holding only entries outside
+            // the window costs a domain the window does not need.
+            let within = epochs[1..]
+                .iter()
+                .all(|e| in_window(e.id) || history.entries_of(e.id).next().is_none());
+            described && active && complete && within
         }
     }
 }
@@ -1766,9 +1848,16 @@ impl HistoryEvaluation {
             }
             OwnerKind::Existing => {
                 let live = live_set_bounds(&admission.live)?;
+                if admission.window.len() > MAX_HISTORY_DOMAINS {
+                    return Err(invalid_field(
+                        "comparison_domains",
+                        "more domains than an operation holds",
+                    ));
+                }
                 let epochs = self
                     .current_epochs(&owner_domain, live.revision, policy)
                     .await?;
+                let window = window_epochs(&epochs, &admission.window, live)?;
                 let live = live_epochs(&epochs, live)?;
                 let selected = self
                     .keys
@@ -1776,6 +1865,7 @@ impl HistoryEvaluation {
                         &sid_core::models::HistoryPreparation {
                             owner_domain,
                             live,
+                            window,
                             operation: admission.id.into_uuid(),
                             expires_at: admission.expires_at,
                             now,
@@ -2023,10 +2113,10 @@ fn live_set_bounds(live: &LiveDomains) -> Result<&LiveDomains, PasswordOperation
     if live.revision < 0 {
         return Err(invalid_field("history_revision", "out of range"));
     }
-    if live.domains.len() > MAX_HISTORY_DOMAINS {
+    if live.domains.len() > MAX_LIVE_HISTORY_DOMAINS {
         return Err(invalid_field(
             "live_comparison_domains",
-            "more domains than an operation holds",
+            "more domains than history retains",
         ));
     }
     if live.settled.len() > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize {
@@ -2070,6 +2160,37 @@ fn live_epochs(
         live: ids,
         settled,
     })
+}
+
+/// The owner's epochs named by the comparison window `window`, sorted: each
+/// domain one the evaluator issued for this owner and named by `live` too.
+/// Anything else is refused before a key is selected.
+fn window_epochs(
+    epochs: &KeyEpochs,
+    window: &[[u8; 32]],
+    live: &LiveDomains,
+) -> Result<Vec<HistoryEpochId>, PasswordOperationError> {
+    let refused = |why: &str| {
+        warn!("history comparison window refused: {why}");
+        unavailable("history lifecycle")
+    };
+    let mut ids = Vec::with_capacity(window.len());
+    for domain in window {
+        if !live.domains.contains(domain) {
+            return Err(refused("a domain outside the live set"));
+        }
+        let epoch = epochs
+            .epochs
+            .iter()
+            .find(|e| OperationDomain::of(&e.descriptor()).comparison_domain == *domain)
+            .ok_or_else(|| refused("a domain not issued for the owner"))?;
+        ids.push(epoch.id);
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|w| w[0] == w[1]) {
+        return Err(refused("a domain named twice"));
+    }
+    Ok(ids)
 }
 
 #[async_trait::async_trait]

@@ -1122,7 +1122,7 @@ async fn history(source: &SqliteBackend) {
             operation: Uuid::now_v7(),
             policy_version: 1,
         },
-        depth: 24,
+        retention: 24,
         max_age_days: 0,
     };
     assert!(
@@ -1154,6 +1154,7 @@ async fn history(source: &SqliteBackend) {
                 live: vec![epoch.epoch.id],
                 settled: vec![],
             },
+            window: vec![epoch.epoch.id],
             operation: Uuid::now_v7(),
             expires_at: now + Duration::minutes(10),
             now,

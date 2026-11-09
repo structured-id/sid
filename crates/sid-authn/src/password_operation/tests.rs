@@ -99,6 +99,8 @@ fn pending(purpose: Change) -> PendingOperation<ProfileId, Change> {
         owner_domain: [1; 32],
         epochs: vec![],
         history_revision: 0,
+        depth: 1,
+        window: vec![],
         policy_version: 3,
         credential_identifier: [7; 16],
         registration_request: None,
@@ -116,6 +118,7 @@ fn admission(kind: OwnerKind, owner_domain: [u8; 32]) -> HistoryAdmission {
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
         charge_key: charge_key("profile:test"),
         live: LiveDomains::default(),
+        window: vec![],
     }
 }
 
@@ -861,6 +864,146 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
     assert!(record.evaluation.is_none(), "nothing was evaluated");
 }
 
+/// The comparison window is the newest `depth` accepted passwords and nothing
+/// else: an operation selects the active epoch plus the epochs holding
+/// window entries, one domain (one KSF) per epoch however many of its
+/// passwords are in the window. A live epoch holding only passwords outside
+/// the window is neither selected nor retired, so a deeper window later
+/// reaches it again; the depth an operation was prepared with is kept with
+/// it. Depth deletes nothing: every retained password stays.
+#[tokio::test]
+async fn a_comparison_window_selects_without_deleting() {
+    use sid_core::models::{CredentialData, HistoryEpochUse, Profile};
+
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let (_, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
+    let keys = storage.history_keys();
+    let ctx = || MutationContext::from(AuditEntry::system("test", "window"));
+    let profile = Profile::new(Some("windowed"));
+    storage.create_profile(&profile, ctx()).await.unwrap();
+    let password = Credential::new(profile.id, CredentialType::Opaque, b"p0".to_vec(), None);
+    storage.create_credential(&password, ctx()).await.unwrap();
+    let domain = owner_domain(installation.as_bytes(), profile.id);
+
+    // Three accepted passwords under an epoch made with an outdated KSF.
+    let old = evaluation
+        .evaluator
+        .new_epoch(
+            domain,
+            HistoryKsf {
+                memory_kib: 1024,
+                passes: 1,
+                lanes: 1,
+            },
+        )
+        .await
+        .unwrap();
+    keys.create_first_epoch(&old, uuid::Uuid::now_v7(), audit("test"))
+        .await
+        .unwrap();
+    let change_to = async |from: u8, to: u8, epochs: Vec<HistoryEpochDescriptor>| {
+        let revision = storage
+            .get_password_history(profile.id)
+            .await
+            .unwrap()
+            .revision;
+        let mut changed = password.clone();
+        changed.data = CredentialData::new(vec![b'p', to]);
+        let commit = HistoryCommit {
+            owner: profile.id,
+            expected_revision: revision,
+            entries: vec![(epochs[0].id, [to; 32])],
+            epochs,
+            evidence: HistoryEvidence {
+                operation: uuid::Uuid::now_v7(),
+                policy_version: 1,
+            },
+            retention: 24,
+            max_age_days: 0,
+        };
+        assert!(
+            storage
+                .change_password(password.id, &[b'p', from], &changed, Some(&commit), ctx())
+                .await
+                .unwrap()
+        );
+    };
+    for (from, to) in [(b'0', b'1'), (b'1', b'2'), (b'2', b'3')] {
+        change_to(from, to, vec![old.epoch.descriptor()]).await;
+    }
+    // Rotated to the current KSF; two more under the replacement.
+    let history = storage.get_password_history(profile.id).await.unwrap();
+    let rotated = evaluation
+        .current_epochs(
+            &domain,
+            history.revision,
+            &evaluation.epoch_policy().await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let current = rotated.active_epoch().unwrap().descriptor();
+    for (from, to) in [(b'3', b'4'), (b'4', b'5')] {
+        change_to(from, to, vec![current, old.epoch.descriptor()]).await;
+    }
+    let history = storage.get_password_history(profile.id).await.unwrap();
+    assert_eq!(history.entries.len(), 5, "every accepted password kept");
+
+    let prepared = async |depth: u32| {
+        let (ops, _) = split(storage.clone(), installation, manager(3), manager(3));
+        let ops = ops.with_history_depth(depth, 24).unwrap();
+        let prepared = ops
+            .prepare(
+                &zkpp_without_proofs(),
+                change(),
+                OperationOwner::Existing(profile.id),
+                "profile:window".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+        (prepared.context.domains.len(), ops.take(&id).await.unwrap())
+    };
+
+    // Depth 2: the two newest, both under the current epoch.
+    let (domains, op) = prepared(2).await;
+    assert_eq!(domains, 1, "one domain: the old epoch is not evaluated");
+    assert_eq!(op.depth, 2);
+    assert_eq!(op.window.len(), 2);
+    assert!(op.window.iter().all(|(epoch, _)| *epoch == current.id));
+    let kept = keys.get_key_epochs(&domain).await.unwrap();
+    assert_eq!(
+        kept.epochs
+            .iter()
+            .find(|e| e.id == old.epoch.id)
+            .map(|e| e.status),
+        Some(HistoryEpochUse::CompareOnly),
+        "a key outside the window was retired"
+    );
+
+    // Depth 5: all five, in two domains; the old epoch's three passwords
+    // cost one domain, not three.
+    let (domains, op) = prepared(5).await;
+    assert_eq!(domains, 2);
+    assert_eq!(op.window.len(), 5);
+
+    // Depth 10, above what is retained: what exists is compared.
+    let (domains, op) = prepared(10).await;
+    assert_eq!((domains, op.window.len()), (2, 5));
+
+    assert_eq!(
+        storage
+            .get_password_history(profile.id)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        5,
+        "a depth deleted nothing"
+    );
+}
+
 /// An active epoch made under KSF parameters the server no longer uses, or
 /// before an operator's cutoff, is replaced when its owner's next operation
 /// is prepared, from the revision after the one the credential service
@@ -910,7 +1053,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
                     operation: uuid::Uuid::now_v7(),
                     policy_version: 1,
                 },
-                depth: 2,
+                retention: 2,
                 max_age_days: 0,
             };
             assert!(
@@ -928,6 +1071,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
         keys.prepare_epochs(
             &sid_core::models::HistoryPreparation {
                 owner_domain: domain,
+                window: live.live.clone(),
                 live,
                 operation: uuid::Uuid::now_v7(),
                 expires_at: now,
@@ -1363,8 +1507,9 @@ fn a_selection_the_history_does_not_require_is_refused() {
     };
     let new = epoch(HistoryEpochUse::Active, 3).descriptor();
     let d = |e: &HistoryEpoch| e.descriptor();
+    // Compared with every retained password: the deepest window.
     let complete = |kind, epochs: &[HistoryEpochDescriptor], history: &PasswordHistory| {
-        selection_is_complete(kind, epochs, history)
+        selection_is_complete(kind, epochs, history, &history.window(24))
     };
     let existing = OwnerKind::Existing;
     assert!(complete(existing, &[d(&active), d(&old)], &history));
@@ -1405,6 +1550,21 @@ fn a_selection_the_history_does_not_require_is_refused() {
         "a history exists"
     );
     assert!(!complete(OwnerKind::New, &[new, d(&old)], &empty));
+
+    // A window of the newest password only: the active epoch suffices, and
+    // the epoch holding only an older password is not selected.
+    let newest = history.window(1);
+    assert_eq!(newest, vec![(active.id, 2)]);
+    assert!(selection_is_complete(
+        existing,
+        &[d(&active)],
+        &history,
+        &newest
+    ));
+    assert!(
+        !selection_is_complete(existing, &[d(&active), d(&old)], &history, &newest),
+        "an epoch holding only passwords outside the window"
+    );
 }
 
 /// A registration start for a held identifier must look like any other to
@@ -1666,8 +1826,13 @@ fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
             revision: -1,
             ..live.clone()
         },
+        // The live set names every retained epoch, beyond what one
+        // operation selects; past what history retains it is refused.
         LiveDomains {
-            domains: vec![domain(&old); MAX_HISTORY_DOMAINS + 1],
+            domains: vec![
+                domain(&old);
+                sid_core::models::password_history::MAX_LIVE_HISTORY_DOMAINS + 1
+            ],
             ..live.clone()
         },
     ] {
@@ -1741,12 +1906,14 @@ fn a_malformed_admission_is_refused_by_its_field() {
         live_comparison_domains: vec![vec![2; 32], vec![1; 32]],
         history_revision: 4,
         settled_operations: vec![PasswordOperationId::generate().into()],
+        comparison_domains: vec![vec![2; 32]],
     };
     let admission = HistoryAdmission::of_request(&good).unwrap();
     assert_eq!(admission.owner_domain, [3; 32]);
     assert_eq!(admission.kind, OwnerKind::Existing);
     assert_eq!(admission.expires_at, expires_at);
     assert_eq!(admission.live.domains, vec![[1; 32], [2; 32]], "sorted");
+    assert_eq!(admission.window, vec![[2; 32]]);
     assert_eq!(admission.live.revision, 4);
     assert_eq!(admission.live.settled.len(), 1);
     assert_eq!(
@@ -1772,7 +1939,25 @@ fn a_malformed_admission_is_refused_by_its_field() {
             ..good.clone()
         },
         PreparePasswordHistoryRequest {
-            live_comparison_domains: vec![vec![1; 32]; MAX_HISTORY_DOMAINS + 1],
+            live_comparison_domains: vec![
+                vec![1; 32];
+                sid_core::models::password_history::MAX_LIVE_HISTORY_DOMAINS
+                    + 1
+            ],
+            ..good.clone()
+        },
+        // A window domain outside the live set, one named twice, a window
+        // larger than an operation holds.
+        PreparePasswordHistoryRequest {
+            comparison_domains: vec![vec![9; 32]],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            comparison_domains: vec![vec![2; 32], vec![2; 32]],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            comparison_domains: vec![vec![1; 32]; MAX_HISTORY_DOMAINS + 1],
             ..good.clone()
         },
         PreparePasswordHistoryRequest {

@@ -208,6 +208,7 @@ async fn an_abort_before_its_preparation_fences_it() {
             expires_at: admission.expires_at,
             charge_key: charge_key("profile:test"),
             live: LiveDomains::default(),
+            window: vec![],
         })
         .await
         .unwrap_err();
