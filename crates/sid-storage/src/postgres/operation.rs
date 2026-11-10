@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::PostgresBackend;
+use crate::operation_place::{PLACES, place_of};
 
 /// The operation tables of a host keeping its own database; the engine's
 /// schema holds the same tables.
@@ -176,23 +177,6 @@ pub(super) async fn record_in_tx(
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
-}
-
-/// The places a period's completions are counted in. Each holds its share
-/// of the capacity (`capacity / PLACES`, one more for the first
-/// `capacity % PLACES`), so the shares add up to the capacity exactly. Up to
-/// this many commits under one period count at once.
-const PLACES: i16 = 32;
-
-/// The place a completion with `fingerprint` counts in first: its inputs'
-/// digest spreads concurrent commands over the places.
-fn place_of(fingerprint: &[u8]) -> i16 {
-    let spread = fingerprint
-        .iter()
-        .take(2)
-        .fold(0u16, |n, b| (n << 8) | u16::from(*b));
-    // A value below PLACES, which is positive and fits i16.
-    (spread % PLACES as u16) as i16
 }
 
 /// The places of a newly held `period`, on `tx`.

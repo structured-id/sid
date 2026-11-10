@@ -29,6 +29,11 @@ const UNIQUE: &[(&str, &str, &str)] = &[
     ("sid_audit_record", "SidAuditRecord", "id"),
     ("sid_operation_slot", "SidOperation", "slot"),
     ("sid_operation_period", "SidOperationPeriod", "period"),
+    (
+        "sid_operation_period_place",
+        "SidOperationPeriodPlace",
+        "key",
+    ),
     ("sid_operation_state", "SidOperationState", "id"),
     ("sid_ceremony_state", "SidCeremonyState", "slot"),
     ("sid_ceremony_count", "SidCeremonyCount", "slot"),
@@ -216,6 +221,7 @@ const UNIQUE: &[(&str, &str, &str)] = &[
 /// The lookups SID's queries select by.
 const INDEXES: &[&str] = &[
     "CREATE INDEX sid_profile_status ON :SidProfile(status)",
+    "CREATE INDEX sid_operation_period_place_period ON :SidOperationPeriodPlace(period)",
     "CREATE INDEX sid_profile_migration ON :SidProfile(migration_pending)",
     "CREATE INDEX sid_phone_profile ON :SidPhone(profile_id)",
     "CREATE INDEX sid_email_profile ON :SidEmail(profile_id)",
