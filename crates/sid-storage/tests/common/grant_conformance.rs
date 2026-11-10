@@ -40,7 +40,7 @@ impl<'a> ProfileGrants<'a> {
     pub fn sqlite(backend: &'a sid_storage::sqlite::SqliteBackend) -> Self {
         Self {
             store: backend,
-            policy: PolicyDatabase::Sqlite(backend.pool()),
+            policy: PolicyDatabase::Sqlite(backend.writer()),
         }
     }
 }

@@ -131,7 +131,13 @@ async fn check_session_fence(
 /// chains) and the work it owes, in one transaction.
 #[derive(Clone)]
 pub struct SqliteBackend {
+    /// Reads, concurrent under WAL.
     pool: SqlitePool,
+    /// Writes, on one connection: writers of this process wait in the pool's
+    /// first-come queue. Waiting for the write lock in SQLite's busy handler
+    /// instead lets writers arriving later take it first under sustained
+    /// contention, until a waiter's busy timeout passes.
+    writer: SqlitePool,
 }
 
 impl SqliteBackend {
@@ -170,10 +176,16 @@ impl SqliteBackend {
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .after_connect(|conn, _| Box::pin(fold::register(conn)))
+            .connect_with(options.clone())
+            .await
+            .map_err(|e| SidError::Storage(format!("SQLite connection failed: {e}")))?;
+        let writer = SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| Box::pin(fold::register(conn)))
             .connect_with(options)
             .await
             .map_err(|e| SidError::Storage(format!("SQLite connection failed: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self { pool, writer })
     }
 
     /// Create a new in-memory SQLite backend (for tests).
@@ -194,19 +206,30 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(format!("SQLite memory pool failed: {e}")))?;
 
-        let backend = Self { pool };
+        // Its one connection is the database: reads and writes share it.
+        let backend = Self {
+            writer: pool.clone(),
+            pool,
+        };
         backend.init_schema().await?;
         Ok(backend)
     }
 
-    /// Get the connection pool (for advanced queries / audit log).
+    /// The pool reads go through.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
+    /// The pool every write goes through: a host's mutation of its own tables
+    /// in this database starts on it ([`Self::begin_write_on`]), and a store
+    /// that writes this database (the audit log) is made on it.
+    pub fn writer(&self) -> &SqlitePool {
+        &self.writer
+    }
+
     /// Create the schema of an empty file, or check an existing one.
     async fn init_schema(&self) -> SidResult<()> {
-        migrations::prepare(&self.pool, schema::SCHEMA).await?;
+        migrations::prepare(&self.writer, schema::SCHEMA).await?;
         let quarantined: i64 = sqlx::query_scalar(crate::QUARANTINED_EMAIL_KEYS_SQL)
             .fetch_one(&self.pool)
             .await
@@ -219,12 +242,13 @@ impl SqliteBackend {
     /// write lock first, so reads inside it (an audit chain head, a count
     /// checked against a limit) cannot be overtaken by another writer.
     async fn begin_write(&self) -> SidResult<WriteTx> {
-        Self::begin_write_on(&self.pool).await
+        Self::begin_write_on(&self.writer).await
     }
 
-    /// Start a mutation's transaction on `pool`, as [`Self::begin_write`]: a
-    /// host whose own tables share this database starts its mutation of them
-    /// with this and finalizes it with [`Self::commit_mutation`].
+    /// Start a mutation's transaction on `pool`, the backend's
+    /// [`Self::writer`], as [`Self::begin_write`]: a host whose own tables
+    /// share this database starts its mutation of them with this and
+    /// finalizes it with [`Self::commit_mutation`].
     pub async fn begin_write_on(pool: &SqlitePool) -> SidResult<WriteTx> {
         pool.begin_with("BEGIN IMMEDIATE")
             .await

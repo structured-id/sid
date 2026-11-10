@@ -992,7 +992,9 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
         )
         .await
         .unwrap();
-    let mut tx = SqliteBackend::begin_write_on(source.pool()).await.unwrap();
+    let mut tx = SqliteBackend::begin_write_on(source.writer())
+        .await
+        .unwrap();
     SqliteBackend::advance_login_policy_epoch(&mut tx)
         .await
         .unwrap();

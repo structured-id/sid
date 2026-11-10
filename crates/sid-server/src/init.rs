@@ -409,7 +409,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .await
             .context("SQLite storage and its migrations")?;
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
-            sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
+            sid_storage::sqlite::SqliteAuditLog::new(backend.writer().clone()),
         );
         let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
         (Arc::new(backend), audit_log, local_history_keys)

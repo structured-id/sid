@@ -224,7 +224,7 @@ impl SqliteBackend {
              WHERE verified = 1 AND verification_expires IS NOT NULL AND verification_expires < ?1",
         )
         .bind(now)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(|e| SidError::Storage(format!("Expire failed: {e}")))?
         .rows_affected();
