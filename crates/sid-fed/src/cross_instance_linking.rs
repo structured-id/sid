@@ -1,62 +1,43 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Cross-instance linking for federation.
 //!
-//! Lets the holder of two BindingIds (from different instances) prove that
-//! both belong to that same holder, scoped to a single service sector.
+//! Lets the holder of two Bindings (from different instances) prove to one
+//! recipient organization that both belong to the same holder.
 //!
 //! ## Security Properties
 //!
 //! - **Dual-signature**: Both binding private keys must sign the linking statement.
-//! - **Service-scoped**: Each link is bound to a specific service sector.
-//! - **Replay-resistant**: Nonce + timestamp prevent reuse.
+//! - **Recipient-scoped**: Link and unlink name the recipient's registered OrgId,
+//!   never a domain, so a later owner of a domain cannot reuse them.
+//! - **Unambiguous**: One versioned statement covers every field; free text is
+//!   length-prefixed, so no two field tuples share an encoding.
+//! - **Replay-resistant**: Nonce + creation time prevent reuse.
 //! - **Revocable**: Single-signature revocation (either key can unlink).
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use sid_core::models::{BindingId, OrgId};
 
-/// Unique identifier for a cross-instance link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LinkId(pub Uuid);
-
-impl LinkId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for LinkId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for LinkId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Version prefix for the linking statement.
+/// Version prefix of the linking statement.
 const LINKING_STATEMENT_PREFIX: &str = "sid:cross-link:v1";
 
-/// A dual-signed proof that two BindingIds belong to the same holder.
-///
-/// Scoped to a single service sector — cannot be reused across services.
+/// Version prefix of the unlinking statement.
+const UNLINKING_STATEMENT_PREFIX: &str = "sid:cross-unlink:v1";
+
+/// A dual-signed proof that two Bindings belong to the same holder, for one
+/// recipient organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossInstanceLinkingProof {
-    pub id: LinkId,
+    /// First Binding.
+    pub binding_a: BindingId,
 
-    /// First binding identity.
-    pub binding_a: String,
+    /// Second Binding.
+    pub binding_b: BindingId,
 
-    /// Second binding identity.
-    pub binding_b: String,
+    /// The recipient organization's registered OrgId the link is for.
+    pub recipient_org: OrgId,
 
-    /// Service sector this link is scoped to (e.g., "app.acme.com").
-    pub service_sector: String,
-
-    /// Canonical linking statement that was signed.
+    /// Canonical linking statement both Bindings signed.
     pub statement: String,
 
     /// Signature from binding_a's private key over the statement.
@@ -68,7 +49,7 @@ pub struct CrossInstanceLinkingProof {
     /// Random nonce for replay protection.
     pub nonce: String,
 
-    /// Whether this link can be revoked later.
+    /// Whether either Binding alone can revoke the link later.
     pub revocable: bool,
 
     pub created_at: DateTime<Utc>,
@@ -84,222 +65,173 @@ pub enum LinkStatus {
     Revoked,
 }
 
-/// Revocation record for a cross-instance link.
+/// Revocation of the link between two Bindings at one recipient, signed by
+/// either of them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossInstanceLinkRevocation {
-    /// Link being revoked.
-    pub link_id: LinkId,
+    pub binding_a: BindingId,
+    pub binding_b: BindingId,
+    pub recipient_org: OrgId,
 
-    /// Which binding is revoking (either side can revoke).
-    pub revoking_binding: String,
+    /// Reason for revocation, e.g. "user_requested" or "binding_revoked".
+    pub reason: String,
 
-    /// Signature from the revoking binding's private key.
+    /// Signature from the signing Binding's private key over
+    /// [`revocation_statement`].
     pub signature: Vec<u8>,
 
-    /// Reason for revocation.
-    pub reason: String,
+    /// Which of the two Bindings signed.
+    pub signing_binding: BindingId,
 
     pub created_at: DateTime<Utc>,
 }
 
-/// Build the canonical linking statement for signing.
-///
-/// Format: `sid:cross-link:v1:{binding_a}:{binding_b}:{service_sector}:{nonce}`
-///
-/// The statement includes the nonce for replay protection.
+/// Why a link record was not built.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LinkingError {
+    /// The signing Binding is not one of the two linked Bindings.
+    #[error("the signing Binding is not a party to the link")]
+    NotAParty,
+}
+
+/// One line per fixed-format field; UUIDs and an RFC 3339 time contain no
+/// newline, and the trailing free text is length-prefixed.
+fn statement(prefix: &str, fields: &[String], text: &str) -> String {
+    let mut out = String::from(prefix);
+    for field in fields {
+        out.push('\n');
+        out.push_str(field);
+    }
+    out.push('\n');
+    out.push_str(&text.len().to_string());
+    out.push(':');
+    out.push_str(text);
+    out
+}
+
+/// The exact text form of a time, every fractional digit included, so two
+/// distinct times never share it.
+fn time(at: &DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+/// Build the canonical linking statement both Bindings sign: both Bindings,
+/// the recipient OrgId, the creation time, the revocable flag and the nonce.
 pub fn build_linking_statement(
-    binding_a: &str,
-    binding_b: &str,
-    service_sector: &str,
+    binding_a: &BindingId,
+    binding_b: &BindingId,
+    recipient_org: &OrgId,
+    created_at: &DateTime<Utc>,
+    revocable: bool,
     nonce: &str,
 ) -> String {
-    format!(
-        "{}:{}:{}:{}:{}",
-        LINKING_STATEMENT_PREFIX, binding_a, binding_b, service_sector, nonce
+    statement(
+        LINKING_STATEMENT_PREFIX,
+        &[
+            binding_a.to_string(),
+            binding_b.to_string(),
+            recipient_org.to_string(),
+            time(created_at),
+            u8::from(revocable).to_string(),
+        ],
+        nonce,
     )
 }
 
-/// Create a linking proof from pre-signed components.
-///
-/// Both signatures must be computed externally using each binding's private key.
+/// Create a linking proof from components both Bindings signed externally
+/// over [`build_linking_statement`] of the same values.
+#[allow(clippy::too_many_arguments)]
 pub fn create_linking_proof(
-    binding_a: String,
-    binding_b: String,
-    service_sector: String,
+    binding_a: BindingId,
+    binding_b: BindingId,
+    recipient_org: OrgId,
+    created_at: DateTime<Utc>,
+    revocable: bool,
     nonce: String,
     signature_a: Vec<u8>,
     signature_b: Vec<u8>,
-    revocable: bool,
 ) -> CrossInstanceLinkingProof {
-    let statement = build_linking_statement(&binding_a, &binding_b, &service_sector, &nonce);
+    let statement = build_linking_statement(
+        &binding_a,
+        &binding_b,
+        &recipient_org,
+        &created_at,
+        revocable,
+        &nonce,
+    );
     CrossInstanceLinkingProof {
-        id: LinkId::new(),
         binding_a,
         binding_b,
-        service_sector,
+        recipient_org,
         statement,
         signature_a,
         signature_b,
         nonce,
         revocable,
-        created_at: Utc::now(),
+        created_at,
     }
 }
 
-/// Verify that a linking proof's statement matches its claimed bindings.
+/// Whether a proof's statement is exactly the one its fields produce.
 ///
-/// This checks the statement format only — actual signature verification
-/// requires access to the binding certificates (caller's responsibility).
+/// This checks the statement only; signature verification needs the
+/// Bindings' certificates (the caller's responsibility).
 pub fn verify_proof_statement(proof: &CrossInstanceLinkingProof) -> bool {
-    let expected = build_linking_statement(
-        &proof.binding_a,
-        &proof.binding_b,
-        &proof.service_sector,
-        &proof.nonce,
-    );
-    proof.statement == expected
+    proof.statement
+        == build_linking_statement(
+            &proof.binding_a,
+            &proof.binding_b,
+            &proof.recipient_org,
+            &proof.created_at,
+            proof.revocable,
+            &proof.nonce,
+        )
 }
 
-/// Verify that a linking proof is scoped to the expected service sector.
-pub fn verify_proof_sector(proof: &CrossInstanceLinkingProof, expected_sector: &str) -> bool {
-    proof.service_sector == expected_sector
+/// Whether a proof is for the recipient organization `expected`.
+pub fn verify_proof_recipient(proof: &CrossInstanceLinkingProof, expected: &OrgId) -> bool {
+    proof.recipient_org == *expected
 }
 
-/// Create a revocation for a cross-instance link.
+/// The statement the signing Binding signs to revoke a link.
+pub fn revocation_statement(revocation: &CrossInstanceLinkRevocation) -> String {
+    statement(
+        UNLINKING_STATEMENT_PREFIX,
+        &[
+            revocation.binding_a.to_string(),
+            revocation.binding_b.to_string(),
+            revocation.recipient_org.to_string(),
+            revocation.signing_binding.to_string(),
+            time(&revocation.created_at),
+        ],
+        &revocation.reason,
+    )
+}
+
+/// Create a revocation signed by `signing_binding`, which must be one of the
+/// two linked Bindings.
 pub fn create_link_revocation(
-    link_id: LinkId,
-    revoking_binding: String,
-    signature: Vec<u8>,
+    binding_a: BindingId,
+    binding_b: BindingId,
+    recipient_org: OrgId,
+    signing_binding: BindingId,
     reason: String,
-) -> CrossInstanceLinkRevocation {
-    CrossInstanceLinkRevocation {
-        link_id,
-        revoking_binding,
-        signature,
-        reason,
-        created_at: Utc::now(),
+    created_at: DateTime<Utc>,
+    signature: Vec<u8>,
+) -> Result<CrossInstanceLinkRevocation, LinkingError> {
+    if signing_binding != binding_a && signing_binding != binding_b {
+        return Err(LinkingError::NotAParty);
     }
+    Ok(CrossInstanceLinkRevocation {
+        binding_a,
+        binding_b,
+        recipient_org,
+        reason,
+        signature,
+        signing_binding,
+        created_at,
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_linking_statement() {
-        let stmt = build_linking_statement("bind_a", "bind_b", "app.acme.com", "nonce123");
-        assert_eq!(
-            stmt,
-            "sid:cross-link:v1:bind_a:bind_b:app.acme.com:nonce123"
-        );
-    }
-
-    #[test]
-    fn test_create_linking_proof() {
-        let proof = create_linking_proof(
-            "bind_a".to_string(),
-            "bind_b".to_string(),
-            "app.acme.com".to_string(),
-            "nonce123".to_string(),
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-            true,
-        );
-        assert_eq!(proof.binding_a, "bind_a");
-        assert_eq!(proof.binding_b, "bind_b");
-        assert_eq!(proof.service_sector, "app.acme.com");
-        assert!(proof.revocable);
-        assert!(verify_proof_statement(&proof));
-    }
-
-    #[test]
-    fn test_verify_proof_statement_valid() {
-        let proof = create_linking_proof(
-            "a".to_string(),
-            "b".to_string(),
-            "sector".to_string(),
-            "n".to_string(),
-            vec![],
-            vec![],
-            false,
-        );
-        assert!(verify_proof_statement(&proof));
-    }
-
-    #[test]
-    fn test_verify_proof_statement_tampered() {
-        let mut proof = create_linking_proof(
-            "a".to_string(),
-            "b".to_string(),
-            "sector".to_string(),
-            "n".to_string(),
-            vec![],
-            vec![],
-            false,
-        );
-        proof.binding_a = "tampered".to_string();
-        assert!(!verify_proof_statement(&proof));
-    }
-
-    #[test]
-    fn test_verify_proof_sector() {
-        let proof = create_linking_proof(
-            "a".to_string(),
-            "b".to_string(),
-            "app.acme.com".to_string(),
-            "n".to_string(),
-            vec![],
-            vec![],
-            false,
-        );
-        assert!(verify_proof_sector(&proof, "app.acme.com"));
-        assert!(!verify_proof_sector(&proof, "other.service.com"));
-    }
-
-    #[test]
-    fn test_create_link_revocation() {
-        let link_id = LinkId::new();
-        let revocation = create_link_revocation(
-            link_id,
-            "bind_a".to_string(),
-            vec![7, 8, 9],
-            "no longer needed".to_string(),
-        );
-        assert_eq!(revocation.link_id, link_id);
-        assert_eq!(revocation.revoking_binding, "bind_a");
-        assert_eq!(revocation.reason, "no longer needed");
-    }
-
-    #[test]
-    fn test_link_id_unique() {
-        let id1 = LinkId::new();
-        let id2 = LinkId::new();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_link_status_serde() {
-        let status = LinkStatus::Active;
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "\"active\"");
-        let parsed: LinkStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, LinkStatus::Active);
-    }
-
-    #[test]
-    fn test_linking_proof_serde_roundtrip() {
-        let proof = create_linking_proof(
-            "bind_a".to_string(),
-            "bind_b".to_string(),
-            "sector".to_string(),
-            "nonce".to_string(),
-            vec![1, 2],
-            vec![3, 4],
-            true,
-        );
-        let json = serde_json::to_string(&proof).unwrap();
-        let parsed: CrossInstanceLinkingProof = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.binding_a, proof.binding_a);
-        assert_eq!(parsed.service_sector, proof.service_sector);
-    }
-}
+mod tests;
