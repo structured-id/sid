@@ -36,14 +36,7 @@ pub mod flags {
 
     /// When OFF: user self-registration forms hidden, endpoints return 403.
     /// Invitation-based registration still works.
-    /// Does NOT affect org/trial creation (see TRIAL_CREATION_ENABLED).
     pub const REGISTRATION_ENABLED: &str = "registration_enabled";
-
-    /// When ON: organization creation is open to the public.
-    /// When OFF: org creation hidden for general public.
-    /// Feature Access rules (token, IP allowlist) still apply — closed beta
-    /// testers can create orgs even when this flag is OFF.
-    pub const TRIAL_CREATION_ENABLED: &str = "trial_creation_enabled";
 }
 
 /// Runtime feature flag service.
@@ -94,14 +87,6 @@ impl FeatureFlagService {
     /// Check if user self-registration is enabled (convenience method).
     pub async fn is_registration_enabled(&self) -> bool {
         self.is_enabled(flags::REGISTRATION_ENABLED, true).await
-    }
-
-    /// Check if SaaS org/trial creation is publicly enabled (convenience method).
-    ///
-    /// When false, org creation is gated by Feature Access rules (token, IP).
-    /// Default is false (closed beta until public launch).
-    pub async fn is_trial_creation_enabled(&self) -> bool {
-        self.is_enabled(flags::TRIAL_CREATION_ENABLED, false).await
     }
 
     /// Set a flag value directly. Used by tests and local development.

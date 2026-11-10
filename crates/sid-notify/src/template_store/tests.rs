@@ -37,7 +37,7 @@ fn alone(_: &Effective, _: &TemplateMeta) -> ((), Option<OperationCompletion>) {
 async fn test_list_all_defaults() {
     let store = store().await;
     let templates = store.list_templates(None, false).await.unwrap();
-    assert_eq!(templates.len(), 10);
+    assert_eq!(templates.len(), 9);
     assert!(templates.iter().all(|t| !t.customized));
 }
 
@@ -428,5 +428,5 @@ async fn test_list_filter_by_channel() {
         .list_templates(Some(Channel::Email), false)
         .await
         .unwrap();
-    assert_eq!(email_templates.len(), 10);
+    assert_eq!(email_templates.len(), 9);
 }

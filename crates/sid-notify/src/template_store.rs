@@ -258,13 +258,6 @@ impl TemplateStore {
                     "SCIM outbound provisioning failure alerts",
                 ),
             ),
-            (
-                "trial_onboarding",
-                (
-                    "sid.organization.trial_activated.v1",
-                    "Trial activation onboarding email",
-                ),
-            ),
         ]);
 
         for (name, (trigger, description)) in &template_info {
