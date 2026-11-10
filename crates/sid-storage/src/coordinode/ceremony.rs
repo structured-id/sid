@@ -12,8 +12,7 @@ use async_trait::async_trait;
 use coordinode_core::graph::types::Value;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
-    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, OwedWork,
-    SingleUseAdmissions,
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
 };
 
 use super::{CoordinodeBackend, Decision, Params, Statements, get_bytes, get_int, slot};
@@ -191,14 +190,13 @@ impl CeremonyStateStore for CoordinodeBackend {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<()> {
-        let (slot, value) = (slot(namespace, key)?, value.to_vec());
-        let (work, capacity) = (owed.work.clone(), owed.capacity);
+        let (slot, value, work) = (slot(namespace, key)?, value.to_vec(), owed.clone());
         self.transaction(move |tx| {
             let present = stored(tx, &slot)?.is_some();
             write(tx, &slot, present, &value, deadline(now(), ttl)?)?;
-            super::work::insert(tx, &work, capacity)?;
+            super::work::insert(tx, &work)?;
             Ok(Decision::Commit(()))
         })
         .await
@@ -211,16 +209,16 @@ impl CeremonyStateStore for CoordinodeBackend {
         expected: &[u8],
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<bool> {
         let (slot, expected, value) = (slot(namespace, key)?, expected.to_vec(), value.to_vec());
-        let (work, capacity) = (owed.work.clone(), owed.capacity);
+        let work = owed.clone();
         self.transaction(move |tx| {
             let now = now();
             match stored(tx, &slot)? {
                 Some((held, expires)) if expires > now && held == expected => {
                     write(tx, &slot, true, &value, deadline(now, ttl)?)?;
-                    super::work::insert(tx, &work, capacity)?;
+                    super::work::insert(tx, &work)?;
                     Ok(Decision::Commit(true))
                 }
                 _ => Ok(Decision::Abandon(false)),

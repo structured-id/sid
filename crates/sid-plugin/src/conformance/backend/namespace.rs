@@ -39,7 +39,7 @@ pub async fn test_instances_are_isolated(a: &dyn StorageBackend, b: &dyn Storage
     // Work and results stay with the instance that owes them.
     let kind = WorkKind::new(&format!("test.namespace.{}", Uuid::now_v7().simple())).unwrap();
     let work = NewWork::new(kind.clone(), b"payload".to_vec());
-    a.enqueue_work(&work, 10).await.unwrap();
+    a.enqueue_work(&work).await.unwrap();
     let claimed = b
         .claim_work(from_ref(&kind), "other", 10, Duration::from_secs(60))
         .await

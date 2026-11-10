@@ -73,16 +73,15 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
 
     /// Hold `value` under `key` as [`Self::put_ceremony_state`] does, with the
     /// durable work `owed` in the same commit: both are stored or neither.
-    /// Refuses `ResourceExhausted`, storing nothing, when `owed`'s kind is
-    /// full. A store keeping no durable work beside its ceremony state
-    /// refuses rather than store the state alone.
+    /// A store keeping no durable work beside its ceremony state refuses
+    /// rather than store the state alone.
     async fn put_ceremony_state_owing(
         &self,
         _namespace: &str,
         _key: &str,
         _value: &[u8],
         _ttl: Duration,
-        _owed: OwedWork<'_>,
+        _owed: &NewWork,
     ) -> Result<()> {
         Err(sid_core::Error::Internal(
             "this ceremony state store keeps no durable work".into(),
@@ -91,8 +90,7 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
 
     /// [`Self::replace_ceremony_state`] with the durable work `owed` in the
     /// same commit: `false`, storing neither, when the state is no longer
-    /// `expected`; `ResourceExhausted`, the state left as it was, when
-    /// `owed`'s kind is full.
+    /// `expected`.
     async fn replace_ceremony_state_owing(
         &self,
         _namespace: &str,
@@ -100,7 +98,7 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
         _expected: &[u8],
         _value: &[u8],
         _ttl: Duration,
-        _owed: OwedWork<'_>,
+        _owed: &NewWork,
     ) -> Result<bool> {
         Err(sid_core::Error::Internal(
             "this ceremony state store keeps no durable work".into(),
@@ -140,14 +138,6 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
             "this ceremony state store does not transfer its records".into(),
         ))
     }
-}
-
-/// Durable work a ceremony state write owes, admitted while its kind holds
-/// fewer than `capacity` open items.
-#[derive(Debug, Clone, Copy)]
-pub struct OwedWork<'a> {
-    pub work: &'a NewWork,
-    pub capacity: u64,
 }
 
 /// Live ceremony records with their deadlines, as a transfer carries them.

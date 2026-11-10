@@ -76,26 +76,20 @@ fn down() -> EventBusError {
     EventBusError::PublishFailed("broker unreachable".into())
 }
 
-/// Records what is enqueued and under which capacity, refusing everything
-/// once `full`.
+/// Records what is enqueued, failing every write once `failing`.
 /// As a store keeps work: the first item under an id stays, a repeated
-/// enqueue keeps it unchanged, and an id in `refuse` is refused once (a
-/// failure part way through owing several items).
+/// enqueue keeps it unchanged, and an id in `refuse` fails once (a failure
+/// part way through owing several items).
 #[derive(Default)]
 struct RecordingStore {
-    enqueued: Mutex<Vec<(NewWork, u64)>>,
-    full: bool,
+    enqueued: Mutex<Vec<NewWork>>,
+    failing: bool,
     refuse: Mutex<std::collections::HashSet<WorkId>>,
 }
 
 impl RecordingStore {
     fn ids(&self) -> Vec<WorkId> {
-        self.enqueued
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(w, _)| w.id)
-            .collect()
+        self.enqueued.lock().unwrap().iter().map(|w| w.id).collect()
     }
 
     fn get(&self, id: WorkId) -> Option<NewWork> {
@@ -103,22 +97,22 @@ impl RecordingStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|(w, _)| w.id == id)
-            .map(|(w, _)| w.clone())
+            .find(|w| w.id == id)
+            .cloned()
     }
 }
 
 #[async_trait]
 impl WorkStore for RecordingStore {
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> sid_core::Result<bool> {
-        if self.full || self.refuse.lock().unwrap().remove(&work.id) {
-            return Err(sid_core::Error::ResourceExhausted("full".into()));
+    async fn enqueue_work(&self, work: &NewWork) -> sid_core::Result<bool> {
+        if self.failing || self.refuse.lock().unwrap().remove(&work.id) {
+            return Err(sid_core::Error::Storage("store unavailable".into()));
         }
         let mut enqueued = self.enqueued.lock().unwrap();
-        if enqueued.iter().any(|(w, _)| w.id == work.id) {
+        if enqueued.iter().any(|w| w.id == work.id) {
             return Ok(false);
         }
-        enqueued.push((work.clone(), capacity));
+        enqueued.push(work.clone());
         Ok(true)
     }
     async fn claim_work(
@@ -139,7 +133,6 @@ impl WorkStore for RecordingStore {
         _: i64,
         _: Option<&str>,
         _: &[NewWork],
-        _: u64,
     ) -> sid_core::Result<bool> {
         unimplemented!()
     }
@@ -169,8 +162,6 @@ impl WorkStore for RecordingStore {
     }
 }
 
-const CAPACITY: u64 = 77;
-
 fn receivers() -> Vec<RequiredReceiver> {
     vec![
         RequiredReceiver {
@@ -185,11 +176,11 @@ fn receivers() -> Vec<RequiredReceiver> {
 }
 
 fn relay(store: Arc<RecordingStore>) -> EventRelayHandler {
-    EventRelayHandler::new(store, receivers(), CAPACITY)
+    EventRelayHandler::new(store, receivers())
 }
 
 fn fanout(bus: Arc<RecordingBus>, store: Arc<RecordingStore>) -> EventFanoutHandler {
-    EventFanoutHandler::new(bus, store, CAPACITY)
+    EventFanoutHandler::new(bus, store)
 }
 
 /// The plan stored for `event`, as the runner would claim it.
@@ -203,7 +194,7 @@ fn plan_of(store: &RecordingStore, event: &Event) -> ClaimedWork {
 
 /// A relayed fact gets one plan naming every receiver that requires its
 /// type; carrying it out owes the fact to each, under its own stable
-/// delivery id and the given capacity, then publishes it unchanged.
+/// delivery id, then publishes it unchanged.
 #[tokio::test]
 async fn test_relay_owes_required_receivers_then_publishes() {
     let bus = Arc::new(RecordingBus::default());
@@ -233,8 +224,7 @@ async fn test_relay_owes_required_receivers_then_publishes() {
             event.delivery_id(&recipient("scim"))
         ]
     );
-    for (work, capacity) in store.enqueued.lock().unwrap().iter() {
-        assert_eq!(*capacity, CAPACITY);
+    for work in store.enqueued.lock().unwrap().iter() {
         if work.id != plan.id {
             assert_eq!(work.kind.as_str(), EVENT_DELIVERY_KIND);
         }
@@ -288,7 +278,6 @@ async fn test_a_retry_keeps_the_receivers_first_fixed() {
             recipient: recipient("audit-sink"),
             event_types: Vec::new(),
         }],
-        CAPACITY,
     );
     let retried = changed.handle(&claimed(event.relay())).await;
     assert!(matches!(retried, WorkOutcome::Done(_)), "{retried:?}");
@@ -326,7 +315,7 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
     );
     let event = Event::new("src", event_types::SCIM_USER_PROVISIONED);
     let work = claimed(event.relay());
-    let outcome = EventRelayHandler::new(store.clone(), receivers(), CAPACITY)
+    let outcome = EventRelayHandler::new(store.clone(), receivers())
         .handle(&work)
         .await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
@@ -336,7 +325,6 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
             recipient: recipient("audit-sink"),
             event_types: Vec::new(),
         }],
-        CAPACITY,
     )
     .handle(&work)
     .await;
@@ -353,18 +341,17 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
         .find(|w| w.record.id == plan_id)
         .unwrap()
         .payload;
-    let outcome =
-        EventFanoutHandler::new(Arc::new(RecordingBus::default()), store.clone(), CAPACITY)
-            .handle(&ClaimedWork {
-                id: plan_id,
-                kind: plan.kind,
-                payload,
-                attempt: 1,
-                max_attempts: plan.max_attempts,
-                generation: 1,
-                expires_at: None,
-            })
-            .await;
+    let outcome = EventFanoutHandler::new(Arc::new(RecordingBus::default()), store.clone())
+        .handle(&ClaimedWork {
+            id: plan_id,
+            kind: plan.kind,
+            payload,
+            attempt: 1,
+            max_attempts: plan.max_attempts,
+            generation: 1,
+            expires_at: None,
+        })
+        .await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
 
     for name in ["sid-notify", "scim"] {
@@ -400,16 +387,16 @@ async fn test_fanout_retries_while_bus_is_down() {
     assert_eq!(store.ids().len(), 2, "plan and its delivery");
 }
 
-/// A plan that cannot be stored (the store full) leaves the relay owed; a
+/// A plan that cannot be stored (the store failing) leaves the relay owed; a
 /// delivery that cannot be stored leaves the plan owed and publishes nothing.
 #[tokio::test]
 async fn test_relay_retries_when_nothing_can_be_owed() {
     let event = Event::new("src", event_types::USER_CREATED);
-    let full = Arc::new(RecordingStore {
-        full: true,
+    let failing = Arc::new(RecordingStore {
+        failing: true,
         ..RecordingStore::default()
     });
-    let outcome = relay(full).handle(&claimed(event.relay())).await;
+    let outcome = relay(failing).handle(&claimed(event.relay())).await;
     assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
 
     let bus = Arc::new(RecordingBus::default());
@@ -545,29 +532,16 @@ async fn test_delivery_outcomes() {
     assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
 }
 
-/// An observed event is stored as its own relay work, under the observation
-/// capacity: below what mutations may owe, so a flood of observations cannot
-/// refuse a mutation its event.
+/// An observed event is stored as its own relay work, under the event's own
+/// relay id, so observing it again stores nothing new.
 #[tokio::test]
-async fn test_observed_event_uses_the_observation_capacity() {
+async fn test_observed_event_is_stored_as_its_relay() {
     let store = RecordingStore::default();
     let event = Event::new("src", event_types::SECURITY_BRUTE_FORCE);
 
     relay_observed(&store, &event).await.unwrap();
-    let stored: Vec<(WorkId, u64)> = store
-        .enqueued
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(w, c)| (w.id, *c))
-        .collect();
-    assert_eq!(stored, [(event.relay().id, OBSERVED_EVENT_CAPACITY)]);
-    const {
-        assert!(
-            OBSERVED_EVENT_CAPACITY < sid_plugin::OWED_WORK_CAPACITY,
-            "observations may crowd out owed events"
-        )
-    };
+    relay_observed(&store, &event).await.unwrap();
+    assert_eq!(store.ids(), [event.relay().id]);
 }
 
 /// A broker that stays down, or a work stream that stays full, never ends a

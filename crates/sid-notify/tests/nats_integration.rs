@@ -35,6 +35,15 @@ async fn job_store() -> Arc<PgWorkStore> {
     Arc::new(store)
 }
 
+/// A job store whose database cannot be reached: every write fails.
+async fn unreachable_store() -> Arc<PgWorkStore> {
+    let pool = sqlx::PgPool::connect(&database_url())
+        .await
+        .expect("test PostgreSQL unreachable; start docker-compose.test.yml");
+    pool.close().await;
+    Arc::new(PgWorkStore::new(pool))
+}
+
 /// A topology no other test uses, prepared by its owner.
 async fn topology() -> (Topology, NatsEventBus) {
     let mut t = Topology::with_root(format!("n{}", uuid::Uuid::now_v7().simple())).unwrap();
@@ -80,12 +89,11 @@ async fn owe(bus: &NatsEventBus, event: &Event) {
         .unwrap();
 }
 
-/// A notify consumer over `bus` storing into `store` with `capacity`, until
-/// the returned sender is dropped or fired.
+/// A notify consumer over `bus` storing into `store`, until the returned
+/// sender is dropped or fired.
 fn run_notify(
     bus: Arc<NatsEventBus>,
     store: Arc<PgWorkStore>,
-    capacity: u64,
 ) -> (
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
@@ -93,7 +101,7 @@ fn run_notify(
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
         let deliveries = delivery::open_work(bus.as_ref(), receiver()).await.unwrap();
-        delivery::accept_work(deliveries, store.as_ref(), capacity, || {}, async move {
+        delivery::accept_work(deliveries, store.as_ref(), || {}, async move {
             let _ = stopped.await;
         })
         .await;
@@ -139,7 +147,7 @@ async fn test_work_owed_while_notify_was_down_is_accepted() {
         "history outlived its age"
     );
 
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
     assert!(
         accepted(&store, &event, Duration::from_secs(10)).await,
         "owed work was lost while notify was down"
@@ -155,8 +163,8 @@ async fn test_work_owed_while_notify_was_down_is_accepted() {
     drop_topology(&t).await;
 }
 
-/// An event notify cannot accept (its job store full) stays with the bus
-/// and is accepted once there is room.
+/// An event notify cannot accept (its job store unreachable) stays with the
+/// bus and is accepted once the store answers again.
 #[tokio::test]
 async fn test_refused_event_stays_owed() {
     let store = job_store().await;
@@ -165,7 +173,7 @@ async fn test_refused_event_stays_owed() {
     let event = Event::new("sid-test", event_types::SESSION_CREATED);
     owe(&bus, &event).await;
 
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 0);
+    let (stop, handle) = run_notify(bus.clone(), unreachable_store().await);
     assert!(
         !accepted(&store, &event, Duration::from_secs(2)).await,
         "a refused event was stored"
@@ -178,7 +186,7 @@ async fn test_refused_event_stays_owed() {
         "a refused event was settled"
     );
 
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
     assert!(
         accepted(&store, &event, Duration::from_secs(15)).await,
         "the refused event never came back"
@@ -196,12 +204,12 @@ async fn test_redelivery_after_a_stored_job_is_stored_once() {
     let (t, bus) = topology().await;
     let bus = Arc::new(bus);
     let event = Event::new("sid-test", event_types::PRINCIPAL_CONTESTED);
-    delivery::accept_event(store.as_ref(), &event, 1_000)
+    delivery::accept_event(store.as_ref(), &event)
         .await
         .unwrap();
     owe(&bus, &event).await;
 
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while stored(&t.work_stream()).await > 0 {
         assert!(tokio::time::Instant::now() < deadline, "never settled");
@@ -236,7 +244,7 @@ async fn test_work_republished_beyond_the_duplicate_window_is_accepted_once() {
     }
     assert_eq!(stored(&t.work_stream()).await, 2, "the broker deduplicated");
 
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while stored(&t.work_stream()).await > 0 {
         assert!(
@@ -268,8 +276,8 @@ async fn test_replicas_share_the_work() {
     let events: Vec<Event> = (0..6)
         .map(|_| Event::new("sid-test", event_types::USER_CREATED))
         .collect();
-    let (stop_a, a) = run_notify(bus.clone(), store.clone(), 1_000);
-    let (stop_b, b) = run_notify(replica, store.clone(), 1_000);
+    let (stop_a, a) = run_notify(bus.clone(), store.clone());
+    let (stop_b, b) = run_notify(replica, store.clone());
     for event in &events {
         owe(&bus, event).await;
     }
@@ -301,7 +309,7 @@ async fn test_history_alone_is_not_work() {
         )
         .await
         .unwrap();
-    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
     assert!(
         !accepted(&store, &event, Duration::from_secs(2)).await,
         "history became notification work"
@@ -333,7 +341,7 @@ async fn test_standalone_notify_without_sid_server() {
         .expect("a producer verifies notify's topology");
     let event = Event::new("sid-test", event_types::SESSION_REVOKED);
     owe(&producer, &event).await;
-    let (stop, handle) = run_notify(notify, store.clone(), 1_000);
+    let (stop, handle) = run_notify(notify, store.clone());
     assert!(accepted(&store, &event, Duration::from_secs(10)).await);
     stop.send(()).unwrap();
     handle.await.unwrap();
@@ -361,8 +369,8 @@ async fn test_both_sources_are_accepted() {
 
     let identity_bus = Arc::new(identity_bus);
     let platform_bus = Arc::new(platform_bus);
-    let (stop_identity, identity_run) = run_notify(identity_bus, store.clone(), 1_000);
-    let (stop_platform, platform_run) = run_notify(platform_bus, store.clone(), 1_000);
+    let (stop_identity, identity_run) = run_notify(identity_bus, store.clone());
+    let (stop_platform, platform_run) = run_notify(platform_bus, store.clone());
     assert!(accepted(&store, &session, Duration::from_secs(10)).await);
     assert!(accepted(&store, &trial, Duration::from_secs(10)).await);
     stop_identity.send(()).unwrap();
@@ -402,7 +410,6 @@ async fn test_notify_server_init() {
         webhook_enabled: false,
         vapid: None,
         database_url: database_url(),
-        job_capacity: sid_notify::config::DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
         api: issuer.receiver_config(
             "https://sid.example.com/api",

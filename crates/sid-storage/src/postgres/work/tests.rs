@@ -21,53 +21,39 @@ async fn pool() -> PgPool {
 
 /// A kind no other test uses.
 fn fresh_kind() -> WorkKind {
-    WorkKind::new(&format!("test.capacity_{}", uuid::Uuid::now_v7().simple())).unwrap()
+    WorkKind::new(&format!("test.work_{}", uuid::Uuid::now_v7().simple())).unwrap()
 }
 
-/// Work a business mutation owes is admitted under the same per-kind bound
-/// as a standalone enqueue: while one mutation that filled the last place
-/// is uncommitted, a concurrent one waits for it and is then refused, so
-/// independent mutations never pass the capacity between them.
+/// Mutations owing work of one kind do not wait on each other: while one is
+/// still uncommitted, another owing the same kind commits at once. Admission
+/// under a per-kind lock made every writer of a kind wait for the one ahead
+/// of it to commit, and the waiters held the pool's connections.
 #[tokio::test]
-async fn owed_work_of_concurrent_mutations_respects_its_capacity() {
+async fn mutations_owing_one_kind_commit_independently() {
     let pool = pool().await;
     let kind = fresh_kind();
-    let capacity = 1;
 
     let mut first = pool.begin().await.unwrap();
-    insert_owed_work_in_tx(&mut first, &[NewWork::new(kind.clone(), vec![])], capacity)
+    insert_owed_work_in_tx(&mut first, &[NewWork::new(kind.clone(), vec![])])
         .await
         .unwrap();
-    let second = {
-        let pool = pool.clone();
-        let kind = kind.clone();
-        tokio::spawn(async move {
-            let mut tx = pool.begin().await.unwrap();
-            let admitted =
-                insert_owed_work_in_tx(&mut tx, &[NewWork::new(kind, vec![])], capacity).await;
-            if admitted.is_ok() {
-                tx.commit().await.unwrap();
-            }
-            admitted
-        })
-    };
-    // The second mutation has its insert in flight before the first commits.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let second = NewWork::new(kind.clone(), vec![]);
+    let committed = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut tx = pool.begin().await.unwrap();
+        insert_owed_work_in_tx(&mut tx, std::slice::from_ref(&second)).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))
+    })
+    .await;
+    assert!(
+        matches!(committed, Ok(Ok(()))),
+        "the second mutation waited for the first: {committed:?}"
+    );
     first.commit().await.unwrap();
 
-    let second = second.await.unwrap();
-    assert!(
-        matches!(second, Err(SidError::ResourceExhausted(_))),
-        "the second mutation passed the capacity: {second:?}"
-    );
-    let open: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM durable_work WHERE kind = $1 AND state IN ('pending', 'claimed')",
-    )
-    .bind(kind.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(open, 1);
+    let store = PgWorkStore::new(pool);
+    assert!(store.get_work(second.id).await.unwrap().is_some());
 }
 
 /// The plan of `sql` with the claim's parameters bound for `kinds`.
@@ -123,183 +109,6 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
     assert!(!sweep.contains("Seq Scan on durable_work"), "{sweep}");
 }
 
-/// The open count admission reads follows every transition of the work:
-/// claimed and retried work stays open, completed, failed and expired work
-/// leaves it, so capacity is admitted without counting the rows.
-#[tokio::test]
-async fn the_open_count_follows_each_transition() {
-    let pool = pool().await;
-    let store = PgWorkStore::new(pool.clone());
-    let kind = fresh_kind();
-    let open = async || -> i64 {
-        sqlx::query_scalar(
-            "SELECT COALESCE(SUM(open), 0)::BIGINT FROM durable_work_open WHERE kind = $1",
-        )
-        .bind(kind.as_str())
-        .fetch_one(&pool)
-        .await
-        .unwrap()
-    };
-    let lease = Duration::from_secs(60);
-    for _ in 0..4 {
-        store
-            .enqueue_work(&NewWork::new(kind.clone(), vec![]), 100)
-            .await
-            .unwrap();
-    }
-    let mut expiring = NewWork::new(kind.clone(), vec![]);
-    expiring.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
-    store.enqueue_work(&expiring, 100).await.unwrap();
-    assert_eq!(open().await, 5);
-
-    // The expired one leaves at the claim's sweep; claimed ones stay open.
-    let claimed = store
-        .claim_work(std::slice::from_ref(&kind), "w", 4, lease)
-        .await
-        .unwrap();
-    assert_eq!(claimed.len(), 4);
-    assert_eq!(open().await, 4);
-
-    let retry = WorkFailure {
-        error: "retry".into(),
-        retry_at: Some(chrono::Utc::now()),
-        ambiguous: false,
-        on_dead: None,
-    };
-    assert!(
-        store
-            .fail_work(claimed[0].id, claimed[0].generation, &retry)
-            .await
-            .unwrap()
-    );
-    assert_eq!(open().await, 4, "a retried item stays open");
-    let dead = WorkFailure {
-        retry_at: None,
-        ..retry
-    };
-    assert!(
-        store
-            .fail_work(claimed[1].id, claimed[1].generation, &dead)
-            .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .complete_work(claimed[2].id, claimed[2].generation, None)
-            .await
-            .unwrap()
-    );
-    assert_eq!(open().await, 2);
-    // A repeated outcome under a stale generation changes nothing.
-    assert!(
-        !store
-            .complete_work(claimed[2].id, claimed[2].generation, None)
-            .await
-            .unwrap()
-    );
-    assert_eq!(open().await, 2);
-}
-
-/// A completion owing work of its own kind takes the kind's admission lock
-/// before its state change touches the open count, the order an enqueue
-/// takes them: an enqueue holding the lock whose item falls in the
-/// completed item's count shard and the completion both commit. Taken the
-/// other way, the completion held the shard while waiting for the lock the
-/// enqueue held while waiting for the shard, and one of them was aborted as
-/// a deadlock.
-#[tokio::test]
-async fn a_completion_owing_its_kind_beside_an_enqueue_commits_both() {
-    let pool = pool().await;
-    let store = PgWorkStore::new(pool.clone());
-    let kind = fresh_kind();
-    let parent = NewWork::new(kind.clone(), vec![]);
-    store.enqueue_work(&parent, 100).await.unwrap();
-    let claimed = store
-        .claim_work(std::slice::from_ref(&kind), "w", 1, Duration::from_secs(60))
-        .await
-        .unwrap();
-    assert_eq!(claimed.len(), 1);
-
-    // The enqueue holds the kind's lock first, as it does before inserting.
-    let mut enqueue = pool.begin().await.unwrap();
-    lock_kind(&mut enqueue, &kind).await.unwrap();
-    let completion = {
-        let store = PgWorkStore::new(pool.clone());
-        let (id, generation) = (claimed[0].id, claimed[0].generation);
-        let child = NewWork::new(kind.clone(), vec![]);
-        tokio::spawn(async move {
-            store
-                .complete_work_owing(id, generation, None, &[child], 100)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // An item in the parent's count shard.
-    let mut bytes = *uuid::Uuid::now_v7().as_bytes();
-    bytes[15] = parent.id.0.as_bytes()[15];
-    let mut same_shard = NewWork::new(kind.clone(), vec![]);
-    same_shard.id = WorkId(uuid::Uuid::from_bytes(bytes));
-    insert_work_in_tx(&mut enqueue, &same_shard, 100)
-        .await
-        .expect("the enqueue commits");
-    enqueue.commit().await.unwrap();
-    assert!(
-        completion.await.unwrap().expect("the completion commits"),
-        "the completion was fenced"
-    );
-}
-
-/// An id in the open-count shard of `of`.
-fn in_shard_of(of: WorkId) -> WorkId {
-    let mut bytes = *uuid::Uuid::now_v7().as_bytes();
-    bytes[15] = of.0.as_bytes()[15];
-    WorkId(uuid::Uuid::from_bytes(bytes))
-}
-
-/// Completions owing work of each other's kinds (A owes B, B owes A), each
-/// child in the other parent's count shard, all commit: each takes the
-/// locks of its own kind and its children's kinds in one order before its
-/// state change. Locking only the children's kinds, each held its parent's
-/// shard and waited for the shard the other held, and one was aborted as a
-/// deadlock.
-#[tokio::test]
-async fn completions_owing_each_others_kinds_commit() {
-    let pool = pool().await;
-    let store = PgWorkStore::new(pool.clone());
-    for _ in 0..12 {
-        let (a, b) = (fresh_kind(), fresh_kind());
-        let parent_a = NewWork::new(a.clone(), vec![]);
-        let parent_b = NewWork::new(b.clone(), vec![]);
-        store.enqueue_work(&parent_a, 100).await.unwrap();
-        store.enqueue_work(&parent_b, 100).await.unwrap();
-        let claimed = store
-            .claim_work(&[a.clone(), b.clone()], "w", 2, Duration::from_secs(60))
-            .await
-            .unwrap();
-        assert_eq!(claimed.len(), 2);
-        let complete = |parent: &ClaimedWork, child_kind: &WorkKind, shard_of: WorkId| {
-            let store = PgWorkStore::new(pool.clone());
-            let (id, generation) = (parent.id, parent.generation);
-            let mut child = NewWork::new(child_kind.clone(), vec![]);
-            child.id = in_shard_of(shard_of);
-            tokio::spawn(async move {
-                store
-                    .complete_work_owing(id, generation, None, &[child], 100)
-                    .await
-            })
-        };
-        let (of_a, of_b) = if claimed[0].kind == a {
-            (&claimed[0], &claimed[1])
-        } else {
-            (&claimed[1], &claimed[0])
-        };
-        let first = complete(of_a, &b, parent_b.id);
-        let second = complete(of_b, &a, parent_a.id);
-        assert!(first.await.unwrap().expect("A's completion commits"));
-        assert!(second.await.unwrap().expect("B's completion commits"));
-    }
-}
-
 /// A host's own state change and the work it owes commit together through
 /// `owe_in_tx`: rolled back, neither is stored; committed, the work is.
 #[tokio::test]
@@ -324,9 +133,8 @@ async fn owed_work_commits_with_the_host_transaction() {
     assert!(store.get_work(kept.id).await.unwrap().is_some());
 }
 
-/// A mutation owing work of several kinds takes their admission locks in one
-/// order, so two mutations owing the same kinds in opposite orders both
-/// commit instead of deadlocking.
+/// Two mutations owing the same kinds, named in opposite orders, both commit
+/// while both are open: inserts of distinct work never wait on each other.
 #[tokio::test]
 async fn owed_work_of_several_kinds_does_not_deadlock() {
     let pool = pool().await;
@@ -336,7 +144,7 @@ async fn owed_work_of_several_kinds_does_not_deadlock() {
         tokio::spawn(async move {
             let mut tx = pool.begin().await.unwrap();
             let works: Vec<NewWork> = kinds.into_iter().map(|k| NewWork::new(k, vec![])).collect();
-            insert_owed_work_in_tx(&mut tx, &works, 10).await?;
+            insert_owed_work_in_tx(&mut tx, &works).await?;
             tokio::time::sleep(Duration::from_millis(100)).await;
             tx.commit()
                 .await
@@ -347,4 +155,26 @@ async fn owed_work_of_several_kinds_does_not_deadlock() {
     let second = owe(vec![b, a]);
     first.await.unwrap().unwrap();
     second.await.unwrap().unwrap();
+}
+
+/// Work owed twice in one batch, or already stored, is stored once: the
+/// batch insert keeps the first and skips the rest.
+#[tokio::test]
+async fn owed_work_already_stored_is_kept_once() {
+    let pool = pool().await;
+    let kind = fresh_kind();
+    let item = NewWork::new(kind, vec![3]);
+    let store = PgWorkStore::new(pool.clone());
+    assert!(store.enqueue_work(&item).await.unwrap());
+    let mut tx = pool.begin().await.unwrap();
+    insert_owed_work_in_tx(&mut tx, &[item.clone(), item.clone()])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_work WHERE id = $1")
+        .bind(item.id.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
 }

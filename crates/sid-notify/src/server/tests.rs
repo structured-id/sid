@@ -72,7 +72,6 @@ fn test_config(api: sid_auth::config::ReceiverConfig) -> NotifyConfig {
         webhook_enabled: true,
         vapid: None,
         database_url: test_database_url(),
-        job_capacity: crate::config::DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
         api,
     }

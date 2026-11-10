@@ -128,7 +128,6 @@ use crate::key_versions::{key_derivation_name, key_version_params};
 use sid_core::models::machine_user::MachineUserStatus;
 
 use crate::CENTRALLY_MANAGED_SQL;
-use sid_plugin::OWED_WORK_CAPACITY;
 
 /// Consumes the admin claim `$2` (sealed) stored as `$1`, only on a
 /// self-managed installation: a centrally managed one consumes no local
@@ -471,7 +470,7 @@ impl PostgresBackend {
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
-        work::insert_owed_work_in_tx(tx, &ctx.work, OWED_WORK_CAPACITY).await?;
+        work::insert_owed_work_in_tx(tx, &ctx.work).await?;
         // Every lock this finalization takes is held now: a sign-in that
         // ended while one of them was awaited authorizes nothing.
         if let Some(until) = session_until {

@@ -43,37 +43,13 @@ const LAPSED_SQL: &str = "SELECT id, not_before FROM durable_work
      WHERE kind = ? AND state = 'claimed' AND lease_until <= ?
      ORDER BY lease_until LIMIT ?";
 
-/// Store `work` inside `tx`, the transaction of the state change that owes
-/// it. Returns `false` when work with its id already exists; refuses with
-/// `ResourceExhausted` when `capacity` open items of its kind are stored.
+/// Store `work` through `conn`, inside the transaction of the state change
+/// that owes it or on its own. Returns `false` when work with its id already
+/// exists: the same obligation again, left as it is.
 pub(crate) async fn insert_work_in_tx(
-    tx: &mut SqliteConnection,
+    conn: &mut SqliteConnection,
     work: &NewWork,
-    capacity: u64,
 ) -> SidResult<bool> {
-    // The same obligation again is already stored: accepted, whatever the load.
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE id = ?)")
-            .bind(work.id.0)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
-    if exists {
-        return Ok(false);
-    }
-    // The count the triggers keep, not a count of the rows: reading every
-    // open item made each admission as slow as the backlog was long.
-    let open: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(open), 0) FROM durable_work_open WHERE kind = ?")
-            .bind(work.kind.as_str())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
-    if u64::try_from(open).unwrap_or(u64::MAX) >= capacity {
-        return Err(SidError::ResourceExhausted(format!(
-            "durable work queue full ({capacity} open items)"
-        )));
-    }
     if work.max_attempts == 0 {
         return Err(SidError::Validation("max_attempts out of range".into()));
     }
@@ -91,7 +67,7 @@ pub(crate) async fn insert_work_in_tx(
     .bind(work.expires_at.as_ref().map(fmt_dt))
     .bind(&now)
     .bind(&now)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(storage)?
     .rows_affected()
@@ -101,14 +77,10 @@ pub(crate) async fn insert_work_in_tx(
 
 #[async_trait]
 impl WorkStore for SqliteBackend {
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> SidResult<bool> {
+    async fn enqueue_work(&self, work: &NewWork) -> SidResult<bool> {
+        // One statement, atomic on its own.
         let mut conn = self.pool.acquire().await.map_err(storage)?;
-        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
-            .await
-            .map_err(storage)?;
-        let inserted = insert_work_in_tx(&mut tx, work, capacity).await?;
-        tx.commit().await.map_err(storage)?;
-        Ok(inserted)
+        insert_work_in_tx(&mut conn, work).await
     }
 
     async fn claim_work(
@@ -239,7 +211,6 @@ impl WorkStore for SqliteBackend {
         generation: i64,
         result: Option<&str>,
         owed: &[NewWork],
-        capacity: u64,
     ) -> SidResult<bool> {
         let mut conn = self.pool.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
@@ -262,7 +233,7 @@ impl WorkStore for SqliteBackend {
             return Ok(false);
         }
         for work in owed {
-            insert_work_in_tx(&mut tx, work, capacity).await?;
+            insert_work_in_tx(&mut tx, work).await?;
         }
         tx.commit().await.map_err(storage)?;
         Ok(true)
@@ -304,9 +275,9 @@ impl WorkStore for SqliteBackend {
         if state == WorkState::Failed.as_str()
             && let Some(alert) = &failure.on_dead
         {
-            // One alert per dead work, never refused for load: the failure it
-            // reports is already recorded.
-            insert_work_in_tx(&mut tx, alert, u64::MAX).await?;
+            // One alert per dead work: the failure it reports is already
+            // recorded.
+            insert_work_in_tx(&mut tx, alert).await?;
         }
         tx.commit().await.map_err(storage)?;
         Ok(true)

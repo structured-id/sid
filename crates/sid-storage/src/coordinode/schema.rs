@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The schema SID's records rely on: what keeps an identifier unique across
 //! concurrent writers, and the lookups its queries use. Nodes that writers
-//! of one thing meet on (a work kind's admission, an audit chain's head, a
-//! command key) are unique too, so the first writers create one node and
-//! conflict instead of each creating its own.
+//! of one thing meet on (an audit chain's head, a command key) are unique
+//! too, so the first writers create one node and conflict instead of each
+//! creating its own.
 //!
 //! The uniqueness constraints are published as one schema package, and SID
 //! serves only once every one of them is in force over the stored data: a
@@ -25,7 +25,6 @@ const SCHEMA_WAIT: Duration = Duration::from_secs(60);
 /// keeps unique.
 const UNIQUE: &[(&str, &str, &str)] = &[
     ("sid_work_id", "SidWork", "id"),
-    ("sid_work_kind", "SidWorkKind", "kind"),
     ("sid_audit_head", "SidAuditHead", "chain"),
     ("sid_audit_record", "SidAuditRecord", "id"),
     ("sid_operation_slot", "SidOperation", "slot"),

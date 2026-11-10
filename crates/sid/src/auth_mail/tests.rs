@@ -70,10 +70,7 @@ async fn codes() -> (Arc<OtpService>, Arc<sid_storage::sqlite::SqliteBackend>) {
     );
     let codes = Arc::new(OtpService::new(
         store.clone(),
-        CodeDelivery {
-            keys: keys(),
-            capacity: 100,
-        },
+        CodeDelivery { keys: keys() },
     ));
     (codes, store)
 }
@@ -201,7 +198,7 @@ async fn ended_mail_records_are_dropped_after_retention() {
         .await
         .unwrap();
     let other = NewWork::new(WorkKind::new("test.other").unwrap(), vec![]);
-    store.enqueue_work(&other, 10).await.unwrap();
+    store.enqueue_work(&other).await.unwrap();
 
     assert_eq!(
         purge_ended_mail(store.as_ref(), Utc::now()).await.unwrap(),

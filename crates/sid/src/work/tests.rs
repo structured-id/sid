@@ -31,10 +31,7 @@ fn parts(storage: Arc<dyn StorageBackend>, links: bool) -> CeWorkParts {
     ));
     let codes = Arc::new(sid_authn::otp::OtpService::new(
         storage.clone(),
-        sid_authn::otp::CodeDelivery {
-            keys: keys(),
-            capacity: 100,
-        },
+        sid_authn::otp::CodeDelivery { keys: keys() },
     ));
     let mail = CeMail {
         codes: Arc::new(CodeMail::new(codes, delivery.clone())),

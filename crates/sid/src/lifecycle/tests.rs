@@ -100,7 +100,7 @@ async fn drain_waits_for_an_attempt_in_flight() {
     let storage = store().await;
     let probe = Probe::new(Duration::from_millis(150));
     let work = NewWork::new(kind(), vec![]);
-    storage.enqueue_work(&work, 100).await.unwrap();
+    storage.enqueue_work(&work).await.unwrap();
 
     let running = Engine::new(parts(&storage, vec![probe.clone()], Maintenance::default()))
         .unwrap()
@@ -121,7 +121,7 @@ async fn pending_work_resumes_after_a_new_start() {
         .unwrap()
         .start();
     let work = NewWork::new(kind(), vec![]);
-    storage.enqueue_work(&work, 100).await.unwrap();
+    storage.enqueue_work(&work).await.unwrap();
     idle.drain().await.unwrap();
     assert_eq!(state(&storage, &work).await, WorkState::Pending);
 

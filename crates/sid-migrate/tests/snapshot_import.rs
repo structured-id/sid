@@ -2209,7 +2209,7 @@ async fn work_claimed_at_the_source_verifies_once_restored() {
     .await;
     let kind = WorkKind::new("snapshot_probe").unwrap();
     let work = NewWork::new(kind.clone(), vec![]);
-    source.enqueue_work(&work, 10).await.unwrap();
+    source.enqueue_work(&work).await.unwrap();
     let claimed = source
         .claim_work(
             &[kind],

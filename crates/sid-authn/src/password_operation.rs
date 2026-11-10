@@ -123,11 +123,6 @@ const KSF_BUDGET_MIB: u32 = 512;
 pub const RESULT_NAMESPACE: &str = "password-operation";
 /// Longest charge key the evaluator admits (`PreparePasswordHistoryRequest.charge_key`).
 const MAX_CHARGE_KEY: usize = 128;
-/// First enrollments admitted and not yet ended (committed, or aborted and
-/// their key reclaimed), across replicas. Past it a new registration is
-/// refused before the evaluator makes a key, so an outage of the cleanup
-/// becomes backpressure rather than unbounded key storage.
-const ENROLLMENT_CAPACITY: u64 = 100_000;
 
 /// What an operation installs a password for and the authority it rests on:
 /// the host's own record of it (a registration, a change of a credential, a
@@ -376,8 +371,6 @@ pub struct PasswordOperations<S: ?Sized + CredentialStore, P> {
     depth: u32,
     /// How many accepted passwords a commit keeps; never cut by `depth`.
     retention: u32,
-    /// First enrollments admitted and not yet ended, across replicas.
-    enrollment_capacity: u64,
 }
 
 /// What the credential service, which holds the entries, tells the evaluator
@@ -989,7 +982,6 @@ where
             installation: installation.into().0,
             depth: DEFAULT_HISTORY_DEPTH,
             retention: DEFAULT_HISTORY_DEPTH,
-            enrollment_capacity: ENROLLMENT_CAPACITY,
         }
     }
 
@@ -1011,12 +1003,6 @@ where
         self.depth = depth;
         self.retention = retention;
         Ok(self)
-    }
-
-    /// The same, admitting at most `capacity` open first enrollments.
-    pub fn with_enrollment_capacity(mut self, capacity: u64) -> Self {
-        self.enrollment_capacity = capacity;
-        self
     }
 
     /// Store `op` until its deadline; once that has passed it is expired.
@@ -1122,27 +1108,18 @@ where
             // Durable before the evaluator makes the new owner's key, so a
             // registration that never commits (abandoned, or lost to a crash
             // before its reply or this record) still has its key reclaimed.
-            // A decoy (a held identifier) is admitted the same way and under
-            // the same capacity: at capacity both are refused alike, so the
-            // refusal does not tell which identifiers are registered. Its
+            // A decoy (a held identifier) is recorded the same way, so its
+            // cost does not tell which identifiers are registered. Its
             // cleanup finds no key and only fences the operation.
             let admission = EnrollmentAdmission {
                 operation: op.id.into_uuid(),
                 owner_domain: op.owner_domain,
                 expires_at,
             };
-            match self
-                .storage
-                .enqueue_work(&admission.work(), self.enrollment_capacity)
+            self.storage
+                .enqueue_work(&admission.work())
                 .await
-            {
-                Ok(_) => {}
-                Err(sid_core::Error::ResourceExhausted(reason)) => {
-                    warn!("first enrollments at capacity: {reason}");
-                    return Err(unavailable("enrollment capacity"));
-                }
-                Err(e) => return Err(internal(e)),
-            }
+                .map_err(internal)?;
         }
         // The window is taken now and kept with the operation, so a depth
         // edit applies to later operations only.

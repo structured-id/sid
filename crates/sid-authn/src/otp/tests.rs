@@ -14,19 +14,14 @@ async fn store() -> Arc<SqliteBackend> {
     )
 }
 
-/// A replica's OTP service over `store`, owing at most `capacity` mails.
-fn replica_with(store: &Arc<SqliteBackend>, capacity: u64) -> OtpService {
+/// A replica's OTP service over `store`.
+fn replica(store: &Arc<SqliteBackend>) -> OtpService {
     OtpService::new(
         store.clone(),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            capacity,
         },
     )
-}
-
-fn replica(store: &Arc<SqliteBackend>) -> OtpService {
-    replica_with(store, 1000)
 }
 
 async fn service() -> OtpService {
@@ -263,7 +258,6 @@ async fn unreachable_store_fails_closed() {
         Arc::new(crate::test_support::DownCeremonies),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            capacity: 10,
         },
     );
     assert!(matches!(
@@ -371,7 +365,7 @@ impl CeremonyStateStore for ResendDuringVerify {
         k: &str,
         v: &[u8],
         ttl: Duration,
-        owed: sid_plugin::OwedWork<'_>,
+        owed: &NewWork,
     ) -> sid_core::Result<()> {
         self.inner
             .put_ceremony_state_owing(n, k, v, ttl, owed)
@@ -384,7 +378,7 @@ impl CeremonyStateStore for ResendDuringVerify {
         expected: &[u8],
         v: &[u8],
         ttl: Duration,
-        owed: sid_plugin::OwedWork<'_>,
+        owed: &NewWork,
     ) -> sid_core::Result<bool> {
         self.inner
             .replace_ceremony_state_owing(n, k, expected, v, ttl, owed)
@@ -426,7 +420,6 @@ async fn code_replaced_during_its_verification_does_not_sign_in() {
         racing.clone(),
         CodeDelivery {
             keys: crate::test_support::key_manager(),
-            capacity: 100,
         },
     );
     let (result, old) = request(&verifier, "race@example.com").await.unwrap();
@@ -508,24 +501,6 @@ async fn code_for_no_account_sends_nothing() {
             .unwrap()
             .is_none()
     );
-}
-
-/// A full delivery queue refuses an address with no account exactly as one
-/// with an account, so the refusal tells nothing about either (it once let
-/// the unknown address through while refusing the known one).
-#[tokio::test]
-async fn full_queue_refuses_every_address_alike() {
-    let store = store().await;
-    let service = replica_with(&store, 1);
-    request(&service, "first@example.com").await.unwrap();
-
-    let unknown = service
-        .request_otp("nobody@example.com", CodeDestination::None)
-        .await;
-    let known = request(&service, "known@example.com").await;
-
-    assert!(matches!(unknown, Err(OtpError::Busy(_))), "{unknown:?}");
-    assert!(matches!(known, Err(OtpError::Busy(_))), "{known:?}");
 }
 
 /// A used or expired code has nothing left to send.
@@ -619,38 +594,6 @@ async fn resent_code_replaces_the_current_one() {
     ));
 }
 
-/// A resend refused because the mail queue is full changes nothing: the
-/// current code still signs in and its mail is still owed. It once replaced
-/// the code first and then failed to owe the new one's mail, leaving a code
-/// nobody would ever send in place of the one already on its way.
-#[tokio::test]
-async fn resend_refused_for_capacity_keeps_the_current_code() {
-    let store = store().await;
-    let service = replica_with(&store, 1);
-    let (result, first) = request(&service, "full@example.com").await.unwrap();
-
-    let refused = service.resend_otp(&result.session_id).await;
-
-    assert!(matches!(refused, Err(OtpError::Busy(_))), "{refused:?}");
-    let owed = owed_mails(&store).await;
-    assert_eq!(owed.len(), 1, "only the current code's mail is owed");
-    assert!(
-        service
-            .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
-            .await
-            .unwrap()
-            .is_some(),
-        "the current code's mail still sends it"
-    );
-    assert!(matches!(
-        service
-            .verify_otp(&result.session_id, &first)
-            .await
-            .unwrap(),
-        OtpVerifyResult::Success { .. }
-    ));
-}
-
 /// A resend counts as a request against its address's limit.
 #[tokio::test]
 async fn resend_counts_against_the_request_limit() {
@@ -670,20 +613,6 @@ async fn resend_counts_against_the_request_limit() {
 async fn resend_of_an_ended_session_is_none() {
     let service = service().await;
     assert!(service.resend_otp(&Uuid::now_v7()).await.unwrap().is_none());
-}
-
-/// When the bound of owed mails is reached the request is refused rather
-/// than answered with a code nobody will send, and its session is gone.
-#[tokio::test]
-async fn full_delivery_queue_refuses_the_request() {
-    let store = store().await;
-    let service = replica_with(&store, 1);
-    request(&service, "first@example.com").await.unwrap();
-
-    let refused = request(&service, "second@example.com").await;
-
-    assert!(matches!(refused, Err(OtpError::Busy(_))), "{refused:?}");
-    assert_eq!(owed_mails(&store).await.len(), 1);
 }
 
 /// A code sealed to another issue is never sent as this one: reading it

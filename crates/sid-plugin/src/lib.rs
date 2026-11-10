@@ -47,7 +47,7 @@ pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
 pub use ceremony_state::{
     CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, InProcessCeremonyState,
-    OwedWork, SingleUseAdmissions,
+    SingleUseAdmissions,
 };
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;
@@ -78,7 +78,7 @@ pub use sign_in_history::{LoginLocation, SignInHistoryStore};
 pub use snapshot_rules::SnapshotRules;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};
-pub use work_store::{OWED_WORK_CAPACITY, WorkStore};
+pub use work_store::WorkStore;
 
 /// Protocol supported by an authentication provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

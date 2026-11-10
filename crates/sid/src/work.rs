@@ -95,16 +95,8 @@ impl CeWork {
         };
         let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
             Arc::new(BackChannelLogoutHandler::new(issuers, storage.clone())?),
-            Arc::new(EventRelayHandler::new(
-                storage.clone(),
-                required_receivers,
-                sid_plugin::OWED_WORK_CAPACITY,
-            )),
-            Arc::new(EventFanoutHandler::new(
-                event_bus.clone(),
-                storage.clone(),
-                sid_plugin::OWED_WORK_CAPACITY,
-            )),
+            Arc::new(EventRelayHandler::new(storage.clone(), required_receivers)),
+            Arc::new(EventFanoutHandler::new(event_bus.clone(), storage.clone())),
             Arc::new(EventDeliveryHandler::new(event_bus)),
             Arc::new(PrincipalContestHandler::new(storage.clone())),
             Arc::new(SessionRevocationHandler::new(revocation)),

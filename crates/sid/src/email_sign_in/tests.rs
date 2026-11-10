@@ -6,13 +6,7 @@ use super::*;
 use crate::test_support::{fixed_policy, keys, sign_in, storage};
 
 fn codes(storage: Arc<dyn StorageBackend>) -> OtpService {
-    OtpService::new(
-        storage,
-        sid_authn::otp::CodeDelivery {
-            keys: keys(),
-            capacity: sid_plugin::OWED_WORK_CAPACITY,
-        },
-    )
+    OtpService::new(storage, sid_authn::otp::CodeDelivery { keys: keys() })
 }
 
 fn attempt() -> Attempt<'static> {

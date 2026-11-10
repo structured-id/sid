@@ -189,7 +189,7 @@ async fn an_abort_before_its_preparation_fences_it() {
         owner_domain: domain,
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
     };
-    storage.enqueue_work(&admission.work(), 10).await.unwrap();
+    storage.enqueue_work(&admission.work()).await.unwrap();
     let handler = EnrollmentHandler::new(
         storage.clone(),
         EvaluatorDelivery::InProcess(evaluation.clone()),
@@ -301,7 +301,7 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
     assert_ne!(successor.id, work.id);
     assert_eq!(successor.payload, work.payload);
     assert!(successor.not_before.is_none(), "due at once");
-    storage.enqueue_work(&successor, 10).await.unwrap();
+    storage.enqueue_work(&successor).await.unwrap();
     let mut next = ClaimedWork {
         id: successor.id,
         kind: successor.kind,
@@ -466,65 +466,47 @@ async fn a_separate_evaluator_compacts_only_ended_fences() {
     );
 }
 
-/// First enrollments are bounded across replicas: at capacity a new one is
-/// refused before the evaluator makes its key.
+/// Every first enrollment, and a registration for a held identifier alike,
+/// records its cleanup as durable work when it is prepared: its key is
+/// reclaimed even if it never commits, and the two cost the same, so the
+/// record tells nobody which identifiers are registered. No count of open
+/// enrollments refuses one.
 #[tokio::test]
-async fn first_enrollments_are_refused_at_capacity() {
+async fn first_enrollments_record_their_cleanup() {
     let storage = sqlite().await;
     let installation = sid_core::models::OrgId::generate();
     let (ops, _) = split(storage.clone(), installation, manager(3), manager(3));
-    let ops = ops.with_enrollment_capacity(1);
-    enrolled(&ops, installation).await;
-    let owner = ProfileId::generate();
-    let refused = ops
-        .prepare(
-            &zkpp_without_proofs(),
-            change(),
-            OperationOwner::New(owner),
-            owner.to_string(),
-            None,
-        )
-        .await
-        .map(|_| ())
-        .unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            PasswordOperationError::Unavailable("enrollment capacity")
-        ),
-        "{refused}"
-    );
-    assert!(
+    let cleanup = EnrollmentAdmission {
+        operation: uuid::Uuid::now_v7(),
+        owner_domain: [0; 32],
+        expires_at: chrono::Utc::now(),
+    }
+    .work()
+    .kind;
+    let recorded = || async {
         storage
-            .history_keys()
-            .get_key_epochs(&owner_domain(installation.as_bytes(), owner))
+            .export_work()
             .await
             .unwrap()
-            .epochs
-            .is_empty(),
-        "no key past capacity"
-    );
-
-    // A registration for a held identifier is answered as a new one would
-    // be: at capacity it is refused alike, so the refusal tells nobody
-    // which identifiers are registered.
-    let decoy = ops
-        .prepare(
+            .iter()
+            .filter(|w| w.record.kind == cleanup)
+            .count()
+    };
+    for owner in [
+        OperationOwner::New(ProfileId::generate()),
+        OperationOwner::Decoy(ProfileId::generate()),
+    ] {
+        let before = recorded().await;
+        ops.prepare(
             &zkpp_without_proofs(),
             change(),
-            OperationOwner::Decoy(ProfileId::generate()),
+            owner,
             "anonymous".into(),
             None,
         )
         .await
         .map(|_| ())
-        .unwrap_err();
-    assert_eq!(decoy.to_string(), refused.to_string());
-    assert!(
-        matches!(
-            decoy,
-            PasswordOperationError::Unavailable("enrollment capacity")
-        ),
-        "{decoy}"
-    );
+        .expect("a first enrollment is prepared");
+        assert_eq!(recorded().await, before + 1);
+    }
 }

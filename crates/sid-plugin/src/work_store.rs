@@ -13,21 +13,13 @@ use sid_core::models::{
     ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
 };
 
-/// Open work per kind a mutation may still add in its own transaction, in
-/// every backend; beyond it the mutation is refused (`ResourceExhausted`)
-/// rather than accepted without its obligation.
-pub const OWED_WORK_CAPACITY: u64 = 100_000;
-
 #[async_trait]
 pub trait WorkStore: Send + Sync {
     /// Store `work`. Returns `false`, writing nothing, when work with its id
-    /// already exists (the same obligation again), whatever the load. When
-    /// `capacity` pending or claimed items of its kind are stored the work is
-    /// refused with `Error::ResourceExhausted`, never dropped after acceptance;
-    /// the bound is per kind so one backlog cannot starve others, and it holds
-    /// exactly however many replicas enqueue at once. (Work a mutation owes in
-    /// its own transaction is bounded only as a safety net.)
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> Result<bool>;
+    /// already exists (the same obligation again). The backlog is not
+    /// counted or bounded here: requests are limited where they enter, and a
+    /// failure to store the work fails the call, never drops it.
+    async fn enqueue_work(&self, work: &NewWork) -> Result<bool>;
 
     /// Claim up to `limit` due work of `kinds` for `worker`, leased for
     /// `lease`. Work whose lease ran out is claimable again, with a new
@@ -51,19 +43,16 @@ pub trait WorkStore: Send + Sync {
     ) -> Result<bool>;
 
     /// Record claimed work done, as [`Self::complete_work`] does, with the
-    /// follow-up work `owed` admitted under each kind's `capacity` in the
-    /// same commit: both are stored or neither. Returns `false`, writing
-    /// nothing, when `generation` is no longer the current claim; refuses
-    /// with `Error::ResourceExhausted`, writing nothing and leaving the claim
-    /// as it was, when a child finds its kind full. A child already stored is
-    /// accepted again whatever the load, as by [`Self::enqueue_work`].
+    /// follow-up work `owed` in the same commit: both are stored or neither.
+    /// Returns `false`, writing nothing, when `generation` is no longer the
+    /// current claim. A child already stored is accepted again, as by
+    /// [`Self::enqueue_work`].
     async fn complete_work_owing(
         &self,
         id: WorkId,
         generation: i64,
         result: Option<&str>,
         owed: &[NewWork],
-        capacity: u64,
     ) -> Result<bool>;
 
     /// Record a failed attempt: the work is due again at `failure.retry_at`,
@@ -100,8 +89,7 @@ pub trait WorkStore: Send + Sync {
     /// Every stored piece of work with its payload, to carry to another store.
     async fn export_work(&self) -> Result<Vec<WorkSnapshot>>;
 
-    /// Store exported work as [`WorkSnapshot::at_rest`] gives it, outside any
-    /// capacity (it was accepted where it came from). Returns `false`, writing
-    /// nothing, when work with its id already exists.
+    /// Store exported work as [`WorkSnapshot::at_rest`] gives it. Returns
+    /// `false`, writing nothing, when work with its id already exists.
     async fn import_work(&self, work: &WorkSnapshot) -> Result<bool>;
 }

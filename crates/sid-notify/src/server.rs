@@ -208,12 +208,8 @@ impl NotifyServer {
             Arc::new(delivery::RouteHandler::new(
                 self.routing.clone(),
                 self.resolver.clone(),
-                self.config.job_capacity,
             )),
-            Arc::new(delivery::PlanHandler::new(
-                Arc::clone(&self.jobs),
-                self.config.job_capacity,
-            )),
+            Arc::new(delivery::PlanHandler::new()),
             Arc::new(delivery::DeliverHandler::new(
                 self.dispatcher.clone(),
                 self.store.clone(),
@@ -227,12 +223,10 @@ impl NotifyServer {
             Arc::new(EventRelayHandler::new(
                 Arc::clone(&self.jobs),
                 self.config.event_receivers.clone(),
-                self.config.job_capacity,
             )),
             Arc::new(EventFanoutHandler::new(
                 Arc::clone(&bus),
                 Arc::clone(&self.jobs),
-                self.config.job_capacity,
             )),
             Arc::new(EventDeliveryHandler::new(Arc::clone(&bus))),
         ];
@@ -259,14 +253,12 @@ impl NotifyServer {
             .into_iter()
             .map(|deliveries| {
                 let jobs = Arc::clone(&self.jobs);
-                let capacity = self.config.job_capacity;
                 let consumer_stopped = stopped.clone().wait();
                 let waker = waker.clone();
                 tokio::spawn(async move {
                     delivery::accept_work(
                         deliveries,
                         jobs.as_ref(),
-                        capacity,
                         || waker.wake(),
                         consumer_stopped,
                     )

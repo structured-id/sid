@@ -33,7 +33,6 @@ fn test_config_struct_defaults() {
         webhook_enabled: true,
         vapid: None,
         database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-        job_capacity: DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
         api: test_api(),
     };
@@ -65,7 +64,6 @@ fn test_config_with_vapid() {
             private_key: "Dt1CLgQlkiaA-tmCkATyKZeoF1".into(),
         }),
         database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-        job_capacity: DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
         api: test_api(),
     };
@@ -116,7 +114,6 @@ fn test_config_disabled_channels() {
         webhook_enabled: false,
         vapid: None,
         database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-        job_capacity: DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
         api: test_api(),
     };

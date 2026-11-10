@@ -35,22 +35,13 @@ pub const RELAY_RETRY: RetrySchedule = RetrySchedule::new(&[
     Duration::from_secs(3600),
 ]);
 
-/// Open relay work beyond which an observed event is refused. It stays below
-/// the capacity of work a mutation owes, so a flood of observations (a
-/// password-guessing run) never refuses a mutation for its event.
-pub const OBSERVED_EVENT_CAPACITY: u64 = 10_000;
-
 /// Relay an event that no state change carries (a refused sign-in) as
-/// durable work of its own. `Error::ResourceExhausted` when the relay backlog
-/// holds [`OBSERVED_EVENT_CAPACITY`] items.
+/// durable work of its own.
 pub async fn relay_observed<S: WorkStore + ?Sized>(
     store: &S,
     event: &Event,
 ) -> sid_core::Result<()> {
-    store
-        .enqueue_work(&event.relay(), OBSERVED_EVENT_CAPACITY)
-        .await
-        .map(|_| ())
+    store.enqueue_work(&event.relay()).await.map(|_| ())
 }
 
 /// The outcome of a bus refusal: a type the bus does not carry never will,
@@ -71,7 +62,6 @@ pub struct EventRelayHandler {
     kind: WorkKind,
     work: Arc<dyn WorkStore>,
     receivers: Vec<RequiredReceiver>,
-    capacity: u64,
     /// The family of the facts this producer relays; its bus carries no
     /// other.
     family: EventFamily,
@@ -79,14 +69,12 @@ pub struct EventRelayHandler {
 
 impl EventRelayHandler {
     /// A relay owing identity facts to the `receivers` that require their
-    /// types, as a plan stored in `work`, each kind holding at most
-    /// `capacity` open items.
-    pub fn new(work: Arc<dyn WorkStore>, receivers: Vec<RequiredReceiver>, capacity: u64) -> Self {
+    /// types, as a plan stored in `work`.
+    pub fn new(work: Arc<dyn WorkStore>, receivers: Vec<RequiredReceiver>) -> Self {
         Self {
             kind: WorkKind::new(EVENT_RELAY_KIND).expect("the relay kind is valid"),
             work,
             receivers,
-            capacity,
             family: EventFamily::Identity,
         }
     }
@@ -135,11 +123,7 @@ impl WorkHandler for EventRelayHandler {
             .filter(|r| r.requires(&event.event_type))
             .map(|r| r.recipient.clone())
             .collect();
-        match self
-            .work
-            .enqueue_work(&event.fanout(&receivers), self.capacity)
-            .await
-        {
+        match self.work.enqueue_work(&event.fanout(&receivers)).await {
             Ok(_) => WorkOutcome::Done(Some(format!("planned for {} receivers", receivers.len()))),
             Err(e) => WorkOutcome::Retry(format!("plan: {e}")),
         }
@@ -152,18 +136,15 @@ pub struct EventFanoutHandler {
     kind: WorkKind,
     bus: Arc<dyn EventBus>,
     work: Arc<dyn WorkStore>,
-    capacity: u64,
 }
 
 impl EventFanoutHandler {
-    /// Fan-out onto `bus`, owing deliveries as work in `work`, each kind
-    /// holding at most `capacity` open items.
-    pub fn new(bus: Arc<dyn EventBus>, work: Arc<dyn WorkStore>, capacity: u64) -> Self {
+    /// Fan-out onto `bus`, owing deliveries as work in `work`.
+    pub fn new(bus: Arc<dyn EventBus>, work: Arc<dyn WorkStore>) -> Self {
         Self {
             kind: WorkKind::new(EVENT_FANOUT_KIND).expect("the fan-out kind is valid"),
             bus,
             work,
-            capacity,
         }
     }
 }
@@ -191,11 +172,7 @@ impl WorkHandler for EventFanoutHandler {
         // The deliveries are owed before the history is published, each
         // under its stable id: a retried plan stores none twice.
         for recipient in &plan.receivers {
-            if let Err(e) = self
-                .work
-                .enqueue_work(&plan.event.deliver(recipient), self.capacity)
-                .await
-            {
+            if let Err(e) = self.work.enqueue_work(&plan.event.deliver(recipient)).await {
                 return WorkOutcome::Retry(format!("owe to {recipient}: {e}"));
             }
         }

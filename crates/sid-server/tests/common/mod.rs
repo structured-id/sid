@@ -732,7 +732,6 @@ pub async fn issue_code(
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
-            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     )
     .request_otp(address, sid_authn::otp::CodeDestination::Email(address))
@@ -1031,7 +1030,6 @@ fn auth_service_keyed(
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
-            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
     let resets = Arc::new(sid_authn::password_reset::PasswordResetService::new(
@@ -1926,15 +1924,11 @@ impl TestServices {
         let contest =
             sid_authn::principal_contest::PrincipalContestHandler::new(self.storage.clone());
         // No required receivers: the tests observe the published history.
-        let relay = sid_authn::event_relay::EventRelayHandler::new(
-            self.storage.clone(),
-            Vec::new(),
-            sid_plugin::OWED_WORK_CAPACITY,
-        );
+        let relay =
+            sid_authn::event_relay::EventRelayHandler::new(self.storage.clone(), Vec::new());
         let fanout = sid_authn::event_relay::EventFanoutHandler::new(
             self.event_bus.clone(),
             self.storage.clone(),
-            sid_plugin::OWED_WORK_CAPACITY,
         );
         let handlers: [&dyn WorkHandler; 3] = [&contest, &relay, &fanout];
         for handler in handlers {

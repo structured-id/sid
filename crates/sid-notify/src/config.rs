@@ -9,7 +9,6 @@
 //! - `SID_EVENT_RECEIVERS` — the deployment's required receivers, as producers list them (required; `none` for none); this service owes its own facts to all but itself
 //! - `SID_NATS_TOPOLOGY` and the `SID_NATS_*` bounds — the event topology, as for every SID service
 //! - `SID_NOTIFY_DATABASE_URL` — PostgreSQL URL for delivery jobs and templates (required)
-//! - `SID_NOTIFY_JOB_CAPACITY` — open jobs per kind before events stay with the broker (default: 100000)
 //! - `SID_IDENTITY_GRPC_ADDRESS` — sid-identity gRPC address for recipient resolution (optional, e.g., `http://127.0.0.1:9000`)
 //! - `SID_GRPC_UPSTREAM`, `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`,
 //!   `SID_RECEIVER_ORIGIN`, `SID_AUTHZ_CHECKER_*` — the template API's
@@ -71,10 +70,6 @@ pub struct NotifyConfig {
     /// customizations live there. Required: without it no delivery can be
     /// owned durably.
     pub database_url: String,
-
-    /// Open jobs per kind before new events are refused (and left with the
-    /// broker) instead of accepted.
-    pub job_capacity: u64,
 
     /// sid-identity gRPC address for recipient resolution (optional).
     /// When None, recipient info extracted from event data only.
@@ -196,17 +191,6 @@ impl NotifyConfig {
             .filter(|s| !s.is_empty())
             .ok_or(ConfigError::Missing("SID_NOTIFY_DATABASE_URL"))?;
 
-        let job_capacity = match std::env::var("SID_NOTIFY_JOB_CAPACITY") {
-            Ok(value) => value
-                .parse::<u64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| {
-                    ConfigError::Invalid("SID_NOTIFY_JOB_CAPACITY", format!("{value:?}"))
-                })?,
-            Err(_) => DEFAULT_JOB_CAPACITY,
-        };
-
         let identity_grpc_address = std::env::var("SID_IDENTITY_GRPC_ADDRESS")
             .ok()
             .filter(|s| !s.is_empty());
@@ -225,15 +209,11 @@ impl NotifyConfig {
             webhook_enabled,
             vapid,
             database_url,
-            job_capacity,
             identity_grpc_address,
             api,
         })
     }
 }
-
-/// Open jobs per kind when `SID_NOTIFY_JOB_CAPACITY` is unset.
-pub const DEFAULT_JOB_CAPACITY: u64 = 100_000;
 
 /// The receiver when `SID_NOTIFY_RECEIVER` is unset.
 pub const DEFAULT_RECEIVER: &str = "sid-notify";

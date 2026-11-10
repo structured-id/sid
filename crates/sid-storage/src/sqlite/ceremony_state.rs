@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
-    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, OwedWork,
-    SingleUseAdmissions,
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
 };
 
 use super::SqliteBackend;
@@ -173,7 +172,7 @@ impl CeremonyStateStore for SqliteBackend {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query(
@@ -189,7 +188,7 @@ impl CeremonyStateStore for SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(failure("store ceremony state"))?;
-        super::work::insert_work_in_tx(&mut tx, owed.work, owed.capacity).await?;
+        super::work::insert_work_in_tx(&mut tx, owed).await?;
         tx.commit().await.map_err(failure("store ceremony state"))?;
         Ok(())
     }
@@ -201,7 +200,7 @@ impl CeremonyStateStore for SqliteBackend {
         expected: &[u8],
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         // Read holding the write lock, as `ceremony_write` does.
@@ -223,7 +222,7 @@ impl CeremonyStateStore for SqliteBackend {
         if replaced != 1 {
             return Ok(false);
         }
-        super::work::insert_work_in_tx(&mut tx, owed.work, owed.capacity).await?;
+        super::work::insert_work_in_tx(&mut tx, owed).await?;
         tx.commit()
             .await
             .map_err(failure("replace ceremony state"))?;

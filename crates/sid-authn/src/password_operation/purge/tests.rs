@@ -92,7 +92,7 @@ async fn a_deleted_owners_keys_are_destroyed() {
     assert_eq!(keys().await, 1);
 
     let purge = purge_of(&org, profile);
-    storage.enqueue_work(&purge, 10).await.unwrap();
+    storage.enqueue_work(&purge).await.unwrap();
 
     let handler = OwnerPurgeHandler::new(
         storage.clone(),
@@ -152,7 +152,7 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     const SOURCE: &str = "https://sid.example.com";
     let (storage, org, profile, _, _) = owner_with_a_key().await;
     let purge = purge_of(&org, profile);
-    storage.enqueue_work(&purge, 10).await.unwrap();
+    storage.enqueue_work(&purge).await.unwrap();
     let handler = OwnerPurgeHandler::new(
         storage.clone(),
         EvaluatorDelivery::Relay {
@@ -187,7 +187,7 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
         .on_dead(&work, "awaiting")
         .expect("the purge goes on");
     assert_ne!(successor.id, work.id);
-    storage.enqueue_work(&successor, 10).await.unwrap();
+    storage.enqueue_work(&successor).await.unwrap();
     let mut work = claimed(storage.as_ref(), successor.id).await;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
     assert!(

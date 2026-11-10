@@ -87,7 +87,7 @@ impl MockStorage {
 
 #[async_trait::async_trait]
 impl sid_plugin::WorkStore for MockStorage {
-    async fn enqueue_work(&self, _: &NewWork, _: u64) -> Result<bool> {
+    async fn enqueue_work(&self, _: &NewWork) -> Result<bool> {
         unimplemented!()
     }
     async fn claim_work(
@@ -108,7 +108,6 @@ impl sid_plugin::WorkStore for MockStorage {
         _: i64,
         _: Option<&str>,
         _: &[NewWork],
-        _: u64,
     ) -> Result<bool> {
         unimplemented!()
     }

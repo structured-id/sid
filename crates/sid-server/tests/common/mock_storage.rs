@@ -111,8 +111,6 @@ pub struct MockStorageInner {
     allowlist_reads_fail: bool,
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
-    /// Owing new work fails as a full queue refuses it.
-    owed_work_full: bool,
     /// The admin IP allowlist: CIDR, description and creation time.
     ip_allowlist: Vec<(String, String, chrono::DateTime<chrono::Utc>)>,
     /// Durable work items with their payload and lease deadline.
@@ -481,13 +479,6 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_profile_reads(&self) {
         self.inner.lock().unwrap().profile_reads_fail = true;
-    }
-
-    /// From now on, every queue of owed work is full: a mutation that owes
-    /// work is refused as the store refuses it past its capacity.
-    #[allow(dead_code)]
-    pub fn fill_owed_work(&self) {
-        self.inner.lock().unwrap().owed_work_full = true;
     }
 
     /// From now on, reading a magic link session fails.
@@ -1309,7 +1300,7 @@ impl MockStorageInner {
             for oldest in active.into_iter().take(excess) {
                 for ended in self.end_with_dependents(oldest.id) {
                     for owed in end.owed_by(&ended) {
-                        self.enqueue(&owed, u64::MAX)?;
+                        self.enqueue(&owed)?;
                     }
                     evicted.push(ended.id);
                 }
@@ -1387,7 +1378,7 @@ impl GrantStore for MockStorage {
         }
         for ended in inner.end_with_dependents(pending) {
             for owed in end.owed_by(&ended) {
-                inner.enqueue(&owed, u64::MAX)?;
+                inner.enqueue(&owed)?;
             }
         }
         inner.create_session(session, max_sessions, proved_by, ctx)
@@ -1712,14 +1703,11 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         key: &str,
         value: &[u8],
         ttl: std::time::Duration,
-        owed: sid_plugin::OwedWork<'_>,
+        owed: &NewWork,
     ) -> SidResult<()> {
-        self.inner
-            .lock()
-            .unwrap()
-            .enqueue(owed.work, owed.capacity)?;
+        self.inner.lock().unwrap().enqueue(owed)?;
         if let Err(e) = self.put_ceremony_state(namespace, key, value, ttl).await {
-            self.inner.lock().unwrap().work.remove(&owed.work.id);
+            self.inner.lock().unwrap().work.remove(&owed.id);
             return Err(e);
         }
         Ok(())
@@ -1731,7 +1719,7 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         expected: &[u8],
         value: &[u8],
         ttl: std::time::Duration,
-        owed: sid_plugin::OwedWork<'_>,
+        owed: &NewWork,
     ) -> SidResult<bool> {
         if !self
             .ceremonies
@@ -1740,7 +1728,7 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         {
             return Ok(false);
         }
-        let owing = self.inner.lock().unwrap().enqueue(owed.work, owed.capacity);
+        let owing = self.inner.lock().unwrap().enqueue(owed);
         if let Err(e) = owing {
             self.ceremonies
                 .replace_ceremony_state(namespace, key, value, expected, ttl)
@@ -6813,9 +6801,8 @@ impl MockStorageInner {
         if let Some(generation) = &ctx.generation {
             self.insert_native_generation(generation);
         }
-        let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {
-            self.enqueue(owed, capacity)?;
+            self.enqueue(owed)?;
         }
         Ok(())
     }
@@ -6905,21 +6892,9 @@ impl MockStorageInner {
         Ok(())
     }
 
-    fn enqueue(&mut self, work: &NewWork, capacity: u64) -> SidResult<bool> {
+    fn enqueue(&mut self, work: &NewWork) -> SidResult<bool> {
         if self.work.contains_key(&work.id) {
             return Ok(false);
-        }
-        let open = self
-            .work
-            .values()
-            .filter(|(r, _, _)| {
-                r.kind == work.kind && matches!(r.state, WorkState::Pending | WorkState::Claimed)
-            })
-            .count() as u64;
-        if open >= capacity {
-            return Err(sid_core::Error::ResourceExhausted(
-                "durable work queue full".into(),
-            ));
         }
         let now = chrono::Utc::now();
         let record = WorkRecord {
@@ -6945,8 +6920,8 @@ impl MockStorageInner {
 
 #[async_trait]
 impl sid_plugin::WorkStore for MockStorage {
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> SidResult<bool> {
-        self.inner.lock().unwrap().enqueue(work, capacity)
+    async fn enqueue_work(&self, work: &NewWork) -> SidResult<bool> {
+        self.inner.lock().unwrap().enqueue(work)
     }
 
     async fn claim_work(
@@ -7005,10 +6980,8 @@ impl sid_plugin::WorkStore for MockStorage {
         generation: i64,
         result: Option<&str>,
         owed: &[NewWork],
-        capacity: u64,
     ) -> SidResult<bool> {
-        // One lock over both: the children and the completion land together
-        // or, undone on a refusal, not at all.
+        // One lock over both: the children and the completion land together.
         let mut inner = self.inner.lock().unwrap();
         let claimed = inner
             .work
@@ -7017,18 +6990,8 @@ impl sid_plugin::WorkStore for MockStorage {
         if !claimed {
             return Ok(false);
         }
-        let mut stored = Vec::new();
         for work in owed {
-            match inner.enqueue(work, capacity) {
-                Ok(true) => stored.push(work.id),
-                Ok(false) => {}
-                Err(e) => {
-                    for child in stored {
-                        inner.work.remove(&child);
-                    }
-                    return Err(e);
-                }
-            }
+            inner.enqueue(work)?;
         }
         let (r, _, until) = inner.work.get_mut(&id).expect("checked above");
         r.state = WorkState::Completed;
@@ -7084,7 +7047,7 @@ impl sid_plugin::WorkStore for MockStorage {
             _ => return Ok(false),
         };
         if dead && let Some(alert) = &failure.on_dead {
-            inner.enqueue(alert, u64::MAX)?;
+            inner.enqueue(alert)?;
         }
         Ok(true)
     }
