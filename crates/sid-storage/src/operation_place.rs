@@ -20,7 +20,9 @@ pub(crate) fn place_of(fingerprint: &[u8]) -> i16 {
 }
 
 /// `place`'s share of `capacity`: `capacity / PLACES`, one more for each of
-/// the first `capacity % PLACES` places.
+/// the first `capacity % PLACES` places. The PostgreSQL store computes it in
+/// its statements.
+#[cfg(feature = "storage-coordinode")]
 pub(crate) fn share(place: i16, capacity: i64) -> i64 {
     let places = i64::from(PLACES);
     capacity / places + i64::from(i64::from(place) < capacity % places)
