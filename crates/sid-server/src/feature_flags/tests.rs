@@ -8,8 +8,6 @@ async fn test_disabled_service_returns_defaults() {
     assert!(!svc.is_maintenance_mode().await);
     // Default for registration_enabled is true
     assert!(svc.is_registration_enabled().await);
-    // Default for trial_creation_enabled is false (closed beta)
-    assert!(!svc.is_trial_creation_enabled().await);
 }
 
 #[tokio::test]
@@ -37,7 +35,6 @@ async fn test_flags_can_be_set_directly() {
 async fn test_flag_names_are_correct() {
     assert_eq!(flags::MAINTENANCE_MODE, "maintenance_mode");
     assert_eq!(flags::REGISTRATION_ENABLED, "registration_enabled");
-    assert_eq!(flags::TRIAL_CREATION_ENABLED, "trial_creation_enabled");
 }
 
 #[tokio::test]

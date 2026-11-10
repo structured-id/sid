@@ -270,52 +270,12 @@ fn test_vars_to_context() {
     assert_eq!(ctx["data"]["city"], "Berlin");
 }
 
+/// A trial's mail belongs to the hosted service that sends it: the shared
+/// defaults ship no such template.
 #[test]
-fn test_trial_onboarding_template_exists() {
+fn test_default_templates_ship_no_trial_mail() {
     let engine = TemplateEngine::with_default_ce_templates();
-    assert!(engine.get("trial_onboarding").is_some());
-}
-
-#[test]
-fn test_trial_onboarding_template_renders() {
-    let engine = TemplateEngine::with_default_ce_templates();
-    let event = Event::new("sid-server", "sid.organization.trial_activated.v1")
-        .with_subject("org/01234567-89ab-cdef-0123-456789abcdef")
-        .with_data(serde_json::json!({
-            "org_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "org_name": "Acme Corp",
-            "domain": "id.acme.com",
-            "trial_days_remaining": 30,
-            "trial_users_limit": 25,
-            "trial_end_date": "2026-04-22",
-        }));
-
-    let msg = engine
-        .render(
-            "trial_onboarding",
-            &event,
-            NotificationPriority::Transactional,
-        )
-        .unwrap();
-
-    let subject = msg.subject.unwrap();
-    assert!(
-        subject.contains("Acme Corp"),
-        "subject should contain org name"
-    );
-    assert!(
-        msg.body.contains("id.acme.com"),
-        "body should contain domain"
-    );
-    assert!(
-        msg.body.contains("25"),
-        "body should contain trial users limit"
-    );
-    assert!(msg.body.contains("30"), "body should contain trial days");
-    assert!(
-        msg.body.contains("2026-04-22"),
-        "body should contain trial end date"
-    );
+    assert!(engine.get("trial_onboarding").is_none());
 }
 
 #[test]
