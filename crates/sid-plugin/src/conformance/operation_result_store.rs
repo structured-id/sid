@@ -5,7 +5,8 @@
 
 use sid_core::Error;
 use sid_core::models::{
-    AuditEntry, MutationContext, OperationCompletion, OperationKey, OperationResourceBinding,
+    AuditEntry, MutationContext, OperationCompletion, OperationKey, OperationRecord,
+    OperationResourceBinding,
 };
 use uuid::Uuid;
 
@@ -420,6 +421,55 @@ pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultSt
         }
     }
     assert!(admitted, "a fresh period admits again");
+}
+
+/// Completions carried into a store count toward their period's capacity
+/// as they would have when committed there: once a restore brought a period
+/// to its capacity, no new completion under it is recorded, whatever inputs
+/// it has. Needs a store of its own whose harness set a capacity of at most
+/// 8.
+pub async fn imported_completions_keep_the_period_bound(store: &dyn OperationResultStore) {
+    use chrono::{Duration, Utc};
+
+    let capacity = store.operation_period_policy().await.unwrap().capacity;
+    assert!(capacity <= 8, "the harness sets a small capacity");
+    let period = store
+        .current_operation_period(Utc::now(), Duration::minutes(5))
+        .await
+        .unwrap()
+        .period;
+    let ns = namespace();
+    // Commands with one and the same inputs, as many as the period holds.
+    for _ in 0..capacity {
+        let carried = OperationRecord {
+            completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
+                .in_period(period),
+            completed_at: Utc::now(),
+        };
+        assert!(store.import_operation_result(&carried).await.unwrap());
+    }
+    for i in 0..16 {
+        let refused = store
+            .record_outcome(
+                MutationContext::from(AuditEntry::system("conformance", "operation_result"))
+                    .with_operation(
+                        OperationCompletion::new(
+                            &ns,
+                            key(),
+                            "keyed",
+                            format!("other-{i}").as_bytes(),
+                            b"done".to_vec(),
+                        )
+                        .in_period(period),
+                    ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, Error::ResourceExhausted(_)),
+            "a completion past the restored capacity: {refused:?}"
+        );
+    }
 }
 
 /// The life of the periods keyed commands are admitted under, in one

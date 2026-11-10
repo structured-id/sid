@@ -435,11 +435,21 @@ CREATE TABLE operation_periods (
     period bigint NOT NULL,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
     accepted_until timestamp with time zone NOT NULL,
-    -- Completions committed under the period.
-    recorded bigint DEFAULT 0 NOT NULL,
     CONSTRAINT operation_periods_pkey PRIMARY KEY (period),
-    CONSTRAINT operation_periods_period_check CHECK (period > 0),
-    CONSTRAINT operation_periods_recorded_check CHECK (recorded >= 0)
+    CONSTRAINT operation_periods_period_check CHECK (period > 0)
+);
+
+-- Completions committed under a period, counted in places: concurrent
+-- commits count into different rows, and the places' shares of the
+-- capacity add up to it.
+CREATE TABLE operation_period_places (
+    period bigint NOT NULL,
+    place smallint NOT NULL,
+    recorded bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT operation_period_places_pkey PRIMARY KEY (period, place),
+    CONSTRAINT operation_period_places_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period),
+    CONSTRAINT operation_period_places_place_check CHECK (place >= 0),
+    CONSTRAINT operation_period_places_recorded_check CHECK (recorded >= 0)
 );
 
 CREATE TABLE operation_results (

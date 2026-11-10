@@ -517,6 +517,7 @@ impl SqliteBackend {
     pub fn history_keys(&self) -> SqliteHistoryKeyStore {
         SqliteHistoryKeyStore {
             pool: self.pool.clone(),
+            writer: self.writer.clone(),
         }
     }
 }
@@ -526,12 +527,15 @@ impl SqliteBackend {
 /// installation that runs both in one process.
 #[derive(Clone)]
 pub struct SqliteHistoryKeyStore {
+    /// The backend's read pool.
     pool: SqlitePool,
+    /// The backend's writer pool, which every write transaction starts on.
+    writer: SqlitePool,
 }
 
 impl SqliteHistoryKeyStore {
     async fn begin_write(&self) -> SidResult<WriteTx> {
-        self.pool
+        self.writer
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage("begin"))

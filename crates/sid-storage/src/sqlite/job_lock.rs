@@ -43,7 +43,7 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(format!("job lock commit: {e}")))?;
         Ok(taken.then(|| {
             JobLock::new(SqliteJobLock {
-                pool: self.pool.clone(),
+                pool: self.writer.clone(),
                 job,
                 holder: Some(holder),
             })
@@ -52,6 +52,7 @@ impl SqliteBackend {
 }
 
 struct SqliteJobLock {
+    /// The backend's writer pool: releasing the lock deletes its row.
     pool: SqlitePool,
     job: i64,
     /// `None` once released.

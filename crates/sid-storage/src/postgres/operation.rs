@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::PostgresBackend;
+use crate::operation_place::{PLACES, place_of};
 
 /// The operation tables of a host keeping its own database; the engine's
 /// schema holds the same tables.
@@ -116,7 +117,7 @@ pub(super) async fn record_in_tx(
     let size = i64::try_from(operation.result.len()).unwrap_or(i64::MAX);
     match period {
         Some(period) => {
-            if let Err(e) = take_place(tx, period, size).await {
+            if let Err(e) = take_place(tx, period, size, &operation.fingerprint).await {
                 // A completed key answers as completed, full period or not.
                 return Err(
                     if matches!(e, SidError::ResourceExhausted(_))
@@ -178,34 +179,103 @@ pub(super) async fn record_in_tx(
     Ok(())
 }
 
-/// Count a completion of `size` bytes into admitted `period` on `tx`. The
-/// period's row stays locked until the commit, so commits under one period
-/// take their places in turn, a retirement waits for them or refuses them,
-/// and the count never passes the policy's capacity on any replica.
+/// The places of a newly held `period`, on `tx`.
+async fn add_places(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, period: i64) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO operation_period_places (period, place)
+         SELECT $1, generate_series(0, $2 - 1)",
+    )
+    .bind(period)
+    .bind(PLACES)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period places: {e}")))?;
+    Ok(())
+}
+
+/// Count a completion of `size` bytes into admitted `period` on `tx`, in
+/// the place its `fingerprint` names, or, when that place's share is used
+/// up, in the first place with room. The counted place stays locked until
+/// the commit: commits counting in one place take turns, a retirement waits
+/// for every place or refuses them, and the places never pass their shares,
+/// so the period never passes the policy's capacity on any replica.
 async fn take_place(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period: i64,
     size: i64,
+    fingerprint: &[u8],
 ) -> SidResult<()> {
+    // A first attempt that waited for another commit to fill its place keeps
+    // that place locked though it counts nothing (PostgreSQL locks a row it
+    // waited for before rechecking the condition). Rolled back to this
+    // savepoint, it releases it before every place is taken in order below,
+    // which would otherwise wait while holding a place out of order.
+    sqlx::query("SAVEPOINT sid_operation_place")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    // $3 places; a place's share is `capacity / $3`, one more for the first
+    // `capacity % $3` places.
     let placed: Option<i64> = sqlx::query_scalar(
-        "UPDATE operation_periods p SET recorded = p.recorded + 1
+        "UPDATE operation_period_places SET recorded = recorded + 1
          FROM operation_period_state s
-         WHERE p.period = $1 AND p.recorded < s.capacity AND $2 <= s.result_bytes
-         RETURNING p.period",
+         WHERE period = $1 AND place = $4 AND $2 <= s.result_bytes
+           AND recorded < s.capacity / $3 + CASE WHEN place < s.capacity % $3 THEN 1 ELSE 0 END
+         RETURNING period",
     )
     .bind(period)
     .bind(size)
+    .bind(PLACES)
+    .bind(place_of(fingerprint))
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
     if placed.is_some() {
         return Ok(());
     }
+    sqlx::query("ROLLBACK TO SAVEPOINT sid_operation_place")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    // Its place is used up, or the commit is refused. Every place is taken,
+    // in order, before one with room is counted: a place another commit
+    // holds may still have room once that commit ends.
+    sqlx::query(
+        "SELECT place FROM operation_period_places WHERE period = $1 ORDER BY place FOR UPDATE",
+    )
+    .bind(period)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    let room: Option<i16> = sqlx::query_scalar(
+        "SELECT place FROM operation_period_places, operation_period_state s
+         WHERE period = $1 AND $2 <= s.result_bytes
+           AND recorded < s.capacity / $3 + CASE WHEN place < s.capacity % $3 THEN 1 ELSE 0 END
+         ORDER BY place LIMIT 1",
+    )
+    .bind(period)
+    .bind(size)
+    .bind(PLACES)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if let Some(place) = room {
+        sqlx::query(
+            "UPDATE operation_period_places SET recorded = recorded + 1
+             WHERE period = $1 AND place = $2",
+        )
+        .bind(period)
+        .bind(place)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        return Ok(());
+    }
     // Why not, read once the commit is refused anyway.
     let (recorded, capacity, limit): (Option<i64>, i64, i64) = sqlx::query_as(
-        "SELECT p.recorded, s.capacity, s.result_bytes
-         FROM operation_period_state s
-         LEFT JOIN operation_periods p ON p.period = $1",
+        "SELECT (SELECT sum(recorded)::bigint FROM operation_period_places WHERE period = $1),
+                s.capacity, s.result_bytes
+         FROM operation_period_state s",
     )
     .bind(period)
     .fetch_one(&mut **tx)
@@ -386,22 +456,29 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
         .begin()
         .await
         .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
-    // A carried completion counts toward its period's capacity here too,
-    // whatever the count. The count is written first, so the period's row is
-    // held for writing from the start: a shared hold upgraded later would
-    // deadlock two imports under one period. A duplicate rolls it back.
+    // A carried completion counts toward its period's capacity here too, in
+    // a place with room as a commit would, so a restored period admits no
+    // more than its capacity; past it, whatever the count, in the place its
+    // inputs name. Places are written before the completion, held for
+    // writing from the start. A duplicate rolls the count back.
     if let Some(period) = c.period {
-        let counted: Option<i64> = sqlx::query_scalar(
-            "UPDATE operation_periods SET recorded = recorded + 1 WHERE period = $1
-             RETURNING period",
-        )
-        .bind(column(period)?)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        if counted.is_none() {
+        let period = column(period)?;
+        match take_place(&mut tx, period, 0, &c.fingerprint).await {
+            Ok(()) => {}
             // Retired or never issued here: refused anyway.
-            return Ok(false);
+            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
+            Err(SidError::ResourceExhausted(_)) => {
+                sqlx::query(
+                    "UPDATE operation_period_places SET recorded = recorded + 1
+                     WHERE period = $1 AND place = $2",
+                )
+                .bind(period)
+                .bind(place_of(&c.fingerprint))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+            }
+            Err(e) => return Err(e),
         }
     }
     let inserted = sqlx::query(
@@ -498,12 +575,22 @@ async fn lock_issued_through(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> 
 }
 
 /// Retire `periods` in `tx`: their completions and rows go together. Their
-/// rows are taken exclusively first, which waits for every commit admitted
-/// under them.
+/// places are taken exclusively first, which waits for every commit counted
+/// in them, and then their rows, which waits for every binding admitted
+/// under them. A commit takes its place before it references the period, so
+/// this order never waits in a cycle with one.
 async fn retire(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, periods: &[i64]) -> SidResult<()> {
     if periods.is_empty() {
         return Ok(());
     }
+    sqlx::query(
+        "SELECT period FROM operation_period_places WHERE period = ANY($1)
+         ORDER BY period, place FOR UPDATE",
+    )
+    .bind(periods)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation period places: {e}")))?;
     sqlx::query("SELECT period FROM operation_periods WHERE period = ANY($1) FOR UPDATE")
         .bind(periods)
         .execute(&mut **tx)
@@ -525,6 +612,11 @@ async fn retire(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, periods: &[i64])
         .execute(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("retire operation results: {e}")))?;
+    sqlx::query("DELETE FROM operation_period_places WHERE period = ANY($1)")
+        .bind(periods)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("retire operation period places: {e}")))?;
     sqlx::query("DELETE FROM operation_periods WHERE period = ANY($1)")
         .bind(periods)
         .execute(&mut **tx)
@@ -577,7 +669,7 @@ async fn current_period(
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("operation period boundary: {e}")))?;
-            sqlx::query_as(
+            let row: PeriodRow = sqlx::query_as(
                 "INSERT INTO operation_periods (period, issued_at, accepted_until)
                  VALUES ($1, $2, $3)
                  RETURNING period, accepted_until",
@@ -587,7 +679,9 @@ async fn current_period(
             .bind(until)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?
+            .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?;
+            add_places(&mut tx, next).await?;
+            row
         }
     };
     tx.commit()
@@ -684,6 +778,7 @@ async fn import_periods(pool: &PgPool, state: &OperationPeriodState) -> SidResul
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation period import: {e}")))?;
+        add_places(&mut tx, period).await?;
     }
     sqlx::query("UPDATE operation_period_state SET issued_through = GREATEST(issued_through, $1)")
         .bind(source_last)
@@ -1155,3 +1250,6 @@ impl OperationResultStore for PostgresBackend {
         import_resource(&self.pool, binding).await
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -72,6 +72,12 @@ jsonwebtoken = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# The file-backed SQLite store of the keyed command bench.
+tempfile = "3"
+
+[[bench]]
+name = "keyed_commands"
+harness = false
 
 [lints.rust]
 unreachable_pub = "warn"

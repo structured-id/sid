@@ -363,7 +363,7 @@ async fn connect_backend(
             Ok(Connected {
                 keys: Box::new(backend.history_keys()),
                 audit: Box::new(sid_storage::sqlite::SqliteAuditLog::new(
-                    backend.pool().clone(),
+                    backend.writer().clone(),
                 )),
                 storage: Box::new(backend),
             })

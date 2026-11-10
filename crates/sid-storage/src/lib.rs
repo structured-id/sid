@@ -44,6 +44,8 @@ mod directory_query;
     feature = "storage-coordinode"
 ))]
 mod key_versions;
+#[cfg(any(feature = "storage-pg", feature = "storage-coordinode"))]
+mod operation_place;
 #[cfg(any(
     feature = "storage-pg",
     feature = "storage-sqlite",

@@ -141,7 +141,7 @@ impl TestIssuer {
         }
         .expect("SQLite storage");
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
-            sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
+            sid_storage::sqlite::SqliteAuditLog::new(backend.writer().clone()),
         );
         let history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore> =
             Arc::new(backend.history_keys());
