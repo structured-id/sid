@@ -109,6 +109,52 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
     assert!(!sweep.contains("Seq Scan on durable_work"), "{sweep}");
 }
 
+/// The claim statement itself never hands out work past its last attempt or
+/// past its validity: such work can lapse after the sweeps ran and before
+/// the claim, which runs as its own statement with a later clock. It once
+/// relied on the sweeps, and so ran a last attempt again and claimed
+/// expired work.
+#[tokio::test]
+async fn the_claim_skips_exhausted_and_expired_work_itself() {
+    let pool = pool().await;
+    let kind = fresh_kind();
+    let rows = [
+        // A last attempt whose lease ran out.
+        "INSERT INTO durable_work (id, kind, payload, max_attempts, attempts, state,
+             lease_until, not_before)
+         VALUES (gen_random_uuid(), $1, '\\x00', 1, 1, 'claimed',
+             NOW() - interval '1 second', NOW() - interval '1 minute')",
+        // Due, but past its validity.
+        "INSERT INTO durable_work (id, kind, payload, max_attempts, not_before, expires_at)
+         VALUES (gen_random_uuid(), $1, '\\x00', 3, NOW() - interval '1 minute',
+             NOW() - interval '1 second')",
+        // A lapsed lease, not yet past its validity, an attempt left: claimable.
+        "INSERT INTO durable_work (id, kind, payload, max_attempts, attempts, state,
+             lease_until, not_before, expires_at)
+         VALUES (gen_random_uuid(), $1, '\\x00', 3, 1, 'claimed',
+             NOW() - interval '1 second', NOW() - interval '1 minute',
+             NOW() + interval '1 hour')",
+    ];
+    for sql in rows {
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(kind.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let claimed = sqlx::query(CLAIM_SQL)
+        .bind(vec![kind.as_str()])
+        .bind("w")
+        .bind(60.0_f64)
+        .bind(10_i64)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "exhausted or expired work was claimed");
+    let attempts: i32 = claimed[0].try_get("attempts").unwrap();
+    assert_eq!(attempts, 2);
+}
+
 /// A host's own state change and the work it owes commit together through
 /// `owe_in_tx`: rolled back, neither is stored; committed, the work is.
 #[tokio::test]

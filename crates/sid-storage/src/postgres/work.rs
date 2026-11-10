@@ -174,7 +174,10 @@ const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_own
 /// claims step past each other's rows instead of all waiting for the first
 /// ones. The earliest `limit` of them are claimed; the rest are released at
 /// commit. The ids are an array the update looks up by key: joined as a
-/// relation, the planner hashed the whole table to find 32 rows.
+/// relation, the planner hashed the whole table to find 32 rows. Each
+/// candidate is checked for its validity and, after a lapsed lease, for an
+/// attempt left: work can cross either line after the sweeps ran, and the
+/// claim reads a later clock than they did.
 const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts = w.attempts + 1,
         generation = w.generation + 1, lease_owner = $2,
         lease_until = NOW() + make_interval(secs => $3), updated_at = NOW()
@@ -182,11 +185,14 @@ const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts =
            SELECT due.id, due.not_before FROM unnest($1::text[]) k(kind)
            CROSS JOIN LATERAL (SELECT id, not_before FROM durable_work
                WHERE kind = k.kind AND state = 'pending' AND not_before <= NOW()
+                 AND (expires_at IS NULL OR expires_at > NOW())
                ORDER BY not_before LIMIT $4 FOR UPDATE SKIP LOCKED) due
            UNION ALL
            SELECT lapsed.id, lapsed.not_before FROM unnest($1::text[]) k(kind)
            CROSS JOIN LATERAL (SELECT id, not_before FROM durable_work
                WHERE kind = k.kind AND state = 'claimed' AND lease_until <= NOW()
+                 AND attempts < max_attempts
+                 AND (expires_at IS NULL OR expires_at > NOW())
                ORDER BY lease_until LIMIT $4 FOR UPDATE SKIP LOCKED) lapsed
          ) c
          ORDER BY c.not_before
