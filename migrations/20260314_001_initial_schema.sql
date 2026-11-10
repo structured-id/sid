@@ -1649,7 +1649,11 @@ CREATE INDEX idx_devices_fingerprint ON devices USING btree (profile_id, fingerp
 
 CREATE INDEX idx_devices_profile_id ON devices USING btree (profile_id);
 
-CREATE INDEX idx_durable_work_open ON durable_work USING btree (kind, not_before) WHERE (state = ANY (ARRAY['pending'::text, 'claimed'::text]));
+CREATE INDEX idx_durable_work_due ON durable_work USING btree (kind, not_before) WHERE (state = 'pending'::text);
+
+CREATE INDEX idx_durable_work_expiry ON durable_work USING btree (kind, expires_at) WHERE ((state = ANY (ARRAY['pending'::text, 'claimed'::text])) AND (expires_at IS NOT NULL));
+
+CREATE INDEX idx_durable_work_lease ON durable_work USING btree (kind, lease_until) WHERE (state = 'claimed'::text);
 
 CREATE INDEX idx_entity_attributes_entity_id ON entity_attributes USING btree (entity_id);
 

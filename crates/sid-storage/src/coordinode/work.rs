@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Durable work in CoordiNode: one `SidWork` node per item, claimed under a
-//! lease and fenced by its claim generation. Enqueues of one kind serialize
-//! on that kind's `SidWorkKind` node, so its open-item bound holds however
-//! many writers enqueue at once; claims of one item conflict on its node.
+//! lease and fenced by its claim generation. Enqueues meet only on the
+//! item's own unique id, so writers of one kind never wait on each other;
+//! claims of one item conflict on its node.
 
 use async_trait::async_trait;
 use coordinode_core::graph::types::Value;
@@ -38,10 +38,11 @@ fn kinds_value(kinds: &[WorkKind]) -> Value {
 }
 
 /// Store `work` in the open transaction `tx`. Returns `false` when work with
-/// its id is stored already; refuses with `ResourceExhausted` when `capacity`
-/// open items of its kind are stored.
-pub(super) fn insert(tx: &Statements<'_>, work: &NewWork, capacity: u64) -> SidResult<bool> {
-    // The same obligation again is already stored: accepted, whatever the load.
+/// its id is stored already: the same obligation again, left as it is.
+pub(super) fn insert(tx: &Statements<'_>, work: &NewWork) -> SidResult<bool> {
+    if work.max_attempts == 0 {
+        return Err(SidError::Validation("max_attempts out of range".into()));
+    }
     let found = tx.run(
         "MATCH (w:SidWork) WHERE w.id = $id RETURN w.id AS id",
         Params::default().with("id", id_value(work.id)),
@@ -49,32 +50,8 @@ pub(super) fn insert(tx: &Statements<'_>, work: &NewWork, capacity: u64) -> SidR
     if !found.is_empty() {
         return Ok(false);
     }
-    // Every enqueue of the kind writes its turn: concurrent ones conflict and
-    // run again, so none counts room another has already taken.
-    tx.run(
-        "MERGE (k:SidWorkKind {kind: $kind}) SET k.turn = coalesce(k.turn, 0) + 1",
-        Params::default().with("kind", Value::String(work.kind.as_str().to_owned())),
-    )?;
-    let open = tx.run(
-        "MATCH (w:SidWork) WHERE w.kind = $kind AND w.state IN ['pending', 'claimed']
-         RETURN count(w) AS n",
-        Params::default().with("kind", Value::String(work.kind.as_str().to_owned())),
-    )?;
-    let open = open
-        .first()
-        .map(|row| get_int(row, "n"))
-        .transpose()?
-        .unwrap_or(0);
-    if u64::try_from(open).unwrap_or(u64::MAX) >= capacity {
-        return Err(SidError::ResourceExhausted(format!(
-            "durable work queue full ({capacity} open items)"
-        )));
-    }
-    if work.max_attempts == 0 {
-        return Err(SidError::Validation("max_attempts out of range".into()));
-    }
     let now = chrono::Utc::now();
-    tx.run(
+    tx.create_absent(
         "CREATE (w:SidWork {id: $id, kind: $kind, payload: $payload, state: 'pending',
             attempts: 0, max_attempts: $max_attempts, generation: 0, ambiguous: false,
             not_before: $not_before, expires_at: $expires_at, created_at: $now,
@@ -93,10 +70,10 @@ pub(super) fn insert(tx: &Statements<'_>, work: &NewWork, capacity: u64) -> SidR
 
 #[async_trait]
 impl WorkStore for CoordinodeBackend {
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> SidResult<bool> {
+    async fn enqueue_work(&self, work: &NewWork) -> SidResult<bool> {
         let work = work.clone();
         self.transaction(move |tx| {
-            let inserted = insert(tx, &work, capacity)?;
+            let inserted = insert(tx, &work)?;
             Ok(if inserted {
                 Decision::Commit(true)
             } else {
@@ -239,7 +216,6 @@ impl WorkStore for CoordinodeBackend {
         generation: i64,
         result: Option<&str>,
         owed: &[NewWork],
-        capacity: u64,
     ) -> SidResult<bool> {
         let (result, owed) = (result.map(str::to_owned), owed.to_vec());
         self.transaction(move |tx| {
@@ -259,7 +235,7 @@ impl WorkStore for CoordinodeBackend {
                 return Ok(Decision::Abandon(false));
             }
             for work in &owed {
-                insert(tx, work, capacity)?;
+                insert(tx, work)?;
             }
             Ok(Decision::Commit(true))
         })
@@ -306,9 +282,9 @@ impl WorkStore for CoordinodeBackend {
                     .with("now", time(chrono::Utc::now())),
             )?;
             if dead && let Some(alert) = &failure.on_dead {
-                // One alert per dead work, never refused for load: the failure
-                // it reports is already recorded.
-                insert(tx, alert, u64::MAX)?;
+                // One alert per dead work: the failure it reports is already
+                // recorded.
+                insert(tx, alert)?;
             }
             Ok(Decision::Commit(true))
         })

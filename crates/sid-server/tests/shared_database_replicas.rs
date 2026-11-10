@@ -126,7 +126,7 @@ async fn replicas_share_the_database(schema: String) {
         ids.push(work.id);
         // Committed through either replica, as a mutation on it would.
         let through = if i % 2 == 0 { &a } else { &b };
-        through.enqueue_work(&work, 1_000).await.unwrap();
+        through.enqueue_work(&work).await.unwrap();
     }
     wait_completed(&a, &ids).await;
 
@@ -137,7 +137,7 @@ async fn replicas_share_the_database(schema: String) {
     for i in 0..5u32 {
         let work = NewWork::new(WorkKind::new(KIND).unwrap(), i.to_be_bytes().to_vec());
         later.push(work.id);
-        a.enqueue_work(&work, 1_000).await.unwrap();
+        a.enqueue_work(&work).await.unwrap();
     }
     wait_completed(&b, &later).await;
     stop_b.send(()).unwrap();

@@ -4,7 +4,6 @@
 //! database never see each other's work.
 
 use chrono::{DateTime, Duration, Utc};
-use sid_core::Error;
 use sid_core::models::{NewWork, WorkFailure, WorkId, WorkKind, WorkState};
 use std::collections::HashSet;
 use std::slice::from_ref;
@@ -35,15 +34,15 @@ fn retry(error: &str, at: DateTime<Utc>) -> WorkFailure {
     }
 }
 
-/// The same work enqueued twice is stored once, and a repeat is accepted even
-/// when the kind is at capacity: a retried command owes nothing new.
+/// The same work enqueued twice is stored once: a retried command owes
+/// nothing new.
 pub async fn enqueue_is_idempotent(store: &dyn WorkStore) {
     let kind = unique_kind("dedup");
     let item = work(&kind);
-    assert!(store.enqueue_work(&item, 1).await.unwrap());
+    assert!(store.enqueue_work(&item).await.unwrap());
     assert!(
-        !store.enqueue_work(&item, 1).await.unwrap(),
-        "the same obligation was stored twice or refused at capacity"
+        !store.enqueue_work(&item).await.unwrap(),
+        "the same obligation was stored twice"
     );
 
     let record = store.get_work(item.id).await.unwrap().unwrap();
@@ -66,7 +65,7 @@ pub async fn enqueue_is_idempotent(store: &dyn WorkStore) {
 pub async fn concurrent_enqueue_stores_once(store: &dyn WorkStore) {
     let kind = unique_kind("concurrent_enqueue");
     let item = work(&kind);
-    let enqueue = || store.enqueue_work(&item, 10);
+    let enqueue = || store.enqueue_work(&item);
     let (a, b, c) = tokio::join!(enqueue(), enqueue(), enqueue());
     let stored = [a, b, c]
         .into_iter()
@@ -84,52 +83,22 @@ pub async fn concurrent_enqueue_stores_once(store: &dyn WorkStore) {
     );
 }
 
-/// A kind holding `capacity` open items refuses more work explicitly; once an
-/// item is done, there is room again. Other kinds are not affected.
-pub async fn capacity_is_enforced_per_kind(store: &dyn WorkStore) {
-    let kind = unique_kind("capacity");
-    for _ in 0..2 {
-        assert!(store.enqueue_work(&work(&kind), 2).await.unwrap());
-    }
-    let refused = store.enqueue_work(&work(&kind), 2).await;
-    assert!(
-        matches!(refused, Err(Error::ResourceExhausted(_))),
-        "a full queue accepted work: {refused:?}"
-    );
-    let other = unique_kind("capacity_other");
-    assert!(store.enqueue_work(&work(&other), 2).await.unwrap());
-
+/// Distinct work of one kind enqueued at once (replicas accepting it
+/// together) is all stored and all claimable: the store neither refuses work
+/// for its backlog nor makes writers of a kind wait on each other.
+pub async fn concurrent_enqueues_of_a_kind_are_all_stored(store: &dyn WorkStore) {
+    let kind = unique_kind("concurrent_kind");
+    let items: Vec<NewWork> = (0..64).map(|_| work(&kind)).collect();
+    let results =
+        futures::future::join_all(items.iter().map(|item| store.enqueue_work(item))).await;
+    assert!(results.iter().all(|r| matches!(r, Ok(true))), "{results:?}");
     let claimed = store
-        .claim_work(from_ref(&kind), "w", 1, LEASE)
+        .claim_work(from_ref(&kind), "w", 100, LEASE)
         .await
         .unwrap();
-    assert!(
-        store
-            .complete_work(claimed[0].id, claimed[0].generation, None)
-            .await
-            .unwrap()
-    );
-    assert!(store.enqueue_work(&work(&kind), 2).await.unwrap());
-}
-
-/// Work enqueued on its own at once (replicas admitting it together) never
-/// exceeds its kind's capacity: exactly the capacity is accepted.
-pub async fn capacity_holds_under_concurrency(store: &dyn WorkStore) {
-    for _ in 0..10 {
-        let kind = unique_kind("capacity_race");
-        let items: Vec<NewWork> = (0..64).map(|_| work(&kind)).collect();
-        let results =
-            futures::future::join_all(items.iter().map(|item| store.enqueue_work(item, 5))).await;
-        let accepted = results.iter().filter(|r| matches!(r, Ok(true))).count();
-        assert_eq!(accepted, 5, "{results:?}");
-        assert!(
-            results
-                .iter()
-                .filter(|r| !matches!(r, Ok(true)))
-                .all(|r| matches!(r, Err(Error::ResourceExhausted(_)))),
-            "{results:?}"
-        );
-    }
+    let claimed: HashSet<WorkId> = claimed.iter().map(|c| c.id).collect();
+    let stored: HashSet<WorkId> = items.iter().map(|i| i.id).collect();
+    assert_eq!(claimed, stored);
 }
 
 /// Ended work of a kind is dropped once older than asked; open work, newer
@@ -137,7 +106,7 @@ pub async fn capacity_holds_under_concurrency(store: &dyn WorkStore) {
 pub async fn ended_work_is_purged(store: &dyn WorkStore) {
     let kind = unique_kind("purge");
     let (done, open) = (work(&kind), work(&kind));
-    store.enqueue_work(&done, 10).await.unwrap();
+    store.enqueue_work(&done).await.unwrap();
     let claimed = store
         .claim_work(from_ref(&kind), "w", 1, LEASE)
         .await
@@ -148,10 +117,10 @@ pub async fn ended_work_is_purged(store: &dyn WorkStore) {
             .await
             .unwrap()
     );
-    store.enqueue_work(&open, 10).await.unwrap();
+    store.enqueue_work(&open).await.unwrap();
     let other = unique_kind("purge_other");
     let theirs = work(&other);
-    store.enqueue_work(&theirs, 10).await.unwrap();
+    store.enqueue_work(&theirs).await.unwrap();
 
     let earlier = Utc::now() - Duration::hours(1);
     assert_eq!(store.purge_ended_work(&kind, earlier).await.unwrap(), 0);
@@ -175,7 +144,7 @@ pub async fn work_of_a_kind_is_reported(store: &dyn WorkStore) {
         "nothing stored yet"
     );
     store
-        .enqueue_work(&work(&unique_kind("has_kind_other")), 10)
+        .enqueue_work(&work(&unique_kind("has_kind_other")))
         .await
         .unwrap();
     assert!(
@@ -183,7 +152,7 @@ pub async fn work_of_a_kind_is_reported(store: &dyn WorkStore) {
         "another kind's work"
     );
 
-    store.enqueue_work(&work(&kind), 10).await.unwrap();
+    store.enqueue_work(&work(&kind)).await.unwrap();
     assert!(store.has_work_of_kind(&kind).await.unwrap(), "pending work");
     let claimed = store
         .claim_work(from_ref(&kind), "w", 1, LEASE)
@@ -207,7 +176,7 @@ pub async fn work_of_a_kind_is_reported(store: &dyn WorkStore) {
 /// times it asks.
 pub async fn live_lease_is_exclusive(store: &dyn WorkStore) {
     let kind = unique_kind("live_lease");
-    store.enqueue_work(&work(&kind), 10).await.unwrap();
+    store.enqueue_work(&work(&kind)).await.unwrap();
     let first = store
         .claim_work(from_ref(&kind), "w1", 10, LEASE)
         .await
@@ -231,7 +200,7 @@ pub async fn live_lease_is_exclusive(store: &dyn WorkStore) {
 pub async fn lease_fences_stale_worker(store: &dyn WorkStore) {
     let kind = unique_kind("lease");
     let item = work(&kind);
-    store.enqueue_work(&item, 10).await.unwrap();
+    store.enqueue_work(&item).await.unwrap();
 
     let claimed_at = std::time::Instant::now();
     let first = store
@@ -315,7 +284,7 @@ pub async fn retries_then_fails(store: &dyn WorkStore) {
     let kind = unique_kind("retry");
     let mut item = work(&kind);
     item.max_attempts = 2;
-    store.enqueue_work(&item, 10).await.unwrap();
+    store.enqueue_work(&item).await.unwrap();
 
     let first = store
         .claim_work(from_ref(&kind), "w", 10, LEASE)
@@ -346,7 +315,7 @@ pub async fn retries_then_fails(store: &dyn WorkStore) {
     let now = Utc::now() - Duration::seconds(5);
     let mut next = work(&kind);
     next.max_attempts = 2;
-    store.enqueue_work(&next, 10).await.unwrap();
+    store.enqueue_work(&next).await.unwrap();
     let a = store
         .claim_work(from_ref(&kind), "w", 10, LEASE)
         .await
@@ -393,7 +362,7 @@ pub async fn dead_letter_alert_commits_with_failure(store: &dyn WorkStore) {
     let kind = unique_kind("dead");
     let alert_kind = unique_kind("dead_alert");
     let item = work(&kind);
-    store.enqueue_work(&item, 10).await.unwrap();
+    store.enqueue_work(&item).await.unwrap();
     let alert = work(&alert_kind);
 
     // Alive after this failure: the offered alert is not stored.
@@ -461,10 +430,10 @@ pub async fn expired_and_future_are_not_claimed(store: &dyn WorkStore) {
     let kind = unique_kind("expiry");
     let mut expired = work(&kind);
     expired.expires_at = Some(Utc::now() - Duration::seconds(1));
-    store.enqueue_work(&expired, 10).await.unwrap();
+    store.enqueue_work(&expired).await.unwrap();
     let mut future = work(&kind);
     future.not_before = Some(Utc::now() + Duration::hours(1));
-    store.enqueue_work(&future, 10).await.unwrap();
+    store.enqueue_work(&future).await.unwrap();
 
     assert!(
         store
@@ -488,7 +457,7 @@ pub async fn abandoned_last_attempt_fails(store: &dyn WorkStore) {
     let kind = unique_kind("abandoned");
     let mut item = work(&kind);
     item.max_attempts = 1;
-    store.enqueue_work(&item, 10).await.unwrap();
+    store.enqueue_work(&item).await.unwrap();
     assert_eq!(
         store
             .claim_work(from_ref(&kind), "w1", 10, SHORT_LEASE)
@@ -519,7 +488,7 @@ pub async fn concurrent_claims_do_not_overlap(store: &dyn WorkStore) {
     for _ in 0..12 {
         let item = work(&kind);
         ids.insert(item.id);
-        store.enqueue_work(&item, 100).await.unwrap();
+        store.enqueue_work(&item).await.unwrap();
     }
     let kinds = [kind.clone()];
     let claim = |worker: &'static str| store.claim_work(&kinds, worker, 5, LEASE);
@@ -534,6 +503,22 @@ pub async fn concurrent_claims_do_not_overlap(store: &dyn WorkStore) {
     assert_eq!(seen, ids, "some work was not claimed by anyone");
 }
 
+/// The kinds a claim names are a set: a kind named twice yields each of its
+/// items once. Read twice, one item was claimed twice in one call, its
+/// first claim already stale and its attempts counted twice.
+pub async fn a_kind_named_twice_claims_each_item_once(store: &dyn WorkStore) {
+    let kind = unique_kind("twice");
+    let item = work(&kind);
+    store.enqueue_work(&item).await.unwrap();
+    let claimed = store
+        .claim_work(&[kind.clone(), kind], "w", 2, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "{claimed:?}");
+    assert_eq!(claimed[0].id, item.id);
+    assert_eq!(claimed[0].attempt, 1);
+}
+
 /// Export carries every piece of work with its payload and outcome; import
 /// stores it as it was, except that a claim does not travel (claimed work is
 /// due again, or failed if that claim was its last attempt), and importing
@@ -544,7 +529,7 @@ pub async fn export_import_round_trip(store: &dyn WorkStore) {
     for max_attempts in [3, 3, 3, 3, 1] {
         let mut item = work(&kind);
         item.max_attempts = max_attempts;
-        store.enqueue_work(&item, 10).await.unwrap();
+        store.enqueue_work(&item).await.unwrap();
         items.push(item);
     }
     let claimed = store
@@ -621,7 +606,7 @@ pub async fn export_import_round_trip(store: &dyn WorkStore) {
 /// A claimed parent and its `kind`.
 async fn claimed_parent(store: &dyn WorkStore, scenario: &str) -> sid_core::models::ClaimedWork {
     let kind = unique_kind(scenario);
-    store.enqueue_work(&work(&kind), 10).await.unwrap();
+    store.enqueue_work(&work(&kind)).await.unwrap();
     store
         .claim_work(&[kind], "w", 1, LEASE)
         .await
@@ -639,7 +624,7 @@ pub async fn completion_commits_with_follow_up_work(store: &dyn WorkStore) {
 
     assert!(
         store
-            .complete_work_owing(parent.id, parent.generation, Some("planned"), &owed, 10)
+            .complete_work_owing(parent.id, parent.generation, Some("planned"), &owed)
             .await
             .unwrap()
     );
@@ -661,7 +646,7 @@ pub async fn stale_completion_owes_nothing(store: &dyn WorkStore) {
 
     assert!(
         !store
-            .complete_work_owing(parent.id, parent.generation + 1, None, from_ref(&child), 10)
+            .complete_work_owing(parent.id, parent.generation + 1, None, from_ref(&child))
             .await
             .unwrap()
     );
@@ -671,72 +656,81 @@ pub async fn stale_completion_owes_nothing(store: &dyn WorkStore) {
     assert!(store.get_work(child.id).await.unwrap().is_none());
 }
 
-/// A completion whose children find their kind full writes nothing and the
-/// parent stays claimed, resumable by its holder; a child already stored is
-/// accepted again however full its kind is.
-pub async fn completion_refused_for_capacity_owes_nothing(store: &dyn WorkStore) {
-    let parent = claimed_parent(store, "owing_full").await;
-    let children = unique_kind("owing_full_child");
+/// A completion owing a child already stored (the same obligation again,
+/// from a retried handler) and a fresh one commits: the stored child is kept
+/// as it was, the fresh one is pending.
+pub async fn completion_owing_a_stored_child_keeps_it(store: &dyn WorkStore) {
+    let parent = claimed_parent(store, "owing_stored").await;
+    let children = unique_kind("owing_stored_child");
     let stored = work(&children);
-    store.enqueue_work(&stored, 1).await.unwrap();
+    store.enqueue_work(&stored).await.unwrap();
+    let claimed = store
+        .claim_work(from_ref(&children), "w", 1, LEASE)
+        .await
+        .unwrap();
     let fresh = work(&children);
 
-    let refused = store
-        .complete_work_owing(
-            parent.id,
-            parent.generation,
-            None,
-            &[stored.clone(), fresh.clone()],
-            1,
-        )
-        .await;
-
-    assert!(
-        matches!(refused, Err(Error::ResourceExhausted(_))),
-        "{refused:?}"
-    );
-    let record = store.get_work(parent.id).await.unwrap().unwrap();
-    assert_eq!(record.state, WorkState::Claimed);
-    assert_eq!(record.generation, parent.generation);
-    assert!(store.get_work(fresh.id).await.unwrap().is_none());
     assert!(
         store
-            .complete_work_owing(parent.id, parent.generation, None, from_ref(&stored), 1)
+            .complete_work_owing(
+                parent.id,
+                parent.generation,
+                None,
+                &[stored.clone(), fresh.clone()],
+            )
             .await
-            .unwrap(),
-        "a child already stored was refused at capacity"
+            .unwrap()
+    );
+    let record = store.get_work(parent.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Completed);
+    let kept = store.get_work(stored.id).await.unwrap().unwrap();
+    assert_eq!(kept.state, WorkState::Claimed, "the stored child was reset");
+    assert_eq!(kept.generation, claimed[0].generation);
+    assert_eq!(
+        store.get_work(fresh.id).await.unwrap().unwrap().state,
+        WorkState::Pending
     );
 }
 
-/// Parents completing at once, each owing a child of one kind, never pass
-/// that kind's capacity: exactly the capacity is accepted, every other parent
-/// is refused and stays claimed.
-pub async fn concurrent_completions_hold_capacity(store: &dyn WorkStore) {
+/// Parents of one kind completing at once, each owing a child of another
+/// kind and some owing a child of their own kind, all commit: completions do
+/// not wait on each other in a cycle, and none is refused for the backlog.
+pub async fn concurrent_completions_owing_work_all_commit(store: &dyn WorkStore) {
     let parents_kind = unique_kind("owing_race");
     for _ in 0..8 {
-        store.enqueue_work(&work(&parents_kind), 10).await.unwrap();
+        store.enqueue_work(&work(&parents_kind)).await.unwrap();
     }
     let parents = store
-        .claim_work(&[parents_kind], "w", 8, LEASE)
+        .claim_work(from_ref(&parents_kind), "w", 8, LEASE)
         .await
         .unwrap();
     assert_eq!(parents.len(), 8);
     let children = unique_kind("owing_race_child");
-    let owed: Vec<NewWork> = parents.iter().map(|_| work(&children)).collect();
+    let owed: Vec<Vec<NewWork>> = parents
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let mut owed = vec![work(&children)];
+            if i % 2 == 0 {
+                owed.push(work(&parents_kind));
+            }
+            owed
+        })
+        .collect();
 
-    let results = futures::future::join_all(parents.iter().zip(&owed).map(|(parent, child)| {
-        store.complete_work_owing(parent.id, parent.generation, None, from_ref(child), 3)
-    }))
-    .await;
+    let results =
+        futures::future::join_all(parents.iter().zip(&owed).map(|(parent, owed)| {
+            store.complete_work_owing(parent.id, parent.generation, None, owed)
+        }))
+        .await;
 
-    let accepted = results.iter().filter(|r| matches!(r, Ok(true))).count();
-    assert_eq!(accepted, 3, "{results:?}");
-    for (parent, result) in parents.iter().zip(&results) {
+    assert!(results.iter().all(|r| matches!(r, Ok(true))), "{results:?}");
+    for parent in &parents {
         let record = store.get_work(parent.id).await.unwrap().unwrap();
-        match result {
-            Ok(true) => assert_eq!(record.state, WorkState::Completed),
-            Err(Error::ResourceExhausted(_)) => assert_eq!(record.state, WorkState::Claimed),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(record.state, WorkState::Completed);
+    }
+    for child in owed.iter().flatten() {
+        let record = store.get_work(child.id).await.unwrap().unwrap();
+        assert_eq!(record.state, WorkState::Pending);
     }
 }

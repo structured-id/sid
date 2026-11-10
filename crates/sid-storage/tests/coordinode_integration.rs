@@ -471,8 +471,7 @@ mod work_store {
     work_store!(
         enqueue_is_idempotent,
         concurrent_enqueue_stores_once,
-        capacity_is_enforced_per_kind,
-        capacity_holds_under_concurrency,
+        concurrent_enqueues_of_a_kind_are_all_stored,
         ended_work_is_purged,
         work_of_a_kind_is_reported,
         live_lease_is_exclusive,
@@ -482,11 +481,12 @@ mod work_store {
         expired_and_future_are_not_claimed,
         abandoned_last_attempt_fails,
         concurrent_claims_do_not_overlap,
+        a_kind_named_twice_claims_each_item_once,
         export_import_round_trip,
         completion_commits_with_follow_up_work,
         stale_completion_owes_nothing,
-        completion_refused_for_capacity_owes_nothing,
-        concurrent_completions_hold_capacity,
+        completion_owing_a_stored_child_keeps_it,
+        concurrent_completions_owing_work_all_commit,
     );
 }
 

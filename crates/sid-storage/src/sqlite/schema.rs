@@ -838,8 +838,14 @@ CREATE TABLE IF NOT EXISTS durable_work (
     updated_at   TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_durable_work_open
-    ON durable_work (kind, not_before) WHERE state IN ('pending', 'claimed');
+-- One index per question a claim asks, each read by kind and time.
+CREATE INDEX IF NOT EXISTS idx_durable_work_due
+    ON durable_work (kind, not_before) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_durable_work_lease
+    ON durable_work (kind, lease_until) WHERE state = 'claimed';
+CREATE INDEX IF NOT EXISTS idx_durable_work_expiry
+    ON durable_work (kind, expires_at)
+    WHERE state IN ('pending', 'claimed') AND expires_at IS NOT NULL;
 
 --------------------------------------------------------------------------------
 -- instance_secrets (sealed secrets every replica shares; written once)

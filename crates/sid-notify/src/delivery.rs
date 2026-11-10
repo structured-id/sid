@@ -86,11 +86,7 @@ pub fn delivery_job_id(event: &Event, template: &str, channel: &str) -> WorkId {
 
 /// Accept an inbound event: store its routing job. Once this returns `Ok`
 /// the event may be settled; on `Err` it must not be.
-pub async fn accept_event(
-    store: &dyn WorkStore,
-    event: &Event,
-    capacity: u64,
-) -> sid_core::Result<()> {
+pub async fn accept_event(store: &dyn WorkStore, event: &Event) -> sid_core::Result<()> {
     // The event's identity names the job, so a redelivered event is stored
     // once, also when it was stored just before a crash cut its settlement.
     let payload = serde_json::to_vec(event)
@@ -98,11 +94,11 @@ pub async fn accept_event(
     let mut work = NewWork::new(kind(ROUTE), payload);
     work.id = route_job_id(event);
     work.max_attempts = MAX_ATTEMPTS;
-    store.enqueue_work(&work, capacity).await.map(|_| ())
+    store.enqueue_work(&work).await.map(|_| ())
 }
 
 /// How long the broker waits before redelivering an event that could not be
-/// accepted (the job store is down or full).
+/// accepted (the job store is down).
 pub const REDELIVER_AFTER: Duration = Duration::from_secs(5);
 
 /// Open the durable consumer of the work addressed to `recipient` on `bus`.
@@ -126,7 +122,6 @@ pub async fn open_work(
 pub async fn accept_work(
     mut deliveries: mpsc::Receiver<Delivery>,
     store: &dyn WorkStore,
-    capacity: u64,
     accepted: impl Fn(),
     stop: impl std::future::Future<Output = ()>,
 ) {
@@ -139,7 +134,7 @@ pub async fn accept_work(
             },
             () = &mut stop => return,
         };
-        match accept_event(store, &delivery.event, capacity).await {
+        match accept_event(store, &delivery.event).await {
             Ok(()) => {
                 delivery.settle(Settlement::Done);
                 accepted();
@@ -198,19 +193,16 @@ pub struct RouteHandler {
     kind: WorkKind,
     routing: RoutingTable,
     resolver: Arc<dyn RecipientSource>,
-    capacity: u64,
 }
 
 impl RouteHandler {
     /// Route accepted events by `routing` to the recipients `resolver`
-    /// names, each plan owed with its routing's completion within `capacity`
-    /// open items.
-    pub fn new(routing: RoutingTable, resolver: Arc<dyn RecipientSource>, capacity: u64) -> Self {
+    /// names, each plan owed with its routing's completion.
+    pub fn new(routing: RoutingTable, resolver: Arc<dyn RecipientSource>) -> Self {
         Self {
             kind: kind(ROUTE),
             routing,
             resolver,
-            capacity,
         }
     }
 }
@@ -277,7 +269,6 @@ impl WorkHandler for RouteHandler {
         WorkOutcome::DoneWith {
             result: Some(format!("{planned} deliveries planned")),
             follow_up: vec![job],
-            capacity: self.capacity,
         }
     }
 }
@@ -285,18 +276,18 @@ impl WorkHandler for RouteHandler {
 /// Stores the delivery jobs of an event's fixed plan.
 pub struct PlanHandler {
     kind: WorkKind,
-    store: Arc<dyn WorkStore>,
-    capacity: u64,
 }
 
 impl PlanHandler {
-    /// Store planned deliveries in `store` within `capacity` open items.
-    pub fn new(store: Arc<dyn WorkStore>, capacity: u64) -> Self {
-        Self {
-            kind: kind(PLAN),
-            store,
-            capacity,
-        }
+    /// Store each plan's deliveries with the plan's completion.
+    pub fn new() -> Self {
+        Self { kind: kind(PLAN) }
+    }
+}
+
+impl Default for PlanHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -339,25 +330,13 @@ impl WorkHandler for PlanHandler {
             delivery.max_attempts = MAX_ATTEMPTS;
             deliveries.push(delivery);
         }
-        let result = Some(format!("{} deliveries", plan.deliveries.len()));
-        // The first attempt owes every delivery with the plan's completion.
-        // One after it (the room was short, or the attempt was lost) stores
-        // them one at a time, so a plan larger than the room still advances
-        // as deliveries end: a delivery stored before is kept as it is, with
-        // its own outcome, and the plan stays owed until the rest are stored.
-        if work.attempt <= 1 {
-            return WorkOutcome::DoneWith {
-                result,
-                follow_up: deliveries,
-                capacity: self.capacity,
-            };
+        // Every delivery is owed with the plan's completion. A delivery
+        // stored by an earlier attempt (one whose outcome was lost) is kept
+        // as it is, with its own outcome.
+        WorkOutcome::DoneWith {
+            result: Some(format!("{} deliveries", plan.deliveries.len())),
+            follow_up: deliveries,
         }
-        for delivery in &deliveries {
-            if let Err(e) = self.store.enqueue_work(delivery, self.capacity).await {
-                return WorkOutcome::Retry(format!("storing delivery: {e}"));
-            }
-        }
-        WorkOutcome::Done(result)
     }
 }
 

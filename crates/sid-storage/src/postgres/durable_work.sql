@@ -22,7 +22,14 @@ CREATE TABLE IF NOT EXISTS durable_work (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Open work only: what workers scan and what admission counts.
-CREATE INDEX IF NOT EXISTS idx_durable_work_open
+-- One index per question a claim asks, each read by kind and time: due
+-- pending work, claimed work whose lease ran out, open work past its expiry.
+CREATE INDEX IF NOT EXISTS idx_durable_work_due
     ON durable_work (kind, not_before)
-    WHERE state IN ('pending', 'claimed');
+    WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_durable_work_lease
+    ON durable_work (kind, lease_until)
+    WHERE state = 'claimed';
+CREATE INDEX IF NOT EXISTS idx_durable_work_expiry
+    ON durable_work (kind, expires_at)
+    WHERE state IN ('pending', 'claimed') AND expires_at IS NOT NULL;

@@ -23,58 +23,33 @@ const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner
        AND state IN ('pending', 'claimed')
        AND expires_at IS NOT NULL AND expires_at <= ?";
 
-/// A claim's sweep of work abandoned on its last attempt. The open-state
-/// term repeats what `state = 'claimed'` implies: SQLite takes a partial
-/// index only for a query naming its condition, and without it this and
-/// [`DUE_SQL`] scan every ended item under the write lock.
+/// A claim's sweep of work abandoned on its last attempt, through the lease
+/// index. SQLite takes a partial index only for a query naming its
+/// condition.
 const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
         lease_until = NULL, updated_at = ?,
         last_error = COALESCE(last_error, 'lease expired on the last attempt')
      WHERE kind IN (SELECT value FROM json_each(?))
-       AND state IN ('pending', 'claimed')
        AND state = 'claimed' AND lease_until <= ?
        AND attempts >= max_attempts";
 
-/// The work a claim takes: pending past its time, or claimed with a lapsed
-/// lease (the open-state term as in [`ABANDONED_SQL`]).
-const DUE_SQL: &str = "SELECT id FROM durable_work
-     WHERE kind IN (SELECT value FROM json_each(?))
-       AND state IN ('pending', 'claimed')
-       AND ((state = 'pending' AND not_before <= ?)
-            OR (state = 'claimed' AND lease_until <= ?))
+/// One kind's first due pending items, read in order from the due index.
+const DUE_SQL: &str = "SELECT id, not_before FROM durable_work
+     WHERE kind = ? AND state = 'pending' AND not_before <= ?
      ORDER BY not_before LIMIT ?";
 
-/// Store `work` inside `tx`, the transaction of the state change that owes
-/// it. Returns `false` when work with its id already exists; refuses with
-/// `ResourceExhausted` when `capacity` open items of its kind are stored.
+/// One kind's first claimed items whose lease ran out, from the lease index.
+const LAPSED_SQL: &str = "SELECT id, not_before FROM durable_work
+     WHERE kind = ? AND state = 'claimed' AND lease_until <= ?
+     ORDER BY lease_until LIMIT ?";
+
+/// Store `work` through `conn`, inside the transaction of the state change
+/// that owes it or on its own. Returns `false` when work with its id already
+/// exists: the same obligation again, left as it is.
 pub(crate) async fn insert_work_in_tx(
-    tx: &mut SqliteConnection,
+    conn: &mut SqliteConnection,
     work: &NewWork,
-    capacity: u64,
 ) -> SidResult<bool> {
-    // The same obligation again is already stored: accepted, whatever the load.
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE id = ?)")
-            .bind(work.id.0)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
-    if exists {
-        return Ok(false);
-    }
-    let open: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM durable_work
-         WHERE kind = ? AND state IN ('pending', 'claimed')",
-    )
-    .bind(work.kind.as_str())
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(storage)?;
-    if u64::try_from(open).unwrap_or(u64::MAX) >= capacity {
-        return Err(SidError::ResourceExhausted(format!(
-            "durable work queue full ({capacity} open items)"
-        )));
-    }
     if work.max_attempts == 0 {
         return Err(SidError::Validation("max_attempts out of range".into()));
     }
@@ -92,7 +67,7 @@ pub(crate) async fn insert_work_in_tx(
     .bind(work.expires_at.as_ref().map(fmt_dt))
     .bind(&now)
     .bind(&now)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(storage)?
     .rows_affected()
@@ -102,14 +77,10 @@ pub(crate) async fn insert_work_in_tx(
 
 #[async_trait]
 impl WorkStore for SqliteBackend {
-    async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> SidResult<bool> {
+    async fn enqueue_work(&self, work: &NewWork) -> SidResult<bool> {
+        // One statement, atomic on its own.
         let mut conn = self.pool.acquire().await.map_err(storage)?;
-        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
-            .await
-            .map_err(storage)?;
-        let inserted = insert_work_in_tx(&mut tx, work, capacity).await?;
-        tx.commit().await.map_err(storage)?;
-        Ok(inserted)
+        insert_work_in_tx(&mut conn, work).await
     }
 
     async fn claim_work(
@@ -156,14 +127,31 @@ impl WorkStore for SqliteBackend {
             .await
             .map_err(storage)?;
 
-        let due: Vec<uuid::Uuid> = sqlx::query_scalar(DUE_SQL)
-            .bind(&kinds_json)
-            .bind(&now_s)
-            .bind(&now_s)
-            .bind(i64::from(limit))
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(storage)?;
+        // Each kind's first candidates from its indexes, merged by time: the
+        // read is bounded by kinds times the limit whatever the backlog.
+        // A set: a kind named twice gave its items twice, claimed twice.
+        let mut distinct: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let mut candidates: Vec<(uuid::Uuid, String)> = Vec::new();
+        for kind in distinct {
+            for sql in [DUE_SQL, LAPSED_SQL] {
+                candidates.extend(
+                    sqlx::query_as::<_, (uuid::Uuid, String)>(sql)
+                        .bind(kind)
+                        .bind(&now_s)
+                        .bind(i64::from(limit))
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(storage)?,
+                );
+            }
+        }
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        let due = candidates
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|(id, _)| id);
 
         let mut claimed = Vec::with_capacity(due.len());
         for id in due {
@@ -223,7 +211,6 @@ impl WorkStore for SqliteBackend {
         generation: i64,
         result: Option<&str>,
         owed: &[NewWork],
-        capacity: u64,
     ) -> SidResult<bool> {
         let mut conn = self.pool.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
@@ -246,7 +233,7 @@ impl WorkStore for SqliteBackend {
             return Ok(false);
         }
         for work in owed {
-            insert_work_in_tx(&mut tx, work, capacity).await?;
+            insert_work_in_tx(&mut tx, work).await?;
         }
         tx.commit().await.map_err(storage)?;
         Ok(true)
@@ -288,9 +275,9 @@ impl WorkStore for SqliteBackend {
         if state == WorkState::Failed.as_str()
             && let Some(alert) = &failure.on_dead
         {
-            // One alert per dead work, never refused for load: the failure it
-            // reports is already recorded.
-            insert_work_in_tx(&mut tx, alert, u64::MAX).await?;
+            // One alert per dead work: the failure it reports is already
+            // recorded.
+            insert_work_in_tx(&mut tx, alert).await?;
         }
         tx.commit().await.map_err(storage)?;
         Ok(true)

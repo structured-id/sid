@@ -20,30 +20,52 @@ async fn plan(backend: &SqliteBackend, sql: &str, params: &[&str]) -> Vec<String
         .collect()
 }
 
-/// Every statement a claim runs reads only open work through the open-work
-/// index, never the whole table: ended work stays in the table until its
-/// retention ends, and the claim holds the write lock. The due read and the
-/// abandoned sweep once scanned the table, so each claim read every ended
-/// item and a backlog drained ever slower.
+/// Every statement a claim runs searches its own index by kind and time,
+/// never reading the open backlog or the whole table: the claim holds the
+/// write lock, and reading every open item made each claim as slow as the
+/// backlog was long. The due and lapsed reads come from the index in order,
+/// with no sort of the matching items.
 #[tokio::test]
-async fn a_claim_reads_open_work_through_its_index() {
+async fn a_claim_reads_only_due_work_through_its_indexes() {
     let backend = SqliteBackend::new_in_memory().await.unwrap();
     let (now, kinds) = ("2026-01-01T00:00:00Z", r#"["kind.a"]"#);
-    for (name, sql, params) in [
-        ("expire", EXPIRE_SQL, [now, kinds, now, ""]),
-        ("abandoned", ABANDONED_SQL, [now, kinds, now, ""]),
-        ("due", DUE_SQL, [kinds, now, now, "32"]),
+    for (name, sql, params, index) in [
+        (
+            "expire",
+            EXPIRE_SQL,
+            vec![now, kinds, now],
+            "idx_durable_work_expiry (kind=? AND expires_at",
+        ),
+        (
+            "abandoned",
+            ABANDONED_SQL,
+            vec![now, kinds, now],
+            "idx_durable_work_lease (kind=? AND lease_until",
+        ),
+        (
+            "due",
+            DUE_SQL,
+            vec!["kind.a", now, "32"],
+            "idx_durable_work_due (kind=? AND not_before",
+        ),
+        (
+            "lapsed",
+            LAPSED_SQL,
+            vec!["kind.a", now, "32"],
+            "idx_durable_work_lease (kind=? AND lease_until",
+        ),
     ] {
-        let params: Vec<&str> = params.into_iter().filter(|p| !p.is_empty()).collect();
         let details = plan(&backend, sql, &params).await;
         assert!(
-            details
-                .iter()
-                .any(|d| d.contains("durable_work USING INDEX idx_durable_work_open")),
+            details.iter().any(|d| d.contains(index)),
             "{name}: {details:?}"
         );
         assert!(
             !details.iter().any(|d| d == "SCAN durable_work"),
+            "{name}: {details:?}"
+        );
+        assert!(
+            !details.iter().any(|d| d.contains("TEMP B-TREE")),
             "{name}: {details:?}"
         );
     }

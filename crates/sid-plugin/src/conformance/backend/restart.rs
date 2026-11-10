@@ -50,7 +50,7 @@ where
         .create_project(&project, test_audit().with_operation(completion))
         .await
         .unwrap();
-    WorkStore::enqueue_work(&before, &work, 10).await.unwrap();
+    WorkStore::enqueue_work(&before, &work).await.unwrap();
     let left = before
         .claim_work(from_ref(&kind), "before", 10, LEASE)
         .await

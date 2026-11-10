@@ -177,7 +177,7 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     }
     audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
     for owed in &ctx.work {
-        work::insert(tx, owed, sid_plugin::OWED_WORK_CAPACITY)?;
+        work::insert(tx, owed)?;
     }
     Ok(())
 }
@@ -208,6 +208,21 @@ impl Statements<'_> {
             .execute_in_transaction(self.id, query, Some(params.0))
             .map_err(|e| {
                 if contention(&e) {
+                    self.contended.set(true);
+                }
+                storage(e)
+            })
+    }
+
+    /// Run a statement creating a uniquely keyed record this transaction
+    /// looked for and did not find. A collision on its key means another
+    /// commit created it after the snapshot was taken: the transaction runs
+    /// again and then finds it, instead of failing.
+    pub(super) fn create_absent(&self, query: &str, params: Params) -> SidResult<Vec<Row>> {
+        self.db
+            .execute_in_transaction(self.id, query, Some(params.0))
+            .map_err(|e| {
+                if contention(&e) || matches!(e, DatabaseError::UniqueViolation { .. }) {
                     self.contended.set(true);
                 }
                 storage(e)

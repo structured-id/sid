@@ -49,8 +49,6 @@ const SINGLES: usize = 500;
 const BACKLOG: usize = 5_000;
 /// Deliveries each event's route makes.
 const FAN_OUT: usize = 2;
-/// Room the store and the stream give the work.
-const CAPACITY: u64 = 1_000_000;
 
 /// Progress counted where it happens: how many, and when the last one was,
 /// stamped by the one that made it, so a sample never includes the time a
@@ -218,13 +216,9 @@ impl Timed {
 
 #[async_trait]
 impl WorkStore for Timed {
-    async fn enqueue_work(
-        &self,
-        work: &sid_core::models::NewWork,
-        capacity: u64,
-    ) -> sid_core::Result<bool> {
+    async fn enqueue_work(&self, work: &sid_core::models::NewWork) -> sid_core::Result<bool> {
         let started = Instant::now();
-        let done = self.inner.enqueue_work(work, capacity).await;
+        let done = self.inner.enqueue_work(work).await;
         self.record("enqueue", started.elapsed());
         done
     }
@@ -263,12 +257,11 @@ impl WorkStore for Timed {
         generation: i64,
         result: Option<&str>,
         owed: &[sid_core::models::NewWork],
-        capacity: u64,
     ) -> sid_core::Result<bool> {
         let started = Instant::now();
         let done = self
             .inner
-            .complete_work_owing(id, generation, result, owed, capacity)
+            .complete_work_owing(id, generation, result, owed)
             .await;
         self.record("complete+", started.elapsed());
         done
@@ -307,6 +300,65 @@ impl WorkStore for Timed {
 
     async fn import_work(&self, work: &sid_core::models::WorkSnapshot) -> sid_core::Result<bool> {
         self.inner.import_work(work).await
+    }
+}
+
+/// What the store's server sessions are doing, sampled from a connection of
+/// its own while a drain runs: per state, wait event and statement, how many
+/// sessions were seen there. Tells a lock queue or an exhausted pool (sessions
+/// idle in transaction, or fewer sessions than workers) from slow statements.
+struct Waits {
+    stop: tokio::sync::oneshot::Sender<()>,
+    sampling: tokio::task::JoinHandle<(usize, std::collections::HashMap<String, u64>)>,
+}
+
+impl Waits {
+    async fn start(pool: &sqlx::PgPool) -> Self {
+        use sqlx::Connection;
+        let mut conn = sqlx::PgConnection::connect_with(&pool.connect_options())
+            .await
+            .unwrap();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+        let sampling = tokio::spawn(async move {
+            let mut seen = std::collections::HashMap::new();
+            let mut samples = 0;
+            loop {
+                let rows: Vec<(String, i64)> = sqlx::query_as(
+                    "SELECT state || ' ' || COALESCE(wait_event_type || ':' || wait_event, 'running') \
+                     || ' ' || left(regexp_replace(query, '\\s+', ' ', 'g'), 60), count(*) \
+                     FROM pg_stat_activity \
+                     WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                     GROUP BY 1",
+                )
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+                samples += 1;
+                for (what, n) in rows {
+                    *seen.entry(what).or_default() += n as u64;
+                }
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+            (samples, seen)
+        });
+        Self { stop, sampling }
+    }
+
+    /// The most frequent states, each as sessions per sample.
+    async fn report(self, mode: &str) {
+        self.stop.send(()).unwrap();
+        let (samples, seen) = self.sampling.await.unwrap();
+        let mut seen: Vec<_> = seen.into_iter().collect();
+        seen.sort_unstable_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (what, n) in seen.into_iter().take(15) {
+            println!(
+                "{mode:<10} sessions  {:>6.2} {what}",
+                n as f64 / samples.max(1) as f64
+            );
+        }
     }
 }
 
@@ -350,9 +402,8 @@ fn runner(
         Arc::new(RouteHandler::new(
             RoutingTable::default_ce_rules(),
             source.clone(),
-            CAPACITY,
         )),
-        Arc::new(PlanHandler::new(store.clone(), CAPACITY)),
+        Arc::new(PlanHandler::new()),
         Arc::new(DeliverHandler::new(
             Arc::new(dispatcher),
             templates.clone(),
@@ -374,7 +425,7 @@ fn runner(
 
 /// `accept`, `drain` and `deliver` over `store`; every delivery reads its
 /// template from the service's own PostgreSQL database.
-async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
+async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, pool: Option<&sqlx::PgPool>) {
     let templates = Arc::new(
         TemplateStore::new(
             &RoutingTable::default_ce_rules(),
@@ -391,24 +442,24 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     for _ in 0..ACCEPTS {
         let event = event();
         let started = Instant::now();
-        accept_event(store.as_ref(), &event, CAPACITY)
-            .await
-            .unwrap();
+        accept_event(store.as_ref(), &event).await.unwrap();
         samples.push(started.elapsed());
         owed += 1;
     }
     report(mode, "accept", samples);
 
     for _ in 0..BACKLOG {
-        accept_event(store.as_ref(), &event(), CAPACITY)
-            .await
-            .unwrap();
+        accept_event(store.as_ref(), &event()).await.unwrap();
         owed += 1;
     }
     let sent = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let timed = Arc::new(Timed::new(store.clone()));
     let timed_store: Arc<dyn WorkStore> = timed.clone();
+    let waits = match pool {
+        Some(pool) => Some(Waits::start(pool).await),
+        None => None,
+    };
     let started = Instant::now();
     let runner = runner(&timed_store, &sent, &templates);
     // Woken after each acceptance, as the notifier's consumer does.
@@ -418,14 +469,15 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     // The accepted ones of `accept` drain with the backlog.
     rate(mode, "drain", owed, done - started);
     timed.report(mode, done - started);
+    if let Some(waits) = waits {
+        waits.report(mode).await;
+    }
 
     let mut samples = Vec::with_capacity(SINGLES);
     for _ in 0..SINGLES {
         let before = sent.count();
         let started = Instant::now();
-        accept_event(store.as_ref(), &event(), CAPACITY)
-            .await
-            .unwrap();
+        accept_event(store.as_ref(), &event()).await.unwrap();
         waker.wake();
         let delivered = sent.reach(before + FAN_OUT).await;
         samples.push(delivered - started);
@@ -457,11 +509,12 @@ async fn fresh_database(name: &str) -> sqlx::PgPool {
         .unwrap()
 }
 
-/// A store of its own on a fresh PostgreSQL database.
-async fn postgres() -> Arc<dyn WorkStore> {
-    let store = sid_storage::PgWorkStore::new(fresh_database("sid_notify_bench").await);
+/// A store of its own on a fresh PostgreSQL database, and its pool.
+async fn postgres() -> (Arc<dyn WorkStore>, sqlx::PgPool) {
+    let pool = fresh_database("sid_notify_bench").await;
+    let store = sid_storage::PgWorkStore::new(pool.clone());
     store.ensure_schema().await.unwrap();
-    Arc::new(store)
+    (Arc::new(store), pool)
 }
 
 /// `handoff` through JetStream into `store`, on streams of its own.
@@ -491,15 +544,9 @@ async fn handoff(store: Arc<dyn WorkStore>) {
     let consumer = {
         let (store, accepted) = (store.clone(), accepted.clone());
         tokio::spawn(async move {
-            accept_work(
-                deliveries,
-                store.as_ref(),
-                CAPACITY,
-                || accepted.add(),
-                async move {
-                    let _ = stopped.await;
-                },
-            )
+            accept_work(deliveries, store.as_ref(), || accepted.add(), async move {
+                let _ = stopped.await;
+            })
             .await;
         })
     };
@@ -543,10 +590,13 @@ async fn main() {
                     sid_storage::sqlite::SqliteBackend::new(&format!("sqlite:{}", file.display()))
                         .await
                         .unwrap();
-                store_modes("sqlite", Arc::new(sqlite)).await;
+                store_modes("sqlite", Arc::new(sqlite), None).await;
             }
-            "postgres" => store_modes("postgres", postgres().await).await,
-            "jetstream" => handoff(postgres().await).await,
+            "postgres" => {
+                let (store, pool) = postgres().await;
+                store_modes("postgres", store, Some(&pool)).await;
+            }
+            "jetstream" => handoff(postgres().await.0).await,
             other => panic!("unknown mode {other}: sqlite, postgres or jetstream"),
         }
     }

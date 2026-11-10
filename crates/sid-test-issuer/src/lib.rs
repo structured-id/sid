@@ -908,10 +908,7 @@ fn auth_service(
         None,
         Arc::new(sid_authn::otp::OtpService::new(
             storage.clone(),
-            sid_authn::otp::CodeDelivery {
-                keys: keys.clone(),
-                capacity: sid_plugin::OWED_WORK_CAPACITY,
-            },
+            sid_authn::otp::CodeDelivery { keys: keys.clone() },
         )),
         issuers,
         org,

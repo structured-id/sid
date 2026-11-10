@@ -713,7 +713,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: key_manager.clone(),
-            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
     let code_mail = Arc::new(sid::auth_mail::CodeMail::new(

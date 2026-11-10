@@ -268,13 +268,6 @@ impl<'a> EmailSignIn<'a> {
                 info!("Magic link request past the per-address limit: no link sent");
                 return unsent();
             }
-            // A full mail queue refuses only real accounts' requests; it
-            // answers as an unknown address does, so a backlog never tells
-            // the caller which addresses have accounts.
-            Err(MagicLinkError::DeliveryBacklog(why)) => {
-                warn!(%why, "magic link email queue full: no link sent");
-                return unsent();
-            }
             Err(e @ (MagicLinkError::Internal(_) | MagicLinkError::Sealed(_))) => {
                 return Err(internal("request magic link", e));
             }

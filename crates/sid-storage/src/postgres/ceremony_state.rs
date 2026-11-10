@@ -12,8 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
-    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, OwedWork,
-    SingleUseAdmissions,
+    CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
 };
 
 use super::PostgresBackend;
@@ -174,10 +173,8 @@ impl CeremonyStateStore for PostgresBackend {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<()> {
-        // The state row first, then the work's kind lock: the order a
-        // mutation consuming a ceremony takes them in.
         let mut tx = self
             .pool
             .begin()
@@ -197,12 +194,7 @@ impl CeremonyStateStore for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(failure("store ceremony state"))?;
-        super::work::insert_owed_work_in_tx(
-            &mut tx,
-            std::slice::from_ref(owed.work),
-            owed.capacity,
-        )
-        .await?;
+        super::work::insert_owed_work_in_tx(&mut tx, std::slice::from_ref(owed)).await?;
         tx.commit().await.map_err(failure("store ceremony state"))?;
         Ok(())
     }
@@ -214,7 +206,7 @@ impl CeremonyStateStore for PostgresBackend {
         expected: &[u8],
         value: &[u8],
         ttl: Duration,
-        owed: OwedWork<'_>,
+        owed: &sid_core::models::NewWork,
     ) -> SidResult<bool> {
         let mut tx = self
             .lock_state(namespace, key, "replace ceremony state")
@@ -236,12 +228,7 @@ impl CeremonyStateStore for PostgresBackend {
         if replaced != 1 {
             return Ok(false);
         }
-        super::work::insert_owed_work_in_tx(
-            &mut tx,
-            std::slice::from_ref(owed.work),
-            owed.capacity,
-        )
-        .await?;
+        super::work::insert_owed_work_in_tx(&mut tx, std::slice::from_ref(owed)).await?;
         tx.commit()
             .await
             .map_err(failure("replace ceremony state"))?;

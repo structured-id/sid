@@ -191,13 +191,10 @@ async fn an_installation_that_addressed_work_keeps_its_durable_bus() {
         .await
         .unwrap();
     store
-        .enqueue_work(
-            &sid_core::models::NewWork::new(
-                sid_core::models::WorkKind::new("backchannel.logout").unwrap(),
-                b"{}".to_vec(),
-            ),
-            10,
-        )
+        .enqueue_work(&sid_core::models::NewWork::new(
+            sid_core::models::WorkKind::new("backchannel.logout").unwrap(),
+            b"{}".to_vec(),
+        ))
         .await
         .unwrap();
     refuse_addressed_history(&store)
@@ -206,7 +203,7 @@ async fn an_installation_that_addressed_work_keeps_its_durable_bus() {
 
     let delivery = Event::new("test", event_types::SESSION_REVOKED)
         .deliver(&WorkRecipient::new("sid-notify").unwrap());
-    store.enqueue_work(&delivery, 10).await.unwrap();
+    store.enqueue_work(&delivery).await.unwrap();
     let claimed = store
         .claim_work(
             &[

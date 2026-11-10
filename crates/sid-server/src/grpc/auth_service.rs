@@ -140,15 +140,6 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
         .with_quota_violation("email_codes", "codes requested per address")
         .with_retry_after(std::time::Duration::from_secs(wait_seconds))
         .into(),
-        // The installation's bound of owed mails: the request is not
-        // accepted rather than answered with a code nobody will send.
-        sid_authn::otp::OtpError::Busy(_) => ApiError::new(
-            ErrorReason::QuotaExceeded,
-            "too many codes are waiting for delivery; try again shortly",
-        )
-        .with_quota_violation("email_deliveries", "codes waiting for delivery")
-        .with_retry_after(std::time::Duration::from_secs(60))
-        .into(),
         e @ (sid_authn::otp::OtpError::Internal(_) | sid_authn::otp::OtpError::Sealed(_)) => {
             internal("request email code", e)
         }

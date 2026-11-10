@@ -26,7 +26,7 @@ use argon2::{
 use chrono::{DateTime, SubsecRound, Utc};
 use rand::RngExt;
 use sid_core::models::{NewWork, WorkKind};
-use sid_plugin::{CeremonyStateStore, OwedWork};
+use sid_plugin::CeremonyStateStore;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -92,9 +92,6 @@ pub enum OtpVerifyResult {
 pub enum OtpError {
     #[error("rate limited: try again in {wait_seconds} seconds")]
     RateLimited { wait_seconds: u64 },
-    /// The code's email could not be admitted: too many are owed already.
-    #[error("too many codes are waiting for delivery: {0}")]
-    Busy(String),
     /// The stored code is not sealed to its issue: it can never be sent.
     #[error("sealed code: {0}")]
     Sealed(String),
@@ -112,11 +109,10 @@ pub enum CodeDestination<'a> {
 }
 
 /// How requested codes are owed their email: the keys sealing each code to
-/// its issue, and the bound of open mails. The mail's work commits with the
-/// session in the ceremony state store, which keeps both.
+/// its issue. The mail's work commits with the session in the ceremony state
+/// store, which keeps both.
 pub struct CodeDelivery {
     pub keys: Arc<dyn sid_keys::KeyManager>,
-    pub capacity: u64,
 }
 
 /// A code waiting for its email: the mailbox bound at the request, the code
@@ -169,15 +165,6 @@ fn store_error(what: &str) -> impl Fn(sid_core::Error) -> OtpError + '_ {
     move |e| OtpError::Internal(format!("{what}: {e}"))
 }
 
-/// A refused write of a session with its mail: the mail queue full is
-/// `Busy`, anything else internal.
-fn owing_error(e: sid_core::Error) -> OtpError {
-    match e {
-        sid_core::Error::ResourceExhausted(e) => OtpError::Busy(e),
-        e => OtpError::Internal(format!("store the session with its email: {e}")),
-    }
-}
-
 /// OTP session service over the ceremony state every replica shares.
 pub struct OtpService {
     ceremonies: Arc<dyn CeremonyStateStore>,
@@ -221,10 +208,10 @@ impl OtpService {
                 &session_id.to_string(),
                 &data,
                 OTP_RETENTION,
-                self.owed(&email),
+                &email,
             )
             .await
-            .map_err(owing_error)?;
+            .map_err(store_error("store the session with its email"))?;
         Ok((Self::requested(session_id), code))
     }
 
@@ -277,7 +264,7 @@ impl OtpService {
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
         let email = Self::email(*session_id, &session);
         // The new code replaces the current one only with its mail owed: a
-        // refused admission leaves the current code and its mail in place.
+        // failed write leaves the current code and its mail in place.
         if !self
             .ceremonies
             .replace_ceremony_state_owing(
@@ -286,10 +273,10 @@ impl OtpService {
                 &current.bytes,
                 &data,
                 OTP_RETENTION,
-                self.owed(&email),
+                &email,
             )
             .await
-            .map_err(owing_error)?
+            .map_err(store_error("store the session with its email"))?
         {
             return Ok(None);
         }
@@ -393,9 +380,9 @@ impl OtpService {
     }
 
     /// The work emailing `session`'s current code. A session with no
-    /// destination owes the same work, which sends nothing: admission, its
-    /// refusal at capacity and its cost are alike for every address, so none
-    /// of them tells whether an account exists.
+    /// destination owes the same work, which sends nothing: storing it and
+    /// its cost are alike for every address, so neither tells whether an
+    /// account exists.
     fn email(session_id: Uuid, session: &StoredOtpSession) -> NewWork {
         let mut payload = session_id.as_bytes().to_vec();
         payload.extend_from_slice(session.issue.as_bytes());
@@ -406,14 +393,6 @@ impl OtpService {
         email.expires_at = Some(session.expires_at);
         email.max_attempts = EMAIL_ATTEMPTS;
         email
-    }
-
-    /// `email` admitted within the bound of open mails.
-    fn owed<'a>(&self, email: &'a NewWork) -> OwedWork<'a> {
-        OwedWork {
-            work: email,
-            capacity: self.delivery.capacity,
-        }
     }
 
     fn requested(session_id: Uuid) -> OtpRequestResult {

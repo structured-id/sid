@@ -84,7 +84,7 @@ pub async fn test_restore_returns_the_backed_up_state<B, L, Bk, BkF, P, Rs, RsF>
         .await
         .unwrap();
     let pending = NewWork::new(kind.clone(), b"pending".to_vec());
-    WorkStore::enqueue_work(live, &pending, 10).await.unwrap();
+    WorkStore::enqueue_work(live, &pending).await.unwrap();
 
     let point = backup().await;
 
@@ -95,7 +95,7 @@ pub async fn test_restore_returns_the_backed_up_state<B, L, Bk, BkF, P, Rs, RsF>
     let later = Project::new(format!("later_{tag}"), None);
     live.create_project(&later, test_audit()).await.unwrap();
     let after = NewWork::new(kind.clone(), b"after".to_vec());
-    WorkStore::enqueue_work(live, &after, 10).await.unwrap();
+    WorkStore::enqueue_work(live, &after).await.unwrap();
     log.log(&chain, AuditEntry::system("test.after", &chain))
         .await
         .unwrap();

@@ -123,11 +123,10 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
 }
 
 fn route_handler(resolver: impl RecipientSource + 'static) -> RouteHandler {
-    RouteHandler::new(RoutingTable::default_ce_rules(), Arc::new(resolver), 1_000)
+    RouteHandler::new(RoutingTable::default_ce_rules(), Arc::new(resolver))
 }
 
-/// Record `outcome` of `work` as the runner does: the outcome as recorded,
-/// a next stage refused for room becoming a retry.
+/// Record `outcome` of `work` as the runner does.
 async fn settle(
     store: &Arc<dyn WorkStore>,
     work: &ClaimedWork,
@@ -157,30 +156,13 @@ async fn settle(
                 .unwrap();
             WorkOutcome::Done(result)
         }
-        WorkOutcome::DoneWith {
-            result,
-            follow_up,
-            capacity,
-        } => match store
-            .complete_work_owing(
-                work.id,
-                work.generation,
-                result.as_deref(),
-                &follow_up,
-                capacity,
-            )
-            .await
-        {
-            Err(sid_core::Error::ResourceExhausted(e)) => retry(e).await,
-            recorded => {
-                recorded.unwrap();
-                WorkOutcome::DoneWith {
-                    result,
-                    follow_up,
-                    capacity,
-                }
-            }
-        },
+        WorkOutcome::DoneWith { result, follow_up } => {
+            store
+                .complete_work_owing(work.id, work.generation, result.as_deref(), &follow_up)
+                .await
+                .unwrap();
+            WorkOutcome::DoneWith { result, follow_up }
+        }
         WorkOutcome::Retry(error) => retry(error).await,
         other => other,
     }
@@ -196,7 +178,7 @@ fn result_of(outcome: &WorkOutcome) -> Option<&str> {
 
 /// The routing job of `event`, accepted and claimed as a runner claims it.
 async fn routing(store: &Arc<dyn WorkStore>, event: &Event) -> ClaimedWork {
-    accept_event(store.as_ref(), event, 1_000).await.unwrap();
+    accept_event(store.as_ref(), event).await.unwrap();
     store
         .claim_work(&[kind(ROUTE)], "w", 100, Duration::from_secs(30))
         .await
@@ -296,8 +278,8 @@ async fn carry_out_plans(store: &Arc<dyn WorkStore>, handler: &PlanHandler) -> V
 async fn test_accept_event_is_idempotent_per_event() {
     let store = store().await;
     let event = security_event();
-    accept_event(store.as_ref(), &event, 10).await.unwrap();
-    accept_event(store.as_ref(), &event, 10).await.unwrap();
+    accept_event(store.as_ref(), &event).await.unwrap();
+    accept_event(store.as_ref(), &event).await.unwrap();
 
     let route = store
         .get_work(route_job_id(&event))
@@ -317,19 +299,6 @@ async fn test_accept_event_is_idempotent_per_event() {
     assert_ne!(route_job_id(&other_source), route_job_id(&event));
 }
 
-/// A full job store refuses the event, so the bus keeps it.
-#[tokio::test]
-async fn test_accept_event_refused_when_full() {
-    let store = store().await;
-    let (first, second) = (security_event(), security_event());
-    accept_event(store.as_ref(), &first, 1).await.unwrap();
-    let refused = accept_event(store.as_ref(), &second, 1).await;
-    assert!(matches!(
-        refused,
-        Err(sid_core::Error::ResourceExhausted(_))
-    ));
-}
-
 /// Routing stores one delivery per (template, channel) with a stable id; a
 /// second routing attempt stores nothing new.
 /// Two producers may reuse an event id: each event is its own notification,
@@ -347,7 +316,7 @@ async fn test_same_id_from_two_sources_is_two_notifications() {
         let outcome = settle(&store, &work, handler.handle(&work).await).await;
         assert_eq!(result_of(&outcome), Some("2 deliveries planned"));
     }
-    carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
+    carry_out_plans(&store, &PlanHandler::new()).await;
     let deliveries = store
         .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
         .await
@@ -370,8 +339,7 @@ async fn test_route_fans_out_once() {
     assert_eq!(result_of(&outcome), Some("2 deliveries planned"));
     // A repeat by the same, now ended, claim owes nothing.
     settle(&store, &work, handler.handle(&work).await).await;
-    let plans = PlanHandler::new(Arc::clone(&store), 1_000);
-    let outcomes = carry_out_plans(&store, &plans).await;
+    let outcomes = carry_out_plans(&store, &PlanHandler::new()).await;
     assert_eq!(
         outcomes.iter().map(result_of).collect::<Vec<_>>(),
         [Some("2 deliveries")],
@@ -401,13 +369,12 @@ async fn test_route_fans_out_once() {
     );
 }
 
-/// A fan-out cut short after one delivery was stored finishes the rest even
-/// when the rules changed meanwhile: the plan stored by the first routing is
-/// carried out whole, each delivery once. Routing once resolved the rules
-/// again on every attempt, so a rule removed between attempts dropped the
-/// remaining delivery while the routing reported done.
+/// A plan stored by the first routing is carried out whole even when the
+/// rules changed meanwhile, each delivery once. Routing once resolved the
+/// rules again on every attempt, so a rule removed between attempts dropped
+/// a delivery while the routing reported done.
 #[tokio::test]
-async fn test_partial_fan_out_finishes_after_a_rule_change() {
+async fn test_plan_finishes_after_a_rule_change() {
     let store = store().await;
     let event = security_event();
     let work = routing(&store, &event).await;
@@ -419,36 +386,15 @@ async fn test_partial_fan_out_finishes_after_a_rule_change() {
         WorkOutcome::DoneWith { .. }
     ));
 
-    // Room for one delivery only, a plan of two: the whole plan does not fit
-    // its first attempt, which stores nothing and stays owed; the next stores
-    // the first delivery and stays owed, so a plan larger than the room
-    // still advances.
-    let cramped = PlanHandler::new(Arc::clone(&store), 1);
-    for stored in [0, 1] {
-        assert!(matches!(
-            carry_out_plans(&store, &cramped).await.as_slice(),
-            [WorkOutcome::Retry(_)]
-        ));
-        let mut deliveries = 0;
-        for channel in ["email", "webhook"] {
-            let id = delivery_job_id(&event, "security_alert", channel);
-            if store.get_work(id).await.unwrap().is_some() {
-                deliveries += 1;
-            }
-        }
-        assert_eq!(deliveries, stored);
-    }
-
     // The rules change: routing the event again now matches nothing, and
     // owes nothing new.
-    let silent = RouteHandler::new(RoutingTable::new(), standalone(), 1_000);
+    let silent = RouteHandler::new(RoutingTable::new(), standalone());
     assert_eq!(
         silent.handle(&work).await,
         WorkOutcome::Done(Some("no routing rule".into()))
     );
 
-    let roomy = PlanHandler::new(Arc::clone(&store), 1_000);
-    let outcomes = carry_out_plans(&store, &roomy).await;
+    let outcomes = carry_out_plans(&store, &PlanHandler::new()).await;
     assert_eq!(
         outcomes.iter().map(result_of).collect::<Vec<_>>(),
         [Some("2 deliveries")]
@@ -462,12 +408,11 @@ async fn test_partial_fan_out_finishes_after_a_rule_change() {
     }
 }
 
-// A plan larger than the room finishes under that same room: with space for
-// one delivery, the plan stores one, waits while it is open, stores the
-// other once the first has ended, and completes, without storing a delivery
-// twice or touching the result of the one already done.
+/// A plan whose delivery was already stored and done (by an attempt whose
+/// outcome was lost) completes, owing the other delivery once, without
+/// storing the done one again or touching its result.
 #[tokio::test]
-async fn test_plan_larger_than_the_room_finishes_under_the_same_room() {
+async fn test_plan_keeps_a_delivery_stored_before() {
     let store = store().await;
     let event = security_event();
     let work = routing(&store, &event).await;
@@ -476,20 +421,14 @@ async fn test_plan_larger_than_the_room_finishes_under_the_same_room() {
         .await;
     settle(&store, &work, routed).await;
 
-    let cramped = PlanHandler::new(Arc::clone(&store), 1);
-    // The first attempt owes both with its completion and is refused whole;
-    // the next stores one delivery and stays owed.
-    for _ in 0..2 {
-        assert!(matches!(
-            carry_out_plans(&store, &cramped).await.as_slice(),
-            [WorkOutcome::Retry(_)]
-        ));
-    }
+    // One delivery of the plan, stored and done before the plan completed.
+    let mut stored = NewWork::new(kind(DELIVER), b"{}".to_vec());
+    stored.id = delivery_job_id(&event, "security_alert", "email");
+    store.enqueue_work(&stored).await.unwrap();
     let open = store
         .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
         .await
         .unwrap();
-    assert_eq!(open.len(), 1, "one delivery fits the room");
     let first = &open[0];
     assert!(
         store
@@ -498,7 +437,7 @@ async fn test_plan_larger_than_the_room_finishes_under_the_same_room() {
             .unwrap()
     );
 
-    let outcomes = carry_out_plans(&store, &cramped).await;
+    let outcomes = carry_out_plans(&store, &PlanHandler::new()).await;
     assert_eq!(
         outcomes.iter().map(result_of).collect::<Vec<_>>(),
         [Some("2 deliveries")]
@@ -738,7 +677,7 @@ async fn test_host_source_decides_the_recipient() {
         matches!(outcome, WorkOutcome::DoneWith { .. }),
         "{outcome:?}"
     );
-    carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
+    carry_out_plans(&store, &PlanHandler::new()).await;
     let deliveries = store
         .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
         .await
@@ -841,7 +780,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
         .unwrap();
     let handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(route_handler(RecipientResolver::without_identity())),
-        Arc::new(PlanHandler::new(Arc::clone(&store), 1_000)),
+        Arc::new(PlanHandler::new()),
         Arc::new(DeliverHandler::new(
             dispatcher(&[Arc::clone(&email), webhook]),
             templates().await,
@@ -853,13 +792,8 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
                 recipient: WorkRecipient::new("audit-sink").unwrap(),
                 event_types: Vec::new(),
             }],
-            100,
         )),
-        Arc::new(EventFanoutHandler::new(
-            bus.clone(),
-            Arc::clone(&store),
-            100,
-        )),
+        Arc::new(EventFanoutHandler::new(bus.clone(), Arc::clone(&store))),
     ];
     let config = RunnerConfig {
         concurrency: 4,
@@ -871,7 +805,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     let handle = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
 
     let event = security_event();
-    accept_event(store.as_ref(), &event, 100).await.unwrap();
+    accept_event(store.as_ref(), &event).await.unwrap();
 
     let alert = tokio::time::timeout(Duration::from_secs(10), alerts.recv())
         .await
