@@ -25,7 +25,7 @@ pub mod trust_anchor;
 mod test_fixtures;
 
 pub use cross_instance_linking::{
-    CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkId, LinkStatus,
+    CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkStatus, LinkingError,
 };
 pub use dns_verifier::{DnsVerifyResult, dns_query_name, parse_dns_txt_token, verify_site_dns};
 pub use error::PkiError;
