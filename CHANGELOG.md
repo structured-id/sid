@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.27](https://github.com/structured-id/sid/compare/v0.2.26...v0.2.27) - 2026-11-10
+
+### Added
+
+- *(authn)* observe durable work in the runner ([#571](https://github.com/structured-id/sid/pull/571))
+
+### Other
+
+- *(storage)* keyed commits under one period no longer serialize ([#573](https://github.com/structured-id/sid/pull/573))
+- *(work)* drop the backlog capacity from the work store ([#568](https://github.com/structured-id/sid/pull/568))
+
 ## [0.2.26](https://github.com/structured-id/sid/compare/v0.2.25...v0.2.26) - 2026-11-09
 
 ### Fixed
