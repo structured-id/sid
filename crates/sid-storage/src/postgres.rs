@@ -9744,6 +9744,8 @@ impl AccessRequestRow {
 
 mod application;
 mod audit_retention;
+mod audit_store;
+pub use audit_store::PgAuditStore;
 mod binding;
 mod ceremony_state;
 mod closure;
