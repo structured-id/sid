@@ -260,6 +260,138 @@ macro_rules! host_operation_result_store {
     )*};
 }
 
+/// A host's audit store in a schema of its own that holds nothing else, its
+/// tables created by its own `ensure_schema`, twice (as replicas starting
+/// together would). Dropped by [`drop_schema`] when the scenario ends.
+async fn host_audit_store() -> (sid_storage::PgAuditStore, String) {
+    let schema = format!("audit_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(setup().await.pool())
+        .await
+        .unwrap();
+    let store = sid_storage::PgAuditStore::new(schema_pool(&schema).await);
+    store.ensure_schema().await.unwrap();
+    store.ensure_schema().await.unwrap();
+    (store, schema)
+}
+
+/// The columns, constraints, indexes and triggers of the audit tables in the
+/// schema the connection `pool` names first, one line each, sorted. Monthly
+/// partitions are left out: the engine creates the year's ahead, a host this
+/// and the next month.
+async fn audit_tables(pool: &sqlx::PgPool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT format('%s.%s %s %s %s', table_name, column_name, data_type, is_nullable,
+                       coalesce(column_default, ''))
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name IN ('audit_chain_heads', 'audit_chain_checkpoints', 'audit_records')
+         UNION ALL
+         SELECT format('%s %s %s', c.conrelid::regclass::text, c.conname,
+                       pg_get_constraintdef(c.oid))
+         FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relnamespace = current_schema()::regnamespace
+           AND t.relname IN ('audit_chain_heads', 'audit_chain_checkpoints', 'audit_records')
+         UNION ALL
+         SELECT format('%s %s', tablename,
+                       regexp_replace(indexdef, ' ON (ONLY )?\\S+\\.', ' ON \\1'))
+         FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND tablename IN ('audit_chain_heads', 'audit_chain_checkpoints', 'audit_records')
+         UNION ALL
+         SELECT format('%s %s %s', t.relname, g.tgname, p.proname)
+         FROM pg_trigger g JOIN pg_class t ON t.oid = g.tgrelid
+         JOIN pg_proc p ON p.oid = g.tgfoid
+         WHERE t.relnamespace = current_schema()::regnamespace
+           AND t.relname = 'audit_records' AND NOT g.tgisinternal
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// A host's audit tables are the engine's: the same columns, defaults,
+/// constraints, indexes and append-only triggers, so a host keeps exactly
+/// the guarantees the engine's audit chains have.
+#[tokio::test]
+async fn host_audit_tables_match_the_engine_schema() {
+    let (_store, schema) = host_audit_store().await;
+    let host = audit_tables(&schema_pool(&schema).await).await;
+    let engine = audit_tables(setup().await.pool()).await;
+    drop_schema(&schema).await;
+    assert!(!engine.is_empty());
+    assert_eq!(host, engine);
+}
+
+/// A host mutation's audit record commits with the mutation or not at all:
+/// rolled back, the chain holds nothing; committed, the chain holds the
+/// record and verifies.
+#[tokio::test]
+async fn a_host_audit_record_commits_with_its_mutation() {
+    use sid_core::models::AuditEntry;
+    use sid_plugin::audit::AuditLog;
+
+    let (store, schema) = host_audit_store().await;
+    let pool = schema_pool(&schema).await;
+    let chain = format!("org:{}", uuid::Uuid::now_v7());
+
+    let mut tx = pool.begin().await.unwrap();
+    sid_storage::PgAuditStore::record_in_tx(&mut tx, &chain, AuditEntry::system("test", "lost"))
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert!(
+        store
+            .log()
+            .query(&chain, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut tx = pool.begin().await.unwrap();
+    sid_storage::PgAuditStore::record_in_tx(&mut tx, &chain, AuditEntry::system("test", "kept"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let records = store.log().query(&chain, None, None).await.unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sequence, 1);
+}
+
+/// Audit tables another schema made are refused at the schema check,
+/// unchanged, rather than kept as they are.
+#[tokio::test]
+async fn host_audit_tables_of_another_schema_are_refused() {
+    let schema = format!("audit_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(setup().await.pool())
+        .await
+        .unwrap();
+    let pool = schema_pool(&schema).await;
+    sqlx::raw_sql("CREATE TABLE audit_chain_heads (chain_id text PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = sid_storage::PgAuditStore::new(pool.clone())
+        .ensure_schema()
+        .await;
+    let kept: bool = sqlx::query_scalar("SELECT to_regclass('audit_schema') IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::InvalidState(_))),
+        "{refused:?}"
+    );
+    assert!(kept, "the refused database was changed");
+}
+
 /// Regression: a host's operation tables made by an earlier schema were kept
 /// as they were (`CREATE ... IF NOT EXISTS`), and its keyed commits failed on
 /// the first new column. They are refused at the schema check, unchanged.
