@@ -878,7 +878,6 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
         storage.clone(),
         sid_authn::otp::CodeDelivery {
             keys: installation.key_manager.clone(),
-            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
     let cascade = Arc::new(
@@ -1948,7 +1947,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // of this run takes, stays pending through the drain.
     let kind = WorkKind::new(WORK_KIND)?;
     let work = NewWork::new(kind.clone(), vec![]);
-    storage.enqueue_work(&work, 100).await?;
+    storage.enqueue_work(&work).await?;
     check(
         due_work(storage.as_ref()).await?.len() > 1,
         "the installation owes CE work besides the host's",
