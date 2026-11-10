@@ -195,15 +195,6 @@ impl RoutingTable {
             enabled: true,
         });
 
-        table.add_rule(RoutingRule {
-            name: "trial_onboarding".into(),
-            event_patterns: vec!["sid.organization.trial_activated.v1".into()],
-            channels: vec!["email".into()],
-            priority: NotificationPriority::Transactional,
-            template: "trial_onboarding".into(),
-            enabled: true,
-        });
-
         table
     }
 }
@@ -349,12 +340,10 @@ mod tests {
         assert!(scim_rule.channels.contains(&"email".to_string()));
         assert!(scim_rule.channels.contains(&"webhook".to_string()));
 
-        // Trial activation events should match
+        // A trial's mail belongs to the hosted service that sends it: the
+        // shared defaults route no trial activation.
         let trial_event = Event::new("sid-server", event_types::ORG_TRIAL_ACTIVATED);
-        let trial_rule = table.route(&trial_event).unwrap();
-        assert_eq!(trial_rule.name, "trial_onboarding");
-        assert_eq!(trial_rule.priority, NotificationPriority::Transactional);
-        assert!(trial_rule.channels.contains(&"email".to_string()));
+        assert!(table.route(&trial_event).is_none());
 
         // Random federation events should not match
         let fed_event = Event::new("src", event_types::FEDERATION_SYNC_COMPLETED);

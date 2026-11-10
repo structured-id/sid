@@ -170,32 +170,6 @@ impl TemplateEngine {
         });
 
         engine.register(NotificationTemplate {
-            name: "trial_onboarding".into(),
-            subject: Some("Welcome to StructuredID — {{data.org_name}} trial activated".into()),
-            body_html: "<h2>Welcome to StructuredID</h2>\
-                <p>Your organization <strong>{{data.org_name}}</strong> is now active on <code>{{data.domain}}</code>.</p>\
-                <h3>Getting Started</h3>\
-                <ul>\
-                <li>Sign in to your admin dashboard at <code>{{data.domain}}</code></li>\
-                <li>Create your first application (OAuth2 client)</li>\
-                <li>Invite team members (up to {{data.trial_users_limit}} during trial)</li>\
-                <li>Configure authentication policies</li>\
-                </ul>\
-                <p>Your trial runs for {{data.trial_days_remaining}} days (until {{data.trial_end_date}}).</p>\
-                <p>Need help? Visit our documentation or contact support.</p>".into(),
-            body_text: "Welcome to StructuredID\n\n\
-                Your organization {{data.org_name}} is now active on {{data.domain}}.\n\n\
-                Getting Started:\n\
-                - Sign in to your admin dashboard at {{data.domain}}\n\
-                - Create your first application (OAuth2 client)\n\
-                - Invite team members (up to {{data.trial_users_limit}} during trial)\n\
-                - Configure authentication policies\n\n\
-                Your trial runs for {{data.trial_days_remaining}} days (until {{data.trial_end_date}}).\n\n\
-                Need help? Visit our documentation or contact support.".into(),
-            default_priority: NotificationPriority::Transactional,
-        });
-
-        engine.register(NotificationTemplate {
             name: "principal_contested".into(),
             subject: Some("Someone is claiming your {{data.principal_type}}: {{data.principal_value}}".into()),
             body_html: "<h2>Principal Ownership Contested</h2>\
