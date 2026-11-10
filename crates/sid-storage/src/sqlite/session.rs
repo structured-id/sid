@@ -343,7 +343,7 @@ impl SqliteBackend {
         .bind(fmt_dt(&at))
         .bind(id)
         .bind(fmt_dt(&at))
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(|e| SidError::Storage(format!("touch session: {e}")))?;
         Ok(())

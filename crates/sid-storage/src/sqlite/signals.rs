@@ -39,7 +39,7 @@ impl SqliteBackend {
         .bind(event.risk_score)
         .bind(&event.reaction)
         .bind(fmt_dt(&event.timestamp))
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(|e| SidError::Storage(format!("save_anomaly_event: {e}")))?;
         Ok(())
@@ -90,7 +90,7 @@ impl SqliteBackend {
         .bind(failed)
         .bind(succeeded)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(|e| SidError::Storage(format!("record_ip_reputation_event: {e}")))?;
         Ok(())

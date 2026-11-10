@@ -79,7 +79,7 @@ pub(crate) async fn insert_work_in_tx(
 impl WorkStore for SqliteBackend {
     async fn enqueue_work(&self, work: &NewWork) -> SidResult<bool> {
         // One statement, atomic on its own.
-        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
         insert_work_in_tx(&mut conn, work).await
     }
 
@@ -104,7 +104,7 @@ impl WorkStore for SqliteBackend {
         let kinds_json =
             serde_json::to_string(&kinds.iter().map(WorkKind::as_str).collect::<Vec<_>>())
                 .map_err(|e| SidError::Internal(format!("work kinds: {e}")))?;
-        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
@@ -201,7 +201,7 @@ impl WorkStore for SqliteBackend {
         .bind(fmt_dt(&chrono::Utc::now()))
         .bind(id.0)
         .bind(generation)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(storage)?
         .rows_affected();
@@ -215,7 +215,7 @@ impl WorkStore for SqliteBackend {
         result: Option<&str>,
         owed: &[NewWork],
     ) -> SidResult<bool> {
-        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
@@ -248,7 +248,7 @@ impl WorkStore for SqliteBackend {
         generation: i64,
         failure: &WorkFailure,
     ) -> SidResult<bool> {
-        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
@@ -344,7 +344,7 @@ impl WorkStore for SqliteBackend {
         .bind(record.expires_at.as_ref().map(fmt_dt))
         .bind(fmt_dt(&record.created_at))
         .bind(fmt_dt(&record.updated_at))
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(storage)?
         .rows_affected()
@@ -365,7 +365,7 @@ impl WorkStore for SqliteBackend {
         kind: &WorkKind,
         before: chrono::DateTime<chrono::Utc>,
     ) -> SidResult<u64> {
-        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;

@@ -673,6 +673,41 @@ async fn test_ceremony_count_window_ending_behind_a_lock_restarts() {
     assert_eq!(count, 1, "an ended window was added to");
 }
 
+/// Regression: under sustained contention a write waited for the database
+/// write lock in SQLite's busy handler, whose growing sleeps let writers
+/// arriving later take the lock first, until the waiter's busy timeout
+/// passed and its mutation failed as "database is locked". Sixteen writers
+/// committing 25 transactions each, every one holding the lock for 15 ms
+/// (more serialized writing than the busy timeout), all commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sustained_concurrent_writes_all_commit() {
+    use sid_core::models::AuditEntry;
+    let dir = tempfile::tempdir().unwrap();
+    let path = format!("sqlite://{}", dir.path().join("sid.db").display());
+    let backend = SqliteBackend::new(&path).await.unwrap();
+    let writers: Vec<_> = (0..16)
+        .map(|w| {
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                for i in 0..25 {
+                    let tx = SqliteBackend::begin_write_on(backend.writer()).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                    SqliteBackend::commit_mutation(
+                        tx,
+                        &format!("writer:{w}"),
+                        AuditEntry::system("test", format!("write {i}")).into(),
+                    )
+                    .await?;
+                }
+                Ok::<_, sid_core::Error>(())
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.await.unwrap().expect("every write commits");
+    }
+}
+
 #[tokio::test]
 async fn test_commit_survives_restart() {
     let dir = tempfile::tempdir().unwrap();

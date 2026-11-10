@@ -119,7 +119,7 @@ impl SqliteBackend {
         .bind(longitude)
         .bind(now)
         .bind(i64::from(designated_threshold))
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await
         .map_err(|e| SidError::Storage(format!("Record login location failed: {e}")))?;
         Ok(())
