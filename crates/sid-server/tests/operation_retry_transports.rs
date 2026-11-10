@@ -7,7 +7,9 @@
 //! still passes the caller's current authorization: another caller under the
 //! same key runs its own command, one without the permission gets a refusal
 //! and no receipt, and a caller whose session ended gets no receipt either.
-//! On PostgreSQL and on SQLite.
+//! An embedding host's in-process call resolves the same command as the
+//! transports, and a browser page on the sign-in origin may send the
+//! command's headers. On PostgreSQL and on SQLite.
 //!
 //! Requires sid-test-postgres on port 54399.
 
@@ -114,6 +116,12 @@ struct Replica {
 impl Installation {
     /// A replica started now over the installation's database and cache.
     async fn replica(&self) -> Replica {
+        self.replica_for(None).await
+    }
+
+    /// A replica whose HTTP form also answers a sign-in page on
+    /// `sign_in`'s origin, as a server configured with that page does.
+    async fn replica_for(&self, sign_in: Option<&url::Url>) -> Replica {
         let revocation = Arc::new(RevocationCache::new(
             Duration::from_secs(900),
             self.cache.clone(),
@@ -137,7 +145,7 @@ impl Installation {
             common::test_key_manager(),
         ));
         Replica {
-            base: serve(routes, issuers).await,
+            base: serve(routes, issuers, sign_in).await,
             revocation,
             _revocations: revocations,
         }
@@ -186,11 +194,16 @@ impl Installation {
 }
 
 /// `routes` served on a port of their own as a server's HTTP port serves
-/// them: the transcoder in front of the same layers. Returns the base URL.
-async fn serve(routes: tonic::service::Routes, issuers: Arc<IssuerRegistry>) -> String {
+/// them: the transcoder in front of the same layers, answering the sign-in
+/// page's origin when there is one. Returns the base URL.
+async fn serve(
+    routes: tonic::service::Routes,
+    issuers: Arc<IssuerRegistry>,
+    sign_in: Option<&url::Url>,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
-    let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, None)
+    let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, sign_in)
         .unwrap()
         .expect("a bind address gives a transcoder");
     let upstream = sid_server::serve::transcoder_upstream(routes, issuers);
@@ -560,6 +573,138 @@ async fn a_receipt_follows_current_authorization(engine: Engine) {
     }
 }
 
+/// `name`'s creation named by `command`, made as an embedding host makes it:
+/// the bearer of `token` verified in process and the engine called with the
+/// typed context, with no transport between. Returns the project's id bytes.
+async fn create_in_process(
+    installation: &Installation,
+    token: &str,
+    command: &Command,
+    name: &str,
+) -> Vec<u8> {
+    let revocation = RevocationCache::new(Duration::from_secs(900), installation.cache.clone());
+    let caller =
+        sid_authn::caller::authenticate_token(token, common::test_jwt().verifier(), &revocation)
+            .await
+            .expect("the administrator's token")
+            .caller;
+    let project =
+        sid::projects::Projects::new(installation.storage.clone(), installation.issuer.clone())
+            .create_project(
+                &caller,
+                // Each attempt of the command carries its own copy of the
+                // one context the caller made.
+                command.context.clone(),
+                CreateProjectRequest {
+                    name: name.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the in-process creation answers");
+    project_id(&project)
+}
+
+/// An embedding host and remote clients resolve one command against the
+/// same store. A creation committed in process is answered over the HTTP
+/// form with its project, and a creation committed over gRPC is answered in
+/// process with its project; each installation holds one of each.
+async fn in_process_and_remote_attempts_resolve_one_command(engine: Engine) {
+    let installation = installation(engine).await;
+    let replica = installation.replica().await;
+    let (token, _) = installation.administrator().await;
+    let period = period(&replica).await;
+
+    let embedded = Command::new(period);
+    let first = create_in_process(&installation, &token, &embedded, "audit").await;
+    assert_eq!(
+        create(&replica, Transport::Http, &token, &embedded, "audit").await,
+        Ok(first),
+        "the remote retry of an in-process command"
+    );
+
+    let remote = Command::new(period);
+    let committed = create(&replica, Transport::Grpc, &token, &remote, "archive")
+        .await
+        .expect("the remote attempt commits");
+    assert_eq!(
+        create_in_process(&installation, &token, &remote, "archive").await,
+        committed,
+        "the in-process retry of a remote command"
+    );
+
+    assert_eq!(projects_named(&replica, &token, "audit").await, 1);
+    assert_eq!(projects_named(&replica, &token, "archive").await, 1);
+}
+
+/// A sign-in page on another origin calls the HTTP form with credentials,
+/// so a keyed command's two headers must pass its preflight: the answer
+/// allows the page's exact origin, credentials and both headers (Fetch
+/// standard §3.2.5 and §4.8). The page's command then commits once and its
+/// retry answers with the same project.
+async fn a_browser_page_may_send_the_operation_context(engine: Engine) {
+    let installation = installation(engine).await;
+    let page = url::Url::parse("https://login.sid.example.com/").unwrap();
+    let replica = installation.replica_for(Some(&page)).await;
+    let (token, _) = installation.administrator().await;
+    let origin = page.origin().ascii_serialization();
+
+    let preflight = http_client()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/v1/projects", replica.base),
+        )
+        .header("origin", &origin)
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type,idempotency-key,sid-operation-period",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(preflight.status().is_success(), "{}", preflight.status());
+    let headers = preflight.headers();
+    assert_eq!(headers["access-control-allow-origin"], origin.as_str());
+    assert_eq!(headers["access-control-allow-credentials"], "true");
+    let allowed = headers["access-control-allow-headers"]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    for name in ["idempotency-key", "sid-operation-period"] {
+        assert!(
+            allowed.split(',').any(|h| h.trim() == name),
+            "the preflight does not allow {name}: {allowed}"
+        );
+    }
+
+    let command = Command::new(period(&replica).await);
+    let send = || async {
+        let mut request = http_client()
+            .post(format!("{}/v1/projects", replica.base))
+            .header("origin", &origin)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "name": "reports" }));
+        for (name, value) in http_headers(&command) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            origin.as_str()
+        );
+        let project: serde_json::Value = response.json().await.unwrap();
+        project["id"]["value"]
+            .as_str()
+            .expect("the project id")
+            .to_string()
+    };
+    let first = send().await;
+    assert_eq!(send().await, first, "the page's retry");
+    assert_eq!(projects_named(&replica, &token, "reports").await, 1);
+}
+
 /// Each scenario on PostgreSQL and on SQLite.
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
@@ -586,4 +731,6 @@ on_both_engines!(
     a_lost_creation_is_answered_on_every_replica_and_transport,
     concurrent_attempts_on_two_replicas_commit_once,
     a_receipt_follows_current_authorization,
+    in_process_and_remote_attempts_resolve_one_command,
+    a_browser_page_may_send_the_operation_context,
 );
