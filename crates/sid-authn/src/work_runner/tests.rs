@@ -523,16 +523,21 @@ mod observed {
         found
     }
 
-    /// A meter provider read through the returned exporter. It is global, so
-    /// each test labels its work with a kind of its own: other runners in the
-    /// same process record under theirs.
-    fn observe() -> (SdkMeterProvider, InMemoryMetricExporter) {
-        let exporter = InMemoryMetricExporter::default();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
-        (provider, exporter)
+    /// The process's one meter provider, read through its exporter. Installed
+    /// once and never replaced, so a test running beside another never builds
+    /// its runner against a provider the other installed; each test labels
+    /// its work with a kind of its own and reads only that kind.
+    fn observe() -> &'static (SdkMeterProvider, InMemoryMetricExporter) {
+        static OBSERVED: std::sync::OnceLock<(SdkMeterProvider, InMemoryMetricExporter)> =
+            std::sync::OnceLock::new();
+        OBSERVED.get_or_init(|| {
+            let exporter = InMemoryMetricExporter::default();
+            let provider = SdkMeterProvider::builder()
+                .with_reader(PeriodicReader::builder(exporter.clone()).build())
+                .build();
+            opentelemetry::global::set_meter_provider(provider.clone());
+            (provider, exporter)
+        })
     }
 
     /// A kind of its own for one test.
