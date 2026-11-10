@@ -13,6 +13,9 @@ use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 
+mod observation;
+use observation::{KindObservation, Settled};
+
 /// Result of one attempt at a piece of work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkOutcome {
@@ -111,9 +114,15 @@ impl WorkWaker {
     }
 }
 
+/// A kind's handler and its observation.
+struct Kind {
+    handler: Arc<dyn WorkHandler>,
+    observation: Arc<KindObservation>,
+}
+
 pub struct WorkRunner {
     storage: Arc<dyn WorkStore>,
-    handlers: HashMap<WorkKind, Arc<dyn WorkHandler>>,
+    handlers: HashMap<WorkKind, Kind>,
     kinds: Vec<WorkKind>,
     worker: String,
     config: RunnerConfig,
@@ -139,7 +148,17 @@ impl WorkRunner {
         let mut by_kind = HashMap::with_capacity(handlers.len());
         for handler in handlers {
             let kind = handler.kind().clone();
-            if by_kind.insert(kind.clone(), handler).is_some() {
+            let observation = Arc::new(KindObservation::new(&kind));
+            if by_kind
+                .insert(
+                    kind.clone(),
+                    Kind {
+                        handler,
+                        observation,
+                    },
+                )
+                .is_some()
+            {
                 return invalid(&format!("two handlers for work kind {}", kind.as_str()));
             }
         }
@@ -198,7 +217,11 @@ impl WorkRunner {
         };
         let full = claimed.len() == free;
         for work in claimed {
-            let Some(handler) = self.handlers.get(&work.kind).map(Arc::clone) else {
+            let Some(Kind {
+                handler,
+                observation,
+            }) = self.handlers.get(&work.kind)
+            else {
                 // Storage returned a kind that was not asked for; its lease runs
                 // out and a runner that handles it takes it.
                 tracing::error!(work = %work.id, kind = work.kind.as_str(), "claimed work of an unhandled kind");
@@ -209,8 +232,12 @@ impl WorkRunner {
                 .expect("only this loop takes slots and it claimed no more than were free");
             let storage = Arc::clone(&self.storage);
             let wake = Arc::clone(&self.wake);
+            let handler = Arc::clone(handler);
+            let observation = Arc::clone(observation);
             in_flight.spawn(async move {
-                attempt(storage.as_ref(), handler.as_ref(), &work).await;
+                let started = observation.started(&work);
+                let settled = attempt(storage.as_ref(), handler.as_ref(), &work).await;
+                observation.finished(&work, started, settled);
                 drop(slot);
                 wake.notify_one();
             });
@@ -220,19 +247,23 @@ impl WorkRunner {
 }
 
 /// Run one attempt and record its outcome.
-async fn attempt(storage: &dyn WorkStore, handler: &dyn WorkHandler, work: &ClaimedWork) {
+async fn attempt(
+    storage: &dyn WorkStore,
+    handler: &dyn WorkHandler,
+    work: &ClaimedWork,
+) -> Settled {
     let (error, ambiguous, retry) = match handler.handle(work).await {
         WorkOutcome::Done(result) => {
             let recorded = storage
                 .complete_work(work.id, work.generation, result.as_deref())
                 .await;
-            return report(work, recorded);
+            return report(work, recorded, Settled::Completed);
         }
         WorkOutcome::DoneWith { result, follow_up } => {
             let recorded = storage
                 .complete_work_owing(work.id, work.generation, result.as_deref(), &follow_up)
                 .await;
-            return report(work, recorded);
+            return report(work, recorded, Settled::Completed);
         }
         WorkOutcome::Retry(error) => (error, false, true),
         WorkOutcome::Ambiguous(error) => (error, true, true),
@@ -245,6 +276,14 @@ async fn attempt(storage: &dyn WorkStore, handler: &dyn WorkHandler, work: &Clai
     });
     // The alert is offered on every failure; storage commits it only when
     // this failure ends the work.
+    // The store ends the work when no attempt is left, as this does.
+    let settled = if !retry || work.attempt >= work.max_attempts {
+        Settled::Failed
+    } else if ambiguous {
+        Settled::Ambiguous
+    } else {
+        Settled::Retried
+    };
     let failure = WorkFailure {
         on_dead: handler.on_dead(work, &error),
         error,
@@ -254,18 +293,26 @@ async fn attempt(storage: &dyn WorkStore, handler: &dyn WorkHandler, work: &Clai
     report(
         work,
         storage.fail_work(work.id, work.generation, &failure).await,
-    );
+        settled,
+    )
 }
 
-fn report(work: &ClaimedWork, recorded: sid_core::Result<bool>) {
+/// `settled` when the outcome was recorded; otherwise why it was not.
+fn report(work: &ClaimedWork, recorded: sid_core::Result<bool>, settled: Settled) -> Settled {
     match recorded {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(
-            work = %work.id,
-            "durable work was reclaimed before its outcome was recorded"
-        ),
+        Ok(true) => settled,
+        Ok(false) => {
+            tracing::warn!(
+                work = %work.id,
+                "durable work was reclaimed before its outcome was recorded"
+            );
+            Settled::Reclaimed
+        }
         // The claim stays until its lease runs out; the work is then retried.
-        Err(e) => tracing::warn!(work = %work.id, error = %e, "recording a work outcome failed"),
+        Err(e) => {
+            tracing::warn!(work = %work.id, error = %e, "recording a work outcome failed");
+            Settled::Unrecorded
+        }
     }
 }
 

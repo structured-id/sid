@@ -29,6 +29,8 @@ async fn claimed(storage: &dyn StorageBackend, id: WorkId) -> ClaimedWork {
         max_attempts: record.max_attempts,
         generation: 1,
         expires_at: None,
+        created_at: record.created_at,
+        due_at: record.not_before,
     }
 }
 

@@ -198,7 +198,7 @@ const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts =
          ORDER BY c.not_before
          LIMIT $4))
      RETURNING w.id, w.kind, w.payload, w.attempts, w.max_attempts,
-        w.generation, w.expires_at";
+        w.generation, w.expires_at, w.created_at, w.not_before";
 
 /// Each statement commits on its own: a sweep only ends work that is already
 /// over, so it needs nothing in common with the claim that follows it.
@@ -251,6 +251,8 @@ async fn claim(
                 max_attempts: count(col(row, "max_attempts")?)?,
                 generation: col(row, "generation")?,
                 expires_at: col(row, "expires_at")?,
+                created_at: col(row, "created_at")?,
+                due_at: col(row, "not_before")?,
             })
         })
         .collect()

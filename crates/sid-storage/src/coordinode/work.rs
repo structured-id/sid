@@ -172,6 +172,8 @@ impl WorkStore for CoordinodeBackend {
                     max_attempts: record.max_attempts,
                     generation: record.generation,
                     expires_at: record.expires_at,
+                    created_at: record.created_at,
+                    due_at: record.not_before,
                 });
             }
             // Committed even with nothing claimed: the expiry and abandonment

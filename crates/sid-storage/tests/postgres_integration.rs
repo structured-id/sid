@@ -1439,6 +1439,7 @@ macro_rules! work_store_conformance {
             enqueue_is_idempotent,
             concurrent_enqueue_stores_once,
             concurrent_enqueues_of_a_kind_are_all_stored,
+            claim_carries_creation_and_due_times,
             ended_work_is_purged,
             work_of_a_kind_is_reported,
             live_lease_is_exclusive,

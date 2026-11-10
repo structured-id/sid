@@ -385,3 +385,223 @@ fn test_retry_schedule_refuses_long_delay() {
     static TOO_LONG: [Duration; 1] = [Duration::from_secs(86_401)];
     RetrySchedule::new(&TOO_LONG);
 }
+
+/// One attempt at fresh work with `max_attempts`, answered with `outcome`:
+/// how the runner settled it and the state the store then holds.
+async fn settle(outcome: WorkOutcome, max_attempts: u32) -> (Settled, WorkState) {
+    let storage = storage().await;
+    let id = enqueue(storage.as_ref(), max_attempts).await;
+    let work = storage
+        .claim_work(&[kind()], "w", 1, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .remove(0);
+    let settled = attempt(
+        storage.as_ref(),
+        Probe::new(outcome, Duration::ZERO).as_ref(),
+        &work,
+    )
+    .await;
+    (settled, storage.get_work(id).await.unwrap().unwrap().state)
+}
+
+/// The outcome the runner observes is the one the store recorded: a retry
+/// on the last attempt and a permanent failure both end the work, as the
+/// store ends it, and only a retry with attempts left keeps it pending.
+#[tokio::test]
+async fn test_attempt_settles_as_the_store_records_it() {
+    assert_eq!(
+        settle(WorkOutcome::Done(None), 3).await,
+        (Settled::Completed, WorkState::Completed)
+    );
+    assert_eq!(
+        settle(
+            WorkOutcome::DoneWith {
+                result: None,
+                follow_up: Vec::new()
+            },
+            3
+        )
+        .await,
+        (Settled::Completed, WorkState::Completed)
+    );
+    assert_eq!(
+        settle(WorkOutcome::Retry("down".into()), 3).await,
+        (Settled::Retried, WorkState::Pending)
+    );
+    assert_eq!(
+        settle(WorkOutcome::Ambiguous("no reply".into()), 3).await,
+        (Settled::Ambiguous, WorkState::Pending)
+    );
+    assert_eq!(
+        settle(WorkOutcome::Retry("down".into()), 1).await,
+        (Settled::Failed, WorkState::Failed)
+    );
+    assert_eq!(
+        settle(WorkOutcome::Ambiguous("no reply".into()), 1).await,
+        (Settled::Failed, WorkState::Failed)
+    );
+    assert_eq!(
+        settle(WorkOutcome::Permanent("rejected".into()), 3).await,
+        (Settled::Failed, WorkState::Failed)
+    );
+}
+
+/// An attempt whose claim was taken over records nothing and is observed as
+/// reclaimed, not as the outcome it would have recorded.
+#[tokio::test]
+async fn test_attempt_under_a_lost_claim_is_reclaimed() {
+    let storage = storage().await;
+    let id = enqueue(storage.as_ref(), 3).await;
+    let mut work = storage
+        .claim_work(&[kind()], "w", 1, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .remove(0);
+    work.generation -= 1;
+    let settled = attempt(
+        storage.as_ref(),
+        Probe::new(WorkOutcome::Done(None), Duration::ZERO).as_ref(),
+        &work,
+    )
+    .await;
+    assert_eq!(settled, Settled::Reclaimed);
+    assert_eq!(
+        storage.get_work(id).await.unwrap().unwrap().state,
+        WorkState::Claimed
+    );
+}
+
+#[cfg(feature = "telemetry")]
+mod observed {
+    use super::*;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+    /// The value of the counter `name` at the point labelled `labels`.
+    fn sum(metrics: &[ResourceMetrics], name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        let labelled = |attributes: &mut dyn Iterator<Item = &opentelemetry::KeyValue>| {
+            let attributes: Vec<_> = attributes.collect();
+            labels.iter().all(|(k, v)| {
+                attributes
+                    .iter()
+                    .any(|a| a.key.as_str() == *k && a.value.as_str() == *v)
+            })
+        };
+        let mut found = None;
+        for metric in metrics
+            .iter()
+            .flat_map(ResourceMetrics::scope_metrics)
+            .flat_map(|scope| scope.metrics())
+            .filter(|m| m.name() == name)
+        {
+            match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(s)) => {
+                    for p in s.data_points() {
+                        if labelled(&mut p.attributes()) {
+                            found = Some(p.value() as f64);
+                        }
+                    }
+                }
+                AggregatedMetrics::I64(MetricData::Sum(s)) => {
+                    for p in s.data_points() {
+                        if labelled(&mut p.attributes()) {
+                            found = Some(p.value() as f64);
+                        }
+                    }
+                }
+                AggregatedMetrics::F64(MetricData::Histogram(h)) => {
+                    for p in h.data_points() {
+                        if labelled(&mut p.attributes()) {
+                            found = Some(p.count() as f64);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// A runner observes each attempt it runs, by kind and outcome: attempts
+    /// started, their outcomes, none left in flight once they ended, one
+    /// queue wait per attempt and one completion latency per completed work.
+    #[tokio::test]
+    async fn test_runner_observes_its_attempts() {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+
+        let storage = storage().await;
+        let done = enqueue(storage.as_ref(), 1).await;
+        let runner = WorkRunner::new(
+            Arc::clone(&storage),
+            "w",
+            vec![Probe::new(WorkOutcome::Done(None), Duration::ZERO)],
+            fast_config(),
+        )
+        .unwrap();
+        let (stop, handle) = start(runner);
+        wait_for_state(storage.as_ref(), done, WorkState::Completed).await;
+        stop.send(()).unwrap();
+        handle.await.unwrap();
+
+        let storage2 = super::storage().await;
+        let failed = enqueue(storage2.as_ref(), 1).await;
+        let runner = WorkRunner::new(
+            Arc::clone(&storage2),
+            "w",
+            vec![Probe::new(
+                WorkOutcome::Permanent("no".into()),
+                Duration::ZERO,
+            )],
+            fast_config(),
+        )
+        .unwrap();
+        let (stop, handle) = start(runner);
+        wait_for_state(storage2.as_ref(), failed, WorkState::Failed).await;
+        stop.send(()).unwrap();
+        handle.await.unwrap();
+
+        provider.force_flush().unwrap();
+        let metrics = exporter.get_finished_metrics().unwrap();
+        let kind = ("kind", "test.work");
+        assert_eq!(
+            sum(
+                &metrics,
+                "sid_work_attempts_started_total",
+                &[kind, ("attempt", "first")]
+            ),
+            Some(2.0)
+        );
+        for outcome in ["completed", "failed"] {
+            assert_eq!(
+                sum(
+                    &metrics,
+                    "sid_work_attempts_settled_total",
+                    &[kind, ("outcome", outcome)]
+                ),
+                Some(1.0),
+                "{outcome}"
+            );
+        }
+        assert_eq!(
+            sum(&metrics, "sid_work_attempts_active", &[kind]),
+            Some(0.0)
+        );
+        assert_eq!(
+            sum(&metrics, "sid_work_queue_wait_seconds", &[kind]),
+            Some(2.0)
+        );
+        assert_eq!(
+            sum(&metrics, "sid_work_attempt_duration_seconds", &[kind]),
+            Some(2.0)
+        );
+        assert_eq!(
+            sum(&metrics, "sid_work_completion_seconds", &[kind]),
+            Some(1.0)
+        );
+    }
+}

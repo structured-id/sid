@@ -160,7 +160,8 @@ impl WorkStore for SqliteBackend {
                     generation = generation + 1, lease_owner = ?, lease_until = ?,
                     updated_at = ?
                  WHERE id = ?
-                 RETURNING id, kind, payload, attempts, max_attempts, generation, expires_at",
+                 RETURNING id, kind, payload, attempts, max_attempts, generation, expires_at,
+                    created_at, not_before",
             )
             .bind(worker)
             .bind(&lease_until)
@@ -177,6 +178,8 @@ impl WorkStore for SqliteBackend {
                 max_attempts: count(col(&row, "max_attempts")?)?,
                 generation: col(&row, "generation")?,
                 expires_at: time_opt(col(&row, "expires_at")?)?,
+                created_at: time(&col::<String>(&row, "created_at")?)?,
+                due_at: time(&col::<String>(&row, "not_before")?)?,
             });
         }
         tx.commit().await.map_err(storage)?;

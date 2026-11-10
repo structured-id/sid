@@ -5930,6 +5930,8 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "maxminddb",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "p256",
  "p384",
  "p521",

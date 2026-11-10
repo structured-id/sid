@@ -58,7 +58,7 @@ uuid = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 
 [features]
-telemetry = ["dep:opentelemetry"]
+telemetry = ["dep:opentelemetry", "sid-authn/telemetry"]
 
 [dev-dependencies]
 sid-crypto = { workspace = true, features = ["primitives", "jwt", "tls-aws-lc"] }
