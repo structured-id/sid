@@ -16,6 +16,8 @@ fn claimed(work: NewWork) -> ClaimedWork {
         max_attempts: work.max_attempts,
         generation: 1,
         expires_at: None,
+        created_at: chrono::Utc::now(),
+        due_at: chrono::Utc::now(),
     }
 }
 
@@ -350,6 +352,8 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
             max_attempts: plan.max_attempts,
             generation: 1,
             expires_at: None,
+            created_at: chrono::Utc::now(),
+            due_at: chrono::Utc::now(),
         })
         .await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");

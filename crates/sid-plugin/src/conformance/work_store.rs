@@ -101,6 +101,43 @@ pub async fn concurrent_enqueues_of_a_kind_are_all_stored(store: &dyn WorkStore)
     assert_eq!(claimed, stored);
 }
 
+/// A claim carries when the work was stored and when the claimed attempt was
+/// due: the stored due time first, the retry time a failed attempt set after.
+pub async fn claim_carries_creation_and_due_times(store: &dyn WorkStore) {
+    let kind = unique_kind("claim_times");
+    let item = work(&kind);
+    store.enqueue_work(&item).await.unwrap();
+    let record = store.get_work(item.id).await.unwrap().unwrap();
+    let first = store
+        .claim_work(from_ref(&kind), "w", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(first.created_at, record.created_at);
+    assert_eq!(first.due_at, record.not_before);
+
+    // The store keeps its own time precision; the retry time is read back
+    // from the record rather than compared with the value passed in.
+    let retry_at = Utc::now() + Duration::milliseconds(200);
+    assert!(
+        store
+            .fail_work(first.id, first.generation, &retry("down", retry_at))
+            .await
+            .unwrap()
+    );
+    let retried = store.get_work(item.id).await.unwrap().unwrap();
+    assert!(retried.not_before > record.not_before);
+    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    let second = store
+        .claim_work(from_ref(&kind), "w", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(second.attempt, 2);
+    assert_eq!(second.created_at, record.created_at);
+    assert_eq!(second.due_at, retried.not_before);
+}
+
 /// Ended work of a kind is dropped once older than asked; open work, newer
 /// ended work and other kinds stay.
 pub async fn ended_work_is_purged(store: &dyn WorkStore) {

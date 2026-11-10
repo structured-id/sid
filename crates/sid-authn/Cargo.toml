@@ -109,8 +109,12 @@ sid-ids-proto = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 # A keyed command's recorded response (optional)
 prost = { workspace = true, optional = true }
+# The durable work runner's in-process observation (optional).
+opentelemetry = { workspace = true, optional = true, features = ["metrics"] }
 
 [features]
+# In-process observation of durable work through the global meter.
+telemetry = ["dep:opentelemetry"]
 # Keyed commands and sign-in ceremonies, transport-free: their identity
 # comes from the proto.
 keyed = ["dep:sid-proto", "dep:prost"]
@@ -144,6 +148,8 @@ tokio = { workspace = true }
 tempfile = "3"
 chrono = { workspace = true }
 criterion = { version = "0.8", features = ["html_reports"] }
+# Reads what the runner's observation recorded.
+opentelemetry_sdk = { workspace = true, features = ["metrics", "testing"] }
 
 [[bench]]
 name = "opaque"

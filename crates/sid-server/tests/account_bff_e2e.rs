@@ -541,6 +541,8 @@ async fn the_issuers_back_channel_logout_signs_the_browser_out() {
             max_attempts: work.max_attempts,
             generation: 1,
             expires_at: None,
+            created_at: chrono::Utc::now(),
+            due_at: chrono::Utc::now(),
         })
         .await;
     assert!(

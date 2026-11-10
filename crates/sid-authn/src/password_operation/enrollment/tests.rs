@@ -38,6 +38,8 @@ async fn claimed(
         max_attempts: record.max_attempts,
         generation: 1,
         expires_at: None,
+        created_at: record.created_at,
+        due_at: record.not_before,
     }
 }
 
@@ -310,6 +312,8 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
         max_attempts: successor.max_attempts,
         generation: 1,
         expires_at: None,
+        created_at: chrono::Utc::now(),
+        due_at: chrono::Utc::now(),
     };
     assert!(matches!(handler.handle(&next).await, WorkOutcome::Retry(_)));
     assert!(

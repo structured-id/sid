@@ -144,6 +144,12 @@ pub struct ClaimedWork {
     pub max_attempts: u32,
     pub generation: i64,
     pub expires_at: Option<DateTime<Utc>>,
+    /// When the work was stored.
+    pub created_at: DateTime<Utc>,
+    /// Its due time when claimed: the first due time or the retry time a
+    /// failed attempt set. Work reclaimed after a lapsed lease keeps the due
+    /// time of the attempt that lapsed.
+    pub due_at: DateTime<Utc>,
 }
 
 /// A failed attempt as recorded on its work.

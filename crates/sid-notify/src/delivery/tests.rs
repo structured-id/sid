@@ -119,6 +119,8 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
         max_attempts: MAX_ATTEMPTS,
         generation: 1,
         expires_at: None,
+        created_at: chrono::Utc::now(),
+        due_at: chrono::Utc::now(),
     }
 }
 

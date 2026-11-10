@@ -229,6 +229,8 @@ async fn code_mail_refuses_malformed_work() {
         max_attempts: 8,
         generation: 1,
         expires_at: None,
+        created_at: chrono::Utc::now(),
+        due_at: chrono::Utc::now(),
     };
 
     assert!(matches!(

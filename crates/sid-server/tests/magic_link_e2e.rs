@@ -388,6 +388,8 @@ fn delivery_of(id: uuid::Uuid) -> ClaimedWork {
         max_attempts: 8,
         generation: 1,
         expires_at: None,
+        created_at: chrono::Utc::now(),
+        due_at: chrono::Utc::now(),
     }
 }
 
