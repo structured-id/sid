@@ -7,11 +7,20 @@
 //!
 //! Recording touches no storage and takes no lock of its own: the instruments
 //! and each kind's labels are built once when the runner is made. Without the
-//! `telemetry` feature every call is empty.
+//! `telemetry` feature the observation is a zero-sized value: no allocation,
+//! reference count, clock read or recording.
+//!
+//! Intake is not observed here: work is accepted where its owner commits it,
+//! not in the runner, and attempts started are the start of processing, which
+//! is zero while no runner runs however much work is accepted.
 
+#[cfg(feature = "telemetry")]
 use chrono::{DateTime, Utc};
 use sid_core::models::{ClaimedWork, WorkKind};
-use std::time::{Duration, Instant};
+#[cfg(feature = "telemetry")]
+use std::sync::Arc;
+#[cfg(any(feature = "telemetry", test))]
+use std::time::Duration;
 
 /// How an attempt ended, as far as this runner knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,16 +36,21 @@ pub(super) enum Settled {
     Reclaimed,
     /// Recording the outcome failed; the lease runs out and the work is retried.
     Unrecorded,
+    /// The attempt ended without an outcome (its handler panicked or the
+    /// runner was stopped mid-attempt); the lease runs out and the work is
+    /// retried.
+    Abandoned,
 }
 
 impl Settled {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Completed,
         Self::Retried,
         Self::Ambiguous,
         Self::Failed,
         Self::Reclaimed,
         Self::Unrecorded,
+        Self::Abandoned,
     ];
 
     const fn as_str(self) -> &'static str {
@@ -47,6 +61,7 @@ impl Settled {
             Self::Failed => "failed",
             Self::Reclaimed => "reclaimed",
             Self::Unrecorded => "unrecorded",
+            Self::Abandoned => "abandoned",
         }
     }
 
@@ -58,14 +73,16 @@ impl Settled {
 /// Time from `since` to `now`, zero when `since` is later: the store's clock
 /// stamps due and creation times, and a store clock ahead of this process
 /// is not a negative wait.
-fn elapsed(since: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
+#[cfg(any(feature = "telemetry", test))]
+fn elapsed(since: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> Duration {
     (now - since).to_std().unwrap_or(Duration::ZERO)
 }
 
-/// One kind's instruments and labels.
+/// One kind's instruments and labels, shared by its attempts.
+#[derive(Clone)]
 pub(super) struct KindObservation {
     #[cfg(feature = "telemetry")]
-    inner: telemetry::Instruments,
+    inner: Arc<telemetry::Instruments>,
 }
 
 impl KindObservation {
@@ -74,40 +91,47 @@ impl KindObservation {
         let _ = kind;
         Self {
             #[cfg(feature = "telemetry")]
-            inner: telemetry::Instruments::new(kind),
+            inner: Arc::new(telemetry::Instruments::new(kind)),
         }
     }
 
-    /// An attempt at `work` starts now; returns when it started.
-    pub(super) fn started(&self, work: &ClaimedWork) -> Instant {
-        #[cfg(feature = "telemetry")]
-        self.inner.started(work, elapsed(work.due_at, Utc::now()));
+    /// An attempt at `work` starts now. The attempt is observed as abandoned
+    /// if it is dropped before it settles (a panic, or the runner stopping it).
+    pub(super) fn start(&self, work: &ClaimedWork) -> Attempt {
         #[cfg(not(feature = "telemetry"))]
         let _ = work;
-        Instant::now()
+        Attempt {
+            #[cfg(feature = "telemetry")]
+            in_flight: self.inner.start(work, elapsed(work.due_at, Utc::now())),
+        }
     }
+}
 
-    /// The attempt at `work` that began at `started` ended as `settled`.
-    pub(super) fn finished(&self, work: &ClaimedWork, started: Instant, settled: Settled) {
+/// An attempt in flight.
+pub(super) struct Attempt {
+    #[cfg(feature = "telemetry")]
+    in_flight: telemetry::InFlight,
+}
+
+impl Attempt {
+    /// The attempt ended as `settled`.
+    pub(super) fn settle(self, settled: Settled) {
         #[cfg(feature = "telemetry")]
-        self.inner.finished(
-            started.elapsed(),
-            (settled == Settled::Completed).then(|| elapsed(work.created_at, Utc::now())),
-            settled,
-        );
+        self.in_flight.settle(settled);
         #[cfg(not(feature = "telemetry"))]
-        let _ = (work, started, settled);
+        let _ = settled;
     }
 }
 
 #[cfg(feature = "telemetry")]
 mod telemetry {
-    use super::{Settled, WorkKind};
+    use super::{DateTime, Settled, Utc, WorkKind, elapsed};
     use opentelemetry::KeyValue;
     use opentelemetry::global;
     use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
     use sid_core::models::ClaimedWork;
-    use std::time::Duration;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     pub(super) struct Instruments {
         started: Counter<u64>,
@@ -163,7 +187,7 @@ mod telemetry {
             }
         }
 
-        pub(super) fn started(&self, work: &ClaimedWork, waited: Duration) {
+        pub(super) fn start(self: &Arc<Self>, work: &ClaimedWork, waited: Duration) -> InFlight {
             let attempt = if work.attempt <= 1 {
                 &self.first_attempt
             } else {
@@ -172,19 +196,47 @@ mod telemetry {
             self.started.add(1, attempt);
             self.active.add(1, &self.kind);
             self.queue_wait.record(waited.as_secs_f64(), &self.kind);
+            InFlight {
+                instruments: Arc::clone(self),
+                started: Instant::now(),
+                created_at: work.created_at,
+                settled: false,
+            }
         }
 
-        pub(super) fn finished(
-            &self,
-            attempt: Duration,
-            completion: Option<Duration>,
-            settled: Settled,
-        ) {
+        fn finished(&self, attempt: Duration, completion: Option<Duration>, settled: Settled) {
             self.active.add(-1, &self.kind);
             self.attempt.record(attempt.as_secs_f64(), &self.kind);
             self.settled.add(1, &self.outcomes[settled.index()]);
             if let Some(completion) = completion {
                 self.completion.record(completion.as_secs_f64(), &self.kind);
+            }
+        }
+    }
+
+    /// An attempt counted in flight until it settles or is dropped.
+    pub(super) struct InFlight {
+        instruments: Arc<Instruments>,
+        started: Instant,
+        created_at: DateTime<Utc>,
+        settled: bool,
+    }
+
+    impl InFlight {
+        pub(super) fn settle(mut self, settled: Settled) {
+            self.settled = true;
+            let completion =
+                (settled == Settled::Completed).then(|| elapsed(self.created_at, Utc::now()));
+            self.instruments
+                .finished(self.started.elapsed(), completion, settled);
+        }
+    }
+
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            if !self.settled {
+                self.instruments
+                    .finished(self.started.elapsed(), None, Settled::Abandoned);
             }
         }
     }

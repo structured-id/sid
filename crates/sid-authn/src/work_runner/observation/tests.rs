@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
+use chrono::Utc;
 
 /// A wait is measured from the store's due time; a store clock ahead of this
 /// process gives zero, not a negative or panicking duration.
@@ -14,6 +15,15 @@ fn elapsed_is_zero_when_the_store_clock_is_ahead() {
         elapsed(now - chrono::Duration::milliseconds(1500), now),
         Duration::from_millis(1500)
     );
+}
+
+/// Without the telemetry feature the observation holds nothing: a runner pays
+/// no allocation, reference count or clock read for it.
+#[cfg(not(feature = "telemetry"))]
+#[test]
+fn observation_is_zero_sized_without_telemetry() {
+    assert_eq!(std::mem::size_of::<KindObservation>(), 0);
+    assert_eq!(std::mem::size_of::<Attempt>(), 0);
 }
 
 /// Each outcome has its own label at its own index, so a recorded outcome

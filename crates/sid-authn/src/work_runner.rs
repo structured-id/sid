@@ -117,7 +117,7 @@ impl WorkWaker {
 /// A kind's handler and its observation.
 struct Kind {
     handler: Arc<dyn WorkHandler>,
-    observation: Arc<KindObservation>,
+    observation: KindObservation,
 }
 
 pub struct WorkRunner {
@@ -148,7 +148,7 @@ impl WorkRunner {
         let mut by_kind = HashMap::with_capacity(handlers.len());
         for handler in handlers {
             let kind = handler.kind().clone();
-            let observation = Arc::new(KindObservation::new(&kind));
+            let observation = KindObservation::new(&kind);
             if by_kind
                 .insert(
                     kind.clone(),
@@ -233,11 +233,11 @@ impl WorkRunner {
             let storage = Arc::clone(&self.storage);
             let wake = Arc::clone(&self.wake);
             let handler = Arc::clone(handler);
-            let observation = Arc::clone(observation);
+            // Moved into the attempt: a panic or an abort drops it unsettled.
+            let observed = observation.start(&work);
             in_flight.spawn(async move {
-                let started = observation.started(&work);
                 let settled = attempt(storage.as_ref(), handler.as_ref(), &work).await;
-                observation.finished(&work, started, settled);
+                observed.settle(settled);
                 drop(slot);
                 wake.notify_one();
             });
