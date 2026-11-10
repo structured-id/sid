@@ -205,6 +205,15 @@ async fn take_place(
     size: i64,
     fingerprint: &[u8],
 ) -> SidResult<()> {
+    // A first attempt that waited for another commit to fill its place keeps
+    // that place locked though it counts nothing (PostgreSQL locks a row it
+    // waited for before rechecking the condition). Rolled back to this
+    // savepoint, it releases it before every place is taken in order below,
+    // which would otherwise wait while holding a place out of order.
+    sqlx::query("SAVEPOINT sid_operation_place")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
     // $3 places; a place's share is `capacity / $3`, one more for the first
     // `capacity % $3` places.
     let placed: Option<i64> = sqlx::query_scalar(
@@ -224,6 +233,10 @@ async fn take_place(
     if placed.is_some() {
         return Ok(());
     }
+    sqlx::query("ROLLBACK TO SAVEPOINT sid_operation_place")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
     // Its place is used up, or the commit is refused. Every place is taken,
     // in order, before one with room is counted: a place another commit
     // holds may still have room once that commit ends.
@@ -443,25 +456,29 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
         .begin()
         .await
         .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
-    // A carried completion counts toward its period's capacity here too,
-    // whatever the count, in the place its inputs name. The count is written
-    // first, so the place's row is held for writing from the start: a shared
-    // hold upgraded later would deadlock two imports into one place. A
-    // duplicate rolls it back.
+    // A carried completion counts toward its period's capacity here too, in
+    // a place with room as a commit would, so a restored period admits no
+    // more than its capacity; past it, whatever the count, in the place its
+    // inputs name. Places are written before the completion, held for
+    // writing from the start. A duplicate rolls the count back.
     if let Some(period) = c.period {
-        let counted: Option<i64> = sqlx::query_scalar(
-            "UPDATE operation_period_places SET recorded = recorded + 1
-             WHERE period = $1 AND place = $2
-             RETURNING period",
-        )
-        .bind(column(period)?)
-        .bind(place_of(&c.fingerprint))
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        if counted.is_none() {
+        let period = column(period)?;
+        match take_place(&mut tx, period, 0, &c.fingerprint).await {
+            Ok(()) => {}
             // Retired or never issued here: refused anyway.
-            return Ok(false);
+            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
+            Err(SidError::ResourceExhausted(_)) => {
+                sqlx::query(
+                    "UPDATE operation_period_places SET recorded = recorded + 1
+                     WHERE period = $1 AND place = $2",
+                )
+                .bind(period)
+                .bind(place_of(&c.fingerprint))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+            }
+            Err(e) => return Err(e),
         }
     }
     let inserted = sqlx::query(
@@ -1233,3 +1250,6 @@ impl OperationResultStore for PostgresBackend {
         import_resource(&self.pool, binding).await
     }
 }
+
+#[cfg(test)]
+mod tests;

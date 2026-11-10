@@ -892,12 +892,19 @@ impl OperationResultStore for CoordinodeBackend {
             // One under a period this store does not admit is not taken: its
             // command is refused here anyway.
             // A carried completion counts toward its period's capacity here
-            // too, whatever the count.
+            // too, in a place with room as a commit would, so a restored
+            // period admits no more than its capacity; past it, whatever the
+            // count, in the place its inputs name.
             if let Some(period) = record.completion.period {
-                match take_place(tx, period, i64::MAX, &record.completion.fingerprint) {
+                let fingerprint = &record.completion.fingerprint;
+                let (capacity, _) = limits(tx)?;
+                match take_place(tx, period, capacity, fingerprint) {
                     Ok(()) => {}
                     Err(SidError::OperationPeriodRefused(_)) => {
                         return Ok(Decision::Abandon(false));
+                    }
+                    Err(SidError::ResourceExhausted(_)) => {
+                        take_place(tx, period, i64::MAX, fingerprint)?;
                     }
                     Err(e) => return Err(e),
                 }

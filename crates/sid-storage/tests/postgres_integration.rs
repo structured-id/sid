@@ -192,29 +192,36 @@ mod operation_result_store {
     );
 }
 
-/// A host's store of its own with a period capacity of 8: the engine's
-/// tables are the same ([`host_operation_tables_match_the_engine_schema`]).
-#[tokio::test]
-async fn a_full_period_refuses_new_completions() {
-    let (store, schema) = host_operation_store().await;
-    let pool = schema_pool(&schema).await;
-    sqlx::query("UPDATE operation_period_state SET capacity = 8")
-        .execute(&pool)
-        .await
-        .unwrap();
-    pool.close().await;
-    let outcome = tokio::spawn(async move {
-        sid_plugin::conformance::operation_result_store::a_full_period_refuses_new_completions(
-            &store,
-        )
-        .await
-    })
-    .await;
-    drop_schema(&schema).await;
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
+/// Run operation result conformance `scenario` against a host's store of its
+/// own with a period capacity of 8: the engine's tables are the same
+/// ([`host_operation_tables_match_the_engine_schema`]).
+macro_rules! small_capacity_operation_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (store, schema) = host_operation_store().await;
+            let pool = schema_pool(&schema).await;
+            sqlx::query("UPDATE operation_period_state SET capacity = 8")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+            let outcome = tokio::spawn(async move {
+                sid_plugin::conformance::operation_result_store::$scenario(&store).await
+            })
+            .await;
+            drop_schema(&schema).await;
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic.into_panic());
+            }
+        }
+    )*};
 }
+
+small_capacity_operation_store!(
+    a_full_period_refuses_new_completions,
+    imported_completions_keep_the_period_bound,
+);
 
 /// A host's operation store in a schema of its own that holds nothing else,
 /// its tables created by its own `ensure_schema`, twice (as replicas starting

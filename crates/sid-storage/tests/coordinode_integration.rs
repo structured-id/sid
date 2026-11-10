@@ -521,27 +521,33 @@ mod operation_result_store {
         concurrent_imports_under_one_period_all_land,
     );
 
-    /// A store of its own with a period capacity of 8.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_full_period_refuses_new_completions() {
-        let harness::Store(backend, db) = store().await;
-        tokio::task::spawn_blocking(move || {
-            db.execute_cypher_shared(
-                "MATCH (s:SidOperationState) WHERE s.id = 1 SET s.capacity = 8",
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect("a host write");
-        })
-        .await
-        .unwrap();
-        sid_plugin::conformance::operation_result_store::a_full_period_refuses_new_completions(
-            &backend,
-        )
-        .await;
+    /// Run `scenario` on a store of its own with a period capacity of 8.
+    macro_rules! small_capacity {
+        ($($scenario:ident),* $(,)?) => {$(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $scenario() {
+                let harness::Store(backend, db) = store().await;
+                tokio::task::spawn_blocking(move || {
+                    db.execute_cypher_shared(
+                        "MATCH (s:SidOperationState) WHERE s.id = 1 SET s.capacity = 8",
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("a host write");
+                })
+                .await
+                .unwrap();
+                sid_plugin::conformance::operation_result_store::$scenario(&backend).await;
+            }
+        )*};
     }
+
+    small_capacity!(
+        a_full_period_refuses_new_completions,
+        imported_completions_keep_the_period_bound,
+    );
 }
 
 /// Run ceremony state conformance `scenario`; each one uses namespaces of
