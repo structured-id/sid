@@ -381,15 +381,21 @@ mod resolver {
             let platform = platform_name(publication).ok_or(DiscoveryError::NoName)?;
             let name = Name::from_ascii(format!("{RECORD_LABEL}.{platform}."))
                 .map_err(|_| DiscoveryError::NoName)?;
-            let lookup = tokio::time::timeout(
-                LOOKUP_TIMEOUT,
+            // One bound for the lookup and the search for an unsigned cut.
+            let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
+            let lookup = tokio::time::timeout_at(
+                deadline,
                 self.resolver.lookup(name.clone(), RecordType::TXT),
             )
             .await
             .map_err(|_| DiscoveryError::Unavailable("timed out".into()))?;
             let lookup = match lookup {
                 Ok(lookup) => lookup,
-                Err(e) => return Err(self.below_cut(&name, DiscoveryError::of_lookup(e)).await),
+                Err(e) => {
+                    return Err(self
+                        .below_cut(&name, DiscoveryError::of_lookup(e), deadline)
+                        .await);
+                }
             };
             let mut texts = Vec::new();
             for record in lookup.answers() {
@@ -401,7 +407,7 @@ mod resolver {
                 }
                 if let Some(reason) = NotProven::of(record.proof) {
                     return Err(self
-                        .below_cut(&name, DiscoveryError::NotSecure(reason))
+                        .below_cut(&name, DiscoveryError::NotSecure(reason), deadline)
                         .await);
                 }
                 // One record's character-strings form one text (RFC 7208
@@ -418,25 +424,32 @@ mod resolver {
         /// `error`, but Insecure instead of Bogus for `name` below a zone cut
         /// its parent proves unsigned ([`unsigned_cut`]): a validator walking
         /// the signatures of a zone the chain of trust never reaches calls
-        /// them bogus. Without such a proof Bogus stays Bogus.
-        async fn below_cut(&self, name: &Name, error: DiscoveryError) -> DiscoveryError {
+        /// them bogus. Without such a proof, or once `deadline` passes,
+        /// Bogus stays Bogus.
+        pub(super) async fn below_cut(
+            &self,
+            name: &Name,
+            error: DiscoveryError,
+            deadline: tokio::time::Instant,
+        ) -> DiscoveryError {
             if !matches!(error, DiscoveryError::NotSecure(NotProven::Bogus)) {
                 return error;
             }
             let mut ancestor = name.base_name();
             while !ancestor.is_root() {
-                let denial = tokio::time::timeout(
-                    LOOKUP_TIMEOUT,
+                let Ok(denial) = tokio::time::timeout_at(
+                    deadline,
                     self.resolver.lookup(ancestor.clone(), RecordType::DS),
                 )
-                .await;
+                .await
+                else {
+                    return error;
+                };
                 // The validator reports a denial either way; each NSEC carries
                 // its own proof, which `unsigned_cut` requires.
                 let authorities: &[Record] = match &denial {
-                    Ok(Err(NetError::Dns(DnsError::Nsec { response, .. }))) => {
-                        &response.authorities
-                    }
-                    Ok(Err(NetError::Dns(DnsError::NoRecordsFound(none)))) => {
+                    Err(NetError::Dns(DnsError::Nsec { response, .. })) => &response.authorities,
+                    Err(NetError::Dns(DnsError::NoRecordsFound(none))) => {
                         none.authorities.as_deref().unwrap_or_default()
                     }
                     _ => &[],

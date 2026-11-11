@@ -400,6 +400,47 @@ mod resolving {
         }
     }
 
+    // Bug prevented: DS queries for the ancestors stalling, each with its
+    // own timeout, so a deep name kept the caller waiting for minutes. The
+    // search ends with the lookup's one deadline and keeps the original
+    // outcome.
+    #[tokio::test]
+    async fn the_cut_search_ends_at_the_lookups_deadline() {
+        use hickory_resolver::proto::rr::Name;
+
+        // A name server that never answers.
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let _silent = socket;
+        let mut connection = ConnectionConfig::new(ProtocolConfig::Udp);
+        connection.port = address.port();
+        let config = ResolverConfig::from_name_servers(vec![NameServerConfig::new(
+            address.ip(),
+            true,
+            vec![connection],
+        )]);
+        let resolver =
+            DiscoveryResolver::from_builder(hickory_resolver::Resolver::builder_with_config(
+                config,
+                TokioRuntimeProvider::default(),
+            ))
+            .unwrap();
+        let name = Name::from_ascii("_sid-ca.a.b.c.d.platform.sid.example.com.").unwrap();
+        let started = tokio::time::Instant::now();
+        let outcome = resolver
+            .below_cut(
+                &name,
+                DiscoveryError::NotSecure(NotProven::Bogus),
+                started + std::time::Duration::from_millis(300),
+            )
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(
+            outcome,
+            DiscoveryError::NotSecure(NotProven::Bogus)
+        ));
+    }
+
     // The validator rejecting the chain ends the lookup itself with an
     // error; that is a bogus answer (RFC 4033 §5), not an unreachable
     // resolver, so the operator is told why the record is not secure.
