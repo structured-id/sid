@@ -246,7 +246,8 @@ mod resolver {
     use hickory_resolver::TokioResolver;
     use hickory_resolver::net::{DnsError, NetError};
     use hickory_resolver::proto::dnssec::Proof;
-    use hickory_resolver::proto::rr::{Name, RData, RecordType};
+    use hickory_resolver::proto::dnssec::rdata::DNSSECRData;
+    use hickory_resolver::proto::rr::{Name, RData, Record, RecordType};
 
     use super::{DiscoveryRecord, RECORD_LABEL, RecordError, parse_records, platform_name};
 
@@ -324,6 +325,25 @@ mod resolver {
         }
     }
 
+    /// Whether `authorities`, the denial of the DS of `name`, hold the
+    /// validated NSEC of `name` as a delegation without DS: proven secure,
+    /// NS present, SOA and DS absent (RFC 6840 §4.1). The parent then proves
+    /// the zone at `name` unsigned, so everything below it is insecure
+    /// (RFC 4035 §4.3, §5.2), whatever signatures it carries.
+    pub(super) fn unsigned_cut(name: &Name, authorities: &[Record]) -> bool {
+        authorities.iter().any(|record| {
+            let RData::DNSSEC(DNSSECRData::NSEC(nsec)) = &record.data else {
+                return false;
+            };
+            let types = nsec.type_set();
+            record.proof == Proof::Secure
+                && record.name == *name
+                && types.contains(RecordType::NS)
+                && !types.contains(RecordType::SOA)
+                && !types.contains(RecordType::DS)
+        })
+    }
+
     /// Reads discovery records through a validating resolver: the system's
     /// name servers, the IANA root trust anchors.
     pub struct DiscoveryResolver {
@@ -366,8 +386,11 @@ mod resolver {
                 self.resolver.lookup(name.clone(), RecordType::TXT),
             )
             .await
-            .map_err(|_| DiscoveryError::Unavailable("timed out".into()))?
-            .map_err(DiscoveryError::of_lookup)?;
+            .map_err(|_| DiscoveryError::Unavailable("timed out".into()))?;
+            let lookup = match lookup {
+                Ok(lookup) => lookup,
+                Err(e) => return Err(self.below_cut(&name, DiscoveryError::of_lookup(e)).await),
+            };
             let mut texts = Vec::new();
             for record in lookup.answers() {
                 let RData::TXT(txt) = &record.data else {
@@ -377,7 +400,9 @@ mod resolver {
                     continue;
                 }
                 if let Some(reason) = NotProven::of(record.proof) {
-                    return Err(DiscoveryError::NotSecure(reason));
+                    return Err(self
+                        .below_cut(&name, DiscoveryError::NotSecure(reason))
+                        .await);
                 }
                 // One record's character-strings form one text (RFC 7208
                 // §3.3 joins them the same way).
@@ -388,6 +413,40 @@ mod resolver {
                 texts.push(String::from_utf8(text).map_err(|_| RecordError::Malformed("text"))?);
             }
             Ok(parse_records(&texts)?)
+        }
+
+        /// `error`, but Insecure instead of Bogus for `name` below a zone cut
+        /// its parent proves unsigned ([`unsigned_cut`]): a validator walking
+        /// the signatures of a zone the chain of trust never reaches calls
+        /// them bogus. Without such a proof Bogus stays Bogus.
+        async fn below_cut(&self, name: &Name, error: DiscoveryError) -> DiscoveryError {
+            if !matches!(error, DiscoveryError::NotSecure(NotProven::Bogus)) {
+                return error;
+            }
+            let mut ancestor = name.base_name();
+            while !ancestor.is_root() {
+                let denial = tokio::time::timeout(
+                    LOOKUP_TIMEOUT,
+                    self.resolver.lookup(ancestor.clone(), RecordType::DS),
+                )
+                .await;
+                // The validator reports a denial either way; each NSEC carries
+                // its own proof, which `unsigned_cut` requires.
+                let authorities: &[Record] = match &denial {
+                    Ok(Err(NetError::Dns(DnsError::Nsec { response, .. }))) => {
+                        &response.authorities
+                    }
+                    Ok(Err(NetError::Dns(DnsError::NoRecordsFound(none)))) => {
+                        none.authorities.as_deref().unwrap_or_default()
+                    }
+                    _ => &[],
+                };
+                if unsigned_cut(&ancestor, authorities) {
+                    return DiscoveryError::NotSecure(NotProven::Insecure);
+                }
+                ancestor = ancestor.base_name();
+            }
+            error
         }
     }
 }
