@@ -170,6 +170,17 @@ fn test_envelope_round_trip() {
     assert_eq!(envelope_to_proto(&domain), wire);
 }
 
+/// An envelope without a maximum validity is one adding no limit of its
+/// own: kept as absence on the way in and out, never a distant date.
+#[test]
+fn test_envelope_without_limit_round_trip() {
+    let mut wire = envelope();
+    wire.max_validity = None;
+    let domain = envelope_from_proto(wire.clone()).unwrap();
+    assert_eq!(domain.max_validity_secs, None);
+    assert_eq!(envelope_to_proto(&domain), wire);
+}
+
 /// Bug prevented: a broken envelope stored as an authority nobody can use,
 /// instead of refused on the field it breaks.
 #[test]
@@ -181,14 +192,17 @@ fn test_envelope_refused_on_its_field() {
         seconds: 1,
         nanos: 5,
     });
-    let mut missing = envelope();
-    missing.max_validity = None;
+    let mut not_positive = envelope();
+    not_positive.max_validity = Some(prost_types::Duration {
+        seconds: 0,
+        nanos: 0,
+    });
     let mut no_roles = envelope();
     no_roles.role_ids.clear();
     for (refused, field) in [
         (unknown_op, "admin.operations"),
         (fractional, "admin.max_validity"),
-        (missing, "admin.max_validity"),
+        (not_positive, "admin.max_validity"),
         (no_roles, "admin.role_ids"),
     ] {
         assert_eq!(field_of(envelope_from_proto(refused).unwrap_err()), field);

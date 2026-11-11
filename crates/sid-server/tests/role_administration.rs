@@ -78,7 +78,7 @@ fn envelope(roles: &[&Role], ceiling: &[&str], kinds: &[RecipientKind]) -> Admin
         permission_ceiling: ceiling.iter().map(|p| p.to_string()).collect(),
         recipient_kinds: kinds.iter().copied().collect(),
         recipient_group: None,
-        max_validity_secs: 90 * 86_400,
+        max_validity_secs: Some(90 * 86_400),
     }
 }
 

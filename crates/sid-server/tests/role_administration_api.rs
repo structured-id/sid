@@ -204,6 +204,53 @@ async fn an_envelope_holder_assigns_within_it() {
     assert_eq!(listed[0].admin, Some(accountant_envelope(&accountant)));
 }
 
+/// Bug prevented: every administered assignment was forced to expire, so an
+/// installation invented a fixed limit for its administering client. An
+/// envelope without a maximum validity lets its holder assign without end;
+/// an administrative assignment that itself expires still grants nothing
+/// that outlasts it.
+#[tokio::test]
+async fn an_unlimited_envelope_assigns_without_end() {
+    let h = harness().await;
+    let accountant = stored_role(&h, &["ledger.read", "ledger.post"]).await;
+    let administrator_role = stored_role(&h, &["roles.administer"]).await;
+    let mut unlimited = accountant_envelope(&accountant);
+    unlimited.max_validity = None;
+
+    let lasting_admin = stored_profile(&h).await;
+    let mut grant = assign(&administrator_role, lasting_admin.id, None);
+    grant.admin = Some(unlimited.clone());
+    let admin_grant = granted(&h, grant, &h.admin_token).await;
+    assert_eq!(
+        admin_grant.admin,
+        Some(unlimited.clone()),
+        "kept as absence"
+    );
+    let token = issue_token(&test_jwt(), &lasting_admin, &["openid".to_string()]);
+    let worker = stored_profile(&h).await;
+    let without_end = granted(&h, assign(&accountant, worker.id, None), &token).await;
+    assert_eq!(without_end.expires_at, None);
+    let other = stored_profile(&h).await;
+    let far = granted(&h, assign(&accountant, other.id, Some(3650)), &token).await;
+    assert!(far.expires_at.is_some());
+
+    let temporary_admin = stored_profile(&h).await;
+    let mut grant = assign(&administrator_role, temporary_admin.id, Some(30));
+    grant.admin = Some(unlimited);
+    granted(&h, grant, &h.admin_token).await;
+    let token = issue_token(&test_jwt(), &temporary_admin, &["openid".to_string()]);
+    let worker = stored_profile(&h).await;
+    for expires in [None, Some(31)] {
+        let err = h
+            .svc
+            .assign_role(authed(assign(&accountant, worker.id, expires), &token))
+            .await
+            .expect_err("outlasts the authority it is granted under");
+        assert_eq!(err.code(), Code::PermissionDenied, "{expires:?}: {err:?}");
+    }
+    granted(&h, assign(&accountant, worker.id, Some(29)), &token).await;
+}
+
 /// UpdateRole never widens a role past the ceiling an envelope approved one
 /// of its assignments under: the administrator is told which precondition
 /// fails, and the assignment shows the ceiling that binds it.
@@ -356,7 +403,6 @@ async fn a_malformed_envelope_names_its_field() {
             with(|e| e.recipient_group_id = Some(sid_ids_proto::GroupId { value: vec![0; 3] })),
             "admin.recipient_group_id",
         ),
-        (with(|e| e.max_validity = None), "admin.max_validity"),
         (
             with(|e| {
                 e.max_validity = Some(prost_types::Duration {

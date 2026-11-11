@@ -1544,7 +1544,7 @@ CREATE TABLE role_assignments (
 CREATE TABLE role_assignment_admin (
     assignment_id uuid NOT NULL,
     recipient_group_id uuid,
-    max_validity_secs bigint NOT NULL,
+    max_validity_secs bigint,
     CONSTRAINT role_assignment_admin_max_validity_secs_check CHECK ((max_validity_secs > 0)),
     CONSTRAINT role_assignment_admin_pkey PRIMARY KEY (assignment_id),
     CONSTRAINT role_assignment_admin_assignment_id_fkey FOREIGN KEY (assignment_id) REFERENCES role_assignments(id) ON DELETE CASCADE,

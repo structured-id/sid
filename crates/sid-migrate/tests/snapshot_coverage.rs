@@ -485,7 +485,7 @@ async fn directory(source: &SqliteBackend, profile: &Profile) {
         permission_ceiling: ["documents:read".to_string()].into(),
         recipient_kinds: [RecipientKind::Profile].into(),
         recipient_group: None,
-        max_validity_secs: 86_400,
+        max_validity_secs: Some(86_400),
     };
     let mut root = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(profile.id),

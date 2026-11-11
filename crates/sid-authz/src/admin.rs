@@ -568,7 +568,7 @@ impl RoleAdministration {
                         && RecipientKind::of(&proposed.principal)
                             .is_some_and(|k| envelope.recipient_kinds.contains(&k))
                         && (envelope.recipient_group.is_none() || member)
-                        && validity.is_some_and(|v| v > 0 && v <= envelope.max_validity_secs)
+                        && envelope.admits_validity(validity)
                 }),
             };
             // A policy authority passes on through the same one assignment:

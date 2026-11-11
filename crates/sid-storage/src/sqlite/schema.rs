@@ -1040,7 +1040,8 @@ CREATE TABLE IF NOT EXISTS role_assignment_admin (
     assignment_id      BLOB PRIMARY KEY CHECK (length(assignment_id) = 16)
                        REFERENCES role_assignments(id) ON DELETE CASCADE,
     recipient_group_id BLOB CHECK (length(recipient_group_id) = 16) REFERENCES groups(id) ON DELETE RESTRICT,
-    max_validity_secs  INTEGER NOT NULL CHECK (max_validity_secs > 0)
+    -- NULL: the envelope adds no validity limit of its own.
+    max_validity_secs  INTEGER CHECK (max_validity_secs > 0)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS role_assignment_admin_entries (

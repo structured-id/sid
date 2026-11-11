@@ -1248,7 +1248,7 @@ impl PostgresBackend {
                 .operations
                 .insert(operation);
         }
-        let heads: Vec<(RoleAssignmentId, Option<GroupId>, i64)> = sqlx::query_as(
+        let heads: Vec<(RoleAssignmentId, Option<GroupId>, Option<i64>)> = sqlx::query_as(
             "SELECT assignment_id, recipient_group_id, max_validity_secs
              FROM role_assignment_admin WHERE assignment_id = ANY($1)",
         )

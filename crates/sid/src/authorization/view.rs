@@ -134,10 +134,9 @@ fn envelope_to_proto(e: &DomainEnvelope) -> AdminEnvelope {
             } as i32)
             .collect(),
         recipient_group_id: e.recipient_group.map(Into::into),
-        max_validity: Some(prost_types::Duration {
-            seconds: e.max_validity_secs,
-            nanos: 0,
-        }),
+        max_validity: e
+            .max_validity_secs
+            .map(|seconds| prost_types::Duration { seconds, nanos: 0 }),
     }
 }
 
@@ -184,15 +183,16 @@ pub(super) fn envelope_from_proto(e: AdminEnvelope) -> Result<DomainEnvelope, Au
         .as_ref()
         .map(|id| wire_id(Some(id), "admin.recipient_group_id"))
         .transpose()?;
+    // Unset: the envelope adds no limit of its own.
     let max_validity_secs = match e.max_validity {
-        Some(d) if d.nanos == 0 => d.seconds,
+        Some(d) if d.nanos == 0 => Some(d.seconds),
         Some(_) => {
             return Err(invalid_field(
                 "admin.max_validity",
                 "not a whole number of seconds",
             ));
         }
-        None => return Err(AuthorizationError::MissingField("admin.max_validity")),
+        None => None,
     };
     let envelope = DomainEnvelope {
         operations,

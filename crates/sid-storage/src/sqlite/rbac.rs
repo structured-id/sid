@@ -600,7 +600,7 @@ pub(crate) async fn with_admin_envelopes(
             .insert(operation);
     }
 
-    let heads: Vec<(RoleAssignmentId, Option<GroupId>, i64)> = rows_of_assignments(
+    let heads: Vec<(RoleAssignmentId, Option<GroupId>, Option<i64>)> = rows_of_assignments(
         pool,
         "assignment_id, recipient_group_id, max_validity_secs",
         "role_assignment_admin",

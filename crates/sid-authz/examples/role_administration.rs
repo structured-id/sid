@@ -97,7 +97,7 @@ async fn main() {
             permission_ceiling: ["ledger.read".to_string(), "ledger.post".to_string()].into(),
             recipient_kinds: [RecipientKind::Profile].into(),
             recipient_group: None,
-            max_validity_secs: 90 * 86_400,
+            max_validity_secs: Some(90 * 86_400),
         }),
         audit(),
     )

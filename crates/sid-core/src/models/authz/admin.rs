@@ -155,8 +155,10 @@ pub struct AdminEnvelope {
     /// eligible recipients.
     pub recipient_group: Option<GroupId>,
     /// The longest validity an administered assignment may be given, in
-    /// seconds; every administered assignment expires.
-    pub max_validity_secs: i64,
+    /// seconds; `None` when the envelope adds no limit of its own, so an
+    /// administered assignment may have a chosen end or none. The
+    /// administrative assignment's own expiry bounds what it grants either way.
+    pub max_validity_secs: Option<i64>,
 }
 
 /// Why an envelope is not well-formed.
@@ -170,7 +172,7 @@ pub enum EnvelopeError {
     NoPermissionCeiling,
     #[error("an administrative envelope names no recipient kind")]
     NoRecipientKinds,
-    #[error("an administrative envelope's maximum validity must be positive")]
+    #[error("an administrative envelope's maximum validity, when set, must be positive")]
     Validity,
 }
 
@@ -204,10 +206,23 @@ impl AdminEnvelope {
         if self.recipient_kinds.is_empty() {
             return Err(EnvelopeError::NoRecipientKinds);
         }
-        if self.max_validity_secs <= 0 {
+        if self.max_validity_secs.is_some_and(|max| max <= 0) {
             return Err(EnvelopeError::Validity);
         }
         Ok(())
+    }
+
+    /// Whether an assignment lasting `validity_secs` (`None`: without end)
+    /// fits this envelope's limit. A chosen end must lie ahead; without a
+    /// limit of the envelope's own, an end is the grantor's choice.
+    pub fn admits_validity(&self, validity_secs: Option<i64>) -> bool {
+        if validity_secs.is_some_and(|v| v <= 0) {
+            return false;
+        }
+        match self.max_validity_secs {
+            None => true,
+            Some(max) => validity_secs.is_some_and(|v| v <= max),
+        }
     }
 
     /// Whether this envelope alone covers `operation` of `role` (at its
@@ -241,9 +256,7 @@ impl AdminEnvelope {
             return Err(Uncovered::Recipient);
         }
         // Revocation ends authority; only a grant must fit the validity.
-        if operation == AdminOperation::Assign
-            && !validity_secs.is_some_and(|v| v > 0 && v <= self.max_validity_secs)
-        {
+        if operation == AdminOperation::Assign && !self.admits_validity(validity_secs) {
             return Err(Uncovered::Validity);
         }
         Ok(())
@@ -261,7 +274,12 @@ impl AdminEnvelope {
                 None => true,
                 Some(group) => child.recipient_group == Some(group),
             }
-            && child.max_validity_secs <= self.max_validity_secs
+            && match (self.max_validity_secs, child.max_validity_secs) {
+                (None, _) => true,
+                (Some(parent), Some(child)) => child <= parent,
+                // A limited envelope cannot pass on an unlimited one.
+                (Some(_), None) => false,
+            }
     }
 }
 
