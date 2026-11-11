@@ -50,6 +50,10 @@ bytes = { version = "1", optional = true }
 tower = { workspace = true, optional = true }
 # The platform CA publication's client (`platform-ca` feature).
 reqwest = { workspace = true, optional = true }
+# The discovery record's fingerprints (`platform-ca`) and its validating
+# resolver (`platform-ca-dns`).
+sha2 = { workspace = true, optional = true }
+hickory-resolver = { workspace = true, optional = true }
 
 [features]
 # Each backend is its own capability: a consumer of one never builds or
@@ -115,6 +119,16 @@ platform-ca = [
     "dep:prost-reflect",
     "dep:url",
     "dep:reqwest",
+    "dep:sha2",
+    "dep:base64",
+]
+# The discovery record read from the platform's DNS, DNSSEC-validated from
+# the root. It links aws-lc for the signatures, so only a binary that wants
+# the DNS step enables it.
+platform-ca-dns = [
+    "platform-ca",
+    "dep:hickory-resolver",
+    "hickory-resolver/dnssec-aws-lc-rs",
 ]
 
 [dev-dependencies]
@@ -126,7 +140,7 @@ sid-infra = { path = ".", features = [
     "issuer-client",
     "password-operation",
     "oauth-http",
-    "platform-ca",
+    "platform-ca-dns",
 ] }
 # The shared adapters' tests run the cores over an in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }

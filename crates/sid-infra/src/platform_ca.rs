@@ -14,6 +14,8 @@ use std::time::Duration;
 use prost::Message;
 use sid_proto::sid::v1::PlatformCas;
 
+pub mod discovery;
+
 /// The proto file the publication's message is defined in.
 const PUBLICATION_FILE: &str = "sid/v1/federation/platform_ca.proto";
 /// The publication's message.
