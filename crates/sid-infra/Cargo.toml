@@ -48,6 +48,8 @@ base64 = { workspace = true, optional = true }
 http-body = { version = "1", optional = true }
 bytes = { version = "1", optional = true }
 tower = { workspace = true, optional = true }
+# The platform CA publication's client (`platform-ca` feature).
+reqwest = { workspace = true, optional = true }
 
 [features]
 # Each backend is its own capability: a consumer of one never builds or
@@ -105,6 +107,15 @@ http = [
     "dep:prost-reflect",
     "dep:anyhow",
 ]
+# The client of the platform's public CA publication, from its configured
+# HTTPS endpoint.
+platform-ca = [
+    "dep:sid-proto",
+    "dep:prost",
+    "dep:prost-reflect",
+    "dep:url",
+    "dep:reqwest",
+]
 
 [dev-dependencies]
 # The tests exercise every backend.
@@ -115,11 +126,12 @@ sid-infra = { path = ".", features = [
     "issuer-client",
     "password-operation",
     "oauth-http",
+    "platform-ca",
 ] }
 # The shared adapters' tests run the cores over an in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
 sid-keys = { workspace = true }
-sid-crypto = { workspace = true, features = ["primitives", "jwt"] }
+sid-crypto = { workspace = true, features = ["primitives", "jwt", "tls-aws-lc"] }
 sid-proto = { workspace = true }
 secrecy = { workspace = true }
 chrono = { workspace = true }

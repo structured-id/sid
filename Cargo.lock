@@ -6128,6 +6128,7 @@ dependencies = [
  "prost",
  "prost-reflect",
  "prost-types",
+ "reqwest",
  "secrecy",
  "serde",
  "serde-saphyr",
