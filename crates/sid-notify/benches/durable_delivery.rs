@@ -5,7 +5,9 @@
 //! - `deliver`: P50/P99/P999 of one event, accepted on a running idle runner,
 //!   until both channels of its route (email and webhook) were sent it;
 //! - `drain`: the rate a backlog of `BACKLOG` owed events is routed, planned
-//!   and delivered at;
+//!   and delivered at, until every delivery reached its channel; `settle`:
+//!   until every work item's completion was committed; `settled`: the same
+//!   for one event on an idle runner;
 //! - `handoff`: P50/P99/P999 of handing a producer's work to JetStream
 //!   (publish and PubAck), and the rate that backlog is accepted into the
 //!   receiver's store;
@@ -49,6 +51,9 @@ const SINGLES: usize = 500;
 const BACKLOG: usize = 5_000;
 /// Deliveries each event's route makes.
 const FAN_OUT: usize = 2;
+/// Work items each event completes in the store: its route, its plan and
+/// one delivery per channel.
+const COMPLETIONS: usize = 2 + FAN_OUT;
 
 /// Progress counted where it happens: how many, and when the last one was,
 /// stamped by the one that made it, so a sample never includes the time a
@@ -159,11 +164,14 @@ impl NotificationChannel for Immediate {
 /// A store recording the latency of each call the runner and handlers make,
 /// and how many items each claim returned: where a drain's time goes. The
 /// runner claims from one loop, so the summed claim time against the
-/// drain's wall time tells whether that loop bounds it.
+/// drain's wall time tells whether that loop bounds it. `completed` counts
+/// each completion the store answered as committed, stamped on its answer:
+/// the durable end of a work item, which a channel's send precedes.
 struct Timed {
     inner: Arc<dyn WorkStore>,
     calls: std::sync::Mutex<std::collections::HashMap<&'static str, Vec<Duration>>>,
     claimed: std::sync::Mutex<Vec<usize>>,
+    completed: Progress,
 }
 
 impl Timed {
@@ -172,6 +180,7 @@ impl Timed {
             inner,
             calls: Default::default(),
             claimed: Default::default(),
+            completed: Progress::default(),
         }
     }
 
@@ -248,6 +257,9 @@ impl WorkStore for Timed {
         let started = Instant::now();
         let done = self.inner.complete_work(id, generation, result).await;
         self.record("complete", started.elapsed());
+        if matches!(done, Ok(true)) {
+            self.completed.add();
+        }
         done
     }
 
@@ -264,6 +276,9 @@ impl WorkStore for Timed {
             .complete_work_owing(id, generation, result, owed)
             .await;
         self.record("complete+", started.elapsed());
+        if matches!(done, Ok(true)) {
+            self.completed.add();
+        }
         done
     }
 
@@ -466,23 +481,32 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, pool: Option<&sqlx::
     let waker = runner.waker();
     let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
     let done = sent.reach(owed * FAN_OUT).await;
-    // The accepted ones of `accept` drain with the backlog.
+    // The accepted ones of `accept` drain with the backlog: `drain` until
+    // every delivery reached its channel, `settle` until every work item's
+    // completion was committed.
     rate(mode, "drain", owed, done - started);
-    timed.report(mode, done - started);
+    let settled = timed.completed.reach(owed * COMPLETIONS).await;
+    rate(mode, "settle", owed, settled - started);
+    timed.report(mode, settled - started);
     if let Some(waits) = waits {
         waits.report(mode).await;
     }
 
     let mut samples = Vec::with_capacity(SINGLES);
+    let mut settled_samples = Vec::with_capacity(SINGLES);
     for _ in 0..SINGLES {
         let before = sent.count();
+        let completed = timed.completed.count();
         let started = Instant::now();
         accept_event(store.as_ref(), &event()).await.unwrap();
         waker.wake();
         let delivered = sent.reach(before + FAN_OUT).await;
         samples.push(delivered - started);
+        let settled = timed.completed.reach(completed + COMPLETIONS).await;
+        settled_samples.push(settled - started);
     }
     report(mode, "deliver", samples);
+    report(mode, "settled", settled_samples);
     stop.send(()).unwrap();
     running.await.unwrap();
 }
@@ -515,6 +539,24 @@ async fn postgres() -> (Arc<dyn WorkStore>, sqlx::PgPool) {
     let store = sid_storage::PgWorkStore::new(pool.clone());
     store.ensure_schema().await.unwrap();
     (Arc::new(store), pool)
+}
+
+/// The server's durability settings the measurement ran under.
+async fn durability(pool: &sqlx::PgPool) {
+    for setting in [
+        "fsync",
+        "synchronous_commit",
+        "wal_sync_method",
+        "full_page_writes",
+        "commit_delay",
+        "wal_level",
+    ] {
+        let value: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SHOW {setting}")))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        println!("postgres   setting   {setting}={value}");
+    }
 }
 
 /// `handoff` through JetStream into `store`, on streams of its own.
@@ -594,6 +636,7 @@ async fn main() {
             }
             "postgres" => {
                 let (store, pool) = postgres().await;
+                durability(&pool).await;
                 store_modes("postgres", store, Some(&pool)).await;
             }
             "jetstream" => handoff(postgres().await.0).await,
