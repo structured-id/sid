@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
-    ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState,
+    ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
+    WorkState,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::WorkStore;
@@ -66,6 +67,39 @@ pub(super) fn insert(tx: &Statements<'_>, work: &NewWork) -> SidResult<bool> {
             .with("now", time(now)),
     )?;
     Ok(true)
+}
+
+/// Record work done in the open transaction `tx` when `generation` is its
+/// current claim, storing `owed` with it. Returns whether the claim was
+/// current; nothing is written otherwise.
+fn complete_claimed(
+    tx: &Statements<'_>,
+    id: WorkId,
+    generation: i64,
+    result: Option<&str>,
+    owed: &[NewWork],
+    now: &Value,
+) -> SidResult<bool> {
+    let completed = !tx
+        .run(
+            "MATCH (w:SidWork) WHERE w.id = $id AND w.generation = $generation
+               AND w.state = 'claimed'
+             SET w.state = 'completed', w.result = $result, w.lease_owner = null,
+                 w.lease_until = null, w.updated_at = $now
+             RETURN w.id AS id",
+            Params::default()
+                .with("id", id_value(id))
+                .with("generation", Value::Int(generation))
+                .with("result", opt_text(result))
+                .with("now", now.clone()),
+        )?
+        .is_empty();
+    if completed {
+        for work in owed {
+            insert(tx, work)?;
+        }
+    }
+    Ok(completed)
 }
 
 #[async_trait]
@@ -189,27 +223,7 @@ impl WorkStore for CoordinodeBackend {
         generation: i64,
         result: Option<&str>,
     ) -> SidResult<bool> {
-        let result = result.map(str::to_owned);
-        self.transaction(move |tx| {
-            let rows = tx.run(
-                "MATCH (w:SidWork) WHERE w.id = $id AND w.generation = $generation
-                   AND w.state = 'claimed'
-                 SET w.state = 'completed', w.result = $result, w.lease_owner = null,
-                     w.lease_until = null, w.updated_at = $now
-                 RETURN w.id AS id",
-                Params::default()
-                    .with("id", id_value(id))
-                    .with("generation", Value::Int(generation))
-                    .with("result", opt_text(result.as_deref()))
-                    .with("now", time(chrono::Utc::now())),
-            )?;
-            Ok(if rows.is_empty() {
-                Decision::Abandon(false)
-            } else {
-                Decision::Commit(true)
-            })
-        })
-        .await
+        self.complete_work_owing(id, generation, result, &[]).await
     }
 
     async fn complete_work_owing(
@@ -221,25 +235,41 @@ impl WorkStore for CoordinodeBackend {
     ) -> SidResult<bool> {
         let (result, owed) = (result.map(str::to_owned), owed.to_vec());
         self.transaction(move |tx| {
-            let rows = tx.run(
-                "MATCH (w:SidWork) WHERE w.id = $id AND w.generation = $generation
-                   AND w.state = 'claimed'
-                 SET w.state = 'completed', w.result = $result, w.lease_owner = null,
-                     w.lease_until = null, w.updated_at = $now
-                 RETURN w.id AS id",
-                Params::default()
-                    .with("id", id_value(id))
-                    .with("generation", Value::Int(generation))
-                    .with("result", opt_text(result.as_deref()))
-                    .with("now", time(chrono::Utc::now())),
-            )?;
-            if rows.is_empty() {
-                return Ok(Decision::Abandon(false));
+            let now = time(chrono::Utc::now());
+            Ok(
+                if complete_claimed(tx, id, generation, result.as_deref(), &owed, &now)? {
+                    Decision::Commit(true)
+                } else {
+                    Decision::Abandon(false)
+                },
+            )
+        })
+        .await
+    }
+
+    async fn complete_works(&self, works: &[WorkCompletion]) -> SidResult<Vec<bool>> {
+        if works.is_empty() {
+            return Ok(Vec::new());
+        }
+        let works = works.to_vec();
+        self.transaction(move |tx| {
+            let now = time(chrono::Utc::now());
+            let mut done = Vec::with_capacity(works.len());
+            for work in &works {
+                done.push(complete_claimed(
+                    tx,
+                    work.id,
+                    work.generation,
+                    work.result.as_deref(),
+                    &work.owed,
+                    &now,
+                )?);
             }
-            for work in &owed {
-                insert(tx, work)?;
-            }
-            Ok(Decision::Commit(true))
+            Ok(if done.contains(&true) {
+                Decision::Commit(done)
+            } else {
+                Decision::Abandon(done)
+            })
         })
         .await
     }

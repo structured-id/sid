@@ -398,11 +398,19 @@ async fn settle(outcome: WorkOutcome, max_attempts: u32) -> (Settled, WorkState)
         .remove(0);
     let settled = attempt(
         storage.as_ref(),
+        &completer(&storage),
         Probe::new(outcome, Duration::ZERO).as_ref(),
         &work,
     )
     .await;
     (settled, storage.get_work(id).await.unwrap().unwrap().state)
+}
+
+/// A committer over `storage`, ending when the returned sender is dropped.
+fn completer(storage: &Arc<dyn WorkStore>) -> Completer {
+    let (completer, completions) = mpsc::channel(4);
+    tokio::spawn(commit_completions(Arc::clone(storage), completions, 4));
+    completer
 }
 
 /// The outcome the runner observes is the one the store recorded: a retry
@@ -461,6 +469,7 @@ async fn test_attempt_under_a_lost_claim_is_reclaimed() {
     work.generation -= 1;
     let settled = attempt(
         storage.as_ref(),
+        &completer(&storage),
         Probe::new(WorkOutcome::Done(None), Duration::ZERO).as_ref(),
         &work,
     )

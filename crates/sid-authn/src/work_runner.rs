@@ -5,12 +5,12 @@
 //! and records every outcome fenced by the claim generation.
 
 use async_trait::async_trait;
-use sid_core::models::{ClaimedWork, NewWork, WorkFailure, WorkKind};
+use sid_core::models::{ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkKind};
 use sid_plugin::WorkStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 
 mod observation;
@@ -180,10 +180,16 @@ impl WorkRunner {
     /// Run until `shutdown` resolves, then wait for attempts in flight.
     pub async fn run(self, shutdown: impl std::future::Future<Output = ()>) {
         tokio::pin!(shutdown);
+        let (completer, completions) = mpsc::channel(self.config.concurrency);
+        let committer = tokio::spawn(commit_completions(
+            Arc::clone(&self.storage),
+            completions,
+            self.config.concurrency,
+        ));
         let mut in_flight = JoinSet::new();
         loop {
             while in_flight.try_join_next().is_some() {}
-            if self.claim_into(&mut in_flight).await == Some(true) {
+            if self.claim_into(&mut in_flight, &completer).await == Some(true) {
                 // Every free slot was filled: more work may be due right away.
                 continue;
             }
@@ -194,11 +200,16 @@ impl WorkRunner {
             }
         }
         while in_flight.join_next().await.is_some() {}
+        // The last sender goes with the runner: the committer drains and ends.
+        drop(completer);
+        if let Err(e) = committer.await {
+            tracing::error!(error = %e, "the work completion committer ended abnormally");
+        }
     }
 
     /// Claim due work for the free slots and start it. Returns whether every
     /// free slot was filled, or `None` when nothing could be claimed.
-    async fn claim_into(&self, in_flight: &mut JoinSet<()>) -> Option<bool> {
+    async fn claim_into(&self, in_flight: &mut JoinSet<()>, completer: &Completer) -> Option<bool> {
         let free = self.slots.available_permits();
         if free == 0 || self.kinds.is_empty() {
             return None;
@@ -231,12 +242,13 @@ impl WorkRunner {
                 .try_acquire_owned()
                 .expect("only this loop takes slots and it claimed no more than were free");
             let storage = Arc::clone(&self.storage);
+            let completer = completer.clone();
             let wake = Arc::clone(&self.wake);
             let handler = Arc::clone(handler);
             // Moved into the attempt: a panic or an abort drops it unsettled.
             let observed = observation.start(&work);
             in_flight.spawn(async move {
-                let settled = attempt(storage.as_ref(), handler.as_ref(), &work).await;
+                let settled = attempt(storage.as_ref(), &completer, handler.as_ref(), &work).await;
                 observed.settle(settled);
                 drop(slot);
                 wake.notify_one();
@@ -246,23 +258,54 @@ impl WorkRunner {
     }
 }
 
+/// A done attempt handed to the committer, with where its outcome goes.
+type Pending = (WorkCompletion, oneshot::Sender<sid_core::Result<bool>>);
+type Completer = mpsc::Sender<Pending>;
+
+/// Commit done attempts as they arrive: whatever is ready when a commit can
+/// start goes in it, up to `max`, so nothing waits for a batch to fill. Each
+/// item stays fenced by its own claim and its owed work commits with it. An
+/// error leaves each item's outcome unknown, as a lost single completion
+/// does: an item already recorded stays completed, any other stays claimed
+/// until its lease runs out and is attempted again.
+async fn commit_completions(
+    storage: Arc<dyn WorkStore>,
+    mut completions: mpsc::Receiver<Pending>,
+    max: usize,
+) {
+    let mut batch = Vec::with_capacity(max);
+    while completions.recv_many(&mut batch, max).await > 0 {
+        let (works, replies): (Vec<_>, Vec<_>) = batch.drain(..).unzip();
+        let recorded = storage.complete_works(&works).await;
+        for (i, reply) in replies.into_iter().enumerate() {
+            let outcome = match &recorded {
+                Ok(done) => Ok(*done
+                    .get(i)
+                    .expect("a store answers every completion it was given")),
+                Err(e) => Err(sid_core::Error::Storage(e.to_string())),
+            };
+            // An attempt that is gone (aborted at shutdown) has nobody to tell.
+            if reply.send(outcome).is_err() {
+                tracing::debug!("a completed attempt ended before its outcome was recorded");
+            }
+        }
+    }
+}
+
 /// Run one attempt and record its outcome.
 async fn attempt(
     storage: &dyn WorkStore,
+    completer: &Completer,
     handler: &dyn WorkHandler,
     work: &ClaimedWork,
 ) -> Settled {
     let (error, ambiguous, retry) = match handler.handle(work).await {
         WorkOutcome::Done(result) => {
-            let recorded = storage
-                .complete_work(work.id, work.generation, result.as_deref())
-                .await;
+            let recorded = complete(completer, work, result, Vec::new()).await;
             return report(work, recorded, Settled::Completed);
         }
         WorkOutcome::DoneWith { result, follow_up } => {
-            let recorded = storage
-                .complete_work_owing(work.id, work.generation, result.as_deref(), &follow_up)
-                .await;
+            let recorded = complete(completer, work, result, follow_up).await;
             return report(work, recorded, Settled::Completed);
         }
         WorkOutcome::Retry(error) => (error, false, true),
@@ -295,6 +338,28 @@ async fn attempt(
         storage.fail_work(work.id, work.generation, &failure).await,
         settled,
     )
+}
+
+/// Record `work` done through the committer.
+async fn complete(
+    completer: &Completer,
+    work: &ClaimedWork,
+    result: Option<String>,
+    owed: Vec<NewWork>,
+) -> sid_core::Result<bool> {
+    let (reply, outcome) = oneshot::channel();
+    let completion = WorkCompletion {
+        id: work.id,
+        generation: work.generation,
+        result,
+        owed,
+    };
+    let gone = || sid_core::Error::Internal("the work completion committer is gone".into());
+    completer
+        .send((completion, reply))
+        .await
+        .map_err(|_| gone())?;
+    outcome.await.map_err(|_| gone())?
 }
 
 /// `settled` when the outcome was recorded; otherwise why it was not.

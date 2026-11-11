@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use sid_core::Result;
 use sid_core::models::{
-    ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
+    ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
 };
 
 #[async_trait]
@@ -54,6 +54,31 @@ pub trait WorkStore: Send + Sync {
         result: Option<&str>,
         owed: &[NewWork],
     ) -> Result<bool>;
+
+    /// Record several done attempts, each as [`Self::complete_work_owing`]
+    /// does, fenced by its own claim: an item whose generation is no longer
+    /// the current claim is refused alone (`false` at its position) and
+    /// stores none of its owed work, even beside the current claim of the
+    /// same work. A backend commits them in one transaction, so a batch is
+    /// never recorded in part; an error still leaves the outcome unknown (a
+    /// commit whose reply was lost recorded them all). The default, for
+    /// stores without a transaction over several items, records them one by
+    /// one: on an error the items before it may already be recorded.
+    async fn complete_works(&self, works: &[WorkCompletion]) -> Result<Vec<bool>> {
+        let mut done = Vec::with_capacity(works.len());
+        for work in works {
+            done.push(
+                self.complete_work_owing(
+                    work.id,
+                    work.generation,
+                    work.result.as_deref(),
+                    &work.owed,
+                )
+                .await?,
+            );
+        }
+        Ok(done)
+    }
 
     /// Record a failed attempt: the work is due again at `failure.retry_at`,
     /// or failed (dead-letter) when that is `None` or no attempts remain, in

@@ -282,6 +282,21 @@ impl WorkStore for Timed {
         done
     }
 
+    async fn complete_works(
+        &self,
+        works: &[sid_core::models::WorkCompletion],
+    ) -> sid_core::Result<Vec<bool>> {
+        let started = Instant::now();
+        let done = self.inner.complete_works(works).await;
+        self.record("complete*", started.elapsed());
+        if let Ok(done) = &done {
+            for _ in done.iter().filter(|done| **done) {
+                self.completed.add();
+            }
+        }
+        done
+    }
+
     async fn fail_work(
         &self,
         id: sid_core::models::WorkId,

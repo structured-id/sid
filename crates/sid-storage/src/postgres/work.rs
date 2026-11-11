@@ -6,7 +6,7 @@
 use super::PostgresBackend;
 use async_trait::async_trait;
 use sid_core::models::{
-    ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
+    ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::WorkStore;
@@ -313,6 +313,63 @@ async fn complete_owing(
         .map_err(|e| SidError::Storage(format!("complete work: {e}")))
 }
 
+/// Several completions and the work they owe as one statement: each item is
+/// fenced by its own claim, and an owed child is inserted only when the claim
+/// it came with completed. A batch may hold a lapsed claim and the claim that
+/// took the same work over, so items are told apart by id and generation.
+/// Returns the claims that completed.
+const COMPLETE_MANY_SQL: &str = "WITH done AS (
+         UPDATE durable_work w SET state = 'completed', result = c.result, lease_owner = NULL,
+             lease_until = NULL, updated_at = NOW()
+         FROM unnest($9::uuid[], $10::bigint[], $11::text[]) AS c(id, generation, result)
+         WHERE w.id = c.id AND w.generation = c.generation AND w.state = 'claimed'
+         RETURNING c.id, c.generation),
+     owed AS (
+         INSERT INTO durable_work (id, kind, payload, max_attempts, not_before, expires_at)
+         SELECT o.id, o.kind, o.payload, o.max_attempts, COALESCE(o.not_before, NOW()),
+             o.expires_at
+         FROM unnest($1::uuid[], $2::text[], $3::bytea[], $4::int[], $5::timestamptz[],
+                     $6::timestamptz[], $7::uuid[], $8::bigint[])
+             AS o(id, kind, payload, max_attempts, not_before, expires_at, parent, parent_generation)
+         JOIN done ON done.id = o.parent AND done.generation = o.parent_generation
+         ON CONFLICT (id) DO NOTHING)
+     SELECT id, generation FROM done";
+
+async fn complete_many(pool: &PgPool, works: &[WorkCompletion]) -> SidResult<Vec<bool>> {
+    if works.is_empty() {
+        return Ok(Vec::new());
+    }
+    let owed = WorkRows::of(works.iter().flat_map(|w| &w.owed))?;
+    let (parents, parent_generations): (Vec<uuid::Uuid>, Vec<i64>) = works
+        .iter()
+        .flat_map(|w| w.owed.iter().map(|_| (w.id.0, w.generation)))
+        .unzip();
+    let ids: Vec<uuid::Uuid> = works.iter().map(|w| w.id.0).collect();
+    let generations: Vec<i64> = works.iter().map(|w| w.generation).collect();
+    let results: Vec<Option<&str>> = works.iter().map(|w| w.result.as_deref()).collect();
+    let storage = |e: sqlx::Error| SidError::Storage(format!("complete work: {e}"));
+    let rows = owed
+        .bind(sqlx::query(COMPLETE_MANY_SQL))
+        .bind(&parents)
+        .bind(&parent_generations)
+        .bind(&ids)
+        .bind(&generations)
+        .bind(&results)
+        .fetch_all(pool)
+        .await
+        .map_err(storage)?;
+    let done = rows
+        .iter()
+        .map(|row| Ok((row.try_get::<uuid::Uuid, _>(0)?, row.try_get::<i64, _>(1)?)))
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map_err(storage)?;
+    // A batch is bounded by the runner's slots, so a scan stays short.
+    Ok(works
+        .iter()
+        .map(|w| done.contains(&(w.id.0, w.generation)))
+        .collect())
+}
+
 /// A failed attempt and its dead-letter alert as one statement: the alert is
 /// inserted only when this attempt ended the work as failed.
 const FAIL_SQL: &str = "WITH failed AS (
@@ -475,6 +532,10 @@ macro_rules! work_store_over_pool {
                 owed: &[NewWork],
             ) -> SidResult<bool> {
                 complete_owing(&self.pool, id, generation, result, owed).await
+            }
+
+            async fn complete_works(&self, works: &[WorkCompletion]) -> SidResult<Vec<bool>> {
+                complete_many(&self.pool, works).await
             }
 
             async fn fail_work(
