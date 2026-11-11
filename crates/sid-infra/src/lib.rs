@@ -29,6 +29,8 @@ pub mod nats_event_bus;
 pub mod nats_topology;
 #[cfg(feature = "oauth-http")]
 pub mod oauth_http;
+#[cfg(feature = "platform-ca")]
+pub mod platform_ca;
 #[cfg(feature = "redis")]
 pub mod redis_cache;
 pub mod route;
