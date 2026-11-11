@@ -237,6 +237,7 @@ mod resolving {
     use hickory_resolver::proto::rr::rdata::TXT;
     use hickory_resolver::proto::rr::{RData, Record, RecordType};
 
+    use super::resolver::unsigned_cut;
     use super::*;
 
     /// A name server on loopback answering every TXT query with `answer`,
@@ -317,6 +318,127 @@ mod resolving {
                 .to_string()
                 .contains("no chain of trust from the root")
         );
+    }
+
+    /// The NSEC of `owner` listing `types`, as a parent's denial carries it,
+    /// validated with `proof`.
+    fn nsec_proven(
+        owner: &str,
+        types: &[RecordType],
+        proof: hickory_resolver::proto::dnssec::Proof,
+    ) -> Record {
+        use hickory_resolver::proto::dnssec::rdata::{DNSSECRData, NSEC};
+        use hickory_resolver::proto::rr::Name;
+        let mut record = Record::from_rdata(
+            Name::from_ascii(owner).unwrap(),
+            86400,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::from_ascii("next.example.").unwrap(),
+                types.iter().copied(),
+            ))),
+        );
+        record.proof = proof;
+        record
+    }
+
+    /// The same, validated secure from the root.
+    fn nsec(owner: &str, types: &[RecordType]) -> Record {
+        nsec_proven(owner, types, hickory_resolver::proto::dnssec::Proof::Secure)
+    }
+
+    // A signed zone whose parent publishes no DS: the parent's NSEC of the
+    // zone lists NS without DS and SOA (RFC 6840 §4.1), so everything below is
+    // insecure (RFC 4035 §4.3) and not bogus. Bug prevented: a zone under a
+    // registry that takes no DS reported as failing its signatures.
+    #[test]
+    fn a_delegation_without_ds_is_an_unsigned_cut() {
+        use RecordType::{DS, NS, NSEC, RRSIG, SOA};
+        use hickory_resolver::proto::rr::Name;
+
+        let zone = Name::from_ascii("structured.example.").unwrap();
+        assert!(unsigned_cut(
+            &zone,
+            &[nsec("structured.example.", &[NS, RRSIG, NSEC])]
+        ));
+        // Capitalization does not change the name (RFC 4343).
+        assert!(unsigned_cut(
+            &zone,
+            &[nsec("Structured.Example.", &[NS, RRSIG, NSEC])]
+        ));
+        // A DS present, an apex (SOA) or no delegation at all prove no cut.
+        for types in [
+            &[NS, DS, RRSIG, NSEC][..],
+            &[NS, SOA, RRSIG, NSEC],
+            &[RRSIG, NSEC],
+        ] {
+            assert!(
+                !unsigned_cut(&zone, &[nsec("structured.example.", types)]),
+                "{types:?}"
+            );
+        }
+        // Another owner's NSEC says nothing about this name.
+        assert!(!unsigned_cut(
+            &zone,
+            &[nsec("other.example.", &[NS, RRSIG, NSEC])]
+        ));
+        assert!(!unsigned_cut(&zone, &[]));
+        // A denial the validator did not prove (a forged or unanchored NSEC)
+        // proves no cut: Bogus stays Bogus.
+        use hickory_resolver::proto::dnssec::Proof;
+        for proof in [Proof::Bogus, Proof::Insecure, Proof::Indeterminate] {
+            assert!(
+                !unsigned_cut(
+                    &zone,
+                    &[nsec_proven(
+                        "structured.example.",
+                        &[NS, RRSIG, NSEC],
+                        proof
+                    )]
+                ),
+                "{proof:?}"
+            );
+        }
+    }
+
+    // Bug prevented: DS queries for the ancestors stalling, each with its
+    // own timeout, so a deep name kept the caller waiting for minutes. The
+    // search ends with the lookup's one deadline and keeps the original
+    // outcome.
+    #[tokio::test]
+    async fn the_cut_search_ends_at_the_lookups_deadline() {
+        use hickory_resolver::proto::rr::Name;
+
+        // A name server that never answers.
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let _silent = socket;
+        let mut connection = ConnectionConfig::new(ProtocolConfig::Udp);
+        connection.port = address.port();
+        let config = ResolverConfig::from_name_servers(vec![NameServerConfig::new(
+            address.ip(),
+            true,
+            vec![connection],
+        )]);
+        let resolver =
+            DiscoveryResolver::from_builder(hickory_resolver::Resolver::builder_with_config(
+                config,
+                TokioRuntimeProvider::default(),
+            ))
+            .unwrap();
+        let name = Name::from_ascii("_sid-ca.a.b.c.d.platform.sid.example.com.").unwrap();
+        let started = tokio::time::Instant::now();
+        let outcome = resolver
+            .below_cut(
+                &name,
+                DiscoveryError::NotSecure(NotProven::Bogus),
+                started + std::time::Duration::from_millis(300),
+            )
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(
+            outcome,
+            DiscoveryError::NotSecure(NotProven::Bogus)
+        ));
     }
 
     // The validator rejecting the chain ends the lookup itself with an
