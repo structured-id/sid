@@ -223,26 +223,44 @@ async fn test_redelivery_after_a_stored_job_is_stored_once() {
     drop_topology(&t).await;
 }
 
-/// A relay retrying long after its first handoff (past the broker's duplicate
-/// window) stores the same fact again under a new message id; notify gets both
-/// copies, accepts the fact into one routing job and settles both.
+/// A relay retrying the same delivery (same event, same delivery id) within
+/// the broker's duplicate window is stored once; retrying it after the window
+/// has passed stores it again. Notify gets both copies, accepts the fact into
+/// one routing job and settles both. The test's own work stream is given a
+/// one-second window so the real window passes during the test.
 #[tokio::test]
 async fn test_work_republished_beyond_the_duplicate_window_is_accepted_once() {
     let store = job_store().await;
     let (t, bus) = topology().await;
     let bus = Arc::new(bus);
-    let event = Event::new("sid-test", event_types::SECURITY_SUSPICIOUS_LOGIN);
-    // A message id the window no longer remembers, as for a late retry.
-    for _ in 0..2 {
-        bus.deliver(
-            &receiver(),
-            sid_core::models::WorkId(uuid::Uuid::now_v7()),
-            &event,
-        )
+    let js = jetstream::new(async_nats::connect(nats_url()).await.unwrap());
+    let mut config = js
+        .get_stream(t.work_stream())
         .await
-        .unwrap();
-    }
-    assert_eq!(stored(&t.work_stream()).await, 2, "the broker deduplicated");
+        .unwrap()
+        .info()
+        .await
+        .unwrap()
+        .config
+        .clone();
+    config.duplicate_window = Duration::from_secs(1);
+    js.update_stream(config).await.unwrap();
+
+    let event = Event::new("sid-test", event_types::SECURITY_SUSPICIOUS_LOGIN);
+    owe(&bus, &event).await;
+    owe(&bus, &event).await;
+    assert_eq!(
+        stored(&t.work_stream()).await,
+        1,
+        "a retry within the window was stored again"
+    );
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    owe(&bus, &event).await;
+    assert_eq!(
+        stored(&t.work_stream()).await,
+        2,
+        "a retry after the window was not stored again"
+    );
 
     let (stop, handle) = run_notify(bus.clone(), store.clone());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
