@@ -210,6 +210,10 @@ base64 = "0.23"
 # `serializable_server_state` keeps ceremonies in the shared challenge store.
 structured-webauthn = { version = "0.1", default-features = false, features = ["bin", "serde", "serializable_server_state"] }
 url = "2"
+# The platform CA discovery record's validating resolver. The DNSSEC backend
+# is chosen by the feature that enables validation, so a closure without it
+# links none.
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 # Public Suffix List: whether two hosts are the same site (registrable domain).
 psl = "2"
 dashmap = "6"
