@@ -152,6 +152,17 @@ pub struct ClaimedWork {
     pub due_at: DateTime<Utc>,
 }
 
+/// A done attempt as recorded on its work: what it produced and the
+/// follow-up work it owes, stored in the same commit.
+#[derive(Debug, Clone)]
+pub struct WorkCompletion {
+    pub id: WorkId,
+    /// The claim the attempt ran under; a later claim refuses it.
+    pub generation: i64,
+    pub result: Option<String>,
+    pub owed: Vec<NewWork>,
+}
+
 /// A failed attempt as recorded on its work.
 #[derive(Debug, Clone)]
 pub struct WorkFailure {

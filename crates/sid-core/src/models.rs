@@ -146,7 +146,8 @@ pub use directory_query::{
 };
 pub use dpop::{DPopBinding, DPopProof, HttpMethod};
 pub use durable_work::{
-    ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState,
+    ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
+    WorkState,
 };
 pub use email_provider::{
     EmailProviderConfig, SmtpAuthMethod, SmtpEncryption, XOAuth2Config, XOAuth2Provider,

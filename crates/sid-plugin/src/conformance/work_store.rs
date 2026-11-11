@@ -4,7 +4,7 @@
 //! database never see each other's work.
 
 use chrono::{DateTime, Duration, Utc};
-use sid_core::models::{NewWork, WorkFailure, WorkId, WorkKind, WorkState};
+use sid_core::models::{NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkState};
 use std::collections::HashSet;
 use std::slice::from_ref;
 use std::time::Duration as StdDuration;
@@ -691,6 +691,113 @@ pub async fn stale_completion_owes_nothing(store: &dyn WorkStore) {
     let record = store.get_work(parent.id).await.unwrap().unwrap();
     assert_eq!(record.state, WorkState::Claimed);
     assert!(store.get_work(child.id).await.unwrap().is_none());
+}
+
+/// Completions recorded together are each fenced by their own claim: a
+/// stale one is refused alone and stores none of its owed work, while the
+/// others complete with theirs, and the answer keeps their order.
+pub async fn completions_together_are_fenced_one_by_one(store: &dyn WorkStore) {
+    let first = claimed_parent(store, "together_first").await;
+    let stale = claimed_parent(store, "together_stale").await;
+    let last = claimed_parent(store, "together_last").await;
+    let child = |name: &str| work(&unique_kind(name));
+    let (first_child, stale_child, last_child) = (
+        child("together_first_child"),
+        child("together_stale_child"),
+        child("together_last_child"),
+    );
+    let completion =
+        |of: &sid_core::models::ClaimedWork, generation, owed: &NewWork| WorkCompletion {
+            id: of.id,
+            generation,
+            result: Some("receipt".into()),
+            owed: vec![owed.clone()],
+        };
+
+    let done = store
+        .complete_works(&[
+            completion(&first, first.generation, &first_child),
+            completion(&stale, stale.generation + 1, &stale_child),
+            completion(&last, last.generation, &last_child),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(done, [true, false, true]);
+
+    for (parent, owed) in [(&first, &first_child), (&last, &last_child)] {
+        let record = store.get_work(parent.id).await.unwrap().unwrap();
+        assert_eq!(record.state, WorkState::Completed);
+        assert_eq!(record.result.as_deref(), Some("receipt"));
+        let child = store.get_work(owed.id).await.unwrap().unwrap();
+        assert_eq!(child.state, WorkState::Pending);
+    }
+    let record = store.get_work(stale.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Claimed);
+    assert!(store.get_work(stale_child.id).await.unwrap().is_none());
+    assert_eq!(store.complete_works(&[]).await.unwrap(), Vec::<bool>::new());
+}
+
+/// Two attempts at one work in one batch, its lapsed claim and the claim
+/// that took it over (attempts overlap once a lease runs out), in either
+/// order: only the current claim completes, with its own owed work; the
+/// lapsed one is refused and its owed work is not stored.
+pub async fn completions_together_fence_each_claim_of_one_work(store: &dyn WorkStore) {
+    for (scenario, current_first) in [("overlap_late", false), ("overlap_early", true)] {
+        let kind = unique_kind(scenario);
+        store.enqueue_work(&work(&kind)).await.unwrap();
+        let lapsed = store
+            .claim_work(from_ref(&kind), "w1", 1, SHORT_LEASE)
+            .await
+            .unwrap()
+            .remove(0);
+        tokio::time::sleep(PAST_SHORT_LEASE).await;
+        let current = store
+            .claim_work(from_ref(&kind), "w2", 1, LEASE)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(current.id, lapsed.id);
+        assert!(current.generation > lapsed.generation);
+        let (lapsed_child, current_child) = (
+            work(&unique_kind(&format!("{scenario}_old"))),
+            work(&unique_kind(&format!("{scenario}_new"))),
+        );
+        let lapsed_done = WorkCompletion {
+            id: lapsed.id,
+            generation: lapsed.generation,
+            result: Some("late".into()),
+            owed: vec![lapsed_child.clone()],
+        };
+        let current_done = WorkCompletion {
+            id: current.id,
+            generation: current.generation,
+            result: Some("done".into()),
+            owed: vec![current_child.clone()],
+        };
+
+        let (batch, expected) = if current_first {
+            ([current_done, lapsed_done], [true, false])
+        } else {
+            ([lapsed_done, current_done], [false, true])
+        };
+        assert_eq!(
+            store.complete_works(&batch).await.unwrap(),
+            expected,
+            "{scenario}"
+        );
+
+        let record = store.get_work(current.id).await.unwrap().unwrap();
+        assert_eq!(record.state, WorkState::Completed, "{scenario}");
+        assert_eq!(record.result.as_deref(), Some("done"), "{scenario}");
+        assert!(
+            store.get_work(current_child.id).await.unwrap().is_some(),
+            "{scenario}: the current claim's owed work is missing"
+        );
+        assert!(
+            store.get_work(lapsed_child.id).await.unwrap().is_none(),
+            "{scenario}: the lapsed claim's owed work was stored"
+        );
+    }
 }
 
 /// A completion owing a child already stored (the same obligation again,

@@ -486,6 +486,8 @@ mod work_store {
         export_import_round_trip,
         completion_commits_with_follow_up_work,
         stale_completion_owes_nothing,
+        completions_together_are_fenced_one_by_one,
+        completions_together_fence_each_claim_of_one_work,
         completion_owing_a_stored_child_keeps_it,
         concurrent_completions_owing_work_all_commit,
     );

@@ -6,7 +6,8 @@
 use super::{SqliteBackend, col, fmt_dt};
 use async_trait::async_trait;
 use sid_core::models::{
-    ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState,
+    ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
+    WorkState,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::WorkStore;
@@ -73,6 +74,40 @@ pub(crate) async fn insert_work_in_tx(
     .rows_affected()
         == 1;
     Ok(inserted)
+}
+
+/// Record work done through `conn` when `generation` is its current claim,
+/// storing `owed` with it; inside the caller's transaction when there is
+/// owed work. Returns whether the claim was current; nothing is written
+/// otherwise.
+async fn complete_claimed(
+    conn: &mut SqliteConnection,
+    id: WorkId,
+    generation: i64,
+    result: Option<&str>,
+    owed: &[NewWork],
+    now: &str,
+) -> SidResult<bool> {
+    let completed = sqlx::query(
+        "UPDATE durable_work SET state = 'completed', result = ?, lease_owner = NULL,
+            lease_until = NULL, updated_at = ?
+         WHERE id = ? AND generation = ? AND state = 'claimed'",
+    )
+    .bind(result)
+    .bind(now)
+    .bind(id.0)
+    .bind(generation)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?
+    .rows_affected()
+        == 1;
+    if completed {
+        for work in owed {
+            insert_work_in_tx(conn, work).await?;
+        }
+    }
+    Ok(completed)
 }
 
 #[async_trait]
@@ -192,20 +227,10 @@ impl WorkStore for SqliteBackend {
         generation: i64,
         result: Option<&str>,
     ) -> SidResult<bool> {
-        let done = sqlx::query(
-            "UPDATE durable_work SET state = 'completed', result = ?, lease_owner = NULL,
-                lease_until = NULL, updated_at = ?
-             WHERE id = ? AND generation = ? AND state = 'claimed'",
-        )
-        .bind(result)
-        .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0)
-        .bind(generation)
-        .execute(&self.writer)
-        .await
-        .map_err(storage)?
-        .rows_affected();
-        Ok(done == 1)
+        // One statement, atomic on its own: no transaction.
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
+        let now = fmt_dt(&chrono::Utc::now());
+        complete_claimed(&mut conn, id, generation, result, &[], &now).await
     }
 
     async fn complete_work_owing(
@@ -219,27 +244,39 @@ impl WorkStore for SqliteBackend {
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let done = sqlx::query(
-            "UPDATE durable_work SET state = 'completed', result = ?, lease_owner = NULL,
-                lease_until = NULL, updated_at = ?
-             WHERE id = ? AND generation = ? AND state = 'claimed'",
-        )
-        .bind(result)
-        .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0)
-        .bind(generation)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?
-        .rows_affected();
-        if done != 1 {
+        let now = fmt_dt(&chrono::Utc::now());
+        if !complete_claimed(&mut tx, id, generation, result, owed, &now).await? {
             return Ok(false);
-        }
-        for work in owed {
-            insert_work_in_tx(&mut tx, work).await?;
         }
         tx.commit().await.map_err(storage)?;
         Ok(true)
+    }
+
+    async fn complete_works(&self, works: &[WorkCompletion]) -> SidResult<Vec<bool>> {
+        if works.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.writer.acquire().await.map_err(storage)?;
+        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let now = fmt_dt(&chrono::Utc::now());
+        let mut done = Vec::with_capacity(works.len());
+        for work in works {
+            done.push(
+                complete_claimed(
+                    &mut tx,
+                    work.id,
+                    work.generation,
+                    work.result.as_deref(),
+                    &work.owed,
+                    &now,
+                )
+                .await?,
+            );
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(done)
     }
 
     async fn fail_work(
