@@ -76,7 +76,9 @@ jobs:
         run: rustup update stable --no-self-update
       - name: protoc with the well-known types
         if: steps.scope.outputs.run == 'true' && matrix.host_binary
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true' && matrix.host_binary
       - name: Server binary

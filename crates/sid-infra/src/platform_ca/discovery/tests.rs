@@ -293,9 +293,29 @@ mod resolving {
         assert!(
             matches!(
                 result,
-                Err(DiscoveryError::NotSecure | DiscoveryError::Unavailable(_))
+                Err(DiscoveryError::NotSecure(_) | DiscoveryError::Unavailable(_))
             ),
             "{result:?}"
+        );
+    }
+
+    // Each validation outcome but a secure one is named, so an operator can
+    // tell a missing delegation from failing signatures.
+    #[test]
+    fn every_unproven_outcome_is_named() {
+        use hickory_resolver::proto::dnssec::Proof;
+
+        assert_eq!(NotProven::of(Proof::Secure), None);
+        assert_eq!(NotProven::of(Proof::Insecure), Some(NotProven::Insecure));
+        assert_eq!(NotProven::of(Proof::Bogus), Some(NotProven::Bogus));
+        assert_eq!(
+            NotProven::of(Proof::Indeterminate),
+            Some(NotProven::Indeterminate)
+        );
+        assert!(
+            DiscoveryError::NotSecure(NotProven::Insecure)
+                .to_string()
+                .contains("no chain of trust from the root")
         );
     }
 }

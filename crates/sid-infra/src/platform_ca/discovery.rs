@@ -237,7 +237,7 @@ pub fn platform_name(publication: &url::Url) -> Option<&str> {
 }
 
 #[cfg(feature = "platform-ca-dns")]
-pub use resolver::{DiscoveryError, DiscoveryResolver};
+pub use resolver::{DiscoveryError, DiscoveryResolver, NotProven};
 
 #[cfg(feature = "platform-ca-dns")]
 mod resolver {
@@ -264,11 +264,47 @@ mod resolver {
         /// not validate.
         #[error("the discovery record did not resolve: {0}")]
         Unavailable(String),
-        /// An answer was not proven by DNSSEC from the root.
-        #[error("the discovery record is not DNSSEC-secure")]
-        NotSecure,
+        /// An answer was not proven by DNSSEC from the root, for the reason
+        /// named.
+        #[error("the discovery record is not DNSSEC-secure: {0}")]
+        NotSecure(NotProven),
         #[error(transparent)]
         Record(#[from] RecordError),
+    }
+
+    /// Why a validated answer was not secure (RFC 4033 §5).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NotProven {
+        /// No chain of trust reaches the answer: a zone above it publishes
+        /// no DS for the signed zone below.
+        Insecure,
+        /// A chain exists but the answer did not validate under it: missing,
+        /// expired or wrong signatures, or a configuration error.
+        Bogus,
+        /// The validator could not decide.
+        Indeterminate,
+    }
+
+    impl std::fmt::Display for NotProven {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(match self {
+                Self::Insecure => "insecure, no chain of trust from the root",
+                Self::Bogus => "bogus, the signatures do not validate",
+                Self::Indeterminate => "indeterminate",
+            })
+        }
+    }
+
+    impl NotProven {
+        /// The outcome of `proof`, None when it is secure.
+        pub(super) fn of(proof: Proof) -> Option<Self> {
+            match proof {
+                Proof::Secure => None,
+                Proof::Insecure => Some(Self::Insecure),
+                Proof::Bogus => Some(Self::Bogus),
+                Proof::Indeterminate => Some(Self::Indeterminate),
+            }
+        }
     }
 
     /// Reads discovery records through a validating resolver: the system's
@@ -323,8 +359,8 @@ mod resolver {
                 if record.name != name {
                     continue;
                 }
-                if record.proof != Proof::Secure {
-                    return Err(DiscoveryError::NotSecure);
+                if let Some(reason) = NotProven::of(record.proof) {
+                    return Err(DiscoveryError::NotSecure(reason));
                 }
                 // One record's character-strings form one text (RFC 7208
                 // §3.3 joins them the same way).
