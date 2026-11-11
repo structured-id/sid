@@ -318,4 +318,21 @@ mod resolving {
                 .contains("no chain of trust from the root")
         );
     }
+
+    // The validator rejecting the chain ends the lookup itself with an
+    // error; that is a bogus answer (RFC 4033 §5), not an unreachable
+    // resolver, so the operator is told why the record is not secure.
+    #[test]
+    fn a_failed_validation_is_bogus_not_unavailable() {
+        use hickory_resolver::net::{DnsError, NetError};
+
+        assert!(matches!(
+            DiscoveryError::of_lookup(NetError::Dns(DnsError::DnssecBogus)),
+            DiscoveryError::NotSecure(NotProven::Bogus)
+        ));
+        assert!(matches!(
+            DiscoveryError::of_lookup(NetError::Timeout),
+            DiscoveryError::Unavailable(_)
+        ));
+    }
 }

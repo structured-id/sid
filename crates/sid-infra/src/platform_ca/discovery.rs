@@ -244,6 +244,7 @@ mod resolver {
     use std::time::Duration;
 
     use hickory_resolver::TokioResolver;
+    use hickory_resolver::net::{DnsError, NetError};
     use hickory_resolver::proto::dnssec::Proof;
     use hickory_resolver::proto::rr::{Name, RData, RecordType};
 
@@ -292,6 +293,22 @@ mod resolver {
                 Self::Bogus => "bogus, the signatures do not validate",
                 Self::Indeterminate => "indeterminate",
             })
+        }
+    }
+
+    impl DiscoveryError {
+        /// Why a lookup that failed read no records: the validator rejecting
+        /// the chain, or a negative answer it did not prove, is a validation
+        /// outcome (RFC 4033 §5); anything else left the record unresolved.
+        pub(super) fn of_lookup(error: NetError) -> Self {
+            match error {
+                NetError::Dns(DnsError::DnssecBogus) => Self::NotSecure(NotProven::Bogus),
+                NetError::Dns(DnsError::Nsec { proof, .. }) => match NotProven::of(proof) {
+                    Some(reason) => Self::NotSecure(reason),
+                    None => Self::Unavailable(format!("no record, {proof}")),
+                },
+                other => Self::Unavailable(other.to_string()),
+            }
         }
     }
 
@@ -350,7 +367,7 @@ mod resolver {
             )
             .await
             .map_err(|_| DiscoveryError::Unavailable("timed out".into()))?
-            .map_err(|e| DiscoveryError::Unavailable(e.to_string()))?;
+            .map_err(DiscoveryError::of_lookup)?;
             let mut texts = Vec::new();
             for record in lookup.answers() {
                 let RData::TXT(txt) = &record.data else {
