@@ -399,6 +399,44 @@ async fn test_ordered_consumer_holds_later_events_across_replicas() {
     drop_topology(&t).await;
 }
 
+/// An unordered consumer hands out further work while earlier deliveries are
+/// still unsettled, so its receiver can accept them concurrently, and each
+/// is settled on its own (regression: the bus waited for each settlement
+/// before reading the next message, so a receiver held one event at a time
+/// whatever its own concurrency).
+#[tokio::test]
+async fn test_unordered_consumer_hands_out_work_before_settlement() {
+    let t = topology();
+    let bus = owner(&t).await;
+    let receiver = recipient("unordered");
+    let events: Vec<Event> = (0..5)
+        .map(|_| Event::new("sid-test", event_types::USER_CREATED))
+        .collect();
+    for event in &events {
+        bus.deliver(&receiver, event.delivery_id(&receiver), event)
+            .await
+            .unwrap();
+    }
+    let mut deliveries = bus.consume(consumer_of("unordered")).await.unwrap();
+
+    let mut held = Vec::new();
+    for _ in 0..events.len() {
+        held.push(next(&mut deliveries).await);
+    }
+    let mut ids: Vec<_> = held.iter().map(|d| d.event.id.clone()).collect();
+    ids.sort();
+    let mut wanted: Vec<_> = events.iter().map(|e| e.id.clone()).collect();
+    wanted.sort();
+    assert_eq!(ids, wanted, "not every event was handed out unsettled");
+
+    // Settled out of order, each on its own: nothing comes back.
+    for delivery in held.into_iter().rev() {
+        delivery.settle(Settlement::Done);
+    }
+    assert!(quiet(&mut deliveries).await, "a settled event came again");
+    drop_topology(&t).await;
+}
+
 /// A delivery its consumer is still processing is renewed past the
 /// acknowledgement wait, so another replica does not get it meanwhile, and
 /// its hold stays ahead; one settled for retry comes again as attempt 2.

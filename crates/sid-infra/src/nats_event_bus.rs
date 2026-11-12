@@ -54,6 +54,63 @@ fn may_renew(deadline: tokio::time::Instant, now: tokio::time::Instant) -> bool 
     now < deadline
 }
 
+/// Deliveries an unordered durable consumer holds unsettled at once: its
+/// receiver accepts them concurrently, and the bus reads no further message
+/// while this many are held.
+pub const DURABLE_IN_FLIGHT: usize = 64;
+
+/// Keep `msg` renewed until its delivery's `outcome` arrives, then settle it.
+/// `deadline` carries the hold the delivery's consumer reads. A delivery
+/// dropped unsettled is delivered again.
+async fn hold_and_settle(
+    msg: jetstream::Message,
+    mut outcome: tokio::sync::oneshot::Receiver<Settlement>,
+    deadline: tokio::sync::watch::Sender<tokio::time::Instant>,
+    ack_wait: std::time::Duration,
+    name: &str,
+) {
+    // Renewed while it is processed, so a slow consumer keeps it rather than
+    // another replica getting it.
+    let every = ack_wait / RENEWALS_PER_ACK_WAIT;
+    let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    let settlement = loop {
+        tokio::select! {
+            // Dropped unsettled: delivered again.
+            settled = &mut outcome => {
+                break settled.unwrap_or(Settlement::Retry(DURABLE_REDELIVERY));
+            }
+            _ = renewal.tick() => {
+                let held = *deadline.borrow();
+                if !may_renew(held, tokio::time::Instant::now()) {
+                    continue;
+                }
+                if let Some(until) = renew(&msg, ack_wait).await {
+                    deadline.send_replace(until);
+                }
+            }
+        }
+    };
+    acknowledge(&msg, &settlement, name).await;
+}
+
+/// Tell the server how `msg` was settled.
+async fn acknowledge(msg: &jetstream::Message, settlement: &Settlement, name: &str) {
+    use async_nats::jetstream::AckKind;
+    let acked = match settlement {
+        Settlement::Done => msg.double_ack().await,
+        Settlement::Retry(delay) => msg.ack_with(AckKind::Nak(Some(*delay))).await,
+        Settlement::Reject(reason) => {
+            tracing::error!(consumer = %name, "event rejected: {reason}");
+            msg.ack_with(AckKind::Term).await
+        }
+    };
+    // An unconfirmed acknowledgement is delivered again; the consumer's
+    // effect is idempotent under its own records.
+    if let Err(e) = acked {
+        tracing::warn!(consumer = %name, "settle an event: {e}");
+    }
+}
+
 /// How often the server confirms a durable consumer's open pull; two missed
 /// in a row reopen it.
 const DURABLE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -252,7 +309,8 @@ impl EventBus for NatsEventBus {
             filter_subjects: subjects,
             ..Default::default()
         };
-        if consumer.ordered {
+        let ordered = consumer.ordered;
+        if ordered {
             // One unacknowledged event for the whole consumer: a message
             // negatively acknowledged with a delay stays pending until it is
             // redelivered, so no replica gets a later one meanwhile.
@@ -270,7 +328,12 @@ impl EventBus for NatsEventBus {
             use async_nats::jetstream::AckKind;
             use futures::StreamExt;
             let mut messages = messages;
+            // The unordered consumer's held deliveries, each settled by its
+            // own task; this loop owns them and waits for them at its end.
+            let mut settling = tokio::task::JoinSet::new();
+            let in_flight = std::sync::Arc::new(tokio::sync::Semaphore::new(DURABLE_IN_FLIGHT));
             loop {
+                while settling.try_join_next().is_some() {}
                 let msg = match messages.next().await {
                     Some(Ok(msg)) => msg,
                     // A missed heartbeat, a deleted consumer or an ended
@@ -296,65 +359,51 @@ impl EventBus for NatsEventBus {
                     Ok(event) => event.validate().map(|()| event).map_err(|e| e.to_string()),
                     Err(e) => Err(e.to_string()),
                 };
-                let settlement = match event {
-                    Err(e) => Settlement::Reject(format!("not an event: {e}")),
-                    Ok(event) => {
-                        let attempt = msg
-                            .info()
-                            .ok()
-                            .and_then(|info| u64::try_from(info.delivered).ok())
-                            .unwrap_or(1);
-                        let first = renew(&msg, ack_wait)
-                            .await
-                            .unwrap_or_else(tokio::time::Instant::now);
-                        let (deadline, hold) = tokio::sync::watch::channel(first);
-                        let (delivery, mut outcome) =
-                            Delivery::held(event, attempt, Hold::until(hold));
-                        if tx.send(delivery).await.is_err() {
-                            // The consumer stopped: the event stays its own.
-                            if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
-                                tracing::warn!(consumer = %name, "release an event: {e}");
-                            }
-                            break;
-                        }
-                        // Renewed while it is processed, so a slow consumer
-                        // keeps it rather than another replica getting it.
-                        let every = ack_wait / RENEWALS_PER_ACK_WAIT;
-                        let mut renewal =
-                            tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-                        loop {
-                            tokio::select! {
-                                // Dropped unsettled: delivered again.
-                                settled = &mut outcome => {
-                                    break settled.unwrap_or(Settlement::Retry(DURABLE_REDELIVERY));
-                                }
-                                _ = renewal.tick() => {
-                                    let held = *deadline.borrow();
-                                    if !may_renew(held, tokio::time::Instant::now()) {
-                                        continue;
-                                    }
-                                    if let Some(until) = renew(&msg, ack_wait).await {
-                                        deadline.send_replace(until);
-                                    }
-                                }
-                            }
-                        }
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let rejected = Settlement::Reject(format!("not an event: {e}"));
+                        acknowledge(&msg, &rejected, &name).await;
+                        continue;
                     }
                 };
-                let acked = match &settlement {
-                    Settlement::Done => msg.double_ack().await,
-                    Settlement::Retry(delay) => msg.ack_with(AckKind::Nak(Some(*delay))).await,
-                    Settlement::Reject(reason) => {
-                        tracing::error!(consumer = %name, "event rejected: {reason}");
-                        msg.ack_with(AckKind::Term).await
+                let attempt = msg
+                    .info()
+                    .ok()
+                    .and_then(|info| u64::try_from(info.delivered).ok())
+                    .unwrap_or(1);
+                let first = renew(&msg, ack_wait)
+                    .await
+                    .unwrap_or_else(tokio::time::Instant::now);
+                let (deadline, hold) = tokio::sync::watch::channel(first);
+                let (delivery, outcome) = Delivery::held(event, attempt, Hold::until(hold));
+                if tx.send(delivery).await.is_err() {
+                    // The consumer stopped: the event stays its own.
+                    if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
+                        tracing::warn!(consumer = %name, "release an event: {e}");
                     }
-                };
-                // An unconfirmed acknowledgement is delivered again; the
-                // consumer's effect is idempotent under its own records.
-                if let Err(e) = acked {
-                    tracing::warn!(consumer = %name, "settle an event: {e}");
+                    break;
+                }
+                if ordered {
+                    // Settled before the next is read: the consumer's order.
+                    hold_and_settle(msg, outcome, deadline, ack_wait, &name).await;
+                } else {
+                    // Held by its own task, so the next is handed out now;
+                    // no more than `DURABLE_IN_FLIGHT` are held at once.
+                    let permit = in_flight
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("the consumer's semaphore is never closed");
+                    let name = name.clone();
+                    settling.spawn(async move {
+                        hold_and_settle(msg, outcome, deadline, ack_wait, &name).await;
+                        drop(permit);
+                    });
                 }
             }
+            // Deliveries still held are settled before the consumer ends.
+            while settling.join_next().await.is_some() {}
         });
         Ok(rx)
     }
