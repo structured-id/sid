@@ -457,8 +457,8 @@ struct Process {
     rss: u64,
 }
 
-/// The processes measured in one snapshot: this one, and the store and
-/// broker servers by name.
+/// The processes measured in one snapshot: this one, and every process on
+/// the host named like a store or broker server, whichever run it serves.
 struct Snapshot {
     at: Instant,
     own: Process,
@@ -551,8 +551,11 @@ impl Snapshot {
             entry.2 += 1;
         }
         for (name, (cpu, rss, processes)) in by_name {
+            // Every process of that name on the host, not only this run's
+            // server, and resident memory summed per process, which counts
+            // shared pages once per process.
             line.push_str(&format!(
-                " {name}={:.2} cores rss={:.0}MiB ({processes} processes)",
+                " host:{name}={:.2} cores rss-sum={:.0}MiB ({processes} processes)",
                 cores(cpu),
                 mib(rss)
             ));
@@ -778,7 +781,10 @@ pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
     // the runners are quiet.
     tokio::time::sleep(QUIET).await;
     println!(
-        "{mode:<10} repeated  {} of {} deliveries",
+        // The channel's send count above the deliveries owed: an aggregate,
+        // so a repeat and a loss would cancel out here; the conformance
+        // tests own per-delivery uniqueness.
+        "{mode:<10} excess    {} sends over {} deliveries owed",
         sent.count() - BACKLOG * FAN_OUT,
         BACKLOG * FAN_OUT
     );
