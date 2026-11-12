@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use sid_authn::sign_in_delivery::{CeremonyClient, Delivery};
 use sid_core::models::session::{AuthLevel, SessionAuthentication};
@@ -108,6 +109,156 @@ async fn upstream_sign_in_of_a_protected_account_awaits_its_second_factor() {
         .unwrap();
     assert!(session.awaits_second_factor());
     assert!(session.amr.is_empty());
+}
+
+/// A login policy written right after each of its next `writes` reads: the
+/// requirements read carry the epoch they were read under, and the write
+/// advances it (requiring `then_require` from then on, when set).
+struct WrittenAfterRead {
+    storage: Arc<sid_storage::sqlite::SqliteBackend>,
+    writes: std::sync::Mutex<u32>,
+    then_require: std::sync::Mutex<Option<String>>,
+    required: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl WrittenAfterRead {
+    async fn new(storage: Arc<sid_storage::sqlite::SqliteBackend>, writes: u32) -> Self {
+        let policy = Self {
+            storage,
+            writes: std::sync::Mutex::new(0),
+            then_require: std::sync::Mutex::default(),
+            required: std::sync::Mutex::default(),
+        };
+        policy.write().await;
+        *policy.writes.lock().unwrap() = writes;
+        policy
+    }
+
+    async fn write(&self) {
+        use sid_storage::sqlite::SqliteBackend;
+        let mut tx = SqliteBackend::begin_write_on(self.storage.pool())
+            .await
+            .unwrap();
+        SqliteBackend::advance_login_policy_epoch(&mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+}
+
+#[async_trait::async_trait]
+impl LoginPolicySource for WrittenAfterRead {
+    async fn requirements(
+        &self,
+        client_id: Option<&str>,
+    ) -> Result<
+        sid_authn::login_policy::LoginRequirements,
+        sid_authn::login_policy::LoginPolicyUnavailable,
+    > {
+        let mut requirements = fixed_policy().requirements(client_id).await?;
+        let epoch = sid_storage::sqlite::SqliteBackend::login_policy_epoch(self.storage.pool())
+            .await
+            .unwrap()
+            .expect("a policy was written");
+        requirements.fence = Some(sid_core::models::ActorFence::LoginPolicy { epoch });
+        requirements.required_amr = self.required.lock().unwrap().clone();
+        let write = {
+            let mut writes = self.writes.lock().unwrap();
+            let write = *writes > 0;
+            if write {
+                *writes -= 1;
+            }
+            write
+        };
+        if write {
+            self.write().await;
+            if let Some(method) = self.then_require.lock().unwrap().take() {
+                self.required.lock().unwrap().insert(method);
+            }
+        }
+        Ok(requirements)
+    }
+}
+
+/// The sign-ins `id` holds that are not pending contexts.
+async fn sessions_of(storage: &sid_storage::sqlite::SqliteBackend, id: ProfileId) -> usize {
+    storage
+        .list_sessions(&id)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|s| !s.awaits_second_factor())
+        .count()
+}
+
+// Regression: a login policy written between a first factor's decision and
+// its session's commit fenced the commit, answered as a failed
+// authentication. The sign-in is decided again under the policy in force
+// and commits once.
+#[tokio::test]
+async fn a_policy_written_before_the_commit_decides_the_sign_in_again() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let id = stored_profile(storage.as_ref(), "frank").await;
+    let profile = storage.get_profile(id).await.unwrap().unwrap();
+    let policy = WrittenAfterRead::new(storage.clone(), 1).await;
+
+    let signed_in = sign_in
+        .upstream_sign_in(&policy, &profile, browser())
+        .await
+        .expect("decided again under the policy written");
+    assert!(
+        storage
+            .get_session(signed_in.signed_in.session_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(sessions_of(&storage, id).await, 1);
+}
+
+// A policy written before the commit that no longer admits the sign-in
+// refuses it with what it asks, not as a failed authentication.
+#[tokio::test]
+async fn a_policy_written_before_the_commit_refuses_with_its_own_reason() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let id = stored_profile(storage.as_ref(), "grace").await;
+    let profile = storage.get_profile(id).await.unwrap().unwrap();
+    let policy = WrittenAfterRead::new(storage.clone(), 1).await;
+    *policy.then_require.lock().unwrap() = Some("hwk".to_string());
+
+    let refused = sign_in.upstream_sign_in(&policy, &profile, browser()).await;
+    assert!(
+        matches!(
+            refused,
+            Err(SignInError::Rules(
+                sid_authn::sign_in_security::SignInRefusal::StepUp(_)
+            ))
+        ),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(sessions_of(&storage, id).await, 0);
+}
+
+// A policy written again before the second commit is not chased: the
+// sign-in stays fenced and commits nothing.
+#[tokio::test]
+async fn a_policy_written_twice_fences_the_sign_in() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let id = stored_profile(storage.as_ref(), "heidi").await;
+    let profile = storage.get_profile(id).await.unwrap().unwrap();
+    let policy = WrittenAfterRead::new(storage.clone(), 2).await;
+
+    let refused = sign_in.upstream_sign_in(&policy, &profile, browser()).await;
+    assert!(
+        matches!(refused, Err(SignInError::Fenced)),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(sessions_of(&storage, id).await, 0);
 }
 
 // An account that can no longer authenticate gets no upstream session,

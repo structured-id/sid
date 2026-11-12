@@ -1133,36 +1133,21 @@ impl ImportedPasswordUpgrades {
             }
         }
 
-        let method = LoginMethod::Password;
-        let requirements = crate::sign_in::organization_requirements(login_policy).await?;
-        let admission = sign_in
-            .first_factor(
-                profile.id,
-                client_ip,
-                (
-                    "opaque",
-                    method.auth_level(sign_in.policy().auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                context,
-                &requirements,
-            )
-            .await?;
         let signed_in = sign_in
-            .complete_first_factor(
+            .sign_in_first_factor(
+                login_policy,
                 &profile,
-                method,
-                context
-                    .user_agent
-                    .map(sid_authn::sign_in_security::device_id),
-                client_ip,
-                client,
+                LoginMethod::Password,
+                crate::sign_in::completions::Completer {
+                    client,
+                    client_ip,
+                    context,
+                },
                 None,
                 Some(&CredentialFence {
                     id: credential.id,
                     data: credential.data.clone(),
                 }),
-                admission,
             )
             .await?;
         info!(

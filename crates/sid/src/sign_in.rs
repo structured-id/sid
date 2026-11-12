@@ -156,6 +156,16 @@ pub enum LoginMethod {
     Upstream,
 }
 
+/// How a first factor's sign-in is judged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Judged {
+    /// Its first judgement: an admitted sign-in is recorded as evidence.
+    Recorded,
+    /// Decided again after its commit was fenced: already recorded, judged
+    /// by the rules of its own request without recording it twice.
+    Again,
+}
+
 impl LoginMethod {
     /// The assurance this sign-in establishes.
     pub fn auth_level(self, passkey_satisfies_mfa: bool) -> AuthLevel {
@@ -487,6 +497,29 @@ impl SignIn {
         context: AttemptContext<'_>,
         requirements: &LoginRequirements,
     ) -> Result<FirstFactor, SignInError> {
+        self.judge_first_factor(
+            profile_id,
+            client_ip,
+            (method, assurance, amr),
+            context,
+            requirements,
+            Judged::Recorded,
+        )
+        .await
+    }
+
+    /// [`Self::first_factor`], recording the admitted sign-in as evidence
+    /// or, for a sign-in already recorded and decided again, judging it
+    /// without recording it twice.
+    async fn judge_first_factor(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<IpAddr>,
+        (method, assurance, amr): (&str, AuthLevel, &[String]),
+        context: AttemptContext<'_>,
+        requirements: &LoginRequirements,
+        judged: Judged,
+    ) -> Result<FirstFactor, SignInError> {
         // The factors are chosen under the same requirements the rules
         // decide on: with the account's protection.
         let requirements = &self.for_account(requirements, profile_id).await?;
@@ -495,15 +528,28 @@ impl SignIn {
             assurance,
             amr,
         };
-        let owed = match self
-            .evaluate(
-                profile_id,
-                client_ip,
-                (authentication, context),
-                requirements,
-            )
-            .await
-        {
+        let judgement = match judged {
+            Judged::Recorded => {
+                self.evaluate(
+                    profile_id,
+                    client_ip,
+                    (authentication, context),
+                    requirements,
+                )
+                .await
+            }
+            Judged::Again => {
+                self.check(
+                    profile_id,
+                    client_ip,
+                    (authentication, context),
+                    requirements,
+                    client_ip,
+                )
+                .await
+            }
+        };
+        let owed = match judgement {
             Ok(()) => return Ok(FirstFactor::Admitted(requirements.fence)),
             Err(
                 owed @ SignInError::Rules(
