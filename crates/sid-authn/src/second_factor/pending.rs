@@ -389,8 +389,71 @@ pub async fn complete_second_factor<H: PendingSignInHost>(
     if !host.can_sign_in(owner).await? {
         return Err(PendingError::AuthenticationFailed.into());
     }
-    let requirements = second_factor_requirements(host, &pending, method).await?;
-    let proved_by = first_factor_fence(host, &pending).await?;
+    // The delivery commits with the session, sealed to the context the
+    // client completed from, and is kept while either may still be used: a
+    // retry of that context after a lost response receives it again.
+    let completed = CompletedContext::of(&pending, client, native_key);
+    let mut spend = spend;
+    let mut decided_again = false;
+    loop {
+        let requirements = second_factor_requirements(host, &pending, method).await?;
+        // The last attempt spends the factor itself; an earlier one a copy.
+        let attempt_spend = if decided_again {
+            spend.take()
+        } else {
+            spend.clone()
+        };
+        match commit_completion(
+            host,
+            &pending,
+            method,
+            client,
+            native_key,
+            &requirements,
+            attempt_spend,
+            completed.as_ref(),
+        )
+        .await?
+        {
+            Some(signed_in) => {
+                // Recorded from the address the rules judged at the first factor.
+                host.record_completed(owner, pending.ip_address).await;
+                return Ok(signed_in);
+            }
+            None => {
+                // A concurrent completion of this context committed first.
+                if let Some(completed) = &completed
+                    && let Some(signed_in) = redeliver_second_factor(host, completed).await?
+                {
+                    return Ok(signed_in);
+                }
+                // A policy written after the decision fenced the commit: the
+                // completion is decided once more under the policy in force
+                // now, which refuses it with its own reason or fences it again.
+                if decided_again || host.requirements(owner).await?.fence == requirements.fence {
+                    return Err(PendingError::Fenced.into());
+                }
+                decided_again = true;
+            }
+        }
+    }
+}
+
+/// Commit `pending` completed by `method` under `requirements` with `spend`;
+/// `None` when a fence stopped the commit.
+#[allow(clippy::too_many_arguments)]
+async fn commit_completion<H: PendingSignInHost>(
+    host: &H,
+    pending: &Session<H::Owner>,
+    method: &str,
+    client: CeremonyClient,
+    native_key: Option<&str>,
+    requirements: &LoginRequirements,
+    spend: Option<FactorSpend>,
+    completed: Option<&CompletedContext>,
+) -> Result<Option<SignedIn>, H::Error> {
+    let owner = pending.profile_id;
+    let proved_by = first_factor_fence(host, pending).await?;
 
     let mut session = host.new_session(owner, pending.ip_address);
     session.device_id = pending.device_id;
@@ -402,11 +465,7 @@ pub async fn complete_second_factor<H: PendingSignInHost>(
     }
     // The authentication began with the first factor.
     session.authenticated_at = pending.authenticated_at;
-    // The delivery commits with the session, sealed to the context the
-    // client completed from, and is kept while either may still be used: a
-    // retry of that context after a lost response receives it again.
-    let completed = CompletedContext::of(&pending, client, native_key);
-    let retained = match &completed {
+    let retained = match completed {
         Some(completed) => Some(RetainedCompletion {
             namespace: SECOND_FACTOR_NAMESPACE,
             method: SECOND_FACTOR_METHOD,
@@ -420,9 +479,9 @@ pub async fn complete_second_factor<H: PendingSignInHost>(
     // The pending context ends in the session's own commit: of concurrent
     // completions one signs in, and one ended meanwhile completes nothing
     // more; it is answered with the completion that committed.
-    let committed = host
+    match host
         .commit(Completion {
-            pending: &pending,
+            pending,
             end: SessionEnd::new(RevocationReason::SignInCompleted, owner.to_string()),
             session,
             client,
@@ -432,22 +491,12 @@ pub async fn complete_second_factor<H: PendingSignInHost>(
             spend,
             retained,
         })
-        .await;
-    let signed_in = match committed {
-        Ok(signed_in) => signed_in,
-        Err(CommitError::Other(e)) => return Err(e),
-        Err(CommitError::Fenced) => {
-            return match &completed {
-                Some(completed) => redeliver_second_factor(host, completed)
-                    .await?
-                    .ok_or_else(|| PendingError::Fenced.into()),
-                None => Err(PendingError::Fenced.into()),
-            };
-        }
-    };
-    // Recorded from the address the rules judged at the first factor.
-    host.record_completed(owner, pending.ip_address).await;
-    Ok(signed_in)
+        .await
+    {
+        Ok(signed_in) => Ok(Some(signed_in)),
+        Err(CommitError::Other(e)) => Err(e),
+        Err(CommitError::Fenced) => Ok(None),
+    }
 }
 
 /// The sign-in the second factor of `completed` already completed,

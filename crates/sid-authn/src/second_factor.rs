@@ -121,6 +121,7 @@ pub fn require_totp_code_format(code: &str) -> Result<(), FactorError> {
 /// A single-use secret a second factor spends (a recovery code): spent in
 /// the commit of the effect it pays for, with the work its spend owes, or
 /// not at all.
+#[derive(Clone)]
 pub struct FactorSpend {
     pub spend: CredentialSpend,
     pub owes: NewWork,
