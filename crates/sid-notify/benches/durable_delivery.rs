@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Durable delivery cost ([`sid_notify::bench`]) on file-backed SQLite
-//! (embedded), PostgreSQL (a fresh `sid_notify_bench` on the server
-//! `SID_BENCH_POSTGRES_URL`) and JetStream handoff into PostgreSQL.
+//! (embedded, concurrent producers on its one runner), PostgreSQL (a fresh
+//! `sid_notify_bench` on the server `SID_BENCH_POSTGRES_URL`, also drained
+//! by `REPLICAS` replicas) and JetStream handoff into PostgreSQL.
 //!
 //! `cargo bench -p sid-notify --bench durable_delivery`
 
 use std::sync::Arc;
 
 use sid_notify::bench;
+
+/// Service replicas draining one PostgreSQL store in `replicas`.
+const REPLICAS: usize = 3;
 
 /// The modes `SID_BENCH_MODES` names (comma-separated: `sqlite`, `postgres`,
 /// `jetstream`), all of them when unset.
@@ -36,12 +40,17 @@ async fn main() {
                     sid_storage::sqlite::SqliteBackend::new(&format!("sqlite:{}", file.display()))
                         .await
                         .unwrap();
-                bench::store_modes("sqlite", Arc::new(sqlite), None).await;
+                let sqlite: Arc<dyn sid_plugin::WorkStore> = Arc::new(sqlite);
+                bench::store_modes("sqlite", sqlite.clone(), None).await;
+                // Embedded SQLite is one process: concurrent producers on its
+                // one runner, not replicas.
+                bench::replicas("sqlite", vec![sqlite]).await;
             }
             "postgres" => {
                 let (store, pool) = bench::postgres().await;
                 bench::durability(&pool).await;
                 bench::store_modes("postgres", store, Some(&pool)).await;
+                bench::replicas("postgres", bench::postgres_replicas(REPLICAS).await).await;
             }
             "jetstream" => bench::handoff(bench::postgres().await.0).await,
             other => panic!("unknown mode {other}: sqlite, postgres or jetstream"),
