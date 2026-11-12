@@ -55,6 +55,10 @@ use sid_ui_host::host::{ADAPTER_PROTO, HostUpstream, asset_routes, issuer_channe
 use sid_ui_host::{GrpcSettingsSource, Retry, UiBundle, follow, standalone};
 use tracing_subscriber::EnvFilter;
 
+/// The log filter without `RUST_LOG`: every component at info, so why a
+/// session, refresh or upstream call was refused reaches the log; without a
+/// filter only errors would.
+const DEFAULT_LOG_FILTER: &str = "info";
 /// A session lasts at most this long, however active.
 const SESSION_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// A session ends after this long unused.
@@ -74,7 +78,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
+        )
         .init();
     sid_crypto::jwt::install_jwt_provider()?;
 
