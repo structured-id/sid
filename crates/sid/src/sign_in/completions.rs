@@ -13,14 +13,16 @@ use sid_authn::login_policy::{LoginDecision, LoginPolicySource};
 use sid_authn::native_session::{NativePolicy, RefreshRequest};
 use sid_authn::sign_in_delivery::{CeremonyClient, RetainedDelivery, SignedIn};
 use sid_authn::sign_in_security::{AttemptAuthentication, SignInRefusal, device_id};
-use sid_core::models::session::{AuthLevel, SessionAuthentication};
+use sid_core::models::session::SessionAuthentication;
 use sid_core::models::{
     ActorFence, OperationKey, PrincipalAssignmentFence, Profile, ProfileId, Session, SignInProof,
 };
 use sid_ids::OpaqueLoginId;
 
+use sid_core::models::CredentialFence;
+
 use super::{
-    ADMITTED_METHOD, ADMITTED_NAMESPACE, AttemptContext, FirstFactorSignedIn, LoginMethod,
+    ADMITTED_METHOD, ADMITTED_NAMESPACE, AttemptContext, FirstFactorSignedIn, Judged, LoginMethod,
     RetainedSignIn, SignIn, SignInError, admitted_inputs, internal, organization_requirements,
     requirements_for,
 };
@@ -51,6 +53,70 @@ pub struct Completer<'a> {
 }
 
 impl SignIn {
+    /// Sign `profile` in on its first factor by `method`, proved by
+    /// `proved_by`: the rules judge it under the organization's requirements,
+    /// then its session, or its pending second-factor context, commits under
+    /// them for `completer`'s client (with the refresh generation bound to
+    /// `native_key` for a native client that proved one). A commit fenced
+    /// because the login policy changed meanwhile is decided once more under
+    /// the policy in force, which refuses it with its own reason or admits
+    /// it, without recording the attempt twice and counting only a CAPTCHA
+    /// its first judgement answered; a credential changed after its check,
+    /// or a policy changed again, still fences it.
+    pub async fn sign_in_first_factor(
+        &self,
+        login_policy: &dyn LoginPolicySource,
+        profile: &Profile,
+        method: LoginMethod,
+        completer: Completer<'_>,
+        native_key: Option<&str>,
+        proved_by: Option<&CredentialFence>,
+    ) -> Result<FirstFactorSignedIn, SignInError> {
+        let amr = method.amr();
+        let factor = (
+            method.name(),
+            method.auth_level(self.policy.auth.passkey_satisfies_mfa),
+            amr.as_slice(),
+        );
+        let mut requirements = organization_requirements(login_policy).await?;
+        let decided = requirements.fence;
+        let mut judged = Judged::Recorded;
+        loop {
+            let (admission, admitted) = self
+                .judge_first_factor(
+                    profile.id,
+                    completer.client_ip,
+                    factor,
+                    completer.context,
+                    &requirements,
+                    judged,
+                )
+                .await?;
+            match self
+                .complete_first_factor(
+                    profile,
+                    method,
+                    completer.context.user_agent.map(device_id),
+                    completer.client_ip,
+                    completer.client,
+                    native_key,
+                    proved_by,
+                    admission,
+                )
+                .await
+            {
+                Err(SignInError::Fenced) if judged == Judged::Recorded => {}
+                done => return done,
+            }
+            let current = organization_requirements(login_policy).await?;
+            if current.fence == decided {
+                return Err(SignInError::Fenced);
+            }
+            requirements = current;
+            judged = Judged::Again(admitted);
+        }
+    }
+
     /// Finish the password sign-in `login` with the client's credential
     /// finalization: the password verified, the rules judging its first
     /// factor under the organization's requirements, then the session or its
@@ -69,31 +135,14 @@ impl SignIn {
             .password_finish(login, credential_finalization, completer.client_ip)
             .await?;
         let profile = verified.account;
-        let method = LoginMethod::Password;
-        let requirements = organization_requirements(login_policy).await?;
-        let admission = self
-            .first_factor(
-                profile.id,
-                completer.client_ip,
-                (
-                    "opaque",
-                    method.auth_level(self.policy.auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                completer.context,
-                &requirements,
-            )
-            .await?;
         let signed_in = self
-            .complete_first_factor(
+            .sign_in_first_factor(
+                login_policy,
                 &profile,
-                method,
-                completer.context.user_agent.map(device_id),
-                completer.client_ip,
-                completer.client,
+                LoginMethod::Password,
+                completer,
                 native_key,
                 Some(&verified.proved_by),
-                admission,
             )
             .await?;
         tracing::info!("OPAQUE login for profile {}", profile.id);
@@ -116,26 +165,13 @@ impl SignIn {
         if !profile.status.can_authenticate() {
             return Err(SignInError::AuthenticationFailed);
         }
-        let method = LoginMethod::Upstream;
-        let requirements = organization_requirements(login_policy).await?;
-        let admission = self
-            .first_factor(
-                profile.id,
-                completer.client_ip,
-                (method.name(), AuthLevel::Basic, &method.amr()),
-                completer.context,
-                &requirements,
-            )
-            .await?;
-        self.complete_first_factor(
+        self.sign_in_first_factor(
+            login_policy,
             profile,
-            method,
-            completer.context.user_agent.map(device_id),
-            completer.client_ip,
-            completer.client,
+            LoginMethod::Upstream,
+            completer,
             None,
             None,
-            admission,
         )
         .await
     }

@@ -423,34 +423,20 @@ impl Passkeys {
             user_verified: verified.user_verified,
             key_amr,
         };
-        let requirements = crate::sign_in::organization_requirements(login_policy).await?;
-        let admission = sign_in
-            .first_factor(
-                profile.id,
-                client_ip,
-                (
-                    "webauthn",
-                    method.auth_level(sign_in.policy().auth.passkey_satisfies_mfa),
-                    &method.amr(),
-                ),
-                context,
-                &requirements,
-            )
-            .await?;
         let signed_in = sign_in
-            .complete_first_factor(
+            .sign_in_first_factor(
+                login_policy,
                 &profile,
                 method,
-                context
-                    .user_agent
-                    .map(sid_authn::sign_in_security::device_id),
-                client_ip,
-                client,
+                crate::sign_in::completions::Completer {
+                    client,
+                    client_ip,
+                    context,
+                },
                 native_key,
                 // The asserting passkey, as it holds after this use, fences
                 // the session's commit (or the pending context's completion).
                 Some(&proved_by),
-                admission,
             )
             .await?;
         info!("WebAuthn login for profile {}", profile.id);
