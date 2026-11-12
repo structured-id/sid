@@ -2,8 +2,8 @@
 
 use std::sync::Mutex;
 
-use crate::application_session::Bearer;
 use crate::application_session::tests::{COOKIE, ORIGIN, fixture, memory, signed_in};
+use sid_plugin::CeremonyStateStore;
 
 use super::*;
 
@@ -425,46 +425,213 @@ async fn a_permission_refusal_or_api_outage_keeps_the_session() {
     }
 }
 
-/// A refusal of a token the session no longer holds (an earlier call's late
-/// answer after a refresh) and a refusal of another session's token leave
-/// the session as it is: a refusal concerns the token it was presented with.
+/// An API that signals `reached` when a call arrives and holds its answer,
+/// UNAUTHENTICATED, until `gate`: the answer of an earlier call arriving
+/// after the session moved on.
+fn held_back(
+    reached: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+) -> impl tower::Service<
+    http::Request<tonic::body::Body>,
+    Response = Answer,
+    Error = Infallible,
+    Future = impl Send,
+> + Clone
++ Send
++ Sync
++ 'static {
+    tower::service_fn(move |_: http::Request<tonic::body::Body>| {
+        let (reached, gate) = (reached.clone(), gate.clone());
+        async move {
+            reached.notify_one();
+            gate.notified().await;
+            let mut answer = http::Response::new(tonic::body::Body::empty());
+            answer
+                .headers_mut()
+                .insert("grpc-status", http::HeaderValue::from_static("16"));
+            Ok::<_, Infallible>(answer)
+        }
+    })
+}
+
+/// A call made with the session's first token whose refusal arrives only
+/// after another replica refreshed the session: the late refusal concerns
+/// the token it was made with, so the refreshed session stays signed in and
+/// is not refreshed again.
 #[tokio::test]
-async fn a_refusal_of_another_token_keeps_the_session() {
+async fn a_late_refusal_after_a_refresh_keeps_the_session() {
     let f = fixture(memory(), true);
-    let (refreshed, _) = signed_in(&f, true).await;
+    let (id, csrf) = signed_in(&f, true).await;
     let adapter = Arc::new(f.adapter);
-    let before = f.sessions.get_session(&refreshed).await.unwrap().unwrap();
-    // The token an earlier call presented, refused only after the session
-    // was refreshed to its next token.
-    let earlier = Bearer::held(&before);
-    let mut next = before.claims.clone();
-    next.jti = "token-2".into();
+    let (reached, gate) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let host = HostUpstream::new(
+        adapter.clone(),
+        Some(held_back(reached.clone(), gate.clone())),
+    );
+    let cookie = format!("{COOKIE}={id}");
+    let in_flight = tokio::spawn(host.oneshot(call(&api_path(), Some(&cookie), Some(&csrf))));
+    // The call holds the first token at the API before the session moves on.
+    reached.notified().await;
+    let before = f.sessions.get_session(&id).await.unwrap().unwrap();
     assert!(matches!(
         f.sessions
             .replace_tokens(
-                &refreshed,
+                &id,
                 &"refresh".into(),
                 "access-2".into(),
                 Some("refresh-2".into()),
-                next.clone(),
+                before.claims,
             )
             .await
             .unwrap(),
         sid_authn::bff_session::TokenReplacement::Replaced
     ));
-    // Another session of the same browser, signed in anew with its own token.
-    next.jti = "token-s2".into();
-    let (other, _) = f
+    gate.notify_one();
+    assert_eq!(grpc_status(&in_flight.await.unwrap().unwrap()), "16");
+    assert!(session_read(&adapter, &cookie).await.is_ok());
+    let after = f.sessions.get_session(&id).await.unwrap().unwrap();
+    assert!(!after.token_refused);
+    assert_eq!(after.bearer(), "access-2");
+}
+
+/// A call of a session that was signed out, refused only after the browser
+/// signed in anew: the refusal reaches the ended session only, the new one
+/// stays signed in.
+#[tokio::test]
+async fn a_late_refusal_after_a_new_sign_in_keeps_the_new_session() {
+    let f = fixture(memory(), true);
+    let (first, csrf) = signed_in(&f, true).await;
+    let adapter = Arc::new(f.adapter);
+    let (reached, gate) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let host = HostUpstream::new(
+        adapter.clone(),
+        Some(held_back(reached.clone(), gate.clone())),
+    );
+    let in_flight = tokio::spawn(host.oneshot(call(
+        &api_path(),
+        Some(&format!("{COOKIE}={first}")),
+        Some(&csrf),
+    )));
+    reached.notified().await;
+    let ended = f.sessions.get_session(&first).await.unwrap().unwrap();
+    f.sessions.destroy_session(&first).await.unwrap();
+    let (second, _) = f
         .sessions
-        .create_session("access-s2".into(), None, next, &before.connection)
+        .create_session(
+            "access-new".into(),
+            Some("refresh-new".into()),
+            ended.claims,
+            &ended.connection,
+        )
         .await
         .unwrap();
+    gate.notify_one();
+    assert_eq!(grpc_status(&in_flight.await.unwrap().unwrap()), "16");
+    assert!(
+        session_read(&adapter, &format!("{COOKIE}={second}"))
+            .await
+            .is_ok()
+    );
+    assert!(
+        !f.sessions
+            .get_session(&second)
+            .await
+            .unwrap()
+            .unwrap()
+            .token_refused
+    );
+}
 
-    adapter.refused(&earlier).await;
-    for id in [refreshed, other] {
-        let read = session_read(&adapter, &format!("{COOKIE}={id}")).await;
-        assert!(read.is_ok(), "{read:?}");
+/// The in-process store with its conditional writes failing, as an
+/// application database refusing them does.
+struct FailingWrites(Arc<dyn CeremonyStateStore>);
+
+#[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for FailingWrites {
+    async fn admit_once(&self, ns: &str, key: &str, ttl: Duration) -> sid_core::Result<bool> {
+        self.0.admit_once(ns, key, ttl).await
     }
+    async fn admit_for(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<bool> {
+        self.0.admit_for(ns, key, value, ttl).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CeremonyStateStore for FailingWrites {
+    async fn put_ceremony_state(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<()> {
+        self.0.put_ceremony_state(ns, key, value, ttl).await
+    }
+    async fn take_ceremony_state(&self, ns: &str, key: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.0.take_ceremony_state(ns, key).await
+    }
+    async fn read_ceremony_state(&self, ns: &str, key: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.0.read_ceremony_state(ns, key).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+        _: Duration,
+    ) -> sid_core::Result<bool> {
+        Err(sid_core::Error::Storage("down".into()))
+    }
+    async fn count_in_window(
+        &self,
+        ns: &str,
+        key: &str,
+        window: Duration,
+    ) -> sid_core::Result<u64> {
+        self.0.count_in_window(ns, key, window).await
+    }
+    async fn read_count(&self, ns: &str, key: &str) -> sid_core::Result<u64> {
+        self.0.read_count(ns, key).await
+    }
+    async fn clear_count(&self, ns: &str, key: &str) -> sid_core::Result<()> {
+        self.0.clear_count(ns, key).await
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        self.0.purge_expired_ceremony_state().await
+    }
+}
+
+/// A refusal the session store cannot record makes the call an outage of the
+/// store, not a refusal the page would weigh against a session still read
+/// as live.
+#[tokio::test]
+async fn a_refusal_the_store_cannot_record_is_an_outage() {
+    let f = fixture(Arc::new(FailingWrites(memory())), true);
+    let (id, csrf) = signed_in(&f, true).await;
+    let host = HostUpstream::new(Arc::new(f.adapter), Some(answering("16")));
+    let answer = host
+        .oneshot(call(
+            &api_path(),
+            Some(&format!("{COOKIE}={id}")),
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(grpc_status(&answer), "14");
+    assert_eq!(reason(&answer), "DEPENDENCY_UNAVAILABLE");
 }
 
 /// Without a hosted API, a call that is not the adapter's is unimplemented.

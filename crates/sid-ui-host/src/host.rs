@@ -193,12 +193,14 @@ where
             // this host presented; the session holding it refreshes before its
             // next use. A refusal answers without a body, its status in the
             // headers (gRPC over HTTP/2, Trailers-Only), so nothing is read.
+            // A mark the store cannot take makes the call an outage.
             if answer
                 .headers()
                 .get("grpc-status")
                 .is_some_and(|status| status.as_bytes() == UNAUTHENTICATED_STATUS)
+                && let Err(outage) = this.sessions.refused(&bearer).await
             {
-                this.sessions.refused(&bearer).await;
+                return Ok(outage.into_http());
             }
             Ok(answer)
         })

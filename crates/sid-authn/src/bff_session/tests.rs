@@ -1245,6 +1245,7 @@ fn test_debug_hides_the_tokens() {
         created_at: Utc::now(),
         last_access: Utc::now(),
         connection: CONN.into(),
+        token_refused: false,
     };
     let rendered = format!("{session:?}");
     assert!(!rendered.contains("super-secret"), "{rendered}");
@@ -1334,4 +1335,90 @@ async fn test_an_issuer_session_logout_ends_its_sessions_only() {
     assert!(b.ended_by_issuer(&claims).await.unwrap());
     assert!(!b.ended_by_issuer(&other).await.unwrap());
     assert!(!b.ended_by_issuer(&other_issuer).await.unwrap());
+}
+
+/// An API's refusal marks the session that still holds the refused token,
+/// on every replica, and a refresh that replaces the token clears it.
+#[tokio::test]
+async fn test_a_refusal_marks_the_session_holding_the_token() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.mark_token_refused(&id, &"access".into()).await.unwrap(),
+        TokenRefusal::Marked
+    );
+    assert!(b.get_session(&id).await.unwrap().unwrap().token_refused);
+    // A repeat changes nothing.
+    assert_eq!(
+        b.mark_token_refused(&id, &"access".into()).await.unwrap(),
+        TokenRefusal::Marked
+    );
+    assert!(matches!(
+        b.replace_tokens(
+            &id,
+            &"refresh".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            test_claims(),
+        )
+        .await
+        .unwrap(),
+        TokenReplacement::Replaced
+    ));
+    assert!(!a.get_session(&id).await.unwrap().unwrap().token_refused);
+}
+
+/// A refusal of a token the session no longer holds, a refusal naming
+/// another session and one for a session that ended change nothing: a late
+/// answer of an earlier call never marks a refresh or a new sign-in.
+#[tokio::test]
+async fn test_a_late_refusal_marks_nothing_newer() {
+    let s = store();
+    let (refreshed, _) = s
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    s.replace_tokens(
+        &refreshed,
+        &"refresh".into(),
+        "access-2".into(),
+        Some("refresh-2".into()),
+        test_claims(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.mark_token_refused(&refreshed, &"access".into())
+            .await
+            .unwrap(),
+        TokenRefusal::Superseded
+    );
+    assert!(
+        !s.get_session(&refreshed)
+            .await
+            .unwrap()
+            .unwrap()
+            .token_refused
+    );
+
+    let (other, _) = s
+        .create_session("access-other".into(), None, test_claims(), CONN)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.mark_token_refused(&other, &"access".into())
+            .await
+            .unwrap(),
+        TokenRefusal::Superseded
+    );
+    s.destroy_session(&other).await.unwrap();
+    assert_eq!(
+        s.mark_token_refused(&other, &"access-other".into())
+            .await
+            .unwrap(),
+        TokenRefusal::Ended
+    );
 }

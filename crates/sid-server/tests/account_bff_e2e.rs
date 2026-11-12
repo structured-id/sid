@@ -556,6 +556,107 @@ async fn the_issuers_back_channel_logout_signs_the_browser_out() {
     assert!(session.is_none());
 }
 
+/// The session's access token, not yet expired by its claims, replaced by
+/// one the account API refuses: the API's own UNAUTHENTICATED answer, which
+/// the host cannot foresee. The session id.
+async fn holding_a_token_the_api_refuses(deployment: &Deployment, browser: &Browser) -> String {
+    let id = browser.cookie.split_once('=').unwrap().1.to_owned();
+    let store = sessions(deployment);
+    let before = store.get_session(&id).await.unwrap().unwrap();
+    let held = before
+        .refresh_token
+        .clone()
+        .expect("the sign-in granted a refresh token");
+    assert!(before.claims.exp > chrono::Utc::now().timestamp());
+    assert!(matches!(
+        store
+            .replace_tokens(
+                &id,
+                &held,
+                secrecy::SecretString::from("not-a-token-the-api-accepts"),
+                before.refresh_token.clone(),
+                before.claims.clone(),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    id
+}
+
+/// The issuer ends the sign-in and its back-channel logout has not reached
+/// the host: the account API refuses the page's call as unauthenticated, and
+/// the page's next session read finds the session ended, because the
+/// refresh the refusal forces is refused by the issuer (`invalid_grant`),
+/// instead of answering it as still signed in.
+#[tokio::test]
+async fn a_session_the_api_refuses_before_its_logout_arrives_ends() {
+    use sid_core::models::{AuditEntry, RevocationReason, SessionEnd, SessionId};
+
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let id = holding_a_token_the_api_refuses(&deployment, &browser).await;
+    let held = sessions(&deployment)
+        .get_session(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    deployment
+        .svc
+        .storage
+        .delete_session(
+            SessionId::parse(&held.claims.sid).unwrap(),
+            &SessionEnd::new(RevocationReason::UserRequested, "test"),
+            AuditEntry::system("test", "sign out at the issuer").into(),
+        )
+        .await
+        .unwrap();
+
+    let (_, refused) = current_profile(&replica, &browser, true).await;
+    assert_eq!(refused, "16");
+    let (session, status) = read_session(&replica, &browser.cookie).await;
+    assert_eq!(status, "16");
+    assert!(session.is_none());
+    assert!(
+        sessions(&deployment)
+            .get_session(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A token the API refused while the issuer still honours the grant: the
+/// refused call is answered as refused, not retried; the next use refreshes,
+/// goes through with the new token, and the one after it is not refreshed
+/// again.
+#[tokio::test]
+async fn a_refused_token_is_refreshed_once_and_the_session_goes_on() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let id = holding_a_token_the_api_refuses(&deployment, &browser).await;
+    let store = sessions(&deployment);
+    let before = store.get_session(&id).await.unwrap().unwrap();
+
+    let (_, refused) = current_profile(&replica, &browser, true).await;
+    assert_eq!(refused, "16");
+    assert!(store.get_session(&id).await.unwrap().unwrap().token_refused);
+
+    let (profile, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    let refreshed = store.get_session(&id).await.unwrap().unwrap();
+    assert_ne!(refreshed.bearer(), before.bearer());
+    assert!(!refreshed.token_refused);
+
+    let (_, again) = current_profile(&replica, &browser, true).await;
+    assert_eq!(again, "0");
+    let after = store.get_session(&id).await.unwrap().unwrap();
+    assert_eq!(after.bearer(), refreshed.bearer(), "refreshed only once");
+}
+
 /// Sign-in through one replica, the account API through another: the user
 /// sees their own profile, the page's request without the CSRF token is
 /// refused, and the bundle is served on the same listener.
