@@ -93,6 +93,18 @@ async fn hold_and_settle(
     acknowledge(&msg, &settlement, name).await;
 }
 
+/// Whether the consumer stopped before taking a delivery; such a delivery
+/// is released at once, so another replica gets it without waiting.
+fn release_unsent(sent: Result<(), mpsc::error::SendError<Delivery>>) -> bool {
+    match sent {
+        Ok(()) => false,
+        Err(mpsc::error::SendError(delivery)) => {
+            delivery.settle(Settlement::Retry(std::time::Duration::ZERO));
+            true
+        }
+    }
+}
+
 /// Tell the server how `msg` was settled.
 async fn acknowledge(msg: &jetstream::Message, settlement: &Settlement, name: &str) {
     use async_nats::jetstream::AckKind;
@@ -325,7 +337,6 @@ impl EventBus for NatsEventBus {
 
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
-            use async_nats::jetstream::AckKind;
             use futures::StreamExt;
             let mut messages = messages;
             // The unordered consumer's held deliveries, each settled by its
@@ -334,6 +345,19 @@ impl EventBus for NatsEventBus {
             let in_flight = std::sync::Arc::new(tokio::sync::Semaphore::new(DURABLE_IN_FLIGHT));
             loop {
                 while settling.try_join_next().is_some() {}
+                // A slot is taken before the next message is pulled, so no
+                // pulled message waits unrenewed for room to be held.
+                let permit = if ordered {
+                    None
+                } else {
+                    Some(
+                        in_flight
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("the consumer's semaphore is never closed"),
+                    )
+                };
                 let msg = match messages.next().await {
                     Some(Ok(msg)) => msg,
                     // A missed heartbeat, a deleted consumer or an ended
@@ -377,29 +401,34 @@ impl EventBus for NatsEventBus {
                     .unwrap_or_else(tokio::time::Instant::now);
                 let (deadline, hold) = tokio::sync::watch::channel(first);
                 let (delivery, outcome) = Delivery::held(event, attempt, Hold::until(hold));
-                if tx.send(delivery).await.is_err() {
-                    // The consumer stopped: the event stays its own.
-                    if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
-                        tracing::warn!(consumer = %name, "release an event: {e}");
-                    }
-                    break;
-                }
+                // Renewal runs from here on, so a delivery waiting for a busy
+                // receiver stays held rather than expiring and coming again.
                 if ordered {
+                    let mut holding =
+                        std::pin::pin!(hold_and_settle(msg, outcome, deadline, ack_wait, &name));
+                    let sent = tokio::select! {
+                        sent = tx.send(delivery) => sent,
+                        // Settled only through the delivery, which is not
+                        // handed out yet: renewal runs here meanwhile.
+                        () = &mut holding => unreachable!("settled before it was handed out"),
+                    };
+                    let stopped = release_unsent(sent);
                     // Settled before the next is read: the consumer's order.
-                    hold_and_settle(msg, outcome, deadline, ack_wait, &name).await;
+                    holding.await;
+                    if stopped {
+                        break;
+                    }
                 } else {
-                    // Held by its own task, so the next is handed out now;
-                    // no more than `DURABLE_IN_FLIGHT` are held at once.
-                    let permit = in_flight
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .expect("the consumer's semaphore is never closed");
-                    let name = name.clone();
+                    // Held by its own task, so the next is handed out once it
+                    // is taken; no more than `DURABLE_IN_FLIGHT` are held.
+                    let held = name.clone();
                     settling.spawn(async move {
-                        hold_and_settle(msg, outcome, deadline, ack_wait, &name).await;
+                        hold_and_settle(msg, outcome, deadline, ack_wait, &held).await;
                         drop(permit);
                     });
+                    if release_unsent(tx.send(delivery).await) {
+                        break;
+                    }
                 }
             }
             // Deliveries still held are settled before the consumer ends.

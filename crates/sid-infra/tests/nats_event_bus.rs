@@ -437,6 +437,46 @@ async fn test_unordered_consumer_hands_out_work_before_settlement() {
     drop_topology(&t).await;
 }
 
+/// A delivery waiting for its receiver to take it is renewed from the moment
+/// it is read, so a busy receiver keeps it past the acknowledgement wait and
+/// another replica does not get it meanwhile (regression: renewal began only
+/// once the receiver had taken the delivery, so one waiting behind a busy
+/// receiver expired and went to another replica while still this one's).
+#[tokio::test]
+async fn test_a_delivery_waiting_for_a_busy_receiver_stays_with_it() {
+    let mut t = topology();
+    t.work_ack_wait = Duration::from_secs(2);
+    let bus = owner(&t).await;
+    let receiver = recipient("busy");
+    let events: Vec<Event> = (0..2)
+        .map(|_| Event::new("sid-test", event_types::USER_CREATED))
+        .collect();
+    for event in &events {
+        bus.deliver(&receiver, event.delivery_id(&receiver), event)
+            .await
+            .unwrap();
+    }
+    // Not read for well past the acknowledgement wait: the first delivery
+    // waits in the receiver's channel, the second behind it. An expired one
+    // would come back from the server as a second attempt.
+    let mut deliveries = bus.consume(consumer_of("busy")).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(7)).await;
+
+    for _ in &events {
+        let delivery = next(&mut deliveries).await;
+        assert_eq!(
+            delivery.attempt, 1,
+            "a waiting delivery expired and came again"
+        );
+        delivery.settle(Settlement::Done);
+    }
+    assert!(
+        quiet(&mut deliveries).await,
+        "a delivery expired while waiting for its receiver"
+    );
+    drop_topology(&t).await;
+}
+
 /// A delivery its consumer is still processing is renewed past the
 /// acknowledgement wait, so another replica does not get it meanwhile, and
 /// its hold stays ahead; one settled for retry comes again as attempt 2.
