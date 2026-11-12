@@ -101,6 +101,11 @@ pub async fn accept_event(store: &dyn WorkStore, event: &Event) -> sid_core::Res
 /// accepted (the job store is down).
 pub const REDELIVER_AFTER: Duration = Duration::from_secs(5);
 
+/// Deliveries accepted at once: each waits on its own store write and is
+/// settled by its own outcome, so the receiver is bounded by the store's
+/// concurrency, not by one write's latency.
+pub const ACCEPT_CONCURRENCY: usize = 32;
+
 /// Open the durable consumer of the work addressed to `recipient` on `bus`.
 /// Replicas consuming as the same receiver share its work.
 pub async fn open_work(
@@ -115,34 +120,53 @@ pub async fn open_work(
     .await
 }
 
-/// Accept `deliveries` until the bus ends the consumer or `stop` resolves.
-/// Each event is settled only once its routing job is stored, and left with
-/// the bus (delivered again later) otherwise; `accepted` runs after each
-/// stored one.
+/// Accept `deliveries` until the bus ends the consumer or `stop` resolves,
+/// up to [`ACCEPT_CONCURRENCY`] at once. Each event is settled only once its
+/// routing job is stored, and left with the bus (delivered again later)
+/// otherwise; `accepted` runs after each stored one. On `stop` the
+/// unfinished ones are dropped unsettled, so the bus delivers them again; a
+/// job already stored for one is the same job then.
 pub async fn accept_work(
     mut deliveries: mpsc::Receiver<Delivery>,
     store: &dyn WorkStore,
     accepted: impl Fn(),
     stop: impl std::future::Future<Output = ()>,
 ) {
+    use futures::StreamExt;
+
     tokio::pin!(stop);
-    loop {
-        let delivery = tokio::select! {
-            delivery = deliveries.recv() => match delivery {
-                Some(delivery) => delivery,
-                None => return,
-            },
+    let mut accepting = futures::stream::FuturesUnordered::new();
+    let mut open = true;
+    while open || !accepting.is_empty() {
+        tokio::select! {
+            delivery = deliveries.recv(), if open && accepting.len() < ACCEPT_CONCURRENCY => {
+                match delivery {
+                    Some(delivery) => accepting.push(accept_one(store, delivery)),
+                    None => open = false,
+                }
+            }
+            Some(stored) = accepting.next(), if !accepting.is_empty() => {
+                if stored {
+                    accepted();
+                }
+            }
             () = &mut stop => return,
-        };
-        match accept_event(store, &delivery.event).await {
-            Ok(()) => {
-                delivery.settle(Settlement::Done);
-                accepted();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "event not accepted; left with the bus");
-                delivery.settle(Settlement::Retry(REDELIVER_AFTER));
-            }
+        }
+    }
+}
+
+/// Store `delivery`'s routing job and settle it by the outcome: whether it
+/// was stored.
+async fn accept_one(store: &dyn WorkStore, delivery: Delivery) -> bool {
+    match accept_event(store, &delivery.event).await {
+        Ok(()) => {
+            delivery.settle(Settlement::Done);
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "event not accepted; left with the bus");
+            delivery.settle(Settlement::Retry(REDELIVER_AFTER));
+            false
         }
     }
 }
