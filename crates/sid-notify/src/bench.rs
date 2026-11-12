@@ -1,19 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Durable delivery cost, measured the same way on every work store:
 //!
-//! - `accept`: P50/P99/P999 of committing one owed event (its routing job);
-//! - `deliver`: P50/P99/P999 of one event, accepted on a running idle runner,
-//!   until both channels of its route (email and webhook) were sent it;
-//! - `drain`: the rate a backlog of `BACKLOG` owed events is routed, planned
-//!   and delivered at, until every delivery reached its channel; `settle`:
-//!   until every work item's completion was committed; `settled`: the same
-//!   for one event on an idle runner;
-//! - `handoff`: P50/P99/P999 of handing a producer's work to JetStream
-//!   (publish and PubAck), and the rate that backlog is accepted into the
-//!   receiver's store.
+//! - `enqueue`: one event's routing job committed through
+//!   `WorkStore::enqueue_work`, alone, by one producer. It is the work
+//!   store's own commit, not a domain mutation committing state, audit and
+//!   owed work together;
+//! - `drain`: a backlog of events routed, planned and delivered by one
+//!   runner until every delivery reached its channel, as events/s; each event
+//!   is `FAN_OUT` deliveries and `COMPLETIONS` work items. `settle`: until
+//!   every work item's completion was committed;
+//! - `deliver`: one event, enqueued on a running idle runner, until both
+//!   channels of its route were sent it; `settled`: until its last work item's
+//!   completion was committed;
+//! - `replicas`: `PRODUCERS` producers enqueueing concurrently into a store
+//!   drained at the same time by several runners, each on a client of its own
+//!   as separate service replicas are, and how many deliveries were repeated;
+//! - `publish`: one event handed to JetStream, publish until PubAck; `accept`:
+//!   that backlog's deliveries durably accepted into the receiver's store,
+//!   as deliveries/s.
 //!
-//! A harness builds its store and calls [`store_modes`] (and [`handoff`]);
-//! templates live in a fresh database on the PostgreSQL server
+//! Each latency line keeps its `n` and prints P999 only when at least ten
+//! samples lie above it. `usage` lines give each phase's CPU (as busy cores
+//! over its wall time) and resident memory for this process and for the
+//! store and broker servers beside it (PostgreSQL, MongoDB, NATS), read from
+//! Linux `/proc`; a server process that ended inside the phase is not
+//! counted.
+//!
+//! A harness builds its stores and calls [`store_modes`], [`replicas`] and
+//! [`handoff`]; templates live in a fresh database on the PostgreSQL server
 //! `SID_BENCH_POSTGRES_URL` (default port 54399), as the notifier keeps them,
 //! and JetStream is the test NATS (`SID_TEST_NATS_URL`, default port 4399).
 //! Each run starts on an empty database and its own streams. Progress is
@@ -43,12 +57,18 @@ use crate::{
     TemplateStore,
 };
 
-/// Events committed one at a time for `accept`.
-const ACCEPTS: usize = 2_000;
+/// Events committed one at a time for `enqueue`: enough for a P999.
+const ENQUEUES: usize = 10_000;
 /// Events delivered one at a time for `deliver`.
 const SINGLES: usize = 500;
-/// Events owed at once for `drain` and `handoff`.
+/// Events owed at once for `drain` and `replicas`.
 const BACKLOG: usize = 5_000;
+/// Events handed to JetStream one at a time for `publish`: enough for a P999.
+const PUBLISHES: usize = 10_000;
+/// Producers enqueueing at once for `replicas`.
+const PRODUCERS: usize = 8;
+/// Samples above a quantile before it is printed.
+const TAIL: usize = 10;
 /// Deliveries each event's route makes.
 const FAN_OUT: usize = 2;
 /// Work items each event completes in the store: its route, its plan and
@@ -166,21 +186,22 @@ impl NotificationChannel for Immediate {
 /// runner claims from one loop, so the summed claim time against the
 /// drain's wall time tells whether that loop bounds it. `completed` counts
 /// each completion the store answered as committed, stamped on its answer:
-/// the durable end of a work item, which a channel's send precedes.
+/// the durable end of a work item, which a channel's send precedes. Several
+/// replicas' stores count into one `completed`.
 struct Timed {
     inner: Arc<dyn WorkStore>,
     calls: std::sync::Mutex<std::collections::HashMap<&'static str, Vec<Duration>>>,
     claimed: std::sync::Mutex<Vec<usize>>,
-    completed: Progress,
+    completed: Arc<Progress>,
 }
 
 impl Timed {
-    fn new(inner: Arc<dyn WorkStore>) -> Self {
+    fn new(inner: Arc<dyn WorkStore>, completed: Arc<Progress>) -> Self {
         Self {
             inner,
             calls: Default::default(),
             claimed: Default::default(),
-            completed: Progress::default(),
+            completed,
         }
     }
 
@@ -392,31 +413,165 @@ impl Waits {
     }
 }
 
-/// P50, P99 and P999 of `samples`.
+/// The quantile `per_mille` of sorted `samples`, or `None` while fewer than
+/// `TAIL` samples lie above it.
+fn quantile(samples: &[Duration], per_mille: usize) -> Option<Duration> {
+    let above = samples.len() * (1000 - per_mille) / 1000;
+    (above >= TAIL).then(|| samples[(samples.len() * per_mille / 1000).min(samples.len() - 1)])
+}
+
+/// P50, P99 and P999 of `samples`, each only with enough samples above it.
 fn report(mode: &str, what: &str, mut samples: Vec<Duration>) {
     samples.sort_unstable();
-    let at = |q: usize| samples[(samples.len() * q / 1000).min(samples.len() - 1)];
+    let show = |per_mille| match quantile(&samples, per_mille) {
+        Some(at) => format!("{at:>9.3?}"),
+        None => format!("{:>9}", "-"),
+    };
     println!(
-        "{mode:<10} {what:<9} n={:<6} p50={:>9.3?} p99={:>9.3?} p999={:>9.3?} max={:>9.3?}",
+        "{mode:<10} {what:<9} n={:<6} p50={} p99={} p999={} max={:>9.3?}",
         samples.len(),
-        at(500),
-        at(990),
-        at(999),
+        show(500),
+        show(990),
+        show(999),
         samples[samples.len() - 1],
     );
 }
 
-fn rate(mode: &str, what: &str, items: usize, took: Duration) {
+/// `events` events drained in `took`, each `FAN_OUT` deliveries and
+/// `COMPLETIONS` work items.
+fn drained(mode: &str, what: &str, events: usize, took: Duration) {
     println!(
-        "{mode:<10} {what:<9} {items} in {took:.3?}: {:.0}/s",
-        items as f64 / took.as_secs_f64()
+        "{mode:<10} {what:<9} {events} events ({} deliveries, {} work items) in {took:.3?}: {:.0} events/s",
+        events * FAN_OUT,
+        events * COMPLETIONS,
+        events as f64 / took.as_secs_f64()
     );
+}
+
+/// CPU time and resident memory of one process.
+#[derive(Clone, Copy)]
+struct Process {
+    cpu: Duration,
+    rss: u64,
+}
+
+/// The processes measured in one snapshot: this one, and the store and
+/// broker servers by name.
+struct Snapshot {
+    at: Instant,
+    own: Process,
+    servers: std::collections::HashMap<u32, (String, Process)>,
+}
+
+/// The server processes measured beside this one.
+const SERVERS: [&str; 4] = ["postgres", "mongod", "mongos", "nats-server"];
+
+/// `/proc/<pid>/stat` counts CPU time in USER_HZ ticks, which the kernel's
+/// ABI fixes at 100 per second (`proc(5)`).
+const USER_HZ: u64 = 100;
+
+/// A process's name and CPU time from its `/proc/<pid>/stat` line. The name
+/// is in parentheses and may itself hold spaces or parentheses, so the
+/// fields are read after its last `)`: from the state (field 3), utime and
+/// stime are fields 14 and 15 (`proc(5)`).
+fn parse_stat(stat: &str) -> Option<(String, Duration)> {
+    let close = stat.rfind(')')?;
+    let name = stat.get(stat.find('(')? + 1..close)?.to_string();
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    let ticks: u64 = fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+    Some((name, Duration::from_millis(ticks * 1000 / USER_HZ)))
+}
+
+/// Resident memory in bytes from a `/proc/<pid>/status` (`VmRSS`, in kB);
+/// zero for a process without one (a kernel thread).
+fn parse_rss(status: &str) -> u64 {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|kb| kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map_or(0, |kb| kb * 1024)
+}
+
+/// One process from `/proc/<pid>`: its name, CPU time and resident memory.
+fn process(dir: &std::path::Path) -> Option<(String, Process)> {
+    let (name, cpu) = parse_stat(&std::fs::read_to_string(dir.join("stat")).ok()?)?;
+    let rss = parse_rss(&std::fs::read_to_string(dir.join("status")).ok()?);
+    Some((name, Process { cpu, rss }))
+}
+
+impl Snapshot {
+    /// This process and the server processes now, or `None` without `/proc`.
+    fn take() -> Option<Self> {
+        let at = Instant::now();
+        let (_, own) = process(std::path::Path::new("/proc/self"))?;
+        let mut servers = std::collections::HashMap::new();
+        for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if let Some((name, measured)) = process(&entry.path())
+                && SERVERS.contains(&name.as_str())
+            {
+                servers.insert(pid, (name, measured));
+            }
+        }
+        Some(Self { at, own, servers })
+    }
+
+    /// Each one's busy cores and resident memory between `self` and `end`.
+    fn report(&self, end: &Self, mode: &str, phase: &str) {
+        let wall = (end.at - self.at).as_secs_f64();
+        let cores = |cpu: Duration| cpu.as_secs_f64() / wall;
+        let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
+        let mut line = format!(
+            "{mode:<10} usage     {phase:<8} wall={:.3}s own={:.2} cores rss={:.0}MiB",
+            wall,
+            // A process's CPU time only grows.
+            cores(end.own.cpu - self.own.cpu),
+            mib(end.own.rss),
+        );
+        let mut by_name: std::collections::BTreeMap<&str, (Duration, u64, usize)> =
+            Default::default();
+        for (pid, (name, measured)) in &end.servers {
+            // A process started inside the phase, or a new one under a reused
+            // pid, counts all of its CPU time.
+            let before = match self.servers.get(pid) {
+                Some((was, p)) if was == name && p.cpu <= measured.cpu => p.cpu,
+                _ => Duration::ZERO,
+            };
+            let entry = by_name.entry(name.as_str()).or_default();
+            entry.0 += measured.cpu - before;
+            entry.1 += measured.rss;
+            entry.2 += 1;
+        }
+        for (name, (cpu, rss, processes)) in by_name {
+            line.push_str(&format!(
+                " {name}={:.2} cores rss={:.0}MiB ({processes} processes)",
+                cores(cpu),
+                mib(rss)
+            ));
+        }
+        println!("{line}");
+    }
+}
+
+/// The usage of the phase from `start` until now, when `/proc` measured it.
+fn usage(start: &Option<Snapshot>, mode: &str, phase: &str) {
+    match (start, Snapshot::take()) {
+        (Some(start), Some(end)) => start.report(&end, mode, phase),
+        _ => println!("{mode:<10} usage     {phase:<8} unavailable (no /proc)"),
+    }
 }
 
 /// A runner over `store` delivering to channels counting into `sent`,
 /// rendering from `templates` as the service does.
 fn runner(
     store: &Arc<dyn WorkStore>,
+    worker: &str,
     sent: &Arc<Progress>,
     templates: &Arc<TemplateStore>,
 ) -> WorkRunner {
@@ -442,7 +597,7 @@ fn runner(
     ];
     WorkRunner::new(
         store.clone(),
-        "bench",
+        worker,
         handlers,
         RunnerConfig {
             concurrency: 32,
@@ -453,12 +608,9 @@ fn runner(
     .unwrap()
 }
 
-/// `accept`, `drain` and `deliver` over `store`, printed under `mode`; every
-/// delivery reads its template from the service's own PostgreSQL database.
-/// `sessions`, the store's own PostgreSQL pool when it has one, is sampled
-/// for where a drain's sessions wait.
-pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option<&sqlx::PgPool>) {
-    let templates = Arc::new(
+/// The notifier's templates, in a fresh database on the bench server.
+async fn templates() -> Arc<TemplateStore> {
+    Arc::new(
         TemplateStore::new(
             &RoutingTable::default_ce_rules(),
             Arc::new(tokio::sync::RwLock::new(
@@ -468,42 +620,55 @@ pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option
         )
         .await
         .unwrap(),
-    );
-    let mut samples = Vec::with_capacity(ACCEPTS);
+    )
+}
+
+/// `enqueue`, `drain` and `deliver` over `store`, printed under `mode`; every
+/// delivery reads its template from the service's own PostgreSQL database.
+/// `sessions`, the store's own PostgreSQL pool when it has one, is sampled
+/// for where a drain's sessions wait.
+pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option<&sqlx::PgPool>) {
+    let templates = templates().await;
+    let mut samples = Vec::with_capacity(ENQUEUES);
     let mut owed = 0;
-    for _ in 0..ACCEPTS {
+    let measured = Snapshot::take();
+    for _ in 0..ENQUEUES {
         let event = event();
         let started = Instant::now();
         accept_event(store.as_ref(), &event).await.unwrap();
         samples.push(started.elapsed());
         owed += 1;
     }
-    report(mode, "accept", samples);
+    usage(&measured, mode, "enqueue");
+    report(mode, "enqueue", samples);
 
     for _ in 0..BACKLOG {
         accept_event(store.as_ref(), &event()).await.unwrap();
         owed += 1;
     }
     let sent = Arc::new(Progress::default());
+    let completed = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let timed = Arc::new(Timed::new(store.clone()));
+    let timed = Arc::new(Timed::new(store.clone(), completed.clone()));
     let timed_store: Arc<dyn WorkStore> = timed.clone();
     let waits = match sessions {
         Some(pool) => Some(Waits::start(pool).await),
         None => None,
     };
+    let measured = Snapshot::take();
     let started = Instant::now();
-    let runner = runner(&timed_store, &sent, &templates);
+    let runner = runner(&timed_store, "bench", &sent, &templates);
     // Woken after each acceptance, as the notifier's consumer does.
     let waker = runner.waker();
     let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
     let done = sent.reach(owed * FAN_OUT).await;
-    // The accepted ones of `accept` drain with the backlog: `drain` until
-    // every delivery reached its channel, `settle` until every work item's
+    // The events of `enqueue` drain with the backlog: `drain` until every
+    // delivery reached its channel, `settle` until every work item's
     // completion was committed.
-    rate(mode, "drain", owed, done - started);
-    let settled = timed.completed.reach(owed * COMPLETIONS).await;
-    rate(mode, "settle", owed, settled - started);
+    drained(mode, "drain", owed, done - started);
+    let settled = completed.reach(owed * COMPLETIONS).await;
+    usage(&measured, mode, "drain");
+    drained(mode, "settle", owed, settled - started);
     timed.report(mode, settled - started);
     if let Some(waits) = waits {
         waits.report(mode).await;
@@ -513,19 +678,114 @@ pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option
     let mut settled_samples = Vec::with_capacity(SINGLES);
     for _ in 0..SINGLES {
         let before = sent.count();
-        let completed = timed.completed.count();
+        let committed = completed.count();
         let started = Instant::now();
         accept_event(store.as_ref(), &event()).await.unwrap();
         waker.wake();
         let delivered = sent.reach(before + FAN_OUT).await;
         samples.push(delivered - started);
-        let settled = timed.completed.reach(completed + COMPLETIONS).await;
+        let settled = completed.reach(committed + COMPLETIONS).await;
         settled_samples.push(settled - started);
     }
     report(mode, "deliver", samples);
     report(mode, "settled", settled_samples);
     stop.send(()).unwrap();
     running.await.unwrap();
+}
+
+/// How long a drain stays quiet after its last delivery before the
+/// deliveries are counted for repeats.
+const QUIET: Duration = Duration::from_secs(2);
+
+/// `replicas`: one runner on each of `stores` (each a client of its own, as
+/// separate service replicas hold), draining while `PRODUCERS` producers
+/// enqueue `BACKLOG` events between them, each producer on one of the
+/// stores in turn. Printed under `mode`.
+pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
+    assert!(!stores.is_empty(), "replicas needs at least one store");
+    let templates = templates().await;
+    let sent = Arc::new(Progress::default());
+    let completed = Arc::new(Progress::default());
+    let mut stops = Vec::with_capacity(stores.len());
+    let mut running = Vec::with_capacity(stores.len());
+    let mut wakers = Vec::with_capacity(stores.len());
+    let mut timed = Vec::with_capacity(stores.len());
+    // From the runners' start, so every call they make falls in the wall time.
+    let measured = Snapshot::take();
+    let started = Instant::now();
+    for (replica, store) in stores.iter().enumerate() {
+        let measured = Arc::new(Timed::new(store.clone(), completed.clone()));
+        let measured_store: Arc<dyn WorkStore> = measured.clone();
+        timed.push(measured);
+        let runner = runner(
+            &measured_store,
+            &format!("bench-{replica}"),
+            &sent,
+            &templates,
+        );
+        wakers.push(runner.waker());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        stops.push(stop);
+        running.push(tokio::spawn(
+            runner.run(async move { stopped.await.unwrap_or(()) }),
+        ));
+    }
+    println!(
+        "{mode:<10} replicas  {} runners x 32 concurrent, {PRODUCERS} producers, {BACKLOG} events",
+        stores.len()
+    );
+
+    let wakers = Arc::new(wakers);
+    let produced = Instant::now();
+    let mut producing = tokio::task::JoinSet::new();
+    for producer in 0..PRODUCERS {
+        let store = stores[producer % stores.len()].clone();
+        let wakers = wakers.clone();
+        producing.spawn(async move {
+            let mut samples = Vec::with_capacity(BACKLOG / PRODUCERS + 1);
+            for _ in (producer..BACKLOG).step_by(PRODUCERS) {
+                let event = event();
+                let enqueued = Instant::now();
+                accept_event(store.as_ref(), &event).await.unwrap();
+                samples.push(enqueued.elapsed());
+                for waker in wakers.iter() {
+                    waker.wake();
+                }
+            }
+            samples
+        });
+    }
+    let mut samples = Vec::with_capacity(BACKLOG);
+    while let Some(produced) = producing.join_next().await {
+        samples.extend(produced.unwrap());
+    }
+    let enqueued = produced.elapsed();
+    let done = sent.reach(BACKLOG * FAN_OUT).await;
+    let settled = completed.reach(BACKLOG * COMPLETIONS).await;
+    usage(&measured, mode, "replicas");
+    report(mode, "enqueue*", samples);
+    drained(mode, "produce", BACKLOG, enqueued);
+    drained(mode, "drain", BACKLOG, done - started);
+    drained(mode, "settle", BACKLOG, settled - started);
+    // Each replica's calls up to the settle, before the quiet wait adds idle
+    // claims of its own.
+    for (replica, measured) in timed.iter().enumerate() {
+        measured.report(&format!("{mode}#{replica}"), settled - started);
+    }
+    // A delivery sent twice would show as more than the events' fan-out once
+    // the runners are quiet.
+    tokio::time::sleep(QUIET).await;
+    println!(
+        "{mode:<10} repeated  {} of {} deliveries",
+        sent.count() - BACKLOG * FAN_OUT,
+        BACKLOG * FAN_OUT
+    );
+    for stop in stops {
+        stop.send(()).unwrap();
+    }
+    for runner in running {
+        runner.await.unwrap();
+    }
 }
 
 /// A pool on `name`, created empty on the bench server.
@@ -558,6 +818,20 @@ pub async fn postgres() -> (Arc<dyn WorkStore>, sqlx::PgPool) {
     (Arc::new(store), pool)
 }
 
+/// `replicas` stores on one fresh PostgreSQL database, each on a pool of its
+/// own as separate service replicas connect.
+pub async fn postgres_replicas(replicas: usize) -> Vec<Arc<dyn WorkStore>> {
+    let (first, pool) = postgres().await;
+    let mut stores = vec![first];
+    for _ in 1..replicas {
+        let own = sqlx::PgPool::connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        stores.push(Arc::new(sid_storage::PgWorkStore::new(own)) as Arc<dyn WorkStore>);
+    }
+    stores
+}
+
 /// The PostgreSQL server's durability settings the measurement ran under.
 pub async fn durability(pool: &sqlx::PgPool) {
     for setting in [
@@ -576,7 +850,8 @@ pub async fn durability(pool: &sqlx::PgPool) {
     }
 }
 
-/// `handoff` through JetStream into `store`, on streams of its own.
+/// `publish` and `accept` through JetStream into `store`, on streams of its
+/// own.
 pub async fn handoff(store: Arc<dyn WorkStore>) {
     let mut topology = Topology::with_root(format!("b{}", uuid::Uuid::now_v7().simple())).unwrap();
     topology.work_max_bytes = 256 << 20;
@@ -585,8 +860,9 @@ pub async fn handoff(store: Arc<dyn WorkStore>) {
         .expect("bench NATS unreachable; start docker-compose.test.yml");
     let receiver = WorkRecipient::new("sid-notify").unwrap();
 
-    let mut samples = Vec::with_capacity(BACKLOG);
-    for _ in 0..BACKLOG {
+    let mut samples = Vec::with_capacity(PUBLISHES);
+    let measured = Snapshot::take();
+    for _ in 0..PUBLISHES {
         let event = event();
         let started = Instant::now();
         bus.deliver(&receiver, event.delivery_id(&receiver), &event)
@@ -594,9 +870,11 @@ pub async fn handoff(store: Arc<dyn WorkStore>) {
             .unwrap();
         samples.push(started.elapsed());
     }
-    report("jetstream", "handoff", samples);
+    usage(&measured, "jetstream", "publish");
+    report("jetstream", "publish", samples);
 
     let accepted = Arc::new(Progress::default());
+    let measured = Snapshot::take();
     let started = Instant::now();
     let deliveries = open_work(&bus, receiver).await.unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -609,8 +887,13 @@ pub async fn handoff(store: Arc<dyn WorkStore>) {
             .await;
         })
     };
-    let done = accepted.reach(BACKLOG).await;
-    rate("jetstream", "drain", BACKLOG, done - started);
+    let done = accepted.reach(PUBLISHES).await;
+    usage(&measured, "jetstream", "accept");
+    let took = done - started;
+    println!(
+        "jetstream  accept    {PUBLISHES} deliveries durably accepted in {took:.3?}: {:.0} deliveries/s",
+        PUBLISHES as f64 / took.as_secs_f64()
+    );
     stop.send(()).unwrap();
     consumer.await.unwrap();
 
@@ -621,3 +904,6 @@ pub async fn handoff(store: Arc<dyn WorkStore>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
