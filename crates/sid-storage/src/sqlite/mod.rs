@@ -15,6 +15,7 @@ mod schema;
 
 // Domain implementation modules
 mod application;
+mod assignment_set;
 mod attestation;
 mod audit;
 mod audit_retention;
@@ -2085,6 +2086,21 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<bool> {
         self.delete_role_assignment_fenced_impl(id, fence, audit)
             .await
+    }
+
+    async fn role_assignment_set(
+        &self,
+        set: &sid_core::models::AssignmentSet,
+    ) -> SidResult<(u64, Vec<sid_core::models::RoleAssignment>)> {
+        self.read_role_assignment_set(set).await
+    }
+
+    async fn replace_role_assignments(
+        &self,
+        change: &sid_core::models::AssignmentSetChange,
+        ctx: MutationContext,
+    ) -> SidResult<u64> {
+        self.replace_role_assignment_set(change, ctx).await
     }
 
     async fn list_role_assignments_for_profile(

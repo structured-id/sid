@@ -1130,6 +1130,30 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// The assignments of `set` with its revision, read together: the
+    /// revision this exact content is at, 0 for a set never changed. Every
+    /// write that stores or removes an assignment of the set moves it in the
+    /// same transaction; an emptied set keeps its revision.
+    async fn role_assignment_set(
+        &self,
+        set: &sid_core::models::AssignmentSet,
+    ) -> Result<(u64, Vec<RoleAssignment>)>;
+
+    /// Commit `change` in one transaction, answering the set's new revision:
+    /// only while the set is at `change.expected_revision`
+    /// (`AssignmentSetChanged` otherwise) and every fence holds (`Fenced`),
+    /// each deletion still naming an assignment of the set
+    /// (`AssignmentSetChanged` otherwise) and the last installation
+    /// administrator assignment kept (`InvalidState`). The commit moves the
+    /// set to exactly `expected_revision + 1`, even when nothing else
+    /// changes, so a caller records the outcome before it commits. Nothing
+    /// is written on any refusal.
+    async fn replace_role_assignments(
+        &self,
+        change: &sid_core::models::AssignmentSetChange,
+        ctx: MutationContext,
+    ) -> Result<u64>;
+
     /// List role assignments for a profile.
     async fn list_role_assignments_for_profile(
         &self,

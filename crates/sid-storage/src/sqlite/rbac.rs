@@ -275,7 +275,16 @@ async fn keep_last_administrator(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: RoleAssignmentId,
 ) -> SidResult<()> {
-    let administrators: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+    let administrators = administrator_assignments(tx).await?;
+    crate::check_other_administrator_assignment(id, &administrators)
+}
+
+/// The live installation administrator assignments in `tx`, each with its
+/// holder's status.
+pub(super) async fn administrator_assignments(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> SidResult<Vec<(uuid::Uuid, String)>> {
+    sqlx::query_as(
         "SELECT ra.id, p.status FROM role_assignments ra
          JOIN profiles p ON p.id = ra.profile_id
          WHERE ra.role_id = ? AND ra.scope = ?
@@ -286,8 +295,7 @@ async fn keep_last_administrator(
     .bind(fmt_dt(&chrono::Utc::now()))
     .fetch_all(&mut **tx)
     .await
-    .map_err(|e| SidError::Storage(format!("read administrator assignments: {e}")))?;
-    crate::check_other_administrator_assignment(id, &administrators)
+    .map_err(|e| SidError::Storage(format!("read administrator assignments: {e}")))
 }
 
 /// Store `role`'s editable fields in `tx` while the stored role is still at
@@ -438,7 +446,7 @@ pub(crate) async fn insert_policy_authority_in_tx(
 
 /// Check in `tx` that `fence` still holds. The write transaction is the
 /// only writer, so nothing can change what it read before it commits.
-async fn check_assignment_fence(
+pub(super) async fn check_assignment_fence(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     fence: &sid_core::models::AssignmentFence,
 ) -> SidResult<()> {
@@ -497,17 +505,30 @@ async fn read_assignments(
     pool: &sqlx::SqlitePool,
     rows: &[sqlx::sqlite::SqliteRow],
 ) -> SidResult<Vec<RoleAssignment>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| SidError::Storage(format!("read role assignments: {e}")))?;
+    read_assignments_in(&mut conn, rows).await
+}
+
+/// `rows` as assignments read on `conn`, so a transaction reads them in its
+/// own snapshot.
+pub(super) async fn read_assignments_in(
+    conn: &mut sqlx::SqliteConnection,
+    rows: &[sqlx::sqlite::SqliteRow],
+) -> SidResult<Vec<RoleAssignment>> {
     let assignments = rows
         .iter()
         .map(row_to_role_assignment)
         .collect::<SidResult<Vec<_>>>()?;
-    with_admin_envelopes(pool, assignments).await
+    with_admin_envelopes(conn, assignments).await
 }
 
 /// `SELECT {columns} FROM {table} WHERE assignment_id IN (...)` over `ids`,
 /// each bound as its 16 bytes.
 async fn rows_of_assignments<T>(
-    pool: &sqlx::SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     columns: &str,
     table: &str,
     ids: &[RoleAssignmentId],
@@ -524,7 +545,7 @@ where
         for id in chunk {
             query = query.bind(*id);
         }
-        rows.extend(query.fetch_all(pool).await?);
+        rows.extend(query.fetch_all(&mut *conn).await?);
     }
     Ok(rows)
 }
@@ -542,7 +563,7 @@ pub(super) fn placeholders(n: usize) -> String {
 /// envelopes of the administrative ones: a fixed number of reads, whatever
 /// the number of assignments.
 pub(crate) async fn with_admin_envelopes(
-    pool: &sqlx::SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     mut assignments: Vec<RoleAssignment>,
 ) -> SidResult<Vec<RoleAssignment>> {
     use sid_core::models::{AdminEnvelope, AdminOperation, RecipientKind};
@@ -563,7 +584,7 @@ pub(crate) async fn with_admin_envelopes(
     let at = |id: &RoleAssignmentId| position.get(id).copied().ok_or_else(|| unreadable(id));
 
     let ceilings: Vec<(RoleAssignmentId, String)> = rows_of_assignments(
-        pool,
+        &mut *conn,
         "assignment_id, permission",
         "role_assignment_ceilings",
         &ids,
@@ -581,7 +602,7 @@ pub(crate) async fn with_admin_envelopes(
     }
 
     let held: Vec<(RoleAssignmentId, String)> = rows_of_assignments(
-        pool,
+        &mut *conn,
         "assignment_id, operation",
         "role_assignment_policy_admin",
         &ids,
@@ -601,7 +622,7 @@ pub(crate) async fn with_admin_envelopes(
     }
 
     let heads: Vec<(RoleAssignmentId, Option<GroupId>, Option<i64>)> = rows_of_assignments(
-        pool,
+        &mut *conn,
         "assignment_id, recipient_group_id, max_validity_secs",
         "role_assignment_admin",
         &ids,
@@ -625,7 +646,7 @@ pub(crate) async fn with_admin_envelopes(
     }
 
     let entries: Vec<(RoleAssignmentId, String, String)> = rows_of_assignments(
-        pool,
+        &mut *conn,
         "assignment_id, kind, value",
         "role_assignment_admin_entries",
         &ids,
@@ -653,7 +674,7 @@ pub(crate) async fn with_admin_envelopes(
     }
 
     let roles: Vec<(RoleAssignmentId, RoleId)> = rows_of_assignments(
-        pool,
+        &mut *conn,
         "assignment_id, role_id",
         "role_assignment_admin_roles",
         &ids,

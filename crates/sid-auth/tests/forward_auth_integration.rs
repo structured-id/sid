@@ -97,6 +97,12 @@ impl AuthzService for MockAuthz {
     ) -> Result<TonicResponse<RevokeRoleResponse>, Status> {
         Err(Status::unimplemented(""))
     }
+    async fn set_role_assignments(
+        &self,
+        _r: TonicRequest<SetRoleAssignmentsRequest>,
+    ) -> Result<TonicResponse<SetRoleAssignmentsResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
     async fn list_role_assignments(
         &self,
         _r: TonicRequest<ListRoleAssignmentsRequest>,

@@ -4602,6 +4602,19 @@ impl StorageBackend for MockStorage {
         inner.keep_last_administrator(id)?;
         Ok(inner.remove_assignment(id))
     }
+    async fn role_assignment_set(
+        &self,
+        _: &sid_core::models::AssignmentSet,
+    ) -> SidResult<(u64, Vec<RoleAssignment>)> {
+        unimplemented!("assignment sets are exercised against the storage engines")
+    }
+    async fn replace_role_assignments(
+        &self,
+        _: &sid_core::models::AssignmentSetChange,
+        _: MutationContext,
+    ) -> SidResult<u64> {
+        unimplemented!("assignment sets are exercised against the storage engines")
+    }
     async fn list_role_assignments_for_profile(
         &self,
         p: ProfileId,

@@ -17,12 +17,12 @@ use std::sync::Arc;
 use prost::Message;
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
-use sid_authz::admin::{Administrator, RoleAdministration};
+use sid_authz::admin::{Administrator, RoleAdministration, SetRequest};
 use sid_authz::cedar::{CedarEffect, CedarError, CedarService};
 use sid_core::Error as SidError;
 use sid_core::models::audit::ActorType;
 use sid_core::models::{
-    AUTHZ_CHECK, ActorFence, AuditEntry, AuthzPrincipal, CedarPolicy, CedarPolicyId,
+    AUTHZ_CHECK, ActorFence, AssignmentSet, AuditEntry, AuthzPrincipal, CedarPolicy, CedarPolicyId,
     ConnectorState, Group, GroupId, GroupMember, MachineUserId, MutationContext, OperationContext,
     PolicyOperation, PolicyScope, ProjectId, ProvisioningConnectorId, ResourceId, ResourceState,
     Role, RoleAssignment, RoleAssignmentPrincipal, TOKEN_INTROSPECT,
@@ -257,6 +257,10 @@ pub enum AuthorizationError {
     /// The record changed since it was read.
     #[error("changed concurrently")]
     ChangedConcurrently,
+    /// The assignment set is no longer at the revision the replacement was
+    /// decided against.
+    #[error("the role assignment set changed: it is at revision {current}")]
+    AssignmentSetChanged { current: u64 },
     /// No administrative assignment of the actor covers the change.
     #[error("no administrative assignment of the caller covers this change")]
     Denied,
@@ -345,6 +349,57 @@ fn revocation(error: SidError) -> AuthorizationError {
         SidError::InvalidState(why) => AuthorizationError::LastAdministrator(why),
         other => administration(other),
     }
+}
+
+/// Why replacing an assignment set was refused: the set moved on, or the
+/// last installation administrator assignment would go, otherwise as
+/// [`administration`].
+fn replacement(error: SidError) -> AuthorizationError {
+    match error {
+        SidError::AssignmentSetChanged { current } => {
+            AuthorizationError::AssignmentSetChanged { current }
+        }
+        other => revocation(other),
+    }
+}
+
+/// The set a request names.
+fn assignment_set_of(set: Option<RoleAssignmentSet>) -> Result<AssignmentSet, AuthorizationError> {
+    use role_assignment_set::Holder;
+    let set = set.ok_or(AuthorizationError::MissingField("assignment_set"))?;
+    let principal = match set.holder {
+        Some(Holder::ProfileId(id)) => {
+            RoleAssignmentPrincipal::Profile(wire_id(Some(&id), "assignment_set.profile_id")?)
+        }
+        Some(Holder::GroupId(id)) => {
+            RoleAssignmentPrincipal::Group(wire_id(Some(&id), "assignment_set.group_id")?)
+        }
+        Some(Holder::MachineUserId(id)) => RoleAssignmentPrincipal::MachineUser(wire_id(
+            Some(&id),
+            "assignment_set.machine_user_id",
+        )?),
+        Some(Holder::OauthClientId(client_id)) => RoleAssignmentPrincipal::OAuthClient(client_id),
+        Some(Holder::ProvisioningConnectorId(id)) => {
+            RoleAssignmentPrincipal::ProvisioningConnector(connector_id(&id)?)
+        }
+        None => return Err(AuthorizationError::MissingField("assignment_set.holder")),
+    };
+    Ok(AssignmentSet {
+        principal,
+        scope: set.scope,
+    })
+}
+
+/// A timestamp of a request field, which must be in the future.
+fn future_timestamp(
+    ts: prost_types::Timestamp,
+    field: &'static str,
+) -> Result<chrono::DateTime<chrono::Utc>, AuthorizationError> {
+    u32::try_from(ts.nanos)
+        .ok()
+        .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
+        .filter(|at| *at > chrono::Utc::now())
+        .ok_or_else(|| invalid_field(field, "not a timestamp in the future"))
 }
 
 /// The answer to a command once its commit returned `committed`: `answer`
@@ -812,6 +867,109 @@ impl Authorization {
         self.resolved(&command, answer).await
     }
 
+    /// Make one holder's assignments of the managed roles in one exact scope
+    /// exactly the requested ones, in one commit at the expected revision.
+    /// Every request moves the revision; a retry answers what the first
+    /// attempt recorded without moving it again.
+    pub async fn set_role_assignments(
+        &self,
+        actor: &Actor,
+        operation: OperationContext,
+        req: SetRoleAssignmentsRequest,
+    ) -> Result<SetRoleAssignmentsResponse, AuthorizationError> {
+        let administrator = actor.administrator()?;
+        let command = KeyedCommand::of::<keyed::SetRoleAssignments>(
+            format!("authz:{}", administrator.subject()),
+            operation,
+            &req,
+        );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(recorded);
+        }
+        let answer = async {
+            let set = assignment_set_of(req.assignment_set.clone())?;
+            if let RoleAssignmentPrincipal::OAuthClient(client_id) = &set.principal {
+                self.confidential_client(client_id).await?;
+            }
+            let mut managed = std::collections::BTreeSet::new();
+            for id in &req.managed_role_ids {
+                managed.insert(wire_id(Some(id), "managed_role_ids")?);
+            }
+            let mut assignments = Vec::with_capacity(req.assignments.len());
+            for requested in &req.assignments {
+                let role_id = wire_id(requested.role_id.as_ref(), "assignments.role_id")?;
+                let until = requested
+                    .expires_at
+                    .map(|ts| future_timestamp(ts, "assignments.expires_at"))
+                    .transpose()?;
+                assignments.push((role_id, until));
+            }
+            // The same shape rules as a single assignment, for each requested one.
+            for (role_id, until) in &assignments {
+                let role = self
+                    .storage
+                    .get_role(*role_id)
+                    .await?
+                    .ok_or_else(|| AuthorizationError::RoleNotFound(role_id.to_string()))?;
+                let mut probe = RoleAssignment::new(set.principal.clone(), *role_id);
+                probe.scope = set.scope.clone();
+                probe.expires_at = *until;
+                check_installation_assignment(&role, &probe)?;
+                if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
+                    self.check_service_assignment(&probe).await?;
+                }
+                if role
+                    .permissions
+                    .iter()
+                    .any(|p| sid_core::models::is_invite_action(p))
+                {
+                    self.check_invite_assignment(&probe).await?;
+                }
+                if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = probe.principal {
+                    self.check_connector_assignment(connector, &probe).await?;
+                }
+            }
+            let audit = MutationContext::from(actor.audit("role.set", set.to_string()));
+            let request = SetRequest {
+                set,
+                managed,
+                assignments,
+                expected_revision: req.expected_revision,
+            };
+            let replaced = self
+                .administration()
+                .replace(&administrator, request, audit, |revision, stored| {
+                    Some(
+                        command.completion(
+                            SetRoleAssignmentsResponse {
+                                revision,
+                                assignments: stored.iter().map(assignment_to_proto).collect(),
+                            }
+                            .encode_to_vec(),
+                        ),
+                    )
+                })
+                .await;
+            let (revision, stored) = match replaced {
+                Ok(done) => done,
+                Err(SidError::OperationCompleted(_)) => {
+                    return Err(AuthorizationError::ChangedConcurrently);
+                }
+                Err(SidError::OperationPeriodRefused(refusal)) => {
+                    return Err(OperationError::PeriodRefused(refusal).into());
+                }
+                Err(e) => return Err(replacement(e)),
+            };
+            info!("Set role assignments to revision {revision}");
+            Ok(SetRoleAssignmentsResponse {
+                revision,
+                assignments: stored.iter().map(assignment_to_proto).collect(),
+            })
+        }
+        .await;
+        self.resolved(&command, answer).await
+    }
+
     /// The assignments the filter names that `actor` administers: a
     /// delegated administrator reads what it administers, as the root reads
     /// everything; anyone else is refused.
@@ -823,7 +981,18 @@ impl Authorization {
         use list_role_assignments_request::Filter;
         let administrator = actor.administrator()?;
         let storage = &self.storage;
+        let mut set_revision = None;
         let assignments = match req.filter {
+            // One exact set, read with its revision in one snapshot. A
+            // delegated administrator sees only what it administers; a
+            // replacement still covers every managed role of the set, whose
+            // assignments it therefore sees whole.
+            Some(Filter::AssignmentSet(set)) => {
+                let set = assignment_set_of(Some(set))?;
+                let (revision, held) = storage.role_assignment_set(&set).await?;
+                set_revision = Some(revision);
+                Ok(held)
+            }
             Some(Filter::ProfileId(id)) => {
                 let pid = wire_id(Some(&id), "profile_id")?;
                 storage.list_role_assignments_for_profile(pid).await
@@ -859,6 +1028,7 @@ impl Authorization {
             .map_err(administration)?;
         Ok(ListRoleAssignmentsResponse {
             assignments: assignments.iter().map(assignment_to_proto).collect(),
+            set_revision,
         })
     }
 

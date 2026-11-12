@@ -50,6 +50,12 @@ pub enum Error {
     #[error("Fenced: {0}")]
     Fenced(String),
 
+    /// A role assignment set is no longer at the revision a replacement was
+    /// decided against: nothing was written, and the current state decides
+    /// any further change.
+    #[error("the role assignment set changed: it is at revision {current}")]
+    AssignmentSetChanged { current: u64 },
+
     /// Resource has expired (session, token, challenge, OTP code).
     #[error("Expired: {0}")]
     Expired(String),

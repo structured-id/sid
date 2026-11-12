@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub mod admin_claim;
 mod all;
 pub mod application;
+pub mod assignment_set;
 pub mod audit_chain;
 pub mod audit_retention;
 pub mod backup;

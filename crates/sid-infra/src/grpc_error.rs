@@ -121,6 +121,7 @@ pub enum ErrorReason {
     InvalidState,
     FeatureNotConfigured,
     RegistrationDisabled,
+    RoleAssignmentSetChanged,
 
     // RESOURCE_EXHAUSTED
     RateLimitExceeded,
@@ -147,7 +148,8 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every reason, for exhaustive checks against the proto enum.
-    pub const ALL: [ErrorReason; 84] = [
+    pub const ALL: [ErrorReason; 85] = [
+        Self::RoleAssignmentSetChanged,
         Self::CsrfTokenInvalid,
         Self::InviteNotFound,
         Self::OrganizationNotFound,
@@ -318,6 +320,7 @@ impl ErrorReason {
             Self::InvalidState => "INVALID_STATE",
             Self::FeatureNotConfigured => "FEATURE_NOT_CONFIGURED",
             Self::RegistrationDisabled => "REGISTRATION_DISABLED",
+            Self::RoleAssignmentSetChanged => "ROLE_ASSIGNMENT_SET_CHANGED",
             Self::ServiceMaintenance => "SERVICE_MAINTENANCE",
             Self::DependencyUnavailable => "DEPENDENCY_UNAVAILABLE",
             Self::InternalError => "INTERNAL_ERROR",
@@ -405,7 +408,8 @@ impl ErrorReason {
             | Self::LegacyMigrationRequired
             | Self::InvalidState
             | Self::FeatureNotConfigured
-            | Self::RegistrationDisabled => Code::FailedPrecondition,
+            | Self::RegistrationDisabled
+            | Self::RoleAssignmentSetChanged => Code::FailedPrecondition,
 
             Self::PasswordHistoryUnavailable
             | Self::ServiceMaintenance

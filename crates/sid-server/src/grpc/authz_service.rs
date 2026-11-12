@@ -164,6 +164,17 @@ pub(crate) fn refusal(e: AuthorizationError) -> Status {
         .with_resource("Policy", name)
         .into(),
         E::ChangedConcurrently => changed_concurrently(),
+        E::AssignmentSetChanged { current } => ApiError::new(
+            ErrorReason::RoleAssignmentSetChanged,
+            "the role assignment set changed since it was read",
+        )
+        .with_metadata("currentRevision", current.to_string())
+        .with_precondition(
+            "ROLE_ASSIGNMENT_SET_REVISION",
+            "assignment_set",
+            "read the set again and decide on its current revision",
+        )
+        .into(),
         E::Denied => ApiError::new(
             ErrorReason::InsufficientPermissions,
             "no administrative assignment of the caller covers this change",
@@ -1166,6 +1177,22 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         let operation = metadata_context(&metadata)?;
         answered(self.authorization.revoke_role(&actor, operation, req).await)
+    }
+
+    #[instrument(skip_all, fields(method = "set_role_assignments"))]
+    async fn set_role_assignments(
+        &self,
+        request: Request<SetRoleAssignmentsRequest>,
+    ) -> Result<Response<SetRoleAssignmentsResponse>, Status> {
+        let actor = self.asker(&request).await?;
+        self.check_maintenance()?;
+        let (metadata, _, req) = request.into_parts();
+        let operation = metadata_context(&metadata)?;
+        answered(
+            self.authorization
+                .set_role_assignments(&actor, operation, req)
+                .await,
+        )
     }
 
     #[instrument(skip_all, fields(method = "list_role_assignments"))]

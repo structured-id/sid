@@ -324,6 +324,94 @@ pub enum RoleAssignmentPrincipal {
     ProvisioningConnector(ProvisioningConnectorId),
 }
 
+/// A conditional replacement of the managed part of one assignment set, as
+/// decided and authorized: committed in one transaction only while the set
+/// is at `expected_revision` and every fence holds, moving the revision
+/// whatever it changes. `hold` fences authority the change rests on without
+/// an effect of its own (an empty or unchanged replacement).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssignmentSetChange {
+    pub set: AssignmentSet,
+    pub expected_revision: u64,
+    /// Assignments to store, each with the authority it was granted under.
+    pub create: Vec<(RoleAssignment, super::AssignmentFence)>,
+    /// Assignments of the set to remove, each with the authority it was
+    /// revoked under.
+    pub delete: Vec<(RoleAssignmentId, super::AssignmentFence)>,
+    pub hold: Vec<super::AssignmentFence>,
+}
+
+/// One holder's assignments in one exact scope (`None`: its unscoped ones
+/// only): the unit a conditional replacement sets, whose revision every
+/// change of it moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentSet {
+    pub principal: RoleAssignmentPrincipal,
+    pub scope: Option<String>,
+}
+
+/// The holder and the scope (`*` for the unscoped set), as an audit target
+/// names the set.
+impl std::fmt::Display for AssignmentSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.principal {
+            RoleAssignmentPrincipal::Profile(id) => write!(f, "profile:{id}")?,
+            RoleAssignmentPrincipal::Group(id) => write!(f, "group:{id}")?,
+            RoleAssignmentPrincipal::MachineUser(id) => write!(f, "machine_user:{id}")?,
+            RoleAssignmentPrincipal::OAuthClient(id) => write!(f, "oauth_client:{id}")?,
+            RoleAssignmentPrincipal::ProvisioningConnector(id) => {
+                write!(f, "provisioning_connector:{id}")?
+            }
+        }
+        match &self.scope {
+            Some(scope) => write!(f, " scope:{scope}"),
+            None => f.write_str(" scope:*"),
+        }
+    }
+}
+
+impl AssignmentSet {
+    /// The set `assignment` belongs to.
+    pub fn of(assignment: &RoleAssignment) -> Self {
+        Self {
+            principal: assignment.principal.clone(),
+            scope: assignment.scope.clone(),
+        }
+    }
+
+    /// Whether `assignment` belongs to this set.
+    pub fn holds(&self, assignment: &RoleAssignment) -> bool {
+        assignment.principal == self.principal && assignment.scope == self.scope
+    }
+
+    /// The set's storage key: the holder's kind, its id's length (4 bytes,
+    /// big-endian) and bytes, then 0 for no scope or 1 and the scope's
+    /// bytes. Distinct sets have distinct keys.
+    pub fn key(&self) -> Vec<u8> {
+        let (kind, id): (u8, &[u8]) = match &self.principal {
+            RoleAssignmentPrincipal::Profile(id) => (1, id.as_bytes()),
+            RoleAssignmentPrincipal::Group(id) => (2, id.as_bytes()),
+            RoleAssignmentPrincipal::MachineUser(id) => (3, id.as_bytes()),
+            RoleAssignmentPrincipal::OAuthClient(id) => (4, id.as_bytes()),
+            RoleAssignmentPrincipal::ProvisioningConnector(id) => (5, id.as_bytes()),
+        };
+        // No stored row holds an id of 4 GiB.
+        let length = u32::try_from(id.len()).expect("a principal id fits u32 bytes");
+        let mut key = Vec::with_capacity(6 + id.len() + self.scope.as_ref().map_or(0, String::len));
+        key.push(kind);
+        key.extend_from_slice(&length.to_be_bytes());
+        key.extend_from_slice(id);
+        match &self.scope {
+            None => key.push(0),
+            Some(scope) => {
+                key.push(1);
+                key.extend_from_slice(scope.as_bytes());
+            }
+        }
+        key
+    }
+}
+
 /// Principal reference for authorization checks.
 /// Used by `AuthzCheckRequest.subject` parsing.
 /// Different from `RoleAssignmentPrincipal` — this is for CHECK operations,

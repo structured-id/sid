@@ -985,8 +985,18 @@ impl PostgresBackend {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         id: RoleAssignmentId,
     ) -> SidResult<()> {
+        let administrators = Self::administrator_assignments_in_tx(tx).await?;
+        crate::check_other_administrator_assignment(id, &administrators)
+    }
+
+    /// Lock, in `tx`, the administrators and then every live installation
+    /// administrator assignment in one order, answering each assignment's id
+    /// and its holder's status.
+    async fn administrator_assignments_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> SidResult<Vec<(Uuid, String)>> {
         Self::lock_administrators_in_tx(tx).await?;
-        let administrators: Vec<(Uuid, String)> = sqlx::query_as(
+        sqlx::query_as(
             "SELECT ra.id, p.status FROM role_assignments ra
              JOIN profiles p ON p.id = ra.profile_id
              WHERE ra.role_id = $1 AND ra.scope = $2
@@ -997,8 +1007,7 @@ impl PostgresBackend {
         .bind(sid_core::models::INSTALLATION_SCOPE)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| SidError::Storage(format!("lock administrator assignments: {e}")))?;
-        crate::check_other_administrator_assignment(id, &administrators)
+        .map_err(|e| SidError::Storage(format!("lock administrator assignments: {e}")))
     }
 
     /// Store the envelope of the administrative assignment `id` in `tx`; an
@@ -1193,6 +1202,20 @@ impl PostgresBackend {
         &self,
         rows: Vec<crate::pg_row::RoleAssignmentRow>,
     ) -> SidResult<Vec<RoleAssignment>> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(format!("read role assignments: {e}")))?;
+        Self::role_assignments_in(&mut conn, rows).await
+    }
+
+    /// `rows` as assignments read on `conn`, so a transaction reads them in
+    /// its own snapshot.
+    async fn role_assignments_in(
+        conn: &mut sqlx::PgConnection,
+        rows: Vec<crate::pg_row::RoleAssignmentRow>,
+    ) -> SidResult<Vec<RoleAssignment>> {
         use sid_core::models::{AdminEnvelope, AdminOperation, RecipientKind};
         let mut assignments = rows
             .into_iter()
@@ -1207,7 +1230,7 @@ impl PostgresBackend {
              WHERE assignment_id = ANY($1)",
         )
         .bind(&ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("read approved ceilings: {e}")))?;
         let position: std::collections::HashMap<RoleAssignmentId, usize> =
@@ -1229,7 +1252,7 @@ impl PostgresBackend {
              WHERE assignment_id = ANY($1)",
         )
         .bind(&ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("read policy authority: {e}")))?;
         for (id, operation) in held_operations {
@@ -1253,7 +1276,7 @@ impl PostgresBackend {
              FROM role_assignment_admin WHERE assignment_id = ANY($1)",
         )
         .bind(&ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("read administrative envelopes: {e}")))?;
         if heads.is_empty() {
@@ -1281,7 +1304,7 @@ impl PostgresBackend {
              WHERE assignment_id = ANY($1)",
         )
         .bind(&held)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("read administrative envelopes: {e}")))?;
         let unreadable = |id: RoleAssignmentId| {
@@ -1311,7 +1334,7 @@ impl PostgresBackend {
              WHERE assignment_id = ANY($1)",
         )
         .bind(&held)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("read administrative envelopes: {e}")))?;
         for (id, role) in roles {
@@ -4955,6 +4978,21 @@ impl StorageBackend for PostgresBackend {
         Ok(true)
     }
 
+    async fn role_assignment_set(
+        &self,
+        set: &sid_core::models::AssignmentSet,
+    ) -> SidResult<(u64, Vec<RoleAssignment>)> {
+        self.read_role_assignment_set(set).await
+    }
+
+    async fn replace_role_assignments(
+        &self,
+        change: &sid_core::models::AssignmentSetChange,
+        ctx: MutationContext,
+    ) -> SidResult<u64> {
+        self.replace_role_assignment_set(change, ctx).await
+    }
+
     async fn list_role_assignments_for_profile(
         &self,
         profile_id: ProfileId,
@@ -5084,8 +5122,13 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let now = chrono::Utc::now();
+        // The rows in id order before their sets, as a set replacement locks
+        // them.
         let expired = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
-            "DELETE FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= $1 \
+            "DELETE FROM role_assignments WHERE id IN (
+                 SELECT id FROM role_assignments
+                 WHERE expires_at IS NOT NULL AND expires_at <= $1
+                 ORDER BY id FOR UPDATE)
              RETURNING *",
         )
         .bind(now)
@@ -9743,6 +9786,7 @@ impl AccessRequestRow {
 }
 
 mod application;
+mod assignment_set;
 mod audit_retention;
 mod audit_store;
 pub use audit_store::PgAuditStore;

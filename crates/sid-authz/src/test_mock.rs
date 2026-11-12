@@ -1373,6 +1373,19 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<bool> {
         unimplemented!("fenced writes are exercised against the storage engines")
     }
+    async fn role_assignment_set(
+        &self,
+        _: &sid_core::models::AssignmentSet,
+    ) -> Result<(u64, Vec<RoleAssignment>)> {
+        unimplemented!("assignment sets are exercised against the storage engines")
+    }
+    async fn replace_role_assignments(
+        &self,
+        _: &sid_core::models::AssignmentSetChange,
+        _: MutationContext,
+    ) -> Result<u64> {
+        unimplemented!("assignment sets are exercised against the storage engines")
+    }
     async fn update_role_fenced(
         &self,
         _: &Role,

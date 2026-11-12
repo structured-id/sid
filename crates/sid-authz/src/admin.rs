@@ -12,10 +12,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use sid_core::models::{
-    ActorFence, AdminOperation, AssignmentFence, AssignmentProvenance, AuthorityBasis,
-    AuthzPrincipal, GroupId, INSTALLATION_SCOPE, MutationContext, OperationCompletion,
-    PolicyOperation, PolicyScope, ProfileId, RecipientKind, Role, RoleAssignment, RoleAssignmentId,
-    RoleAssignmentPrincipal, RoleEditFence,
+    ActorFence, AdminOperation, AssignmentFence, AssignmentProvenance, AssignmentSet,
+    AssignmentSetChange, AuthorityBasis, AuthzPrincipal, GroupId, INSTALLATION_SCOPE,
+    MutationContext, OperationCompletion, PolicyOperation, PolicyScope, ProfileId, RecipientKind,
+    Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleEditFence, RoleId,
 };
 use sid_core::{Error, Result};
 use sid_plugin::StorageBackend;
@@ -57,6 +57,33 @@ impl Administrator {
             AuthzPrincipal::ProvisioningConnector(id) => format!("provisioning_connector:{id}"),
         }
     }
+}
+
+/// A replacement of the managed roles of one assignment set, as requested.
+#[derive(Debug, Clone)]
+pub struct SetRequest {
+    pub set: AssignmentSet,
+    /// The roles the request manages; listing one grants no authority.
+    pub managed: BTreeSet<RoleId>,
+    /// Each managed role the holder has afterwards, with its end (`None`:
+    /// no end).
+    pub assignments: Vec<(RoleId, Option<chrono::DateTime<chrono::Utc>>)>,
+    pub expected_revision: u64,
+}
+
+/// `at` to the whole millisecond: every store keeps an end at least that
+/// precisely, so a stored end reads back as granted.
+fn whole_millisecond(at: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    use chrono::SubsecRound;
+    at.trunc_subsecs(3)
+}
+
+/// Whether a requested end is the held one.
+fn same_end(
+    requested: Option<chrono::DateTime<chrono::Utc>>,
+    held: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    requested.map(whole_millisecond) == held.map(whole_millisecond)
 }
 
 /// `role` and the permissions a fence re-checks it with.
@@ -181,11 +208,34 @@ impl RoleAdministration {
                 ));
             }
         }
+        let fence = self
+            .decide_grant(actor, root.as_ref(), &role, &mut proposed)
+            .await?;
+        let ctx = match record(&proposed) {
+            Some(completion) => ctx.with_operation(completion),
+            None => ctx,
+        };
+        self.storage
+            .create_role_assignment_fenced(&proposed, &fence, ctx)
+            .await?;
+        Ok(proposed)
+    }
+
+    /// The fence granting `proposed` of `role` on `actor`'s authority (`root`
+    /// its basis as the root) commits under, recording in `proposed` who
+    /// granted it on what authority.
+    async fn decide_grant(
+        &self,
+        actor: &Administrator,
+        root: Option<&AuthorityBasis>,
+        role: &Role,
+        proposed: &mut RoleAssignment,
+    ) -> Result<AssignmentFence> {
         let (fence, granted_under, depends_on, ceiling) = match (actor, root) {
             (Administrator::Root(_), Some(basis)) => (
                 AssignmentFence {
-                    basis,
-                    role: content(&role),
+                    basis: *basis,
+                    role: content(role),
                     recipient_membership: None,
                     grantor_outside: None,
                 },
@@ -195,7 +245,7 @@ impl RoleAdministration {
             ),
             (Administrator::Root(_), None) => unreachable!("a root has its basis"),
             (Administrator::Holder(holder), _) => {
-                let (basis, fence) = self.basis_for_grant(holder, &role, &proposed).await?;
+                let (basis, fence) = self.basis_for_grant(holder, role, proposed).await?;
                 if proposed.administers() {
                     // A redelegation depends on its source.
                     (fence, Some(basis.id), Some(basis.id), None)
@@ -215,14 +265,209 @@ impl RoleAdministration {
             depends_on,
             ceiling,
         });
-        let ctx = match record(&proposed) {
+        Ok(fence)
+    }
+
+    /// The fence revoking `target` of `role` on `actor`'s authority commits
+    /// under.
+    async fn decide_revocation(
+        &self,
+        actor: &Administrator,
+        root: Option<&AuthorityBasis>,
+        role: &Role,
+        target: &RoleAssignment,
+    ) -> Result<AssignmentFence> {
+        match (actor, root) {
+            (Administrator::Root(_), Some(basis)) => Ok(AssignmentFence {
+                basis: *basis,
+                role: content(role),
+                recipient_membership: None,
+                grantor_outside: None,
+            }),
+            (Administrator::Root(_), None) => unreachable!("a root has its basis"),
+            (Administrator::Holder(holder), _) => {
+                self.basis_for_revocation(holder, role, target).await
+            }
+        }
+    }
+
+    /// Make the non-administrative assignments of `request.managed` roles in
+    /// `request.set` exactly `request.assignments`, in one commit at
+    /// `request.expected_revision`. A held assignment of a requested role
+    /// and end stays; every other managed one is revoked and each missing one
+    /// granted. Administrative and policy assignments are never touched.
+    /// `actor` must be able to assign and revoke every managed role for this
+    /// holder and scope, the empty request included, and each grant and
+    /// revocation is covered as on its own; the commit re-checks all of it.
+    /// `record` makes the operation completion of the outcome. Answers the
+    /// set's new revision and its managed assignments.
+    pub async fn replace(
+        &self,
+        actor: &Administrator,
+        request: SetRequest,
+        ctx: MutationContext,
+        record: impl FnOnce(u64, &[RoleAssignment]) -> Option<OperationCompletion>,
+    ) -> Result<(u64, Vec<RoleAssignment>)> {
+        let SetRequest {
+            set,
+            managed,
+            assignments: requested,
+            expected_revision,
+        } = request;
+        if managed.is_empty() {
+            return Err(Error::Validation("a replacement manages no role".into()));
+        }
+        let mut wanted = std::collections::BTreeMap::new();
+        for (role_id, until) in requested {
+            if !managed.contains(&role_id) {
+                return Err(Error::Validation(format!(
+                    "role {role_id} is requested but not managed"
+                )));
+            }
+            if wanted.insert(role_id, until).is_some() {
+                return Err(Error::Validation(format!(
+                    "role {role_id} is requested twice"
+                )));
+            }
+        }
+        if wanted
+            .values()
+            .flatten()
+            .any(|until| *until <= chrono::Utc::now())
+        {
+            return Err(Error::Validation("an end is not in the future".into()));
+        }
+        let root = self.root_basis(actor).await?;
+        let mut roles = std::collections::BTreeMap::new();
+        for role_id in &managed {
+            let Some(role) = self.storage.get_role(*role_id).await? else {
+                return Err(actor.missing(format!("role {role_id}")));
+            };
+            roles.insert(*role_id, role);
+        }
+        let (revision, current) = self.storage.role_assignment_set(&set).await?;
+        if revision != expected_revision {
+            return Err(Error::AssignmentSetChanged { current: revision });
+        }
+
+        // The authority over every managed role, whatever this request changes.
+        let mut hold = Vec::with_capacity(roles.len());
+        for role in roles.values() {
+            hold.push(match (actor, &root) {
+                (Administrator::Root(_), Some(basis)) => AssignmentFence {
+                    basis: *basis,
+                    role: content(role),
+                    recipient_membership: None,
+                    grantor_outside: None,
+                },
+                (Administrator::Root(_), None) => unreachable!("a root has its basis"),
+                (Administrator::Holder(holder), _) => {
+                    self.basis_for_management(holder, role, &set).await?
+                }
+            });
+        }
+
+        let mut kept = Vec::new();
+        let mut delete = Vec::new();
+        for held in current {
+            let Some(role) = roles.get(&held.role_id) else {
+                continue;
+            };
+            if held.admin.is_some() || held.policy_admin.is_some() {
+                continue;
+            }
+            match wanted.get(&held.role_id) {
+                Some(until) if same_end(*until, held.expires_at) => {
+                    wanted.remove(&held.role_id);
+                    kept.push(held);
+                }
+                _ => {
+                    let fence = self
+                        .decide_revocation(actor, root.as_ref(), role, &held)
+                        .await?;
+                    delete.push((held.id, fence));
+                }
+            }
+        }
+        let mut create = Vec::with_capacity(wanted.len());
+        for (role_id, until) in wanted {
+            let mut proposed = RoleAssignment::new(set.principal.clone(), role_id);
+            proposed.scope = set.scope.clone();
+            proposed.expires_at = until.map(whole_millisecond);
+            let fence = self
+                .decide_grant(actor, root.as_ref(), &roles[&role_id], &mut proposed)
+                .await?;
+            create.push((proposed, fence));
+        }
+        let mut result = kept;
+        result.extend(create.iter().map(|(a, _)| a.clone()));
+        let change = AssignmentSetChange {
+            set,
+            expected_revision,
+            create,
+            delete,
+            hold,
+        };
+        // The commit moves the set to exactly the next revision, so the
+        // recorded outcome names it before the commit.
+        let next = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidState("assignment set revision exhausted".into()))?;
+        let ctx = match record(next, &result) {
             Some(completion) => ctx.with_operation(completion),
             None => ctx,
         };
-        self.storage
-            .create_role_assignment_fenced(&proposed, &fence, ctx)
-            .await?;
-        Ok(proposed)
+        let revision = self.storage.replace_role_assignments(&change, ctx).await?;
+        debug_assert_eq!(revision, next, "a replacement moves the set by one");
+        Ok((revision, result))
+    }
+
+    /// The fence of `holder` managing `role` in `set`: one of its
+    /// administrative assignments in the set's scope lets it both assign and
+    /// revoke the role for the set's holder, never itself.
+    async fn basis_for_management(
+        &self,
+        holder: &AuthzPrincipal,
+        role: &Role,
+        set: &AssignmentSet,
+    ) -> Result<AssignmentFence> {
+        if self.is_self(holder, &set.principal).await? {
+            return Err(not_permitted());
+        }
+        for candidate in self.envelopes_of(holder, &set.scope).await? {
+            let Some(envelope) = candidate.admin.as_ref() else {
+                continue;
+            };
+            let (member, membership) = match envelope.recipient_group {
+                Some(group) => self.in_group(group, &set.principal).await?,
+                None => (false, None),
+            };
+            let covered = envelope.operations.contains(&AdminOperation::Assign)
+                && envelope.operations.contains(&AdminOperation::Revoke)
+                && envelope.roles.contains(&role.id)
+                && role
+                    .permissions
+                    .iter()
+                    .all(|p| envelope.permission_ceiling.contains(p))
+                && RecipientKind::of(&set.principal)
+                    .is_some_and(|k| envelope.recipient_kinds.contains(&k))
+                && (envelope.recipient_group.is_none() || member);
+            if covered {
+                let grantor_outside = match (holder, &set.principal) {
+                    (AuthzPrincipal::Profile(grantor), RoleAssignmentPrincipal::Group(group)) => {
+                        Some((*group, *grantor))
+                    }
+                    _ => None,
+                };
+                return Ok(AssignmentFence {
+                    basis: basis(holder, &candidate),
+                    role: content(role),
+                    recipient_membership: membership,
+                    grantor_outside,
+                });
+            }
+        }
+        Err(not_permitted())
     }
 
     /// Remove assignment `id` on `actor`'s authority; false when it does not

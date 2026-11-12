@@ -1065,6 +1065,55 @@ CREATE TABLE IF NOT EXISTS role_assignment_admin_roles (
 CREATE INDEX IF NOT EXISTS idx_role_assignment_admin_roles_role
     ON role_assignment_admin_roles(role_id);
 
+-- The revision of one holder's assignments in one exact scope: a conditional
+-- replacement of the set commits only at the revision it was decided on.
+CREATE TABLE IF NOT EXISTS role_assignment_sets (
+    profile_id       BLOB CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    group_id         BLOB CHECK (length(group_id) = 16) REFERENCES groups(id) ON DELETE CASCADE,
+    machine_user_id  BLOB CHECK (length(machine_user_id) = 16),
+    oauth_client_id  TEXT REFERENCES oauth2_clients(client_id) ON DELETE CASCADE,
+    provisioning_connector_id BLOB CHECK (length(provisioning_connector_id) = 16)
+                     REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
+    scope            TEXT,
+    revision         INTEGER NOT NULL CHECK (revision >= 0),
+    CHECK (
+        (profile_id IS NOT NULL) + (group_id IS NOT NULL) + (machine_user_id IS NOT NULL)
+            + (oauth_client_id IS NOT NULL) + (provisioning_connector_id IS NOT NULL) = 1
+    )
+) STRICT;
+-- One row per set: SQLite's unique index counts NULLs distinct, so absent
+-- columns are compared as an empty blob, which no present value equals.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_role_assignment_sets ON role_assignment_sets(
+    ifnull(profile_id, x''), ifnull(group_id, x''), ifnull(machine_user_id, x''),
+    ifnull(oauth_client_id, x''), ifnull(provisioning_connector_id, x''), ifnull(scope, x''));
+CREATE INDEX IF NOT EXISTS idx_role_assignment_sets_holder ON role_assignment_sets(
+    profile_id, group_id, machine_user_id, oauth_client_id, provisioning_connector_id, scope);
+
+-- Every stored or removed assignment moves its set's revision, cascades
+-- included. A removal only moves an existing set: a set whose holder is
+-- being deleted goes with it.
+CREATE TRIGGER IF NOT EXISTS role_assignment_set_stored
+AFTER INSERT ON role_assignments
+BEGIN
+    INSERT OR IGNORE INTO role_assignment_sets (profile_id, group_id, machine_user_id,
+        oauth_client_id, provisioning_connector_id, scope, revision)
+    VALUES (NEW.profile_id, NEW.group_id, NEW.machine_user_id, NEW.oauth_client_id,
+        NEW.provisioning_connector_id, NEW.scope, 0);
+    UPDATE role_assignment_sets SET revision = revision + 1
+    WHERE profile_id IS NEW.profile_id AND group_id IS NEW.group_id
+      AND machine_user_id IS NEW.machine_user_id AND oauth_client_id IS NEW.oauth_client_id
+      AND provisioning_connector_id IS NEW.provisioning_connector_id AND scope IS NEW.scope;
+END;
+
+CREATE TRIGGER IF NOT EXISTS role_assignment_set_removed
+AFTER DELETE ON role_assignments
+BEGIN
+    UPDATE role_assignment_sets SET revision = revision + 1
+    WHERE profile_id IS OLD.profile_id AND group_id IS OLD.group_id
+      AND machine_user_id IS OLD.machine_user_id AND oauth_client_id IS OLD.oauth_client_id
+      AND provisioning_connector_id IS OLD.provisioning_connector_id AND scope IS OLD.scope;
+END;
+
 CREATE TABLE IF NOT EXISTS role_assignment_policy_admin (
     assignment_id BLOB NOT NULL CHECK (length(assignment_id) = 16)
                   REFERENCES role_assignments(id) ON DELETE CASCADE,

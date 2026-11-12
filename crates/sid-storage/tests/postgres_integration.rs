@@ -1097,6 +1097,131 @@ async fn setup_isolated() -> PostgresBackend {
     backend
 }
 
+/// Bug prevented: a set replacement locked the set's revision before the
+/// assignments it removes, the reverse of a single removal (the assignment,
+/// then its set from the trigger): with a removal of the same assignment
+/// between, each waited for the other and PostgreSQL aborted one of them.
+#[tokio::test]
+async fn a_replacement_never_deadlocks_with_a_removal_of_its_assignment() {
+    use sid_core::models::{
+        AdminEnvelope, AdminOperation, AssignmentFence, AssignmentSet, AssignmentSetChange,
+        AuthorityBasis, ProjectId, RecipientKind, Role, RoleAssignment, RoleAssignmentPrincipal,
+    };
+    use sid_plugin::conformance::backend::{create_test_profile, test_audit};
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let schema = format!("sets_{tag}");
+    // The replacement's connections are found by this name while they wait.
+    let application = format!("sets{tag}");
+    let url = format!("{}?application_name={application}", database_url());
+    let backend = PostgresBackend::new(&url, Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("Failed to run migrations");
+    backend.ensure_system_project(test_audit()).await.unwrap();
+    let mut role = Role::new(ProjectId::SYSTEM, format!("k{tag}"), format!("n{tag}"));
+    role.permissions = vec!["documents:read".into()];
+    backend.create_role(&role, test_audit()).await.unwrap();
+    let administrator = Role::new(ProjectId::SYSTEM, format!("a{tag}"), format!("m{tag}"));
+    backend
+        .create_role(&administrator, test_audit())
+        .await
+        .unwrap();
+    let grantor = create_test_profile(&format!("g{tag}"));
+    let holder = create_test_profile(&format!("h{tag}"));
+    for profile in [&grantor, &holder] {
+        backend.create_profile(profile, test_audit()).await.unwrap();
+    }
+    let basis = RoleAssignment::new(
+        RoleAssignmentPrincipal::Profile(grantor.id),
+        administrator.id,
+    )
+    .administering(AdminEnvelope {
+        operations: [AdminOperation::Assign, AdminOperation::Revoke].into(),
+        roles: [role.id].into(),
+        permission_ceiling: ["documents:read".to_string()].into(),
+        recipient_kinds: [RecipientKind::Profile].into(),
+        recipient_group: None,
+        max_validity_secs: None,
+    });
+    backend
+        .create_role_assignment(&basis, test_audit())
+        .await
+        .unwrap();
+    let held = RoleAssignment::new(RoleAssignmentPrincipal::Profile(holder.id), role.id);
+    backend
+        .create_role_assignment(&held, test_audit())
+        .await
+        .unwrap();
+    let set = AssignmentSet::of(&held);
+    let (revision, _) = backend.role_assignment_set(&set).await.unwrap();
+    let fence = AssignmentFence {
+        basis: AuthorityBasis {
+            assignment: basis.id,
+            revision: 0,
+            member: None,
+        },
+        role: (role.id, role.permissions.iter().cloned().collect()),
+        recipient_membership: None,
+        grantor_outside: None,
+    };
+    let change = AssignmentSetChange {
+        set: set.clone(),
+        expected_revision: revision,
+        create: vec![],
+        delete: vec![(held.id, fence)],
+        hold: vec![],
+    };
+
+    // A removal holds the assignment, as its DELETE does first.
+    let mut removal = backend.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM role_assignments WHERE id = $1 FOR UPDATE")
+        .bind(held.id)
+        .execute(&mut *removal)
+        .await
+        .unwrap();
+    let replacing = backend.clone();
+    let replacement = tokio::spawn(async move {
+        replacing
+            .replace_role_assignments(&change, test_audit())
+            .await
+    });
+    // The replacement waits for a lock the removal holds.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE application_name = $1 AND wait_event_type = 'Lock'",
+            )
+            .bind(&application)
+            .fetch_one(backend.pool())
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the replacement waits for the removal");
+    // The removal then takes the set's revision, as its trigger does.
+    sqlx::query(
+        "UPDATE role_assignment_sets SET revision = revision
+         WHERE set_key = role_assignment_set_key($1, NULL, NULL, NULL, NULL, NULL)",
+    )
+    .bind(holder.id)
+    .execute(&mut *removal)
+    .await
+    .expect("the removal is not aborted");
+    removal.commit().await.unwrap();
+    assert_eq!(
+        replacement.await.unwrap().expect("the replacement commits"),
+        revision + 1
+    );
+}
+
 /// Run grant store conformance `scenario` against this backend in a schema
 /// of its own.
 macro_rules! grant_store_isolated {
