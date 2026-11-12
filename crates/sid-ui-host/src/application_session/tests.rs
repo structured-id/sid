@@ -755,7 +755,7 @@ async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
         sid_authn::bff_session::TokenReplacement::Replaced
     ));
     let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.expose_secret(), "access-1");
+    assert_eq!(token.token().expose_secret(), "access-1");
 }
 
 /// A refresh that completed with a token still inside the refresh margin (its
@@ -888,7 +888,7 @@ async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
         .unwrap();
 
     let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.expose_secret(), "access-2");
+    assert_eq!(token.token().expose_secret(), "access-2");
 
     // Token lifetimes run on the wall clock, which a paused runtime does not
     // advance.

@@ -36,7 +36,7 @@ use crate::jwt::AccessTokenClaims;
 /// unread. While a rollout that changes the shape is in progress a browser
 /// may be asked to sign in again on a replica of the other version; reading
 /// both shapes would keep every former shape alive in the code.
-const SESSIONS: &str = "bff_session_3";
+const SESSIONS: &str = "bff_session_4";
 /// Namespace of pending sign-ins, keyed by the digest of the sign-in binding
 /// they were started under and their `state`.
 const PENDING: &str = "bff_pending_4";
@@ -162,6 +162,9 @@ pub struct BffSession {
     /// The connection its tokens were issued under; an adapter with another
     /// connection does not use the session.
     pub connection: String,
+    /// The application's API refused the current access token: it is
+    /// refreshed before the session is used again. A new token clears it.
+    pub token_refused: bool,
 }
 
 /// Hand-written so that a session reaching a log or an error message does not
@@ -234,6 +237,7 @@ impl BffSessionStore {
             created_at: now,
             last_access: now,
             connection: connection.to_owned(),
+            token_refused: false,
         };
         self.write(&session_id, &session).await?;
         Ok((session_id, csrf_token))
@@ -393,6 +397,7 @@ impl BffSessionStore {
             session.access_token = access_token.clone();
             session.refresh_token = refresh_token.clone();
             session.claims = claims.clone();
+            session.token_refused = false;
             if self.rewrite(id, &raw, &session).await? {
                 return Ok(TokenReplacement::Replaced);
             }
@@ -492,6 +497,39 @@ impl BffSessionStore {
             .read_ceremony_state(ENDED, &ended_key(&claims.iss, &claims.sid))
             .await?
             .is_some())
+    }
+
+    /// Mark that the application's API refused `token`, if session `id` still
+    /// holds it: the session refreshes before it is used again. A session
+    /// that moved on to a newer token, ended, or is another session's is
+    /// left as it is, so a late refusal of an earlier call never touches a
+    /// refresh or a new sign-in made since.
+    pub async fn mark_token_refused(
+        &self,
+        id: &str,
+        token: &SecretString,
+    ) -> SessionResult<TokenRefusal> {
+        // Applied to the session as it is when written: a concurrent idle push
+        // makes the write miss and it is applied again over that push.
+        for _ in 0..REPLACE_ATTEMPTS {
+            let Some(raw) = self.store.read_ceremony_state(SESSIONS, id).await? else {
+                return Ok(TokenRefusal::Ended);
+            };
+            let mut session: BffSession = serde_json::from_slice(&raw)?;
+            if !session.holds_access_token(token) {
+                return Ok(TokenRefusal::Superseded);
+            }
+            if session.token_refused {
+                return Ok(TokenRefusal::Marked);
+            }
+            session.token_refused = true;
+            if self.rewrite(id, &raw, &session).await? {
+                return Ok(TokenRefusal::Marked);
+            }
+        }
+        Err(SessionStoreError::Backend(sid_core::Error::Storage(
+            format!("session {id} kept changing while its token's refusal was marked"),
+        )))
     }
 
     /// Write a session under its current idle window.
@@ -615,6 +653,18 @@ impl BffSession {
         self.access_token.expose_secret()
     }
 
+    /// Whether this session's access token is `token`, compared in constant
+    /// time.
+    pub fn holds_access_token(&self, token: &SecretString) -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(
+            self.access_token
+                .expose_secret()
+                .as_bytes()
+                .ct_eq(token.expose_secret().as_bytes()),
+        )
+    }
+
     /// Whether this session's refresh token is `token`: the version of the
     /// tokens a refresh started from. Compared in constant time, as every
     /// comparison of a secret.
@@ -640,6 +690,18 @@ pub enum TokenReplacement {
     /// Boxed: the rare outcome should not size every answer.
     Superseded(Box<BffSession>),
     /// Not stored: the session ended meanwhile.
+    Ended,
+}
+
+/// What became of an API's refusal handed to
+/// [`BffSessionStore::mark_token_refused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRefusal {
+    /// The session holds the refused token and refreshes before its next use.
+    Marked,
+    /// The session holds a newer token: nothing changed.
+    Superseded,
+    /// The session ended meanwhile.
     Ended,
 }
 
