@@ -54,7 +54,7 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 # Atomic swap for hot-reload (ZKPP keygen, config reload)
 arc-swap = "1"
 # A lock around one small invariant where no atomic expresses it.
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # gRPC
 tonic = "0.14"
@@ -160,7 +160,7 @@ phonenumber = "0.3"
 cedar-policy = "4"
 
 # NATS JetStream (event bus)
-async-nats = "0.51"
+async-nats = "0.52"
 futures = "0.3"
 hex = "0.4"
 fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub", "i-scripts"] }
