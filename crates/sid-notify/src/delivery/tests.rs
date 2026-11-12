@@ -840,3 +840,152 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     assert_eq!(sent_record.result.as_deref(), Some("smtp:email:m-42"));
     assert_eq!(email.sent.lock().unwrap().len(), 1);
 }
+
+/// A store whose writes each take `delay`, counting how many were in flight
+/// at once; every write of `fail_kind`'s event subject fails.
+struct SlowStore {
+    inner: Arc<dyn WorkStore>,
+    delay: Duration,
+    in_flight: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+    fail_subject: Option<&'static str>,
+}
+
+#[async_trait]
+impl WorkStore for SlowStore {
+    async fn enqueue_work(&self, work: &NewWork) -> sid_core::Result<bool> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if let Some(subject) = self.fail_subject {
+            let event: Event = serde_json::from_slice(&work.payload).unwrap();
+            if event.subject.as_deref() == Some(subject) {
+                return Err(sid_core::Error::Storage("store down".into()));
+            }
+        }
+        self.inner.enqueue_work(work).await
+    }
+
+    async fn claim_work(
+        &self,
+        kinds: &[WorkKind],
+        worker: &str,
+        limit: u32,
+        lease: Duration,
+    ) -> sid_core::Result<Vec<ClaimedWork>> {
+        self.inner.claim_work(kinds, worker, limit, lease).await
+    }
+
+    async fn complete_work(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+    ) -> sid_core::Result<bool> {
+        self.inner.complete_work(id, generation, result).await
+    }
+
+    async fn complete_work_owing(
+        &self,
+        id: WorkId,
+        generation: i64,
+        result: Option<&str>,
+        owed: &[NewWork],
+    ) -> sid_core::Result<bool> {
+        self.inner
+            .complete_work_owing(id, generation, result, owed)
+            .await
+    }
+
+    async fn fail_work(
+        &self,
+        id: WorkId,
+        generation: i64,
+        failure: &sid_core::models::WorkFailure,
+    ) -> sid_core::Result<bool> {
+        self.inner.fail_work(id, generation, failure).await
+    }
+
+    async fn get_work(&self, id: WorkId) -> sid_core::Result<Option<sid_core::models::WorkRecord>> {
+        self.inner.get_work(id).await
+    }
+
+    async fn purge_ended_work(
+        &self,
+        kind: &WorkKind,
+        before: chrono::DateTime<Utc>,
+    ) -> sid_core::Result<u64> {
+        self.inner.purge_ended_work(kind, before).await
+    }
+
+    async fn export_work(&self) -> sid_core::Result<Vec<sid_core::models::WorkSnapshot>> {
+        self.inner.export_work().await
+    }
+
+    async fn import_work(&self, work: &sid_core::models::WorkSnapshot) -> sid_core::Result<bool> {
+        self.inner.import_work(work).await
+    }
+}
+
+/// Deliveries are accepted concurrently, up to `ACCEPT_CONCURRENCY` store
+/// writes at once, and each is settled by its own outcome: stored ones done,
+/// a failed one left with the bus (regression: one write at a time bounded a
+/// receiver to the store's write rate, 162 events/s on MongoDB).
+#[tokio::test]
+async fn deliveries_are_accepted_concurrently_and_settled_one_by_one() {
+    let slow = Arc::new(SlowStore {
+        inner: store().await,
+        delay: Duration::from_millis(10),
+        in_flight: Default::default(),
+        most: Default::default(),
+        fail_subject: Some("profile/p-down"),
+    });
+    let (tx, rx) = mpsc::channel(256);
+    let mut outcomes = Vec::new();
+    for i in 0..(ACCEPT_CONCURRENCY * 3) {
+        let subject = if i == 7 {
+            "profile/p-down".to_string()
+        } else {
+            format!("profile/p-{i}")
+        };
+        let event =
+            Event::new("sid-test", event_types::SECURITY_BRUTE_FORCE).with_subject(&subject);
+        let (delivery, outcome) = Delivery::new(event);
+        tx.send(delivery).await.unwrap();
+        outcomes.push((subject, outcome));
+    }
+    drop(tx);
+    let accepted = std::sync::atomic::AtomicUsize::new(0);
+    accept_work(
+        rx,
+        slow.as_ref(),
+        || {
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+        std::future::pending(),
+    )
+    .await;
+
+    let most = slow.most.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(most > 1, "deliveries were accepted one at a time");
+    assert!(
+        most <= ACCEPT_CONCURRENCY,
+        "{most} writes at once, more than the bound"
+    );
+    assert_eq!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        ACCEPT_CONCURRENCY * 3 - 1
+    );
+    for (subject, outcome) in outcomes {
+        match outcome.await.unwrap() {
+            Settlement::Done => assert_ne!(subject, "profile/p-down"),
+            Settlement::Retry(after) => {
+                assert_eq!(subject, "profile/p-down");
+                assert_eq!(after, REDELIVER_AFTER);
+            }
+            other => panic!("unexpected settlement {other:?}"),
+        }
+    }
+}
