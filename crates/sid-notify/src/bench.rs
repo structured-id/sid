@@ -375,7 +375,9 @@ impl Waits {
             let mut samples = 0;
             loop {
                 let rows: Vec<(String, i64)> = sqlx::query_as(
-                    "SELECT state || ' ' || COALESCE(wait_event_type || ':' || wait_event, 'running') \
+                    // A session the server reports no state for (a backend
+                    // not serving a client) still counts, under `none`.
+                    "SELECT COALESCE(state, 'none') || ' ' || COALESCE(wait_event_type || ':' || wait_event, 'running') \
                      || ' ' || left(regexp_replace(query, '\\s+', ' ', 'g'), 60), count(*) \
                      FROM pg_stat_activity \
                      WHERE datname = current_database() AND pid <> pg_backend_pid() \
