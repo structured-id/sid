@@ -6382,6 +6382,7 @@ dependencies = [
  "sid-ids",
  "sid-ids-proto",
  "sid-infra",
+ "sid-notify",
  "sid-plugin",
  "sid-proto",
  "sid-serve",

@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "sid-notify"
 path = "src/main.rs"
 
+[features]
+# The durable delivery measurement, shared with every work store's harness.
+bench = []
+
 [dependencies]
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
@@ -89,6 +93,8 @@ sid-ids-proto = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 
 [dev-dependencies]
+# The bench harness runs the shared measurement.
+sid-notify = { path = ".", features = ["bench"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 tokio-stream = "0.1"
