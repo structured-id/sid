@@ -116,6 +116,42 @@ BEGIN
 END;
 $$;
 
+-- The key of one holder's assignments in one exact scope: the holder's kind,
+-- its id (a client id with its 4-byte length), then 0 for no scope or 1 and
+-- the scope. The database encoding is UTF-8, so the conversion is fixed.
+CREATE FUNCTION role_assignment_set_key(profile_id uuid, group_id uuid, machine_user_id uuid, oauth_client_id text, provisioning_connector_id uuid, scope text) RETURNS bytea
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN CASE
+        WHEN profile_id IS NOT NULL THEN '\x01'::bytea || uuid_send(profile_id)
+        WHEN group_id IS NOT NULL THEN '\x02'::bytea || uuid_send(group_id)
+        WHEN machine_user_id IS NOT NULL THEN '\x03'::bytea || uuid_send(machine_user_id)
+        WHEN oauth_client_id IS NOT NULL THEN '\x04'::bytea
+            || int4send(octet_length(oauth_client_id)) || convert_to(oauth_client_id, 'UTF8')
+        ELSE '\x05'::bytea || uuid_send(provisioning_connector_id)
+    END || CASE WHEN scope IS NULL THEN '\x00'::bytea ELSE '\x01'::bytea || convert_to(scope, 'UTF8') END;
+
+-- Every stored or removed assignment moves its set's revision, cascades
+-- included. A removal only moves an existing set: a set whose holder is
+-- being deleted goes with it.
+CREATE FUNCTION role_assignment_set_changed() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO role_assignment_sets (profile_id, group_id, machine_user_id, oauth_client_id,
+            provisioning_connector_id, scope, revision)
+        VALUES (NEW.profile_id, NEW.group_id, NEW.machine_user_id, NEW.oauth_client_id,
+            NEW.provisioning_connector_id, NEW.scope, 1)
+        ON CONFLICT (set_key) DO UPDATE SET revision = role_assignment_sets.revision + 1;
+    ELSE
+        UPDATE role_assignment_sets SET revision = revision + 1
+        WHERE set_key = role_assignment_set_key(OLD.profile_id, OLD.group_id, OLD.machine_user_id,
+            OLD.oauth_client_id, OLD.provisioning_connector_id, OLD.scope);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 CREATE FUNCTION update_updated_at_column() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1577,6 +1613,26 @@ CREATE TABLE role_assignment_admin_roles (
     CONSTRAINT role_assignment_admin_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 );
 
+-- The revision of one holder's assignments in one exact scope: a conditional
+-- replacement of the set commits only at the revision it was decided on.
+CREATE TABLE role_assignment_sets (
+    set_key bytea GENERATED ALWAYS AS (role_assignment_set_key(profile_id, group_id, machine_user_id, oauth_client_id, provisioning_connector_id, scope)) STORED NOT NULL,
+    profile_id uuid,
+    group_id uuid,
+    machine_user_id uuid,
+    oauth_client_id text,
+    provisioning_connector_id uuid,
+    scope text,
+    revision bigint NOT NULL,
+    CONSTRAINT chk_role_assignment_set_holder CHECK ((num_nonnulls(profile_id, group_id, machine_user_id, oauth_client_id, provisioning_connector_id) = 1)),
+    CONSTRAINT role_assignment_sets_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT role_assignment_sets_pkey PRIMARY KEY (set_key),
+    CONSTRAINT role_assignment_sets_group_id_fkey FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    CONSTRAINT role_assignment_sets_oauth_client_id_fkey FOREIGN KEY (oauth_client_id) REFERENCES oauth2_clients(client_id) ON DELETE CASCADE,
+    CONSTRAINT role_assignment_sets_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    CONSTRAINT role_assignment_sets_provisioning_connector_id_fkey FOREIGN KEY (provisioning_connector_id) REFERENCES provisioning_connectors(id) ON DELETE CASCADE
+);
+
 CREATE TABLE role_assignment_policy_admin (
     assignment_id uuid NOT NULL,
     operation text NOT NULL,
@@ -1863,6 +1919,8 @@ CREATE RULE profiles_view_no_update AS
 CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed BEFORE INSERT OR UPDATE ON instance_secrets FOR EACH ROW EXECUTE FUNCTION refuse_admin_claim_when_centrally_managed();
 
 CREATE TRIGGER principals_email_policy_fence BEFORE INSERT OR UPDATE OF value, email_policy_revision, principal_type ON principals FOR EACH ROW EXECUTE FUNCTION principals_email_policy_fence();
+
+CREATE TRIGGER role_assignment_set_changed AFTER INSERT OR DELETE ON role_assignments FOR EACH ROW EXECUTE FUNCTION role_assignment_set_changed();
 
 CREATE TRIGGER trg_audit_records_no_delete BEFORE DELETE ON audit_records FOR EACH ROW EXECUTE FUNCTION audit_records_immutable();
 

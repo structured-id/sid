@@ -243,6 +243,33 @@ fn check_other_administrator_assignment(
     Ok(())
 }
 
+/// Refuse a change removing the assignments `removed` when it removed an
+/// administrator assignment (`before`, read and locked ahead of the change)
+/// and no live administrator assignment of an active or suspended Profile
+/// remains after it (`after`, read in the same transaction): one replacing
+/// an administrator's term in the same commit keeps the installation usable.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+fn check_administrator_kept(
+    removed: &[sid_core::models::RoleAssignmentId],
+    before: &[(uuid::Uuid, String)],
+    after: &[(uuid::Uuid, String)],
+) -> sid_core::Result<()> {
+    let removed_one = removed
+        .iter()
+        .any(|r| before.iter().any(|(id, _)| *id == r.into_uuid()));
+    if removed_one && !after.iter().any(|(_, status)| usable_administrator(status)) {
+        return Err(sid_core::Error::InvalidState(
+            "the last administrator assignment cannot be removed: assign another administrator first"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The refusal of deleting the installation administrator role while it is
 /// assigned: the deletion would take every assignment with it.
 #[cfg(any(

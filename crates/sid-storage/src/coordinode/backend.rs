@@ -1405,6 +1405,21 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::delete_role_assignment_fenced(self, id, fence, ctx).await
     }
 
+    async fn role_assignment_set(
+        &self,
+        set: &sid_core::models::AssignmentSet,
+    ) -> Result<(u64, Vec<RoleAssignment>)> {
+        CoordinodeBackend::role_assignment_set(self, set).await
+    }
+
+    async fn replace_role_assignments(
+        &self,
+        change: &sid_core::models::AssignmentSetChange,
+        ctx: MutationContext,
+    ) -> Result<u64> {
+        CoordinodeBackend::replace_role_assignments(self, change, ctx).await
+    }
+
     async fn list_role_assignments_for_profile(
         &self,
         profile_id: ProfileId,

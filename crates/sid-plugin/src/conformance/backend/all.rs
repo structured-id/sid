@@ -287,6 +287,13 @@ macro_rules! __storage_conformance {
                 test_fenced_role_edit
                 test_create_role_assignment_never_replaces
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],assignment_set:
+                test_every_change_moves_the_set
+                test_replacement_is_conditional
+                test_replacement_is_fenced
+                test_replacement_keeps_an_administrator
+                test_concurrent_replacements_serialize
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],service_binding:
                 test_binding_is_stable
                 test_bindings_are_pairwise

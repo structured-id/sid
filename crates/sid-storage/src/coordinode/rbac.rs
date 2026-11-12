@@ -15,11 +15,11 @@ use chrono::Utc;
 use coordinode_core::graph::types::Value;
 use sid_core::models::{
     AccessRequest, AccessRequestId, AccessRequestStatus, AdminEnvelope, AdminOperation,
-    AssignmentFence, AssignmentProvenance, AuthorityBasis, CedarPolicy, CedarPolicyId, Group,
-    GroupId, GroupMember, INSTALLATION_SCOPE, MachineUserId, MutationContext, PolicyAuthority,
-    PolicyOperation, PolicyScope, ProfileId, ProjectId, ProvisioningConnectorId, RecipientKind,
-    ResourceId, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleEditFence,
-    RoleId,
+    AssignmentFence, AssignmentProvenance, AssignmentSet, AssignmentSetChange, AuthorityBasis,
+    CedarPolicy, CedarPolicyId, Group, GroupId, GroupMember, INSTALLATION_SCOPE, MachineUserId,
+    MutationContext, PolicyAuthority, PolicyOperation, PolicyScope, ProfileId, ProjectId,
+    ProvisioningConnectorId, RecipientKind, ResourceId, Role, RoleAssignment, RoleAssignmentId,
+    RoleAssignmentPrincipal, RoleEditFence, RoleId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -424,6 +424,7 @@ fn delete_group_records(tx: &Statements<'_>, group_id: GroupId) -> SidResult<()>
     for assignment in assignments_where(tx, "a.group_id = $value", bin(group_id.as_bytes()))? {
         delete_assignment(tx, assignment.id)?;
     }
+    delete_sets_of(tx, &RoleAssignmentPrincipal::Group(group_id))?;
     for query in [
         "MATCH (m:SidGroupMember) WHERE m.group_id = $id DETACH DELETE m",
         "MATCH (g:SidGroup) WHERE g.parent_group_id = $id SET g.parent_group_id = null",
@@ -569,6 +570,99 @@ fn touch_references(
         | RoleAssignmentPrincipal::MachineUser(_)
         | RoleAssignmentPrincipal::OAuthClient(_) => {}
     }
+    Ok(())
+}
+
+/// The assignments of `set`: its holder's, in its exact scope.
+fn set_assignments(tx: &Statements<'_>, set: &AssignmentSet) -> SidResult<Vec<RoleAssignment>> {
+    let (filter, value) = match &set.principal {
+        RoleAssignmentPrincipal::Profile(id) => ("a.profile_id = $value", bin(id.as_bytes())),
+        RoleAssignmentPrincipal::Group(id) => ("a.group_id = $value", bin(id.as_bytes())),
+        RoleAssignmentPrincipal::MachineUser(id) => {
+            ("a.machine_user_id = $value", bin(id.as_bytes()))
+        }
+        RoleAssignmentPrincipal::OAuthClient(id) => {
+            ("a.oauth_client_id = $value", Value::String(id.clone()))
+        }
+        RoleAssignmentPrincipal::ProvisioningConnector(id) => {
+            ("a.connector_id = $value", bin(id.as_bytes()))
+        }
+    };
+    let mut held = assignments_where(tx, filter, value)?;
+    held.retain(|a| set.holds(a));
+    Ok(held)
+}
+
+/// The revision of `set`, 0 for a set never changed.
+fn set_revision(tx: &Statements<'_>, set: &AssignmentSet) -> SidResult<u64> {
+    let rows = tx.run(
+        "MATCH (s:SidAssignmentSet) WHERE s.key = $key RETURN s.revision AS revision",
+        Params::default().with("key", Value::Binary(set.key())),
+    )?;
+    rows.first().map_or(Ok(0), revision_of)
+}
+
+/// Move `set`'s revision on, answering the new one: every stored or removed
+/// assignment of it does. The node names its holder, so a deleted holder's
+/// sets go with it.
+fn bump_set(tx: &Statements<'_>, set: &AssignmentSet) -> SidResult<u64> {
+    let key = Value::Binary(set.key());
+    let rows = tx.run(
+        "MATCH (s:SidAssignmentSet) WHERE s.key = $key
+         SET s.revision = s.revision + 1 RETURN s.revision AS revision",
+        Params::default().with("key", key.clone()),
+    )?;
+    if let Some(row) = rows.first() {
+        return revision_of(row);
+    }
+    tx.run(
+        "CREATE (s:SidAssignmentSet {key: $key, holder: $holder, revision: 1})",
+        Params::default()
+            .with("key", key)
+            .with("holder", set_holder(&set.principal)),
+    )?;
+    Ok(1)
+}
+
+/// Write `set`'s revision as `next`.
+fn put_set(tx: &Statements<'_>, set: &AssignmentSet, next: u64) -> SidResult<()> {
+    let key = Value::Binary(set.key());
+    let rows = tx.run(
+        "MATCH (s:SidAssignmentSet) WHERE s.key = $key SET s.revision = $next
+         RETURN s.revision AS revision",
+        Params::default()
+            .with("key", key.clone())
+            .with("next", revision(next)?),
+    )?;
+    if rows.is_empty() {
+        tx.run(
+            "CREATE (s:SidAssignmentSet {key: $key, holder: $holder, revision: $next})",
+            Params::default()
+                .with("key", key)
+                .with("holder", set_holder(&set.principal))
+                .with("next", revision(next)?),
+        )?;
+    }
+    Ok(())
+}
+
+/// The holder every set of `principal` names: the key of its unscoped set.
+fn set_holder(principal: &RoleAssignmentPrincipal) -> Value {
+    Value::Binary(
+        AssignmentSet {
+            principal: principal.clone(),
+            scope: None,
+        }
+        .key(),
+    )
+}
+
+/// Delete in `tx` the revisions of `principal`'s sets: the holder is gone.
+fn delete_sets_of(tx: &Statements<'_>, principal: &RoleAssignmentPrincipal) -> SidResult<()> {
+    tx.run(
+        "MATCH (s:SidAssignmentSet) WHERE s.holder = $holder DETACH DELETE s",
+        Params::default().with("holder", set_holder(principal)),
+    )?;
     Ok(())
 }
 
@@ -782,6 +876,7 @@ fn store_assignment(
             )
             .with("revision", revision(a.revision)?),
     )?;
+    bump_set(tx, &AssignmentSet::of(a))?;
     Ok(())
 }
 
@@ -803,6 +898,7 @@ fn delete_assignment(
             bin(next.id.as_bytes()),
         )?);
         touch_references(tx, next.role_id, &next.principal)?;
+        bump_set(tx, &AssignmentSet::of(&next))?;
         for query in [
             "MATCH (e:SidAdminRole) WHERE e.assignment_id = $id DETACH DELETE e",
             "MATCH (a:SidRoleAssignment) WHERE a.id = $id DETACH DELETE a",
@@ -869,6 +965,13 @@ pub(super) fn grant_installation_administrator(
 /// Profile. Removals write the role, and the holders' Profiles are held, so
 /// what is counted stays as counted until the commit.
 fn keep_last_administrator(tx: &Statements<'_>, assignment_id: RoleAssignmentId) -> SidResult<()> {
+    let administrators = held_administrator_assignments(tx)?;
+    crate::check_other_administrator_assignment(assignment_id, &administrators)
+}
+
+/// The live installation administrator assignments of existing Profiles,
+/// each with its holder's status, the Profiles held for the commit.
+fn held_administrator_assignments(tx: &Statements<'_>) -> SidResult<Vec<(uuid::Uuid, String)>> {
     let mut administrators = Vec::new();
     for a in administrator_assignments(tx, None)? {
         let RoleAssignmentPrincipal::Profile(holder) = a.principal else {
@@ -882,7 +985,7 @@ fn keep_last_administrator(tx: &Statements<'_>, assignment_id: RoleAssignmentId)
             administrators.push((a.id.into_uuid(), get_text(&rows[0], "status")?));
         }
     }
-    crate::check_other_administrator_assignment(assignment_id, &administrators)
+    Ok(administrators)
 }
 
 /// The Profiles holding a live installation administrator assignment, with
@@ -999,6 +1102,7 @@ pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) ->
     for a in assignments_where(tx, "a.profile_id = $value", bin(profile.as_bytes()))? {
         delete_assignment(tx, a.id)?;
     }
+    delete_sets_of(tx, &RoleAssignmentPrincipal::Profile(profile))?;
     tx.run(
         "MATCH (q:SidAccessRequest) WHERE q.requester_id = $id DETACH DELETE q",
         Params::default().with("id", bin(profile.as_bytes())),
@@ -1041,7 +1145,10 @@ pub(super) fn delete_client_records(tx: &Statements<'_>, client_id: &str) -> Sid
     )? {
         delete_assignment(tx, a.id)?;
     }
-    Ok(())
+    delete_sets_of(
+        tx,
+        &RoleAssignmentPrincipal::OAuthClient(client_id.to_owned()),
+    )
 }
 
 // === Cedar policies ===
@@ -1444,6 +1551,82 @@ impl CoordinodeBackend {
             }
             finalize(tx, &format!("role_assignment:{assignment_id}"), ctx.clone())?;
             Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn role_assignment_set(
+        &self,
+        set: &AssignmentSet,
+    ) -> SidResult<(u64, Vec<RoleAssignment>)> {
+        let set = set.clone();
+        self.read(move |tx| {
+            let revision = set_revision(tx, &set)?;
+            Ok((revision, set_assignments(tx, &set)?))
+        })
+        .await
+    }
+
+    pub(super) async fn replace_role_assignments(
+        &self,
+        change: &AssignmentSetChange,
+        ctx: MutationContext,
+    ) -> SidResult<u64> {
+        if let Some((outside, _)) = change.create.iter().find(|(a, _)| !change.set.holds(a)) {
+            return Err(SidError::Validation(format!(
+                "assignment {} is outside the set it replaces",
+                outside.id
+            )));
+        }
+        let change = change.clone();
+        self.transaction(move |tx| {
+            let set = &change.set;
+            // The set's node is written at the end, so a concurrent change
+            // of the set conflicts with this one.
+            let current = set_revision(tx, set)?;
+            if current != change.expected_revision {
+                return Err(SidError::AssignmentSetChanged { current });
+            }
+            let fences = change
+                .create
+                .iter()
+                .map(|(_, f)| f)
+                .chain(change.delete.iter().map(|(_, f)| f))
+                .chain(&change.hold);
+            for fence in fences {
+                check_assignment_fence(tx, fence)?;
+            }
+            let removed: Vec<RoleAssignmentId> = change.delete.iter().map(|(id, _)| *id).collect();
+            let administrators = if removed.is_empty() {
+                Vec::new()
+            } else {
+                held_administrator_assignments(tx)?
+            };
+            for id in &removed {
+                // One already gone was removed by a change the caller did not see.
+                if !get_assignment(tx, *id)?.is_some_and(|a| set.holds(&a)) {
+                    return Err(SidError::AssignmentSetChanged { current });
+                }
+                delete_assignment(tx, *id)?;
+            }
+            for (assignment, _) in &change.create {
+                insert_assignment(tx, assignment, None)?;
+            }
+            let removes_administrator = removed
+                .iter()
+                .any(|r| administrators.iter().any(|(id, _)| *id == r.into_uuid()));
+            if removes_administrator {
+                let remaining = held_administrator_assignments(tx)?;
+                crate::check_administrator_kept(&removed, &administrators, &remaining)?;
+            }
+            // A concurrent write of the set conflicts with this commit, so
+            // the one revision others see after `expected` is the next.
+            let next = change.expected_revision.checked_add(1).ok_or_else(|| {
+                SidError::InvalidState("assignment set revision exhausted".into())
+            })?;
+            put_set(tx, set, next)?;
+            finalize(tx, &format!("role_assignments:{set}"), ctx.clone())?;
+            Ok(Decision::Commit(next))
         })
         .await
     }
