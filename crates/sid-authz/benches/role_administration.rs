@@ -106,7 +106,7 @@ async fn setup(storage: Arc<dyn StorageBackend>) -> Setup {
                 permission_ceiling: [read].into(),
                 recipient_kinds: [RecipientKind::Profile].into(),
                 recipient_group: None,
-                max_validity_secs: 30 * 86_400,
+                max_validity_secs: Some(30 * 86_400),
             }),
             audit(),
         )

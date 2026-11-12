@@ -461,7 +461,7 @@ pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) 
         permission_ceiling: ["documents:read".to_string()].into(),
         recipient_kinds: [RecipientKind::Profile].into(),
         recipient_group: None,
-        max_validity_secs: 3_600,
+        max_validity_secs: Some(3_600),
     };
     let own = RoleAssignment::new(RoleAssignmentPrincipal::Profile(holder), role.id);
     let through_first = RoleAssignment::new(RoleAssignmentPrincipal::Group(first.id), role.id)
@@ -669,7 +669,8 @@ async fn assignee(backend: &dyn StorageBackend) -> sid_core::models::ProfileId {
 }
 
 /// An administrative assignment keeps its whole envelope and provenance
-/// (D050 B); a redelegated one ends with the assignment it depends on,
+/// (D050 B), a validity limit's absence as absence; a redelegated one ends
+/// with the assignment it depends on,
 /// while an assignment that only names its authorizing basis outlives it;
 /// a group an envelope restricts recipients to cannot be deleted from under
 /// it, which would silently widen the envelope.
@@ -687,7 +688,8 @@ pub async fn test_administrative_assignment(backend: &dyn StorageBackend) {
         permission_ceiling: ["documents:read".to_string()].into(),
         recipient_kinds: [RecipientKind::Profile, RecipientKind::Group].into(),
         recipient_group: Some(group.id),
-        max_validity_secs: 86_400,
+        // No limit of its own: stored and read back as absence.
+        max_validity_secs: None,
     };
     let root_holder = assignee(backend).await;
     let root = RoleAssignment::new(
@@ -729,6 +731,7 @@ pub async fn test_administrative_assignment(backend: &dyn StorageBackend) {
     // Redelegated: narrower, and dependent on the root.
     let mut narrower = envelope.clone();
     narrower.operations = [AdminOperation::Assign].into();
+    narrower.max_validity_secs = Some(3_600);
     let delegate_holder = assignee(backend).await;
     let delegated = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(delegate_holder),
@@ -824,7 +827,7 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
             permission_ceiling: ["documents:read".to_string()].into(),
             recipient_kinds: [RecipientKind::Profile].into(),
             recipient_group: Some(group.id),
-            max_validity_secs: 86_400,
+            max_validity_secs: Some(86_400),
         });
     backend
         .create_role_assignment(&basis, test_audit())
@@ -977,7 +980,7 @@ pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
             permission_ceiling: ["documents:read".to_string()].into(),
             recipient_kinds: [RecipientKind::Group].into(),
             recipient_group: None,
-            max_validity_secs: 86_400,
+            max_validity_secs: Some(86_400),
         });
     backend
         .create_role_assignment(&basis, test_audit())
@@ -1080,7 +1083,7 @@ pub async fn test_fenced_role_edit(backend: &dyn StorageBackend) {
         permission_ceiling: ["documents:read".to_string()].into(),
         recipient_kinds: [RecipientKind::Profile].into(),
         recipient_group: None,
-        max_validity_secs: 86_400,
+        max_validity_secs: Some(86_400),
     });
     backend
         .create_role_assignment(&editor, test_audit())

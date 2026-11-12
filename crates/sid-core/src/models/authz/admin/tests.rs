@@ -14,7 +14,7 @@ fn envelope(role: &Role) -> AdminEnvelope {
         permission_ceiling: ["ledger.read".to_string(), "ledger.post".to_string()].into(),
         recipient_kinds: [RecipientKind::Profile].into(),
         recipient_group: None,
-        max_validity_secs: 90 * 86_400,
+        max_validity_secs: Some(90 * 86_400),
     }
 }
 
@@ -134,8 +134,34 @@ fn an_incomplete_envelope_is_refused() {
     no_kinds.recipient_kinds.clear();
     assert_eq!(no_kinds.validate(), Err(EnvelopeError::NoRecipientKinds));
     let mut no_time = envelope(&role);
-    no_time.max_validity_secs = 0;
+    no_time.max_validity_secs = Some(0);
     assert_eq!(no_time.validate(), Err(EnvelopeError::Validity));
+}
+
+/// Bug prevented: every administered assignment was forced to expire, so an
+/// authorized assignment without end could not be made at all. Without a
+/// limit of its own an envelope admits an assignment without end or with any
+/// end ahead; a limited one still refuses none and longer.
+#[test]
+fn an_unlimited_envelope_admits_an_assignment_without_end() {
+    let role = accountant();
+    let mut unlimited = envelope(&role);
+    unlimited.max_validity_secs = None;
+    assert_eq!(unlimited.validate(), Ok(()));
+    for validity in [None, Some(1), Some(10 * 365 * 86_400)] {
+        assert_eq!(
+            unlimited.covers(AdminOperation::Assign, &role, &worker(), false, validity),
+            Ok(()),
+            "{validity:?}"
+        );
+    }
+    for validity in [Some(0), Some(-1)] {
+        assert_eq!(
+            unlimited.covers(AdminOperation::Assign, &role, &worker(), false, validity),
+            Err(Uncovered::Validity),
+            "an end already past: {validity:?}"
+        );
+    }
 }
 
 /// A redelegated envelope may only narrow: it adds no operation, role,
@@ -147,15 +173,28 @@ fn redelegation_only_narrows() {
     parent.operations.insert(AdminOperation::Redelegate);
     let mut child = envelope(&role);
     child.operations = [AdminOperation::Assign].into();
-    child.max_validity_secs = 86_400;
+    child.max_validity_secs = Some(86_400);
     assert!(parent.is_narrowed_by(&child));
     assert!(parent.is_narrowed_by(&parent.clone()));
+    let mut unlimited_child = child.clone();
+    unlimited_child.max_validity_secs = None;
+    assert!(
+        !parent.is_narrowed_by(&unlimited_child),
+        "a limited envelope passes on no unlimited one"
+    );
+    let mut unlimited_parent = parent.clone();
+    unlimited_parent.max_validity_secs = None;
+    assert!(unlimited_parent.is_narrowed_by(&unlimited_child));
+    assert!(
+        unlimited_parent.is_narrowed_by(&child),
+        "a limit may be added"
+    );
 
     let mut wider = child.clone();
     wider.operations.insert(AdminOperation::EditRole);
     assert!(!parent.is_narrowed_by(&wider));
     let mut longer = child.clone();
-    longer.max_validity_secs = parent.max_validity_secs + 1;
+    longer.max_validity_secs = parent.max_validity_secs.map(|max| max + 1);
     assert!(!parent.is_narrowed_by(&longer));
     let mut more = child.clone();
     more.permission_ceiling.insert("payroll.read".into());

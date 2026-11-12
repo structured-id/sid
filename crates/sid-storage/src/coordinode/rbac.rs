@@ -494,7 +494,7 @@ fn assignment(tx: &Statements<'_>, row: &Row) -> SidResult<RoleAssignment> {
                 .collect(),
             recipient_kinds: parsed_set(row, "admin_recipient_kinds", RecipientKind::parse)?,
             recipient_group: opt_id(row, "admin_group", GroupId::from_slice)?,
-            max_validity_secs: get_int(row, "admin_validity")?,
+            max_validity_secs: get_opt_int(row, "admin_validity")?,
         })
     } else {
         None
@@ -776,7 +776,9 @@ fn store_assignment(
             )
             .with(
                 "admin_validity",
-                envelope.map_or(Value::Null, |e| Value::Int(e.max_validity_secs)),
+                envelope
+                    .and_then(|e| e.max_validity_secs)
+                    .map_or(Value::Null, Value::Int),
             )
             .with("revision", revision(a.revision)?),
     )?;
