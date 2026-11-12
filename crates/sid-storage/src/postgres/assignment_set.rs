@@ -155,6 +155,13 @@ impl PostgresBackend {
         for fence in fences {
             Self::check_assignment_fence_in_tx(&mut tx, fence).await?;
         }
+        // The removed assignments before their set, in one order, as a
+        // single removal locks its row before its trigger takes the set.
+        sqlx::query("SELECT 1 FROM role_assignments WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&removed)
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?;
         let current = Self::lock_set_in_tx(&mut tx, set).await?;
         if current != change.expected_revision {
             return Err(SidError::AssignmentSetChanged { current });

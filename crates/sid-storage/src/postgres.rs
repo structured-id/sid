@@ -5122,8 +5122,13 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let now = chrono::Utc::now();
+        // The rows in id order before their sets, as a set replacement locks
+        // them.
         let expired = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
-            "DELETE FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= $1 \
+            "DELETE FROM role_assignments WHERE id IN (
+                 SELECT id FROM role_assignments
+                 WHERE expires_at IS NOT NULL AND expires_at <= $1
+                 ORDER BY id FOR UPDATE)
              RETURNING *",
         )
         .bind(now)

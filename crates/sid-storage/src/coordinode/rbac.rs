@@ -615,7 +615,9 @@ fn bump_set(tx: &Statements<'_>, set: &AssignmentSet) -> SidResult<u64> {
     if let Some(row) = rows.first() {
         return revision_of(row);
     }
-    tx.run(
+    // Another first change committing meanwhile reruns this one, which then
+    // finds its node.
+    tx.create_absent(
         "CREATE (s:SidAssignmentSet {key: $key, holder: $holder, revision: 1})",
         Params::default()
             .with("key", key)
@@ -635,7 +637,8 @@ fn put_set(tx: &Statements<'_>, set: &AssignmentSet, next: u64) -> SidResult<()>
             .with("next", revision(next)?),
     )?;
     if rows.is_empty() {
-        tx.run(
+        // As in `bump_set`: a concurrent first change reruns this one.
+        tx.create_absent(
             "CREATE (s:SidAssignmentSet {key: $key, holder: $holder, revision: $next})",
             Params::default()
                 .with("key", key)
