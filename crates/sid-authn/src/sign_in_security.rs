@@ -155,19 +155,61 @@ fn unavailable<E: From<SignInRefusal>>(e: impl Display) -> E {
     SignInRefusal::Unavailable(e.to_string()).into()
 }
 
+/// What admitted a sign-in, for deciding it again: whether a CAPTCHA the
+/// rules asked was answered by its pass, which is spent by then.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Admission {
+    pub captcha_answered: bool,
+}
+
+/// What the rules weigh a sign-in against besides its own request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prior {
+    /// Nothing: a sign-in judged for the first time.
+    Fresh,
+    /// A repeat of a sign-in already admitted and recorded from this address.
+    Repeat(Option<IpAddr>),
+    /// The same sign-in decided again after its commit was fenced, under
+    /// the admission its first judgement made.
+    Redecided(Admission),
+}
+
 /// Run the rules for `owner`'s verified sign-in under `requirements`, the
 /// login requirements the host's policy states for it, and record the
-/// admitted sign-in as evidence for later ones.
+/// admitted sign-in as evidence for later ones; what admitted it.
 pub async fn evaluate<H: SignInSecurityHost>(
     host: &H,
     owner: &H::Owner,
     attempt: SignInAttempt<'_>,
     requirements: &LoginRequirements,
-) -> Result<(), H::Error> {
+) -> Result<Admission, H::Error> {
     let client_ip = attempt.client_ip;
-    let geo_location = judge(host, owner, attempt, requirements, None).await?;
+    let (geo_location, admission) = judge(host, owner, attempt, requirements, Prior::Fresh).await?;
     record_evidence(host, owner, client_ip, geo_location.as_ref()).await;
-    Ok(())
+    Ok(admission)
+}
+
+/// Run the rules again for `owner`'s sign-in that `admitted` admitted, whose
+/// commit was fenced by a policy written meanwhile, under `requirements`, the
+/// policy in force now, recording nothing: a CAPTCHA counts as answered only
+/// when its first judgement answered one, and one it did not ask is answered
+/// only by a pass the attempt still has.
+pub async fn redecide<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
+    admitted: Admission,
+) -> Result<Admission, H::Error> {
+    judge(
+        host,
+        owner,
+        attempt,
+        requirements,
+        Prior::Redecided(admitted),
+    )
+    .await
+    .map(|(_, admission)| admission)
 }
 
 /// Run the same rules as [`evaluate`] without recording anything: for a
@@ -183,20 +225,26 @@ pub async fn check<H: SignInSecurityHost>(
     requirements: &LoginRequirements,
     admitted_from: Option<IpAddr>,
 ) -> Result<(), H::Error> {
-    judge(host, owner, attempt, requirements, Some(admitted_from))
-        .await
-        .map(|_| ())
+    judge(
+        host,
+        owner,
+        attempt,
+        requirements,
+        Prior::Repeat(admitted_from),
+    )
+    .await
+    .map(|_| ())
 }
 
-/// The rules themselves, for a repeat of a sign-in admitted from `admitted`
-/// when given; the client's location when it was resolved.
+/// The rules themselves, weighed against `prior`; the client's location when
+/// it was resolved, and what admitted the sign-in.
 async fn judge<H: SignInSecurityHost>(
     host: &H,
     owner: &H::Owner,
     attempt: SignInAttempt<'_>,
     requirements: &LoginRequirements,
-    admitted: Option<Option<IpAddr>>,
-) -> Result<Option<sid_plugin::geoip::GeoLocation>, H::Error> {
+    prior: Prior,
+) -> Result<(Option<sid_plugin::geoip::GeoLocation>, Admission), H::Error> {
     let identity = owner.to_string();
     let client_ip = attempt.client_ip;
 
@@ -317,15 +365,23 @@ async fn judge<H: SignInSecurityHost>(
             }
             RuleReaction::RequireCaptcha => {
                 // The admission being repeated was itself judged from that
-                // address: no pass is spent on its repeat.
-                answered.captcha = match attempt.captcha_pass {
-                    _ if admitted == Some(client_ip) => true,
-                    Some(pass) => host
+                // address: no pass is spent on its repeat. A sign-in decided
+                // again counts only the CAPTCHA its first judgement answered;
+                // a pass it did not spend then still answers one asked now.
+                answered.captcha = match (prior, attempt.captcha_pass) {
+                    (Prior::Repeat(from), _) if from == client_ip => true,
+                    (
+                        Prior::Redecided(Admission {
+                            captcha_answered: true,
+                        }),
+                        _,
+                    ) => true,
+                    (_, Some(pass)) => host
                         .captcha_gate()
                         .redeem(pass, &subject)
                         .await
                         .map_err(unavailable)?,
-                    None => false,
+                    (_, None) => false,
                 };
                 if !answered.captcha {
                     break;
@@ -428,7 +484,12 @@ async fn judge<H: SignInSecurityHost>(
             return Err(SignInRefusal::StepUp(unmet).into());
         }
     }
-    Ok(geo_location)
+    Ok((
+        geo_location,
+        Admission {
+            captcha_answered: answered.captcha,
+        },
+    ))
 }
 
 /// Record `owner`'s sign-in from `client_ip` that the rules admitted and a

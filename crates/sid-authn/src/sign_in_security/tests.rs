@@ -206,6 +206,66 @@ async fn judged(
         &requirements,
     )
     .await
+    .map(|_| ())
+}
+
+/// A password sign-in from a new device and address decided again under a
+/// policy that now asks such a sign-in for a CAPTCHA, after a first
+/// judgement that admitted it with `admitted`.
+async fn redecided(host: &Host, admitted: Admission) -> Result<Admission, Refused> {
+    let mut requirements = FixedLoginPolicy::of(&SecurityPolicy::ce_default())
+        .requirements(None)
+        .await
+        .unwrap();
+    requirements.new_device = RuleReaction::RequireCaptcha;
+    let amr = vec!["pwd".to_owned(), "otp".to_owned()];
+    redecide(
+        host,
+        &ProfileId::generate(),
+        SignInAttempt {
+            client_ip: CLIENT.parse().ok(),
+            authentication: AttemptAuthentication::Local {
+                method: "opaque",
+                assurance: AuthLevel::Standard,
+                amr: &amr,
+            },
+            captcha_pass: None,
+            user_agent: Some("a new browser"),
+        },
+        &requirements,
+        admitted,
+    )
+    .await
+}
+
+/// Regression: a sign-in decided again after a policy write that now asks
+/// a CAPTCHA was treated as a repeat from its own address, and committed
+/// without the CAPTCHA it was never asked. It is asked one now.
+#[tokio::test]
+async fn a_redecided_sign_in_answers_a_newly_asked_captcha() {
+    let (host, _) = Host::new(Vec::new());
+    let refused = redecided(&host, Admission::default()).await;
+    assert!(
+        matches!(refused, Err(Refused(SignInRefusal::CaptchaRequired(_)))),
+        "{refused:?}"
+    );
+}
+
+/// A CAPTCHA its first judgement answered, with the pass that is spent by
+/// then, still answers the same requirement when the sign-in is decided
+/// again.
+#[tokio::test]
+async fn a_redecided_sign_in_keeps_the_captcha_it_answered() {
+    let (host, _) = Host::new(Vec::new());
+    let admission = redecided(
+        &host,
+        Admission {
+            captcha_answered: true,
+        },
+    )
+    .await
+    .expect("the answered CAPTCHA still answers it");
+    assert!(admission.captcha_answered);
 }
 
 /// A passkey with user verification signs in at the multi-factor level by

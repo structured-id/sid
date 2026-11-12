@@ -31,7 +31,8 @@ use sid_authn::second_factor::pending::{
 use sid_authn::second_factor::{FactorError, FactorSpend};
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::sign_in_security::{
-    AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost, implied_auth_level,
+    Admission, AttemptAuthentication, SignInAttempt, SignInRefusal, SignInSecurityHost,
+    implied_auth_level,
 };
 use sid_core::Error as SidError;
 use sid_core::models::event::{Event, event_types};
@@ -161,9 +162,10 @@ pub enum LoginMethod {
 enum Judged {
     /// Its first judgement: an admitted sign-in is recorded as evidence.
     Recorded,
-    /// Decided again after its commit was fenced: already recorded, judged
-    /// by the rules of its own request without recording it twice.
-    Again,
+    /// Decided again after its commit was fenced, under what its first
+    /// judgement admitted: already recorded, judged by the rules of its own
+    /// request without recording it twice.
+    Again(Admission),
 }
 
 impl LoginMethod {
@@ -427,14 +429,14 @@ impl SignIn {
 
     /// Run the rules for `profile_id`'s verified sign-in under
     /// `requirements` and record it, once admitted, as evidence for later
-    /// sign-ins.
+    /// sign-ins; what admitted it.
     pub async fn evaluate(
         &self,
         profile_id: ProfileId,
         client_ip: Option<IpAddr>,
         (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
         requirements: &LoginRequirements,
-    ) -> Result<(), SignInError> {
+    ) -> Result<Admission, SignInError> {
         let requirements = self.for_account(requirements, profile_id).await?;
         let attempt = attempt(client_ip, authentication, context);
         Ok(
@@ -446,6 +448,30 @@ impl SignIn {
             )
             .await?,
         )
+    }
+
+    /// The same rules again for a sign-in `admitted` admitted whose commit a
+    /// policy written meanwhile fenced, under `requirements`, the policy in
+    /// force now, recording nothing (see
+    /// [`sid_authn::sign_in_security::redecide`]).
+    async fn redecide(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<IpAddr>,
+        (authentication, context): (AttemptAuthentication<'_>, AttemptContext<'_>),
+        requirements: &LoginRequirements,
+        admitted: Admission,
+    ) -> Result<Admission, SignInError> {
+        let requirements = self.for_account(requirements, profile_id).await?;
+        let attempt = attempt(client_ip, authentication, context);
+        Ok(sid_authn::sign_in_security::redecide(
+            &Rules(self),
+            &profile_id,
+            attempt,
+            &requirements,
+            admitted,
+        )
+        .await?)
     }
 
     /// `requirements` for a sign-in of `profile_id`, with the protection its
@@ -506,11 +532,13 @@ impl SignIn {
             Judged::Recorded,
         )
         .await
+        .map(|(admission, _)| admission)
     }
 
     /// [`Self::first_factor`], recording the admitted sign-in as evidence
     /// or, for a sign-in already recorded and decided again, judging it
-    /// without recording it twice.
+    /// without recording it twice; with what admitted it (nothing known for
+    /// a sign-in that owes its second factor).
     async fn judge_first_factor(
         &self,
         profile_id: ProfileId,
@@ -519,7 +547,7 @@ impl SignIn {
         context: AttemptContext<'_>,
         requirements: &LoginRequirements,
         judged: Judged,
-    ) -> Result<FirstFactor, SignInError> {
+    ) -> Result<(FirstFactor, Admission), SignInError> {
         // The factors are chosen under the same requirements the rules
         // decide on: with the account's protection.
         let requirements = &self.for_account(requirements, profile_id).await?;
@@ -538,19 +566,19 @@ impl SignIn {
                 )
                 .await
             }
-            Judged::Again => {
-                self.check(
+            Judged::Again(admitted) => {
+                self.redecide(
                     profile_id,
                     client_ip,
                     (authentication, context),
                     requirements,
-                    client_ip,
+                    admitted,
                 )
                 .await
             }
         };
         let owed = match judgement {
-            Ok(()) => return Ok(FirstFactor::Admitted(requirements.fence)),
+            Ok(admission) => return Ok((FirstFactor::Admitted(requirements.fence), admission)),
             Err(
                 owed @ SignInError::Rules(
                     SignInRefusal::StepUp(_) | SignInRefusal::StepUpAfterAnomaly(_),
@@ -587,11 +615,16 @@ impl SignIn {
         if factors.is_empty() && enrollable.is_empty() {
             return Err(owed);
         }
-        Ok(FirstFactor::AwaitsSecondFactor {
-            factors,
-            enrollable,
-            fence: requirements.fence,
-        })
+        // The refusal that left the rules carries no admission: a CAPTCHA
+        // they took is not counted when the sign-in is decided again.
+        Ok((
+            FirstFactor::AwaitsSecondFactor {
+                factors,
+                enrollable,
+                fence: requirements.fence,
+            },
+            Admission::default(),
+        ))
     }
 
     /// Record `profile_id`'s sign-in completed from `client_ip`, the address

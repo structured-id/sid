@@ -60,8 +60,9 @@ impl SignIn {
     /// `native_key` for a native client that proved one). A commit fenced
     /// because the login policy changed meanwhile is decided once more under
     /// the policy in force, which refuses it with its own reason or admits
-    /// it, without recording the attempt twice; a credential changed after
-    /// its check, or a policy changed again, still fences it.
+    /// it, without recording the attempt twice and counting only a CAPTCHA
+    /// its first judgement answered; a credential changed after its check,
+    /// or a policy changed again, still fences it.
     pub async fn sign_in_first_factor(
         &self,
         login_policy: &dyn LoginPolicySource,
@@ -81,7 +82,7 @@ impl SignIn {
         let decided = requirements.fence;
         let mut judged = Judged::Recorded;
         loop {
-            let admission = self
+            let (admission, admitted) = self
                 .judge_first_factor(
                     profile.id,
                     completer.client_ip,
@@ -112,7 +113,7 @@ impl SignIn {
                 return Err(SignInError::Fenced);
             }
             requirements = current;
-            judged = Judged::Again;
+            judged = Judged::Again(admitted);
         }
     }
 
