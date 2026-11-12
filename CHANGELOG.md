@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.28](https://github.com/structured-id/sid/compare/v0.2.27...v0.2.28) - 2026-11-12
+
+### Added
+
+- *(authz)* replace a role assignment set at its revision ([#606](https://github.com/structured-id/sid/pull/606))
+- *(authz)* make an envelope's maximum validity optional ([#604](https://github.com/structured-id/sid/pull/604))
+
+### Other
+
+- *(notify)* drop the trial onboarding mail from the defaults ([#579](https://github.com/structured-id/sid/pull/579))
+
 ## [0.2.27](https://github.com/structured-id/sid/compare/v0.2.26...v0.2.27) - 2026-11-10
 
 ### Added
