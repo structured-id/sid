@@ -754,8 +754,8 @@ async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
             .unwrap(),
         sid_authn::bff_session::TokenReplacement::Replaced
     ));
-    let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.expose_secret(), "access-1");
+    let token = f.adapter.current_token(&id, stale, None).await.unwrap();
+    assert_eq!(token.token().expose_secret(), "access-1");
 }
 
 /// A refresh that completed with a token still inside the refresh margin (its
@@ -799,7 +799,11 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
         .unwrap();
 
     let session = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let refused = f.adapter.current_token(&id, session).await.unwrap_err();
+    let refused = f
+        .adapter
+        .current_token(&id, session, None)
+        .await
+        .unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
     assert!(
         refused.message().contains("issuer"),
@@ -840,11 +844,15 @@ async fn the_claim_names_the_version_actually_refreshed() {
         .await
         .unwrap();
 
-    let first = f.adapter.current_token(&id, stale).await.unwrap_err();
+    let first = f.adapter.current_token(&id, stale, None).await.unwrap_err();
     assert!(first.message().contains("issuer"), "{first:?}");
 
     let session = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let second = f.adapter.current_token(&id, session).await.unwrap_err();
+    let second = f
+        .adapter
+        .current_token(&id, session, None)
+        .await
+        .unwrap_err();
     assert_eq!(second.code(), Code::Unavailable);
     assert!(
         !second.message().contains("issuer"),
@@ -887,14 +895,18 @@ async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
         .await
         .unwrap();
 
-    let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.expose_secret(), "access-2");
+    let token = f.adapter.current_token(&id, stale, None).await.unwrap();
+    assert_eq!(token.token().expose_secret(), "access-2");
 
     // Token lifetimes run on the wall clock, which a paused runtime does not
     // advance.
     std::thread::sleep(std::time::Duration::from_secs(3));
     let near_end = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let refused = f.adapter.current_token(&id, near_end).await.unwrap_err();
+    let refused = f
+        .adapter
+        .current_token(&id, near_end, None)
+        .await
+        .unwrap_err();
     assert!(
         refused.message().contains("issuer"),
         "the call waited for a refresh nobody was making: {refused:?}"
@@ -1025,7 +1037,7 @@ async fn a_refresh_ends_within_its_claim() {
     let session = sessions.get_session(&id).await.unwrap().unwrap();
 
     let started = tokio::time::Instant::now();
-    let refused = adapter.current_token(&id, session).await.unwrap_err();
+    let refused = adapter.current_token(&id, session, None).await.unwrap_err();
     assert!(
         started.elapsed() < REFRESH_HOLD,
         "the refresh outlived its claim: {:?}",

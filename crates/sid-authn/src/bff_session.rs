@@ -44,6 +44,12 @@ const PENDING: &str = "bff_pending_4";
 const REFRESH: &str = "bff_refresh_1";
 /// Namespace of the issuer sessions the issuer's back-channel logouts ended.
 const ENDED: &str = "bff_ended_1";
+/// Namespace of the access tokens the application's API refused, by issuer
+/// and token id.
+const REFUSED: &str = "bff_refused_1";
+/// How long a refusal outlives its token's expiry: a session holding the
+/// token past its end is refreshed anyway.
+const REFUSAL_GRACE: Duration = Duration::from_secs(60);
 /// How many times a token replacement is applied again over concurrent idle
 /// pushes before it is reported: each push is one write per half idle window
 /// per replica, so a few attempts outlast any real interleaving.
@@ -494,6 +500,34 @@ impl BffSessionStore {
             .is_some())
     }
 
+    /// Record that the application's API refused the access token `jti` of
+    /// issuer `iss`, which expires at `exp` (Unix seconds): a session still
+    /// holding that token must refresh before it is used again, and only
+    /// that token is concerned, not the session's later tokens nor another
+    /// session's. Repeated refusals leave the same record.
+    pub async fn record_token_refusal(&self, iss: &str, jti: &str, exp: i64) -> SessionResult<()> {
+        let left = u64::try_from(exp - Utc::now().timestamp()).unwrap_or(0);
+        self.store
+            .put_ceremony_state(
+                REFUSED,
+                &ended_key(iss, jti),
+                b"refused",
+                Duration::from_secs(left) + REFUSAL_GRACE,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Whether the application's API refused the current access token of
+    /// `claims`.
+    pub async fn token_refused(&self, claims: &SessionClaims) -> SessionResult<bool> {
+        Ok(self
+            .store
+            .read_ceremony_state(REFUSED, &ended_key(&claims.iss, &claims.jti))
+            .await?
+            .is_some())
+    }
+
     /// Write a session under its current idle window.
     async fn write(&self, id: &str, session: &BffSession) -> SessionResult<()> {
         self.store
@@ -573,8 +607,9 @@ fn refresh_key(id: &str, token: &SecretString) -> String {
     format!("{id}:{version}")
 }
 
-/// The key of an ended issuer session: a digest of the issuer and the
-/// session, each length prefixed, so no issuer's session names another's.
+/// The key of an ended issuer session, or of a refused token: a digest of
+/// the issuer and the session (or token) id, each length prefixed, so no
+/// issuer's id names another's.
 fn ended_key(iss: &str, sid: &str) -> String {
     use base64::Engine as _;
     use sha2::Digest as _;

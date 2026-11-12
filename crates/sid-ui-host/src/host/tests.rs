@@ -2,6 +2,7 @@
 
 use std::sync::Mutex;
 
+use crate::application_session::Bearer;
 use crate::application_session::tests::{COOKIE, ORIGIN, fixture, memory, signed_in};
 
 use super::*;
@@ -325,6 +326,145 @@ async fn an_unreachable_api_is_a_typed_outage() {
     assert_eq!(reason(&answer), "DEPENDENCY_UNAVAILABLE");
     let message = answer.headers()["grpc-message"].to_str().unwrap();
     assert!(!message.contains("10.0.0.7"), "{message}");
+}
+
+/// An API that answers every call with gRPC status `code`, as Trailers-Only.
+fn answering(
+    code: &'static str,
+) -> impl tower::Service<
+    http::Request<tonic::body::Body>,
+    Response = Answer,
+    Error = Infallible,
+    Future = impl Send,
+> + Clone
++ Send
++ Sync
++ 'static {
+    tower::service_fn(move |_: http::Request<tonic::body::Body>| async move {
+        let mut answer = http::Response::new(tonic::body::Body::empty());
+        answer
+            .headers_mut()
+            .insert("grpc-status", http::HeaderValue::from_static(code));
+        Ok::<_, Infallible>(answer)
+    })
+}
+
+/// The page's own session read with `cookie`, as its code after a refused
+/// call asks it.
+async fn session_read(
+    adapter: &ApplicationSessions,
+    cookie: &str,
+) -> Result<tonic::Response<sid_proto::sid::v1::authn::ApplicationSession>, tonic::Status> {
+    use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionService;
+    adapter
+        .get_application_session(crate::application_session::tests::with_cookie(
+            sid_proto::sid::v1::authn::GetApplicationSessionRequest {},
+            cookie,
+            None,
+        ))
+        .await
+}
+
+/// The issuer ended the sign-in and its back-channel logout has not reached
+/// this host yet: the API refuses the call as unauthenticated, and the page's
+/// next session read finds the session ended instead of still signed in, so
+/// the page goes to sign-in rather than showing its data as unavailable. A
+/// session without a refresh token has no other way to go on.
+#[tokio::test]
+async fn an_api_refusal_of_the_token_ends_a_session_without_refresh() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, false).await;
+    let adapter = Arc::new(f.adapter);
+    let host = HostUpstream::new(adapter.clone(), Some(answering("16")));
+    let cookie = format!("{COOKIE}={id}");
+    assert!(session_read(&adapter, &cookie).await.is_ok());
+    let answer = host
+        .oneshot(call(&api_path(), Some(&cookie), Some(&csrf)))
+        .await
+        .unwrap();
+    assert_eq!(grpc_status(&answer), "16");
+    let read = session_read(&adapter, &cookie).await.unwrap_err();
+    assert_eq!(read.code(), tonic::Code::Unauthenticated);
+    assert!(f.sessions.get_session(&id).await.unwrap().is_none());
+}
+
+/// A session with a refresh token tries the refresh after the API refused its
+/// token; an issuer that cannot answer leaves it an outage, not a sign-out:
+/// the session stays for the next attempt.
+#[tokio::test(start_paused = true)]
+async fn a_refused_token_with_the_issuer_down_is_an_outage_not_a_sign_out() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, true).await;
+    let adapter = Arc::new(f.adapter);
+    let host = HostUpstream::new(adapter.clone(), Some(answering("16")));
+    let cookie = format!("{COOKIE}={id}");
+    host.oneshot(call(&api_path(), Some(&cookie), Some(&csrf)))
+        .await
+        .unwrap();
+    let read = session_read(&adapter, &cookie).await.unwrap_err();
+    assert_eq!(read.code(), tonic::Code::Unavailable, "{read:?}");
+    assert!(f.sessions.get_session(&id).await.unwrap().is_some());
+}
+
+/// A permission refusal and an outage of the API are the call's own answer:
+/// the session stays signed in and nothing is refreshed.
+#[tokio::test]
+async fn a_permission_refusal_or_api_outage_keeps_the_session() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, false).await;
+    let adapter = Arc::new(f.adapter);
+    let cookie = format!("{COOKIE}={id}");
+    for code in ["7", "14"] {
+        let host = HostUpstream::new(adapter.clone(), Some(answering(code)));
+        let answer = host
+            .oneshot(call(&api_path(), Some(&cookie), Some(&csrf)))
+            .await
+            .unwrap();
+        assert_eq!(grpc_status(&answer), code);
+        assert!(session_read(&adapter, &cookie).await.is_ok(), "{code}");
+    }
+}
+
+/// A refusal of a token the session no longer holds (an earlier call's late
+/// answer after a refresh) and a refusal of another session's token leave
+/// the session as it is: a refusal concerns the token it was presented with.
+#[tokio::test]
+async fn a_refusal_of_another_token_keeps_the_session() {
+    let f = fixture(memory(), true);
+    let (refreshed, _) = signed_in(&f, true).await;
+    let adapter = Arc::new(f.adapter);
+    let before = f.sessions.get_session(&refreshed).await.unwrap().unwrap();
+    // The token an earlier call presented, refused only after the session
+    // was refreshed to its next token.
+    let earlier = Bearer::held(&before);
+    let mut next = before.claims.clone();
+    next.jti = "token-2".into();
+    assert!(matches!(
+        f.sessions
+            .replace_tokens(
+                &refreshed,
+                &"refresh".into(),
+                "access-2".into(),
+                Some("refresh-2".into()),
+                next.clone(),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    // Another session of the same browser, signed in anew with its own token.
+    next.jti = "token-s2".into();
+    let (other, _) = f
+        .sessions
+        .create_session("access-s2".into(), None, next, &before.connection)
+        .await
+        .unwrap();
+
+    adapter.refused(&earlier).await;
+    for id in [refreshed, other] {
+        let read = session_read(&adapter, &format!("{COOKIE}={id}")).await;
+        assert!(read.is_ok(), "{read:?}");
+    }
 }
 
 /// Without a hosted API, a call that is not the adapter's is unimplemented.
