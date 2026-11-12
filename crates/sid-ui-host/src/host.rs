@@ -29,6 +29,9 @@ use crate::application_session::{ApplicationSessions, CSRF_HEADER};
 /// The gRPC path prefix of the adapter's own service, answered in process.
 const ADAPTER_SERVICE: &str = "/sid.v1.authn.ApplicationSessionService/";
 
+/// The `grpc-status` of an UNAUTHENTICATED answer (gRPC status code 16).
+const UNAUTHENTICATED_STATUS: &[u8] = b"16";
+
 /// The proto file of the adapter's service: the only annotated RPCs the
 /// transcoder serves here.
 pub const ADAPTER_PROTO: &str = "sid/v1/authn/application_session.proto";
@@ -168,7 +171,8 @@ where
             for name in NOT_FORWARDED {
                 headers.remove(name);
             }
-            match http::HeaderValue::try_from(format!("Bearer {}", bearer.expose_secret())) {
+            match http::HeaderValue::try_from(format!("Bearer {}", bearer.token().expose_secret()))
+            {
                 Ok(mut value) => {
                     value.set_sensitive(true);
                     headers.insert(http::header::AUTHORIZATION, value);
@@ -179,10 +183,26 @@ where
             }
             // The API's own answers, refusals included, go back as they are;
             // only a call that never reached it is this host's to answer.
-            Ok(match api.oneshot(request).await {
+            let answer = match api.oneshot(request).await {
                 Ok(answer) => answer,
-                Err(e) => refuse::dependency_unavailable("application API", e).into_http(),
-            })
+                Err(e) => {
+                    return Ok(refuse::dependency_unavailable("application API", e).into_http());
+                }
+            };
+            // An API refusing the call as unauthenticated refused the token
+            // this host presented; the session holding it refreshes before its
+            // next use. A refusal answers without a body, its status in the
+            // headers (gRPC over HTTP/2, Trailers-Only), so nothing is read.
+            // A mark the store cannot take makes the call an outage.
+            if answer
+                .headers()
+                .get("grpc-status")
+                .is_some_and(|status| status.as_bytes() == UNAUTHENTICATED_STATUS)
+                && let Err(outage) = this.sessions.refused(&bearer).await
+            {
+                return Ok(outage.into_http());
+            }
+            Ok(answer)
         })
     }
 }

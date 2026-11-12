@@ -57,6 +57,30 @@ const _: () = assert!(REFRESH_WORK.as_secs() < REFRESH_HOLD.as_secs());
 /// How often a replica that did not win the refresh looks for its result.
 const REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The access token a forwarded call carries and the session it was taken
+/// from: the API's refusal of that call concerns this token of this session
+/// only. Neither leaves the host.
+#[derive(Debug)]
+pub struct Bearer {
+    session: String,
+    token: SecretString,
+}
+
+impl Bearer {
+    /// The access token session `id` holds now.
+    pub(crate) fn held(id: &str, session: &BffSession) -> Self {
+        Self {
+            session: id.to_owned(),
+            token: session.access_token.clone(),
+        }
+    }
+
+    /// The token, for the call's `authorization`.
+    pub fn token(&self) -> &SecretString {
+        &self.token
+    }
+}
+
 /// The adapter of one application: its client at the issuer, the issuer
 /// directory that verifies what the issuer returns, the shared session store
 /// and the revocations every SID process records.
@@ -147,7 +171,34 @@ impl ApplicationSessions {
             }
             return Err(unauthenticated());
         }
+        // The API refused the token this session holds: the issuer session
+        // may have ended before its back-channel logout arrived here, or the
+        // token alone is no longer usable. Its refresh tells which: a refused
+        // refresh ends the session, a granted one replaces the token.
+        if session.token_refused {
+            self.current_token(&id, session).await?;
+            let session = self
+                .sessions
+                .get_session(&id)
+                .await
+                .map_err(|e| refuse::dependency_unavailable("session store", e))?
+                .ok_or_else(unauthenticated)?;
+            return Ok((id, session));
+        }
         Ok((id, session))
+    }
+
+    /// Mark that the API refused the call `bearer` was presented with for
+    /// want of a usable credential, so its session, while it still holds
+    /// that token, refreshes before its next use. A store that cannot take
+    /// the mark is an outage of the call, not a refusal the page would read
+    /// against a session still answered as live.
+    pub async fn refused(&self, bearer: &Bearer) -> Result<(), Status> {
+        self.sessions
+            .mark_token_refused(&bearer.session, &bearer.token)
+            .await
+            .map(|_| ())
+            .map_err(|e| refuse::dependency_unavailable("session store", e))
     }
 
     /// The issuer's back-channel logout (Back-Channel Logout 1.0 §2.5–§2.8):
@@ -242,7 +293,7 @@ impl ApplicationSessions {
     /// expire. Every such call reads or changes data on the user's behalf, so
     /// it must echo the session's CSRF token: a request another site makes the
     /// browser send carries the cookie but not the token.
-    pub async fn bearer(&self, metadata: &MetadataMap) -> Result<SecretString, Status> {
+    pub async fn bearer(&self, metadata: &MetadataMap) -> Result<Bearer, Status> {
         self.require_the_page(metadata).await?;
         let (id, session) = self.signed_in(metadata).await?;
         if !csrf_matches(metadata, &session.csrf_token) {
@@ -267,10 +318,12 @@ impl ApplicationSessions {
     /// that window it reads the replay as theft, revokes the family and the
     /// refusal ends this session: the user signs in again, nothing is left
     /// holding a token the issuer no longer honours.
-    async fn current_token(&self, id: &str, session: BffSession) -> Result<SecretString, Status> {
+    ///
+    /// A token the API refused is refreshed whatever its expiry.
+    async fn current_token(&self, id: &str, session: BffSession) -> Result<Bearer, Status> {
         let now = chrono::Utc::now().timestamp();
-        if session.claims.exp - now > REFRESH_MARGIN_SECS {
-            return Ok(session.access_token);
+        if !due(&session, now) {
+            return Ok(Bearer::held(id, &session));
         }
         let Some(from) = session.refresh_token.clone() else {
             return Err(self.end(id).await);
@@ -286,14 +339,12 @@ impl ApplicationSessions {
         // rotated is never presented.
         let session = match self
             .sessions
-            .claim_refresh(id, &from, REFRESH_HOLD, |current| {
-                current.claims.exp - now <= REFRESH_MARGIN_SECS
-            })
+            .claim_refresh(id, &from, REFRESH_HOLD, |current| due(current, now))
             .await
             .map_err(|e| refuse::dependency_unavailable("session store", e))?
         {
             RefreshClaim::Claimed(current) => *current,
-            RefreshClaim::Current(current) => return Ok(current.access_token),
+            RefreshClaim::Current(current) => return Ok(Bearer::held(id, &current)),
             RefreshClaim::HeldElsewhere => {
                 return self
                     .refreshed_elsewhere(id, session.access_token.expose_secret())
@@ -319,9 +370,9 @@ impl ApplicationSessions {
         id: &str,
         session: BffSession,
         now: i64,
-    ) -> Result<SecretString, Status> {
-        if session.claims.exp - now > REFRESH_MARGIN_SECS {
-            return Ok(session.access_token);
+    ) -> Result<Bearer, Status> {
+        if !due(&session, now) {
+            return Ok(Bearer::held(id, &session));
         }
         let Some(refresh_token) = session.refresh_token.clone() else {
             return Err(self.end(id).await);
@@ -353,32 +404,38 @@ impl ApplicationSessions {
             .map_err(|e| refuse::dependency_unavailable("issuer", e))?;
         let claims = SessionClaims::from(claims).refreshed(&session.claims);
         let access_token = SecretString::from(tokens.access_token);
+        let replaced = Bearer {
+            session: id.to_owned(),
+            token: access_token.clone(),
+        };
         match self
             .sessions
             .replace_tokens(
                 id,
                 &refresh_token,
-                access_token.clone(),
+                access_token,
                 tokens.refresh_token.map(SecretString::from),
                 claims,
             )
             .await
         {
-            Ok(TokenReplacement::Replaced) => Ok(access_token),
+            Ok(TokenReplacement::Replaced) => Ok(replaced),
             // A newer refresh landed first; its tokens stand.
-            Ok(TokenReplacement::Superseded(current)) => Ok(current.access_token),
+            Ok(TokenReplacement::Superseded(current)) => Ok(Bearer::held(id, &current)),
             Ok(TokenReplacement::Ended) => Err(unauthenticated()),
             Err(e) => Err(refuse::dependency_unavailable("session store", e)),
         }
     }
 
     /// The token another replica's refresh stored, once it is there.
-    async fn refreshed_elsewhere(&self, id: &str, stale: &str) -> Result<SecretString, Status> {
+    async fn refreshed_elsewhere(&self, id: &str, stale: &str) -> Result<Bearer, Status> {
         let deadline = tokio::time::Instant::now() + REFRESH_HOLD;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(REFRESH_POLL).await;
             match self.sessions.get_session(id).await {
-                Ok(Some(session)) if session.bearer() != stale => return Ok(session.access_token),
+                Ok(Some(session)) if session.bearer() != stale => {
+                    return Ok(Bearer::held(id, &session));
+                }
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(unauthenticated()),
                 Err(e) => return Err(refuse::dependency_unavailable("session store", e)),
@@ -794,6 +851,12 @@ fn revocation_failure(failure: &RpClientError) -> GrantOutcome {
             GrantOutcome::NotRevoked
         }
     }
+}
+
+/// Whether `session`'s access token is refreshed before its use at `now`:
+/// it is about to expire, or the API refused it.
+fn due(session: &BffSession, now: i64) -> bool {
+    session.token_refused || session.claims.exp - now <= REFRESH_MARGIN_SECS
 }
 
 /// Whether a failed refresh may succeed if repeated: the issuer or the path
