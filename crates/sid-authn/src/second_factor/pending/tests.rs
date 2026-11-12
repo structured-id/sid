@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
 use sid_core::models::{
-    AuditEntry, CredentialData, CredentialType, EnforcementMode, MfaEnforcement, MutationContext,
-    OperationCompletion, Profile, ProfileId, SignInProof,
+    ActorFence, AuditEntry, CredentialData, CredentialType, EnforcementMode, MfaEnforcement,
+    MutationContext, OperationCompletion, Profile, ProfileId, SignInProof,
 };
 use sid_plugin::{CeremonyStateStore, InProcessCeremonyState, StorageBackend};
 use sid_storage::sqlite::SqliteBackend;
@@ -32,6 +32,23 @@ struct Host {
     required_amr: Mutex<BTreeSet<String>>,
     gone: Mutex<HashSet<ProfileId>>,
     completed: Mutex<Vec<ProfileId>>,
+    /// Policy writes that land just before the next commits, one each.
+    policy_writes: Mutex<u32>,
+    /// A method the policy written before a commit requires from then on.
+    written_requirement: Mutex<Option<String>>,
+}
+
+impl Host {
+    /// A policy write: the login-policy epoch advances.
+    async fn write_policy(&self) {
+        let mut tx = SqliteBackend::begin_write_on(self.store.pool())
+            .await
+            .unwrap();
+        SqliteBackend::advance_login_policy_epoch(&mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
 }
 
 #[async_trait]
@@ -61,13 +78,19 @@ impl PendingSignInHost for Host {
         "https://sid.example.com"
     }
     async fn requirements(&self, owner: ProfileId) -> Result<LoginRequirements, HostError> {
+        // The epoch first: a policy written after it fences what is decided.
+        let fence = SqliteBackend::login_policy_epoch(self.store.pool())
+            .await
+            .unwrap()
+            .map(|epoch| ActorFence::LoginPolicy { epoch });
+        let required_amr = self.required_amr.lock().unwrap().clone();
         let requirements = LoginRequirements {
             min_acr: AuthLevel::Basic,
-            required_amr: self.required_amr.lock().unwrap().clone(),
+            required_amr,
             max_authentication_age: None,
             enforcement: EnforcementMode::Hard,
             new_device: crate::anomaly::RuleReaction::StepUp,
-            fence: None,
+            fence,
             mfa: MfaEnforcement::Required,
             passkey_satisfies_mfa: false,
             account_protection: AuthLevel::Basic,
@@ -121,6 +144,23 @@ impl PendingSignInHost for Host {
         if let Some(spend) = completion.spend {
             ctx = spend.into_context(ctx);
         }
+        if let Some(fence) = completion.policy {
+            ctx = ctx.fenced_by(fence);
+        }
+        let write = {
+            let mut writes = self.policy_writes.lock().unwrap();
+            let write = *writes > 0;
+            if write {
+                *writes -= 1;
+            }
+            write
+        };
+        if write {
+            self.write_policy().await;
+            if let Some(method) = self.written_requirement.lock().unwrap().take() {
+                self.required_amr.lock().unwrap().insert(method);
+            }
+        }
         match self
             .store
             .complete_pending_session(
@@ -165,6 +205,8 @@ async fn host() -> Host {
         required_amr: Mutex::default(),
         gone: Mutex::default(),
         completed: Mutex::default(),
+        policy_writes: Mutex::default(),
+        written_requirement: Mutex::default(),
     }
 }
 
@@ -366,6 +408,153 @@ async fn an_account_that_cannot_sign_in_gets_nothing() {
         redeliver_second_factor(&h, &completed).await,
         Err(HostError(PendingError::SessionEnded))
     ));
+}
+
+/// The sessions `owner` holds that are not pending contexts.
+async fn signed_in_sessions(h: &Host, owner: ProfileId) -> usize {
+    h.store
+        .list_sessions(&owner)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|s| !s.awaits_second_factor())
+        .count()
+}
+
+/// A login policy written between the completion's decision and its commit
+/// fences that commit; when the policy in force then still admits the
+/// completion, it commits once under that policy instead of failing.
+#[tokio::test]
+async fn a_policy_written_before_the_commit_decides_the_completion_again() {
+    let h = host().await;
+    h.write_policy().await;
+    let (pending, _) = pending(&h).await;
+    *h.policy_writes.lock().unwrap() = 1;
+    let signed_in = complete_second_factor(
+        &h,
+        pending.clone(),
+        "otp",
+        CeremonyClient::Browser,
+        None,
+        None,
+    )
+    .await
+    .expect("the completion is decided again under the policy written");
+    assert!(
+        h.store
+            .get_session(signed_in.session_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(signed_in_sessions(&h, pending.profile_id).await, 1);
+    assert_eq!(*h.completed.lock().unwrap(), vec![pending.profile_id]);
+}
+
+/// A policy written before the commit that no longer admits the completion
+/// answers with what that policy asks, not with a fenced commit.
+#[tokio::test]
+async fn a_policy_written_before_the_commit_refuses_with_its_own_reason() {
+    let h = host().await;
+    h.write_policy().await;
+    let (pending, _) = pending(&h).await;
+    *h.policy_writes.lock().unwrap() = 1;
+    *h.written_requirement.lock().unwrap() = Some("hwk".to_string());
+    match complete_second_factor(
+        &h,
+        pending.clone(),
+        "otp",
+        CeremonyClient::Browser,
+        None,
+        None,
+    )
+    .await
+    {
+        Err(HostError(PendingError::StepUp(unmet))) => {
+            assert_eq!(unmet.amr, vec!["hwk".to_string()])
+        }
+        other => panic!("expected the new policy's step-up, got {:?}", other.err()),
+    }
+    assert_eq!(signed_in_sessions(&h, pending.profile_id).await, 0);
+    assert!(
+        live_pending(&h.store, pending, CeremonyClient::Browser, None)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+}
+
+/// A recovery code completing a sign-in decided again after a policy write is
+/// spent once, by the commit that signs in.
+#[tokio::test]
+async fn a_completion_decided_again_spends_its_recovery_code_once() {
+    let h = host().await;
+    h.write_policy().await;
+    let (pending, _) = pending(&h).await;
+    let hashes: Vec<String> = ["AAAA-1111", "BBBB-2222"]
+        .iter()
+        .map(|code| crate::hash_code(&crate::normalize_code(code)))
+        .collect();
+    let set = Credential::new(
+        pending.profile_id,
+        CredentialType::Recovery,
+        CredentialData::new(serde_json::to_vec(&hashes).unwrap()),
+        None,
+    );
+    h.store.create_credential(&set, ctx()).await.unwrap();
+    let ceremonies = crate::second_factor::FactorCeremonies::<ProfileId>::new(
+        "https://sid.example.com".to_string(),
+        "profile",
+        Arc::new(InProcessCeremonyState::new()),
+        h.keys.clone(),
+    );
+    let (spend, left) = ceremonies
+        .recovery_spend(&h.store, pending.profile_id, "AAAA-1111")
+        .await
+        .unwrap();
+    assert_eq!(left, 1);
+    *h.policy_writes.lock().unwrap() = 1;
+    complete_second_factor(
+        &h,
+        pending.clone(),
+        crate::second_factor::RECOVERY_CODE_AMR,
+        CeremonyClient::Browser,
+        None,
+        Some(spend),
+    )
+    .await
+    .expect("the completion is decided again and spends the code");
+    assert_eq!(
+        crate::second_factor::codes_left(&h.store, pending.profile_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(signed_in_sessions(&h, pending.profile_id).await, 1);
+}
+
+/// A policy written again before the second commit is not chased further:
+/// the completion is fenced, nothing commits and the context stays pending.
+#[tokio::test]
+async fn a_policy_written_twice_fences_the_completion() {
+    let h = host().await;
+    h.write_policy().await;
+    let (pending, _) = pending(&h).await;
+    *h.policy_writes.lock().unwrap() = 2;
+    assert!(matches!(
+        complete_second_factor(
+            &h,
+            pending.clone(),
+            "otp",
+            CeremonyClient::Browser,
+            None,
+            None
+        )
+        .await,
+        Err(HostError(PendingError::Fenced))
+    ));
+    assert_eq!(signed_in_sessions(&h, pending.profile_id).await, 0);
+    assert!(h.completed.lock().unwrap().is_empty());
 }
 
 /// A context that never completed has nothing to deliver again.
