@@ -1515,13 +1515,20 @@ impl PostgresBackend {
     ) -> SidResult<()> {
         let (verified, policy_version, artifact) =
             crate::policy_evidence::columns(&credential.policy_evidence)?;
-        sqlx::query(
+        // A federated reference authenticates at its issuer: it holds no
+        // credential here, by whichever path one would be added. Decided in
+        // the statement that writes, so nothing slips between a check and
+        // the insert.
+        let written = sqlx::query(
             "INSERT INTO credentials (
                 id, profile_id, credential_type, status, data, label,
                 created_at, last_used_at,
                 policy_version, zkpp_verified, opaque_curve, legacy_algorithm,
                 opaque_credential_identifier, zkpp_artifact
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+              WHERE NOT EXISTS (
+                SELECT 1 FROM profiles WHERE id = $2 AND profile_type = 'federated'
+              )",
         )
         .bind(credential.id.0)
         .bind(credential.profile_id)
@@ -1543,7 +1550,13 @@ impl PostgresBackend {
         .bind(artifact)
         .execute(&mut **tx)
         .await
-        .map_err(|e| insert_error("credential", e))?;
+        .map_err(|e| insert_error("credential", e))?
+        .rows_affected();
+        if written == 0 {
+            return Err(SidError::InvalidState(
+                crate::FEDERATED_HOLDS_NO_CREDENTIAL.into(),
+            ));
+        }
         Ok(())
     }
 

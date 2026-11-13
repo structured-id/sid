@@ -158,6 +158,24 @@ impl PostgresBackend {
 /// keeps its assignment and proof, which only a proven transfer changes.
 /// A login handle is never shared (`Conflict` when another Profile holds it).
 pub(super) async fn bind_principal(tx: &mut Tx<'_>, p: &Principal) -> SidResult<()> {
+    // A federated reference is reached only by the subject its trusted
+    // issuer names: it claims no email, phone or user name here.
+    if p.principal_type != sid_core::models::PrincipalType::FederatedSubject {
+        let reference: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM profiles WHERE id = $1 AND profile_type = 'federated'
+             )",
+        )
+        .bind(p.profile_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(storage("principal claimant"))?;
+        if reference {
+            return Err(SidError::InvalidState(
+                crate::FEDERATED_HOLDS_NO_LOGIN_NAME.into(),
+            ));
+        }
+    }
     if !p.principal_type.is_contestable() {
         return bind_login_principal(tx, p).await;
     }

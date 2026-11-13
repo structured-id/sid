@@ -287,6 +287,80 @@ fn reference(issuer: &str, subject: Uuid) -> sid_core::models::NewRegistration {
     }
 }
 
+/// A federated reference authenticates at its issuer and is reached only by
+/// the subject that issuer names: the store refuses it a password, a
+/// passkey, a second factor, an email and a user name, and stores none of
+/// them, whichever caller asks. A registration that would create a
+/// reference together with a credential is refused whole. Bug prevented: an
+/// outside identity gaining a way to sign in here without its issuer.
+pub async fn test_federated_reference_holds_nothing_local(backend: &dyn StorageBackend) {
+    use sid_core::models::{Credential, CredentialType};
+    let issuer = format!(
+        "https://issuer{}.sid.example.com/i/r",
+        Uuid::now_v7().simple()
+    );
+    let visitor = reference(&issuer, Uuid::now_v7());
+    backend
+        .register_profile(&visitor, test_audit())
+        .await
+        .unwrap();
+    let id = visitor.profile.id;
+
+    for kind in [
+        CredentialType::Opaque,
+        CredentialType::WebAuthn,
+        CredentialType::Totp,
+    ] {
+        let refused = backend
+            .create_credential(
+                &Credential::new(id, kind, vec![7u8; 32], None),
+                test_audit(),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::InvalidState(_))),
+            "{kind:?}: {refused:?}"
+        );
+    }
+    assert!(
+        backend
+            .get_credentials_by_profile(id, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let name = format!("visitor{}", Uuid::now_v7().simple());
+    for claim in [
+        Principal::new_email(id, address()),
+        Principal::new_username(id, &name),
+    ] {
+        let refused = backend.save_principal(&claim, test_audit()).await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::InvalidState(_))),
+            "{:?}: {refused:?}",
+            claim.principal_type
+        );
+    }
+    let held = backend.get_principals_by_profile(id).await.unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].principal_type, PrincipalType::FederatedSubject);
+
+    // A reference never arrives with a credential of its own.
+    let mut armed = reference(&issuer, Uuid::now_v7());
+    armed.credential = Some(Credential::new(
+        armed.profile.id,
+        CredentialType::Opaque,
+        vec![9u8; 32],
+        None,
+    ));
+    assert!(matches!(
+        backend.register_profile(&armed, test_audit()).await,
+        Err(sid_core::Error::InvalidState(_))
+    ));
+    assert_eq!(backend.get_profile(armed.profile.id).await.unwrap(), None);
+}
+
 /// An identity admitted through federation gets one local record: it is
 /// stored as a federated reference without a login name and assigned its
 /// issuer's subject, and a second registration of that subject, alone or at
