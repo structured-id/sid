@@ -15,12 +15,18 @@
 //!         └── SiteCertificate (federation member, 1y)
 //! ```
 
+pub mod allocation;
+pub mod binding_passport;
 pub mod chain_validator;
 pub mod cross_instance_linking;
 pub mod dns_verifier;
 pub mod error;
+pub mod organization_scope;
+pub mod purpose;
 pub mod trust_anchor;
 
+#[cfg(test)]
+mod test_certificates;
 #[cfg(test)]
 mod test_fixtures;
 
