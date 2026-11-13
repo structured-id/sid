@@ -30,6 +30,8 @@ fn published() -> PlatformCas {
                 certificate: vec![2; 600],
                 state: PlatformCaState::Active as i32,
                 overlap_end: None,
+                // The generation's CRL travels as bytes (base64 in the JSON).
+                crl: vec![0x30, 0x82, 0xff, 0x00, 0x7f],
             },
             PlatformCa {
                 generation: 1,
@@ -39,6 +41,7 @@ fn published() -> PlatformCas {
                     seconds: 1_900_000_000,
                     nanos: 0,
                 }),
+                crl: vec![0x30, 0x03, 0x02, 0x01, 0x01],
             },
         ],
         roots: vec![vec![9; 400]],

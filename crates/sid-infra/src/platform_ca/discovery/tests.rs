@@ -24,6 +24,8 @@ fn generation(generation: u32, certificate: &[u8], state: PlatformCaState) -> Pl
         certificate: certificate.to_vec(),
         state: state as i32,
         overlap_end: None,
+        // Discovery names certificates; a generation's CRL is not its concern.
+        crl: Vec::new(),
     }
 }
 
