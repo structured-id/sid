@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The scope of an organization's authority: what a verifier requires of its
 //! certificate before anything it issued is taken as that organization's.
+//!
+//! In plain words: an organization's certificate authority may speak only
+//! for that one organization. Its certificate must say so in a way software
+//! is obliged to enforce, and this check refuses one that says nothing, says
+//! it only as a hint, or names more than the organization.
+//!
+//! This is a check of the certificate's content. It verifies no signature:
+//! it is applied to an authority found on a path that was verified.
 
 use std::str::FromStr;
 

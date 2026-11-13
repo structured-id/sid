@@ -1,6 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The Binding Passport as a recipient reads it: the end-entity certificate
-//! of one authorized signer of a Binding, its BindingId as the subject.
+//! The Binding Passport as a recipient reads it.
+//!
+//! In plain words: when a user connects one of their Profiles to an
+//! organization, that connection (a Binding) gets its own identifier and its
+//! own signing key. The Binding Passport is the certificate an issuer signs
+//! for that connection: it says which connection this is, which organization
+//! it is for, and which key speaks for it. It is not a government passport
+//! and it does not describe the user's Profile.
+//!
+//! Technically it is the end-entity certificate of one authorized signer of
+//! a Binding, with the BindingId as its subject.
+//!
+//! This module only PARSES a passport: it reads what the certificate states
+//! and refuses one that is not written in the passport's exact form. It
+//! verifies nothing. Whether the certificate was really issued by an
+//! authority the recipient admits, is still valid and is not revoked is
+//! decided by the path verifier; whether its holder is present is decided by
+//! the presentation verifier.
 //!
 //! The extended key usage and the four SID extensions are read under one
 //! explicit [`PassportProfile`]; production has no allocation until the
@@ -17,9 +33,6 @@
 //! - `sid.merkle_root`: `OCTET STRING (SIZE (32))`;
 //! - `sid.instance_id`: `UTF8String`;
 //! - `sid.assurance_level`: `ENUMERATED` of [`AssuranceLevel`].
-//!
-//! Only the passport's content is read here. Its path, validity and status
-//! are the path verifier's.
 
 use std::str::FromStr;
 
@@ -161,7 +174,10 @@ pub enum PassportError {
 const ORGANIZATIONAL_UNIT: &str = "Pairwise Binding";
 
 impl Passport {
-    /// The passport `certificate` states under `profile`.
+    /// Parse the passport `certificate` states under `profile`. This reads
+    /// the certificate's content and checks nothing else: a caller that
+    /// trusts the result without verifying the certificate's path trusts
+    /// whoever wrote the bytes.
     pub fn read(
         profile: &PassportProfile,
         certificate: &Certificate,

@@ -7,8 +7,17 @@
 //! refused under any other allocation, on an intermediate or anchor as on a
 //! leaf.
 //!
-//! Reading a role from a certificate tells a verifier what that authority
-//! may have issued. It gives the reader no authority or key to issue.
+//! In plain words: every certificate authority in a SID chain is marked
+//! with what it is for (the platform's issuing authority, one organization's
+//! authority), and each kind may sign only certain things. A verifier uses
+//! these marks to refuse a certificate signed by an authority that had no
+//! business signing it, even when every signature on the way is genuine.
+//!
+//! This module PARSES the marks and states the rule. It verifies no
+//! signature: the roles it returns mean something only for a certificate
+//! whose path was verified. Reading a role tells a verifier what that
+//! authority may have issued; it gives the reader no authority or key to
+//! issue.
 
 use der::Decode;
 use der::asn1::ObjectIdentifier;
