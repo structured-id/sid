@@ -635,10 +635,12 @@ mod tests {
     async fn test_inmem_incr_after_expiry_resets() {
         let cache = InMemoryCacheBackend::new();
         assert_eq!(cache.incr("c", Duration::from_millis(50)).await.unwrap(), 1);
-        assert_eq!(cache.incr("c", Duration::from_millis(50)).await.unwrap(), 2);
         tokio::time::sleep(Duration::from_millis(80)).await;
-        // Expired — counter resets.
+        // Expired: the counter starts over (2 if the old window still stood),
+        // and counts on within the new window. Nothing is asserted inside the
+        // short window, where a slow host would let it lapse between calls.
         assert_eq!(cache.incr("c", Duration::from_secs(60)).await.unwrap(), 1);
+        assert_eq!(cache.incr("c", Duration::from_secs(60)).await.unwrap(), 2);
     }
 
     #[tokio::test]
