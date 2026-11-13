@@ -23,7 +23,7 @@ pub(crate) fn rsa_from_components(n: &[u8], e: &[u8]) -> Result<RsaPublicKey, In
         return Err(InvalidPublicKey);
     }
     let n = BoxedUint::from_be_slice_vartime(n);
-    if n.bits() < 2048 {
+    if n.bit_width() < 2048 {
         return Err(InvalidPublicKey);
     }
     let e = BoxedUint::from_be_slice_vartime(e);
