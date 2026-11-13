@@ -445,6 +445,7 @@ impl SqliteBackend {
         registration: &NewRegistration,
         audit: MutationContext,
     ) -> SidResult<()> {
+        registration.check_reference()?;
         let NewRegistration {
             profile,
             principal,

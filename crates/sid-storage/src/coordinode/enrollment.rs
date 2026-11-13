@@ -464,6 +464,7 @@ impl CoordinodeBackend {
         registration: &NewRegistration,
         ctx: MutationContext,
     ) -> SidResult<()> {
+        registration.check_reference()?;
         let registration = registration.clone();
         let chain = format!("profile:{}", registration.profile.id);
         self.transaction(move |tx| {

@@ -346,6 +346,38 @@ pub async fn test_federated_reference_holds_nothing_local(backend: &dyn StorageB
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].principal_type, PrincipalType::FederatedSubject);
 
+    // Nor through a directory write to it.
+    let mut write = sid_core::models::DirectoryUserWrite::new(
+        sid_core::models::DirectoryWriteMode::Update,
+        backend.get_profile(id).await.unwrap().expect("the record"),
+    );
+    write.bind = vec![Principal::new_username(
+        id,
+        format!("directory{}", Uuid::now_v7().simple()),
+    )];
+    let refused = backend.write_directory_user(&write, test_audit()).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::InvalidState(_))),
+        "{refused:?}"
+    );
+    let held = backend.get_principals_by_profile(id).await.unwrap();
+    assert_eq!(held.len(), 1);
+
+    // A reference never registers under a local name: not as the principal
+    // it is reached by, and not as a user name of its own.
+    let mut named = reference(&issuer, Uuid::now_v7());
+    named.principal = Principal::new_email(named.profile.id, address());
+    let mut titled = reference(&issuer, Uuid::now_v7());
+    titled.profile.username = Some(format!("titled{}", Uuid::now_v7().simple()));
+    for refused in [named, titled] {
+        let outcome = backend.register_profile(&refused, test_audit()).await;
+        assert!(
+            matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(backend.get_profile(refused.profile.id).await.unwrap(), None);
+    }
+
     // A reference never arrives with a credential of its own.
     let mut armed = reference(&issuer, Uuid::now_v7());
     armed.credential = Some(Credential::new(

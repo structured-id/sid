@@ -183,7 +183,7 @@ impl SqliteBackend {
 pub(super) async fn bind_principal(tx: &mut WriteTx, p: &Principal) -> SidResult<()> {
     // A federated reference is reached only by the subject its trusted
     // issuer names: it claims no email, phone or user name here.
-    if p.principal_type != sid_core::models::PrincipalType::FederatedSubject {
+    if p.principal_type != PrincipalType::FederatedSubject {
         let reference: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM profiles WHERE id = ? AND profile_type = 'federated')",
         )
@@ -593,11 +593,7 @@ impl SqliteBackend {
                     "a directory write binds principals to its own account only".into(),
                 ));
             }
-            if p.principal_type == PrincipalType::Username {
-                bind_login_principal(&mut tx, p).await?;
-            } else {
-                bind_principal(&mut tx, p).await?;
-            }
+            bind_principal(&mut tx, p).await?;
         }
         for id in &write.remove_phones {
             delete_phone(&mut tx, *id, Some(profile_id)).await?;
