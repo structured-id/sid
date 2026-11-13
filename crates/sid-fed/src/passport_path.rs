@@ -141,7 +141,10 @@ impl path::Verify for EcdsaP256 {
     fn verify(
         &self,
         algorithm: &structured_pkix::algorithm::AlgorithmIdentifier<'_>,
-        key: path::WorkingKey<'_>,
+        // The issuer's public key the signature is checked with. The type's
+        // name is RFC 5280 §6.1.2 (d) `working_public_key`: the key in use at
+        // this step of the path.
+        issuer_key: structured_pkix::path::WorkingKey<'_>,
         signed: &[u8],
         signature: structured_pkix::signature::SignatureValue<'_>,
         _execution: &Memory,
@@ -151,7 +154,8 @@ impl path::Verify for EcdsaP256 {
         if algorithm.algorithm().as_bytes() != ECDSA_WITH_SHA256 {
             return Ok(Verified::Unsupported);
         }
-        let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(key.key().as_bytes()) else {
+        let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(issuer_key.key().as_bytes())
+        else {
             return Ok(Verified::Unsupported);
         };
         let Some(signature) = signature
