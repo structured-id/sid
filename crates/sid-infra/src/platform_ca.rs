@@ -17,7 +17,7 @@ use sid_proto::sid::v1::PlatformCas;
 pub mod discovery;
 
 /// The proto file the publication's message is defined in.
-const PUBLICATION_FILE: &str = "sid/v1/federation/platform_ca.proto";
+const PUBLICATION_FILE: &str = sid_proto::PLATFORM_CA_PROTO;
 /// The publication's message.
 const MESSAGE: &str = "sid.v1.federation.PlatformCas";
 /// The longest answer read: a few generations of hybrid certificates and
