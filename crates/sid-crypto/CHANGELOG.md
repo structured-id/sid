@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/structured-id/sid/compare/sid-crypto-v0.1.1...sid-crypto-v0.1.2) - 2026-11-13
+
+### Other
+
+- *(deps)* bump the cargo group with 8 updates ([#623](https://github.com/structured-id/sid/pull/623))
+
 ## [0.1.1](https://github.com/structured-id/sid/compare/sid-crypto-v0.1.0...sid-crypto-v0.1.1) - 2026-10-28
 
 ### Fixed

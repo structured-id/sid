@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.29](https://github.com/structured-id/sid/compare/v0.2.28...v0.2.29) - 2026-11-13
+
+### Fixed
+
+- *(server)* mount no route for the platform CA publication ([#627](https://github.com/structured-id/sid/pull/627))
+- *(ui-host)* end a session the API refused before its logout arrives ([#614](https://github.com/structured-id/sid/pull/614))
+
 ## [0.2.28](https://github.com/structured-id/sid/compare/v0.2.27...v0.2.28) - 2026-11-12
 
 ### Added
