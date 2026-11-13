@@ -470,6 +470,20 @@ pub struct VerifiedPresentation {
     pub created: i64,
 }
 
+/// The passport `certificate` certifies its keys to sign. A stated key usage
+/// restricts them (RFC 5280 §4.2.1.3): without digitalSignature they sign no
+/// presentation, under any proof algorithm. None stated is no restriction.
+pub fn check_signing_usage(certificate: &x509_cert::Certificate) -> Result<(), PresentationError> {
+    let usage = certificate
+        .tbs_certificate()
+        .get_extension::<x509_cert::ext::pkix::KeyUsage>()
+        .map_err(|_| PresentationError::KeyUsage)?;
+    if usage.is_some_and(|(_, usage)| !usage.digital_signature()) {
+        return Err(PresentationError::KeyUsage);
+    }
+    Ok(())
+}
+
 /// The holder's ES256 signature over `input` verifies with the key of the
 /// passport `certificate` (DER): 64 bytes `R || S`, not DER (RFC 7518 §3.4).
 pub fn verify_es256(
@@ -481,17 +495,9 @@ pub fn verify_es256(
     use p256::pkcs8::DecodePublicKey;
     let certificate =
         x509_cert::Certificate::from_der(certificate).map_err(|_| PresentationError::Signature)?;
-    let tbs = certificate.tbs_certificate();
-    // A stated key usage restricts the key (RFC 5280 §4.2.1.3): without
-    // digitalSignature it does not sign a presentation. None stated is no
-    // restriction.
-    let usage = tbs
-        .get_extension::<x509_cert::ext::pkix::KeyUsage>()
-        .map_err(|_| PresentationError::KeyUsage)?;
-    if usage.is_some_and(|(_, usage)| !usage.digital_signature()) {
-        return Err(PresentationError::KeyUsage);
-    }
-    let key = tbs
+    check_signing_usage(&certificate)?;
+    let key = certificate
+        .tbs_certificate()
         .subject_public_key_info()
         .to_der()
         .ok()
