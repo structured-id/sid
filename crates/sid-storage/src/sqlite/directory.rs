@@ -62,6 +62,7 @@ async fn write_profile(
 
 /// Insert `profile`; an existing id or user name is `Conflict`.
 pub(super) async fn insert_profile(tx: &mut WriteTx, profile: &Profile) -> SidResult<()> {
+    profile.check_reference()?;
     let revision = i64::try_from(profile.revision)
         .map_err(|e| SidError::Validation(format!("profile revision: {e}")))?;
     write_profile(tx, profile, revision, profile_insert!(""))
@@ -71,11 +72,15 @@ pub(super) async fn insert_profile(tx: &mut WriteTx, profile: &Profile) -> SidRe
 
 /// Write `profile` over the stored row while it is still at
 /// `profile.revision`, moving the revision on; its id and creation time never
-/// change. False when the row is gone or changed since it was read.
+/// change. False when the row is gone or changed since it was read. A write
+/// that would make a federated reference local, or the reverse, is refused:
+/// the statement itself leaves such a row untouched.
 pub(super) async fn update_profile(tx: &mut WriteTx, profile: &Profile) -> SidResult<bool> {
+    profile.check_reference()?;
     let revision = i64::try_from(profile.revision)
         .map_err(|e| SidError::Validation(format!("profile revision: {e}")))?;
-    sqlx::query(
+    let reference = !profile.profile_type.is_local();
+    let written = sqlx::query(
         "UPDATE profiles SET
             profile_type = ?, username = ?,
             given_name = ?, family_name = ?, middle_name = ?,
@@ -84,7 +89,7 @@ pub(super) async fn update_profile(tx: &mut WriteTx, profile: &Profile) -> SidRe
             manager_id = ?, migration_pending = ?,
             migration_started_at = ?, migration_completed_at = ?,
             updated_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ?",
+         WHERE id = ? AND revision = ? AND (profile_type = 'federated') = ?",
     )
     .bind(profile.profile_type.as_str())
     .bind(&profile.username)
@@ -104,10 +109,36 @@ pub(super) async fn update_profile(tx: &mut WriteTx, profile: &Profile) -> SidRe
     .bind(fmt_dt(&profile.updated_at))
     .bind(profile.id)
     .bind(revision)
+    .bind(reference)
     .execute(&mut **tx)
     .await
     .map(|r| r.rows_affected() == 1)
-    .map_err(|e| insert_error("profile", e))
+    .map_err(|e| insert_error("profile", e))?;
+    if written {
+        return Ok(true);
+    }
+    // Not written: gone, changed since it was read, or of the other kind.
+    let stored: Option<bool> = sqlx::query_scalar(
+        "SELECT profile_type = 'federated' FROM profiles WHERE id = ? AND revision = ?",
+    )
+    .bind(profile.id)
+    .bind(revision)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("profile kind: {e}")))?;
+    if let Some(stored) = stored {
+        profile.check_reference_kept(kind(stored))?;
+    }
+    Ok(false)
+}
+
+/// A Profile type of the stored kind: a federated reference or a local one.
+fn kind(reference: bool) -> sid_core::models::ProfileType {
+    if reference {
+        sid_core::models::ProfileType::Federated
+    } else {
+        sid_core::models::ProfileType::Corporate
+    }
 }
 
 /// Upsert the binding of `p` to entity `entity_id`.

@@ -159,6 +159,7 @@ fn profile_params(profile: &Profile) -> SidResult<Params> {
 
 /// Store a new profile in `tx`; an existing id or user name is `Conflict`.
 pub(super) fn insert(tx: &Statements<'_>, profile: &Profile) -> SidResult<()> {
+    profile.check_reference()?;
     let found = tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id RETURN p.id AS id",
         Params::default().with("id", profile_value(profile.id)),
@@ -182,8 +183,18 @@ pub(super) fn insert(tx: &Statements<'_>, profile: &Profile) -> SidResult<()> {
 
 /// Write `profile` over the stored one while it is still at
 /// `profile.revision`, moving the revision on; its id and creation time
-/// never change. False when it is gone or changed since it was read.
+/// never change. False when it is gone or changed since it was read. A
+/// write that would make a federated reference local, or the reverse, is
+/// refused.
 pub(super) fn update(tx: &Statements<'_>, profile: &Profile) -> SidResult<bool> {
+    profile.check_reference()?;
+    // The stored kind is read in the transaction that writes: a change of
+    // it since restarts the decision.
+    if let Some(stored) = get(tx, profile.id)?
+        && stored.revision == profile.revision
+    {
+        profile.check_reference_kept(stored.profile_type)?;
+    }
     let next = profile
         .revision
         .checked_add(1)

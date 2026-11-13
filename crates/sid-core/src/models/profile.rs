@@ -833,6 +833,31 @@ impl<'a> ClosedProfile<'a> {
 }
 
 impl Profile {
+    /// A federated reference has no user name: it is reached only by the
+    /// subject its issuer names. Every store checks this on each write of a
+    /// Profile; a local Profile passes.
+    pub fn check_reference(&self) -> crate::Result<()> {
+        if self.profile_type.is_local() || self.username.is_none() {
+            return Ok(());
+        }
+        Err(crate::Error::InvalidState(
+            "a federated reference has no user name".into(),
+        ))
+    }
+
+    /// Whether a stored Profile of `stored` type may be written as this
+    /// one: a Profile never becomes a federated reference nor stops being
+    /// one. A reference made local could be given a password; a local
+    /// Profile made a reference would keep the ones it holds.
+    pub fn check_reference_kept(&self, stored: ProfileType) -> crate::Result<()> {
+        if stored.is_local() == self.profile_type.is_local() {
+            return Ok(());
+        }
+        Err(crate::Error::InvalidState(
+            "a Profile neither becomes nor stops being a federated reference".into(),
+        ))
+    }
+
     /// Gateway: obtain typed wrapper if profile is Active.
     pub fn as_active(&mut self) -> Option<ActiveProfile<'_>> {
         if self.status == ProfileStatus::Active {

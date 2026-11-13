@@ -159,8 +159,8 @@ impl NewRegistration {
         if self.profile.profile_type.is_local() {
             return Ok(());
         }
+        self.profile.check_reference()?;
         let bare = self.principal.principal_type == super::PrincipalType::FederatedSubject
-            && self.profile.username.is_none()
             && self.email.is_none()
             && self.phone.is_none()
             && self.credential.is_none()

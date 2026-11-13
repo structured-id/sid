@@ -363,6 +363,39 @@ pub async fn test_federated_reference_holds_nothing_local(backend: &dyn StorageB
     let held = backend.get_principals_by_profile(id).await.unwrap();
     assert_eq!(held.len(), 1);
 
+    // A write of the record itself gives it no user name, and never turns
+    // it into a local account, which could then hold a password; nor does
+    // a local account, with whatever it holds, become a reference.
+    let stored = backend.get_profile(id).await.unwrap().expect("the record");
+    let mut renamed = stored.clone();
+    renamed.username = Some(format!("renamed{}", Uuid::now_v7().simple()));
+    let mut localized = stored.clone();
+    localized.profile_type = sid_core::models::ProfileType::Personal;
+    let local = profile(backend, "local").await;
+    let mut referenced = local.clone();
+    referenced.profile_type = sid_core::models::ProfileType::Federated;
+    referenced.username = None;
+    for written in [&renamed, &localized, &referenced] {
+        let outcome = backend.update_profile(written, test_audit()).await;
+        assert!(
+            matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(backend.get_profile(id).await.unwrap(), Some(stored));
+    assert_eq!(
+        backend.get_profile(local.id).await.unwrap(),
+        Some(local),
+        "a refused write changed the account"
+    );
+    let mut created = Profile::new(Some(format!("created{}", Uuid::now_v7().simple())));
+    created.profile_type = sid_core::models::ProfileType::Federated;
+    let outcome = backend.create_profile(&created, test_audit()).await;
+    assert!(
+        matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+        "{outcome:?}"
+    );
+
     // A reference never registers under a local name: not as the principal
     // it is reached by, and not as a user name of its own.
     let mut named = reference(&issuer, Uuid::now_v7());
