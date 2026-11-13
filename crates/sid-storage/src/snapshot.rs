@@ -17,8 +17,8 @@ use sid_core::models::consent::ConsentRecord;
 use sid_core::models::notification::NotificationPreferences;
 use sid_core::models::{
     AccessRequest, AnomalyEventRecord, BootstrapPolicy, EnrollmentPolicy, FlowAction, FlowConfig,
-    Invite, InviteId, InviteRedemption, IpReputation, PasswordResetSession, ProfileId,
-    ProvisioningConnector, ProvisioningCredential, RegistrationSource,
+    Invite, InviteId, InviteRedemption, IpReputation, LoginSettings, PasswordResetSession,
+    ProfileId, ProvisioningConnector, ProvisioningCredential, RegistrationSource,
 };
 use sid_core::models::{
     Application, BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device,
@@ -316,6 +316,10 @@ pub struct Snapshot {
     /// centrally managed one never takes a local administrator claim again.
     pub bootstrap_policy: BootstrapPolicy,
 
+    /// The installation's login settings (which incoming external
+    /// identities it admits), when an administrator set them.
+    pub login_settings: Option<LoginSettings>,
+
     /// The login policy epoch: a decision taken under an earlier policy
     /// never commits after the move.
     pub login_policy_epoch: Option<i64>,
@@ -501,6 +505,7 @@ impl Snapshot {
             access_requests: Vec::new(),
             enrollment_policy: None,
             bootstrap_policy: BootstrapPolicy::SelfManaged,
+            login_settings: None,
             login_policy_epoch: None,
             ip_allowlist: Vec::new(),
             ip_reputation: Vec::new(),
@@ -595,6 +600,7 @@ impl Snapshot {
             self.access_requests.len() as u64,
             u64::from(self.enrollment_policy.is_some()),
             u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
+            u64::from(self.login_settings.is_some()),
             u64::from(self.login_policy_epoch.is_some()),
             self.ip_allowlist.len() as u64,
             self.ip_reputation.len() as u64,

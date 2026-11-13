@@ -457,6 +457,15 @@ pub async fn import(
             }
         }
     }
+    // The settings move as stored and advance no epoch: the source's epoch
+    // moves beside them.
+    if let Some(settings) = &snapshot.login_settings
+        && backend
+            .import_login_settings(settings, audit("import_login_settings", "installation"))
+            .await?
+    {
+        result.policies += 1;
+    }
     if let Some(epoch) = snapshot.login_policy_epoch
         && backend
             .import_login_policy_epoch(epoch, audit("import_login_policy_epoch", "installation"))

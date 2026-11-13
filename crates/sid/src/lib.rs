@@ -18,6 +18,7 @@ pub mod flows;
 pub mod identity;
 pub mod installation;
 pub mod lifecycle;
+pub mod login_settings;
 pub mod machines;
 pub mod maintenance;
 pub mod oauth;

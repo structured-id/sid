@@ -43,6 +43,7 @@ pub struct MockStorageInner {
     reset_sessions: HashMap<Uuid, PasswordResetSession>,
     access_requests: HashMap<sid_core::models::AccessRequestId, sid_core::models::AccessRequest>,
     email_provider: Option<sid_core::models::EmailProviderConfig>,
+    login_settings: Option<sid_core::models::LoginSettings>,
     machine_users: HashMap<MachineUserId, sid_core::models::MachineUser>,
     machine_credentials: Vec<sid_core::models::MachineUserCredential>,
     provisioning_connectors: HashMap<ProvisioningConnectorId, ProvisioningConnector>,
@@ -6030,6 +6031,30 @@ impl StorageBackend for MockStorage {
         _: &str,
         _: &str,
         _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
+        Ok(self.inner.lock().unwrap().login_settings)
+    }
+    async fn set_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.login_settings.as_ref() != expected {
+            return Ok(false);
+        }
+        inner.login_settings = Some(*settings);
+        inner.owe(&ctx)?;
+        Ok(true)
+    }
+    async fn import_login_settings(
+        &self,
+        _: &sid_core::models::LoginSettings,
         _: MutationContext,
     ) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")

@@ -155,6 +155,7 @@ const UNIQUE: &[(&str, &str, &str)] = &[
         "verifier",
     ),
     ("sid_login_policy_epoch", "SidLoginPolicyEpoch", "id"),
+    ("sid_login_settings", "SidLoginSettings", "scope"),
     ("sid_profile_metadata", "SidProfileMetadata", "pair"),
     ("sid_pat_id", "SidPat", "id"),
     ("sid_pat_hash", "SidPat", "token_hash"),

@@ -4304,6 +4304,27 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))
     }
 
+    async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
+        self.login_settings_impl().await
+    }
+
+    async fn set_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_login_settings_impl(settings, expected, ctx).await
+    }
+
+    async fn import_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_login_settings_impl(settings, ctx).await
+    }
+
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         Self::login_policy_epoch(&self.pool).await
     }

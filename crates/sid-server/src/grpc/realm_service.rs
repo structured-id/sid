@@ -6,11 +6,13 @@
 //!
 //! The email provider (PLAIN/LOGIN and XOAUTH2 for Microsoft 365 / Google
 //! Workspace) is configured through [`sid::email_provider`] and tested here
-//! over the delivery channel; the other settings are not part of this build
-//! and answer FEATURE_NOT_AVAILABLE.
+//! over the delivery channel. The login settings serve the admission of
+//! incoming external identities through [`sid::login_settings`]. The other
+//! settings are not part of this build and answer FEATURE_NOT_AVAILABLE.
 
 use secrecy::ExposeSecret;
 use sid::email_provider::{EmailProvider, EmailProviderError};
+use sid::login_settings::{LoginSettingsAdmin, LoginSettingsError};
 use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
@@ -36,6 +38,22 @@ pub struct RealmServiceImpl {
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
     email: EmailProvider,
+    login: LoginSettingsAdmin,
+}
+
+/// The status a login settings refusal answers with.
+fn login_refusal(e: LoginSettingsError) -> Status {
+    match e {
+        LoginSettingsError::Caller(e) => e.into_status(),
+        LoginSettingsError::Operation(e) => e.into_status(),
+        LoginSettingsError::Store(e) => storage_failure(e),
+        LoginSettingsError::NotServed(setting) => not_in_this_build(setting),
+        // Other administrators' changes kept landing first: the caller
+        // repeats the command.
+        LoginSettingsError::Contended => {
+            dependency_unavailable("login settings", "changed concurrently, repeat the change")
+        }
+    }
 }
 
 /// The status an email provider refusal answers with.
@@ -60,6 +78,7 @@ impl RealmServiceImpl {
         Self {
             jwt,
             revocation,
+            login: LoginSettingsAdmin::new(storage.clone()),
             email: EmailProvider::new(storage, keys),
         }
     }
@@ -214,19 +233,36 @@ impl RealmService for RealmServiceImpl {
         Err(not_in_this_build("realm_settings"))
     }
 
+    // ── Login settings: the admission of incoming external identities ────────
+
+    #[instrument(skip(self, request), fields(rpc = "GetLoginSettings"))]
     async fn get_login_settings(
         &self,
-        _request: Request<sid_proto::sid::v1::admin::GetLoginSettingsRequest>,
+        request: Request<sid_proto::sid::v1::admin::GetLoginSettingsRequest>,
     ) -> Result<Response<sid_proto::sid::v1::admin::LoginSettings>, Status> {
-        Err(not_in_this_build("login_settings"))
+        let caller = self.caller(&request).await?;
+        self.login
+            .settings(&caller)
+            .await
+            .map(Response::new)
+            .map_err(login_refusal)
     }
 
+    #[instrument(skip(self, request), fields(rpc = "UpdateLoginSettings"))]
     async fn update_login_settings(
         &self,
-        _request: Request<sid_proto::sid::v1::admin::UpdateLoginSettingsRequest>,
+        request: Request<sid_proto::sid::v1::admin::UpdateLoginSettingsRequest>,
     ) -> Result<Response<sid_proto::sid::v1::admin::LoginSettings>, Status> {
-        Err(not_in_this_build("login_settings"))
+        let caller = self.caller(&request).await?;
+        let operation = context(&request)?;
+        self.login
+            .update(&caller, operation, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(login_refusal)
     }
+
+    // ── More settings this build does not implement ──────────────────────────
 
     async fn get_localization_settings(
         &self,
