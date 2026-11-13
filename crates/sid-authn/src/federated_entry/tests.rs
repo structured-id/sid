@@ -343,6 +343,71 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
             auth_time: Utc.timestamp_opt(auth_time as i64, 0).single().unwrap(),
         }
     );
+    // The token carried no Binding presentation: none is returned, and the
+    // issuer's signature on the token is not offered in its place.
+    assert_eq!(returned.presentation, None);
+}
+
+fn nonce_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "nonce")
+        .map(|(_, v)| v.into_owned())
+        .unwrap()
+}
+
+// A SID issuer returns the presentation of the Binding it signed in as an
+// ID Token claim. The return hands it to the caller as received, with what
+// the caller must verify it against: the entry's nonce as the challenge and
+// the entry's redirect URI as the verifier context. A retry of the return
+// gets the same. Bug prevented: the holder's proof dropped at the return,
+// or checked against a challenge or address the returned token chose.
+#[tokio::test]
+async fn a_return_hands_over_the_presentation_and_what_it_answers() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    let presentation = json!({
+        "payload": "eyJ0eXBlIjoiU0lEQmluZGluZ1ByZXNlbnRhdGlvbiJ9",
+        "signatures": [{ "protected": "eyJhbGciOiJFUzI1NiJ9", "signature": "c2ln" }],
+    });
+    issuer.issue_for(
+        &browser.url,
+        json!({ PRESENTATION_CLAIM: presentation.clone() }),
+    );
+    let returned = browser
+        .complete(&entry, "the-code", REDIRECT)
+        .await
+        .unwrap();
+    let carried: serde_json::Value =
+        serde_json::from_slice(returned.presentation.as_deref().expect("a presentation")).unwrap();
+    assert_eq!(carried, presentation);
+    assert_eq!(returned.challenge, nonce_of(&browser.url));
+    assert_eq!(returned.verifier_context, REDIRECT);
+
+    let again = browser
+        .complete(&entry, "the-code", REDIRECT)
+        .await
+        .unwrap();
+    assert_eq!(again, returned);
+}
+
+// The presentation claim is a JSON object. Bug prevented: text or a number
+// in its place passed on as if a holder had signed something.
+#[tokio::test]
+async fn a_presentation_claim_that_is_not_an_object_fails_the_entry() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    for claim in [json!("a-compact-jws"), json!(1), json!([])] {
+        let browser = begin(&entry, &EntryRequest::default()).await;
+        issuer.issue_for(&browser.url, json!({ PRESENTATION_CLAIM: claim.clone() }));
+        let refused = browser.complete(&entry, "the-code", REDIRECT).await;
+        assert!(
+            matches!(refused, Err(EntryError::Token(_))),
+            "{claim}: {refused:?}"
+        );
+    }
 }
 
 // A return names what its entry asked the issuer for, so the caller can tell
