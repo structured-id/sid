@@ -371,7 +371,9 @@ pub async fn test_federated_reference_holds_nothing_local(backend: &dyn StorageB
     renamed.username = Some(format!("renamed{}", Uuid::now_v7().simple()));
     let mut localized = stored.clone();
     localized.profile_type = sid_core::models::ProfileType::Personal;
-    let local = profile(backend, "local").await;
+    // As stored: the store keeps times at its own resolution.
+    let local = profile(backend, "local").await.id;
+    let local = backend.get_profile(local).await.unwrap().expect("stored");
     let mut referenced = local.clone();
     referenced.profile_type = sid_core::models::ProfileType::Federated;
     referenced.username = None;
