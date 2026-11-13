@@ -384,6 +384,7 @@ async fn test_issue_tokens() {
                 profile: &profile,
                 email: None,
                 phone: None,
+                presentation: None,
             }),
         )
         .expect("Token issuance should succeed");
@@ -420,6 +421,79 @@ async fn test_issue_tokens() {
     )
     .unwrap();
     assert_eq!(unverified["iss"], issuer.canonical_url.as_str());
+    // No presentation was supplied: the claim is absent, not null.
+    assert!(
+        unverified
+            .get(crate::federated_entry::PRESENTATION_CLAIM)
+            .is_none()
+    );
+}
+
+/// The claims of a compact JWT, unverified.
+fn payload(token: &str) -> serde_json::Value {
+    serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(token.split('.').nth(1).unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+// A SID installation's federation return carries the holder's Binding
+// presentation in the ID token, exactly as the holder's executor made it and
+// under the claim name the receiving entry reads. The access token of the
+// same grant carries none: the presentation answers one sign-in and is not
+// handed on to the application's APIs. Bug prevented: a presentation under
+// a name the receiver does not read, re-encoded on the way, or leaked into
+// every downstream API call.
+#[tokio::test]
+async fn the_id_token_alone_carries_the_binding_presentation() {
+    let jwt = create_test_jwt();
+    let server = OAuth2Server::new(jwt);
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let signer = issuers.signer(&issuer).await.unwrap();
+    let profile = create_test_profile();
+    let session = create_test_session(&profile);
+    let client = create_test_client();
+    let target = orders_target(&client);
+    let scopes = vec!["openid".to_string()];
+    let presentation = serde_json::json!({
+        "payload": "eyJ0eXBlIjoiU0lEQmluZGluZ1ByZXNlbnRhdGlvbiJ9",
+        "signatures": [{ "protected": "eyJhbGciOiJFUzI1NiJ9", "signature": "c2ln" }],
+    });
+
+    let (response, _) = server
+        .issue_tokens(
+            &signer,
+            &profile.id.to_string(),
+            &profile.roles,
+            &session,
+            &client,
+            &target,
+            &scopes,
+            Some("nonce123"),
+            None,
+            None,
+            Some(IdTokenSource {
+                profile: &profile,
+                email: None,
+                phone: None,
+                presentation: Some(&presentation),
+            }),
+        )
+        .unwrap();
+
+    let id_token = payload(&response.id_token.expect("id_token"));
+    assert_eq!(
+        id_token[crate::federated_entry::PRESENTATION_CLAIM],
+        presentation
+    );
+    let access_token = payload(&response.access_token);
+    assert!(
+        access_token
+            .get(crate::federated_entry::PRESENTATION_CLAIM)
+            .is_none()
+    );
 }
 
 #[tokio::test]

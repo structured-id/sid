@@ -395,6 +395,17 @@ pub struct IdTokenClaims {
     /// Time the user's information was last updated (Unix timestamp).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
+
+    /// The Binding presentation a SID installation's federation return
+    /// carries (`crate::federated_entry::PRESENTATION_CLAIM`): the holder's
+    /// proof for this one sign-in, a JWS in General JSON Serialization. It
+    /// is carried here only, never in an access token.
+    #[serde(
+        rename = "https://structured.id/claims/binding-presentation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub binding_presentation: Option<serde_json::Value>,
 }
 
 /// Back-channel logout token claims (OpenID Connect Back-Channel Logout 1.0).
@@ -766,11 +777,14 @@ impl JwtService {
             nonce,
             primary_email,
             primary_phone,
+            None,
         )
     }
 
     /// An ID token issued by `signer` with this service's lifetime;
-    /// otherwise as [`Self::issue_id_token`].
+    /// otherwise as [`Self::issue_id_token`]. `presentation` is the Binding
+    /// presentation of a SID installation's federation return, carried as
+    /// given.
     #[allow(clippy::too_many_arguments)]
     pub fn id_token_signed_by<S: TokenSigner, O>(
         &self,
@@ -782,6 +796,7 @@ impl JwtService {
         nonce: Option<&str>,
         primary_email: Option<&ProfileEmail>,
         primary_phone: Option<&ProfilePhone>,
+        presentation: Option<&serde_json::Value>,
     ) -> SidResult<String> {
         let now = Utc::now();
         let exp = now + self.id_token_ttl;
@@ -808,6 +823,7 @@ impl JwtService {
             phone_number: primary_phone.map(|p| p.formatted_e164()),
             phone_number_verified: primary_phone.map(|p| p.verified),
             updated_at: Some(profile.updated_at.timestamp()),
+            binding_presentation: presentation.cloned(),
         };
 
         signer.sign_claims(None, &claims)

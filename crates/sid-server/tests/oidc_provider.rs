@@ -2443,6 +2443,7 @@ impl Browser {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         (session, id_token)
