@@ -35,7 +35,7 @@ use serde_json::{Map, Value};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::binding_passport::PassportProfile;
+use crate::binding_passport::{Passport, PassportProfile};
 use crate::passport_path::{AcceptedPassport, PathError, PathPolicy, accept_passport};
 use crate::purpose::PurposeProfile;
 
@@ -413,16 +413,17 @@ impl Statement {
         })
     }
 
-    /// The statement is the accepted passport's own, for the request the
+    /// The statement is the accepted `passport`'s own, for the request the
     /// recipient is holding: the same Binding, recipient and root as the
     /// certificate, and the pending challenge and verifier context exactly.
     /// The challenge is compared in constant time; the caller consumes it.
+    /// `passport` is the one read from this statement's certificate on an
+    /// accepted path, validated now or kept from an earlier acceptance.
     pub fn admit(
         &self,
-        accepted: &AcceptedPassport,
+        passport: &Passport,
         expected: &Expected<'_>,
     ) -> Result<(), PresentationError> {
-        let passport = &accepted.passport;
         if self.binding != passport.binding_id {
             return Err(PresentationError::Context("connection"));
         }
@@ -542,7 +543,7 @@ pub fn verify_presentation(
         &envelope.signing_input(proof),
         &proof.signature,
     )?;
-    statement.admit(&accepted, expected)?;
+    statement.admit(&accepted.passport, expected)?;
     Ok(VerifiedPresentation {
         accepted,
         created: statement.created,
