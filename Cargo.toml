@@ -235,9 +235,6 @@ aes-gcm = "0.11"
 # Legacy hash verification (migration from competitor IdPs)
 bcrypt = "0.19"
 
-# X.509 PKI (federation certificate verification)
-x509-parser = { version = "0.18", features = ["verify"] }
-rustls-pki-types = "1"
 # Provider-neutral TLS types; applications explicitly select their backend.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 time = "0.3"

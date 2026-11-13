@@ -15,10 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-x509-parser = { workspace = true }
-rustls-pki-types = { workspace = true }
 hex = { workspace = true }
-tracing = { workspace = true }
 # The certificates a recipient verifies: their decoding, and RFC 5280 path
 # processing from the shared PKIX implementation.
 x509-cert = { version = "0.3" }

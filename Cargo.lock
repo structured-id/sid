@@ -6299,17 +6299,14 @@ dependencies = [
  "der 0.8.3",
  "hex",
  "p256",
- "rustls-pki-types",
  "serde",
  "serde_json",
  "sid-core",
  "structured-asn1",
  "structured-pkix",
  "thiserror 2.0.21",
- "tracing",
  "uuid",
  "x509-cert",
- "x509-parser",
 ]
 
 [[package]]
