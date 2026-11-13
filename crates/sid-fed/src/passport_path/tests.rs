@@ -417,7 +417,38 @@ fn an_organization_ca_must_be_usable_as_an_issuer() {
         Err(PathError::Target(_))
     ));
 
+    // A certificate with the organization's purpose and scope that is not an
+    // authority at all (RFC 5280 §4.2.1.9): no basic constraints, or a
+    // subject marked as an end entity. The scope requires a name constraint,
+    // and path processing refuses one on a certificate that is not an
+    // authority (§4.2.1.10), so such a certificate never reaches the scope.
     let anchor = intermediate(Some(1), current());
+    for constraints in [None, Some(false)] {
+        let mut extensions = scoped(source());
+        extensions.retain(|e| {
+            use der::oid::AssociatedOid;
+            e.extn_id != x509_cert::ext::pkix::BasicConstraints::OID
+        });
+        if let Some(ca) = constraints {
+            extensions.push(crate::test_certificates::extension(
+                <x509_cert::ext::pkix::BasicConstraints as der::oid::AssociatedOid>::OID,
+                true,
+                &x509_cert::ext::pkix::BasicConstraints {
+                    ca,
+                    path_len_constraint: None,
+                },
+            ));
+        }
+        let end_entity = organization_ca(source(), extensions, current());
+        assert!(
+            matches!(
+                accept_ca(&end_entity, &[], &[&anchor], source()),
+                Err(PathError::Rejected(_))
+            ),
+            "{constraints:?}"
+        );
+    }
+
     let mut mute = scoped(source());
     mute.retain(|e| {
         use der::oid::AssociatedOid;

@@ -269,6 +269,10 @@ pub fn accept_organization_ca(
         Issued::Ca(IssuerRole::OrganizationCa),
         Some(organization),
     )?;
+    // The scope also settles that the target is an authority: it requires a
+    // name constraint, which path processing refuses on a certificate that
+    // is not one (RFC 5280 §4.2.1.10), so no separate check of its basic
+    // constraints can be reached with a different answer.
     check_organization_scope(&issued, organization).map_err(|_| {
         PathError::Purpose("the organization's authority is not scoped to its organization")
     })?;

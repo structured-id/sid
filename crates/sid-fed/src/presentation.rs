@@ -76,6 +76,9 @@ pub enum PresentationError {
     /// The passport the statement presents was not accepted.
     #[error(transparent)]
     Path(#[from] PathError),
+    /// The passport's key is not certified to sign (RFC 5280 §4.2.1.3).
+    #[error("the passport's key is not certified to sign")]
+    KeyUsage,
     /// The holder's signature does not verify with the passport's key.
     #[error("the holder's signature does not verify")]
     Signature,
@@ -476,15 +479,22 @@ pub fn verify_es256(
 ) -> Result<(), PresentationError> {
     use p256::ecdsa::signature::Verifier;
     use p256::pkcs8::DecodePublicKey;
-    let key = x509_cert::Certificate::from_der(certificate)
+    let certificate =
+        x509_cert::Certificate::from_der(certificate).map_err(|_| PresentationError::Signature)?;
+    let tbs = certificate.tbs_certificate();
+    // A stated key usage restricts the key (RFC 5280 §4.2.1.3): without
+    // digitalSignature it does not sign a presentation. None stated is no
+    // restriction.
+    let usage = tbs
+        .get_extension::<x509_cert::ext::pkix::KeyUsage>()
+        .map_err(|_| PresentationError::KeyUsage)?;
+    if usage.is_some_and(|(_, usage)| !usage.digital_signature()) {
+        return Err(PresentationError::KeyUsage);
+    }
+    let key = tbs
+        .subject_public_key_info()
+        .to_der()
         .ok()
-        .and_then(|certificate| {
-            certificate
-                .tbs_certificate()
-                .subject_public_key_info()
-                .to_der()
-                .ok()
-        })
         .and_then(|spki| p256::ecdsa::VerifyingKey::from_public_key_der(&spki).ok())
         .ok_or(PresentationError::Signature)?;
     let signature =

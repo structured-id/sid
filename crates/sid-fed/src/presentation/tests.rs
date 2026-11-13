@@ -43,6 +43,11 @@ fn anchor() -> Vec<u8> {
 
 /// A Personal passport of the holder's key, issued by the intermediate.
 fn passport() -> Vec<u8> {
+    passport_with(Some(signs()))
+}
+
+/// The same passport with the key usage `usage`, or with none stated.
+fn passport_with(usage: Option<x509_cert::ext::Extension>) -> Vec<u8> {
     let stated = Passport {
         binding_id: binding(),
         source_org: None,
@@ -51,7 +56,8 @@ fn passport() -> Vec<u8> {
         instance_id: "instance.sid.example.com".into(),
         assurance_level: AssuranceLevel::Loa2,
     };
-    let mut extensions = vec![signs(), purposes(&[DEVELOPMENT_PASSPORT.key_usage])];
+    let mut extensions = vec![purposes(&[DEVELOPMENT_PASSPORT.key_usage])];
+    extensions.extend(usage);
     extensions.extend(stated.extensions(&DEVELOPMENT_PASSPORT).unwrap());
     Stated {
         subject: stated.subject().unwrap(),
@@ -196,6 +202,37 @@ fn only_the_passport_key_over_the_received_bytes_signs() {
         verify(&encoded, &expected()),
         Err(PresentationError::Signature)
     );
+}
+
+// The issuer's key usage binds the holder's key (RFC 5280 §4.2.1.3): a
+// passport whose key usage is stated and does not include digitalSignature
+// cannot sign a presentation, while one that states no key usage is not
+// restricted. Bug prevented: a key certified for key agreement or for
+// signing certificates accepted as the holder's authentication key.
+#[test]
+fn a_key_not_certified_to_sign_makes_no_presentation() {
+    use x509_cert::ext::pkix::{KeyUsage, KeyUsages};
+    let present = |certificate: Vec<u8>| {
+        let payload = statement(|v| {
+            v["credential"]["proof"]["x5c"] = json!([STANDARD.encode(certificate)]);
+        });
+        verify(&presented(&payload), &expected())
+    };
+    for usage in [
+        KeyUsage(KeyUsages::KeyAgreement.into()),
+        KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign),
+    ] {
+        let restricted = crate::test_certificates::extension(
+            <KeyUsage as der::oid::AssociatedOid>::OID,
+            true,
+            &usage,
+        );
+        assert_eq!(
+            present(passport_with(Some(restricted))).unwrap_err(),
+            PresentationError::KeyUsage
+        );
+    }
+    assert!(present(passport_with(None)).is_ok());
 }
 
 // A presentation answers one pending request of one recipient. Bug
