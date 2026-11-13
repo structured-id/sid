@@ -21,6 +21,14 @@ pub enum ProfileType {
     Personal,
     /// Corporate profile owned by an organization.
     Corporate,
+    /// This installation's local reference to an identity it admitted
+    /// through federation: another SID installation signs that identity in,
+    /// and this record is what its sessions and permissions here attach to.
+    /// It is not a third kind of Profile at the issuing side and tells
+    /// nothing about what that side holds. It has no local credentials,
+    /// login names or keys, and is reached only through its
+    /// `(trusted issuer, subject)` assignment.
+    Federated,
 }
 
 impl ProfileType {
@@ -28,7 +36,15 @@ impl ProfileType {
         match self {
             Self::Personal => "personal",
             Self::Corporate => "corporate",
+            Self::Federated => "federated",
         }
+    }
+
+    /// Whether the record is one of this installation's own Profiles: it
+    /// may hold local credentials and login names. A [`Self::Federated`]
+    /// record may not: the identity it refers to authenticates elsewhere.
+    pub fn is_local(&self) -> bool {
+        !matches!(self, Self::Federated)
     }
 }
 
@@ -541,7 +557,11 @@ impl std::fmt::Display for ProfileVisibility {
     }
 }
 
-parse_stored!(ProfileType, "profile type", [Personal, Corporate]);
+parse_stored!(
+    ProfileType,
+    "profile type",
+    [Personal, Corporate, Federated]
+);
 parse_stored!(
     ProfileStatus,
     "profile status",

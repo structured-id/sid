@@ -261,6 +261,7 @@ macro_rules! __storage_conformance {
                 test_claimant_leaving_keeps_assignment
                 test_sign_in_routes_only_the_holder
                 test_profile_by_principal_is_assigned_holder
+                test_federated_reference_is_registered_once
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],project:
                 test_projects_count_and_listing

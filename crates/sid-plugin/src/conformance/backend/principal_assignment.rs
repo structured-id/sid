@@ -266,3 +266,93 @@ pub async fn test_profile_by_principal_is_assigned_holder(backend: &dyn StorageB
         .expect("the holder resolves");
     assert_eq!(resolved.id, holder.id);
 }
+
+/// The registration of a federated reference: a record with no login name,
+/// contact or credential, reached by the subject a trusted issuer names.
+fn reference(issuer: &str, subject: Uuid) -> sid_core::models::NewRegistration {
+    let mut profile = Profile::new(None::<&str>);
+    profile.profile_type = sid_core::models::ProfileType::Federated;
+    let principal = Principal::new_federated_subject(profile.id, issuer, &subject.to_string());
+    sid_core::models::NewRegistration {
+        profile,
+        principal,
+        email: None,
+        phone: None,
+        credential: None,
+        source: None,
+        instance_claim: None,
+        history: None,
+        enrollment: None,
+        source_recording: sid_core::models::SourceRecording::AsGiven,
+    }
+}
+
+/// An identity admitted through federation gets one local record: it is
+/// stored as a federated reference without a login name and assigned its
+/// issuer's subject, and a second registration of that subject, alone or at
+/// the same moment, is a conflict that writes nothing. Bug prevented: two
+/// records for one outside identity, each gathering its own permissions.
+pub async fn test_federated_reference_is_registered_once(backend: &dyn StorageBackend) {
+    let issuer = format!(
+        "https://issuer{}.sid.example.com/i/r",
+        Uuid::now_v7().simple()
+    );
+    let subject = Uuid::now_v7();
+    let value = sid_core::models::federated_subject_value(&issuer, &subject.to_string());
+
+    let first = reference(&issuer, subject);
+    backend
+        .register_profile(&first, test_audit())
+        .await
+        .expect("a reference registers without a login name or credential");
+    let stored = backend
+        .get_profile(first.profile.id)
+        .await
+        .unwrap()
+        .expect("the record");
+    assert_eq!(
+        stored.profile_type,
+        sid_core::models::ProfileType::Federated
+    );
+    assert_eq!(stored.username, None);
+    let assigned = backend
+        .get_principal_by_value(PrincipalType::FederatedSubject, &value)
+        .await
+        .unwrap()
+        .expect("the assignment");
+    assert_eq!(assigned.assigned_profile_id, Some(first.profile.id));
+
+    let second = reference(&issuer, subject);
+    assert!(matches!(
+        backend.register_profile(&second, test_audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        backend.get_profile(second.profile.id).await.unwrap(),
+        None,
+        "a refused registration left a record"
+    );
+
+    // Two first entries of another identity at once: one record.
+    let other = Uuid::now_v7();
+    let (a, b) = (reference(&issuer, other), reference(&issuer, other));
+    let (ra, rb) = tokio::join!(
+        backend.register_profile(&a, test_audit()),
+        backend.register_profile(&b, test_audit())
+    );
+    assert_eq!(
+        [&ra, &rb].iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{ra:?} {rb:?}"
+    );
+    let winner = if ra.is_ok() { &a } else { &b };
+    let assigned = backend
+        .get_principal_by_value(
+            PrincipalType::FederatedSubject,
+            &sid_core::models::federated_subject_value(&issuer, &other.to_string()),
+        )
+        .await
+        .unwrap()
+        .expect("the assignment");
+    assert_eq!(assigned.assigned_profile_id, Some(winner.profile.id));
+}
