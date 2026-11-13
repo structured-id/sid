@@ -32,6 +32,11 @@ use crate::upstream::oidc::{
 /// How long a started entry waits for its return.
 pub const PENDING_TTL: Duration = Duration::from_secs(600);
 
+/// The ID Token claim in which a SID issuer returns the presentation of the
+/// Binding it signed in: proof that the Binding's holder was present for
+/// this entry. A claim name, not an address to fetch.
+pub const PRESENTATION_CLAIM: &str = "https://structured.id/claims/binding-presentation";
+
 /// The cache namespace of pending entries.
 const NAMESPACE: &str = "federated-entry";
 
@@ -127,6 +132,8 @@ enum Progress {
         pending: Pending,
         subject: String,
         evidence: AcceptedEvidence,
+        /// The Binding presentation the ID Token carried, when it carried one.
+        presentation: Option<Vec<u8>>,
     },
     /// An exchange may have spent the code without a retained answer: the
     /// entry can only be started again, continuing where it would have.
@@ -164,6 +171,19 @@ pub struct Returned {
     /// The entry's end: whatever the caller keeps for its retries lives no
     /// longer.
     pub deadline: DateTime<Utc>,
+    /// The Binding presentation the issuer returned in the ID Token (the
+    /// [`PRESENTATION_CLAIM`] value, a JWS in General JSON Serialization), as
+    /// received and NOT verified here: the caller verifies its path, the
+    /// holder's signature and its statement against [`Self::challenge`] and
+    /// [`Self::verifier_context`]. None when the ID Token carried none; the
+    /// issuer's signature on the token does not stand in for it.
+    pub presentation: Option<Vec<u8>>,
+    /// The one-time challenge a presentation of this entry must answer: the
+    /// entry's nonce.
+    pub challenge: String,
+    /// The verifier context a presentation of this entry must name: the
+    /// redirect URI the entry was started for, exactly as it was sent.
+    pub verifier_context: String,
 }
 
 /// Why an entry did not complete. Every case completes nothing.
@@ -484,18 +504,20 @@ impl FederatedEntry {
                 Progress::Ended => return Err(EntryError::Unknown),
                 Progress::Received { pending, id_token } => {
                     let pending = pending.clone();
-                    let (subject, evidence) = match self.validate(id_token, &pending).await {
-                        Ok(validated) => validated,
-                        Err(e @ EntryError::Token(_)) => {
-                            self.pending.take(&key).await?;
-                            return Err(e);
-                        }
-                        Err(e) => return Err(e),
-                    };
+                    let (subject, evidence, presentation) =
+                        match self.validate(id_token, &pending).await {
+                            Ok(validated) => validated,
+                            Err(e @ EntryError::Token(_)) => {
+                                self.pending.take(&key).await?;
+                                return Err(e);
+                            }
+                            Err(e) => return Err(e),
+                        };
                     let next = Progress::Exchanged {
                         pending: pending.clone(),
                         subject,
                         evidence,
+                        presentation,
                     };
                     self.pending
                         .replace(&key, &read, &next, pending.deadline)
@@ -505,6 +527,7 @@ impl FederatedEntry {
                     pending,
                     subject,
                     evidence,
+                    presentation,
                 } => {
                     return Ok(Returned {
                         subject: subject.clone(),
@@ -513,6 +536,9 @@ impl FederatedEntry {
                         requested: pending.request.clone(),
                         operation,
                         deadline: pending.deadline,
+                        presentation: presentation.clone(),
+                        challenge: pending.nonce.clone(),
+                        verifier_context: pending.redirect_uri.clone(),
                     });
                 }
             }
@@ -566,12 +592,13 @@ impl FederatedEntry {
 
     /// The subject and evidence of `token`, the ID Token answered for
     /// `pending`, validated against the trusted issuer (OpenID Connect Core
-    /// 1.0 §3.1.3.7).
+    /// 1.0 §3.1.3.7), with the Binding presentation it carries, if any. The
+    /// presentation is only taken out of the token here.
     async fn validate(
         &self,
         token: &str,
         pending: &Pending,
-    ) -> Result<(String, AcceptedEvidence), EntryError> {
+    ) -> Result<(String, AcceptedEvidence, Option<Vec<u8>>), EntryError> {
         let discovery = discover(&self.http, &self.trusted.issuer)
             .await
             .map_err(|e| EntryError::Issuer(e.to_string()))?;
@@ -623,7 +650,22 @@ impl FederatedEntry {
             amr,
             auth_time,
         );
-        Ok((subject, evidence))
+        // The presentation is a JSON object (a JWS in General JSON
+        // Serialization, RFC 7515 §7.2.1). Its signed members are text, so
+        // writing the object out again changes none of the signed bytes.
+        let presentation = match claims.get(PRESENTATION_CLAIM) {
+            None => None,
+            Some(value @ serde_json::Value::Object(_)) => Some(
+                serde_json::to_vec(value)
+                    .map_err(|_| EntryError::Token("a malformed Binding presentation".into()))?,
+            ),
+            Some(_) => {
+                return Err(EntryError::Token(
+                    "a Binding presentation that is not an object".into(),
+                ));
+            }
+        };
+        Ok((subject, evidence, presentation))
     }
 
     /// The store key of `state` started in the browser holding `browser`:
