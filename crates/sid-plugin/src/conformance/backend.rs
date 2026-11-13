@@ -35,6 +35,7 @@ pub mod export_job;
 pub mod flow_action;
 pub mod group;
 pub mod job_lock;
+pub mod login_settings;
 pub mod machine;
 pub mod namespace;
 pub mod notification;

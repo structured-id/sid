@@ -436,6 +436,15 @@ CREATE TABLE login_policy_epoch (
     CONSTRAINT login_policy_epoch_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE login_settings (
+    scope text NOT NULL,
+    allow_personal_profiles boolean NOT NULL,
+    allow_foreign_corporate_profiles boolean NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT login_settings_scope_check CHECK ((scope = 'installation'::text)),
+    CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
+);
+
 CREATE TABLE magic_link_sessions (
     id uuid NOT NULL,
     email text NOT NULL,

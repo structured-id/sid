@@ -48,6 +48,7 @@ pub mod incident;
 pub mod instance_secret;
 pub mod invite;
 pub mod ip_reputation;
+pub mod login_settings;
 pub mod machine_user;
 pub mod magic_link;
 pub mod mapped_claims;
@@ -169,6 +170,7 @@ pub use invite::{
     InviteStatus, generate_invite_code, normalize_invite_code,
 };
 pub use ip_reputation::IpReputation;
+pub use login_settings::LoginSettings;
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,
     MachineOwner, MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId,

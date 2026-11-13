@@ -54,6 +54,76 @@ impl PostgresBackend {
             .map_err(|e| SidError::Storage(format!("read login policy epoch: {e}")))
     }
 
+    pub(super) async fn login_settings_impl(
+        &self,
+    ) -> SidResult<Option<sid_core::models::LoginSettings>> {
+        let row: Option<(bool, bool)> = sqlx::query_as(
+            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+             FROM login_settings WHERE scope = 'installation'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+        Ok(
+            row.map(|(personal, corporate)| sid_core::models::LoginSettings {
+                allow_personal_profiles: personal,
+                allow_foreign_corporate_profiles: corporate,
+            }),
+        )
+    }
+
+    pub(super) async fn set_login_settings_impl(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("write login settings: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // One writer at a time, also while no row exists yet; readers are
+        // not held. What is read below is what this write replaces.
+        sqlx::query("LOCK TABLE login_settings IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        let stored: Option<(bool, bool)> = sqlx::query_as(
+            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+             FROM login_settings WHERE scope = 'installation'",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let expected = expected.map(|e| {
+            (
+                e.allow_personal_profiles,
+                e.allow_foreign_corporate_profiles,
+            )
+        });
+        if stored != expected {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO login_settings (scope, allow_personal_profiles,
+                 allow_foreign_corporate_profiles, updated_at)
+             VALUES ('installation', $1, $2, NOW())
+             ON CONFLICT (scope) DO UPDATE SET
+                 allow_personal_profiles = EXCLUDED.allow_personal_profiles,
+                 allow_foreign_corporate_profiles = EXCLUDED.allow_foreign_corporate_profiles,
+                 updated_at = NOW()",
+        )
+        .bind(settings.allow_personal_profiles)
+        .bind(settings.allow_foreign_corporate_profiles)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        // A sign-in decided under the earlier settings no longer commits:
+        // its fence share-locks the epoch row this write updates.
+        Self::advance_login_policy_epoch(&mut tx).await?;
+        Self::audit_in_tx(&mut tx, "installation:login_settings", ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     pub(super) async fn import_login_policy_epoch_impl(
         &self,
         epoch: i64,

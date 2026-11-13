@@ -55,6 +55,69 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(format!("read login policy epoch: {e}")))
     }
 
+    pub(crate) async fn login_settings_impl(
+        &self,
+    ) -> SidResult<Option<sid_core::models::LoginSettings>> {
+        let row: Option<(bool, bool)> = sqlx::query_as(
+            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+             FROM login_settings WHERE scope = 'installation'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+        Ok(
+            row.map(|(personal, corporate)| sid_core::models::LoginSettings {
+                allow_personal_profiles: personal,
+                allow_foreign_corporate_profiles: corporate,
+            }),
+        )
+    }
+
+    pub(crate) async fn set_login_settings_impl(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        // The write lock is held from here: what is read below is what this
+        // write replaces.
+        let mut tx = self.begin_write().await?;
+        let stored: Option<(bool, bool)> = sqlx::query_as(
+            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+             FROM login_settings WHERE scope = 'installation'",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+        let expected = expected.map(|e| {
+            (
+                e.allow_personal_profiles,
+                e.allow_foreign_corporate_profiles,
+            )
+        });
+        if stored != expected {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO login_settings (scope, allow_personal_profiles,
+                 allow_foreign_corporate_profiles, updated_at)
+             VALUES ('installation', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (scope) DO UPDATE SET
+                 allow_personal_profiles = excluded.allow_personal_profiles,
+                 allow_foreign_corporate_profiles = excluded.allow_foreign_corporate_profiles,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(settings.allow_personal_profiles)
+        .bind(settings.allow_foreign_corporate_profiles)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("write login settings: {e}")))?;
+        // A sign-in decided under the earlier settings no longer commits.
+        Self::advance_login_policy_epoch(&mut tx).await?;
+        Self::commit_mutation(tx, "installation:login_settings", ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn import_login_policy_epoch_impl(
         &self,
         epoch: i64,

@@ -1857,4 +1857,12 @@ CREATE TABLE IF NOT EXISTS login_policy_epoch (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     epoch           INTEGER NOT NULL
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS login_settings (
+    scope                            TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    allow_personal_profiles          INTEGER NOT NULL CHECK (allow_personal_profiles IN (0, 1)),
+    allow_foreign_corporate_profiles INTEGER NOT NULL
+        CHECK (allow_foreign_corporate_profiles IN (0, 1)),
+    updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
 "#;

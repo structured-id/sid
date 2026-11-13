@@ -884,6 +884,25 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// The installation's stored login settings; `None` until an
+    /// administrator sets them, which reads as the defaults.
+    async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>>;
+
+    /// Store `settings` as the installation's login settings in place of
+    /// `expected`, the ones the caller read (`None`: never set), with its
+    /// audit entry and an advance of the login policy epoch in the same
+    /// transaction: a sign-in decided under the earlier settings no longer
+    /// commits. `false`, with nothing written, when the stored settings are
+    /// no longer `expected`: the caller reads again, so a change of one
+    /// setting never overwrites a concurrent change of another. The
+    /// enrollment policy is a record of its own and is not touched.
+    async fn set_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The installation's login policy epoch, advanced by every change of a
     /// policy a login is admitted under; `None` until the first change.
     async fn export_login_policy_epoch(&self) -> Result<Option<i64>>;

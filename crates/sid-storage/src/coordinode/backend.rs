@@ -1161,6 +1161,19 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::set_enrollment_policy(self, policy, mode, ctx).await
     }
 
+    async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {
+        CoordinodeBackend::login_settings(self).await
+    }
+
+    async fn set_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        expected: Option<&sid_core::models::LoginSettings>,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::set_login_settings(self, settings, expected, ctx).await
+    }
+
     async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
         CoordinodeBackend::login_policy_epoch(self).await
     }

@@ -2246,6 +2246,17 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<bool> {
         unimplemented!()
     }
+    async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {
+        unimplemented!()
+    }
+    async fn set_login_settings(
+        &self,
+        _: &sid_core::models::LoginSettings,
+        _: Option<&sid_core::models::LoginSettings>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
     async fn export_login_policy_epoch(&self) -> Result<Option<i64>> {
         unimplemented!()
     }
