@@ -139,9 +139,10 @@ impl CoordinodeBackend {
                 values(),
             )?;
             if updated.is_empty() {
-                // Concurrent first writes create one unique node: all but one
-                // commit conflict.
-                tx.run(
+                // Another first write may have created the node since this
+                // transaction looked: it then runs again, finds settings it
+                // did not expect and writes nothing.
+                tx.create_absent(
                     "CREATE (s:SidLoginSettings {scope: $scope,
                          allow_personal_profiles: $personal,
                          allow_foreign_corporate_profiles: $corporate, updated_at: $now})",
@@ -155,11 +156,55 @@ impl CoordinodeBackend {
                 Params::default(),
             )?;
             if advanced.is_empty() {
-                tx.run(
+                // The first policy write of any kind starts the epoch: one
+                // racing this one makes the transaction run again.
+                tx.create_absent(
                     "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: 1})",
                     Params::default(),
                 )?;
             }
+            super::finalize(tx, "installation:login_settings", ctx.clone())?;
+            Ok(super::Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn import_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        use coordinode_core::graph::types::Value;
+        let settings = *settings;
+        self.transaction(move |tx| {
+            let rows = tx.run(
+                "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
+                 RETURN s.allow_personal_profiles AS personal,
+                        s.allow_foreign_corporate_profiles AS corporate",
+                Params::default().with("scope", settings_scope()),
+            )?;
+            if let Some(row) = rows.first() {
+                let held = sid_core::models::LoginSettings {
+                    allow_personal_profiles: super::get_bool(row, "personal")?,
+                    allow_foreign_corporate_profiles: super::get_bool(row, "corporate")?,
+                };
+                return crate::transfer_repeat(&held, &settings, "login settings")
+                    .map(super::Decision::Abandon);
+            }
+            // Concurrent importers meet on the unique node.
+            tx.create_absent(
+                "CREATE (s:SidLoginSettings {scope: $scope,
+                     allow_personal_profiles: $personal,
+                     allow_foreign_corporate_profiles: $corporate, updated_at: $now})",
+                Params::default()
+                    .with("scope", settings_scope())
+                    .with("personal", Value::Bool(settings.allow_personal_profiles))
+                    .with(
+                        "corporate",
+                        Value::Bool(settings.allow_foreign_corporate_profiles),
+                    )
+                    .with("now", super::time(chrono::Utc::now())),
+            )?;
             super::finalize(tx, "installation:login_settings", ctx.clone())?;
             Ok(super::Decision::Commit(true))
         })

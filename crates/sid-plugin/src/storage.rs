@@ -903,6 +903,16 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// Store exported login settings into a store that has none, with its
+    /// audit entry. The login policy epoch is not advanced: it moves as a
+    /// record of its own. The same settings stored before are `false`; other
+    /// ones are a `Conflict`.
+    async fn import_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The installation's login policy epoch, advanced by every change of a
     /// policy a login is admitted under; `None` until the first change.
     async fn export_login_policy_epoch(&self) -> Result<Option<i64>>;

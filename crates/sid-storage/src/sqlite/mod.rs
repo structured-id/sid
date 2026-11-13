@@ -1814,6 +1814,14 @@ impl StorageBackend for SqliteBackend {
         self.set_login_settings_impl(settings, expected, ctx).await
     }
 
+    async fn import_login_settings(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_login_settings_impl(settings, ctx).await
+    }
+
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         Self::login_policy_epoch(&self.pool).await
     }

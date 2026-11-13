@@ -118,6 +118,40 @@ impl SqliteBackend {
         Ok(true)
     }
 
+    pub(crate) async fn import_login_settings_impl(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let stored: Option<(bool, bool)> = sqlx::query_as(
+            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+             FROM login_settings WHERE scope = 'installation'",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+        if let Some((personal, corporate)) = stored {
+            let held = sid_core::models::LoginSettings {
+                allow_personal_profiles: personal,
+                allow_foreign_corporate_profiles: corporate,
+            };
+            return crate::transfer_repeat(&held, settings, "login settings");
+        }
+        sqlx::query(
+            "INSERT INTO login_settings (scope, allow_personal_profiles,
+                 allow_foreign_corporate_profiles)
+             VALUES ('installation', ?, ?)",
+        )
+        .bind(settings.allow_personal_profiles)
+        .bind(settings.allow_foreign_corporate_profiles)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| super::insert_error("login settings", e))?;
+        Self::commit_mutation(tx, "installation:login_settings", ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn import_login_policy_epoch_impl(
         &self,
         epoch: i64,

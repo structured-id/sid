@@ -202,6 +202,8 @@ macro_rules! __storage_conformance {
             $crate::__storage_scenarios!($setup [$(super::$finish)?],login_settings:
                 test_login_settings_stored_and_replaced
                 test_login_settings_replace_only_what_was_read
+                test_first_login_settings_write_races_without_failing
+                test_login_settings_import_keeps_the_epoch
                 test_login_settings_advance_the_login_policy_epoch
                 test_login_settings_and_enrollment_policy_are_independent
             );

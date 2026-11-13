@@ -94,6 +94,11 @@ const OWN_COLUMNS: &[(&str, &str, &str)] = &[
         "updated_at",
         "when this store recorded the policy; never read",
     ),
+    (
+        "login_settings",
+        "updated_at",
+        "when this store recorded the settings; never read",
+    ),
 ];
 
 fn ctx() -> MutationContext {
@@ -1001,6 +1006,21 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
     SqliteBackend::commit_mutation(tx, "installation:login_policy", ctx())
         .await
         .unwrap();
+    // The login settings, with an epoch they advanced on top of the one
+    // above: the move carries both as they stand.
+    assert!(
+        source
+            .set_login_settings(
+                &LoginSettings {
+                    allow_personal_profiles: false,
+                    allow_foreign_corporate_profiles: true,
+                },
+                None,
+                ctx(),
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(
         source.adopt_central_management(ctx()).await.unwrap(),
         CentralAdoption::Adopted

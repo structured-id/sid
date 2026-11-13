@@ -124,6 +124,45 @@ impl PostgresBackend {
         Ok(true)
     }
 
+    pub(super) async fn import_login_settings_impl(
+        &self,
+        settings: &sid_core::models::LoginSettings,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("import login settings: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The row's insert serializes concurrent importers on its key.
+        let inserted = sqlx::query(
+            "INSERT INTO login_settings (scope, allow_personal_profiles,
+                 allow_foreign_corporate_profiles)
+             VALUES ('installation', $1, $2) ON CONFLICT (scope) DO NOTHING",
+        )
+        .bind(settings.allow_personal_profiles)
+        .bind(settings.allow_foreign_corporate_profiles)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            let held: (bool, bool) = sqlx::query_as(
+                "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
+                 FROM login_settings WHERE scope = 'installation'",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage)?;
+            let held = sid_core::models::LoginSettings {
+                allow_personal_profiles: held.0,
+                allow_foreign_corporate_profiles: held.1,
+            };
+            return crate::transfer_repeat(&held, settings, "login settings");
+        }
+        Self::audit_in_tx(&mut tx, "installation:login_settings", ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     pub(super) async fn import_login_policy_epoch_impl(
         &self,
         epoch: i64,

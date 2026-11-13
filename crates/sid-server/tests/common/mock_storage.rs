@@ -6052,6 +6052,13 @@ impl StorageBackend for MockStorage {
         inner.owe(&ctx)?;
         Ok(true)
     }
+    async fn import_login_settings(
+        &self,
+        _: &sid_core::models::LoginSettings,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         unimplemented!("instance transfer is tested against the real backends")
     }

@@ -89,10 +89,65 @@ pub async fn test_login_settings_replace_only_what_was_read(backend: &dyn Storag
         backend.set_login_settings(&BOTH, Some(&PERSONAL_ONLY), test_audit()),
         backend.set_login_settings(&NEITHER, Some(&PERSONAL_ONLY), test_audit()),
     );
-    let landed = [first.unwrap_or(false), second.unwrap_or(false)];
+    // The one that did not land is refused, never failed: its caller reads
+    // again and decides again.
+    let landed = [first.unwrap(), second.unwrap()];
     assert_eq!(landed.iter().filter(|l| **l).count(), 1, "{landed:?}");
     let stored = backend.login_settings().await.unwrap();
     assert_eq!(stored, Some(if landed[0] { BOTH } else { NEITHER }));
+}
+
+/// The very first change races too: of several administrators changing the
+/// settings of an installation that has none, one write lands and each other
+/// is refused, without an error, however the store makes its first record.
+pub async fn test_first_login_settings_write_races_without_failing(backend: &dyn StorageBackend) {
+    let attempts = [PERSONAL_ONLY, CORPORATE_ONLY, BOTH, NEITHER];
+    let outcomes = futures::future::join_all(
+        attempts
+            .iter()
+            .map(|written| backend.set_login_settings(written, None, test_audit())),
+    )
+    .await;
+    let landed: Vec<bool> = outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("a refused first write is not a failure"))
+        .collect();
+    assert_eq!(landed.iter().filter(|l| **l).count(), 1, "{landed:?}");
+    let winner = attempts[landed.iter().position(|l| *l).unwrap()];
+    assert_eq!(backend.login_settings().await.unwrap(), Some(winner));
+    assert_eq!(backend.export_login_policy_epoch().await.unwrap(), Some(1));
+}
+
+/// Moved settings are stored as they were and advance no epoch (the epoch
+/// moves as a record of its own); the same settings imported again are a
+/// repeat, other ones conflict and change nothing.
+pub async fn test_login_settings_import_keeps_the_epoch(backend: &dyn StorageBackend) {
+    assert!(
+        backend
+            .import_login_settings(&CORPORATE_ONLY, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.login_settings().await.unwrap(),
+        Some(CORPORATE_ONLY)
+    );
+    assert_eq!(backend.export_login_policy_epoch().await.unwrap(), None);
+
+    assert!(
+        !backend
+            .import_login_settings(&CORPORATE_ONLY, test_audit())
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        backend.import_login_settings(&BOTH, test_audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        backend.login_settings().await.unwrap(),
+        Some(CORPORATE_ONLY)
+    );
 }
 
 /// Every change of the login settings advances the installation's login
