@@ -509,8 +509,9 @@ pub const HTTP_FORWARDED_HEADERS: [&str; 15] = [
 /// The embedded transcoder serving this server's annotated RPCs over HTTP:
 /// `config_file` is a structured-proxy configuration, else `bind` alone is
 /// the listen address; neither means no HTTP form. The forward-auth decision
-/// belongs to sid-auth and is not mounted here. With a sign-in page, its
-/// origin is among the CORS origins (see [`allow_sign_in_origin`]).
+/// belongs to sid-auth and the platform CA publication to the platform:
+/// neither is mounted here. With a sign-in page, its origin is among the CORS
+/// origins (see [`allow_sign_in_origin`]).
 #[cfg(feature = "http")]
 pub fn http_transcoder(
     bind: Option<&str>,
@@ -554,7 +555,8 @@ pub fn http_transcoder_with(
     sid_infra::http::embedded_transcoder_with_sets(
         &config,
         &HTTP_FORWARDED_HEADERS,
-        |name| name != sid_proto::FORWARD_AUTH_PROTO,
+        // Neither is served here: no route of theirs is mounted.
+        |name| name != sid_proto::FORWARD_AUTH_PROTO && name != sid_proto::PLATFORM_CA_PROTO,
         added,
     )
     .map(Some)

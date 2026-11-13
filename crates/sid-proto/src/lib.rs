@@ -190,6 +190,10 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// decision service serves.
 pub const FORWARD_AUTH_PROTO: &str = "sid/v1/authz/forward_auth.proto";
 
+/// The proto file of the platform CA publication, which only the platform
+/// serves.
+pub const PLATFORM_CA_PROTO: &str = "sid/v1/federation/platform_ca.proto";
+
 /// The encoded `FileDescriptorSet` of the files `keep` selects together with
 /// every file they import, in dependency order. A service that transcodes its
 /// own RPCs hands its transcoder only these, so no route of another service

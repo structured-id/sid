@@ -27,8 +27,11 @@ async fn test_unreadable_http_config_stops_startup() {
 }
 
 /// The server's own annotated RPCs are mounted and reach this server's
-/// services in process; the forward-auth decision is sid-auth's and is not
-/// mounted here.
+/// services in process; the forward-auth decision is sid-auth's and the
+/// platform CA publication is the platform's: neither is served here, so
+/// neither is mounted. A route mounted for a service that is not served
+/// answers 501 at a well-known path instead of 404, and keeps a host from
+/// adding its own service there.
 #[cfg(feature = "http")]
 #[tokio::test]
 async fn test_transcoder_mounts_own_rpcs_not_forward_auth() {
@@ -57,15 +60,14 @@ async fn test_transcoder_mounts_own_rpcs_not_forward_auth() {
         .unwrap();
     assert_eq!(discovery.status(), StatusCode::NOT_IMPLEMENTED);
 
-    let verify = service
-        .oneshot(
-            Request::get("/auth/verify/orders")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(verify.status(), StatusCode::NOT_FOUND);
+    for unserved in ["/auth/verify/orders", "/.well-known/sid-ca/index.json"] {
+        let answer = service
+            .clone()
+            .oneshot(Request::get(unserved).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(answer.status(), StatusCode::NOT_FOUND, "{unserved}");
+    }
 }
 
 /// With a sign-in page, the transcoder answers that page's credentialed
