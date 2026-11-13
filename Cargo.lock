@@ -6295,6 +6295,7 @@ name = "sid-fed"
 version = "0.2.29"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "der 0.8.3",
  "hex",
@@ -6304,6 +6305,7 @@ dependencies = [
  "sid-core",
  "structured-asn1",
  "structured-pkix",
+ "subtle",
  "thiserror 2.0.21",
  "uuid",
  "x509-cert",

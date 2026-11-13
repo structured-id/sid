@@ -18,7 +18,9 @@
 //! - [`purpose`] and [`organization_scope`] state what each authority may
 //!   issue and for whom;
 //! - [`passport_path`] verifies the signatures up to the trust point and
-//!   applies those rules.
+//!   applies those rules;
+//! - [`presentation`] verifies that the passport's holder signed for this
+//!   very request.
 
 pub mod allocation;
 pub mod binding_passport;
@@ -26,6 +28,7 @@ pub mod cross_instance_linking;
 pub mod dns_verifier;
 pub mod organization_scope;
 pub mod passport_path;
+pub mod presentation;
 pub mod purpose;
 
 #[cfg(test)]
