@@ -1016,6 +1016,10 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                 &LoginSettings {
                     allow_personal_profiles: false,
                     allow_foreign_corporate_profiles: true,
+                    // A named source organization and a revision past the
+                    // first: the move must carry both.
+                    admitted_sources: vec![org.id].try_into().unwrap(),
+                    revision: 3,
                 },
                 None,
                 ctx(),

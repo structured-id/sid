@@ -440,7 +440,10 @@ CREATE TABLE login_settings (
     scope text NOT NULL,
     allow_personal_profiles boolean NOT NULL,
     allow_foreign_corporate_profiles boolean NOT NULL,
+    admitted_sources uuid[] NOT NULL,
+    revision bigint NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT login_settings_revision_check CHECK ((revision >= 0)),
     CONSTRAINT login_settings_scope_check CHECK ((scope = 'installation'::text)),
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );

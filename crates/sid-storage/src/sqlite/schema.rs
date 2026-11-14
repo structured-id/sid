@@ -1867,6 +1867,9 @@ CREATE TABLE IF NOT EXISTS login_settings (
     allow_personal_profiles          INTEGER NOT NULL CHECK (allow_personal_profiles IN (0, 1)),
     allow_foreign_corporate_profiles INTEGER NOT NULL
         CHECK (allow_foreign_corporate_profiles IN (0, 1)),
+    -- Organization ids one after another, 16 bytes each, in id order.
+    admitted_sources                 BLOB NOT NULL CHECK (length(admitted_sources) % 16 = 0),
+    revision                         INTEGER NOT NULL CHECK (revision >= 0),
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 "#;

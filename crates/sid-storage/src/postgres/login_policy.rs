@@ -9,6 +9,54 @@ use super::PostgresBackend;
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
+/// The stored login settings read on `executor`; none before they were set.
+async fn stored_settings<'e, E>(executor: E) -> SidResult<Option<sid_core::models::LoginSettings>>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let row: Option<(bool, bool, Vec<uuid::Uuid>, i64)> = sqlx::query_as(
+        "SELECT allow_personal_profiles, allow_foreign_corporate_profiles,
+                admitted_sources, revision
+         FROM login_settings WHERE scope = 'installation'",
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+    row.map(|(personal, corporate, sources, revision)| {
+        let corrupt = |what: &str| SidError::Storage(format!("stored login settings: {what}"));
+        let sources = sources
+            .into_iter()
+            .map(sid_core::models::OrgId::from_uuid)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| corrupt(&e.to_string()))?;
+        Ok(sid_core::models::LoginSettings {
+            allow_personal_profiles: personal,
+            allow_foreign_corporate_profiles: corporate,
+            admitted_sources: sources
+                .try_into()
+                .map_err(|_| corrupt("too many sources"))?,
+            revision: u64::try_from(revision).map_err(|_| corrupt("negative revision"))?,
+        })
+    })
+    .transpose()
+}
+
+/// The admitted source organizations as the `uuid[]` column holds them.
+fn sources(settings: &sid_core::models::LoginSettings) -> Vec<uuid::Uuid> {
+    settings
+        .admitted_sources
+        .as_slice()
+        .iter()
+        .map(|id| id.into_uuid())
+        .collect()
+}
+
+/// The settings' revision as the `bigint` column holds it.
+fn revision(settings: &sid_core::models::LoginSettings) -> SidResult<i64> {
+    i64::try_from(settings.revision)
+        .map_err(|_| SidError::Validation("login settings revision out of range".into()))
+}
+
 impl PostgresBackend {
     /// Fail with `Fenced` unless the login-policy epoch is still `epoch` in
     /// this transaction. The epoch row is share-locked until the transaction
@@ -57,19 +105,7 @@ impl PostgresBackend {
     pub(super) async fn login_settings_impl(
         &self,
     ) -> SidResult<Option<sid_core::models::LoginSettings>> {
-        let row: Option<(bool, bool)> = sqlx::query_as(
-            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-             FROM login_settings WHERE scope = 'installation'",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-        Ok(
-            row.map(|(personal, corporate)| sid_core::models::LoginSettings {
-                allow_personal_profiles: personal,
-                allow_foreign_corporate_profiles: corporate,
-            }),
-        )
+        stored_settings(&self.pool).await
     }
 
     pub(super) async fn set_login_settings_impl(
@@ -86,33 +122,24 @@ impl PostgresBackend {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-        let stored: Option<(bool, bool)> = sqlx::query_as(
-            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-             FROM login_settings WHERE scope = 'installation'",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage)?;
-        let expected = expected.map(|e| {
-            (
-                e.allow_personal_profiles,
-                e.allow_foreign_corporate_profiles,
-            )
-        });
-        if stored != expected {
+        if stored_settings(&mut *tx).await?.as_ref() != expected {
             return Ok(false);
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, updated_at)
-             VALUES ('installation', $1, $2, NOW())
+                 allow_foreign_corporate_profiles, admitted_sources, revision, updated_at)
+             VALUES ('installation', $1, $2, $3, $4, NOW())
              ON CONFLICT (scope) DO UPDATE SET
                  allow_personal_profiles = EXCLUDED.allow_personal_profiles,
                  allow_foreign_corporate_profiles = EXCLUDED.allow_foreign_corporate_profiles,
+                 admitted_sources = EXCLUDED.admitted_sources,
+                 revision = EXCLUDED.revision,
                  updated_at = NOW()",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
+        .bind(sources(settings))
+        .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
@@ -134,28 +161,22 @@ impl PostgresBackend {
         // The row's insert serializes concurrent importers on its key.
         let inserted = sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles)
-             VALUES ('installation', $1, $2) ON CONFLICT (scope) DO NOTHING",
+                 allow_foreign_corporate_profiles, admitted_sources, revision)
+             VALUES ('installation', $1, $2, $3, $4) ON CONFLICT (scope) DO NOTHING",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
+        .bind(sources(settings))
+        .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
         .map_err(storage)?
         .rows_affected()
             == 1;
         if !inserted {
-            let held: (bool, bool) = sqlx::query_as(
-                "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-                 FROM login_settings WHERE scope = 'installation'",
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
-            let held = sid_core::models::LoginSettings {
-                allow_personal_profiles: held.0,
-                allow_foreign_corporate_profiles: held.1,
-            };
+            let held = stored_settings(&mut *tx)
+                .await?
+                .ok_or_else(|| SidError::Storage("login settings vanished while read".into()))?;
             return crate::transfer_repeat(&held, settings, "login settings");
         }
         Self::audit_in_tx(&mut tx, "installation:login_settings", ctx).await?;

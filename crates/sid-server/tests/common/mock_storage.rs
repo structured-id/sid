@@ -6050,7 +6050,7 @@ impl StorageBackend for MockStorage {
         unimplemented!("instance transfer is tested against the real backends")
     }
     async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
-        Ok(self.inner.lock().unwrap().login_settings)
+        Ok(self.inner.lock().unwrap().login_settings.clone())
     }
     async fn set_login_settings(
         &self,
@@ -6062,7 +6062,7 @@ impl StorageBackend for MockStorage {
         if inner.login_settings.as_ref() != expected {
             return Ok(false);
         }
-        inner.login_settings = Some(*settings);
+        inner.login_settings = Some(settings.clone());
         inner.owe(&ctx)?;
         Ok(true)
     }

@@ -173,7 +173,7 @@ pub use invite::{
     InviteStatus, generate_invite_code, normalize_invite_code,
 };
 pub use ip_reputation::IpReputation;
-pub use login_settings::LoginSettings;
+pub use login_settings::{AdmittedSources, LoginSettings, MAX_ADMITTED_SOURCES, Origin};
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,
     MachineOwner, MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId,

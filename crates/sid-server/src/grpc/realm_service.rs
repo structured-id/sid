@@ -48,6 +48,7 @@ fn login_refusal(e: LoginSettingsError) -> Status {
         LoginSettingsError::Operation(e) => e.into_status(),
         LoginSettingsError::Store(e) => storage_failure(e),
         LoginSettingsError::NotServed(setting) => not_in_this_build(setting),
+        LoginSettingsError::InvalidField { field, reason } => invalid_field(field, reason),
         // Other administrators' changes kept landing first: the caller
         // repeats the command.
         LoginSettingsError::Contended => {

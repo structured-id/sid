@@ -9,6 +9,38 @@ use super::SqliteBackend;
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
 
+/// The stored login settings read on `executor`; none before they were set.
+async fn stored_settings<'e, E>(executor: E) -> SidResult<Option<sid_core::models::LoginSettings>>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    let row: Option<(bool, bool, Vec<u8>, i64)> = sqlx::query_as(
+        "SELECT allow_personal_profiles, allow_foreign_corporate_profiles,
+                admitted_sources, revision
+         FROM login_settings WHERE scope = 'installation'",
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
+    row.map(|(personal, corporate, sources, revision)| {
+        let corrupt = |what: &str| SidError::Storage(format!("stored login settings: {what}"));
+        Ok(sid_core::models::LoginSettings {
+            allow_personal_profiles: personal,
+            allow_foreign_corporate_profiles: corporate,
+            admitted_sources: sid_core::models::AdmittedSources::from_bytes(&sources)
+                .map_err(|e| corrupt(&e.to_string()))?,
+            revision: u64::try_from(revision).map_err(|_| corrupt("negative revision"))?,
+        })
+    })
+    .transpose()
+}
+
+/// The settings' revision as the INTEGER column holds it.
+fn revision(settings: &sid_core::models::LoginSettings) -> SidResult<i64> {
+    i64::try_from(settings.revision)
+        .map_err(|_| SidError::Validation("login settings revision out of range".into()))
+}
+
 /// Fail with `Fenced` unless the login-policy epoch is still `epoch`, read in
 /// the write transaction (which holds the database write lock, so no policy
 /// write lands before this commit).
@@ -58,19 +90,7 @@ impl SqliteBackend {
     pub(crate) async fn login_settings_impl(
         &self,
     ) -> SidResult<Option<sid_core::models::LoginSettings>> {
-        let row: Option<(bool, bool)> = sqlx::query_as(
-            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-             FROM login_settings WHERE scope = 'installation'",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-        Ok(
-            row.map(|(personal, corporate)| sid_core::models::LoginSettings {
-                allow_personal_profiles: personal,
-                allow_foreign_corporate_profiles: corporate,
-            }),
-        )
+        stored_settings(&self.pool).await
     }
 
     pub(crate) async fn set_login_settings_impl(
@@ -82,33 +102,24 @@ impl SqliteBackend {
         // The write lock is held from here: what is read below is what this
         // write replaces.
         let mut tx = self.begin_write().await?;
-        let stored: Option<(bool, bool)> = sqlx::query_as(
-            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-             FROM login_settings WHERE scope = 'installation'",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-        let expected = expected.map(|e| {
-            (
-                e.allow_personal_profiles,
-                e.allow_foreign_corporate_profiles,
-            )
-        });
-        if stored != expected {
+        if stored_settings(&mut *tx).await?.as_ref() != expected {
             return Ok(false);
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, updated_at)
-             VALUES ('installation', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 allow_foreign_corporate_profiles, admitted_sources, revision, updated_at)
+             VALUES ('installation', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (scope) DO UPDATE SET
                  allow_personal_profiles = excluded.allow_personal_profiles,
                  allow_foreign_corporate_profiles = excluded.allow_foreign_corporate_profiles,
+                 admitted_sources = excluded.admitted_sources,
+                 revision = excluded.revision,
                  updated_at = excluded.updated_at",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
+        .bind(settings.admitted_sources.to_bytes())
+        .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("write login settings: {e}")))?;
@@ -124,27 +135,18 @@ impl SqliteBackend {
         ctx: sid_core::models::MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let stored: Option<(bool, bool)> = sqlx::query_as(
-            "SELECT allow_personal_profiles, allow_foreign_corporate_profiles
-             FROM login_settings WHERE scope = 'installation'",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-        if let Some((personal, corporate)) = stored {
-            let held = sid_core::models::LoginSettings {
-                allow_personal_profiles: personal,
-                allow_foreign_corporate_profiles: corporate,
-            };
+        if let Some(held) = stored_settings(&mut *tx).await? {
             return crate::transfer_repeat(&held, settings, "login settings");
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles)
-             VALUES ('installation', ?, ?)",
+                 allow_foreign_corporate_profiles, admitted_sources, revision)
+             VALUES ('installation', ?, ?, ?, ?)",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
+        .bind(settings.admitted_sources.to_bytes())
+        .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("login settings", e))?;
