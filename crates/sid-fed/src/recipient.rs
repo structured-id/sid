@@ -665,6 +665,43 @@ impl<V: Verdict> Recipient<V> {
         }
     }
 
+    /// Accepts the authority `certificate` (DER) of `organization`, with the
+    /// `chain` presented above it, at `at`: on a complete path to a held
+    /// platform anchor, scoped to exactly that organization, and shown not
+    /// revoked by the generation that issued it. No held status of it is
+    /// [`RecipientError::Status`] with [`StatusRefusal::Unavailable`]: not
+    /// shown either way.
+    pub async fn accept_organization_ca(
+        &self,
+        allocation: ContextAllocation,
+        organization: Uuid,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        at: SystemTime,
+    ) -> Result<(), RecipientError> {
+        let now = seconds(at)?;
+        let view = self.view(now).await?;
+        let path = accept_organization_ca(
+            &self.verdict.path(),
+            &PurposeProfile::of(allocation).map_err(no_profile)?,
+            certificate,
+            chain,
+            &view.held.anchors,
+            organization,
+            at,
+        )
+        .map_err(RecipientError::Path)?;
+        issued_ca_status(&view.held, &path, Some(certificate), now)?;
+        Ok(())
+    }
+
+    /// Drop every path accepted so far: the caller changed status an
+    /// acceptance may have rested on outside this recipient (its own
+    /// authority revoked a passport). The next acceptance validates again.
+    pub async fn forget(&self) {
+        *self.view.write().await = None;
+    }
+
     /// Hold the status `organization` published for the passports one of
     /// its authority's generations issued: that generation's `certificate`
     /// with the `chain` above it and its `crl`, all DER, as a resolver
@@ -682,19 +719,8 @@ impl<V: Verdict> Recipient<V> {
         crl: &[u8],
         at: SystemTime,
     ) -> Result<(), RecipientError> {
-        let now = seconds(at)?;
-        let view = self.view(now).await?;
-        let path = accept_organization_ca(
-            &self.verdict.path(),
-            &PurposeProfile::of(allocation).map_err(no_profile)?,
-            certificate,
-            chain,
-            &view.held.anchors,
-            organization,
-            at,
-        )
-        .map_err(RecipientError::Path)?;
-        issued_ca_status(&view.held, &path, Some(certificate), now)?;
+        self.accept_organization_ca(allocation, organization, certificate, chain, at)
+            .await?;
         let verified = self
             .verdict
             .status(crl, certificate)
