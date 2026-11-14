@@ -892,11 +892,23 @@ impl<V: Verdict> Recipient<V> {
             // Issued by an authority below the platform: its own published
             // status, as this installation holds it. Missing or past its
             // time, the organization's own publication is read once, where
-            // the installation knows it, and the list it gives decides.
+            // the installation knows it, and the list it gives decides. That
+            // happens whatever the policy: an offline allowance decides what
+            // happens when no current list can be had, it never stops a
+            // reachable one, which may revoke this passport, from being read.
             Some(issuer) => {
                 let mut status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
                 let mut decided = standing(&status, &serial, policy.issuer, now);
-                if matches!(decided, Err(StatusRefusal::Unavailable))
+                let not_current = matches!(
+                    standing(
+                        &status,
+                        &serial,
+                        sid_core::models::StatusRequirement::Fresh,
+                        now
+                    ),
+                    Err(StatusRefusal::Unavailable)
+                );
+                if not_current
                     && let Some(organization) = path.passport.source_org
                     && self
                         .refresh_issuer_status(

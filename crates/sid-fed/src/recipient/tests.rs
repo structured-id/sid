@@ -476,6 +476,41 @@ fn organization_publication(crl: Vec<u8>) -> PlatformCaSet {
     }
 }
 
+/// An offline allowance does not stop a reachable list from being read: a
+/// recipient whose policy admits missing issuer status still reads the
+/// organization's publication when it holds no current list, and the list
+/// revoking the passport refuses it. Bug prevented: a recipient under an
+/// offline policy admitting a revoked passport indefinitely because it never
+/// looked at a list it could read.
+#[tokio::test]
+async fn an_offline_policy_still_reads_a_reachable_list() {
+    let chain = [organization_ca()];
+    let offline = StatusPolicy {
+        issuer: StatusRequirement::Offline(OfflineLimits::ANY),
+        authorities: StatusRequirement::Offline(OfflineLimits::ANY),
+    };
+    let revoking = Published::of(Ok(Some(organization_publication(organization_list(
+        1,
+        &[PASSPORT_SERIAL],
+    )))));
+    let recipient = recipient()
+        .await
+        .with_organization_publications(revoking.clone());
+    recipient
+        .record_platform_cas(&set(
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        accept_under(&recipient, &corporate(), &chain, &offline).await,
+        Err(RecipientError::PassportRevoked)
+    ));
+    assert_eq!(revoking.reads(), 1);
+}
+
 /// A Corporate passport whose organization's list is not held is decided
 /// on the list the organization publishes now, read where the installation
 /// knows its publication: a list without the passport admits it as fresh

@@ -508,9 +508,22 @@ impl FederatedEntryService for FederatedEntryServiceImpl {
             return Ok(oauth_http::page(400, "Sign-in request refused"));
         };
         // This installation's policy weighs whatever the issuer returns; the
-        // first request asks for nothing beyond the subject.
+        // first request asks the issuer for what the kept authorization it
+        // continues asks of the sign-in, so a reused authentication that
+        // authorization would refuse is not brought back.
+        let required = match self.auth.sign_in_requirements(continuation.as_str()).await {
+            Ok(required) => required,
+            Err(status) => {
+                warn!(error = %status, "the continued authorization is not waiting");
+                return Ok(oauth_http::page(400, "Sign-in request refused"));
+            }
+        };
+        let request = EntryRequest {
+            acr: required.acr,
+            max_age: required.max_age,
+        };
         Ok(self
-            .begin(&step, &continuation, &EntryRequest::default())
+            .begin(&step, &continuation, &request)
             .await
             .unwrap_or_else(unavailable))
     }
