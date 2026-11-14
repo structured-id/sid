@@ -125,12 +125,67 @@ fn accept(
         &Classical,
         &DEVELOPMENT_PASSPORT,
         &DEVELOPMENT_PURPOSES,
+        Trust::Platform,
         certificate,
         &owned(chain),
         &owned(anchors),
         recipient(),
         at,
     )
+}
+
+/// Accept `certificate` at the organization `organization`'s own installed
+/// authorities `own`, as that organization's installation does.
+fn accept_own(
+    certificate: &[u8],
+    chain: &[&[u8]],
+    own: &[&[u8]],
+    organization: uuid::Uuid,
+) -> Result<AcceptedPassport, PathError> {
+    accept_passport(
+        &Classical,
+        &DEVELOPMENT_PASSPORT,
+        &DEVELOPMENT_PURPOSES,
+        Trust::OwnOrganization(organization),
+        certificate,
+        &owned(chain),
+        &owned(own),
+        recipient(),
+        SystemTime::now(),
+    )
+}
+
+// An organization accepts a passport it issued from its own installed
+// authority: the path ends there, and the platform intermediate above is
+// neither presented nor an anchor. Its own authority anchors nothing else:
+// not another organization's passport, not a platform-issued one, and an
+// authority that is not an organization's, or not scoped to it, is no such
+// trust point. Bug prevented: an installation cut off from its platform
+// unable to sign its own people in, or a local trust point accepting what
+// its organization did not issue.
+#[test]
+fn an_organization_accepts_its_own_passport_from_its_own_authority() {
+    let authority = organization_ca(source(), scoped(source()), current());
+    let passport = corporate(current());
+    // The issuer presented with the passport is the anchor itself.
+    for chain in [&[authority.as_slice()][..], &[][..]] {
+        let accepted = accept_own(&passport, chain, &[&authority], source()).unwrap();
+        assert_eq!(accepted.passport.source_org, Some(source()));
+        assert!(accepted.path.issuers.is_empty());
+        assert_eq!(accepted.path.anchor, authority);
+    }
+    // Claimed for another organization than the authority's.
+    let other = uuid::Uuid::from_u128(0x0192_f3a4_0000_7000_8000_0000_0000_0c0c);
+    assert!(matches!(
+        accept_own(&passport, &[&authority], &[&authority], other),
+        Err(PathError::Purpose(_))
+    ));
+    // A platform intermediate is not an organization's own authority.
+    let platform = intermediate(Some(1), current());
+    assert!(matches!(
+        accept_own(&passport, &[&authority], &[&platform], source()),
+        Err(PathError::Purpose(_))
+    ));
 }
 
 fn not_after_of(der: &[u8]) -> SystemTime {
@@ -292,6 +347,7 @@ fn another_recipient_refuses_the_passport() {
         &Classical,
         &DEVELOPMENT_PASSPORT,
         &DEVELOPMENT_PURPOSES,
+        Trust::Platform,
         &corporate(current()),
         &[authority],
         &[anchor],

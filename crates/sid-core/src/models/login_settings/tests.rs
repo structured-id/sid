@@ -6,6 +6,7 @@ fn settings(personal: bool, corporate: bool, sources: Vec<OrgId>) -> LoginSettin
         allow_personal_profiles: personal,
         allow_foreign_corporate_profiles: corporate,
         admitted_sources: AdmittedSources::try_from(sources).unwrap(),
+        status_policy: crate::models::StatusPolicy::default(),
         revision: 1,
     }
 }

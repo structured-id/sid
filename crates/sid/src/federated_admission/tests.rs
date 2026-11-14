@@ -111,6 +111,10 @@ impl Installed {
             allow_personal_profiles: personal,
             allow_foreign_corporate_profiles: foreign_corporate,
             admitted_sources: sources.to_vec().try_into().unwrap(),
+            status_policy: held
+                .as_ref()
+                .map(|held| held.status_policy)
+                .unwrap_or_default(),
             revision: held.as_ref().map_or(1, |held| held.revision + 1),
         };
         assert!(

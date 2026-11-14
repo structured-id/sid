@@ -32,7 +32,8 @@ fn settings_scope() -> coordinode_core::graph::types::Value {
 /// What a read of the stored settings returns of them.
 const SETTINGS: &str = "s.allow_personal_profiles AS personal,
     s.allow_foreign_corporate_profiles AS corporate,
-    s.admitted_sources AS sources, s.revision AS revision";
+    s.admitted_sources AS sources, s.status_policy AS status_policy,
+    s.revision AS revision";
 
 /// The stored settings of `row`, read with [`SETTINGS`].
 fn stored(row: &super::Row) -> SidResult<sid_core::models::LoginSettings> {
@@ -44,6 +45,11 @@ fn stored(row: &super::Row) -> SidResult<sid_core::models::LoginSettings> {
             row, "sources",
         )?)
         .map_err(|e| corrupt(&e.to_string()))?,
+        status_policy: sid_core::models::StatusPolicy::from_tag(&super::get_bytes(
+            row,
+            "status_policy",
+        )?)
+        .ok_or_else(|| corrupt("a status policy no policy encodes"))?,
         revision: u64::try_from(get_int(row, "revision")?)
             .map_err(|_| corrupt("negative revision"))?,
     })
@@ -66,6 +72,11 @@ fn values(settings: &sid_core::models::LoginSettings) -> SidResult<Params> {
             "sources",
             Value::Binary(settings.admitted_sources.to_bytes()),
         )
+        // What must be known of withdrawals, as the policy's encoding.
+        .with(
+            "status_policy",
+            Value::Binary(settings.status_policy.tag().to_vec()),
+        )
         .with("revision", Value::Int(revision))
         .with("now", super::time(chrono::Utc::now())))
 }
@@ -74,7 +85,8 @@ fn values(settings: &sid_core::models::LoginSettings) -> SidResult<Params> {
 const CREATE_SETTINGS: &str = "CREATE (s:SidLoginSettings {scope: $scope,
     allow_personal_profiles: $personal,
     allow_foreign_corporate_profiles: $corporate,
-    admitted_sources: $sources, revision: $revision, updated_at: $now})";
+    admitted_sources: $sources, status_policy: $status_policy,
+    revision: $revision, updated_at: $now})";
 
 impl CoordinodeBackend {
     /// Advance the login-policy epoch in `tx`, a transaction of the host's
@@ -155,7 +167,8 @@ impl CoordinodeBackend {
                 "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
                  SET s.allow_personal_profiles = $personal,
                      s.allow_foreign_corporate_profiles = $corporate,
-                     s.admitted_sources = $sources, s.revision = $revision,
+                     s.admitted_sources = $sources, s.status_policy = $status_policy,
+                     s.revision = $revision,
                      s.updated_at = $now
                  RETURN s.scope AS scope",
                 values(&settings)?,

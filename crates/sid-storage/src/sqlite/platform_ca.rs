@@ -383,9 +383,6 @@ impl PlatformCaStore for SqliteBackend {
                 .await
                 .map_err(storage("read the held set"))?;
         let (revision, issued_at, next_update) = set.ok_or(PlatformCaError::NotProvisioned)?;
-        if now > next_update {
-            return Err(PlatformCaError::Stale);
-        }
         let generations: Vec<(i64, Vec<u8>, Option<i64>, Option<i64>)> = sqlx::query_as(
             "SELECT g.generation, g.certificate, g.overlap_end, c.next_update
              FROM platform_ca_generations g
@@ -399,7 +396,12 @@ impl PlatformCaStore for SqliteBackend {
         .fetch_all(&mut *tx)
         .await
         .map_err(storage("read the held generations"))?;
-        let mut until = next_update;
+        // A refresh time already passed bounds nothing further.
+        let mut until = if now <= next_update {
+            next_update
+        } else {
+            i64::MAX
+        };
         let mut anchors = Vec::with_capacity(generations.len());
         let mut status = Vec::with_capacity(generations.len());
         for (generation, certificate, overlap_end, crl_until) in generations {
@@ -426,6 +428,7 @@ impl PlatformCaStore for SqliteBackend {
             anchors,
             status,
             until,
+            refresh_at: next_update,
             // Both are seconds since the epoch, so the halfway point cannot
             // overflow; a set issued after its own refresh time renews at
             // once.

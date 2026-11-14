@@ -385,7 +385,7 @@ macro_rules! platform_ca_store {
 
 platform_ca_store!(
     anchors_follow_the_published_states,
-    no_anchor_without_current_evidence,
+    a_set_past_its_refresh_time_still_anchors,
     what_is_held_only_narrows,
     only_the_held_revision_anchors,
     an_anchor_answers_for_the_cas_it_issued,

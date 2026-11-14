@@ -14,15 +14,15 @@ async fn stored_settings<'e, E>(executor: E) -> SidResult<Option<sid_core::model
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let row: Option<(bool, bool, Vec<uuid::Uuid>, i64)> = sqlx::query_as(
+    let row: Option<(bool, bool, Vec<uuid::Uuid>, Vec<u8>, i64)> = sqlx::query_as(
         "SELECT allow_personal_profiles, allow_foreign_corporate_profiles,
-                admitted_sources, revision
+                admitted_sources, status_policy, revision
          FROM login_settings WHERE scope = 'installation'",
     )
     .fetch_optional(executor)
     .await
     .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-    row.map(|(personal, corporate, sources, revision)| {
+    row.map(|(personal, corporate, sources, policy, revision)| {
         let corrupt = |what: &str| SidError::Storage(format!("stored login settings: {what}"));
         let sources = sources
             .into_iter()
@@ -35,6 +35,8 @@ where
             admitted_sources: sources
                 .try_into()
                 .map_err(|_| corrupt("too many sources"))?,
+            status_policy: sid_core::models::StatusPolicy::from_tag(&policy)
+                .ok_or_else(|| corrupt("a status policy no policy encodes"))?,
             revision: u64::try_from(revision).map_err(|_| corrupt("negative revision"))?,
         })
     })
@@ -127,18 +129,21 @@ impl PostgresBackend {
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, admitted_sources, revision, updated_at)
-             VALUES ('installation', $1, $2, $3, $4, NOW())
+                 allow_foreign_corporate_profiles, admitted_sources, status_policy, revision,
+                 updated_at)
+             VALUES ('installation', $1, $2, $3, $4, $5, NOW())
              ON CONFLICT (scope) DO UPDATE SET
                  allow_personal_profiles = EXCLUDED.allow_personal_profiles,
                  allow_foreign_corporate_profiles = EXCLUDED.allow_foreign_corporate_profiles,
                  admitted_sources = EXCLUDED.admitted_sources,
+                 status_policy = EXCLUDED.status_policy,
                  revision = EXCLUDED.revision,
                  updated_at = NOW()",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
         .bind(sources(settings))
+        .bind(settings.status_policy.tag().as_slice())
         .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
@@ -161,12 +166,13 @@ impl PostgresBackend {
         // The row's insert serializes concurrent importers on its key.
         let inserted = sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, admitted_sources, revision)
-             VALUES ('installation', $1, $2, $3, $4) ON CONFLICT (scope) DO NOTHING",
+                 allow_foreign_corporate_profiles, admitted_sources, status_policy, revision)
+             VALUES ('installation', $1, $2, $3, $4, $5) ON CONFLICT (scope) DO NOTHING",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
         .bind(sources(settings))
+        .bind(settings.status_policy.tag().as_slice())
         .bind(revision(settings)?)
         .execute(&mut *tx)
         .await

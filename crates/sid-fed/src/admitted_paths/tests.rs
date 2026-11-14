@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+use sid_core::models::{StatusEvidence, StatusPolicy, StatusRequirement};
+
 use super::*;
-use crate::binding_passport::AssuranceLevel;
+use crate::binding_passport::{AssuranceLevel, Passport};
 
 fn held(until: i64) -> HeldAnchors {
     HeldAnchors {
@@ -9,6 +11,7 @@ fn held(until: i64) -> HeldAnchors {
         // The view keeps results; status is checked before one is kept.
         status: vec![sid_plugin::platform_ca::AnchorStatus::default()],
         until,
+        refresh_at: until,
         renew_at: until,
     }
 }
@@ -32,18 +35,23 @@ async fn a_view_renewed_early_bounds_its_results() {
     assert!(!AnchorView::new(held(300), 10_000).current(300));
 }
 
-fn passport(n: u8) -> Passport {
-    Passport {
-        binding_id: uuid::Uuid::from_bytes([n; 16]),
-        source_org: Some(uuid::Uuid::from_bytes([2; 16])),
-        recipient_org: uuid::Uuid::from_bytes([3; 16]),
-        merkle_root: [n; 32],
-        instance_id: "sid.example.com".into(),
-        assurance_level: AssuranceLevel::Loa1,
+fn passport(n: u8) -> Accepted {
+    Accepted {
+        passport: Passport {
+            binding_id: uuid::Uuid::from_bytes([n; 16]),
+            source_org: Some(uuid::Uuid::from_bytes([2; 16])),
+            recipient_org: uuid::Uuid::from_bytes([3; 16]),
+            merkle_root: [n; 32],
+            instance_id: "sid.example.com".into(),
+            assurance_level: AssuranceLevel::Loa1,
+        },
+        issuer: StatusEvidence::Fresh,
+        authorities: Some(StatusEvidence::Stale),
     }
 }
 
-// A result is reused before its own end and not from that second on.
+// A result is reused before its own end and not from that second on, with
+// what was known of its status when it was reached.
 #[tokio::test]
 async fn a_result_holds_until_its_end() {
     let view = view(1_000);
@@ -84,18 +92,33 @@ async fn the_bound_drops_the_soonest_ending_result() {
 }
 
 // Every input the acceptance depends on is part of the key, and the parts
-// cannot run into each other: the allocation, the recipient, and where the
-// passport ends and the chain begins.
+// cannot run into each other: the allocation, the status policy, the
+// recipient, and where the passport ends and the chain begins. Bug
+// prevented: a path accepted under an offline policy answered from the
+// cache after the installation turned strict.
 #[test]
 fn the_key_separates_every_input() {
     let recipient = uuid::Uuid::from_bytes([3; 16]);
-    let base = key(0, recipient, b"ab", &[b"c".to_vec()]);
-    assert_ne!(base, key(1, recipient, b"ab", &[b"c".to_vec()]));
+    let policy = StatusPolicy::default().tag();
+    let strict = StatusPolicy {
+        issuer: StatusRequirement::Fresh,
+        authorities: StatusRequirement::Fresh,
+    }
+    .tag();
+    let base = key(0, &policy, recipient, b"ab", &[b"c".to_vec()]);
+    assert_ne!(base, key(1, &policy, recipient, b"ab", &[b"c".to_vec()]));
+    assert_ne!(base, key(0, &strict, recipient, b"ab", &[b"c".to_vec()]));
     assert_ne!(
         base,
-        key(0, uuid::Uuid::from_bytes([4; 16]), b"ab", &[b"c".to_vec()])
+        key(
+            0,
+            &policy,
+            uuid::Uuid::from_bytes([4; 16]),
+            b"ab",
+            &[b"c".to_vec()]
+        )
     );
-    assert_ne!(base, key(0, recipient, b"a", &[b"bc".to_vec()]));
-    assert_ne!(base, key(0, recipient, b"abc", &[]));
-    assert_eq!(base, key(0, recipient, b"ab", &[b"c".to_vec()]));
+    assert_ne!(base, key(0, &policy, recipient, b"a", &[b"bc".to_vec()]));
+    assert_ne!(base, key(0, &policy, recipient, b"abc", &[]));
+    assert_eq!(base, key(0, &policy, recipient, b"ab", &[b"c".to_vec()]));
 }

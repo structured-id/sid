@@ -14,21 +14,23 @@ async fn stored_settings<'e, E>(executor: E) -> SidResult<Option<sid_core::model
 where
     E: sqlx::SqliteExecutor<'e>,
 {
-    let row: Option<(bool, bool, Vec<u8>, i64)> = sqlx::query_as(
+    let row: Option<(bool, bool, Vec<u8>, Vec<u8>, i64)> = sqlx::query_as(
         "SELECT allow_personal_profiles, allow_foreign_corporate_profiles,
-                admitted_sources, revision
+                admitted_sources, status_policy, revision
          FROM login_settings WHERE scope = 'installation'",
     )
     .fetch_optional(executor)
     .await
     .map_err(|e| SidError::Storage(format!("read login settings: {e}")))?;
-    row.map(|(personal, corporate, sources, revision)| {
+    row.map(|(personal, corporate, sources, policy, revision)| {
         let corrupt = |what: &str| SidError::Storage(format!("stored login settings: {what}"));
         Ok(sid_core::models::LoginSettings {
             allow_personal_profiles: personal,
             allow_foreign_corporate_profiles: corporate,
             admitted_sources: sid_core::models::AdmittedSources::from_bytes(&sources)
                 .map_err(|e| corrupt(&e.to_string()))?,
+            status_policy: sid_core::models::StatusPolicy::from_tag(&policy)
+                .ok_or_else(|| corrupt("a status policy no policy encodes"))?,
             revision: u64::try_from(revision).map_err(|_| corrupt("negative revision"))?,
         })
     })
@@ -107,18 +109,21 @@ impl SqliteBackend {
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, admitted_sources, revision, updated_at)
-             VALUES ('installation', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 allow_foreign_corporate_profiles, admitted_sources, status_policy, revision,
+                 updated_at)
+             VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (scope) DO UPDATE SET
                  allow_personal_profiles = excluded.allow_personal_profiles,
                  allow_foreign_corporate_profiles = excluded.allow_foreign_corporate_profiles,
                  admitted_sources = excluded.admitted_sources,
+                 status_policy = excluded.status_policy,
                  revision = excluded.revision,
                  updated_at = excluded.updated_at",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
         .bind(settings.admitted_sources.to_bytes())
+        .bind(settings.status_policy.tag().as_slice())
         .bind(revision(settings)?)
         .execute(&mut *tx)
         .await
@@ -140,12 +145,13 @@ impl SqliteBackend {
         }
         sqlx::query(
             "INSERT INTO login_settings (scope, allow_personal_profiles,
-                 allow_foreign_corporate_profiles, admitted_sources, revision)
-             VALUES ('installation', ?, ?, ?, ?)",
+                 allow_foreign_corporate_profiles, admitted_sources, status_policy, revision)
+             VALUES ('installation', ?, ?, ?, ?, ?)",
         )
         .bind(settings.allow_personal_profiles)
         .bind(settings.allow_foreign_corporate_profiles)
         .bind(settings.admitted_sources.to_bytes())
+        .bind(settings.status_policy.tag().as_slice())
         .bind(revision(settings)?)
         .execute(&mut *tx)
         .await

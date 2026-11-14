@@ -532,6 +532,7 @@ pub fn verify_presentation(
         policy,
         profile,
         purposes,
+        crate::passport_path::Trust::Platform,
         &statement.certificate,
         &statement.chain,
         anchors,

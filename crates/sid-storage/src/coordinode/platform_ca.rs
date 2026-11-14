@@ -409,7 +409,7 @@ fn record(tx: &Statements<'_>, crl: &GenerationStatus) -> SidResult<()> {
 }
 
 /// The anchors of the held revision at `now`; `Ok(Err(..))` when no set is
-/// held or the held one is past its refresh time.
+/// held.
 fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, PlatformCaError>> {
     let set = tx.run(
         "MATCH (s:SidPlatformCaSet) WHERE s.id = 1
@@ -422,9 +422,6 @@ fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, Platform
     };
     let revision = get_int(row, "revision")?;
     let (issued_at, next_update) = (get_int(row, "issued_at")?, get_int(row, "next_update")?);
-    if now > next_update {
-        return Ok(Err(PlatformCaError::Stale));
-    }
     let rows = tx.run(
         "MATCH (g:SidPlatformCaGeneration) WHERE g.listed_in = $revision
          RETURN g.generation AS generation, g.certificate AS certificate,
@@ -449,7 +446,12 @@ fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, Platform
     }
     // Newest generation first.
     generations.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-    let mut until = next_update;
+    // A refresh time already passed bounds nothing further.
+    let mut until = if now <= next_update {
+        next_update
+    } else {
+        i64::MAX
+    };
     let mut anchors = Vec::with_capacity(generations.len());
     let mut status = Vec::with_capacity(generations.len());
     for (number, certificate, overlap_end) in generations {
@@ -476,6 +478,7 @@ fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, Platform
         anchors,
         status,
         until,
+        refresh_at: next_update,
         // Both are seconds since the epoch, so the halfway point cannot
         // overflow; a set issued after its own refresh time renews at once.
         renew_at: issued_at + (next_update - issued_at).max(0) / 2,

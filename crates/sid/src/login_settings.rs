@@ -14,10 +14,11 @@ use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
     AdmittedSources, AuditEntry, LoginSettings, MAX_ADMITTED_SOURCES, MutationContext,
-    OperationContext,
+    OfflineLimits, OperationContext, StatusPolicy, StatusRequirement,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::realm_service as keyed;
+use sid_proto::sid::v1::admin as wire;
 use sid_proto::sid::v1::admin::{LoginSettings as LoginSettingsView, UpdateLoginSettingsRequest};
 
 /// How many times a change is decided again when another change lands
@@ -75,8 +76,59 @@ fn view(settings: &LoginSettings) -> LoginSettingsView {
             .map(|id| sid_ids_proto::OrgId::from(*id))
             .collect(),
         revision: settings.revision,
+        status_policy: Some(policy_view(settings.status_policy)),
         ..LoginSettingsView::default()
     }
+}
+
+/// The status policy as an administrator reads it.
+fn policy_view(policy: StatusPolicy) -> wire::StatusPolicy {
+    let requirement = |requirement: StatusRequirement| wire::StatusRequirement {
+        offline: match requirement {
+            StatusRequirement::Fresh => None,
+            StatusRequirement::Offline(limits) => Some(wire::OfflineStatusLimits {
+                missing: limits.missing,
+                max_stale_seconds: limits.max_stale,
+            }),
+        },
+    };
+    wire::StatusPolicy {
+        issuer: Some(requirement(policy.issuer)),
+        authorities: Some(requirement(policy.authorities)),
+    }
+}
+
+/// The field of a change that replaces the status policy.
+const POLICY_FIELD: &str = "status_policy";
+
+/// The status policy `req` replaces the stored one with; `None` when it
+/// keeps the stored one. A change names both requirements: one left out is
+/// not read as the strict one or as the stored one.
+fn replacement_policy(
+    req: &UpdateLoginSettingsRequest,
+) -> Result<Option<StatusPolicy>, LoginSettingsError> {
+    let Some(policy) = &req.status_policy else {
+        return Ok(None);
+    };
+    let requirement = |given: &Option<wire::StatusRequirement>, name: &str| {
+        let given = given
+            .as_ref()
+            .ok_or_else(|| LoginSettingsError::InvalidField {
+                field: POLICY_FIELD,
+                reason: format!("{name} is required"),
+            })?;
+        Ok::<_, LoginSettingsError>(match &given.offline {
+            None => StatusRequirement::Fresh,
+            Some(limits) => StatusRequirement::Offline(OfflineLimits {
+                missing: limits.missing,
+                max_stale: limits.max_stale_seconds,
+            }),
+        })
+    };
+    Ok(Some(StatusPolicy {
+        issuer: requirement(&policy.issuer, "issuer")?,
+        authorities: requirement(&policy.authorities, "authorities")?,
+    }))
 }
 
 /// The field of a change that replaces the admitted source organizations.
@@ -169,6 +221,7 @@ impl LoginSettingsAdmin {
             return Err(LoginSettingsError::NotServed(setting));
         }
         let sources = replacement_sources(&req)?;
+        let policy = replacement_policy(&req)?;
         let command = KeyedCommand::by_profile::<keyed::UpdateLoginSettings>(
             caller.profile_id,
             operation,
@@ -189,6 +242,7 @@ impl LoginSettingsAdmin {
                         admitted_sources: sources
                             .clone()
                             .unwrap_or_else(|| held.admitted_sources.clone()),
+                        status_policy: policy.unwrap_or(held.status_policy),
                         revision: held.revision,
                     };
                     // The revision numbers the changes of what is admitted:
@@ -227,3 +281,6 @@ impl LoginSettingsAdmin {
             .map_err(CommandError::<LoginSettingsError>::refusal)
     }
 }
+
+#[cfg(test)]
+mod tests;

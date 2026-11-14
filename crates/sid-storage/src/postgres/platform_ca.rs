@@ -417,10 +417,12 @@ impl PlatformCaStore for PostgresBackend {
         .map_err(storage("read the held set"))?;
         let &(revision, issued_at, next_update, ..) =
             rows.first().ok_or(PlatformCaError::NotProvisioned)?;
-        if now > next_update {
-            return Err(PlatformCaError::Stale);
-        }
-        let mut until = next_update;
+        // A refresh time already passed bounds nothing further.
+        let mut until = if now <= next_update {
+            next_update
+        } else {
+            i64::MAX
+        };
         let mut anchors = Vec::with_capacity(rows.len());
         let mut status = Vec::with_capacity(rows.len());
         for (.., certificate, overlap_end, crl_until, revoked) in rows {
@@ -445,6 +447,7 @@ impl PlatformCaStore for PostgresBackend {
             anchors,
             status,
             until,
+            refresh_at: next_update,
             // Both are seconds since the epoch, so the halfway point cannot
             // overflow; a set issued after its own refresh time renews at
             // once.

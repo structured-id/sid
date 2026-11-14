@@ -83,6 +83,7 @@ pub mod service_binding;
 pub mod session;
 pub mod session_end;
 pub mod site_registration;
+pub mod status_policy;
 pub mod upstream_identity;
 pub mod upstream_provider;
 pub mod username;
@@ -279,6 +280,7 @@ pub use session_end::{
     SessionRevocation,
 };
 pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
+pub use status_policy::{OfflineLimits, StatusEvidence, StatusPolicy, StatusRequirement};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{
     ProviderTrustCategory, UpstreamProtocol, UpstreamProvider, UpstreamProviderId,

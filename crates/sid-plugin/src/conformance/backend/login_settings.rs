@@ -119,6 +119,67 @@ pub async fn test_login_settings_keep_admitted_sources(backend: &dyn StorageBack
     assert_eq!(read, third);
 }
 
+/// The status policy reads back exactly as written, in each of its shapes:
+/// the strict requirement, an offline one that permits a missing list, one
+/// that does not, with and without a limit on the age of an expired list.
+/// A write expecting the same settings under another policy is a stale read.
+/// Bug prevented: a stored policy read back as a more permissive one (an
+/// absent limit read as no limit, or a strict requirement as offline), or a
+/// change decided on an older policy overwriting a newer one.
+pub async fn test_login_settings_keep_the_status_policy(backend: &dyn StorageBackend) {
+    use sid_core::models::{OfflineLimits, StatusPolicy, StatusRequirement};
+    let offline =
+        |missing, max_stale| StatusRequirement::Offline(OfflineLimits { missing, max_stale });
+    let policies = [
+        StatusPolicy::default(),
+        StatusPolicy {
+            issuer: StatusRequirement::Fresh,
+            authorities: StatusRequirement::Fresh,
+        },
+        StatusPolicy {
+            issuer: offline(true, None),
+            authorities: offline(false, Some(0)),
+        },
+        StatusPolicy {
+            issuer: offline(false, Some(86_400)),
+            authorities: offline(true, Some(u64::MAX)),
+        },
+    ];
+    let mut stored: Option<LoginSettings> = None;
+    for (revision, policy) in (1..).zip(policies) {
+        let written = LoginSettings {
+            status_policy: policy,
+            revision,
+            ..personal_only()
+        };
+        assert!(
+            backend
+                .set_login_settings(&written, stored.as_ref(), test_audit())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            backend.login_settings().await.unwrap(),
+            Some(written.clone())
+        );
+        stored = Some(written);
+    }
+    // The stored settings read under the default policy are not the stored
+    // ones: nothing is written over them.
+    let stored = stored.unwrap();
+    let stale = LoginSettings {
+        status_policy: StatusPolicy::default(),
+        ..stored.clone()
+    };
+    assert!(
+        !backend
+            .set_login_settings(&neither(), Some(&stale), test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(backend.login_settings().await.unwrap(), Some(stored));
+}
+
 /// A write replaces exactly the settings its caller read: against any other
 /// stored state it writes nothing and leaves the epoch where it was, so a
 /// change of one admission decided on a stale read never overwrites a change

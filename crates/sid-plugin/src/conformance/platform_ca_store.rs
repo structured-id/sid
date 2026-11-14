@@ -99,6 +99,7 @@ pub async fn anchors_follow_the_published_states(backend: &dyn PlatformCaStore) 
             anchors: vec![vec![4u8; 32], vec![3u8; 32]],
             status: vec![unknown(), unknown()],
             until: NOW + 60,
+            refresh_at: NOW + 3600,
             renew_at: NOW + 1800,
         }
     );
@@ -110,27 +111,38 @@ pub async fn anchors_follow_the_published_states(backend: &dyn PlatformCaStore) 
             anchors: vec![vec![4u8; 32]],
             status: vec![unknown()],
             until: NOW + 3600,
+            refresh_at: NOW + 3600,
             renew_at: NOW + 1800,
         }
     );
 }
 
-/// Nothing is answered before a set arrives, nor from a set past its refresh
-/// time: stale states are not current evidence.
-pub async fn no_anchor_without_current_evidence(backend: &dyn PlatformCaStore) {
+/// Nothing is answered before a set arrives. A set past its refresh time
+/// still anchors: its certificates did not expire, only the statement is
+/// due for renewal, and the answer says so for the relying policy to
+/// decide. Bug prevented: an installation that cannot reach its platform
+/// losing every anchor an hour after its last refresh.
+pub async fn a_set_past_its_refresh_time_still_anchors(backend: &dyn PlatformCaStore) {
     let store = &Audited(backend);
     assert!(matches!(
         store.held_platform_cas(NOW).await,
         Err(PlatformCaError::NotProvisioned)
     ));
     store
-        .apply_platform_cas(&set(1, vec![ca(1, PlatformCaState::Active, None)]))
+        .apply_platform_cas(&set(
+            1,
+            vec![
+                ca(2, PlatformCaState::Active, None),
+                ca(1, PlatformCaState::Withdrawn, None),
+            ],
+        ))
         .await
         .unwrap();
-    assert!(matches!(
-        store.held_platform_cas(NOW + 3601).await,
-        Err(PlatformCaError::Stale)
-    ));
+    let held = store.held_platform_cas(NOW + 3601).await.unwrap();
+    // The withdrawn generation stays out, however old the statement.
+    assert_eq!(held.anchors, vec![vec![2u8; 32]]);
+    assert_eq!(held.refresh_at, NOW + 3600);
+    assert!(held.until > NOW + 3601);
 }
 
 /// An older set arriving after a newer one changes nothing; a withdrawal is

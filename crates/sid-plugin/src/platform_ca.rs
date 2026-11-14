@@ -211,10 +211,16 @@ pub struct HeldAnchors {
     /// The status each anchor holds of the CA certificates it issued, in the
     /// anchors' order.
     pub status: Vec<AnchorStatus>,
-    /// The earliest of the set's refresh time and the overlap ends of the
-    /// verification-only generations among the anchors (seconds since the
-    /// epoch): from then on the answer must be read again.
+    /// From when the answer must be read again (seconds since the epoch):
+    /// the earliest of the overlap ends of the verification-only generations
+    /// among the anchors and, while it is still ahead, the set's refresh
+    /// time.
     pub until: i64,
+    /// The set's refresh time: by then the platform was to state a newer
+    /// set. Past it the anchors still anchor (their certificates did not
+    /// expire) and what the set says of withdrawals is no longer known to
+    /// be current: whether that suffices is the relying policy's decision.
+    pub refresh_at: i64,
     /// Halfway through the set's freshness: from then on a configured
     /// publication is asked for a newer set, while this one still holds.
     pub renew_at: i64,
@@ -240,9 +246,6 @@ pub enum PlatformCaError {
     /// No platform set has been received.
     #[error("no platform CA set has been received")]
     NotProvisioned,
-    /// The held set is past its refresh time; its states are not current.
-    #[error("the platform CA set is past its refresh time")]
-    Stale,
     /// A move met a store that already holds other platform CA state.
     #[error("the store already holds another platform CA set")]
     Occupied,
@@ -288,8 +291,8 @@ pub trait PlatformCaStore: Send + Sync {
     /// The generations a path may end at, at `now` (seconds since the
     /// epoch): the active ones and the verification-only ones whose overlap
     /// has not ended, of one committed revision. Refused when no set is held
-    /// ([`PlatformCaError::NotProvisioned`]) or the held one is past its
-    /// refresh time ([`PlatformCaError::Stale`]).
+    /// ([`PlatformCaError::NotProvisioned`]). A set past its refresh time is
+    /// still answered, with that time ([`HeldAnchors::refresh_at`]).
     async fn held_platform_cas(&self, now: i64) -> Result<HeldAnchors, PlatformCaError>;
 
     /// Hold the CRL `status` of an authority below the platform, which the

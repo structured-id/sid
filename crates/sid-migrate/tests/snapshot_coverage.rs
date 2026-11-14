@@ -1058,6 +1058,17 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                     // A named source organization and a revision past the
                     // first: the move must carry both.
                     admitted_sources: vec![org.id].try_into().unwrap(),
+                    // A policy that is not the default: the move must not
+                    // turn it into one.
+                    status_policy: sid_core::models::StatusPolicy {
+                        issuer: sid_core::models::StatusRequirement::Offline(
+                            sid_core::models::OfflineLimits {
+                                missing: false,
+                                max_stale: Some(86_400),
+                            },
+                        ),
+                        authorities: sid_core::models::StatusRequirement::Fresh,
+                    },
                     revision: 3,
                 },
                 None,

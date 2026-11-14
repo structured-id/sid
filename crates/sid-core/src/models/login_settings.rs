@@ -119,6 +119,11 @@ pub struct LoginSettings {
     /// `allow_foreign_corporate_profiles` is on. Admission is a sign-in
     /// decision: it gives no role or permission.
     pub admitted_sources: AdmittedSources,
+    /// What must be known of withdrawals before an admitted identity's
+    /// Binding Passport is relied on. Admission and this are separate
+    /// decisions: the policy admits nobody, and a missing list never makes
+    /// the installation more permissive than the policy stored here.
+    pub status_policy: super::StatusPolicy,
     /// The number of the change that left these settings: 1 after the first.
     pub revision: u64,
 }

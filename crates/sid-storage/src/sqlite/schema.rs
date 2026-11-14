@@ -1869,6 +1869,8 @@ CREATE TABLE IF NOT EXISTS login_settings (
         CHECK (allow_foreign_corporate_profiles IN (0, 1)),
     -- Organization ids one after another, 16 bytes each, in id order.
     admitted_sources                 BLOB NOT NULL CHECK (length(admitted_sources) % 16 = 0),
+    -- What must be known of withdrawals, as the policy's 20-byte encoding.
+    status_policy                    BLOB NOT NULL CHECK (length(status_policy) = 20),
     revision                         INTEGER NOT NULL CHECK (revision >= 0),
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;

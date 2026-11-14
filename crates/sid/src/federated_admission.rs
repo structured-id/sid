@@ -192,21 +192,18 @@ pub async fn admit(
         return Err(Refused::NotAdmitted);
     }
     let presentation = returned.presentation.ok_or(Refused::NoPresentation)?;
-    // Verified under the allocation of the platform intermediates this
-    // installation holds: admitting an outside identity needs no
-    // organization authority of its own.
-    let allocation = identities
-        .platform_allocation(at)
-        .await
-        .map_err(unavailable)?
-        .ok_or_else(|| unavailable("no platform CA set to verify under"))?;
     let expected = Expected {
         recipient: organization.into(),
         challenge: returned.challenge,
         domain: returned.verifier_context,
     };
-    let passport = identities
-        .accept_presentation(allocation, presentation, &expected, at)
+    // Verified under the platform intermediates this installation holds:
+    // admitting an outside identity needs no organization authority of its
+    // own. What must be known of withdrawals is the installation's stored
+    // policy, read with the settings for this completion: an issuer that
+    // cannot be reached never makes it more permissive.
+    let accepted = identities
+        .accept_presentation(presentation, &expected, &settings.status_policy, at)
         .await
         .map_err(|e| {
             // The evidence to decide on is missing now, not refused.
@@ -216,6 +213,7 @@ pub async fn admit(
                 Refused::Presentation(e)
             }
         })?;
+    let passport = &accepted.passport;
     // The token's subject and the passport's Binding are one identity.
     if passport.binding_id != subject {
         return Err(Refused::AnotherIdentity);
@@ -223,7 +221,7 @@ pub async fn admit(
     // Decided on the settings read for this completion, by the organization
     // the accepted passport names: a Corporate Profile is admitted only from
     // a source the recipient named, whatever the Personal switch says.
-    let origin = origin(&passport, organization)?.ok_or(Refused::Own)?;
+    let origin = origin(passport, organization)?.ok_or(Refused::Own)?;
     // A connection registered for one organization brings in no other
     // organization's Corporate Profile, though the settings name that one.
     if let (Some(registered), Origin::Corporate(source)) = (connection.source, origin)
@@ -234,7 +232,16 @@ pub async fn admit(
     if !settings.admits(origin) {
         return Err(Refused::NotAdmitted);
     }
-    let ctx = AuditEntry::system("federated_entry.admit", format!("subject/{subject}")).into();
+    // The record of the admission says what was known of withdrawals and
+    // under which policy: stale or unknown status the policy admitted is
+    // never recorded as shown good.
+    let ctx = AuditEntry::system("federated_entry.admit", format!("subject/{subject}"))
+        .with_metadata(serde_json::json!({
+            "status_policy": settings.status_policy,
+            "issuer_status": accepted.issuer,
+            "authorities_status": accepted.authorities,
+        }))
+        .into();
     record_of(storage, &connection.issuer, subject, ctx)
         .await
         .map_err(|e| match e {

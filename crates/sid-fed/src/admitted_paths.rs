@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use sid_plugin::platform_ca::HeldAnchors;
 use tokio::sync::Mutex;
 
-use crate::binding_passport::Passport;
+use crate::recipient::Accepted;
 
 /// The most accepted paths one view keeps; the oldest-ending one goes first.
 const MAX_PATHS: usize = 1024;
@@ -31,10 +31,11 @@ pub(crate) struct AnchorView {
     paths: Mutex<HashMap<Box<[u8]>, Reused>>,
 }
 
-/// An accepted passport and the moment its acceptance stops holding.
+/// An accepted passport, with what was known of its status, and the moment
+/// its acceptance stops holding.
 #[derive(Clone)]
 struct Reused {
-    passport: Passport,
+    accepted: Accepted,
     until: i64,
 }
 
@@ -57,17 +58,17 @@ impl AnchorView {
 
     /// The passport accepted under `key` before, while its acceptance holds
     /// at `now`.
-    pub(crate) async fn reused(&self, key: &[u8], now: i64) -> Option<Passport> {
+    pub(crate) async fn reused(&self, key: &[u8], now: i64) -> Option<Accepted> {
         let paths = self.paths.lock().await;
         paths
             .get(key)
             .filter(|reused| now < reused.until)
-            .map(|reused| reused.passport.clone())
+            .map(|reused| reused.accepted.clone())
     }
 
-    /// Keep `passport`, accepted under `key`, until `until` or the view's own
-    /// end, whichever comes first.
-    pub(crate) async fn keep(&self, key: Box<[u8]>, passport: Passport, until: i64, now: i64) {
+    /// Keep `accepted`, accepted under `key`, until `until` or the view's
+    /// own end, whichever comes first.
+    pub(crate) async fn keep(&self, key: Box<[u8]>, accepted: Accepted, until: i64, now: i64) {
         let until = until.min(self.until);
         let mut paths = self.paths.lock().await;
         if paths.len() >= MAX_PATHS && !paths.contains_key(&key) {
@@ -81,22 +82,30 @@ impl AnchorView {
                 paths.remove(&first);
             }
         }
-        paths.insert(key, Reused { passport, until });
+        paths.insert(key, Reused { accepted, until });
     }
 }
 
 /// The exact inputs a passport's acceptance depends on besides the anchors:
-/// the profile allocation, the recipient, the passport and the presented
-/// chain, each length-prefixed.
+/// the profile allocation, the status policy it was decided under (its
+/// `policy` tag), the recipient, the passport and the presented chain, each
+/// length-prefixed. A result reached under one policy is never another's.
 pub(crate) fn key(
     allocation: u8,
+    policy: &[u8],
     recipient: uuid::Uuid,
     certificate: &[u8],
     chain: &[Vec<u8>],
 ) -> Box<[u8]> {
-    let size = 1 + 16 + 4 + certificate.len() + chain.iter().map(|c| 4 + c.len()).sum::<usize>();
+    let size = 1
+        + policy.len()
+        + 16
+        + 4
+        + certificate.len()
+        + chain.iter().map(|c| 4 + c.len()).sum::<usize>();
     let mut key = Vec::with_capacity(size);
     key.push(allocation);
+    key.extend_from_slice(policy);
     key.extend_from_slice(recipient.as_bytes());
     for part in std::iter::once(certificate).chain(chain.iter().map(Vec::as_slice)) {
         // A certificate is far below 4 GiB; the length only separates parts.

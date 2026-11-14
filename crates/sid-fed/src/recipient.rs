@@ -2,19 +2,36 @@
 //! A recipient's acceptance of the identities presented to it.
 //!
 //! In plain words: someone signs in here with an identity issued elsewhere.
-//! This installation accepts it only when four things hold at once. The
+//! This installation accepts it only when these hold at once. The
 //! identity's certificate (its Binding Passport) leads, signature by
-//! signature, to a platform authority this installation currently admits.
-//! None of the authorities on the way, nor the passport itself, was
-//! withdrawn by its issuer, shown by a list still within its time. The
-//! passport was issued for this very organization. And the holder signed
-//! for this one sign-in, with the key the passport certifies.
+//! signature, to a platform authority this installation admits. Nothing
+//! the installation has seen withdrew the passport or an authority on the
+//! way. The passport was issued for this very organization. And the holder
+//! signed for this one sign-in, with the key the passport certifies.
+//!
+//! Whether more must be known of withdrawals is the installation's policy
+//! ([`StatusPolicy`]): by default the passport's issuer must have published
+//! a list still within its time, and the installation may instead choose to
+//! admit without one, within limits it names. Each outcome is defined:
+//!
+//! | What is held | Strict requirement | Offline requirement |
+//! |---|---|---|
+//! | a list in its time, no withdrawal | accepted, fresh | accepted, fresh |
+//! | no list, or one past its time | not decided | accepted only if that exact absence is permitted, as stale or unknown |
+//! | a withdrawal seen of the passport or of an authority on the path | refused | refused |
+//! | expired certificate, another recipient, bad signature or holder proof | refused | refused |
+//! | the platform's set past its refresh time | not decided | its anchors still anchor; a withdrawn generation stays out |
+//! | a list that is malformed, wrongly signed or another issuer's | not recorded; what is held decides | the same |
+//!
+//! An organization that issues passports itself accepts its own from its
+//! own installed authority and its own record of what it withdrew: no
+//! platform authority, published list or network takes part.
 //!
 //! The admitted platform authorities and the published status are held in
 //! the installation's store ([`PlatformCaStore`]) and only ever narrow. A
 //! path validated once is reused while every certificate on it, the held
-//! answer and the status it rested on stay valid; the holder's signature is
-//! verified every time.
+//! answer, the policy and the status it rested on stay as they were; the
+//! holder's signature is verified every time.
 //!
 //! How signatures are checked is the [`Verdict`] of the composition: the
 //! [`ClassicalVerdict`] here checks ECDSA P-256 and says nothing of further
@@ -27,10 +44,12 @@ use std::time::SystemTime;
 
 use der::Decode;
 use sha2::{Digest, Sha256};
-use sid_core::models::{AuditEntry, MutationContext};
+use sid_core::models::{
+    AuditEntry, MutationContext, StatusEvidence, StatusPolicy, StatusRequirement,
+};
 use sid_plugin::platform_ca::{
-    Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCaError, PlatformCaSet,
-    PlatformCaSource, PlatformCaState, PlatformCaStore, StatusRefusal,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCaError,
+    PlatformCaSet, PlatformCaSource, PlatformCaState, PlatformCaStore, StatusRefusal,
 };
 use uuid::Uuid;
 use x509_cert::Certificate;
@@ -39,7 +58,7 @@ use crate::admitted_paths::{self, AnchorView};
 use crate::allocation::ContextAllocation;
 use crate::binding_passport::{Passport, PassportProfile};
 use crate::passport_path::{
-    Classical, PathError, PathPolicy, ValidatedPath, accept_organization_ca, accept_passport,
+    Classical, PathError, PathPolicy, Trust, ValidatedPath, accept_organization_ca, accept_passport,
 };
 use crate::presentation::{ES256, Envelope, Expected, PresentationError, Statement, verify_es256};
 use crate::purpose::{IssuerRole, PurposeProfile};
@@ -47,6 +66,24 @@ use crate::status::{IssuedStatus, StatusError, verify_status};
 
 /// The wait after a failed fetch before the source is asked again.
 const SOURCE_BACKOFF: i64 = 30;
+
+/// How long a view of a set past its refresh time is kept before the store
+/// is read again: another replica may have held a newer set meanwhile.
+const STALE_SET_REREAD: i64 = 60;
+
+/// An accepted passport, with what was known of withdrawals when it was
+/// accepted. Stale or unknown status is an accepted passport the policy
+/// admitted, never one shown good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    pub passport: Passport,
+    /// Of the passport, by its issuer's status.
+    pub issuer: StatusEvidence,
+    /// Of the authorities above the issuer and of the platform's set; none
+    /// when the path ended at the installation's own authority and nothing
+    /// above it was relied on.
+    pub authorities: Option<StatusEvidence>,
+}
 
 /// How a composition checks the signatures of what is presented: of a
 /// certificate path, of a published revocation list, and of the holder over
@@ -94,11 +131,22 @@ impl Verdict for ClassicalVerdict {
     }
 }
 
-/// The status of the passports this installation's own authority issued,
-/// when it has one: answered from its own record, never from a published
-/// list.
+/// This installation's own authority, when its organization issues passports
+/// itself: the certificates it installed after they were admitted, and its
+/// own record of what it withdrew. A passport one of them issued is accepted
+/// from that certificate and that record alone, never from a published list
+/// or a platform authority.
 #[async_trait::async_trait]
 pub trait OwnIssuer: Send + Sync {
+    /// The organization this installation issues for.
+    fn organization(&self) -> Uuid;
+
+    /// The authority certificates (DER) installed here that still issue or
+    /// verify: every generation the installation holds, exactly as
+    /// installed. A certificate presented with a passport is the
+    /// installation's own only when it is one of these, byte for byte.
+    async fn authorities(&self) -> Result<Vec<Vec<u8>>, RecipientError>;
+
     /// Until when (seconds since the epoch) the certificate with `serial`,
     /// issued by `issuer` (DER), is shown not revoked at `now`. `Ok(None)`
     /// when `issuer` is not this installation's own authority.
@@ -115,10 +163,14 @@ pub trait OwnIssuer: Send + Sync {
 pub enum RecipientError {
     #[error("invalid {field}: {reason}")]
     Invalid { field: &'static str, reason: String },
-    /// The platform CA set: none held, past its refresh time, or a
-    /// generation arriving with another certificate than the one held.
+    /// The platform CA set: none held, or a generation arriving with
+    /// another certificate than the one held.
     #[error(transparent)]
     Platform(PlatformCaError),
+    /// The held platform CA set is past its refresh time and the policy
+    /// requires a current one: its anchors are not relied on now.
+    #[error("the platform CA set is past its refresh time and a current one is required")]
+    PlatformSetStale,
     /// A presented passport is not accepted on a path to the held anchors.
     #[error(transparent)]
     Path(PathError),
@@ -151,6 +203,7 @@ impl RecipientError {
         matches!(
             self,
             Self::Platform(_)
+                | Self::PlatformSetStale
                 | Self::PassportStatusUnavailable
                 | Self::Status(StatusRefusal::Unavailable)
                 | Self::Store(_)
@@ -226,55 +279,88 @@ fn audit(action: &str) -> MutationContext {
     AuditEntry::system(action, "installation").into()
 }
 
-/// Whether the CA certificate directly under the anchor of `path` may be
-/// relied on at `now`, by the status the anchor's generation published: a
-/// revoked CA refuses the path, a leaf never seen before included. A path
-/// with no CA below the anchor has none to check here; the end of the
-/// status' evidence is returned for the reuse of the result.
-fn issued_ca_status(
+/// What is known, and until when, of the certificate with `serial` under the
+/// `status` its issuer published, by `requirement` at `now`. A withdrawal
+/// seen once refuses under every requirement; with none seen, the
+/// requirement decides whether what is held suffices.
+fn standing(
+    status: &AnchorStatus,
+    serial: &[u8],
+    requirement: StatusRequirement,
+    now: i64,
+) -> Result<(StatusEvidence, Option<i64>), StatusRefusal> {
+    if status.revoked.iter().any(|revoked| revoked == serial) {
+        return Err(StatusRefusal::Revoked);
+    }
+    requirement
+        .weigh(status.until, now)
+        .ok_or(StatusRefusal::Unavailable)
+}
+
+/// The status the anchor of `path` holds of what its generation issued.
+fn anchor_status<'a>(held: &'a HeldAnchors, path: &ValidatedPath) -> Option<&'a AnchorStatus> {
+    held.anchors
+        .iter()
+        .position(|anchor| anchor == &path.anchor)
+        .and_then(|i| held.status.get(i))
+}
+
+/// The less that is known of two things relied on together, and the earlier
+/// end of the two answers.
+fn weakest(
+    a: (StatusEvidence, Option<i64>),
+    b: (StatusEvidence, Option<i64>),
+) -> (StatusEvidence, Option<i64>) {
+    let until = match (a.1, b.1) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    (a.0.max(b.0), until)
+}
+
+/// What is known of the authorities a platform path relied on, by
+/// `requirement` at `now`: the held set itself (past its refresh time its
+/// withdrawals are no longer known to be current) and, when a CA stands
+/// between the anchor and the certificate (`issued` when the certificate is
+/// itself that CA), that CA by the status the anchor's generation
+/// published. A revoked CA refuses the path, a leaf never seen before
+/// included.
+fn authorities_standing(
     held: &HeldAnchors,
     path: &ValidatedPath,
     issued: Option<&[u8]>,
+    requirement: StatusRequirement,
     now: i64,
-) -> Result<Option<i64>, RecipientError> {
+) -> Result<(StatusEvidence, Option<i64>), RecipientError> {
+    let set = requirement
+        .weigh(Some(held.refresh_at), now)
+        .ok_or(RecipientError::PlatformSetStale)?;
     // The path's issuers are listed the certificate's own first, so the CA
     // the anchor issued is the last; a CA target is itself that CA when no
     // issuer stands between.
     let Some(ca) = path.issuers.last().map(Vec::as_slice).or(issued) else {
-        return Ok(None);
+        return Ok(set);
     };
-    let status = held
-        .anchors
-        .iter()
-        .position(|anchor| anchor == &path.anchor)
-        .and_then(|i| held.status.get(i))
-        .ok_or(RecipientError::Status(StatusRefusal::Unavailable))?;
-    status
-        .admits(&serial_of(ca)?, now)
-        .map_err(RecipientError::Status)?;
-    Ok(status.until)
+    let unknown = AnchorStatus::default();
+    let status = anchor_status(held, path).unwrap_or(&unknown);
+    let ca = standing(status, &serial_of(ca)?, requirement, now).map_err(RecipientError::Status)?;
+    Ok(weakest(set, ca))
 }
 
 /// What a recipient asks of the identities presented to it, whatever the
 /// verdict of its composition.
 #[async_trait::async_trait]
 pub trait PresentedIdentities: Send + Sync {
-    /// The identifier allocation the held platform intermediates were issued
-    /// under; see [`Recipient::platform_allocation`].
-    async fn platform_allocation(
-        &self,
-        at: SystemTime,
-    ) -> Result<Option<ContextAllocation>, RecipientError>;
-
     /// The passport of the presentation `jws`, accepted as its holder's
-    /// answer to `expected`; see [`Recipient::accept_presentation`].
+    /// answer to `expected` under the installation's `policy`, with what
+    /// was known of withdrawals; see [`Recipient::accept_presentation`].
     async fn accept_presentation(
         &self,
-        allocation: ContextAllocation,
         jws: &[u8],
         expected: &Expected<'_>,
+        policy: &StatusPolicy,
         at: SystemTime,
-    ) -> Result<Passport, RecipientError>;
+    ) -> Result<Accepted, RecipientError>;
 }
 
 /// The recipient side of one installation over its store.
@@ -422,9 +508,10 @@ impl<V: Verdict> Recipient<V> {
     /// The held platform anchors at `now` (seconds since the epoch), from
     /// the view while it is current, else read once for every caller waiting
     /// on it. Past halfway through the held set's freshness, or with no
-    /// current set, the configured source is asked for a newer one first; a
-    /// failed fetch leaves the held answer as it is (refused once past its
-    /// refresh time) and is not repeated for [`SOURCE_BACKOFF`] seconds.
+    /// set, the platform's publication is asked for a newer one first; a
+    /// failed fetch leaves the held answer as it is (its anchors keep
+    /// anchoring past its refresh time, which the policy weighs) and is not
+    /// repeated for [`SOURCE_BACKOFF`] seconds.
     async fn view(&self, now: i64) -> Result<Arc<AnchorView>, RecipientError> {
         if let Some(view) = self.view.read().await.as_ref()
             && view.current(now)
@@ -440,7 +527,7 @@ impl<V: Verdict> Recipient<V> {
         let mut held = self.store.held_platform_cas(now).await;
         let due = match &held {
             Ok(held) => now >= held.renew_at,
-            Err(PlatformCaError::NotProvisioned | PlatformCaError::Stale) => true,
+            Err(PlatformCaError::NotProvisioned) => true,
             Err(_) => false,
         };
         let pulled = match &self.source {
@@ -456,7 +543,13 @@ impl<V: Verdict> Recipient<V> {
         let held = held?;
         // A configured source is asked again halfway through the set's
         // freshness, or after the backoff when it just failed.
+        let stale = now > held.refresh_at;
         let until = match pulled {
+            // Nothing in this process will replace a set past its refresh
+            // time; another replica may have, so the store is read again.
+            Pulled::Unconfigured | Pulled::Current | Pulled::Applied if stale => {
+                held.until.min(now + STALE_SET_REREAD)
+            }
             Pulled::Unconfigured => held.until,
             Pulled::Failed => held.until.min(now + SOURCE_BACKOFF),
             Pulled::Current | Pulled::Applied if held.renew_at > now => {
@@ -507,29 +600,133 @@ impl<V: Verdict> Recipient<V> {
 
     /// Accepts the Binding Passport `certificate` (DER), with the
     /// authorities `chain` presented above it, for the recipient
-    /// organization `recipient` at `at`, on a complete path to a platform
-    /// intermediate the held set admits, under the profiles of `allocation`.
+    /// organization `recipient` at `at`, under the installation's status
+    /// `policy`.
+    ///
+    /// A passport issued by this installation's own authority (its issuer
+    /// is, byte for byte, one of the certificates installed here) is
+    /// accepted from that authority and its own record: see
+    /// [`Self::accept_own`]. Every other passport is accepted on a complete
+    /// path to a platform intermediate the held set admits: see
+    /// [`Self::accept_under_platform`].
+    ///
     /// A passport and chain accepted before are not validated again while
-    /// every certificate of the path and the held answer stay valid; the
-    /// holder's proof over a presentation is verified every time.
+    /// every certificate of the path, the held answer, the policy and the
+    /// status it rested on stay as they were; the holder's proof over a
+    /// presentation is verified every time.
     pub async fn accept_passport(
         &self,
-        allocation: ContextAllocation,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        recipient: Uuid,
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<Accepted, RecipientError> {
+        // Chosen by the certificates installed here, never by what the
+        // passport or its presenter says of its source: a certificate
+        // another organization presents is not one of them.
+        if let Some(own) = &self.own
+            && let Some(issuer) = chain.first()
+        {
+            let installed = own.authorities().await?;
+            if installed.iter().any(|authority| authority == issuer) {
+                return self
+                    .accept_own(own.as_ref(), &installed, certificate, chain, recipient, at)
+                    .await;
+            }
+        }
+        self.accept_under_platform(certificate, chain, recipient, policy, at)
+            .await
+    }
+
+    /// Accepts a passport this installation's own authority issued, from
+    /// that authority alone: its signature under one of the `installed`
+    /// certificates, its validity, purpose and recipient, and the
+    /// installation's own record of what it withdrew. No platform set,
+    /// published list or network is consulted, so an installation cut off
+    /// from everything still signs its own people in. A passport the
+    /// organization withdrew is refused all the same: being local excuses
+    /// nothing.
+    async fn accept_own(
+        &self,
+        own: &dyn OwnIssuer,
+        installed: &[Vec<u8>],
         certificate: &[u8],
         chain: &[Vec<u8>],
         recipient: Uuid,
         at: SystemTime,
-    ) -> Result<Passport, RecipientError> {
+    ) -> Result<Accepted, RecipientError> {
         let now = seconds(at)?;
-        let view = self.view(now).await?;
-        let key = admitted_paths::key(allocation_tag(allocation), recipient, certificate, chain);
-        if let Some(passport) = view.reused(&key, now).await {
-            return Ok(passport);
-        }
+        let allocation = allocation_of(installed, IssuerRole::OrganizationCa)?.ok_or(
+            RecipientError::Invalid {
+                field: "own authority",
+                reason: "the installed certificates name no single allocation".into(),
+            },
+        )?;
         let accepted = accept_passport(
             &self.verdict.path(),
             &PassportProfile::of(allocation).map_err(no_profile)?,
             &PurposeProfile::of(allocation).map_err(no_profile)?,
+            Trust::OwnOrganization(own.organization()),
+            certificate,
+            chain,
+            installed,
+            recipient,
+            at,
+        )
+        .map_err(RecipientError::Path)?;
+        // The installation's own record is the authority on its passports:
+        // read on every acceptance, so a withdrawal is seen at once.
+        own.standing(&accepted.path.anchor, &serial_of(certificate)?, now)
+            .await?
+            .ok_or(RecipientError::PassportStatusUnavailable)?;
+        Ok(Accepted {
+            passport: accepted.passport,
+            issuer: StatusEvidence::Fresh,
+            authorities: None,
+        })
+    }
+
+    /// Accepts a passport issued elsewhere on a complete path to a platform
+    /// intermediate the held set admits. What must be known of withdrawals
+    /// is `policy`'s: of the passport by its issuer's status (the platform
+    /// generation's for a Personal one, the organization authority's for a
+    /// Corporate one), and of the authorities above by the platform's. A
+    /// withdrawal seen of any of them refuses under every policy.
+    async fn accept_under_platform(
+        &self,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        recipient: Uuid,
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<Accepted, RecipientError> {
+        let now = seconds(at)?;
+        let view = self.view(now).await?;
+        // A held set whose every generation was withdrawn anchors nothing.
+        if view.held.anchors.is_empty() {
+            return Err(RecipientError::Path(PathError::NoAnchor));
+        }
+        let allocation = allocation_of(&view.held.anchors, IssuerRole::PlatformIntermediate)?
+            .ok_or(RecipientError::Invalid {
+                field: "platform CA set",
+                reason: "its generations name no single allocation".into(),
+            })?;
+        let key = admitted_paths::key(
+            allocation_tag(allocation),
+            &policy.tag(),
+            recipient,
+            certificate,
+            chain,
+        );
+        if let Some(accepted) = view.reused(&key, now).await {
+            return Ok(accepted);
+        }
+        let path = accept_passport(
+            &self.verdict.path(),
+            &PassportProfile::of(allocation).map_err(no_profile)?,
+            &PurposeProfile::of(allocation).map_err(no_profile)?,
+            Trust::Platform,
             certificate,
             chain,
             &view.held.anchors,
@@ -537,22 +734,38 @@ impl<V: Verdict> Recipient<V> {
             at,
         )
         .map_err(RecipientError::Path)?;
-        // The path's CA under the platform anchor stands only while the
-        // anchor's published status says so; the result is reused no longer
-        // than that status is evidence.
-        let status_until = issued_ca_status(&view.held, &accepted.path, None, now)?;
-        // A Corporate passport stands only while its own issuer's published
-        // status says so.
-        let leaf_until = match (accepted.passport.source_org, accepted.path.issuers.first()) {
-            (Some(_), Some(issuer)) => Some(self.leaf_status(issuer, certificate, now).await?),
-            _ => None,
+        let (authorities, authorities_until) =
+            authorities_standing(&view.held, &path.path, None, policy.authorities, now)?;
+        let serial = serial_of(certificate)?;
+        let leaf = match path.path.issuers.first() {
+            // Issued by an authority below the platform: its own published
+            // status, as this installation holds it.
+            Some(issuer) => {
+                let status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
+                standing(&status, &serial, policy.issuer, now)
+            }
+            // Issued by the platform generation itself: that generation's.
+            None => {
+                let unknown = AnchorStatus::default();
+                let status = anchor_status(&view.held, &path.path).unwrap_or(&unknown);
+                standing(status, &serial, policy.issuer, now)
+            }
         };
-        let until = [status_until, leaf_until]
+        let (issuer, issuer_until) = leaf.map_err(|refusal| match refusal {
+            StatusRefusal::Revoked => RecipientError::PassportRevoked,
+            StatusRefusal::Unavailable => RecipientError::PassportStatusUnavailable,
+        })?;
+        let until = [authorities_until, issuer_until]
             .into_iter()
             .flatten()
-            .fold(seconds(accepted.until)?, i64::min);
-        view.keep(key, accepted.passport.clone(), until, now).await;
-        Ok(accepted.passport)
+            .fold(seconds(path.until)?, i64::min);
+        let accepted = Accepted {
+            passport: path.passport,
+            issuer,
+            authorities: Some(authorities),
+        };
+        view.keep(key, accepted.clone(), until, now).await;
+        Ok(accepted)
     }
 
     /// Accepts the Binding presentation `jws` as its holder's answer to the
@@ -563,19 +776,19 @@ impl<V: Verdict> Recipient<V> {
     /// context. The caller consumes the challenge.
     pub async fn accept_presentation(
         &self,
-        allocation: ContextAllocation,
         jws: &[u8],
         expected: &Expected<'_>,
+        policy: &StatusPolicy,
         at: SystemTime,
-    ) -> Result<Passport, RecipientError> {
+    ) -> Result<Accepted, RecipientError> {
         let envelope = Envelope::parse(jws).map_err(RecipientError::Presentation)?;
         let statement = Statement::read(&envelope.payload).map_err(RecipientError::Presentation)?;
-        let passport = self
+        let accepted = self
             .accept_passport(
-                allocation,
                 &statement.certificate,
                 &statement.chain,
                 expected.recipient,
+                policy,
                 at,
             )
             .await?;
@@ -583,9 +796,9 @@ impl<V: Verdict> Recipient<V> {
             .holder(&envelope, &statement.certificate)
             .map_err(RecipientError::Presentation)?;
         statement
-            .admit(&passport, expected)
+            .admit(&accepted.passport, expected)
             .map_err(RecipientError::Presentation)?;
-        Ok(passport)
+        Ok(accepted)
     }
 
     /// The identifier allocation the platform intermediates this
@@ -599,76 +812,23 @@ impl<V: Verdict> Recipient<V> {
         at: SystemTime,
     ) -> Result<Option<ContextAllocation>, RecipientError> {
         let view = self.view(seconds(at)?).await?;
-        if view.held.anchors.is_empty() {
-            return Ok(None);
-        }
-        let anchors = view
-            .held
-            .anchors
-            .iter()
-            .map(|der| Certificate::from_der(der))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                RecipientError::Store(sid_core::Error::Storage(format!(
-                    "a held platform certificate: {e}"
-                )))
-            })?;
-        Ok([
-            ContextAllocation::Development,
-            ContextAllocation::Production,
-        ]
-        .into_iter()
-        .find(|allocation| {
-            PurposeProfile::of(*allocation).is_ok_and(|purposes| {
-                anchors.iter().all(|anchor| {
-                    purposes
-                        .issuer_roles(anchor)
-                        .is_ok_and(|roles| roles.contains(&IssuerRole::PlatformIntermediate))
-                })
-            })
-        }))
-    }
-
-    /// Until when the passport `certificate`, issued by the authority
-    /// certificate `issuer` (both DER), is shown not revoked at `now`. A
-    /// passport of this installation's own authority is answered from its
-    /// own record; another organization's from the status that organization
-    /// published and this installation holds.
-    async fn leaf_status(
-        &self,
-        issuer: &[u8],
-        certificate: &[u8],
-        now: i64,
-    ) -> Result<i64, RecipientError> {
-        let serial = serial_of(certificate)?;
-        if let Some(own) = &self.own
-            && let Some(until) = own.standing(issuer, &serial, now).await?
-        {
-            return Ok(until);
-        }
-        let status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
-        match status.admits(&serial, now) {
-            // Admitted only under a list in its time, which names its end.
-            Ok(()) => status
-                .until
-                .ok_or(RecipientError::PassportStatusUnavailable),
-            Err(StatusRefusal::Revoked) => Err(RecipientError::PassportRevoked),
-            Err(StatusRefusal::Unavailable) => Err(RecipientError::PassportStatusUnavailable),
-        }
+        allocation_of(&view.held.anchors, IssuerRole::PlatformIntermediate)
     }
 
     /// Accepts the authority `certificate` (DER) of `organization`, with the
     /// `chain` presented above it, at `at`: on a complete path to a held
-    /// platform anchor, scoped to exactly that organization, and shown not
-    /// revoked by the generation that issued it. No held status of it is
-    /// [`RecipientError::Status`] with [`StatusRefusal::Unavailable`]: not
-    /// shown either way.
+    /// platform anchor, scoped to exactly that organization, and not
+    /// revoked by the generation that issued it. Whether the absence of a
+    /// current list of that generation suffices is `requirement`'s; under
+    /// the strict one it is [`RecipientError::Status`] with
+    /// [`StatusRefusal::Unavailable`]: not shown either way.
     pub async fn accept_organization_ca(
         &self,
         allocation: ContextAllocation,
         organization: Uuid,
         certificate: &[u8],
         chain: &[Vec<u8>],
+        requirement: StatusRequirement,
         at: SystemTime,
     ) -> Result<(), RecipientError> {
         let now = seconds(at)?;
@@ -683,7 +843,7 @@ impl<V: Verdict> Recipient<V> {
             at,
         )
         .map_err(RecipientError::Path)?;
-        issued_ca_status(&view.held, &path, Some(certificate), now)?;
+        authorities_standing(&view.held, &path, Some(certificate), requirement, now)?;
         Ok(())
     }
 
@@ -701,7 +861,10 @@ impl<V: Verdict> Recipient<V> {
     /// must be that organization's authority on a path to a held platform
     /// anchor whose generation has not revoked it, and the list must be
     /// issued by exactly that certificate. A list older than the one held
-    /// changes only what it revokes.
+    /// changes only what it revokes. Recording a list only ever narrows
+    /// what is relied on, so no current status of the authority itself is
+    /// required to take it; a list that is malformed, wrongly signed or
+    /// another issuer's is not recorded and what is held stays as it was.
     pub async fn record_issuer_status(
         &self,
         allocation: ContextAllocation,
@@ -711,8 +874,15 @@ impl<V: Verdict> Recipient<V> {
         crl: &[u8],
         at: SystemTime,
     ) -> Result<(), RecipientError> {
-        self.accept_organization_ca(allocation, organization, certificate, chain, at)
-            .await?;
+        self.accept_organization_ca(
+            allocation,
+            organization,
+            certificate,
+            chain,
+            StatusRequirement::Offline(sid_core::models::OfflineLimits::ANY),
+            at,
+        )
+        .await?;
         let verified = self
             .verdict
             .status(crl, certificate)
@@ -737,22 +907,50 @@ impl<V: Verdict> Recipient<V> {
 
 #[async_trait::async_trait]
 impl<V: Verdict> PresentedIdentities for Recipient<V> {
-    async fn platform_allocation(
-        &self,
-        at: SystemTime,
-    ) -> Result<Option<ContextAllocation>, RecipientError> {
-        Recipient::platform_allocation(self, at).await
-    }
-
     async fn accept_presentation(
         &self,
-        allocation: ContextAllocation,
         jws: &[u8],
         expected: &Expected<'_>,
+        policy: &StatusPolicy,
         at: SystemTime,
-    ) -> Result<Passport, RecipientError> {
-        Recipient::accept_presentation(self, allocation, jws, expected, at).await
+    ) -> Result<Accepted, RecipientError> {
+        Recipient::accept_presentation(self, jws, expected, policy, at).await
     }
+}
+
+/// The identifier allocation `certificates` (DER) were issued under, read
+/// from them: the one whose purposes name every one of them `role`. `None`
+/// when there are none or they name no single allocation.
+fn allocation_of(
+    certificates: &[Vec<u8>],
+    role: IssuerRole,
+) -> Result<Option<ContextAllocation>, RecipientError> {
+    if certificates.is_empty() {
+        return Ok(None);
+    }
+    let read = certificates
+        .iter()
+        .map(|der| Certificate::from_der(der))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            RecipientError::Store(sid_core::Error::Storage(format!(
+                "a held authority certificate: {e}"
+            )))
+        })?;
+    Ok([
+        ContextAllocation::Development,
+        ContextAllocation::Production,
+    ]
+    .into_iter()
+    .find(|allocation| {
+        PurposeProfile::of(*allocation).is_ok_and(|purposes| {
+            read.iter().all(|certificate| {
+                purposes
+                    .issuer_roles(certificate)
+                    .is_ok_and(|roles| roles.contains(&role))
+            })
+        })
+    }))
 }
 
 #[cfg(test)]

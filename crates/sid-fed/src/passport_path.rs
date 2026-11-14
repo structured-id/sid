@@ -208,16 +208,32 @@ fn issued_as(passport: &Passport) -> Issued {
     }
 }
 
+/// What the anchors a path may end at are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Platform intermediates the verifier admits: the path of an identity
+    /// issued elsewhere ends at one of them.
+    Platform,
+    /// The authority of this organization, installed in the verifying
+    /// installation after it was admitted: the path of a passport the
+    /// organization issued itself ends there, and nothing above it is
+    /// consulted. Whoever calls with this names its own installed
+    /// certificates as the anchors, never one that was presented to it.
+    OwnOrganization(uuid::Uuid),
+}
+
 /// Verify and accept the passport `certificate` (DER) for the recipient
 /// organization `recipient` at `at`: `chain` holds the authorities above it,
 /// its issuer first, and may go on to the certificate of the anchor it
 /// reaches and above it, which are then not part of the path (RFC 5280
-/// §6.1). `anchors` are the certificates the caller admits for this purpose.
+/// §6.1). `anchors` are the certificates the caller admits for this purpose,
+/// and `trust` says what they are.
 #[allow(clippy::too_many_arguments)]
 pub fn accept_passport(
     policy: &impl PathPolicy,
     profile: &PassportProfile,
     purposes: &PurposeProfile,
+    trust: Trust,
     certificate: &[u8],
     chain: &[Vec<u8>],
     anchors: &[Vec<u8>],
@@ -227,7 +243,22 @@ pub fn accept_passport(
     let path = validate_path(policy, certificate, chain, anchors, at)?;
     let leaf = read(certificate)?;
     let passport = Passport::read(profile, &leaf)?;
-    admit_roles(purposes, &path, issued_as(&passport), passport.source_org)?;
+    // An organization answers from its own authority only for what that
+    // authority issued for it: its own Corporate passports.
+    if let Trust::OwnOrganization(organization) = trust
+        && passport.source_org != Some(organization)
+    {
+        return Err(PathError::Purpose(
+            "an organization's own authority anchors only its own passports",
+        ));
+    }
+    admit_roles(
+        purposes,
+        trust,
+        &path,
+        issued_as(&passport),
+        passport.source_org,
+    )?;
     if passport.recipient_org != recipient {
         return Err(PathError::Recipient);
     }
@@ -264,6 +295,7 @@ pub fn accept_organization_ca(
     }
     admit_roles(
         purposes,
+        Trust::Platform,
         &path,
         Issued::Ca(IssuerRole::OrganizationCa),
         Some(organization),
@@ -364,26 +396,44 @@ fn roles(
         .map_err(|_| PathError::Purpose("a SID purpose of another allocation"))
 }
 
-/// The SID roles along a validated path: the anchor is a platform
-/// intermediate, each authority below it holds a role its parent may issue,
-/// and the last one may issue `issued`, all by [`IssuerRole::may_issue`]. An
-/// organization's authority on the path is scoped exactly to `source_org`,
-/// which path processing does not require of a name constraint it merely
-/// finds. Path processing applies none of this; an extra purpose on a child
-/// cannot enlarge what its parent may issue.
+/// The SID roles along a validated path: the anchor is what `trust` says (a
+/// platform intermediate, or the organization's own authority scoped to
+/// exactly that organization), each authority below it holds a role its
+/// parent may issue, and the last one may issue `issued`, all by
+/// [`IssuerRole::may_issue`]. An organization's authority on the path is
+/// scoped exactly to `source_org`, which path processing does not require of
+/// a name constraint it merely finds. Path processing applies none of this;
+/// an extra purpose on a child cannot enlarge what its parent may issue.
 fn admit_roles(
     purposes: &PurposeProfile,
+    trust: Trust,
     path: &ValidatedPath,
     issued: Issued,
     source_org: Option<uuid::Uuid>,
 ) -> Result<(), PathError> {
     let anchor = read(&path.anchor)?;
-    if !roles(purposes, &anchor)?.contains(&IssuerRole::PlatformIntermediate) {
-        return Err(PathError::Purpose(
-            "the trust point is not a platform intermediate",
-        ));
-    }
-    let mut parent = IssuerRole::PlatformIntermediate;
+    let held = roles(purposes, &anchor)?;
+    let mut parent = match trust {
+        Trust::Platform => {
+            if !held.contains(&IssuerRole::PlatformIntermediate) {
+                return Err(PathError::Purpose(
+                    "the trust point is not a platform intermediate",
+                ));
+            }
+            IssuerRole::PlatformIntermediate
+        }
+        Trust::OwnOrganization(organization) => {
+            if held != [IssuerRole::OrganizationCa] {
+                return Err(PathError::Purpose(
+                    "the trust point is not an organization's authority",
+                ));
+            }
+            check_organization_scope(&anchor, organization).map_err(|_| {
+                PathError::Purpose("the trust point is not scoped to its organization")
+            })?;
+            IssuerRole::OrganizationCa
+        }
+    };
     // From the anchor down: the issuers are listed the certificate's first.
     for der in path.issuers.iter().rev() {
         let authority = read(der)?;

@@ -10,6 +10,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use p256::ecdsa::SigningKey;
 use p256::ecdsa::signature::Signer;
 use serde_json::json;
+use sid_core::models::OfflineLimits;
 use sid_plugin::platform_ca::PlatformCa;
 use sid_storage::sqlite::SqliteBackend;
 
@@ -195,20 +196,57 @@ async fn recipient() -> Recipient {
     Recipient::new(store().await, ClassicalVerdict)
 }
 
+/// Every absence of status permitted: for the tests whose subject is the
+/// path, the anchors or the publication, not what is known of withdrawals.
+const RELAXED: StatusPolicy = StatusPolicy {
+    issuer: StatusRequirement::Offline(OfflineLimits::ANY),
+    authorities: StatusRequirement::Offline(OfflineLimits::ANY),
+};
+
+/// A list in its time required of the passport's issuer and of every
+/// authority above it.
+const STRICT: StatusPolicy = StatusPolicy {
+    issuer: StatusRequirement::Fresh,
+    authorities: StatusRequirement::Fresh,
+};
+
+async fn accept_under(
+    recipient: &Recipient,
+    certificate: &[u8],
+    chain: &[Vec<u8>],
+    policy: &StatusPolicy,
+) -> Result<Accepted, RecipientError> {
+    recipient
+        .accept_passport(
+            certificate,
+            chain,
+            recipient_org(),
+            policy,
+            SystemTime::now(),
+        )
+        .await
+}
+
+/// The passport accepted with no status required: see [`RELAXED`].
 async fn accept(
     recipient: &Recipient,
     certificate: &[u8],
     chain: &[Vec<u8>],
 ) -> Result<Passport, RecipientError> {
-    recipient
-        .accept_passport(
-            ContextAllocation::Development,
-            certificate,
-            chain,
-            recipient_org(),
-            SystemTime::now(),
-        )
+    accept_under(recipient, certificate, chain, &RELAXED)
         .await
+        .map(|accepted| accepted.passport)
+}
+
+/// The passport accepted only on lists in their time: see [`STRICT`].
+async fn accept_strict(
+    recipient: &Recipient,
+    certificate: &[u8],
+    chain: &[Vec<u8>],
+) -> Result<Passport, RecipientError> {
+    accept_under(recipient, certificate, chain, &STRICT)
+        .await
+        .map(|accepted| accepted.passport)
 }
 
 async fn record_organization_list(recipient: &Recipient, crl: &[u8]) -> Result<(), RecipientError> {
@@ -267,24 +305,120 @@ async fn a_personal_passport_is_accepted_under_the_held_set() {
     );
 }
 
-/// Bug prevented: a Corporate passport accepted on its signatures alone.
-/// Both authorities above it must be shown standing: the organization's
-/// authority by the platform generation's list, and the passport by the
-/// organization authority's list. Each missing list is evidence missing.
+/// What a Corporate passport is accepted on is the installation's policy,
+/// and each case has its own outcome.
+///
+/// The strict policy needs a list in its time from both issuers: the
+/// platform generation's of the organization's authority, and that
+/// authority's of the passport. Each missing list is evidence missing, not
+/// a refusal. The default needs only the passport issuer's list and takes
+/// the authorities above on what is held. The offline policy admits with
+/// neither, and says so: the status is reported unknown, never fresh.
+///
+/// Bug prevented: a Corporate passport accepted on its signatures alone
+/// when the installation requires status; an installation that cannot
+/// reach the platform refusing everyone although its policy permits it;
+/// unknown status reported as shown good.
 #[tokio::test]
-async fn a_corporate_passport_needs_the_status_of_both_issuers() {
+async fn a_corporate_passport_is_accepted_as_the_policy_says() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
+    let default = StatusPolicy::default();
     recipient
         .record_platform_cas(&set(1, PlatformCaState::Active, None))
         .await
         .unwrap();
-    let refused = accept(&recipient, &corporate(), &chain).await.unwrap_err();
+
+    // Nothing held of either issuer.
+    let refused = accept_strict(&recipient, &corporate(), &chain)
+        .await
+        .unwrap_err();
     assert!(matches!(
         refused,
         RecipientError::Status(StatusRefusal::Unavailable)
     ));
     assert!(refused.undecided());
+    let refused = accept_under(&recipient, &corporate(), &chain, &default)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, RecipientError::PassportStatusUnavailable));
+    assert!(refused.undecided());
+    let offline = accept_under(&recipient, &corporate(), &chain, &RELAXED)
+        .await
+        .unwrap();
+    assert_eq!(offline.passport, stated(Some(source())));
+    assert_eq!(offline.issuer, StatusEvidence::Unknown);
+    assert_eq!(offline.authorities, Some(StatusEvidence::Unknown));
+
+    // An offline policy that does not permit a missing list admits nothing
+    // on one: nothing is permitted by not being mentioned.
+    let stale_only = StatusPolicy {
+        issuer: StatusRequirement::Offline(OfflineLimits {
+            missing: false,
+            max_stale: None,
+        }),
+        authorities: RELAXED.authorities,
+    };
+    assert!(matches!(
+        accept_under(&recipient, &corporate(), &chain, &stale_only).await,
+        Err(RecipientError::PassportStatusUnavailable)
+    ));
+
+    // The platform's list arrives: the organization's authority stands.
+    recipient
+        .record_platform_cas(&set(
+            2,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
+    let refused = accept_strict(&recipient, &corporate(), &chain)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, RecipientError::PassportStatusUnavailable));
+    assert!(refused.undecided());
+
+    // The organization's list arrives: every policy accepts, as fresh.
+    record_organization_list(&recipient, &organization_list(1, &[]))
+        .await
+        .unwrap();
+    for policy in [&STRICT, &default, &RELAXED, &stale_only] {
+        let accepted = accept_under(&recipient, &corporate(), &chain, policy)
+            .await
+            .unwrap();
+        assert_eq!(accepted.passport, stated(Some(source())));
+        assert_eq!(accepted.issuer, StatusEvidence::Fresh);
+        assert_eq!(accepted.authorities, Some(StatusEvidence::Fresh));
+    }
+}
+
+/// A Personal passport is issued by the platform generation itself, so its
+/// status is that generation's list. The default asks for it in its time;
+/// without one the passport is not decided, and the offline policy admits
+/// it as unknown. A passport the generation withdrew is refused under every
+/// policy. Bug prevented: a withdrawn Personal passport signing in because
+/// only Corporate passports were ever checked against a list.
+#[tokio::test]
+async fn a_personal_passport_stands_by_its_generations_list() {
+    let recipient = recipient().await;
+    let default = StatusPolicy::default();
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .await
+        .unwrap();
+    let undecided = accept_under(&recipient, &personal(), &[], &default)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        undecided,
+        RecipientError::PassportStatusUnavailable
+    ));
+    assert!(undecided.undecided());
+    let offline = accept_under(&recipient, &personal(), &[], &RELAXED)
+        .await
+        .unwrap();
+    assert_eq!(offline.issuer, StatusEvidence::Unknown);
 
     recipient
         .record_platform_cas(&set(
@@ -294,17 +428,112 @@ async fn a_corporate_passport_needs_the_status_of_both_issuers() {
         ))
         .await
         .unwrap();
-    let refused = accept(&recipient, &corporate(), &chain).await.unwrap_err();
-    assert!(matches!(refused, RecipientError::PassportStatusUnavailable));
-    assert!(refused.undecided());
+    let fresh = accept_under(&recipient, &personal(), &[], &default)
+        .await
+        .unwrap();
+    assert_eq!(fresh.passport, stated(None));
+    assert_eq!(fresh.issuer, StatusEvidence::Fresh);
 
+    // The generation withdraws the passport.
+    recipient
+        .record_platform_cas(&set(
+            3,
+            PlatformCaState::Active,
+            Some(platform_list(2, &[PASSPORT_SERIAL])),
+        ))
+        .await
+        .unwrap();
+    for policy in [&STRICT, &default, &RELAXED] {
+        let refused = accept_under(&recipient, &personal(), &[], policy)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, RecipientError::PassportRevoked));
+        assert!(!refused.undecided());
+    }
+}
+
+/// A list past its time is no evidence under the strict requirement, and
+/// under the offline one it admits only within the age the policy names:
+/// stale, never fresh. What it revoked stays revoked at any age.
+#[tokio::test]
+async fn an_expired_list_admits_only_within_the_policys_age() {
+    let recipient = recipient().await;
+    let chain = [organization_ca()];
+    recipient
+        .record_platform_cas(&set(
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
     record_organization_list(&recipient, &organization_list(1, &[]))
         .await
         .unwrap();
-    assert_eq!(
-        accept(&recipient, &corporate(), &chain).await.unwrap(),
-        stated(Some(source()))
-    );
+    // The fixture's lists are evidence for an hour; this is two hours on,
+    // and the certificates are valid for a day.
+    let later = SystemTime::now() + Duration::from_secs(2 * 3600);
+    let at = |policy: StatusPolicy| {
+        let (recipient, chain) = (&recipient, &chain);
+        async move {
+            recipient
+                .accept_passport(&corporate(), chain, recipient_org(), &policy, later)
+                .await
+        }
+    };
+    let aged = |max_stale| StatusPolicy {
+        issuer: StatusRequirement::Offline(OfflineLimits {
+            missing: false,
+            max_stale,
+        }),
+        authorities: RELAXED.authorities,
+    };
+    assert!(matches!(
+        at(StatusPolicy::default()).await,
+        Err(RecipientError::PassportStatusUnavailable)
+    ));
+    // Stale by about an hour: within a day's limit, beyond a minute's.
+    let stale = at(aged(Some(86_400))).await.unwrap();
+    assert_eq!(stale.issuer, StatusEvidence::Stale);
+    assert_eq!(stale.authorities, Some(StatusEvidence::Stale));
+    assert_eq!(at(aged(None)).await.unwrap().issuer, StatusEvidence::Stale);
+    assert!(matches!(
+        at(aged(Some(60))).await,
+        Err(RecipientError::PassportStatusUnavailable)
+    ));
+}
+
+/// The platform's set past its refresh time still anchors under a policy
+/// that takes the authorities on what is held, and is not decided on under
+/// one that requires a current set. Bug prevented: the certificates an
+/// installation was shipped with ceasing to verify an hour after its last
+/// contact with the platform.
+#[tokio::test]
+async fn a_set_past_its_refresh_time_anchors_by_policy() {
+    let recipient = recipient().await;
+    recipient
+        .record_platform_cas(&set(
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
+    let later = SystemTime::now() + Duration::from_secs(2 * 3600);
+    let at = |policy: StatusPolicy| {
+        let recipient = &recipient;
+        async move {
+            recipient
+                .accept_passport(&personal(), &[], recipient_org(), &policy, later)
+                .await
+        }
+    };
+    let offline = at(RELAXED).await.unwrap();
+    assert_eq!(offline.passport, stated(None));
+    assert_eq!(offline.authorities, Some(StatusEvidence::Stale));
+    let strict = at(STRICT).await.unwrap_err();
+    assert!(matches!(strict, RecipientError::PlatformSetStale));
+    assert!(strict.undecided());
 }
 
 /// Bug prevented: a passport still accepted after its organization's
@@ -390,8 +619,9 @@ async fn a_list_of_another_key_is_not_recorded() {
         record_organization_list(&recipient, &forged).await,
         Err(RecipientError::List(StatusError::Signature))
     ));
+    // Nothing was taken from it: no status of the passport is held.
     assert!(matches!(
-        accept(&recipient, &corporate(), &[organization_ca()]).await,
+        accept_strict(&recipient, &corporate(), &[organization_ca()]).await,
         Err(RecipientError::PassportStatusUnavailable)
     ));
 }
@@ -527,25 +757,28 @@ fn expected() -> Expected<'static> {
 async fn a_presentation_answers_one_pending_request() {
     let recipient = recipient().await;
     recipient
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .record_platform_cas(&set(
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
         .await
         .unwrap();
     let identities: &dyn PresentedIdentities = &recipient;
     let accept = |jws: Vec<u8>| async move {
         identities
             .accept_presentation(
-                ContextAllocation::Development,
                 &jws,
                 &expected(),
+                &StatusPolicy::default(),
                 SystemTime::now(),
             )
             .await
     };
     let payload = statement(&personal(), &[], |_| {});
-    assert_eq!(
-        accept(presented(&payload, &key(HOLDER))).await.unwrap(),
-        stated(None)
-    );
+    let accepted = accept(presented(&payload, &key(HOLDER))).await.unwrap();
+    assert_eq!(accepted.passport, stated(None));
+    assert_eq!(accepted.issuer, StatusEvidence::Fresh);
     // Signed by another key than the passport certifies.
     assert!(matches!(
         accept(presented(&payload, &key(ORGANIZATION))).await,
@@ -695,11 +928,24 @@ async fn a_failing_publication_is_not_asked_on_every_request() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
 }
 
-/// The installation's own authority, as a test answers for it.
-struct Own(Option<bool>);
+/// The installation's own authority, as a test answers for it: the
+/// certificates installed here, and whether its record shows the passport
+/// standing.
+struct Own {
+    installed: Vec<Vec<u8>>,
+    stands: bool,
+}
 
 #[async_trait::async_trait]
 impl OwnIssuer for Own {
+    fn organization(&self) -> Uuid {
+        source()
+    }
+
+    async fn authorities(&self) -> Result<Vec<Vec<u8>>, RecipientError> {
+        Ok(self.installed.clone())
+    }
+
     async fn standing(
         &self,
         issuer: &[u8],
@@ -708,52 +954,72 @@ impl OwnIssuer for Own {
     ) -> Result<Option<i64>, RecipientError> {
         assert_eq!(issuer, organization_ca());
         assert_eq!(serial, [PASSPORT_SERIAL as u8]);
-        match self.0 {
-            None => Ok(None),
-            Some(true) => Ok(Some(now + 3600)),
-            Some(false) => Err(RecipientError::PassportRevoked),
+        if self.stands {
+            Ok(Some(now + 3600))
+        } else {
+            Err(RecipientError::PassportRevoked)
         }
     }
 }
 
-/// A passport of the installation's own authority is answered from its own
-/// record, never from a published list; an authority that is not its own
-/// falls to the held list.
+/// An organization accepts a passport it issued from its own installed
+/// authority and its own record, with nothing else: the store holds no
+/// platform set, no list was ever published or fetched, and the strictest
+/// policy changes nothing, because none of it is consulted. A passport its
+/// record withdrew is refused all the same.
+///
+/// The own path is chosen by the certificates installed here. A passport
+/// whose issuer is not one of them goes the platform's way (and with no
+/// platform set is not decided), and one that names the installed
+/// authority without that authority's signature is refused.
+///
+/// Bug prevented: an installation cut off from the platform unable to sign
+/// its own people in; a withdrawn own passport passing because its issuer
+/// is local; a stranger's certificate accepted as the installation's own.
 #[tokio::test]
-async fn an_own_authority_answers_for_its_passports() {
+async fn an_organization_accepts_its_own_passport_offline() {
     let chain = [organization_ca()];
-    let with = |own: Own| async {
-        let recipient =
-            Recipient::new(store().await, ClassicalVerdict).with_own_issuer(Arc::new(own));
-        recipient
-            .record_platform_cas(&set(
-                1,
-                PlatformCaState::Active,
-                Some(platform_list(1, &[])),
-            ))
+    let with = |installed: Vec<Vec<u8>>, stands: bool| async move {
+        Recipient::new(store().await, ClassicalVerdict)
+            .with_own_issuer(Arc::new(Own { installed, stands }))
+    };
+    let own = with(vec![organization_ca()], true).await;
+    for policy in [&STRICT, &StatusPolicy::default(), &RELAXED] {
+        let accepted = accept_under(&own, &corporate(), &chain, policy)
             .await
             .unwrap();
-        recipient
-    };
-    let standing = with(Own(Some(true))).await;
-    assert_eq!(
-        accept(&standing, &corporate(), &chain).await.unwrap(),
-        stated(Some(source()))
-    );
-    let revoked = with(Own(Some(false))).await;
+        assert_eq!(accepted.passport, stated(Some(source())));
+        assert_eq!(accepted.issuer, StatusEvidence::Fresh);
+        // Nothing above its own authority was relied on.
+        assert_eq!(accepted.authorities, None);
+    }
+
+    let withdrawn = with(vec![organization_ca()], false).await;
+    let refused = accept_under(&withdrawn, &corporate(), &chain, &RELAXED)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, RecipientError::PassportRevoked));
+    assert!(!refused.undecided());
+
+    // The issuer presented is not installed here: the platform's way.
+    let elsewhere = with(vec![intermediate()], true).await;
     assert!(matches!(
-        accept(&revoked, &corporate(), &chain).await,
-        Err(RecipientError::PassportRevoked)
+        accept_under(&elsewhere, &corporate(), &chain, &RELAXED).await,
+        Err(RecipientError::Platform(PlatformCaError::NotProvisioned))
     ));
-    let foreign = with(Own(None)).await;
+
+    // Names the installed authority as its issuer, signed by another key.
+    let forged = issued(&stated(Some(source())), &format!("O={}", source()), HOLDER);
     assert!(matches!(
-        accept(&foreign, &corporate(), &chain).await,
-        Err(RecipientError::PassportStatusUnavailable)
+        accept_under(&own, &forged, &chain, &RELAXED).await,
+        Err(RecipientError::Path(_))
     ));
 }
 
 /// The evidence a kept acceptance rests on bounds it: a day of certificate
-/// validity is not reused past the hour its issuers' lists are evidence.
+/// validity is not reused past the hour its issuer's list is evidence. Bug
+/// prevented: a passport accepted once answered from the kept result after
+/// the list it rested on ran out.
 #[tokio::test]
 async fn an_acceptance_is_kept_no_longer_than_its_status() {
     let recipient = recipient().await;
@@ -775,19 +1041,19 @@ async fn an_acceptance_is_kept_no_longer_than_its_status() {
         async move {
             recipient
                 .accept_passport(
-                    ContextAllocation::Development,
                     &corporate(),
                     chain,
                     recipient_org(),
+                    &StatusPolicy::default(),
                     SystemTime::now() + later,
                 )
                 .await
         }
     };
     at(Duration::ZERO).await.unwrap();
-    // Past the set's refresh time the held set itself is no evidence.
+    // Two hours on the organization's list is past its time.
     assert!(matches!(
         at(Duration::from_secs(2 * 3600)).await,
-        Err(RecipientError::Platform(PlatformCaError::Stale))
+        Err(RecipientError::PassportStatusUnavailable)
     ));
 }
