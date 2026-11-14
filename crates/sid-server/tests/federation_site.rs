@@ -14,7 +14,7 @@ use common::{issue_admin_token, issue_token, test_jwt, test_key_manager, test_re
 use sid::federation_site::FederationSite;
 use sid_core::models::{ProfileId, StatusPolicy};
 use sid_fed::recipient::{ClassicalVerdict, Recipient};
-use sid_fed::test_support::{enroll, platform_cas};
+use sid_fed::test_support::{enroll, hold_platform};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::federation_site_service_server::FederationSiteService;
 use sid_proto::sid::v1::{
@@ -51,10 +51,7 @@ async fn installed() -> Installed {
     .await
     .unwrap();
     let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(recipient.as_ref(), 1, &[]).await;
     Installed {
         svc: FederationSiteServiceImpl::new(
             Arc::new(FederationSite::new(
@@ -176,10 +173,7 @@ async fn an_administrator_enrolls_the_site_and_gets_its_statement() {
             .unwrap(),
     );
     let reader = Recipient::new(elsewhere, ClassicalVerdict);
-    reader
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(&reader, 1, &[]).await;
     let read = reader
         .accept_admission(&statement, &StatusPolicy::default(), SystemTime::now())
         .await

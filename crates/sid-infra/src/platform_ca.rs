@@ -37,6 +37,12 @@ const BUILD_PLATFORM: Option<&str> = option_env!("SID_BUILD_PLATFORM");
 /// Where a platform publishes its admitted CA set, below its origin.
 const PUBLICATION_PATH: &str = "/.well-known/sid-ca/index.json";
 
+/// Below which a generation's CRL is read, at `{CRL_PATH}{generation}/crl`.
+const CRL_PATH: &str = "/.well-known/sid-ca/";
+
+/// The media type of a DER CRL (RFC 2585 section 4.2).
+const CRL_TYPE: &str = "application/pkix-crl";
+
 /// The publication of the platform this build was made for; `None` for a
 /// build made for none, which then verifies no identity under a platform
 /// set until one is supplied to its store otherwise.
@@ -198,10 +204,29 @@ impl PlatformCaPublication {
 
     /// Fetch the publication: the set as the platform last published it.
     pub async fn fetch(&self) -> Result<PlatformCas, PublicationError> {
+        let body = self.read(self.endpoint.clone(), "application/json").await?;
+        decode(&self.message, &body)
+    }
+
+    /// Fetch the current CRL (DER) of generation `generation`, served apart
+    /// from the set at `{origin}/.well-known/sid-ca/{generation}/crl` as
+    /// `application/pkix-crl` (RFC 2585 section 4.2). Only transported: its
+    /// holder authenticates it.
+    pub async fn fetch_crl(&self, generation: u32) -> Result<Vec<u8>, PublicationError> {
+        let crl = self
+            .endpoint
+            .join(&format!("{CRL_PATH}{generation}/crl"))
+            .map_err(|_| PublicationError::NotHttps)?;
+        self.read(crl, CRL_TYPE).await
+    }
+
+    /// The body of a successful answer to `GET url` accepting `accept`, at
+    /// most [`MAX_BODY`] bytes; no redirect is followed.
+    async fn read(&self, url: url::Url, accept: &str) -> Result<Vec<u8>, PublicationError> {
         let mut response = self
             .client
-            .get(self.endpoint.clone())
-            .header(reqwest::header::ACCEPT, "application/json")
+            .get(url)
+            .header(reqwest::header::ACCEPT, accept)
             .send()
             .await
             .map_err(|e| PublicationError::Unreachable(e.to_string()))?;
@@ -226,7 +251,7 @@ impl PlatformCaPublication {
             }
             body.extend_from_slice(&chunk);
         }
-        decode(&self.message, &body)
+        Ok(body)
     }
 }
 
@@ -262,7 +287,6 @@ pub fn set_of(wire: PlatformCas) -> Result<PlatformCaSet, WireError> {
                 certificate: g.certificate,
                 state,
                 overlap_end: g.overlap_end.map(|t| t.seconds),
-                crl: (!g.crl.is_empty()).then_some(g.crl),
             })
         })
         .collect::<Result<Vec<_>, WireError>>()?;
@@ -386,6 +410,14 @@ impl PlatformCaSource for PublishedPlatformCas {
         let (set, step) = Self::taken(wire.map_err(|e| e.to_string())?, records, endpoint)?;
         tracing::info!(revision = set.revision, ?step, "platform CA set fetched");
         Ok(set)
+    }
+
+    async fn crl(&self, endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String> {
+        PlatformCaPublication::new(endpoint.clone())
+            .map_err(|e| e.to_string())?
+            .fetch_crl(generation)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

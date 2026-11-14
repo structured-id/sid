@@ -48,8 +48,9 @@ use sid_core::models::{
     AuditEntry, MutationContext, StatusEvidence, StatusPolicy, StatusRequirement,
 };
 use sid_plugin::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCaError,
-    PlatformCaSet, PlatformCaSource, PlatformCaState, PlatformCaStore, StatusRefusal,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCa,
+    PlatformCaError, PlatformCaSet, PlatformCaSource, PlatformCaState, PlatformCaStore,
+    StatusRefusal,
 };
 use uuid::Uuid;
 use x509_cert::Certificate;
@@ -416,6 +417,11 @@ pub trait OrganizationPublications: Send + Sync {
     /// What `organization` publishes now; `Ok(None)` when no location of its
     /// publication is known to this installation.
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String>;
+
+    /// The current CRL (DER) of `organization`'s generation `generation`,
+    /// read apart from its publication; `Ok(None)` when no location of it is
+    /// known to this installation.
+    async fn crl(&self, organization: Uuid, generation: u32) -> Result<Option<Vec<u8>>, String>;
 }
 
 /// The recipient side of one installation over its store.
@@ -515,16 +521,32 @@ impl<V: Verdict> Recipient<V> {
                 return false;
             }
         };
-        let Some(crl) = published
+        // The generation is the one whose certificate issued the passport;
+        // its status is read apart from the publication.
+        let Some(generation) = published
             .generations
             .iter()
-            .find(|g| g.certificate == issuer)
-            .and_then(|g| g.crl.as_deref())
+            .find(|g| g.certificate == issuer && g.state != PlatformCaState::Withdrawn)
+            .map(|g| g.generation)
         else {
             return false;
         };
+        let crl = match publications.crl(organization, generation).await {
+            Ok(Some(crl)) => crl,
+            Ok(None) => return false,
+            Err(reason) => {
+                tracing::warn!(%organization, %reason, "organization list not read");
+                backoff(
+                    &mut self
+                        .publication_failed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                return false;
+            }
+        };
         match self
-            .record_issuer_status(allocation, organization, issuer, chain, crl, at)
+            .record_issuer_status(allocation, organization, issuer, chain, &crl, at)
             .await
         {
             Ok(()) => true,
@@ -572,12 +594,9 @@ impl<V: Verdict> Recipient<V> {
         &self.verdict
     }
 
-    /// A platform set's generations are CA certificates, a verification-only
-    /// one names its overlap end, and a list a generation publishes is its
-    /// own, by this verdict. The authenticated lists are returned for the
-    /// store.
-    fn check_set(&self, set: &PlatformCaSet) -> Result<Vec<GenerationStatus>, RecipientError> {
-        let mut status = Vec::new();
+    /// A platform set's generations are CA certificates and a
+    /// verification-only one names its overlap end.
+    fn check_set(&self, set: &PlatformCaSet) -> Result<(), RecipientError> {
         for generation in &set.generations {
             let certificate = Certificate::from_der(&generation.certificate).map_err(|e| {
                 RecipientError::Invalid {
@@ -605,40 +624,60 @@ impl<V: Verdict> Recipient<V> {
                     reason: "a verification-only generation names its overlap end".into(),
                 });
             }
-            if let Some(crl) = &generation.crl {
-                let verified = self
-                    .verdict
-                    .status(crl, &generation.certificate)
-                    .map_err(|e| RecipientError::Invalid {
-                        field: "generations.crl",
-                        reason: e.to_string(),
-                    })?;
-                issued_by_now(&verified, SystemTime::now(), "generations.crl")?;
-                status.push(GenerationStatus {
-                    generation: generation.generation,
-                    certificate: generation.certificate.clone(),
-                    number: verified.number,
-                    next_update: seconds(verified.next_update)?,
-                    revoked: verified.revoked,
-                });
-            }
         }
-        Ok(status)
+        Ok(())
     }
 
-    /// Hold the status and then the set: an anchor is never held ahead of
-    /// what its generation revoked.
+    /// Hold the set after checking it. Its status is read and recorded
+    /// apart ([`Self::record_platform_ca_crl`]).
     async fn hold(&self, set: &PlatformCaSet) -> Result<Applied, RecipientError> {
-        let status = self.check_set(set)?;
-        if !status.is_empty() {
-            self.store
-                .record_platform_ca_status(&status, audit("platform_ca.record_status"))
-                .await?;
-        }
+        self.check_set(set)?;
         Ok(self
             .store
             .apply_platform_cas(set, audit("platform_ca.apply"))
             .await?)
+    }
+
+    /// Hold the CRL `crl` of the platform generation `generation`, after
+    /// authenticating it under that generation's certificate by this
+    /// verdict: the status of the certificates the generation issued.
+    pub async fn record_platform_ca_crl(
+        &self,
+        generation: &PlatformCa,
+        crl: &[u8],
+    ) -> Result<(), RecipientError> {
+        let mut view = self.view.write().await;
+        self.hold_crl(generation, crl).await?;
+        // Paths accepted under the earlier status are read again.
+        *view = None;
+        Ok(())
+    }
+
+    /// Authenticate and hold `crl` of `generation`; the caller holds the
+    /// view and drops it.
+    async fn hold_crl(&self, generation: &PlatformCa, crl: &[u8]) -> Result<(), RecipientError> {
+        let verified = self
+            .verdict
+            .status(crl, &generation.certificate)
+            .map_err(|e| RecipientError::Invalid {
+                field: "crl",
+                reason: e.to_string(),
+            })?;
+        issued_by_now(&verified, SystemTime::now(), "crl")?;
+        let status = GenerationStatus {
+            generation: generation.generation,
+            certificate: generation.certificate.clone(),
+            number: verified.number,
+            next_update: seconds(verified.next_update)?,
+            revoked: verified.revoked,
+        };
+        self.store
+            .record_platform_ca_status(
+                std::slice::from_ref(&status),
+                audit("platform_ca.record_status"),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Hold the platform's admitted CA set `set`, after checking it.
@@ -736,6 +775,18 @@ impl<V: Verdict> Recipient<V> {
                 ?applied,
                 "platform CA set refreshed"
             );
+            // The status of every generation a path may still end at, read
+            // apart from the set: a withdrawn one anchors nothing.
+            for generation in set
+                .generations
+                .iter()
+                .filter(|g| g.state != PlatformCaState::Withdrawn)
+            {
+                let crl = source.crl(publication, generation.generation).await?;
+                self.hold_crl(generation, &crl)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             Ok::<Pulled, String>(Pulled::Applied)
         }
         .await;

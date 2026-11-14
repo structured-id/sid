@@ -6,7 +6,7 @@
 use sid_core::models::{LoginSettings, OfflineLimits, StatusPolicy, StatusRequirement};
 use sid_fed::participant::key_of_record;
 use sid_fed::recipient::{ClassicalVerdict, Recipient};
-use sid_fed::test_support::{PARTICIPANT_SERIAL, enroll, platform_cas};
+use sid_fed::test_support::{PARTICIPANT_SERIAL, enroll, hold_platform};
 use uuid::Uuid;
 
 use super::*;
@@ -41,10 +41,7 @@ async fn installed() -> Installed {
     .await
     .unwrap();
     let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(recipient.as_ref(), 1, &[]).await;
     let admin = administrator(stored_profile(storage.as_ref(), "admin").await);
     Installed {
         site: FederationSite::new(storage.clone(), keys, recipient.clone(), organization.id),
@@ -233,10 +230,7 @@ async fn the_statement_repeats_the_stored_settings() {
     // Another installation: it holds the platform set and nothing of B.
     let elsewhere: Arc<dyn StorageBackend> = storage().await;
     let reader = Recipient::new(elsewhere, ClassicalVerdict);
-    reader
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(&reader, 1, &[]).await;
     let read = async |jws: &[u8]| {
         reader
             .accept_admission(jws, &StatusPolicy::default(), SystemTime::now())
@@ -284,10 +278,7 @@ async fn a_withdrawn_site_states_nothing() {
     let mount = Mount::parse(&i.mount).unwrap();
     i.site.admission(&i.admin, &mount).await.unwrap();
 
-    i.recipient
-        .record_platform_cas(&platform_cas(2, &[PARTICIPANT_SERIAL]))
-        .await
-        .unwrap();
+    hold_platform(i.recipient.as_ref(), 2, &[PARTICIPANT_SERIAL]).await;
     let relaxed = LoginSettings {
         status_policy: StatusPolicy {
             issuer: StatusRequirement::Offline(OfflineLimits::ANY),

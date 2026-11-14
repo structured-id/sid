@@ -1131,7 +1131,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             certificate: vec![generation as u8; 32],
             state,
             overlap_end,
-            crl: None,
         };
         let published = |revision, generations| PlatformCaSet {
             revision,

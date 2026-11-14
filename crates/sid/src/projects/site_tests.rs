@@ -10,7 +10,7 @@ use sid_core::models::{
 };
 use sid_fed::participant::Mount;
 use sid_fed::recipient::{ClassicalVerdict, Recipient};
-use sid_fed::test_support::{PARTICIPANT_SERIAL, enroll, platform_cas};
+use sid_fed::test_support::{PARTICIPANT_SERIAL, enroll, hold_platform};
 use uuid::Uuid;
 
 use super::*;
@@ -44,10 +44,7 @@ async fn site_b(site: Uuid) -> SiteB {
     .await
     .unwrap();
     let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(recipient.as_ref(), 1, &[]).await;
     let admin = administrator(stored_profile(storage.as_ref(), "b-admin").await);
     let federation = FederationSite::new(storage.clone(), keys, recipient, org.id);
     let request = federation.enrollment_request(&admin).await.unwrap();
@@ -92,10 +89,7 @@ async fn installation_a() -> InstallationA {
     .await
     .unwrap();
     let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(recipient.as_ref(), 1, &[]).await;
     let projects = Projects::new(storage.clone(), issuer).with_site_registrar(SiteRegistrar {
         identities: recipient.clone(),
         keys,
@@ -391,10 +385,7 @@ async fn a_sites_callback_is_not_edited() {
 async fn a_withdrawn_site_is_not_registered() {
     let b = site_b(site_id(5)).await;
     let a = installation_a().await;
-    a.recipient
-        .record_platform_cas(&platform_cas(2, &[PARTICIPANT_SERIAL]))
-        .await
-        .unwrap();
+    hold_platform(a.recipient.as_ref(), 2, &[PARTICIPANT_SERIAL]).await;
     let relaxed = LoginSettings {
         status_policy: StatusPolicy {
             issuer: StatusRequirement::Offline(OfflineLimits::ANY),
@@ -468,10 +459,7 @@ async fn a_site_client_is_usable_only_while_its_admission_stands() {
         .await
         .unwrap();
 
-    a.recipient
-        .record_platform_cas(&platform_cas(2, &[PARTICIPANT_SERIAL]))
-        .await
-        .unwrap();
+    hold_platform(a.recipient.as_ref(), 2, &[PARTICIPANT_SERIAL]).await;
     let relaxed = LoginSettings {
         status_policy: StatusPolicy {
             issuer: StatusRequirement::Offline(OfflineLimits::ANY),

@@ -18,8 +18,6 @@ fn ca(generation: u32, state: PlatformCaState, overlap_end: Option<i64>) -> Plat
         certificate: vec![generation as u8; 32],
         state,
         overlap_end,
-        // A store takes authenticated status apart from the set.
-        crl: None,
     }
 }
 

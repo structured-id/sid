@@ -105,9 +105,8 @@ pub fn organization_ca(source: Uuid) -> Vec<u8> {
 }
 
 /// The platform's set at `revision`: the intermediate as generation 1,
-/// active, publishing a revocation list that revokes the organization
-/// authorities whose serials are `revoked`.
-pub fn platform_cas(revision: u64, revoked: &[u32]) -> PlatformCaSet {
+/// active. It carries no status: see [`platform_crl`].
+pub fn platform_cas(revision: u64) -> PlatformCaSet {
     let now = SystemTime::now();
     PlatformCaSet {
         revision,
@@ -116,13 +115,32 @@ pub fn platform_cas(revision: u64, revoked: &[u32]) -> PlatformCaSet {
             certificate: intermediate(),
             state: PlatformCaState::Active,
             overlap_end: None,
-            crl: Some(
-                StatedList::new(INTERMEDIATE_NAME, &[2; 20], 1, revoked).signed(&key(INTERMEDIATE)),
-            ),
         }],
         issued_at: epoch(now) - 60,
         next_update: epoch(now) + 3600,
     }
+}
+
+/// CRL number `number` of the intermediate, revoking the certificates it
+/// issued whose serials are `revoked`.
+pub fn platform_crl(number: u8, revoked: &[u32]) -> Vec<u8> {
+    StatedList::new(INTERMEDIATE_NAME, &[2; 20], number, revoked).signed(&key(INTERMEDIATE))
+}
+
+/// Have `recipient` hold the platform's set at `revision` and, read apart
+/// as a recipient reads it, the intermediate's CRL numbered by that
+/// revision, revoking `revoked`.
+pub async fn hold_platform<V: crate::recipient::Verdict>(
+    recipient: &crate::recipient::Recipient<V>,
+    revision: u8,
+    revoked: &[u32],
+) {
+    let set = platform_cas(u64::from(revision));
+    recipient.record_platform_cas(&set).await.expect("the set");
+    recipient
+        .record_platform_ca_crl(&set.generations[0], &platform_crl(revision, revoked))
+        .await
+        .expect("the CRL");
 }
 
 /// The serial every participant certificate carries.
