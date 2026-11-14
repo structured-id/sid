@@ -1998,6 +1998,31 @@ async fn a_prepared_request_keeps_its_origin_through_redemption() {
             .unwrap(),
         None
     );
+
+    // The result is judged again when it is read: once the client requires
+    // a method the redeemed session does not have, it is not answered.
+    let mut stricter = storage
+        .get_oauth2_client("test-client")
+        .await
+        .unwrap()
+        .expect("the test client");
+    stricter.required_amr = vec!["hwk".into()];
+    assert!(
+        storage
+            .update_oauth2_client(
+                &stricter,
+                sid_core::models::AuditEntry::system("test", "client.update").into(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        auth.redeemed_request("test-client", prepared.origin)
+            .await
+            .unwrap(),
+        None,
+        "a result below the client's current requirement"
+    );
 }
 
 /// The sign-in context of `authorization_request`, read as the sign-in page

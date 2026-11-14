@@ -412,10 +412,13 @@ impl OAuth {
     }
 
     /// What redeeming the code of the kept request `origin` of `client_id`
-    /// committed, while the session it was redeemed into is still live;
-    /// `None` until that code is redeemed, and once that session ended. The
-    /// caller compares the answer with what it expects: this says who
-    /// authorized the request, never that anyone was allowed to.
+    /// committed, while it still stands: the session it was redeemed into
+    /// is live, the client is active, and that session's authentication
+    /// satisfies the requirements the login policy states for the client
+    /// now, with the account's own enabled protection. `None` until the
+    /// code is redeemed and once any of that no longer holds. The caller
+    /// compares the answer with what it expects: this says who authorized
+    /// the request, never that anyone was allowed to.
     pub async fn redeemed_request(
         &self,
         client_id: &str,
@@ -430,12 +433,35 @@ impl OAuth {
         };
         // A session that ended is no longer stored; one past its time is
         // not live either.
-        Ok(self
+        let Some(session) = self
             .storage
             .get_session(redeemed.session_id)
             .await?
             .filter(|session| !session.is_expired())
-            .map(|session| (redeemed, session)))
+        else {
+            return Ok(None);
+        };
+        let Some(client) = self
+            .storage
+            .get_oauth2_client(client_id)
+            .await?
+            .filter(|client| client.active)
+        else {
+            return Ok(None);
+        };
+        // Judged again at the read, as every authorization is: a policy
+        // tightened or a second factor enabled since the redemption leaves
+        // the result unusable.
+        let requirements = self
+            .login_requirements(Some(client_id))
+            .await?
+            .with_client(&client, None)
+            .for_account(self.storage.as_ref(), session.profile_id)
+            .await?;
+        Ok(match requirements.decide(&session, Utc::now()) {
+            LoginDecision::Allow { .. } => Some((redeemed, session)),
+            LoginDecision::StepUp(_) => None,
+        })
     }
 }
 
