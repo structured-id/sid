@@ -85,6 +85,45 @@ fn published() -> PlatformCas {
     }
 }
 
+/// What a build carries is the platform's publication as it was fetched:
+/// it states the same set the publication states. A build that carries
+/// nothing states none, and a file that is no publication (a site's HTML
+/// page answered at that address) is refused rather than read as no set.
+/// Bug prevented: a delivery going out with a platform named and nothing to
+/// verify under, unnoticed.
+#[test]
+fn a_build_carries_the_publication_it_fetched() {
+    let message = publication_message().unwrap();
+    let dynamic =
+        prost_reflect::DynamicMessage::decode(message, published().encode_to_vec().as_slice())
+            .unwrap();
+    let body = serde_json::to_vec(&dynamic).unwrap();
+    assert_eq!(carried(&body).unwrap(), Some(set_of(published()).unwrap()));
+    assert_eq!(carried(b"").unwrap(), None);
+    for other in [&b"<!doctype html><html></html>"[..], b"{\"revision\":"] {
+        assert!(matches!(
+            carried(other),
+            Err(PublicationError::Malformed(_))
+        ));
+    }
+    let oversized = vec![b' '; MAX_BODY + 1];
+    assert!(matches!(
+        carried(&oversized),
+        Err(PublicationError::TooLarge)
+    ));
+}
+
+/// Whatever this very build carries reads as a set with at least one
+/// generation, or the build carries nothing. In a build made for a platform
+/// this is the check that the fetched publication is one.
+#[test]
+fn what_this_build_carries_is_a_set() {
+    if let Some(set) = build_platform_cas().unwrap() {
+        assert!(!set.generations.is_empty());
+        assert!(build_publication().unwrap().is_some());
+    }
+}
+
 struct Publishing(PlatformCas);
 
 #[tonic::async_trait]

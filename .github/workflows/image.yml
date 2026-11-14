@@ -28,10 +28,14 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/structured-id/sid
-  # The platform these images are made for, compiled into the server: it
-  # asks this platform, and no other, for the platform CA set it verifies
-  # under. Images published here are releases, made for production.
-  SID_BUILD_PLATFORM: https://structured.id
+  # The platform these images are made for, compiled into the server with
+  # that platform's CA set, fetched below from its publication: the server
+  # verifies under it from its first start, and asks this platform, and no
+  # other, for a newer one. A published image is a release, made for
+  # production; a pull request only proves the image builds, against the
+  # development platform.
+  SID_BUILD_PLATFORM: ${{ github.event_name == 'pull_request' && 'https://dev.structured.id' || 'https://structured.id' }}
+  SID_BUILD_PLATFORM_CAS: ${{ github.workspace }}/platform-cas.json
 
 jobs:
   build:
@@ -73,6 +77,19 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+      # No redirect is followed and only the publication's JSON is taken: a
+      # platform that does not publish its set stops the build, so no image
+      # goes out without the certificates it verifies under.
+      - name: Platform CA set
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          type="$(curl --fail --silent --show-error --max-time 30 \
+            --output "$SID_BUILD_PLATFORM_CAS" --write-out '%{content_type}' \
+            "$SID_BUILD_PLATFORM/.well-known/sid-ca/index.json")"
+          case "$type" in
+            application/json*) ;;
+            *) echo "::error::$SID_BUILD_PLATFORM publishes no platform CA set (answered $type)"; exit 1 ;;
+          esac
       # The CE image packs a binary built on the runner (Dockerfile copies
       # target/release/sid); the embedded image compiles inside its build.
       - name: Latest stable toolchain

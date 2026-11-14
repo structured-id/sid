@@ -904,6 +904,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         key_manager.clone(),
     ));
     let recipient = classical_recipient(storage.clone())?;
+    hold_build_platform_cas(&recipient).await?;
     let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> = Arc::new(recipient);
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
@@ -1122,6 +1123,34 @@ pub fn of_build_platform<V: sid_fed::recipient::Verdict>(
     recipient
         .with_source(publication, Arc::new(source))
         .map_err(|e| anyhow::anyhow!("the build's platform CA publication: {e}"))
+}
+
+/// Hold the platform CA set this build carries, so the installation
+/// verifies under its platform's certificates from the first start with no
+/// network. It is applied as any received set is: one older than the set
+/// already held changes nothing, and a generation a newer held set withdrew
+/// stays withdrawn. A carried set that cannot be held stops the start: the
+/// delivery is broken, and serving without it would refuse every identity
+/// without saying why.
+pub async fn hold_build_platform_cas<V: sid_fed::recipient::Verdict>(
+    recipient: &sid_fed::recipient::Recipient<V>,
+) -> anyhow::Result<()> {
+    let Some(set) =
+        sid_infra::platform_ca::build_platform_cas().context("the build's platform CA set")?
+    else {
+        info!("this build carries no platform CA set");
+        return Ok(());
+    };
+    let applied = recipient
+        .record_platform_cas(&set)
+        .await
+        .map_err(|e| anyhow::anyhow!("hold the build's platform CA set: {e}"))?;
+    info!(
+        revision = set.revision,
+        ?applied,
+        "the build's platform CA set"
+    );
+    Ok(())
 }
 
 /// The recipient a self-managed installation verifies presented identities

@@ -27,3 +27,6 @@ logs/
 
 # MaxMind GeoIP databases (licensed, not redistributable)
 data/geoip/*.mmdb
+
+# The platform CA set an image build fetches to compile in
+/platform-cas.json

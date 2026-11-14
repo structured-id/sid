@@ -48,6 +48,61 @@ pub fn build_publication() -> Result<Option<url::Url>, PublicationError> {
         .transpose()
 }
 
+/// The platform CA set this build carries: the publication of its platform
+/// as the build that made it fetched it (see the crate's build script).
+/// Empty for a build made for no platform.
+const BUILD_PLATFORM_CAS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/platform_cas.json"));
+
+/// The platform CA set this build carries, for its holder to apply at
+/// start: the installation then verifies under it with no network, and the
+/// publication only brings a newer one sooner than the next build. Only
+/// decoded here: the holder checks and applies it under the store's rules,
+/// so it never brings back a generation a newer held set withdrew. `None`
+/// for a build made for no platform.
+pub fn build_platform_cas() -> Result<Option<PlatformCaSet>, PublicationError> {
+    carried(BUILD_PLATFORM_CAS)
+}
+
+/// The set the carried publication `body` states; none when nothing is
+/// carried.
+fn carried(body: &[u8]) -> Result<Option<PlatformCaSet>, PublicationError> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+    if body.len() > MAX_BODY {
+        return Err(PublicationError::TooLarge);
+    }
+    let wire = decode(&publication_message()?, body)?;
+    set_of(wire)
+        .map(Some)
+        .map_err(|e| PublicationError::Malformed(e.to_string()))
+}
+
+/// The descriptor of the publication's message.
+fn publication_message() -> Result<prost_reflect::MessageDescriptor, PublicationError> {
+    let pool = prost_reflect::DescriptorPool::decode(
+        sid_proto::descriptor_set_of(|file| file == PUBLICATION_FILE).as_slice(),
+    )
+    .map_err(|e| PublicationError::Malformed(e.to_string()))?;
+    pool.get_message_by_name(MESSAGE)
+        .ok_or_else(|| PublicationError::Malformed(format!("no {MESSAGE} descriptor")))
+}
+
+/// The publication's JSON `body` read as its message, by the proto3 JSON
+/// mapping the transcoder writes it with.
+fn decode(
+    message: &prost_reflect::MessageDescriptor,
+    body: &[u8],
+) -> Result<PlatformCas, PublicationError> {
+    let mut json = serde_json::Deserializer::from_slice(body);
+    let message = prost_reflect::DynamicMessage::deserialize(message.clone(), &mut json)
+        .map_err(|e| PublicationError::Malformed(e.to_string()))?;
+    json.end()
+        .map_err(|e| PublicationError::Malformed(e.to_string()))?;
+    PlatformCas::decode(message.encode_to_vec().as_slice())
+        .map_err(|e| PublicationError::Malformed(e.to_string()))
+}
+
 /// The publication of the platform whose public origin is `platform`: an
 /// `https` origin, nothing after its authority.
 fn publication_of(platform: &str) -> Result<url::Url, PublicationError> {
@@ -118,17 +173,10 @@ impl PlatformCaPublication {
     /// The publication at `endpoint` over `client`, whose bounds and
     /// redirect policy are the caller's.
     fn with_client(client: reqwest::Client, endpoint: url::Url) -> Result<Self, PublicationError> {
-        let pool = prost_reflect::DescriptorPool::decode(
-            sid_proto::descriptor_set_of(|file| file == PUBLICATION_FILE).as_slice(),
-        )
-        .map_err(|e| PublicationError::Malformed(e.to_string()))?;
-        let message = pool
-            .get_message_by_name(MESSAGE)
-            .ok_or_else(|| PublicationError::Malformed(format!("no {MESSAGE} descriptor")))?;
         Ok(Self {
             client,
             endpoint,
-            message,
+            message: publication_message()?,
         })
     }
 
@@ -167,19 +215,7 @@ impl PlatformCaPublication {
             }
             body.extend_from_slice(&chunk);
         }
-        self.decode(&body)
-    }
-
-    /// The publication's JSON `body` read as its message, by the proto3 JSON
-    /// mapping the transcoder writes it with.
-    fn decode(&self, body: &[u8]) -> Result<PlatformCas, PublicationError> {
-        let mut json = serde_json::Deserializer::from_slice(body);
-        let message = prost_reflect::DynamicMessage::deserialize(self.message.clone(), &mut json)
-            .map_err(|e| PublicationError::Malformed(e.to_string()))?;
-        json.end()
-            .map_err(|e| PublicationError::Malformed(e.to_string()))?;
-        PlatformCas::decode(message.encode_to_vec().as_slice())
-            .map_err(|e| PublicationError::Malformed(e.to_string()))
+        decode(&self.message, &body)
     }
 }
 
