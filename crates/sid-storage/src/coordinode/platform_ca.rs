@@ -445,7 +445,7 @@ fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, Platform
         }
     }
     // Newest generation first.
-    generations.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    generations.sort_unstable_by_key(|held| std::cmp::Reverse(held.0));
     // A refresh time already passed bounds nothing further.
     let mut until = if now <= next_update {
         next_update

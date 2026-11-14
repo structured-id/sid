@@ -37,6 +37,10 @@ fn unsigned<T: TryFrom<i64>>(value: i64, field: &str) -> Result<T, PlatformCaErr
     })
 }
 
+/// One stored generation row: its number, certificate, state, the end of
+/// its overlap and the revision that listed it.
+type GenerationRow = (i64, Vec<u8>, i64, Option<i64>, i64);
+
 /// Everything the store holds, as one committed state of `conn`'s
 /// transaction.
 async fn archive(conn: &mut sqlx::SqliteConnection) -> Result<PlatformCaArchive, PlatformCaError> {
@@ -54,7 +58,7 @@ async fn archive(conn: &mut sqlx::SqliteConnection) -> Result<PlatformCaArchive,
             })
         })
         .transpose()?;
-    let rows: Vec<(i64, Vec<u8>, i64, Option<i64>, i64)> = sqlx::query_as(
+    let rows: Vec<GenerationRow> = sqlx::query_as(
         "SELECT generation, certificate, state, overlap_end, listed_in
          FROM platform_ca_generations ORDER BY generation",
     )

@@ -9,12 +9,16 @@ use super::SqliteBackend;
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
 
+/// The stored login settings row: both admission switches, the admitted
+/// sources, the status policy and the revision.
+type SettingsRow = (bool, bool, Vec<u8>, Vec<u8>, i64);
+
 /// The stored login settings read on `executor`; none before they were set.
 async fn stored_settings<'e, E>(executor: E) -> SidResult<Option<sid_core::models::LoginSettings>>
 where
     E: sqlx::SqliteExecutor<'e>,
 {
-    let row: Option<(bool, bool, Vec<u8>, Vec<u8>, i64)> = sqlx::query_as(
+    let row: Option<SettingsRow> = sqlx::query_as(
         "SELECT allow_personal_profiles, allow_foreign_corporate_profiles,
                 admitted_sources, status_policy, revision
          FROM login_settings WHERE scope = 'installation'",

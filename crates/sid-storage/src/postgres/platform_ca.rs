@@ -38,6 +38,14 @@ fn unsigned<T: TryFrom<i64>>(value: i64, field: &str) -> Result<T, PlatformCaErr
     })
 }
 
+/// One stored generation row: its number, certificate, state, the end of
+/// its overlap and the revision that listed it.
+type GenerationRow = (i64, Vec<u8>, i16, Option<i64>, i64);
+
+/// One issuer's stored status row: the issuer's key identifier, its list
+/// number, the next update and the revoked serials.
+type IssuerStatusRow = (Vec<u8>, i64, i64, Vec<Vec<u8>>);
+
 /// Everything the store holds, as `conn`'s transaction sees it.
 async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, PlatformCaError> {
     let set: Option<(i64, i64, i64)> =
@@ -54,7 +62,7 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
             })
         })
         .transpose()?;
-    let rows: Vec<(i64, Vec<u8>, i16, Option<i64>, i64)> = sqlx::query_as(
+    let rows: Vec<GenerationRow> = sqlx::query_as(
         "SELECT generation, certificate, state, overlap_end, listed_in
          FROM platform_ca_generations ORDER BY generation",
     )
@@ -94,7 +102,7 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
             revoked,
         });
     }
-    let rows: Vec<(Vec<u8>, i64, i64, Vec<Vec<u8>>)> = sqlx::query_as(
+    let rows: Vec<IssuerStatusRow> = sqlx::query_as(
         "SELECT c.issuer, c.number, c.next_update,
                 COALESCE((SELECT array_agg(r.serial ORDER BY r.serial)
                           FROM ca_issuer_revoked r WHERE r.issuer = c.issuer), '{}')

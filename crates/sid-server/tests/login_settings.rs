@@ -209,9 +209,7 @@ async fn an_invalid_source_list_is_refused_and_changes_nothing() {
         ..Default::default()
     };
     let malformed = AdmittedSourceOrganizations {
-        organizations: vec![sid_ids_proto::OrgId {
-            value: vec![7; 15].into(),
-        }],
+        organizations: vec![sid_ids_proto::OrgId { value: vec![7; 15] }],
     };
     let too_many = AdmittedSourceOrganizations {
         organizations: (0..=MAX_ADMITTED_SOURCES)
