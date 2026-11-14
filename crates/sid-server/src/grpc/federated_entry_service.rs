@@ -180,24 +180,6 @@ impl FederatedEntryServiceImpl {
                 return Err(Refusal::over("Sign-in was not completed"));
             }
         };
-        let (profile, assignment) = resolve(
-            self.storage.as_ref(),
-            self.identities.as_ref(),
-            &step.issuer,
-            &step.connection,
-            &returned,
-            std::time::SystemTime::now(),
-        )
-        .await
-        .map_err(|refused| {
-            if refused.retryable() {
-                warn!(error = %refused, "returned identity not decided");
-                Refusal::retry()
-            } else {
-                warn!(error = %refused, "returned identity not admitted");
-                Refusal::over("This account has no access here")
-            }
-        })?;
         // A resumed admission keeps the original authentication time and
         // evidence bounds: the evidence is the one kept with the entry.
         let Some(authentication) = returned.evidence.authentication(chrono::Utc::now()) else {
@@ -212,41 +194,72 @@ impl FederatedEntryServiceImpl {
         let Some(client_id) = client_of(&continuation) else {
             return Err(Refusal::over("Sign-in was not completed"));
         };
-        let completion = AdmittedCompletion {
-            operation: &returned.operation,
-            deadline: returned.deadline,
-        };
-        let signed_in = match self
-            .auth
-            .complete_admitted_sign_in(
-                request,
-                &profile,
-                assignment,
-                &authentication,
-                &client_id,
-                Some(completion),
+        // The admission and its session commit hold to one reading of the
+        // login settings: a settings write in between moves the commit off,
+        // and the admission is decided again under the settings in force.
+        let mut attempt = 0;
+        let signed_in = loop {
+            attempt += 1;
+            let resolved = resolve(
+                self.storage.as_ref(),
+                self.identities.as_ref(),
+                &step.issuer,
+                &step.connection,
+                &returned,
+                std::time::SystemTime::now(),
             )
             .await
-        {
-            Ok(signed_in) => signed_in,
-            Err(status) => {
-                // A level or freshness the issuer can be asked for starts one
-                // further entry asking for it; anything else, or a return to
-                // an entry that already asked, is refused. A further entry
-                // that cannot start now keeps this one, so the same return
-                // can be retried.
-                if let Some(further) = further_request(&status, &returned.requested) {
-                    return self
-                        .begin(step, &continuation, &further)
-                        .await
-                        .ok_or_else(Refusal::retry);
+            .map_err(|refused| {
+                if refused.retryable() {
+                    warn!(error = %refused, "returned identity not decided");
+                    Refusal::retry()
+                } else {
+                    warn!(error = %refused, "returned identity not admitted");
+                    Refusal::over("This account has no access here")
                 }
-                warn!(error = %status, profile = %profile.id, "federated sign-in refused");
-                return Err(match status.code() {
-                    tonic::Code::Unavailable | tonic::Code::Internal => Refusal::retry(),
-                    _ => Refusal::over("Sign-in was refused"),
-                });
+            })?;
+            let completion = AdmittedCompletion {
+                operation: &returned.operation,
+                deadline: returned.deadline,
+            };
+            let status = match self
+                .auth
+                .complete_admitted_sign_in(
+                    request,
+                    &resolved.profile,
+                    resolved.assignment,
+                    resolved.admission,
+                    &authentication,
+                    &client_id,
+                    Some(completion),
+                )
+                .await
+            {
+                Ok(signed_in) => break signed_in,
+                Err(status) => status,
+            };
+            if attempt < ADMISSION_ATTEMPTS && admission_changed(&status) {
+                continue;
             }
+            // A level or freshness the issuer can be asked for starts one
+            // further entry asking for it; anything else, or a return to an
+            // entry that already asked, is refused. A further entry that
+            // cannot start now keeps this one, so the same return can be
+            // retried.
+            if let Some(further) = further_request(&status, &returned.requested) {
+                return self
+                    .begin(step, &continuation, &further)
+                    .await
+                    .ok_or_else(Refusal::retry);
+            }
+            warn!(error = %status, profile = %resolved.profile.id, "federated sign-in refused");
+            return Err(match status.code() {
+                tonic::Code::Unavailable | tonic::Code::Internal => Refusal::retry(),
+                // Settings that kept moving under every attempt: the same
+                // return decides again on the next try.
+                _ if admission_changed(&status) => Refusal::retry(),
+                _ => Refusal::over("Sign-in was refused"),
+            });
         };
         let mut response = oauth_http::redirect(&continuation);
         signed_in
@@ -377,6 +390,18 @@ fn with_cookie(response: &mut Response<HttpBody>, cookie: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// How often one return decides its admission before it answers that the
+/// sign-in is to be retried: each attempt follows a settings write that
+/// landed between the admission and its commit.
+const ADMISSION_ATTEMPTS: u32 = 3;
+
+/// Whether `refusal` says that nothing committed because the record the
+/// sign-in was decided on changed meanwhile: its admission is decided again.
+fn admission_changed(refusal: &Status) -> bool {
+    sid_infra::grpc_error::extract_error_info(refusal)
+        .is_some_and(|(reason, _, _)| reason == "CONCURRENT_MODIFICATION")
 }
 
 /// The further entry that meets the step-up `refusal` names, given what the

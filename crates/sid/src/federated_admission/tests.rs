@@ -140,6 +140,27 @@ impl Installed {
             SystemTime::now(),
         )
         .await
+        .map(|admitted| admitted.record)
+    }
+
+    /// The fence [`admit`] holds the session commit to.
+    async fn fence_of(&self, subject: Uuid, presentation: &[u8]) -> Option<ActorFence> {
+        admit(
+            self.storage.as_ref(),
+            &self.recipient,
+            self.issuer.recipient_org,
+            &self.connection,
+            subject,
+            Pending {
+                presentation: Some(presentation),
+                challenge: CHALLENGE,
+                verifier_context: &self.connection.callback,
+            },
+            SystemTime::now(),
+        )
+        .await
+        .unwrap()
+        .fence
     }
 
     fn present(&self, issued: &Issued) -> Vec<u8> {
@@ -229,6 +250,30 @@ async fn nothing_is_admitted_without_settings_or_presentation() {
 // record, the same one on the next entry. Bug prevented: a presentation
 // made for another sign-in or of another identity being accepted, or a
 // record per entry.
+#[tokio::test]
+async fn an_admission_holds_its_session_to_the_settings_it_read() {
+    // Bug prevented: an identity admitted under settings an administrator
+    // has since tightened still got its session, because nothing tied the
+    // session commit to the settings the admission was decided on.
+    let i = installed(ConnectionOwner::Administration, None).await;
+    let subject = Uuid::now_v7();
+    let jws = i.present(&personal(subject, i.organization()));
+    i.settings(true, false, &[]).await;
+    let first = i.fence_of(subject, &jws).await;
+    assert!(
+        matches!(first, Some(ActorFence::LoginPolicy { .. })),
+        "{first:?}"
+    );
+    // Unchanged settings, the same fence.
+    assert_eq!(i.fence_of(subject, &jws).await, first);
+    // A settings write moves it on: a session decided on `first` no longer
+    // commits.
+    i.settings(true, true, &[OrgId::generate()]).await;
+    let second = i.fence_of(subject, &jws).await;
+    assert!(second.is_some());
+    assert_ne!(second, first);
+}
+
 #[tokio::test]
 async fn a_personal_profile_is_admitted_by_its_setting() {
     let i = installed(ConnectionOwner::Administration, None).await;
@@ -479,4 +524,5 @@ async fn resolved(
         SystemTime::now(),
     )
     .await
+    .map(|resolved| (resolved.profile, resolved.assignment))
 }

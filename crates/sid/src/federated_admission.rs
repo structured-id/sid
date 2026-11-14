@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use sid_authn::federated_entry::Returned;
 use sid_core::models::{
-    AuditEntry, ConnectionOwner, EntryConnection, OidcIssuer, OrgId, Origin,
+    ActorFence, AuditEntry, ConnectionOwner, EntryConnection, OidcIssuer, OrgId, Origin,
     PrincipalAssignmentFence, PrincipalType, Profile, federated_subject_value,
 };
 use sid_fed::binding_passport::Passport;
@@ -113,6 +113,18 @@ impl<'a> From<&'a Returned> for Pending<'a> {
     }
 }
 
+/// Who a returned entry signs in and what its session commits under.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub profile: Profile,
+    /// The assignment of the issuer's subject to `profile`.
+    pub assignment: PrincipalAssignmentFence,
+    /// The login settings an outside identity was admitted under: its
+    /// session commits only while no settings write moved them on. None for
+    /// the organization's own Profile, which the settings do not decide.
+    pub admission: Option<ActorFence>,
+}
+
 /// The Profile the entry `returned` through `connection` signs in at the
 /// installation issuer `issuer`, with the assignment its session commits
 /// under.
@@ -130,7 +142,7 @@ pub async fn resolve(
     connection: &EntryConnection,
     returned: &Returned,
     at: SystemTime,
-) -> Result<(Profile, PrincipalAssignmentFence), Refused> {
+) -> Result<Resolved, Refused> {
     // The subject is the recipient Binding the issuer signs the holder in
     // as, in the canonical form its assignment was recorded under.
     let subject = Uuid::parse_str(&returned.subject).map_err(|_| Refused::NoBinding)?;
@@ -151,11 +163,15 @@ pub async fn resolve(
                 .map_err(unavailable)?
                 .ok_or(Refused::NotAdmitted)?;
             if profile.profile_type.is_local() {
-                return Ok((profile, assignment));
+                return Ok(Resolved {
+                    profile,
+                    assignment,
+                    admission: None,
+                });
             }
         }
     }
-    let record = admit(
+    let admitted = admit(
         storage,
         identities,
         issuer.recipient_org,
@@ -165,7 +181,21 @@ pub async fn resolve(
         at,
     )
     .await?;
-    Ok((record.profile, record.assignment))
+    Ok(Resolved {
+        profile: admitted.record.profile,
+        assignment: admitted.record.assignment,
+        admission: admitted.fence,
+    })
+}
+
+/// An admitted outside identity: its record and the login settings it was
+/// admitted under.
+#[derive(Debug, Clone)]
+pub struct Admitted {
+    pub record: Record,
+    /// The login-policy epoch read before the settings this admission was
+    /// decided on; none while no settings were ever written.
+    pub fence: Option<ActorFence>,
 }
 
 /// Admit the outside identity the issuer of `connection` signed in as
@@ -183,7 +213,15 @@ pub async fn admit(
     subject: Uuid,
     returned: Pending<'_>,
     at: SystemTime,
-) -> Result<Record, Refused> {
+) -> Result<Admitted, Refused> {
+    // Every settings write moves the epoch on: read before the settings, it
+    // holds the session commit to them. A write in between moves it past
+    // this read, which then fences the commit.
+    let fence = storage
+        .export_login_policy_epoch()
+        .await
+        .map_err(unavailable)?
+        .map(|epoch| ActorFence::LoginPolicy { epoch });
     let settings = crate::login_settings::in_force(storage)
         .await
         .map_err(unavailable)?;
@@ -242,12 +280,13 @@ pub async fn admit(
             "authorities_status": accepted.authorities,
         }))
         .into();
-    record_of(storage, &connection.issuer, subject, ctx)
+    let record = record_of(storage, &connection.issuer, subject, ctx)
         .await
         .map_err(|e| match e {
             RecordError::OwnProfile => Refused::Own,
             RecordError::Released | RecordError::Storage(_) => unavailable(e),
-        })
+        })?;
+    Ok(Admitted { record, fence })
 }
 
 #[cfg(test)]
