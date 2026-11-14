@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.30](https://github.com/structured-id/sid/compare/v0.2.29...v0.2.30) - 2026-11-14
+
+### Added
+
+- *(oauth)* keep a kept request's origin through redemption ([#641](https://github.com/structured-id/sid/pull/641))
+- *(authn)* carry the Binding presentation in the ID token ([#639](https://github.com/structured-id/sid/pull/639))
+- *(admin)* store and serve incoming Profile admission ([#629](https://github.com/structured-id/sid/pull/629))
+
 ## [0.2.29](https://github.com/structured-id/sid/compare/v0.2.28...v0.2.29) - 2026-11-13
 
 ### Fixed
