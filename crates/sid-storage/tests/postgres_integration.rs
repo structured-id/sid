@@ -693,12 +693,15 @@ async fn test_ceremony_count_window_ending_behind_a_row_lock_restarts() {
         .count_in_window(&namespace, "k", window)
         .await
         .unwrap();
+    // The window that opens behind the lock is long: it must still be open
+    // when it is read below, however loaded the machine running the test.
+    let reopened = std::time::Duration::from_secs(60);
     let count = after_a_held_row_lock(
         &backend,
         LOCK_COUNT,
         &namespace,
         window,
-        backend.count_in_window(&namespace, "k", window),
+        backend.count_in_window(&namespace, "k", reopened),
     )
     .await
     .unwrap();
