@@ -938,6 +938,9 @@ impl AuthServiceImpl {
     /// its delivery sealed for a lost response: a repeat of the operation
     /// gets the same live session again, after the current checks, never a
     /// second one (the recoverable federation callback completion contract).
+    /// `admission` holds the session to the login settings an outside
+    /// identity was admitted under (see `SignIn::admitted_sign_in`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn complete_admitted_sign_in<T>(
         &self,
         request: &Request<T>,

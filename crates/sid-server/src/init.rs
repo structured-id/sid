@@ -1166,10 +1166,14 @@ pub async fn hold_build_platform_cas<V: sid_fed::recipient::Verdict>(
 pub fn classical_recipient(
     storage: Arc<dyn StorageBackend>,
 ) -> anyhow::Result<sid_fed::recipient::Recipient> {
-    of_build_platform(sid_fed::recipient::Recipient::new(
-        storage,
-        sid_fed::recipient::ClassicalVerdict,
-    ))
+    // An organization's list missing or past its time is read where the
+    // installation is connected to that organization.
+    let publications =
+        Arc::new(crate::organization_publications::ConnectedPublications::new(storage.clone()));
+    of_build_platform(
+        sid_fed::recipient::Recipient::new(storage, sid_fed::recipient::ClassicalVerdict)
+            .with_organization_publications(publications),
+    )
 }
 
 /// Make the installation's JWT key pair if neither file exists; `true` when

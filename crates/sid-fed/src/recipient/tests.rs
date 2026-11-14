@@ -393,6 +393,124 @@ async fn a_corporate_passport_is_accepted_as_the_policy_says() {
     }
 }
 
+/// An issuing organization's publication as a test serves it: one answer,
+/// and how often it was read.
+struct Published {
+    answer: std::sync::Mutex<Result<Option<PlatformCaSet>, String>>,
+    reads: AtomicUsize,
+}
+
+impl Published {
+    fn of(answer: Result<Option<PlatformCaSet>, String>) -> Arc<Self> {
+        Arc::new(Self {
+            answer: std::sync::Mutex::new(answer),
+            reads: AtomicUsize::new(0),
+        })
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl OrganizationPublications for Published {
+    async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String> {
+        assert_eq!(organization, source(), "the passport's own organization");
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.answer.lock().unwrap().clone()
+    }
+}
+
+/// The organization's publication: its authority as generation 1 with
+/// `crl`.
+fn organization_publication(crl: Vec<u8>) -> PlatformCaSet {
+    let now = epoch(SystemTime::now());
+    PlatformCaSet {
+        revision: 1,
+        generations: vec![PlatformCa {
+            generation: 1,
+            certificate: organization_ca(),
+            state: PlatformCaState::Active,
+            overlap_end: None,
+            crl: Some(crl),
+        }],
+        issued_at: now,
+        next_update: now + 3600,
+    }
+}
+
+/// A Corporate passport whose organization's list is not held is decided
+/// on the list the organization publishes now, read where the installation
+/// knows its publication: a list without the passport admits it as fresh
+/// and is held from then on, one revoking it refuses it. Where no
+/// publication is known, or reading it fails, the passport stays undecided,
+/// and a failing publication is not read again at once. Bug prevented: the
+/// default policy never admitting another organization's employee, because
+/// nothing ever brought that organization's list to the recipient.
+#[tokio::test]
+async fn an_organizations_list_is_read_from_its_publication() {
+    let chain = [organization_ca()];
+    let with = |published: Arc<Published>| async move {
+        let recipient = recipient().await.with_organization_publications(published);
+        recipient
+            .record_platform_cas(&set(
+                1,
+                PlatformCaState::Active,
+                Some(platform_list(1, &[])),
+            ))
+            .await
+            .unwrap();
+        recipient
+    };
+
+    let published = Published::of(Ok(Some(organization_publication(organization_list(
+        1,
+        &[],
+    )))));
+    let recipient = with(published.clone()).await;
+    let accepted = accept_under(&recipient, &corporate(), &chain, &STRICT)
+        .await
+        .unwrap();
+    assert_eq!(accepted.issuer, StatusEvidence::Fresh);
+    // Held now: the next sign-in reads nothing.
+    accept_strict(&recipient, &corporate(), &chain)
+        .await
+        .unwrap();
+    assert_eq!(published.reads(), 1);
+
+    let revoking = Published::of(Ok(Some(organization_publication(organization_list(
+        2,
+        &[PASSPORT_SERIAL],
+    )))));
+    let recipient = with(revoking).await;
+    assert!(matches!(
+        accept_strict(&recipient, &corporate(), &chain).await,
+        Err(RecipientError::PassportRevoked)
+    ));
+
+    let unknown = Published::of(Ok(None));
+    let recipient = with(unknown).await;
+    assert!(matches!(
+        accept_strict(&recipient, &corporate(), &chain).await,
+        Err(RecipientError::PassportStatusUnavailable)
+    ));
+
+    let failing = Published::of(Err("unreachable".into()));
+    let recipient = with(failing.clone()).await;
+    for _ in 0..2 {
+        assert!(matches!(
+            accept_strict(&recipient, &corporate(), &chain).await,
+            Err(RecipientError::PassportStatusUnavailable)
+        ));
+    }
+    assert_eq!(
+        failing.reads(),
+        1,
+        "a failing publication is not read at once again"
+    );
+}
+
 /// A Personal passport is issued by the platform generation itself, so its
 /// status is that generation's list. The default asks for it in its time;
 /// without one the passport is not decided, and the offline policy admits

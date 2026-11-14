@@ -388,6 +388,18 @@ pub trait PresentedIdentities: Send + Sync {
     ) -> Result<VerifiedAdmission, RecipientError>;
 }
 
+/// Where an organization's own publication is read from: its CA generations
+/// and the list each publishes of the passports it issued
+/// (`arch/auth/org-ca-architecture.md` §organization-status-publication),
+/// in the platform publication's format. Where it is read grants nothing:
+/// every certificate and list is checked as the recipient checks any.
+#[async_trait::async_trait]
+pub trait OrganizationPublications: Send + Sync {
+    /// What `organization` publishes now; `Ok(None)` when no location of its
+    /// publication is known to this installation.
+    async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String>;
+}
+
 /// The recipient side of one installation over its store.
 pub struct Recipient<V = ClassicalVerdict> {
     store: Arc<dyn PlatformCaStore>,
@@ -403,6 +415,13 @@ pub struct Recipient<V = ClassicalVerdict> {
     /// When the last fetch failed (seconds since the epoch), so a failing
     /// source is not asked again on every request.
     failed_at: AtomicI64,
+    /// Where issuing organizations' publications are read when a list of
+    /// theirs is missing or past its time; none reads nothing, and only what
+    /// is held decides.
+    publications: Option<Arc<dyn OrganizationPublications>>,
+    /// When reading an organization's publication last failed (seconds
+    /// since the epoch), so a failing one is not asked on every sign-in.
+    publication_failed_at: std::sync::Mutex<std::collections::HashMap<Uuid, i64>>,
 }
 
 impl<V: Verdict> Recipient<V> {
@@ -414,6 +433,93 @@ impl<V: Verdict> Recipient<V> {
             source: None,
             own: None,
             failed_at: AtomicI64::new(i64::MIN),
+            publications: None,
+            publication_failed_at: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The recipient reading an issuing organization's own publication
+    /// through `publications` when what it holds of that organization's
+    /// list is missing or past its time.
+    pub fn with_organization_publications(
+        mut self,
+        publications: Arc<dyn OrganizationPublications>,
+    ) -> Self {
+        self.publications = Some(publications);
+        self
+    }
+
+    /// Read `organization`'s publication and hold the list of its generation
+    /// `issuer` (with `chain` above it): whether a list of that generation
+    /// was found and recorded. A failure is logged and answers false; it is
+    /// not asked again within [`SOURCE_BACKOFF`].
+    async fn refresh_issuer_status(
+        &self,
+        allocation: ContextAllocation,
+        organization: Uuid,
+        issuer: &[u8],
+        chain: &[Vec<u8>],
+        at: SystemTime,
+    ) -> bool {
+        let Some(publications) = &self.publications else {
+            return false;
+        };
+        let Ok(now) = seconds(at) else {
+            return false;
+        };
+        let backoff = |failed_at: &mut std::collections::HashMap<Uuid, i64>| {
+            failed_at.insert(organization, now);
+        };
+        {
+            let failed_at = self
+                .publication_failed_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if failed_at
+                .get(&organization)
+                // Both are seconds since the epoch: the sum stays in range.
+                .is_some_and(|failed| now < failed + SOURCE_BACKOFF)
+            {
+                return false;
+            }
+        }
+        let published = match publications.fetch(organization).await {
+            Ok(Some(published)) => published,
+            Ok(None) => return false,
+            Err(reason) => {
+                tracing::warn!(%organization, %reason, "organization publication not read");
+                backoff(
+                    &mut self
+                        .publication_failed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                return false;
+            }
+        };
+        let Some(crl) = published
+            .generations
+            .iter()
+            .find(|g| g.certificate == issuer)
+            .and_then(|g| g.crl.as_deref())
+        else {
+            return false;
+        };
+        match self
+            .record_issuer_status(allocation, organization, issuer, chain, crl, at)
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(%organization, error = %e, "organization list not recorded");
+                backoff(
+                    &mut self
+                        .publication_failed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                false
+            }
         }
     }
 
@@ -765,10 +871,28 @@ impl<V: Verdict> Recipient<V> {
         let serial = serial_of(certificate)?;
         let leaf = match path.path.issuers.first() {
             // Issued by an authority below the platform: its own published
-            // status, as this installation holds it.
+            // status, as this installation holds it. Missing or past its
+            // time, the organization's own publication is read once, where
+            // the installation knows it, and the list it gives decides.
             Some(issuer) => {
-                let status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
-                standing(&status, &serial, policy.issuer, now)
+                let mut status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
+                let mut decided = standing(&status, &serial, policy.issuer, now);
+                if matches!(decided, Err(StatusRefusal::Unavailable))
+                    && let Some(organization) = path.passport.source_org
+                    && self
+                        .refresh_issuer_status(
+                            allocation,
+                            organization,
+                            issuer,
+                            &path.path.issuers[1..],
+                            at,
+                        )
+                        .await
+                {
+                    status = self.store.held_issuer_status(&issuer_name(issuer)).await?;
+                    decided = standing(&status, &serial, policy.issuer, now);
+                }
+                decided
             }
             // Issued by the platform generation itself: that generation's.
             None => {
