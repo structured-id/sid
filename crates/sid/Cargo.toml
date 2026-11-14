@@ -19,6 +19,9 @@ sid-core = { workspace = true }
 # The primitives trait only: the host selects the provider.
 sid-crypto = { workspace = true }
 sid-keys = { workspace = true }
+# Verifies the Binding Passport and presentation of an identity signed in
+# through federation.
+sid-fed = { workspace = true }
 sid-plugin = { workspace = true }
 # The snapshot format, import rules and archive; no backend is selected here.
 sid-storage = { workspace = true }
@@ -67,6 +70,8 @@ sid-opaque-ke = { workspace = true }
 sid-pake-core = { workspace = true }
 # A real passkey ceremony for the stored-passkey conversions.
 sid-authn = { workspace = true, features = ["keyed", "password-operation", "soft-authenticator"] }
+# Real passports and presentations for the federated admission tests.
+sid-fed = { workspace = true, features = ["test-support"] }
 # Signs the device-key proofs of the enrollment ceremony tests.
 jsonwebtoken = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }

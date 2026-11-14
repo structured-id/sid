@@ -39,8 +39,12 @@ pub mod purpose;
 pub mod recipient;
 pub mod status;
 
-#[cfg(test)]
+// The fixture uses part of these builders; the crate's own tests use all.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod test_certificates;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cross_instance_linking::{
     CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkStatus, LinkingError,

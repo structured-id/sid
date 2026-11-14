@@ -7390,6 +7390,7 @@ dependencies = [
  "sid-authz",
  "sid-core",
  "sid-crypto",
+ "sid-fed",
  "sid-ids",
  "sid-ids-proto",
  "sid-keys",

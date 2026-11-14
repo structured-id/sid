@@ -32,6 +32,11 @@ structured-pkix = { version = "0.22", features = ["alloc"] }
 structured-asn1 = { version = "0.22", features = ["alloc"] }
 p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 
+[features]
+# A development platform that issues real passports and presentations, for
+# tests of the crates that receive them. Off in every shipped build.
+test-support = ["x509-cert/builder"]
+
 [dev-dependencies]
 # Tests build their own certificates.
 x509-cert = { version = "0.3", features = ["builder"] }
