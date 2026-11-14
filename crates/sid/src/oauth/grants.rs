@@ -207,6 +207,7 @@ impl GrantHost for ProfileGrant<'_> {
                 profile: profile.clone(),
                 email,
                 phone,
+                presentation: None,
             }),
             custom_claims,
         })
@@ -736,6 +737,7 @@ impl OAuth {
                     profile: &profile,
                     email: primary_email.as_ref(),
                     phone: primary_phone.as_ref(),
+                    presentation: None,
                 }),
             )
             .map_err(|e| internal("issue tokens", e))?;

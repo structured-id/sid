@@ -276,6 +276,9 @@ pub struct IdTokenSource<'a> {
     pub profile: &'a Profile,
     pub email: Option<&'a ProfileEmail>,
     pub phone: Option<&'a ProfilePhone>,
+    /// The Binding presentation of a SID installation's federation return:
+    /// in the ID token only, never in the access token.
+    pub presentation: Option<&'a serde_json::Value>,
 }
 
 /// OAuth2 error response.
@@ -513,6 +516,7 @@ impl OAuth2Server {
                 nonce,
                 source.email,
                 source.phone,
+                source.presentation,
             )?)
         } else {
             None

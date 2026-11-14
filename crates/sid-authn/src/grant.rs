@@ -57,6 +57,10 @@ pub struct IdTokenAccount {
     pub profile: Profile,
     pub email: Option<ProfileEmail>,
     pub phone: Option<ProfilePhone>,
+    /// The Binding presentation of the sign-in the host's request redeems,
+    /// when the client is a SID installation's federation client and the
+    /// holder's executor made one for it; carried in the ID token only.
+    pub presentation: Option<serde_json::Value>,
 }
 
 impl IdTokenAccount {
@@ -65,6 +69,7 @@ impl IdTokenAccount {
             profile: &self.profile,
             email: self.email.as_ref(),
             phone: self.phone.as_ref(),
+            presentation: self.presentation.as_ref(),
         }
     }
 }
