@@ -263,6 +263,7 @@ fn client() -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec![REDIRECT.into()],
         allowed_scopes: vec!["account".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],

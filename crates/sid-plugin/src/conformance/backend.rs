@@ -129,6 +129,7 @@ pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
         application_type: sid_core::models::ApplicationType::default(),
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into(), "profile".into()],
         grant_types: vec!["authorization_code".into()],
@@ -2597,6 +2598,7 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
             )
             .unwrap(),
         ),
+        participant_admission: Some(vec![0x7b; 900]),
         redirect_uris: vec![
             "https://app.sid.example.com/cb".to_string(),
             "https://app.sid.example.com/cb2?a=1,http://evil.sid.example.com/cb".to_string(),

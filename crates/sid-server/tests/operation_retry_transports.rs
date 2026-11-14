@@ -133,6 +133,7 @@ impl Installation {
             common::test_jwt(),
             revocation.clone(),
             self.issuer.clone(),
+            None,
         );
         let periods: Arc<dyn sid_plugin::OperationResultStore> = self.storage.clone();
         let routes = tonic::service::Routes::new(ProjectServiceServer::new(project)).add_service(

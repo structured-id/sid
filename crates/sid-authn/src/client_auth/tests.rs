@@ -177,6 +177,7 @@ mod verify {
             application_type: ApplicationType::Web,
             client_secret_hash: None,
             jwks: Some(keys()),
+            participant_admission: None,
             redirect_uris: vec!["https://cabinet.example/callback".into()],
             allowed_scopes: vec!["account".into()],
             grant_types: vec!["authorization_code".into(), "refresh_token".into()],

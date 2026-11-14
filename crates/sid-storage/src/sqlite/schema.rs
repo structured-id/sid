@@ -506,6 +506,9 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     client_secret_hash                  BLOB,
     -- Public keys of a private_key_jwt client: a JWK Set as JSON text.
     jwks                                TEXT,
+    -- A federation site's signed admission statement the client was
+    -- registered on; only for another organization's site.
+    participant_admission               BLOB,
     -- Redirect URIs: a JSON array of strings (a URI may hold a comma).
     redirect_uris                       TEXT NOT NULL DEFAULT '[]',
     allowed_scopes                      TEXT NOT NULL DEFAULT 'openid profile email',

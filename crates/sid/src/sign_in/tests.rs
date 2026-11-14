@@ -681,6 +681,7 @@ fn test_client_with_acr(
         application_type: sid_core::models::ApplicationType::Web,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec![],
         allowed_scopes: vec![],
         grant_types: vec![],

@@ -27,6 +27,8 @@ use sid_core::models::{
     InitialAccessTokenId, LoginStrategy, MutationContext, OAuth2Client, OperationContext, Project,
     ProjectChange, ProjectId, ResourceId, ResourceIndicator, ResourceState, Role, RoleId,
 };
+use sid_fed::recipient::PresentedIdentities;
+use sid_keys::KeyManager;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::projects::project_service as keyed;
 use sid_proto::sid::v1::{
@@ -183,6 +185,10 @@ pub enum ProjectError {
     /// The record changed since it was read.
     #[error("changed concurrently")]
     ChangedConcurrently,
+    /// A federation site's admission could not be decided now: the status
+    /// its policy requires is not at hand. The same request may be retried.
+    #[error("the site's evidence cannot be checked now: {0}")]
+    SiteEvidenceUnavailable(String),
 }
 
 impl From<ProjectError> for Effect<ProjectError> {
@@ -240,10 +246,37 @@ pub struct Issued<T> {
 pub struct Projects {
     storage: Arc<dyn StorageBackend>,
     /// The installation's organization: every application registered here
-    /// belongs to it.
+    /// belongs to it, except another organization's federation site.
     org: model::OrgId,
     /// That organization's OIDC issuer, the one its applications configure.
     issuer: model::OidcIssuer,
+    /// What registering another organization's federation site needs; an
+    /// installation without it registers none.
+    sites: Option<SiteRegistrar>,
+}
+
+/// What registers another organization's federation site as a client here
+/// (`arch/auth/oidc-issuer-model.md` §direct-work-recipient-registration):
+/// the verifier of its signed admission, and what this installation's issuer
+/// for that organization is made with.
+pub struct SiteRegistrar {
+    /// Verifies the site's statement under the platform CA set.
+    pub identities: Arc<dyn PresentedIdentities>,
+    /// Seals the signing key of a new issuer.
+    pub keys: Arc<dyn KeyManager>,
+    /// The deployment's public URL new issuers are addressed under.
+    pub base: url::Url,
+}
+
+/// A federation site's registration, as its verified statement settles it.
+struct SiteClient {
+    /// The organization the statement authenticates.
+    org: model::OrgId,
+    /// The one redirect URI: the site's admitted mount and the shared
+    /// federation callback route.
+    redirect_uri: String,
+    /// The statement as received, kept with the client.
+    statement: Vec<u8>,
 }
 
 /// The request fields a new resource role's indicator and scopes come from.
@@ -271,7 +304,100 @@ impl Projects {
             storage,
             org: issuer.recipient_org,
             issuer,
+            sites: None,
         }
+    }
+
+    /// These projects, registering other organizations' federation sites
+    /// with `registrar`.
+    pub fn with_site_registrar(mut self, registrar: SiteRegistrar) -> Self {
+        self.sites = Some(registrar);
+        self
+    }
+
+    /// The registration of the federation site whose signed statement
+    /// `settings` carries, `requested_org` being the organization the
+    /// request names, if any; `None` for any other client. The statement is
+    /// verified now, under the installation's status policy: the client's
+    /// organization is the one it authenticates and its redirect URI the
+    /// shared callback at its mount, so nothing an administrator types pairs
+    /// a real organization with another callback. That organization is held
+    /// as a reference and gets this installation's issuer for it; both are
+    /// kept when this registration is retried or refused later.
+    async fn site_client(
+        &self,
+        settings: &ClientRoleSettings,
+        requested_org: Option<model::OrgId>,
+    ) -> Result<Option<SiteClient>, ProjectError> {
+        const FIELD: &str = "client.participant_admission";
+        let Some(statement) = settings.participant_admission.as_ref() else {
+            return Ok(None);
+        };
+        let registrar = self.sites.as_ref().ok_or_else(|| {
+            invalid_field(FIELD, "this installation registers no federation sites")
+        })?;
+        if !settings.redirect_uris.is_empty() {
+            return Err(invalid_field(
+                "client.redirect_uris",
+                "a federation site's callback comes from its admission",
+            ));
+        }
+        if !matches!(proto_to_app_type(settings.r#type), ApplicationType::Web) {
+            return Err(invalid_field(FIELD, "a federation site is a web client"));
+        }
+        let policy = crate::login_settings::in_force(self.storage.as_ref())
+            .await?
+            .status_policy;
+        let verified = registrar
+            .identities
+            .accept_admission(statement, &policy, std::time::SystemTime::now())
+            .await
+            .map_err(|e| {
+                if e.undecided() {
+                    ProjectError::SiteEvidenceUnavailable(e.to_string())
+                } else {
+                    invalid_field(FIELD, e.to_string())
+                }
+            })?;
+        let org = model::OrgId::from_uuid(verified.admission.recipient_org)
+            .map_err(|e| invalid_field(FIELD, e.to_string()))?;
+        if org == self.org {
+            return Err(invalid_field(
+                FIELD,
+                "the site is this installation's own organization's",
+            ));
+        }
+        if requested_org.is_some_and(|requested| requested != org) {
+            return Err(invalid_field(
+                "org_id",
+                "the site's admission authenticates another organization",
+            ));
+        }
+        let reference = model::OrganizationReference {
+            id: org,
+            created_at: chrono::Utc::now(),
+        };
+        self.storage
+            .insert_organization_reference(
+                &reference,
+                AuditEntry::system("organization_reference.created", org.to_string()).into(),
+            )
+            .await?;
+        sid_authn::issuer::ensure_local_issuer(
+            self.storage.as_ref(),
+            registrar.keys.as_ref(),
+            &registrar.base,
+            org,
+        )
+        .await?;
+        Ok(Some(SiteClient {
+            org,
+            redirect_uri: verified
+                .admission
+                .mount
+                .at(sid_core::models::entry_connection::CALLBACK),
+            statement: statement.clone(),
+        }))
     }
 
     /// Projects, applications (OAuth clients and their secrets), project
@@ -280,22 +406,31 @@ impl Projects {
         Ok(caller.require_admin()?)
     }
 
-    /// The exact issuer `client` is registered under. Every application here
-    /// belongs to the installation's organization; one that does not has no
-    /// issuer to report, which is an internal inconsistency, never an empty
-    /// value a relying party would configure.
-    fn issuer_of(&self, client: &OAuth2Client) -> Result<&str, ProjectError> {
+    /// The exact issuer `client` is registered under: the installation
+    /// organization's for its own applications, this installation's issuer
+    /// for another organization for that organization's federation site. A
+    /// client with neither has no issuer to report, which is an internal
+    /// inconsistency, never an empty value a relying party would configure.
+    async fn issuer_of(&self, client: &OAuth2Client) -> Result<String, ProjectError> {
         if self.issuer.serves(client.org_id) {
-            Ok(&self.issuer.canonical_url)
-        } else {
-            warn!(client_id = %client.client_id, "application outside the installation's organization");
-            Err(ProjectError::Internal)
+            return Ok(self.issuer.canonical_url.clone());
         }
+        if client.participant_admission.is_some()
+            && let Some(org) = client.org_id
+            && let Some(issuer) = self
+                .storage
+                .oidc_issuer_for(model::IssuerAuthority::Local, org)
+                .await?
+        {
+            return Ok(issuer.canonical_url);
+        }
+        warn!(client_id = %client.client_id, "application without an issuer here");
+        Err(ProjectError::Internal)
     }
 
     /// `client` as the API shows it, with its issuer.
-    fn client_view(&self, client: &OAuth2Client) -> Result<OAuthClient, ProjectError> {
-        Ok(client_to_proto(client, self.issuer_of(client)?))
+    async fn client_view(&self, client: &OAuth2Client) -> Result<OAuthClient, ProjectError> {
+        Ok(client_to_proto(client, &self.issuer_of(client).await?))
     }
 
     /// The exact issuer whose tokens `resource` accepts. Resources here are
@@ -319,15 +454,19 @@ impl Projects {
     }
 
     /// `app` with the roles given.
-    fn application_with(
+    async fn application_with(
         &self,
         app: &model::Application,
         client: Option<&OAuth2Client>,
         resource: Option<&model::ProtectedResource>,
     ) -> Result<Application, ProjectError> {
+        let client = match client {
+            Some(client) => Some(self.client_view(client).await?),
+            None => None,
+        };
         Ok(application_to_proto(
             app,
-            client.map(|c| self.client_view(c)).transpose()?,
+            client,
             resource.map(|r| self.resource_view(r)).transpose()?,
         ))
     }
@@ -343,6 +482,7 @@ impl Projects {
             .protected_resource_of_application(app.id)
             .await?;
         self.application_with(app, client.as_ref(), resource.as_ref())
+            .await
     }
 
     /// The stored application `id` names (field `field`).
@@ -431,6 +571,7 @@ impl Projects {
         &self,
         app: &model::Application,
         settings: ClientRoleSettings,
+        site: Option<SiteClient>,
     ) -> Result<(OAuth2Client, Option<SecretBox<String>>), ProjectError> {
         let app_type = proto_to_app_type(settings.r#type);
         // Generate client_id and secret. The whole id: a UUIDv7 prefix is a
@@ -457,6 +598,12 @@ impl Projects {
             .map(|secret| hash_secret(secret.expose_secret()))
             .transpose()?;
         let now = chrono::Utc::now();
+        // A federation site's organization, callback and evidence come from
+        // its verified statement (`site_client`), never from the request.
+        let (org_id, redirect_uris, participant_admission) = match site {
+            Some(site) => (site.org, vec![site.redirect_uri], Some(site.statement)),
+            None => (self.org, settings.redirect_uris, None),
+        };
         let client = OAuth2Client {
             client_id,
             project_id: app.project_id,
@@ -464,7 +611,7 @@ impl Projects {
             default_resource: None,
             application_type: app_type,
             client_secret_hash: secret_hash.map(String::into_bytes),
-            redirect_uris: settings.redirect_uris,
+            redirect_uris,
             allowed_scopes: if settings.allowed_scopes.is_empty() {
                 vec!["openid".into(), "profile".into(), "email".into()]
             } else {
@@ -486,6 +633,7 @@ impl Projects {
                 (false, None) => model::TokenEndpointAuthMethod::ClientSecretBasic,
             },
             jwks,
+            participant_admission,
             response_types: vec!["code".into()],
             // The documented registration value (registration metadata A):
             // issuer-relative public, which does not decide a user's subject.
@@ -510,7 +658,7 @@ impl Projects {
             show_federation_button: true,
             federation_timeout_ms: 500,
             unified_input: false,
-            org_id: Some(self.org),
+            org_id: Some(org_id),
             revision: 0,
             created_at: now,
         };
@@ -972,11 +1120,27 @@ impl Projects {
                     .settings
                     .clone()
                     .ok_or(ProjectError::MissingField("settings"))?;
-                let (client, client_secret) = self.new_client(&app, settings)?;
+                let site = self.site_client(&settings, None).await?;
+                // A federation site's application is its client alone: its
+                // resources live at its own installation, not here.
+                if site.is_some()
+                    && self
+                        .storage
+                        .protected_resource_of_application(app.id)
+                        .await?
+                        .is_some()
+                {
+                    return Err(invalid_field(
+                        "settings.participant_admission",
+                        "a federation site's application has no resource role here",
+                    )
+                    .into());
+                }
+                let (client, client_secret) = self.new_client(&app, settings, site)?;
                 // The application as this addition leaves it: its stored
                 // roles and the new client.
                 let mut view = self.application_view(&app).await?;
-                view.client = Some(self.client_view(&client)?);
+                view.client = Some(self.client_view(&client).await?);
                 let recorded = CreateApplicationResponse {
                     application: Some(view),
                     client_secret: String::new(),
@@ -1354,6 +1518,9 @@ impl Projects {
             application_type: app_type,
             client_secret_hash: secret_hash,
             jwks: requested_jwks(req.jwks.as_deref())?,
+            // Dynamic registration (RFC 7591) never registers another
+            // organization's federation site: that is the administrator's.
+            participant_admission: None,
             redirect_uris: req.redirect_uris,
             allowed_scopes: req.scope,
             grant_types: req.grant_types,
@@ -1426,7 +1593,7 @@ impl Projects {
         info!("DCR: registered client '{}' via IAT {}", client_id, iat.id);
 
         Ok(RegisterClientResponse {
-            client: Some(self.client_view(&client)?),
+            client: Some(self.client_view(&client).await?),
             client_secret: client_secret.map(|s| s.expose_secret().clone()),
             registration_access_token: rat.expose_secret().clone(),
         })
@@ -1441,7 +1608,7 @@ impl Projects {
         let client = self
             .verify_rat(rat, &req.client_id, &req.issuer_handle)
             .await?;
-        self.client_view(&client)
+        self.client_view(&client).await
     }
 
     /// Replace the metadata of the client its registration access token
@@ -1518,7 +1685,7 @@ impl Projects {
         }
         client.revision += 1;
 
-        self.client_view(&client)
+        self.client_view(&client).await
     }
 
     /// Delete the client its registration access token `rat` manages.
@@ -1688,24 +1855,42 @@ impl Projects {
             .await?
             .ok_or(ProjectError::ProjectNotFound(project_id))?;
 
-        // Every application belongs to the installation's organization; a
-        // request naming another one names an organization that is not here.
-        if let Some(requested) = req.org_id.as_ref() {
-            let requested: model::OrgId = wire_id(Some(requested), "org_id")?;
-            if requested != self.org {
-                return Err(invalid_field(
-                    "org_id",
-                    format!("organization {requested} is not this installation's"),
-                )
-                .into());
-            }
-        }
+        let requested_org: Option<model::OrgId> = req
+            .org_id
+            .as_ref()
+            .map(|id| wire_id(Some(id), "org_id"))
+            .transpose()?;
         if req.name.is_empty() {
             return Err(ProjectError::MissingField("name").into());
         }
         // An application is a client, a protected resource, or both.
         if req.client.is_none() && req.resource.is_none() {
             return Err(ProjectError::RoleRequired.into());
+        }
+        let site = match &req.client {
+            Some(settings) => self.site_client(settings, requested_org).await?,
+            None => None,
+        };
+        // Every other application belongs to the installation's organization;
+        // a request naming another one names an organization that is not here.
+        if site.is_none()
+            && let Some(requested) = requested_org
+            && requested != self.org
+        {
+            return Err(invalid_field(
+                "org_id",
+                format!("organization {requested} is not this installation's"),
+            )
+            .into());
+        }
+        // A federation site's application is its client alone: its resources
+        // live at its own installation.
+        if site.is_some() && req.resource.is_some() {
+            return Err(invalid_field(
+                "resource",
+                "a federation site's application has no resource role here",
+            )
+            .into());
         }
 
         let now = chrono::Utc::now();
@@ -1724,14 +1909,17 @@ impl Projects {
             .transpose()?;
         let (client, client_secret) = match req.client {
             Some(settings) => {
-                let (client, secret) = self.new_client(&app, settings)?;
+                let (client, secret) = self.new_client(&app, settings, site)?;
                 (Some(client), secret)
             }
             None => (None, None),
         };
 
         let recorded = CreateApplicationResponse {
-            application: Some(self.application_with(&app, client.as_ref(), resource.as_ref())?),
+            application: Some(
+                self.application_with(&app, client.as_ref(), resource.as_ref())
+                    .await?,
+            ),
             client_secret: String::new(),
         };
         let ctx = admin_ctx(caller, "application.create", app.id.to_string())
@@ -1805,6 +1993,16 @@ impl Projects {
             client.client_name = name;
         }
         if !req.redirect_uris.is_empty() {
+            // A federation site's one callback is its admitted mount's: it is
+            // never retyped, or a real organization could be paired with
+            // another callback.
+            if client.participant_admission.is_some() {
+                return Err(invalid_field(
+                    "redirect_uris",
+                    "a federation site's callback comes from its admission",
+                )
+                .into());
+            }
             client.redirect_uris = req.redirect_uris;
         }
         if !req.allowed_scopes.is_empty() {
@@ -1850,7 +2048,7 @@ impl Projects {
         let mut left = client.clone();
         left.revision += 1;
         let mut view = self.application_view(&app).await?;
-        view.client = Some(self.client_view(&left)?);
+        view.client = Some(self.client_view(&left).await?);
         let ctx = admin_ctx(caller, "client.update", client.client_id.clone())
             .with_operation(command.completion(view.encode_to_vec()));
         if !self.storage.update_oauth2_client(&client, ctx).await? {
@@ -2208,5 +2406,7 @@ fn sha256_hash(data: &[u8]) -> Vec<u8> {
     Sha256::digest(data).to_vec()
 }
 
+#[cfg(test)]
+mod site_tests;
 #[cfg(test)]
 mod tests;

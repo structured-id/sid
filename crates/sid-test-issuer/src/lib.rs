@@ -798,6 +798,7 @@ async fn register(
         application_type: ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec![format!("{}/callback", indicator.trim_end_matches('/'))],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],

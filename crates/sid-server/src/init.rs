@@ -886,6 +886,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(presentations) => auth_svc.with_own_presentations(presentations),
         None => auth_svc,
     };
+    // The recipient side verifies what other installations present, and
+    // the admissions their sites were registered on as clients here.
+    let recipient = classical_recipient(storage.clone())?;
+    hold_build_platform_cas(&recipient).await?;
+    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> = Arc::new(recipient);
+    let auth_svc = auth_svc.with_site_evidence(identities.clone());
     let auth_svc = match &ceremony_page {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
@@ -910,9 +916,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         storage.clone(),
         key_manager.clone(),
     ));
-    let recipient = classical_recipient(storage.clone())?;
-    hold_build_platform_cas(&recipient).await?;
-    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> = Arc::new(recipient);
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
@@ -920,6 +923,11 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         jwt.clone(),
         revocation_cache.clone(),
         local_issuer.clone(),
+        Some(sid::projects::SiteRegistrar {
+            identities: identities.clone(),
+            keys: key_manager.clone(),
+            base: issuer_base.clone(),
+        }),
     ));
 
     // Maintenance mode bridge: FeatureFlagService → AtomicBool for sid-authz

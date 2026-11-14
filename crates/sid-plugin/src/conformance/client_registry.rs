@@ -68,6 +68,7 @@ pub fn client() -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: Some(client_keys()),
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".into()],
         allowed_scopes: vec!["orders.read".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],

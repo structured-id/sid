@@ -317,10 +317,10 @@ const OAUTH2_CLIENT_CREATE: &str = "INSERT INTO oauth2_clients (client_id, proje
         registration_access_token_hash, org_id,
         client_id_issued_at, client_secret_expires_at,
         created_at, revision, application_id, default_resource, jwks,
-        post_logout_redirect_uris)
+        post_logout_redirect_uris, participant_admission)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-        $36, $37, $38, $39)
+        $36, $37, $38, $39, $40)
     ON CONFLICT DO NOTHING";
 
 /// Update of a stored client at revision `$35`, with the parameters of
@@ -340,7 +340,7 @@ const OAUTH2_CLIENT_UPDATE: &str = "UPDATE oauth2_clients SET
         token_endpoint_auth_method = $26, response_types = $27, contacts = $28,
         registration_access_token_hash = $30, org_id = $31,
         client_secret_expires_at = $33, default_resource = $37, jwks = $38,
-        post_logout_redirect_uris = $39,
+        post_logout_redirect_uris = $39, participant_admission = $40,
         revision = revision + 1
     WHERE client_id = $1 AND revision = $35
       AND registration_iat IS NOT DISTINCT FROM $29
@@ -1455,6 +1455,7 @@ impl PostgresBackend {
             .bind(client.default_resource)
             .bind(client.jwks.as_ref().map(ClientKeySet::to_json))
             .bind(&client.post_logout_redirect_uris)
+            .bind(client.participant_admission.as_deref())
             .execute(&mut **tx)
             .await
             .map_err(|e| SidError::Storage(format!("write oauth2 client: {e}")))?

@@ -83,6 +83,7 @@ fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2C
         application_type: ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into(), "profile".into()],
         grant_types: vec!["authorization_code".into()],

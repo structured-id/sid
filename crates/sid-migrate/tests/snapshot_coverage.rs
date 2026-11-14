@@ -278,6 +278,7 @@ fn client_for(app: &Application, org: OrgId) -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: Some(vec![0x5a; 64]),
         redirect_uris: vec!["https://app.sid.example.com/cb".into()],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into()],

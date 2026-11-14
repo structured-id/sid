@@ -659,6 +659,16 @@ impl AuthServiceImpl {
         self
     }
 
+    /// Verify the admissions other organizations' federation sites were
+    /// registered on, at each use of their clients, with `identities`.
+    pub fn with_site_evidence(
+        mut self,
+        identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
+    ) -> Self {
+        self.oauth.set_site_evidence(identities);
+        self
+    }
+
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
     /// not enabled magic links. The answer does not depend on the address asked
     /// about.

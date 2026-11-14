@@ -358,6 +358,7 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         application_type: sid_core::models::ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into(), "profile".into(), "email".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],
@@ -1828,6 +1829,9 @@ impl TestServices {
             jwt.clone(),
             revocation_cache.clone(),
             issuer.clone(),
+            // This harness verifies no federation evidence; registering a
+            // federation site is covered where a recipient is set up.
+            None,
         ));
         let admin = AdminServiceImpl::new(
             storage.clone(),

@@ -67,10 +67,20 @@ fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::model
 
 /// Refusal of a credential for a federated reference: the identity it
 /// refers to authenticates at its issuer and holds none here.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 const FEDERATED_HOLDS_NO_CREDENTIAL: &str = "a federated reference holds no local credential";
 
 /// Refusal of a login name for a federated reference: it is reached only by
 /// the subject its trusted issuer names.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 const FEDERATED_HOLDS_NO_LOGIN_NAME: &str = "a federated reference holds no local login name";
 
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
@@ -293,12 +303,8 @@ fn administrator_role_assigned() -> sid_core::Error {
 
 /// An exported record found already stored under its key: `false` when it
 /// is the same record, so a repeated import writes nothing, a `Conflict` when
-/// another one holds the key.
-#[cfg(any(
-    feature = "storage-pg",
-    feature = "storage-sqlite",
-    feature = "storage-coordinode"
-))]
+/// another one holds the key. The backends and the portable snapshot both
+/// use it, so it is not tied to a backend feature.
 fn transfer_repeat<T: PartialEq>(stored: &T, wanted: &T, what: &str) -> sid_core::Result<bool> {
     if stored == wanted {
         Ok(false)

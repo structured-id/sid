@@ -158,6 +158,42 @@ pub trait OwnPresentations: Send + Sync {
     async fn present(&self, sign_in: PresentedSignIn<'_>) -> Result<Vec<u8>, PresentationRefused>;
 }
 
+/// Whether the federation site `client` was registered from still stands
+/// now, checked with `identities`: its statement verifies again under the
+/// installation's status policy, so a site whose certificate is known
+/// revoked, or whose statement's time has passed, is no usable client
+/// (`arch/auth/oidc-issuer-model.md` §direct-work-recipient-registration).
+/// Any other client is not concerned. Status the policy requires and cannot
+/// get now is unavailability, retried, never a pass.
+pub(crate) async fn site_admission_stands(
+    storage: &dyn StorageBackend,
+    identities: Option<&dyn sid_fed::recipient::PresentedIdentities>,
+    client: &OAuth2Client,
+) -> Result<(), OAuthError> {
+    let Some(statement) = &client.participant_admission else {
+        return Ok(());
+    };
+    let Some(identities) = identities else {
+        warn!(client_id = %client.client_id, "a federation site's client without a verifier");
+        return Err(OAuthError::ClientRefused);
+    };
+    let policy = crate::login_settings::in_force(storage)
+        .await
+        .map_err(|e| internal("login settings", e))?
+        .status_policy;
+    match identities
+        .accept_admission(statement, &policy, std::time::SystemTime::now())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.undecided() => Err(OAuthError::unavailable("site certificate status", e)),
+        Err(e) => {
+            warn!(client_id = %client.client_id, error = %e, "a federation site's admission no longer stands");
+            Err(OAuthError::ClientRefused)
+        }
+    }
+}
+
 /// What the OAuth endpoints of one installation are built from.
 pub struct OAuthParts {
     pub storage: Arc<dyn StorageBackend>,
@@ -203,6 +239,10 @@ pub struct OAuth {
     /// Makes the proof of an own Profile for a sign-in at another
     /// organization; none in an installation that issues no such proof.
     presentations: Option<Arc<dyn OwnPresentations>>,
+    /// Verifies the admission a federation site's client was registered on
+    /// again at each use; none in an installation that verifies no
+    /// federation evidence, which then serves no such client.
+    site_evidence: Option<Arc<dyn sid_fed::recipient::PresentedIdentities>>,
 }
 
 impl OAuth {
@@ -224,7 +264,21 @@ impl OAuth {
             login_policy: parts.login_policy,
             installation_url: parts.installation_url,
             presentations: None,
+            site_evidence: None,
         }
+    }
+
+    /// Verify the admissions federation sites' clients were registered on
+    /// with `identities` from now on.
+    pub fn set_site_evidence(
+        &mut self,
+        identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
+    ) {
+        self.site_evidence = Some(identities);
+    }
+
+    async fn check_site_evidence(&self, client: &OAuth2Client) -> Result<(), OAuthError> {
+        site_admission_stands(self.storage.as_ref(), self.site_evidence.as_deref(), client).await
     }
 
     /// Make the proofs of own Profiles for sign-ins at other organizations
@@ -425,6 +479,7 @@ impl OAuth {
         if !client.active {
             return Err(OAuthError::ClientRefused);
         }
+        self.check_site_evidence(client).await?;
         Ok(issuer)
     }
 

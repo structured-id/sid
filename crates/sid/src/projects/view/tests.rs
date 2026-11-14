@@ -15,6 +15,7 @@ fn client(kind: ApplicationType) -> OAuth2Client {
         application_type: kind,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".to_string()],
         grant_types: vec!["authorization_code".to_string()],

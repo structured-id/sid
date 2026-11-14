@@ -288,6 +288,7 @@ fn new_integration(
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: Some(settings.keys.clone()),
+        participant_admission: None,
         redirect_uris: vec![settings.callback()],
         allowed_scopes: CLIENT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],

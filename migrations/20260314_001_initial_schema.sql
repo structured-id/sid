@@ -1582,6 +1582,7 @@ CREATE TABLE oauth2_clients (
     default_resource uuid,
     jwks text,
     post_logout_redirect_uris text[] DEFAULT '{}'::text[] NOT NULL,
+    participant_admission bytea,
     CONSTRAINT oauth2_clients_revision_non_negative CHECK ((revision >= 0)),
     CONSTRAINT oauth2_clients_application_unique UNIQUE (application_id),
     CONSTRAINT oauth2_clients_pkey PRIMARY KEY (client_id),

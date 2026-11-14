@@ -510,6 +510,7 @@ pub struct OAuth2ClientRow {
     pub application_type: String,
     pub client_secret_hash: Option<Vec<u8>>,
     pub jwks: Option<String>,
+    pub participant_admission: Option<Vec<u8>>,
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub grant_types: String,
@@ -565,6 +566,7 @@ impl OAuth2ClientRow {
                 .map(sid_core::models::ClientKeySet::from_json)
                 .transpose()
                 .map_err(|e| parse("jwks", e))?,
+            participant_admission: self.participant_admission,
             redirect_uris: self.redirect_uris,
             allowed_scopes: split_ws(&self.allowed_scopes),
             grant_types: split_ws(&self.grant_types),

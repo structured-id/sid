@@ -215,6 +215,7 @@ impl Installation {
             jwt.clone(),
             revocation.clone(),
             self.issuer.clone(),
+            None,
         ));
         let provider = OidcProviderServiceImpl::new(auth, project, None);
         let tokens = sid_authn::resource_token::ResourceTokenVerifier::new(
