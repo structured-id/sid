@@ -55,12 +55,23 @@ async fn read(svc: &RealmServiceImpl, token: &str) -> LoginSettings {
 }
 
 /// The two admissions as answered after `revision` changes of them, with no
-/// source organization named.
+/// source organization named and the status policy never changed: a list
+/// in its time from the issuer, the authorities above on what is held.
 fn admissions(personal: bool, corporate: bool, revision: u64) -> LoginSettings {
+    use sid_proto::sid::v1::admin::{OfflineStatusLimits, StatusPolicy, StatusRequirement};
     LoginSettings {
         allow_personal_profiles: personal,
         allow_foreign_corporate_profiles: corporate,
         revision,
+        status_policy: Some(StatusPolicy {
+            issuer: Some(StatusRequirement { offline: None }),
+            authorities: Some(StatusRequirement {
+                offline: Some(OfflineStatusLimits {
+                    missing: true,
+                    max_stale_seconds: None,
+                }),
+            }),
+        }),
         ..Default::default()
     }
 }

@@ -35,6 +35,7 @@ use sid_proto::sid::v1::{
     authz_service_server::AuthzServiceServer, branding_service_server::BrandingServiceServer,
     entry_connection_service_server::EntryConnectionServiceServer,
     federated_entry_service_server::FederatedEntryServiceServer,
+    federation_site_service_server::FederationSiteServiceServer,
     flow_action_service_server::FlowActionServiceServer,
     flow_config_service_server::FlowConfigServiceServer,
     identity_service_server::IdentityServiceServer,
@@ -148,6 +149,21 @@ impl CeServices {
             ))
             .await
             .add(FederatedEntryServiceServer::new(federated_entry(c)?))
+            .await
+            // Built here, after a host has set the recipient side its
+            // composition verifies with.
+            .add(FederationSiteServiceServer::new(
+                crate::grpc::federation_site_service::FederationSiteServiceImpl::new(
+                    std::sync::Arc::new(sid::federation_site::FederationSite::new(
+                        c.storage.clone(),
+                        c.key_manager.clone(),
+                        c.identities.clone(),
+                        c.organization.id,
+                    )),
+                    c.jwt.clone(),
+                    c.revocation_cache.clone(),
+                ),
+            ))
             .await
             .add(SystemIntegrationServiceServer::new(
                 crate::grpc::system_integration_service::SystemIntegrationServiceImpl::new(

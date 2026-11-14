@@ -15,6 +15,7 @@ pub mod enrollment_service;
 pub mod entry_connection_service;
 pub mod event_stream_service;
 pub mod federated_entry_service;
+pub mod federation_site_service;
 pub mod flow_service;
 pub mod governance_service;
 pub mod identity_service;
