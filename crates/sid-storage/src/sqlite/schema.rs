@@ -1927,6 +1927,8 @@ CREATE TABLE IF NOT EXISTS platform_ca_generations (
 
 CREATE TABLE IF NOT EXISTS platform_ca_status (
     generation      INTEGER PRIMARY KEY CHECK (generation >= 0),
+    -- The generation certificate (DER) the CRL was authenticated under.
+    certificate     BLOB NOT NULL,
     number          INTEGER NOT NULL CHECK (number >= 0),
     next_update     INTEGER NOT NULL
 ) STRICT;

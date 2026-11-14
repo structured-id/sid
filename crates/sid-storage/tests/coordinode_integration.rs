@@ -759,6 +759,7 @@ mod platform_ca_store {
         an_anchor_answers_for_the_cas_it_issued,
         a_revocation_seen_once_stays,
         status_is_per_generation,
+        status_belongs_to_its_generation_certificate,
         a_generation_keeps_its_certificate,
         concurrent_applies_never_widen,
         an_older_set_racing_a_newer_one_leaves_nothing,

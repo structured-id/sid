@@ -125,6 +125,10 @@ pub struct PlatformCa {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationStatus {
     pub generation: u32,
+    /// The generation's certificate (DER) the CRL was authenticated under: a
+    /// generation number means something only with its certificate, so the
+    /// status of one certificate never becomes another's.
+    pub certificate: Vec<u8>,
     /// The CRL's number: a lower one than the one held changes nothing.
     pub number: u64,
     /// The CRL's nextUpdate (seconds since the epoch): after it the status is
@@ -269,8 +273,9 @@ pub trait PlatformCaStore: Send + Sync {
     /// revision's generations anchor, while a generation a later set omits
     /// keeps its narrowed state. A generation number arriving with another
     /// certificate than the one held is [`PlatformCaError::Conflict`] and
-    /// nothing of the set is held. A set older than the one held writes
-    /// nothing, its audit entry included.
+    /// nothing of the set is held; so is a new generation whose recorded
+    /// status was authenticated under another certificate. A set older than
+    /// the one held writes nothing, its audit entry included.
     async fn apply_platform_cas(
         &self,
         set: &PlatformCaSet,
@@ -281,7 +286,10 @@ pub trait PlatformCaStore: Send + Sync {
     /// generations' certificates. Each replaces the generation's held one
     /// only with a number not lower, and every serial it revokes is kept
     /// from then on. Both only ever narrow what is relied on, so they are
-    /// recorded whatever set they arrived with, an older one included.
+    /// recorded whatever set they arrived with, an older one included. A
+    /// status whose certificate is not the one held, or not the one an
+    /// earlier status of the same generation named, is
+    /// [`PlatformCaError::Conflict`] and none of `status` is recorded.
     async fn record_platform_ca_status(
         &self,
         status: &[GenerationStatus],

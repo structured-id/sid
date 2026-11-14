@@ -491,6 +491,7 @@ impl<V: Verdict> Recipient<V> {
                     })?;
                 status.push(GenerationStatus {
                     generation: generation.generation,
+                    certificate: generation.certificate.clone(),
                     number: verified.number,
                     next_update: seconds(verified.next_update)?,
                     revoked: verified.revoked,

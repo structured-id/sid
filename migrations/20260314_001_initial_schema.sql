@@ -530,6 +530,7 @@ CREATE TABLE platform_ca_set (
 
 CREATE TABLE platform_ca_status (
     generation bigint NOT NULL,
+    certificate bytea NOT NULL,
     number bigint NOT NULL,
     next_update bigint NOT NULL,
     CONSTRAINT platform_ca_status_generation_check CHECK ((generation >= 0)),

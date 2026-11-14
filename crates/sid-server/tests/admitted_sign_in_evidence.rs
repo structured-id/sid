@@ -50,6 +50,7 @@ async fn repeats_record_no_further_sign_in() {
                 &from(ip),
                 &profile,
                 assignment,
+                None,
                 &authentication,
                 "an-application",
                 Some(completion()),

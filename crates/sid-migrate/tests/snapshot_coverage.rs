@@ -1152,6 +1152,7 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             .record_platform_ca_status(
                 &[GenerationStatus {
                     generation: 3,
+                    certificate: vec![3; 32],
                     number: 5,
                     next_update: 1_800_003_600,
                     revoked: vec![vec![7], vec![9]],

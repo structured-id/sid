@@ -79,14 +79,15 @@ async fn archive(conn: &mut sqlx::SqliteConnection) -> Result<PlatformCaArchive,
             listed_in: unsigned(listed_in, "revision")?,
         });
     }
-    let rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-        "SELECT generation, number, next_update FROM platform_ca_status ORDER BY generation",
+    let rows: Vec<(i64, Vec<u8>, i64, i64)> = sqlx::query_as(
+        "SELECT generation, certificate, number, next_update FROM platform_ca_status
+         ORDER BY generation",
     )
     .fetch_all(&mut *conn)
     .await
     .map_err(storage("read the status"))?;
     let mut status = Vec::with_capacity(rows.len());
-    for (generation, number, next_update) in rows {
+    for (generation, certificate, number, next_update) in rows {
         let revoked = sqlx::query_scalar(
             "SELECT serial FROM platform_ca_revoked WHERE generation = ? ORDER BY serial",
         )
@@ -96,6 +97,7 @@ async fn archive(conn: &mut sqlx::SqliteConnection) -> Result<PlatformCaArchive,
         .map_err(storage("read the revocations"))?;
         status.push(GenerationStatus {
             generation: unsigned(generation, "generation")?,
+            certificate,
             number: unsigned(number, "CRL number")?,
             next_update,
             revoked,
@@ -244,10 +246,11 @@ impl PlatformCaStore for SqliteBackend {
         for crl in &moved.status {
             let generation = i64::from(crl.generation);
             sqlx::query(
-                "INSERT INTO platform_ca_status (generation, number, next_update)
-                 VALUES (?, ?, ?)",
+                "INSERT INTO platform_ca_status (generation, certificate, number, next_update)
+                 VALUES (?, ?, ?, ?)",
             )
             .bind(generation)
+            .bind(crl.certificate.as_slice())
             .bind(stored(crl.number, "CRL number")?)
             .bind(crl.next_update)
             .execute(&mut *tx)
@@ -297,6 +300,18 @@ impl PlatformCaStore for SqliteBackend {
             if certificate.is_some_and(|held| held != generation.certificate) {
                 return Err(PlatformCaError::Conflict(generation.generation));
             }
+            // Status recorded before the generation was held names the
+            // certificate it was authenticated under.
+            let status: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT certificate FROM platform_ca_status WHERE generation = ?",
+            )
+            .bind(i64::from(generation.generation))
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage("read a generation's status"))?;
+            if status.is_some_and(|named| named != generation.certificate) {
+                return Err(PlatformCaError::Conflict(generation.generation));
+            }
         }
         sqlx::query(
             "INSERT INTO platform_ca_set (id, revision, issued_at, next_update)
@@ -341,16 +356,37 @@ impl PlatformCaStore for SqliteBackend {
         ctx: MutationContext,
     ) -> Result<(), PlatformCaError> {
         let mut tx = self.begin_write().await?;
+        // Every list is checked before anything is written: one authenticated
+        // under another certificate than the generation's records nothing.
+        for crl in status {
+            let generation = i64::from(crl.generation);
+            let held: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT certificate FROM platform_ca_generations WHERE generation = ?
+                 UNION ALL
+                 SELECT certificate FROM platform_ca_status WHERE generation = ?",
+            )
+            .bind(generation)
+            .bind(generation)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage("read a generation's certificate"))?
+            .into_iter()
+            .find(|held| *held != crl.certificate);
+            if held.is_some() {
+                return Err(PlatformCaError::Conflict(crl.generation));
+            }
+        }
         for crl in status {
             let generation = i64::from(crl.generation);
             sqlx::query(
-                "INSERT INTO platform_ca_status (generation, number, next_update)
-                 VALUES (?, ?, ?)
+                "INSERT INTO platform_ca_status (generation, certificate, number, next_update)
+                 VALUES (?, ?, ?, ?)
                  ON CONFLICT (generation) DO UPDATE SET number = excluded.number,
                      next_update = excluded.next_update
                  WHERE platform_ca_status.number <= excluded.number",
             )
             .bind(generation)
+            .bind(crl.certificate.as_slice())
             .bind(stored(crl.number, "CRL number")?)
             .bind(crl.next_update)
             .execute(&mut *tx)

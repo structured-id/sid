@@ -28,9 +28,12 @@ fn unknown() -> AnchorStatus {
     AnchorStatus::default()
 }
 
+/// A CRL of generation `generation`, authenticated under that generation's
+/// certificate as [`ca`] writes it.
 fn status(generation: u32, number: u64, next_update: i64, revoked: &[&[u8]]) -> GenerationStatus {
     GenerationStatus {
         generation,
+        certificate: vec![generation as u8; 32],
         number,
         next_update,
         revoked: revoked.iter().map(|serial| serial.to_vec()).collect(),
@@ -270,6 +273,52 @@ pub async fn a_revocation_seen_once_stays(backend: &dyn PlatformCaStore) {
         .await
         .unwrap();
     assert_eq!(store.held_platform_cas(NOW).await.unwrap(), held);
+}
+
+/// A generation number means something only with its certificate: a list
+/// authenticated under another certificate than the held generation's is
+/// refused and records nothing, the other lists of its write included; and a
+/// set holding a generation whose recorded status was authenticated under
+/// another certificate holds nothing. Bug prevented: a refused set's list
+/// adding revocations to, or moving the freshness of, the genuine
+/// generation it reused the number of.
+pub async fn status_belongs_to_its_generation_certificate(backend: &dyn PlatformCaStore) {
+    let store = &Audited(backend);
+    store
+        .apply_platform_cas(&set(1, vec![ca(1, PlatformCaState::Active, None)]))
+        .await
+        .unwrap();
+    let before = store.held_platform_cas(NOW).await.unwrap();
+    let mut foreign = status(1, 50, NOW + 9000, &[&[7]]);
+    foreign.certificate = vec![0xee; 32];
+    let refused = store
+        .record_platform_ca_status(&[status(1, 3, NOW + 600, &[&[6]]), foreign])
+        .await;
+    assert!(
+        matches!(refused, Err(PlatformCaError::Conflict(1))),
+        "{refused:?}"
+    );
+    assert_eq!(store.held_platform_cas(NOW).await.unwrap(), before);
+
+    // Status recorded for a generation not held yet binds its certificate:
+    // a set bringing that number with another certificate holds nothing.
+    let mut early = status(2, 1, NOW + 600, &[&[9]]);
+    early.certificate = vec![0xdd; 32];
+    store.record_platform_ca_status(&[early]).await.unwrap();
+    let refused = store
+        .apply_platform_cas(&set(
+            2,
+            vec![
+                ca(2, PlatformCaState::Active, None),
+                ca(1, PlatformCaState::Active, None),
+            ],
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(PlatformCaError::Conflict(2))),
+        "{refused:?}"
+    );
+    assert_eq!(store.held_platform_cas(NOW).await.unwrap(), before);
 }
 
 /// One generation's CRL says nothing of another's certificates: each anchor

@@ -46,6 +46,24 @@ type GenerationRow = (i64, Vec<u8>, i16, Option<i64>, i64);
 /// number, the next update and the revoked serials.
 type IssuerStatusRow = (Vec<u8>, i64, i64, Vec<Vec<u8>>);
 
+/// One generation's stored status row: its number, the certificate its list
+/// was authenticated under, the list number, the next update and the
+/// revoked serials.
+type GenerationStatusRow = (i64, Vec<u8>, i64, i64, Vec<Vec<u8>>);
+
+/// Hold every write of generations and their status in turn until `tx`
+/// ends: each checks the certificate the other wrote, so two of them never
+/// both pass their check for one generation with different certificates.
+async fn serialize_generation_writes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PlatformCaError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sid.platform_ca.generations'))")
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("serialize generation writes"))?;
+    Ok(())
+}
+
 /// Everything the store holds, as `conn`'s transaction sees it.
 async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, PlatformCaError> {
     let set: Option<(i64, i64, i64)> =
@@ -83,8 +101,8 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
             listed_in: unsigned(listed_in, "revision")?,
         });
     }
-    let rows: Vec<(i64, i64, i64, Vec<Vec<u8>>)> = sqlx::query_as(
-        "SELECT c.generation, c.number, c.next_update,
+    let rows: Vec<GenerationStatusRow> = sqlx::query_as(
+        "SELECT c.generation, c.certificate, c.number, c.next_update,
                 COALESCE((SELECT array_agg(r.serial ORDER BY r.serial)
                           FROM platform_ca_revoked r
                           WHERE r.generation = c.generation), '{}')
@@ -94,9 +112,10 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
     .await
     .map_err(storage("read the status"))?;
     let mut status = Vec::with_capacity(rows.len());
-    for (generation, number, next_update, revoked) in rows {
+    for (generation, certificate, number, next_update, revoked) in rows {
         status.push(GenerationStatus {
             generation: unsigned(generation, "generation")?,
+            certificate,
             number: unsigned(number, "CRL number")?,
             next_update,
             revoked,
@@ -261,10 +280,11 @@ impl PlatformCaStore for PostgresBackend {
         for crl in &moved.status {
             let generation = i64::from(crl.generation);
             sqlx::query(
-                "INSERT INTO platform_ca_status (generation, number, next_update)
-                 VALUES ($1, $2, $3)",
+                "INSERT INTO platform_ca_status (generation, certificate, number, next_update)
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(generation)
+            .bind(crl.certificate.as_slice())
             .bind(stored(crl.number, "CRL number")?)
             .bind(crl.next_update)
             .execute(&mut *tx)
@@ -298,6 +318,7 @@ impl PlatformCaStore for PostgresBackend {
     ) -> Result<Applied, PlatformCaError> {
         let revision = stored(set.revision, "revision")?;
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        serialize_generation_writes(&mut tx).await?;
         let held = sqlx::query(
             "INSERT INTO platform_ca_set (id, revision, issued_at, next_update)
              VALUES (1, $1, $2, $3)
@@ -325,6 +346,18 @@ impl PlatformCaStore for PostgresBackend {
             .map_err(storage("read a generation"))?;
             // Dropping the transaction rolls the set's row back with it.
             if certificate.is_some_and(|held| held != generation.certificate) {
+                return Err(PlatformCaError::Conflict(generation.generation));
+            }
+            // Status recorded before the generation was held names the
+            // certificate it was authenticated under.
+            let status: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT certificate FROM platform_ca_status WHERE generation = $1",
+            )
+            .bind(number)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage("read a generation's status"))?;
+            if status.is_some_and(|named| named != generation.certificate) {
                 return Err(PlatformCaError::Conflict(generation.generation));
             }
             // Listed now in any case; the state moves only to a narrower
@@ -359,16 +392,35 @@ impl PlatformCaStore for PostgresBackend {
         ctx: MutationContext,
     ) -> Result<(), PlatformCaError> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        serialize_generation_writes(&mut tx).await?;
+        // Every list is checked before anything is written: one authenticated
+        // under another certificate than the generation's records nothing.
+        for crl in status {
+            let generation = i64::from(crl.generation);
+            let named: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT certificate FROM platform_ca_generations WHERE generation = $1
+                 UNION ALL
+                 SELECT certificate FROM platform_ca_status WHERE generation = $1",
+            )
+            .bind(generation)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage("read a generation's certificate"))?;
+            if named.iter().any(|named| *named != crl.certificate) {
+                return Err(PlatformCaError::Conflict(crl.generation));
+            }
+        }
         for crl in status {
             let generation = i64::from(crl.generation);
             sqlx::query(
-                "INSERT INTO platform_ca_status (generation, number, next_update)
-                 VALUES ($1, $2, $3)
+                "INSERT INTO platform_ca_status (generation, certificate, number, next_update)
+                 VALUES ($1, $2, $3, $4)
                  ON CONFLICT (generation) DO UPDATE SET number = EXCLUDED.number,
                      next_update = EXCLUDED.next_update
                  WHERE platform_ca_status.number <= EXCLUDED.number",
             )
             .bind(generation)
+            .bind(crl.certificate.as_slice())
             .bind(stored(crl.number, "CRL number")?)
             .bind(crl.next_update)
             .execute(&mut *tx)

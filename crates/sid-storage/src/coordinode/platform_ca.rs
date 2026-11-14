@@ -104,12 +104,13 @@ fn archive(tx: &Statements<'_>) -> SidResult<PlatformCaArchive> {
     let mut status = Vec::new();
     for row in tx.run(
         "MATCH (c:SidPlatformCaStatus)
-         RETURN c.generation AS generation, c.number AS number,
+         RETURN c.generation AS generation, c.certificate AS certificate, c.number AS number,
                 c.next_update AS next_update, c.revoked AS revoked",
         Params::default(),
     )? {
         status.push(GenerationStatus {
             generation: unsigned(get_int(&row, "generation")?, "generation")?,
+            certificate: get_bytes(&row, "certificate")?,
             number: unsigned(get_int(&row, "number")?, "CRL number")?,
             next_update: get_int(&row, "next_update")?,
             // Written in byte order by every writer.
@@ -196,9 +197,10 @@ fn import(
         revoked.sort_unstable();
         revoked.dedup();
         tx.create_absent(
-            "CREATE (c:SidPlatformCaStatus {generation: $generation, number: $number,
-                 next_update: $next_update, revoked: $revoked})",
+            "CREATE (c:SidPlatformCaStatus {generation: $generation, certificate: $certificate,
+                 number: $number, next_update: $next_update, revoked: $revoked})",
             generation(crl.generation)
+                .with("certificate", Value::Binary(crl.certificate.clone()))
                 .with("number", Value::Int(stored(crl.number, "CRL number")?))
                 .with("next_update", Value::Int(crl.next_update))
                 .with("revoked", serials(&revoked)),
@@ -307,6 +309,11 @@ fn apply(
             }
             None => None,
         };
+        // Status recorded before the generation was held names the
+        // certificate it was authenticated under.
+        if names_another(tx, listed.generation, &listed.certificate)? {
+            return Ok(Decision::Abandon(Outcome::Conflict(listed.generation)));
+        }
         known.push(state);
     }
     for (listed, known) in set.generations.iter().zip(known) {
@@ -359,6 +366,24 @@ fn apply(
     Ok(Decision::Commit(Outcome::Applied(Applied::Current)))
 }
 
+/// Whether generation `number` is held with, or has status recorded under,
+/// another certificate than `certificate`.
+fn names_another(tx: &Statements<'_>, number: u32, certificate: &[u8]) -> SidResult<bool> {
+    for query in [
+        "MATCH (g:SidPlatformCaGeneration) WHERE g.generation = $generation
+         RETURN g.certificate AS certificate",
+        "MATCH (c:SidPlatformCaStatus) WHERE c.generation = $generation
+         RETURN c.certificate AS certificate",
+    ] {
+        for row in tx.run(query, generation(number))? {
+            if get_bytes(&row, "certificate")? != certificate {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Hold one generation's authenticated CRL: its number and time when not
 /// older than the held one, and every serial it revokes beside those held.
 fn record(tx: &Statements<'_>, crl: &GenerationStatus) -> SidResult<()> {
@@ -374,9 +399,10 @@ fn record(tx: &Statements<'_>, crl: &GenerationStatus) -> SidResult<()> {
         revoked.sort_unstable();
         revoked.dedup();
         tx.create_absent(
-            "CREATE (c:SidPlatformCaStatus {generation: $generation, number: $number,
-                 next_update: $next_update, revoked: $revoked})",
+            "CREATE (c:SidPlatformCaStatus {generation: $generation, certificate: $certificate,
+                 number: $number, next_update: $next_update, revoked: $revoked})",
             generation(crl.generation)
+                .with("certificate", Value::Binary(crl.certificate.clone()))
                 .with("number", Value::Int(number))
                 .with("next_update", Value::Int(crl.next_update))
                 .with("revoked", serials(&revoked)),
@@ -556,15 +582,27 @@ impl PlatformCaStore for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<(), PlatformCaError> {
         let status = status.to_vec();
-        self.transaction(move |tx| {
-            for crl in &status {
-                record(tx, crl)?;
-            }
-            finalize(tx, CHAIN, ctx.clone())?;
-            Ok(Decision::Commit(()))
-        })
-        .await?;
-        Ok(())
+        let conflict = self
+            .transaction(move |tx| {
+                // Every list is checked before anything is written: one
+                // authenticated under another certificate than the
+                // generation's records nothing.
+                for crl in &status {
+                    if names_another(tx, crl.generation, &crl.certificate)? {
+                        return Ok(Decision::Abandon(Some(crl.generation)));
+                    }
+                }
+                for crl in &status {
+                    record(tx, crl)?;
+                }
+                finalize(tx, CHAIN, ctx.clone())?;
+                Ok(Decision::Commit(None))
+            })
+            .await?;
+        match conflict {
+            Some(generation) => Err(PlatformCaError::Conflict(generation)),
+            None => Ok(()),
+        }
     }
 
     async fn held_platform_cas(&self, now: i64) -> Result<HeldAnchors, PlatformCaError> {
