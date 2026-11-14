@@ -127,6 +127,13 @@ pub struct CeComponents {
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
+    /// The registered connections federated sign-ins arrive through.
+    pub entry_connections: Arc<sid::entry_connections::EntryConnections>,
+    /// Accepts the Binding Passport and presentation of an identity signed
+    /// in through a connection: the classical recipient over the
+    /// installation's store, or, set by the host before serving, the one
+    /// with the signature checks its edition adds.
+    pub identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
     /// Emails requested sign-in links, when magic links are enabled.
     pub magic_link_mail: Option<Arc<sid::auth_mail::MagicLinkMail>>,
     /// Emails requested sign-in codes.
@@ -892,6 +899,13 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         auth_svc.clone(),
     ));
 
+    let entry_connections = Arc::new(sid::entry_connections::EntryConnections::new(
+        storage.clone(),
+        key_manager.clone(),
+    ));
+    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> =
+        Arc::new(classical_recipient(storage.clone()));
+
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
         feature_flags.clone(),
@@ -1072,7 +1086,29 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         security_svc,
         account_svc,
         upstream_svc,
+        entry_connections,
+        identities,
     })
+}
+
+/// The recipient a self-managed installation verifies presented identities
+/// with: classical signature checks, under the platform CA set held in
+/// `storage`. The set is refreshed from the publication the installation
+/// configured, if it configured one, with the platform's discovery records
+/// read beside it; without a usable resolver the HTTPS step alone refreshes.
+pub fn classical_recipient(storage: Arc<dyn StorageBackend>) -> sid_fed::recipient::Recipient {
+    use sid_infra::platform_ca::PublishedPlatformCas;
+    use sid_infra::platform_ca::discovery::DiscoveryResolver;
+    let mut source = PublishedPlatformCas::new();
+    match DiscoveryResolver::new() {
+        Ok(discovery) => source = source.with_discovery(Arc::new(discovery)),
+        Err(reason) => tracing::warn!(
+            %reason,
+            "no DNS resolver for the platform CA discovery records; the HTTPS publication alone refreshes the set"
+        ),
+    }
+    sid_fed::recipient::Recipient::new(storage, sid_fed::recipient::ClassicalVerdict)
+        .with_source(Arc::new(source))
 }
 
 /// Make the installation's JWT key pair if neither file exists; `true` when

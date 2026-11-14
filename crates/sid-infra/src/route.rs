@@ -100,9 +100,28 @@ pub const PENDING_COMPLETING_METHOD: &str = "/sid.v1.authn.AuthService/VerifyTot
 /// `/i/{handle}`) receives and sets: authorization reads the session for
 /// single sign-on, end-session reads and clears it, the sign-in ceremonies
 /// that complete a session set it, and a second factor completing a pending
-/// sign-in reads that context first. Discovery, keys, token, UserInfo,
-/// introspection, revocation and every other method use no cookie.
+/// sign-in reads that context first. A federated entry's start sets the
+/// correlation cookie of the entry it starts and reads none; its return
+/// reads and clears that cookie, may set a further entry's and sets the
+/// session it admits. Discovery, keys, token, UserInfo, introspection,
+/// revocation and every other method use no cookie.
 pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
+    use sid_core::models::entry_connection::EntryRoute;
+    match EntryRoute::of(endpoint) {
+        Some(EntryRoute::Start(_)) => {
+            return IssuerCookies {
+                session: None,
+                entry: Some(EntryCookieUse::Start),
+            };
+        }
+        Some(EntryRoute::Callback(_)) => {
+            return IssuerCookies {
+                session: Some(SessionCookieUse::Issue),
+                entry: Some(EntryCookieUse::Return),
+            };
+        }
+        None => {}
+    }
     let session = match endpoint {
         "/oauth2/authorize" => Some(SessionCookieUse::Read),
         "/oauth2/end-session" => Some(SessionCookieUse::ReadAndClear),

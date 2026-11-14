@@ -66,6 +66,10 @@ fn each_endpoint_gets_its_own_cookie_capability() {
         "/api/sid.v1.IdentityService/GetCurrentProfile",
         "/apix/sid.v1.authn.AuthService/OpaqueLoginFinish",
         "/auth/federation/callback",
+        "/auth/federation/start",
+        "/auth/federation/connections",
+        "/auth/federation/0123456789abcdef0123456789abcdef/callback/x",
+        "/auth/federation/not-a-handle/callback",
     ] {
         assert_eq!(
             issuer_cookies(endpoint),
@@ -73,6 +77,30 @@ fn each_endpoint_gets_its_own_cookie_capability() {
             "{endpoint}"
         );
     }
+}
+
+/// A federated entry's start sets the correlation cookie of the entry it
+/// starts and reads nothing; its return reads that cookie and sets the
+/// session it admits. Bug prevented: an edge that drops the correlation
+/// cookie on the way to the callback, so no entry ever completes, or one
+/// that hands the session cookie to the start.
+#[test]
+fn a_federated_entry_gets_its_correlation_cookie() {
+    let connection = "0123456789abcdef0123456789abcdef";
+    assert_eq!(
+        issuer_cookies(&format!("/auth/federation/{connection}/start")),
+        IssuerCookies {
+            session: None,
+            entry: Some(EntryCookieUse::Start),
+        }
+    );
+    assert_eq!(
+        issuer_cookies(&format!("/auth/federation/{connection}/callback")),
+        IssuerCookies {
+            session: Some(SessionCookieUse::Issue),
+            entry: Some(EntryCookieUse::Return),
+        }
+    );
 }
 
 /// The capability's directions: what reads the session receives it, what
