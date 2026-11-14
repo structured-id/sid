@@ -311,7 +311,6 @@ pub fn verify_admission(
     at: SystemTime,
 ) -> Result<VerifiedAdmission, AdmissionError> {
     let envelope = Envelope::parse_typed(jws, ADMISSION_TYP)?;
-    let proof = envelope.required(ES256)?;
     let admission = Admission::read(&envelope.payload)?;
     let participant = accept_participant(
         policy,
@@ -321,34 +320,59 @@ pub fn verify_admission(
         anchors,
         at,
     )?;
-    verify_es256(
-        &admission.certificate,
-        &envelope.signing_input(proof),
-        &proof.signature,
-    )?;
-    if admission.recipient_org != participant.participant.organization {
-        return Err(AdmissionError::Scope("organization"));
-    }
-    if admission.site != participant.participant.site {
-        return Err(AdmissionError::Scope("site"));
-    }
-    // Exactly a listed entry: the same host with another port or path is
-    // another site's.
-    if !participant.participant.admits(&admission.mount) {
-        return Err(AdmissionError::Scope("entry mounts"));
-    }
-    let now = at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .ok_or(AdmissionError::Time)?;
-    if now < admission.not_before || now > admission.not_after {
-        return Err(AdmissionError::Time);
-    }
+    verify_site_signature(&envelope, &admission.certificate)?;
+    admission.within(&participant.participant, at)?;
     Ok(VerifiedAdmission {
         admission,
         participant,
     })
+}
+
+impl Admission {
+    /// The statement speaks for exactly the organization and site
+    /// `participant` enrolls, at an entry its certificate lists, and `at` is
+    /// within its time. `participant` is the one read from this statement's
+    /// certificate on an accepted path.
+    pub fn within(
+        &self,
+        participant: &crate::participant::Participant,
+        at: SystemTime,
+    ) -> Result<(), AdmissionError> {
+        if self.recipient_org != participant.organization {
+            return Err(AdmissionError::Scope("organization"));
+        }
+        if self.site != participant.site {
+            return Err(AdmissionError::Scope("site"));
+        }
+        // Exactly a listed entry: the same host with another port or path
+        // is another site's.
+        if !participant.admits(&self.mount) {
+            return Err(AdmissionError::Scope("entry mounts"));
+        }
+        let now = at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+            .ok_or(AdmissionError::Time)?;
+        if now < self.not_before || now > self.not_after {
+            return Err(AdmissionError::Time);
+        }
+        Ok(())
+    }
+}
+
+/// The site's ES256 signature over the statement of `envelope` verifies
+/// with the key of its participant `certificate` (DER).
+pub fn verify_site_signature(
+    envelope: &Envelope,
+    certificate: &[u8],
+) -> Result<(), AdmissionError> {
+    let proof = envelope.required(ES256)?;
+    Ok(verify_es256(
+        certificate,
+        &envelope.signing_input(proof),
+        &proof.signature,
+    )?)
 }
 
 #[cfg(test)]

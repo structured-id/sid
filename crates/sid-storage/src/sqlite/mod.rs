@@ -43,6 +43,7 @@ mod operation;
 mod password_history;
 mod platform_ca;
 mod principal_transfer;
+mod site_enrollment;
 pub use password_history::SqliteHistoryKeyStore;
 mod profile;
 mod project;
@@ -1830,6 +1831,20 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_login_settings_impl(settings, ctx).await
+    }
+
+    async fn site_enrollment(&self) -> SidResult<Option<sid_core::models::SiteEnrollment>> {
+        self.site_enrollment_impl().await
+    }
+
+    async fn set_site_enrollment(
+        &self,
+        enrollment: &sid_core::models::SiteEnrollment,
+        expected: Option<&sid_core::models::SiteEnrollment>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_site_enrollment_impl(enrollment, expected, ctx)
+            .await
     }
 
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {

@@ -1057,3 +1057,149 @@ async fn an_acceptance_is_kept_no_longer_than_its_status() {
         Err(RecipientError::PassportStatusUnavailable)
     ));
 }
+
+const SITE: u8 = 5;
+const SITE_SERIAL: u32 = 11;
+const MOUNT: &str = "https://hosted.sid.example.com/i/0123456789abcdef0123456789abcdef";
+
+fn site() -> Uuid {
+    Uuid::from_u128(0x0192_f3a4_0000_7000_8000_0000_0000_0c0c)
+}
+
+/// The participant certificate of the recipient organization's site, under
+/// the platform intermediate.
+fn enrolled() -> Vec<u8> {
+    use der::oid::AssociatedOid;
+    use x509_cert::ext::pkix::{BasicConstraints, SubjectAltName};
+    let mounts = [crate::participant::Mount::parse(MOUNT).unwrap()];
+    Stated {
+        subject: crate::participant::participant_subject(recipient_org(), site()).unwrap(),
+        serial: SITE_SERIAL,
+        validity: crate::test_certificates::current(),
+        extensions: vec![
+            crate::test_certificates::extension(
+                BasicConstraints::OID,
+                true,
+                &BasicConstraints {
+                    ca: false,
+                    path_len_constraint: None,
+                },
+            ),
+            signs(),
+            purposes(&[DEVELOPMENT_PURPOSES.federation_participant]),
+            crate::test_certificates::extension(
+                SubjectAltName::OID,
+                false,
+                &crate::participant::mounts_name(&mounts).unwrap(),
+            ),
+        ],
+    }
+    .signed(&key(SITE), &name(INTERMEDIATE_NAME), &key(INTERMEDIATE))
+}
+
+/// The site's statement admitting the source organization, signed by the
+/// key of `seed`.
+fn admission_by(seed: u8) -> Vec<u8> {
+    let now = epoch(SystemTime::now());
+    let admission = Admission {
+        recipient_org: recipient_org(),
+        site: site(),
+        mount: crate::participant::Mount::parse(MOUNT).unwrap(),
+        revision: 4,
+        allow_personal_profiles: false,
+        allow_foreign_corporate_profiles: true,
+        admitted_sources: vec![source()],
+        not_before: now - 60,
+        not_after: now + 3600,
+        certificate: enrolled(),
+        chain: vec![],
+    };
+    let signer: SigningKey = key(seed);
+    crate::admission::sealed(&admission.payload(), |input| {
+        let signature: p256::ecdsa::Signature = signer.sign(input);
+        Ok::<_, std::convert::Infallible>(signature.to_bytes().into())
+    })
+    .unwrap()
+}
+
+/// An enrolled site and its statement are accepted under the held set as
+/// the policy says of withdrawals: undecided without the generation's list
+/// under the default policy, accepted under it once the list is held or
+/// under a policy that asks for none, and refused under every policy once
+/// the generation withdrew the site's certificate. A statement another key
+/// signed is refused whatever is held. Bug prevented: a site whose
+/// enrollment the platform withdrew still naming where people are sent, or
+/// a statement taken on the certificate alone without the site's signature.
+#[tokio::test]
+async fn an_enrolled_site_stands_by_its_generations_list() {
+    let recipient = recipient().await;
+    let default = StatusPolicy::default();
+    let now = SystemTime::now;
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .await
+        .unwrap();
+    let undecided = recipient
+        .accept_participant(&enrolled(), &[], &default, now())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        undecided,
+        RecipientError::Status(StatusRefusal::Unavailable)
+    ));
+    assert!(undecided.undecided());
+    let offline = recipient
+        .accept_participant(&enrolled(), &[], &RELAXED, now())
+        .await
+        .unwrap();
+    assert_eq!(offline.participant.organization, recipient_org());
+    assert_eq!(offline.participant.site, site());
+
+    recipient
+        .record_platform_cas(&set(
+            2,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
+    let verified = recipient
+        .accept_admission(&admission_by(SITE), &default, now())
+        .await
+        .unwrap();
+    assert!(verified.admission.admits_source(source()));
+    assert!(!verified.admission.admits_source(recipient_org()));
+    assert_eq!(verified.participant.participant.site, site());
+    let forged = recipient
+        .accept_admission(&admission_by(HOLDER), &default, now())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forged,
+        RecipientError::Admission(crate::admission::AdmissionError::Envelope(
+            PresentationError::Signature
+        ))
+    ));
+    assert!(!forged.undecided());
+
+    // The generation withdraws the site's certificate.
+    recipient
+        .record_platform_cas(&set(
+            3,
+            PlatformCaState::Active,
+            Some(platform_list(2, &[SITE_SERIAL])),
+        ))
+        .await
+        .unwrap();
+    for policy in [&STRICT, &default, &RELAXED] {
+        let refused = recipient
+            .accept_admission(&admission_by(SITE), policy, now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            RecipientError::Status(StatusRefusal::Revoked)
+        ));
+        assert!(!refused.undecided());
+    }
+}

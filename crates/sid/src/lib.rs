@@ -17,6 +17,7 @@ pub mod enrollment;
 pub mod entry_connections;
 pub mod federated_admission;
 pub mod federated_record;
+pub mod federation_site;
 pub mod flows;
 pub mod identity;
 pub mod installation;

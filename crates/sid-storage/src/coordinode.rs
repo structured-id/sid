@@ -53,6 +53,7 @@ mod schema;
 mod scim;
 mod session;
 mod signals;
+mod site_enrollment;
 mod work;
 
 #[cfg(test)]

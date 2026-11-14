@@ -44,6 +44,7 @@ pub struct MockStorageInner {
     access_requests: HashMap<sid_core::models::AccessRequestId, sid_core::models::AccessRequest>,
     email_provider: Option<sid_core::models::EmailProviderConfig>,
     login_settings: Option<sid_core::models::LoginSettings>,
+    site_enrollment: Option<sid_core::models::SiteEnrollment>,
     machine_users: HashMap<MachineUserId, sid_core::models::MachineUser>,
     machine_credentials: Vec<sid_core::models::MachineUserCredential>,
     provisioning_connectors: HashMap<ProvisioningConnectorId, ProvisioningConnector>,
@@ -6171,6 +6172,24 @@ impl StorageBackend for MockStorage {
         _: MutationContext,
     ) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn site_enrollment(&self) -> SidResult<Option<sid_core::models::SiteEnrollment>> {
+        Ok(self.inner.lock().unwrap().site_enrollment.clone())
+    }
+    async fn set_site_enrollment(
+        &self,
+        enrollment: &sid_core::models::SiteEnrollment,
+        expected: Option<&sid_core::models::SiteEnrollment>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        enrollment.check()?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.site_enrollment.as_ref() != expected {
+            return Ok(false);
+        }
+        inner.site_enrollment = Some(enrollment.clone());
+        inner.owe(&ctx)?;
+        Ok(true)
     }
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         unimplemented!("instance transfer is tested against the real backends")

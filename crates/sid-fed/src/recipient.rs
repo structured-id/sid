@@ -54,11 +54,13 @@ use sid_plugin::platform_ca::{
 use uuid::Uuid;
 use x509_cert::Certificate;
 
+use crate::admission::{ADMISSION_TYP, Admission, VerifiedAdmission, verify_site_signature};
 use crate::admitted_paths::{self, AnchorView};
 use crate::allocation::ContextAllocation;
 use crate::binding_passport::{Passport, PassportProfile};
 use crate::passport_path::{
-    Classical, PathError, PathPolicy, Trust, ValidatedPath, accept_organization_ca, accept_passport,
+    AcceptedParticipant, Classical, PathError, PathPolicy, Trust, ValidatedPath,
+    accept_organization_ca, accept_participant, accept_passport,
 };
 use crate::presentation::{ES256, Envelope, Expected, PresentationError, Statement, verify_es256};
 use crate::purpose::{IssuerRole, PurposeProfile};
@@ -189,6 +191,10 @@ pub enum RecipientError {
     /// request: its envelope, the holder's proof or what it states.
     #[error(transparent)]
     Presentation(PresentationError),
+    /// A site's statement of whom it admits is not that site's own: its
+    /// envelope, the site's signature, its scope or its time.
+    #[error(transparent)]
+    Admission(crate::admission::AdmissionError),
     /// A published revocation list is not its issuer's.
     #[error(transparent)]
     List(StatusError),
@@ -361,6 +367,25 @@ pub trait PresentedIdentities: Send + Sync {
         policy: &StatusPolicy,
         at: SystemTime,
     ) -> Result<Accepted, RecipientError>;
+
+    /// The enrolled site of the participant `certificate`, accepted under
+    /// the installation's `policy`; see [`Recipient::accept_participant`].
+    async fn accept_participant(
+        &self,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<AcceptedParticipant, RecipientError>;
+
+    /// The statement `jws` of whom a site admits, accepted as that site's
+    /// own; see [`Recipient::accept_admission`].
+    async fn accept_admission(
+        &self,
+        jws: &[u8],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<VerifiedAdmission, RecipientError>;
 }
 
 /// The recipient side of one installation over its store.
@@ -847,6 +872,76 @@ impl<V: Verdict> Recipient<V> {
         Ok(())
     }
 
+    /// Accepts the participant certificate `certificate` (DER) of an
+    /// enrolled site, with the `chain` presented above it, at `at`: on a
+    /// complete path to a platform intermediate the held set admits, issued
+    /// by that intermediate itself, in the participant profile, and not
+    /// withdrawn by the generation that issued it. What must be known of
+    /// withdrawals is `policy`'s, as for a passport the platform issued; a
+    /// withdrawal seen refuses under every policy.
+    pub async fn accept_participant(
+        &self,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<AcceptedParticipant, RecipientError> {
+        let now = seconds(at)?;
+        let view = self.view(now).await?;
+        if view.held.anchors.is_empty() {
+            return Err(RecipientError::Path(PathError::NoAnchor));
+        }
+        let allocation = allocation_of(&view.held.anchors, IssuerRole::PlatformIntermediate)?
+            .ok_or(RecipientError::Invalid {
+                field: "platform CA set",
+                reason: "its generations name no single allocation".into(),
+            })?;
+        let accepted = accept_participant(
+            &self.verdict.path(),
+            &PurposeProfile::of(allocation).map_err(no_profile)?,
+            certificate,
+            chain,
+            &view.held.anchors,
+            at,
+        )
+        .map_err(RecipientError::Path)?;
+        authorities_standing(&view.held, &accepted.path, None, policy.authorities, now)?;
+        let unknown = AnchorStatus::default();
+        let status = anchor_status(&view.held, &accepted.path).unwrap_or(&unknown);
+        standing(status, &serial_of(certificate)?, policy.issuer, now)
+            .map_err(RecipientError::Status)?;
+        Ok(accepted)
+    }
+
+    /// Accepts the statement `jws` of whom a site admits as that site's own
+    /// at `at`: its participant certificate as
+    /// [`Self::accept_participant`] accepts one, the site's signature with
+    /// that certificate's key, and that it speaks for exactly that
+    /// organization and site at an entry the certificate lists, within its
+    /// time. Which revision is the newest seen is the caller's.
+    pub async fn accept_admission(
+        &self,
+        jws: &[u8],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<VerifiedAdmission, RecipientError> {
+        let envelope = Envelope::parse_typed(jws, ADMISSION_TYP)
+            .map_err(|e| RecipientError::Admission(e.into()))?;
+        let admission = Admission::read(&envelope.payload).map_err(RecipientError::Admission)?;
+        let participant = self
+            .accept_participant(&admission.certificate, &admission.chain, policy, at)
+            .await?;
+        verify_site_signature(&envelope, &admission.certificate)
+            .map_err(RecipientError::Admission)?;
+        admission
+            .within(&participant.participant, at)
+            .map_err(RecipientError::Admission)?;
+        Ok(VerifiedAdmission {
+            admission,
+            participant,
+        })
+    }
+
     /// Drop every path accepted so far: the caller changed status an
     /// acceptance may have rested on outside this recipient (its own
     /// authority revoked a passport). The next acceptance validates again.
@@ -915,6 +1010,25 @@ impl<V: Verdict> PresentedIdentities for Recipient<V> {
         at: SystemTime,
     ) -> Result<Accepted, RecipientError> {
         Recipient::accept_presentation(self, jws, expected, policy, at).await
+    }
+
+    async fn accept_participant(
+        &self,
+        certificate: &[u8],
+        chain: &[Vec<u8>],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<AcceptedParticipant, RecipientError> {
+        Recipient::accept_participant(self, certificate, chain, policy, at).await
+    }
+
+    async fn accept_admission(
+        &self,
+        jws: &[u8],
+        policy: &StatusPolicy,
+        at: SystemTime,
+    ) -> Result<VerifiedAdmission, RecipientError> {
+        Recipient::accept_admission(self, jws, policy, at).await
     }
 }
 

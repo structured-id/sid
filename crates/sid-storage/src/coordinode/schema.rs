@@ -156,6 +156,7 @@ const UNIQUE: &[(&str, &str, &str)] = &[
     ),
     ("sid_login_policy_epoch", "SidLoginPolicyEpoch", "id"),
     ("sid_login_settings", "SidLoginSettings", "scope"),
+    ("sid_site_enrollment", "SidSiteEnrollment", "scope"),
     ("sid_platform_ca_set", "SidPlatformCaSet", "id"),
     (
         "sid_platform_ca_generation",

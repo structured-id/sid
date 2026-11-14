@@ -916,6 +916,26 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// The installation's enrollment as a site of the federation; `None`
+    /// until the certificate the platform issued for its site was held.
+    async fn site_enrollment(&self) -> Result<Option<sid_core::models::SiteEnrollment>>;
+
+    /// Hold `enrollment` as the installation's site enrollment in place of
+    /// `expected`, the one the caller read (`None`: none held), with its
+    /// audit entry in the same transaction. `false`, with nothing written,
+    /// when the held enrollment is no longer `expected`: of two concurrent
+    /// renewals one is held and the other reads again. An enrollment outside
+    /// [`sid_core::models::SiteEnrollment::check`] is refused
+    /// (`Error::Validation`). Login settings and their epoch are records of
+    /// their own and are not touched: a renewed certificate is not a change
+    /// of whom the installation admits.
+    async fn set_site_enrollment(
+        &self,
+        enrollment: &sid_core::models::SiteEnrollment,
+        expected: Option<&sid_core::models::SiteEnrollment>,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The installation's login policy epoch, advanced by every change of a
     /// policy a login is admitted under; `None` until the first change.
     async fn export_login_policy_epoch(&self) -> Result<Option<i64>>;

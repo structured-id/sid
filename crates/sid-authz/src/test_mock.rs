@@ -2351,6 +2351,17 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {
         unimplemented!()
     }
+    async fn site_enrollment(&self) -> Result<Option<sid_core::models::SiteEnrollment>> {
+        unimplemented!()
+    }
+    async fn set_site_enrollment(
+        &self,
+        _: &sid_core::models::SiteEnrollment,
+        _: Option<&sid_core::models::SiteEnrollment>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
     async fn set_login_settings(
         &self,
         _: &sid_core::models::LoginSettings,

@@ -125,6 +125,50 @@ pub fn platform_cas(revision: u64, revoked: &[u32]) -> PlatformCaSet {
     }
 }
 
+/// The serial every participant certificate carries.
+pub const PARTICIPANT_SERIAL: u32 = 11;
+
+/// The participant certificate the platform intermediate issues for site
+/// `site` of `organization`, certifying `public_key` (DER
+/// `SubjectPublicKeyInfo`) and entered at `mounts`.
+pub fn enroll(organization: Uuid, site: Uuid, public_key: &[u8], mounts: &[&str]) -> Vec<u8> {
+    use der::Decode;
+    use der::oid::AssociatedOid;
+    use x509_cert::ext::pkix::{BasicConstraints, SubjectAltName};
+    let mounts: Vec<_> = mounts
+        .iter()
+        .map(|mount| crate::participant::Mount::parse(mount).expect("a mount"))
+        .collect();
+    Stated {
+        subject: crate::participant::participant_subject(organization, site)
+            .expect("a participant subject"),
+        serial: PARTICIPANT_SERIAL,
+        validity: current(),
+        extensions: vec![
+            crate::test_certificates::extension(
+                BasicConstraints::OID,
+                true,
+                &BasicConstraints {
+                    ca: false,
+                    path_len_constraint: None,
+                },
+            ),
+            signs(),
+            purposes(&[DEVELOPMENT_PURPOSES.federation_participant]),
+            crate::test_certificates::extension(
+                SubjectAltName::OID,
+                false,
+                &crate::participant::mounts_name(&mounts).expect("the mounts"),
+            ),
+        ],
+    }
+    .signed_for(
+        x509_cert::spki::SubjectPublicKeyInfoOwned::from_der(public_key).expect("a public key"),
+        &name(INTERMEDIATE_NAME),
+        &key(INTERMEDIATE),
+    )
+}
+
 /// List `number` of the authority of organization `source`, revoking the
 /// passports whose serials are `revoked`.
 pub fn organization_status(source: Uuid, number: u8, revoked: &[u32]) -> Vec<u8> {

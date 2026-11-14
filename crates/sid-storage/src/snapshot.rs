@@ -335,6 +335,11 @@ pub struct Snapshot {
     /// identities it admits), when an administrator set them.
     pub login_settings: Option<LoginSettings>,
 
+    /// The installation's enrollment as a site of the federation, when it
+    /// holds one: the moved installation is the same site.
+    #[serde(default)]
+    pub site_enrollment: Option<sid_core::models::SiteEnrollment>,
+
     /// The login policy epoch: a decision taken under an earlier policy
     /// never commits after the move.
     pub login_policy_epoch: Option<i64>,
@@ -527,6 +532,7 @@ impl Snapshot {
             enrollment_policy: None,
             bootstrap_policy: BootstrapPolicy::SelfManaged,
             login_settings: None,
+            site_enrollment: None,
             login_policy_epoch: None,
             platform_cas: Default::default(),
             ip_allowlist: Vec::new(),
@@ -624,6 +630,7 @@ impl Snapshot {
             u64::from(self.enrollment_policy.is_some()),
             u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
             u64::from(self.login_settings.is_some()),
+            u64::from(self.site_enrollment.is_some()),
             u64::from(self.login_policy_epoch.is_some()),
             self.platform_cas.len() as u64,
             self.ip_allowlist.len() as u64,

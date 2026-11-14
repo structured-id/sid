@@ -99,6 +99,11 @@ const OWN_COLUMNS: &[(&str, &str, &str)] = &[
         "updated_at",
         "when this store recorded the settings; never read",
     ),
+    (
+        "site_enrollment",
+        "updated_at",
+        "when this store recorded the enrollment; never read",
+    ),
 ];
 
 fn ctx() -> MutationContext {
@@ -1072,6 +1077,21 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                         authorities: sid_core::models::StatusRequirement::Fresh,
                     },
                     revision: 3,
+                },
+                None,
+                ctx(),
+            )
+            .await
+            .unwrap()
+    );
+    // The site's enrollment, with a chain of two: the moved installation is
+    // the same site.
+    assert!(
+        source
+            .set_site_enrollment(
+                &sid_core::models::SiteEnrollment {
+                    certificate: vec![0x30; 700],
+                    chain: vec![vec![0x31; 650], vec![0x32; 500]],
                 },
                 None,
                 ctx(),

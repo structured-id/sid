@@ -32,13 +32,13 @@ mod admitted_paths;
 pub mod allocation;
 pub mod binding_passport;
 pub mod cross_instance_linking;
-pub mod dns_verifier;
 pub mod organization_scope;
 pub mod participant;
 pub mod passport_path;
 pub mod presentation;
 pub mod purpose;
 pub mod recipient;
+pub mod site_key;
 pub mod status;
 
 // The fixture uses part of these builders; the crate's own tests use all.
@@ -51,4 +51,3 @@ pub mod test_support;
 pub use cross_instance_linking::{
     CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkStatus, LinkingError,
 };
-pub use dns_verifier::{DnsVerifyResult, dns_query_name, parse_dns_txt_token, verify_site_dns};

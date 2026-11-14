@@ -196,6 +196,43 @@ pub fn mounts_name(mounts: &[Mount]) -> Result<SubjectAltName, ParticipantError>
         .map(SubjectAltName)
 }
 
+/// The label a site's key is published under, before the verified domain.
+pub const KEY_RECORD_LABEL: &str = "_sid-fed";
+
+/// The version tag of a key record.
+const KEY_RECORD_VERSION: &str = "v=sid1";
+
+/// The DNS name the site's key is published at under the verified domain
+/// `domain`.
+pub fn key_record_name(domain: &str) -> String {
+    format!("{KEY_RECORD_LABEL}.{domain}")
+}
+
+/// The TXT value publishing the site's public key `public_key` (DER
+/// `SubjectPublicKeyInfo`): `v=sid1; pubkey=<base64>`.
+pub fn key_record(public_key: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "{KEY_RECORD_VERSION}; pubkey={}",
+        base64::engine::general_purpose::STANDARD.encode(public_key)
+    )
+}
+
+/// The public key a TXT value publishes; none when it is not exactly what
+/// [`key_record`] writes. Whoever enrolls the site compares this key with
+/// the one it is asked to certify: a record under a domain shows that the
+/// domain's owner chose that key, and nothing more.
+pub fn key_of_record(value: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let encoded = value
+        .strip_prefix(KEY_RECORD_VERSION)?
+        .strip_prefix("; pubkey=")?;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    (!key.is_empty() && key_record(&key) == value).then_some(key)
+}
+
 /// The organization and site of a subject that is exactly what
 /// [`participant_subject`] writes.
 fn site_of(name: &Name) -> Result<(uuid::Uuid, uuid::Uuid), ParticipantError> {

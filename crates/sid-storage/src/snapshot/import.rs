@@ -466,6 +466,23 @@ pub async fn import(
     {
         result.policies += 1;
     }
+    // The moved installation is the same site: its enrollment is held as the
+    // source held it. A resumed import finds it already held; a target that
+    // holds another site's enrollment refuses the snapshot.
+    if let Some(enrollment) = &snapshot.site_enrollment {
+        let written = backend
+            .set_site_enrollment(
+                enrollment,
+                None,
+                audit("import_site_enrollment", "installation"),
+            )
+            .await?;
+        if written {
+            result.policies += 1;
+        } else if let Some(held) = backend.site_enrollment().await? {
+            crate::transfer_repeat(&held, enrollment, "site enrollment")?;
+        }
+    }
     if let Some(epoch) = snapshot.login_policy_epoch
         && backend
             .import_login_policy_epoch(epoch, audit("import_login_policy_epoch", "installation"))

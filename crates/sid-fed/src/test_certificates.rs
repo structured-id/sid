@@ -146,6 +146,19 @@ impl Stated {
         issuer: &Name,
         issuer_key: &SigningKey,
     ) -> Vec<u8> {
+        let spki = SubjectPublicKeyInfoOwned::from_key(subject_key.verifying_key())
+            .expect("a P-256 public key");
+        self.signed_for(spki, issuer, issuer_key)
+    }
+
+    /// The certificate (DER) of the public key `spki`, signed by
+    /// `issuer_key` under the issuer name `issuer`.
+    pub(crate) fn signed_for(
+        &self,
+        spki: SubjectPublicKeyInfoOwned,
+        issuer: &Name,
+        issuer_key: &SigningKey,
+    ) -> Vec<u8> {
         struct Exactly<'a>(&'a Stated, &'a Name);
         impl BuilderProfile for Exactly<'_> {
             fn get_issuer(&self, _: &Name) -> Name {
@@ -163,8 +176,6 @@ impl Stated {
                 Ok(self.0.extensions.clone())
             }
         }
-        let spki = SubjectPublicKeyInfoOwned::from_key(subject_key.verifying_key())
-            .expect("a P-256 public key");
         CertificateBuilder::new(
             Exactly(self, issuer),
             SerialNumber::from(self.serial),

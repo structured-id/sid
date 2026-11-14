@@ -450,6 +450,18 @@ CREATE TABLE login_settings (
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );
 
+-- The certificate the platform issued for this installation's site, and the
+-- certificates above it: each behind its four-byte length, in order.
+CREATE TABLE site_enrollment (
+    scope text NOT NULL,
+    certificate bytea NOT NULL,
+    chain bytea NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT site_enrollment_certificate_check CHECK ((octet_length(certificate) > 0)),
+    CONSTRAINT site_enrollment_scope_check CHECK ((scope = 'installation'::text)),
+    CONSTRAINT site_enrollment_pkey PRIMARY KEY (scope)
+);
+
 CREATE TABLE entry_connections (
     handle uuid NOT NULL,
     owner text NOT NULL,

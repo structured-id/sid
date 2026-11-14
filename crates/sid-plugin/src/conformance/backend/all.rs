@@ -209,6 +209,11 @@ macro_rules! __storage_conformance {
                 test_login_settings_advance_the_login_policy_epoch
                 test_login_settings_and_enrollment_policy_are_independent
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],site_enrollment:
+                test_site_enrollment_held_and_renewed
+                test_site_enrollment_replaces_only_what_was_read
+                test_site_enrollment_is_bounded_and_apart
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],export_job:
                 test_export_job_roundtrip
                 test_export_job_status_transitions

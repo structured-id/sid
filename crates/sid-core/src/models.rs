@@ -82,7 +82,7 @@ pub mod security_policy;
 pub mod service_binding;
 pub mod session;
 pub mod session_end;
-pub mod site_registration;
+pub mod site_enrollment;
 pub mod status_policy;
 pub mod upstream_identity;
 pub mod upstream_provider;
@@ -279,7 +279,7 @@ pub use session_end::{
     SESSION_REVOCATION_ATTEMPTS, SESSION_REVOCATION_KIND, SESSION_REVOCATION_WINDOW, SessionEnd,
     SessionRevocation,
 };
-pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
+pub use site_enrollment::SiteEnrollment;
 pub use status_policy::{OfflineLimits, StatusEvidence, StatusPolicy, StatusRequirement};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{

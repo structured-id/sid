@@ -357,6 +357,7 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     snapshot.enrollment_policy = backend.enrollment_policy().await?;
     snapshot.bootstrap_policy = backend.bootstrap_policy().await?;
     snapshot.login_settings = backend.login_settings().await?;
+    snapshot.site_enrollment = backend.site_enrollment().await?;
     snapshot.login_policy_epoch = backend.export_login_policy_epoch().await?;
     snapshot.platform_cas = backend.export_platform_cas().await?;
     snapshot.entry_connections = backend.list_entry_connections().await?;

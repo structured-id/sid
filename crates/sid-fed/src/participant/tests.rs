@@ -292,6 +292,36 @@ fn every_part_of_the_profile_is_required() {
     }
 }
 
+// The key a site publishes is read back from exactly the record written
+// for it, at the name under its verified domain. A record of another
+// version, with spacing, padding, a token in place of a key or nothing
+// after the tag publishes no key. Bug prevented: an enrollment certifying
+// a key the domain's record does not state.
+#[test]
+fn a_key_record_publishes_exactly_its_key() {
+    let key = vec![0x30, 0x59, 1, 2, 3, 4, 5];
+    let record = key_record(&key);
+    assert_eq!(record, "v=sid1; pubkey=MFkBAgMEBQ==");
+    assert_eq!(key_of_record(&record), Some(key));
+    assert_eq!(
+        key_record_name("login.sid.example.com"),
+        "_sid-fed.login.sid.example.com"
+    );
+    for refused in [
+        "v=sid2; pubkey=MFkBAgMEBQ==",
+        " v=sid1; pubkey=MFkBAgMEBQ==",
+        "v=sid1;pubkey=MFkBAgMEBQ==",
+        "v=sid1; pubkey=MFkBAgMEBQ== ",
+        "v=sid1; pubkey=MFkBAgMEBQ",
+        "v=sid1; pubkey=",
+        "v=sid1; token=abc123",
+        "v=sid1",
+        "",
+    ] {
+        assert_eq!(key_of_record(refused), None, "{refused:?}");
+    }
+}
+
 // A development participant is refused under any other allocation. Bug
 // prevented: a development enrollment accepted by an installation that is
 // not a development one.

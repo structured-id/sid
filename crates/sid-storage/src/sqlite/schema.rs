@@ -1877,6 +1877,15 @@ CREATE TABLE IF NOT EXISTS login_settings (
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
+-- The certificate the platform issued for this installation's site, and the
+-- certificates above it: each behind its four-byte length, in order.
+CREATE TABLE IF NOT EXISTS site_enrollment (
+    scope       TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    certificate BLOB NOT NULL CHECK (length(certificate) > 0),
+    chain       BLOB NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
+
 -- The registered connections federated sign-ins arrive through. One issuer
 -- has one connection: identities recorded here are found by their issuer.
 CREATE TABLE IF NOT EXISTS entry_connections (
