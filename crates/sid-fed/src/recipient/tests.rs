@@ -620,6 +620,64 @@ async fn the_configured_publication_supplies_the_set() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
 }
 
+/// Halfway through the held set's freshness the publication is asked for a
+/// newer set, and the newer set is what is held after it: a withdrawal it
+/// states takes the generation out. Bug prevented: a set relied on to its
+/// last second while the platform had already withdrawn a generation.
+#[tokio::test]
+async fn a_set_halfway_through_its_freshness_is_renewed() {
+    let publication = Arc::new(Publication {
+        answer: Ok(set(2, PlatformCaState::Withdrawn, None)),
+        asked: AtomicUsize::new(0),
+    });
+    let recipient =
+        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
+    // Issued 2000 s ago and current for an hour: past its halfway point.
+    let mut aged = set(1, PlatformCaState::Active, None);
+    aged.issued_at = epoch(SystemTime::now()) - 2_000;
+    aged.next_update = aged.issued_at + 3_600;
+    recipient.record_platform_cas(&aged).await.unwrap();
+    recipient
+        .configure_publication(
+            &url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        accept(&recipient, &personal(), &[]).await,
+        Err(RecipientError::Path(PathError::NoAnchor))
+    ));
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+}
+
+/// What the publication states is held only if it states a set: a
+/// generation that is no CA certificate is refused whole and nothing is
+/// anchored.
+#[tokio::test]
+async fn a_publication_that_states_no_set_is_not_held() {
+    let mut stated = set(1, PlatformCaState::Active, None);
+    stated.generations[0].certificate = vec![0x30, 0x00];
+    let publication = Arc::new(Publication {
+        answer: Ok(stated),
+        asked: AtomicUsize::new(0),
+    });
+    let recipient =
+        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
+    recipient
+        .configure_publication(
+            &url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        accept(&recipient, &personal(), &[]).await,
+        Err(RecipientError::Platform(PlatformCaError::NotProvisioned))
+    ));
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+}
+
 /// Bug prevented: a failing publication asked on every request. After a
 /// failure it is left alone for the backoff, and the held answer (none
 /// here) decides.

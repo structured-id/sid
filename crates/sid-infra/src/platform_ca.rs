@@ -248,23 +248,40 @@ impl PublishedPlatformCas {
         wire: PlatformCas,
         records: Option<Result<Vec<discovery::DiscoveryRecord>, String>>,
         endpoint: &url::Url,
-    ) -> Result<PlatformCaSet, String> {
-        match records {
-            None => {}
+    ) -> Result<(PlatformCaSet, RefreshStep), String> {
+        let step = match records {
+            None => RefreshStep::Publication,
             Some(Ok(records)) => match discovery::check(&wire, &records, endpoint) {
-                Ok(()) => tracing::debug!("platform CA set announced by its discovery records"),
-                Err(mismatch) => tracing::warn!(
-                    %mismatch,
-                    "platform CA discovery candidate rejected; the HTTPS publication supplies the set"
-                ),
+                Ok(()) => RefreshStep::Discovery,
+                Err(mismatch) => {
+                    tracing::warn!(
+                        %mismatch,
+                        "platform CA discovery candidate rejected; the HTTPS publication supplies the set"
+                    );
+                    RefreshStep::Publication
+                }
             },
-            Some(Err(reason)) => tracing::warn!(
-                %reason,
-                "platform CA discovery not usable; the HTTPS publication supplies the set"
-            ),
-        }
-        set_of(wire).map_err(|e| e.to_string())
+            Some(Err(reason)) => {
+                tracing::warn!(
+                    %reason,
+                    "platform CA discovery not usable; the HTTPS publication supplies the set"
+                );
+                RefreshStep::Publication
+            }
+        };
+        Ok((set_of(wire).map_err(|e| e.to_string())?, step))
     }
+}
+
+/// Which step of the refresh order supplied a set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshStep {
+    /// The platform's DNSSEC-secure discovery records announced exactly the
+    /// fetched set.
+    Discovery,
+    /// The configured HTTPS publication alone: no discovery is configured,
+    /// its records were not usable, or they did not match the set.
+    Publication,
 }
 
 #[async_trait::async_trait]
@@ -280,7 +297,9 @@ impl PlatformCaSource for PublishedPlatformCas {
             }
             None => (None, publication.fetch().await),
         };
-        Self::taken(wire.map_err(|e| e.to_string())?, records, endpoint)
+        let (set, step) = Self::taken(wire.map_err(|e| e.to_string())?, records, endpoint)?;
+        tracing::info!(revision = set.revision, ?step, "platform CA set fetched");
+        Ok(set)
     }
 }
 

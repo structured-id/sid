@@ -264,15 +264,75 @@ fn discovery_only_qualifies_the_fetched_set() {
         .parse()
         .unwrap();
     let expected = set_of(published()).unwrap();
-    for records in [
-        None,
-        Some(Err("no answer".to_owned())),
-        // No record at all: the candidate is rejected, the set still taken.
-        Some(Ok(Vec::new())),
+    // The record announcing `generation` with `certificate` at the endpoint.
+    let announced = |generation: u32, certificate: &[u8]| {
+        use sha2::Digest;
+        discovery::DiscoveryRecord {
+            generation,
+            algorithms: vec![
+                discovery::KeyAlgorithm::EcdsaP256,
+                discovery::KeyAlgorithm::MlDsa65,
+            ],
+            fingerprint: sha2::Sha256::digest(certificate).into(),
+            publication: endpoint.clone(),
+        }
+    };
+    // Both anchoring generations of the published set, exactly.
+    let exact = vec![announced(2, &[2; 600]), announced(1, &[1; 600])];
+    for (records, step) in [
+        (None, RefreshStep::Publication),
+        // A set the secure records announce exactly is taken on the DNS step.
+        (Some(Ok(exact)), RefreshStep::Discovery),
+        // Records that cannot be read, name no generation, or announce
+        // another certificate reject the DNS candidate: the HTTPS
+        // publication still supplies the set.
+        (Some(Err("NXDOMAIN".to_owned())), RefreshStep::Publication),
+        (Some(Ok(Vec::new())), RefreshStep::Publication),
+        (
+            Some(Ok(vec![
+                announced(2, b"another certificate"),
+                announced(1, &[1; 600]),
+            ])),
+            RefreshStep::Publication,
+        ),
     ] {
         assert_eq!(
             PublishedPlatformCas::taken(published(), records, &endpoint).unwrap(),
-            expected
+            (expected.clone(), step)
         );
     }
+}
+
+/// Discovery records answering with `answer`, counting the reads.
+struct Discovery {
+    answer: Result<Vec<discovery::DiscoveryRecord>, String>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl DiscoverySource for Discovery {
+    async fn records(&self, _: &url::Url) -> Result<Vec<discovery::DiscoveryRecord>, String> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer.clone()
+    }
+}
+
+// The source reads the records once beside each fetch, and a publication it
+// cannot reach fails the fetch whatever the records say: DNS never supplies
+// a set.
+#[tokio::test]
+async fn the_records_are_read_beside_the_fetch_and_never_replace_it() {
+    let discovery = std::sync::Arc::new(Discovery {
+        answer: Ok(Vec::new()),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let source = PublishedPlatformCas::new().with_discovery(discovery.clone());
+    // Nothing listens on the discard port of the loopback.
+    let endpoint: url::Url = "https://127.0.0.1:9/.well-known/sid-ca/index.json"
+        .parse()
+        .unwrap();
+    // The process's TLS provider, as the other tests install it.
+    let _ = loopback(endpoint.as_str());
+    assert!(source.fetch(&endpoint).await.is_err());
+    assert_eq!(discovery.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
