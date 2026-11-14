@@ -15,6 +15,7 @@ pub mod instance_secret_store;
 pub mod issuer_store;
 pub mod key_manager;
 pub mod operation_result_store;
+pub mod platform_ca_store;
 pub mod principal_store;
 pub mod sign_in_history;
 pub mod work_store;

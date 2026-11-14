@@ -1675,6 +1675,58 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
     }
 }
 
+/// The double holds no platform CA set: it reads as never provisioned and
+/// refuses every write, so a test that needs one uses a real store.
+#[async_trait]
+impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
+    async fn apply_platform_cas(
+        &self,
+        _set: &sid_plugin::platform_ca::PlatformCaSet,
+        _ctx: MutationContext,
+    ) -> Result<sid_plugin::platform_ca::Applied, sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn record_platform_ca_status(
+        &self,
+        _status: &[sid_plugin::platform_ca::GenerationStatus],
+        _ctx: MutationContext,
+    ) -> Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn held_platform_cas(
+        &self,
+        _now: i64,
+    ) -> Result<sid_plugin::platform_ca::HeldAnchors, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Err(sid_plugin::platform_ca::PlatformCaError::NotProvisioned)
+    }
+    async fn platform_ca_publication(
+        &self,
+    ) -> Result<Option<String>, sid_plugin::platform_ca::PlatformCaError> {
+        Ok(None)
+    }
+    async fn configure_platform_ca_publication(
+        &self,
+        _publication: &str,
+        _ctx: MutationContext,
+    ) -> Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn export_platform_cas(
+        &self,
+    ) -> Result<sid_plugin::platform_ca::PlatformCaArchive, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Ok(Default::default())
+    }
+    async fn import_platform_cas(
+        &self,
+        _archive: &sid_plugin::platform_ca::PlatformCaArchive,
+        _ctx: MutationContext,
+    ) -> Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+}
+
 #[async_trait]
 impl sid_plugin::CeremonyStateStore for MockStorage {
     async fn put_ceremony_state(

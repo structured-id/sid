@@ -1031,6 +1031,73 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
         source.adopt_central_management(ctx()).await.unwrap(),
         CentralAdoption::Adopted
     );
+    // The admitted platform CA set: its publication, a held revision, a
+    // withdrawn generation that revision no longer lists and a revocation.
+    {
+        use sid_plugin::platform_ca::{
+            GenerationStatus, PlatformCa, PlatformCaSet, PlatformCaState, PlatformCaStore,
+        };
+        let generation = |generation: u32, state, overlap_end| PlatformCa {
+            generation,
+            certificate: vec![generation as u8; 32],
+            state,
+            overlap_end,
+            crl: None,
+        };
+        let published = |revision, generations| PlatformCaSet {
+            revision,
+            generations,
+            issued_at: 1_800_000_000,
+            next_update: 1_800_003_600,
+        };
+        assert!(
+            source
+                .configure_platform_ca_publication(
+                    "https://platform.sid.example.com/.well-known/sid-ca/index.json",
+                    ctx(),
+                )
+                .await
+                .unwrap()
+        );
+        source
+            .apply_platform_cas(
+                &published(
+                    1,
+                    vec![
+                        generation(1, PlatformCaState::Withdrawn, None),
+                        generation(2, PlatformCaState::Active, None),
+                    ],
+                ),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        source
+            .apply_platform_cas(
+                &published(
+                    2,
+                    vec![
+                        generation(3, PlatformCaState::Active, None),
+                        generation(2, PlatformCaState::VerificationOnly, Some(1_800_000_600)),
+                    ],
+                ),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        source
+            .record_platform_ca_status(
+                &[GenerationStatus {
+                    generation: 3,
+                    number: 5,
+                    next_update: 1_800_003_600,
+                    revoked: vec![vec![7], vec![9]],
+                }],
+                ctx(),
+            )
+            .await
+            .unwrap();
+    }
     source
         .put_ceremony_state(
             "webauthn",

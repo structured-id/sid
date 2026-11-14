@@ -40,6 +40,7 @@ mod native_session;
 mod oidc_issuer;
 mod operation;
 mod password_history;
+mod platform_ca;
 mod principal_transfer;
 pub use password_history::SqliteHistoryKeyStore;
 mod profile;

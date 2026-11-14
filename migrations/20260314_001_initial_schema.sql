@@ -448,6 +448,50 @@ CREATE TABLE login_settings (
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );
 
+CREATE TABLE platform_ca_generations (
+    generation bigint NOT NULL,
+    certificate bytea NOT NULL,
+    state smallint NOT NULL,
+    overlap_end bigint,
+    listed_in bigint NOT NULL,
+    CONSTRAINT platform_ca_generations_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_generations_state_check CHECK ((state = ANY (ARRAY[0, 1, 2]))),
+    CONSTRAINT platform_ca_generations_pkey PRIMARY KEY (generation)
+);
+
+CREATE TABLE platform_ca_revoked (
+    generation bigint NOT NULL,
+    serial bytea NOT NULL,
+    CONSTRAINT platform_ca_revoked_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_revoked_pkey PRIMARY KEY (generation, serial)
+);
+
+CREATE TABLE platform_ca_set (
+    id smallint NOT NULL,
+    revision bigint NOT NULL,
+    issued_at bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT platform_ca_set_id_check CHECK ((id = 1)),
+    CONSTRAINT platform_ca_set_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT platform_ca_set_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE platform_ca_source (
+    id smallint NOT NULL,
+    publication text NOT NULL,
+    CONSTRAINT platform_ca_source_id_check CHECK ((id = 1)),
+    CONSTRAINT platform_ca_source_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE platform_ca_status (
+    generation bigint NOT NULL,
+    number bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT platform_ca_status_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_status_number_check CHECK ((number >= 0)),
+    CONSTRAINT platform_ca_status_pkey PRIMARY KEY (generation)
+);
+
 CREATE TABLE magic_link_sessions (
     id uuid NOT NULL,
     email text NOT NULL,

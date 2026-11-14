@@ -1872,4 +1872,42 @@ CREATE TABLE IF NOT EXISTS login_settings (
     revision                         INTEGER NOT NULL CHECK (revision >= 0),
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
+
+-- The admitted platform CA set: its revision and freshness (one row), the
+-- generations ever published, the publication it is refreshed from (one
+-- row), and what each generation's CRLs said of the CA certificates it
+-- issued. Times are seconds since the epoch.
+CREATE TABLE IF NOT EXISTS platform_ca_set (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    revision        INTEGER NOT NULL CHECK (revision >= 0),
+    issued_at       INTEGER NOT NULL,
+    next_update     INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_generations (
+    generation      INTEGER PRIMARY KEY CHECK (generation >= 0),
+    certificate     BLOB NOT NULL,
+    -- 0 active, 1 verification-only, 2 withdrawn: only ever raised.
+    state           INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    overlap_end     INTEGER,
+    -- The revision that last listed the generation.
+    listed_in       INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_source (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    publication     TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_status (
+    generation      INTEGER PRIMARY KEY CHECK (generation >= 0),
+    number          INTEGER NOT NULL CHECK (number >= 0),
+    next_update     INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_revoked (
+    generation      INTEGER NOT NULL CHECK (generation >= 0),
+    serial          BLOB NOT NULL,
+    PRIMARY KEY (generation, serial)
+) STRICT, WITHOUT ROWID;
 "#;

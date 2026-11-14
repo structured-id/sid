@@ -156,6 +156,18 @@ const UNIQUE: &[(&str, &str, &str)] = &[
     ),
     ("sid_login_policy_epoch", "SidLoginPolicyEpoch", "id"),
     ("sid_login_settings", "SidLoginSettings", "scope"),
+    ("sid_platform_ca_set", "SidPlatformCaSet", "id"),
+    (
+        "sid_platform_ca_generation",
+        "SidPlatformCaGeneration",
+        "generation",
+    ),
+    (
+        "sid_platform_ca_status",
+        "SidPlatformCaStatus",
+        "generation",
+    ),
+    ("sid_platform_ca_source", "SidPlatformCaSource", "id"),
     ("sid_profile_metadata", "SidProfileMetadata", "pair"),
     ("sid_pat_id", "SidPat", "id"),
     ("sid_pat_hash", "SidPat", "token_hash"),

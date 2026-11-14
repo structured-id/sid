@@ -41,6 +41,7 @@ mod lifecycle;
 mod login_policy;
 mod machine;
 mod operation;
+mod platform_ca;
 mod principal;
 mod profile;
 mod project;

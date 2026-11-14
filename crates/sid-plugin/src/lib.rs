@@ -34,6 +34,7 @@ pub mod mfa;
 pub mod notification;
 pub mod operation_result_store;
 pub mod otp;
+pub mod platform_ca;
 pub mod principal_store;
 pub mod sign_in_history;
 pub mod snapshot_rules;

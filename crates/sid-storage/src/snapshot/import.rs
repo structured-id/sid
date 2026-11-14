@@ -473,6 +473,18 @@ pub async fn import(
     {
         result.policies += 1;
     }
+    // Held exactly as the source held it; a source that held nothing moves
+    // nothing, and a target holding another set refuses the snapshot.
+    if !snapshot.platform_cas.is_empty()
+        && backend
+            .import_platform_cas(
+                &snapshot.platform_cas,
+                audit("import_platform_cas", "installation"),
+            )
+            .await?
+    {
+        result.policies += 1;
+    }
     for (cidr, description, created_at) in &snapshot.ip_allowlist {
         if backend
             .import_ip_allowlist_entry(

@@ -299,6 +299,63 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
+    async fn apply_platform_cas(
+        &self,
+        _: &sid_plugin::platform_ca::PlatformCaSet,
+        _: MutationContext,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::Applied,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn record_platform_ca_status(
+        &self,
+        _: &[sid_plugin::platform_ca::GenerationStatus],
+        _: MutationContext,
+    ) -> std::result::Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn held_platform_cas(
+        &self,
+        _: i64,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::HeldAnchors,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn platform_ca_publication(
+        &self,
+    ) -> std::result::Result<Option<String>, sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn configure_platform_ca_publication(
+        &self,
+        _: &str,
+        _: MutationContext,
+    ) -> std::result::Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn export_platform_cas(
+        &self,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::PlatformCaArchive,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn import_platform_cas(
+        &self,
+        _: &sid_plugin::platform_ca::PlatformCaArchive,
+        _: MutationContext,
+    ) -> std::result::Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::InstanceSecretStore for MockStorage {
     async fn get_instance_secret(
         &self,

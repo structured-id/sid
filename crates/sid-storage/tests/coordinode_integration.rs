@@ -712,6 +712,44 @@ mod history_key_store {
     );
 }
 
+/// Run platform CA store conformance `scenario` on a database of its own:
+/// every scenario starts from a store that holds no set.
+macro_rules! platform_ca_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::platform_ca_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod platform_ca_store {
+    use super::*;
+
+    platform_ca_store!(
+        anchors_follow_the_published_states,
+        no_anchor_without_current_evidence,
+        what_is_held_only_narrows,
+        only_the_held_revision_anchors,
+        an_anchor_answers_for_the_cas_it_issued,
+        a_revocation_seen_once_stays,
+        status_is_per_generation,
+        the_publication_is_configured_once,
+        a_generation_keeps_its_certificate,
+        concurrent_applies_never_widen,
+        an_older_set_racing_a_newer_one_leaves_nothing,
+    );
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_keeps_every_narrowing() {
+        sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(
+            &setup().await,
+            &setup().await,
+        )
+        .await;
+    }
+}
+
 /// The principal store harness the SQL backends use: owners are Profiles.
 mod common {
     pub use sid_plugin::conformance::backend::*;

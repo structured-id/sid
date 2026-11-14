@@ -66,6 +66,17 @@ pub enum SnapshotError {
     Audit(#[from] sid_core::models::audit::AuditError),
 }
 
+impl From<sid_plugin::platform_ca::PlatformCaError> for SnapshotError {
+    fn from(e: sid_plugin::platform_ca::PlatformCaError) -> Self {
+        use sid_plugin::platform_ca::PlatformCaError;
+        match e {
+            PlatformCaError::Storage(e) => Self::Store(e),
+            // The target holds another platform CA set than the snapshot's.
+            other => Self::Target(other.to_string()),
+        }
+    }
+}
+
 /// The result of snapshot operations.
 pub type Result<T> = std::result::Result<T, SnapshotError>;
 
@@ -324,6 +335,11 @@ pub struct Snapshot {
     /// never commits after the move.
     pub login_policy_epoch: Option<i64>,
 
+    /// The admitted platform CA set with every narrowing the source had
+    /// seen: a withdrawn generation or a revoked CA certificate is never
+    /// relied on again after the move.
+    pub platform_cas: sid_plugin::platform_ca::PlatformCaArchive,
+
     /// The IP allowlist, with when each entry was added.
     pub ip_allowlist: Vec<(String, String, DateTime<Utc>)>,
 
@@ -375,7 +391,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -507,6 +523,7 @@ impl Snapshot {
             bootstrap_policy: BootstrapPolicy::SelfManaged,
             login_settings: None,
             login_policy_epoch: None,
+            platform_cas: Default::default(),
             ip_allowlist: Vec::new(),
             ip_reputation: Vec::new(),
             anomaly_events: Vec::new(),
@@ -602,6 +619,7 @@ impl Snapshot {
             u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
             u64::from(self.login_settings.is_some()),
             u64::from(self.login_policy_epoch.is_some()),
+            self.platform_cas.len() as u64,
             self.ip_allowlist.len() as u64,
             self.ip_reputation.len() as u64,
             self.anomaly_events.len() as u64,

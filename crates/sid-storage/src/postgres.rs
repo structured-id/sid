@@ -9860,6 +9860,7 @@ mod login_policy;
 mod machine_credential;
 mod native_session;
 mod operation;
+mod platform_ca;
 pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;

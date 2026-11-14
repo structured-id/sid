@@ -347,6 +347,42 @@ history_key_store!(
     key_versions_are_insert_only,
 );
 
+// ─── Admitted platform CA set ───
+
+/// Run platform CA store conformance `scenario` against a database of its
+/// own: every scenario starts from a store that holds no set.
+macro_rules! platform_ca_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::platform_ca_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+platform_ca_store!(
+    anchors_follow_the_published_states,
+    no_anchor_without_current_evidence,
+    what_is_held_only_narrows,
+    only_the_held_revision_anchors,
+    an_anchor_answers_for_the_cas_it_issued,
+    a_revocation_seen_once_stays,
+    status_is_per_generation,
+    the_publication_is_configured_once,
+    a_generation_keeps_its_certificate,
+    concurrent_applies_never_widen,
+    an_older_set_racing_a_newer_one_leaves_nothing,
+);
+
+#[tokio::test]
+async fn a_move_keeps_every_narrowing() {
+    sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(
+        &setup().await,
+        &setup().await,
+    )
+    .await;
+}
+
 // ─── User directory query ───
 
 /// Seed plain profiles until `backend` holds at least `n`, in one
