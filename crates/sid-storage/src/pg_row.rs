@@ -788,6 +788,7 @@ pub struct AuthCodeRow {
     pub assurance_level: String,
     pub elevation_level: Option<String>,
     pub elevation_until: Option<DateTime<Utc>>,
+    pub request_origin: Option<uuid::Uuid>,
 }
 
 impl AuthCodeRow {
@@ -812,6 +813,9 @@ impl AuthCodeRow {
             created_at: self.created_at,
             used: self.used,
             session_id: self.session_id,
+            request_origin: self
+                .request_origin
+                .map(sid_core::models::RequestOrigin::from_uuid),
         })
     }
 }

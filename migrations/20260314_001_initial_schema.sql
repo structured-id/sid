@@ -1378,6 +1378,7 @@ CREATE TABLE authorization_codes (
     assurance_level text NOT NULL,
     elevation_level text,
     elevation_until timestamp with time zone,
+    request_origin uuid,
     CONSTRAINT authorization_codes_pkey PRIMARY KEY (code_hash),
     CONSTRAINT authorization_codes_authorizing_session_id_fkey FOREIGN KEY (authorizing_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     CONSTRAINT authorization_codes_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
@@ -1687,6 +1688,8 @@ CREATE INDEX idx_anomaly_events_timestamp ON anomaly_events USING btree ("timest
 CREATE INDEX idx_applications_project ON applications USING btree (project_id);
 
 CREATE INDEX idx_auth_codes_expires ON authorization_codes USING btree (expires_at);
+
+CREATE UNIQUE INDEX idx_auth_codes_request_origin ON authorization_codes USING btree (client_id, request_origin) WHERE (request_origin IS NOT NULL);
 
 CREATE INDEX idx_branding_configs_project_id ON branding_configs USING btree (project_id);
 

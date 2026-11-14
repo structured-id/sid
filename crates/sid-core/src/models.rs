@@ -94,7 +94,10 @@ pub use application::{
     ResourceState, SystemIntegration, scope_list,
 };
 pub use audit::{ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainHead};
-pub use auth_code::{AuthCodeError, AuthCodeRedemption, AuthorizationCode, ExchangedCode};
+pub use auth_code::{
+    AuthCodeError, AuthCodeRedemption, AuthorizationCode, ExchangedCode, RedeemedAuthorization,
+    RequestOrigin,
+};
 pub use auth_flow::{
     ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowConfig,
     FlowType, StepConfig,

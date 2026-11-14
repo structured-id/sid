@@ -215,4 +215,20 @@ pub trait GrantStore: Send + Sync {
         refresh_token: &RefreshToken<Self::Owner>,
         ctx: MutationContext,
     ) -> Result<AuthCodeRedemption>;
+
+    /// What redeeming the code of the kept authorization request `origin` of
+    /// `client_id` committed; `None` while no code of that request was
+    /// redeemed (the request is pending, its code unused or expired) and
+    /// for another client's request. A client belongs to one issuer, so the
+    /// pair names the request at its issuer. Answered from an index, never
+    /// by scanning codes.
+    async fn redeemed_authorization(
+        &self,
+        _client_id: &str,
+        _origin: sid_core::models::RequestOrigin,
+    ) -> Result<Option<sid_core::models::RedeemedAuthorization<Self::Owner>>> {
+        Err(sid_core::Error::Unavailable(
+            "this store does not answer redeemed authorization requests".into(),
+        ))
+    }
 }

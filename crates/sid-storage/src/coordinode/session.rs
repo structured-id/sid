@@ -56,7 +56,8 @@ const CODE: &str = "a.code_hash AS code_hash, a.profile_id AS profile_id,
     a.authorizing_session_id AS authorizing_session_id, a.authenticated_at AS authenticated_at,
     a.amr AS amr, a.assurance_level AS assurance_level, a.elevation_level AS elevation_level,
     a.elevation_until AS elevation_until, a.expires_at AS expires_at,
-    a.created_at AS created_at, a.used AS used, a.session_id AS session_id";
+    a.created_at AS created_at, a.used AS used, a.session_id AS session_id,
+    a.request_origin AS request_origin";
 
 const GENERATION: &str = "g.id AS id, g.session_id AS session_id, g.key_jkt AS key_jkt,
     g.expires_at AS expires_at, g.created_at AS created_at, g.exchange AS exchange,
@@ -565,6 +566,8 @@ fn code(row: &Row) -> SidResult<AuthorizationCode> {
         created_at: get_time(row, "created_at")?,
         used: get_bool(row, "used")?,
         session_id: get_opt_id(row, "session_id")?,
+        request_origin: get_opt_uuid(row, "request_origin")?
+            .map(sid_core::models::RequestOrigin::from_uuid),
     })
 }
 
@@ -1033,6 +1036,33 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn redeemed_authorization(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> SidResult<Option<sid_core::models::RedeemedAuthorization>> {
+        let (client_id, origin) = (client_id.to_owned(), origin.into_uuid());
+        self.transaction(move |tx| {
+            // The origin's index finds the one code of that kept request.
+            let rows = tx.run(
+                &format!(
+                    "MATCH (a:SidAuthCode) WHERE a.request_origin = $origin
+                       AND a.client_id = $client AND a.used = true RETURN {CODE}"
+                ),
+                Params::default()
+                    .with("origin", uuid(&origin))
+                    .with("client", Value::String(client_id.clone())),
+            )?;
+            Ok(Decision::Abandon(
+                rows.first()
+                    .map(code)
+                    .transpose()?
+                    .and_then(AuthorizationCode::redeemed),
+            ))
+        })
+        .await
+    }
+
     // === Native generations ===
 
     pub(super) async fn native_generation_by_credential(
@@ -1281,9 +1311,13 @@ fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
             resource_id: $resource_id, authorizing_session_id: $authorizing,
             authenticated_at: $authenticated_at, amr: $amr,
             assurance_level: $assurance_level, elevation_level: $elevation_level,
-            elevation_until: $elevation_until})",
+            elevation_until: $elevation_until, request_origin: $request_origin})",
         grant_authentication_params(
             Params::default()
+                .with(
+                    "request_origin",
+                    opt_uuid(code.request_origin.map(|o| o.into_uuid()).as_ref()),
+                )
                 .with("hash", Value::Binary(code.code_hash.clone()))
                 .with("profile_id", profile_value(code.profile_id))
                 .with("client_id", Value::String(code.client_id.clone()))
