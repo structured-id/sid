@@ -226,6 +226,9 @@ impl EntryConnectionStore for CoordinodeBackend {
                      c.revision = c.revision + 1",
                 changed(&connection),
             )?;
+            // A sign-in decided through the connection before this change
+            // does not commit after it.
+            super::login_policy::advance_epoch(tx)?;
             finalize(tx, &chain(connection.handle), ctx.clone())?;
             Ok(Decision::Commit(true))
         })
@@ -249,6 +252,7 @@ impl EntryConnectionStore for CoordinodeBackend {
                 "MATCH (c:SidEntryConnection) WHERE c.handle = $handle DELETE c",
                 Params::default().with("handle", handle_value(handle)),
             )?;
+            super::login_policy::advance_epoch(tx)?;
             finalize(tx, &chain(handle), ctx.clone())?;
             Ok(Decision::Commit(true))
         })

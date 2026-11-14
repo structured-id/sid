@@ -24,6 +24,24 @@ pub(super) fn check_fence(tx: &Statements<'_>, epoch: i64) -> SidResult<()> {
     Ok(())
 }
 
+/// Advance the login-policy epoch in `tx`: a sign-in decided under the
+/// earlier one no longer commits. The first policy write of any kind starts
+/// it; one racing this one makes the transaction run again.
+pub(super) fn advance_epoch(tx: &Statements<'_>) -> SidResult<()> {
+    let advanced = tx.run(
+        "MATCH (e:SidLoginPolicyEpoch) WHERE e.id = 1 SET e.epoch = e.epoch + 1
+         RETURN e.epoch AS epoch",
+        Params::default(),
+    )?;
+    if advanced.is_empty() {
+        tx.create_absent(
+            "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: 1})",
+            Params::default(),
+        )?;
+    }
+    Ok(())
+}
+
 /// The one scope login settings are stored for.
 fn settings_scope() -> coordinode_core::graph::types::Value {
     coordinode_core::graph::types::Value::String("installation".into())
@@ -180,19 +198,7 @@ impl CoordinodeBackend {
                 tx.create_absent(CREATE_SETTINGS, values(&settings)?)?;
             }
             // A sign-in decided under the earlier settings no longer commits.
-            let advanced = tx.run(
-                "MATCH (e:SidLoginPolicyEpoch) WHERE e.id = 1 SET e.epoch = e.epoch + 1
-                 RETURN e.epoch AS epoch",
-                Params::default(),
-            )?;
-            if advanced.is_empty() {
-                // The first policy write of any kind starts the epoch: one
-                // racing this one makes the transaction run again.
-                tx.create_absent(
-                    "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: 1})",
-                    Params::default(),
-                )?;
-            }
+            advance_epoch(tx)?;
             super::finalize(tx, "installation:login_settings", ctx.clone())?;
             Ok(super::Decision::Commit(true))
         })

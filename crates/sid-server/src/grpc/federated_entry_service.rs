@@ -213,6 +213,14 @@ impl FederatedEntryServiceImpl {
                 if refused.retryable() {
                     warn!(error = %refused, "returned identity not decided");
                     Refusal::retry()
+                } else if matches!(
+                    refused,
+                    sid::federated_admission::Refused::ConnectionChanged
+                ) {
+                    // The connection was withdrawn while the code was
+                    // exchanged: nothing about the account was decided.
+                    warn!(error = %refused, "entry connection changed during the entry");
+                    Refusal::over("Sign-in was not completed")
                 } else {
                     warn!(error = %refused, "returned identity not admitted");
                     Refusal::over("This account has no access here")

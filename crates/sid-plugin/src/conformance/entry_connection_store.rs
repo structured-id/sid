@@ -265,6 +265,57 @@ pub async fn a_removal_applies_over_the_revision_it_read(store: &dyn EntryConnec
     );
 }
 
+/// A written change and a removal each advance the login-policy epoch in the
+/// same commit; a change or removal over a stale revision writes nothing and
+/// leaves it. Bug prevented: a sign-in decided through a connection that an
+/// administrator disabled or removed meanwhile still committing its session,
+/// because nothing it was fenced on moved.
+pub async fn connection_writes_move_the_login_policy_epoch(
+    store: &dyn crate::storage::StorageBackend,
+) {
+    let held = connection(1, ConnectionOwner::Administration);
+    store.create_entry_connection(&held, audit()).await.unwrap();
+    let before = store.export_login_policy_epoch().await.unwrap();
+    let mut disabled = held.clone();
+    disabled.enabled = false;
+    assert!(
+        store
+            .update_entry_connection(&disabled, audit())
+            .await
+            .unwrap()
+    );
+    let after_change = store.export_login_policy_epoch().await.unwrap();
+    assert!(after_change > before, "{before:?} -> {after_change:?}");
+    // Over the revision the change moved on: nothing is written.
+    assert!(
+        !store
+            .update_entry_connection(&disabled, audit())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .remove_entry_connection(held.handle, 0, audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.export_login_policy_epoch().await.unwrap(),
+        after_change
+    );
+    assert!(
+        store
+            .remove_entry_connection(held.handle, 1, audit())
+            .await
+            .unwrap()
+    );
+    let after_removal = store.export_login_policy_epoch().await.unwrap();
+    assert!(
+        after_removal > after_change,
+        "{after_change:?} -> {after_removal:?}"
+    );
+}
+
 /// Two registrations of one issuer at once end at one connection, and two
 /// changes of one connection at once land one after the other or one of
 /// them is refused: never both over the same revision. A store that

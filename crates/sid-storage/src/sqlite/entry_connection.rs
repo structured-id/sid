@@ -181,6 +181,9 @@ impl EntryConnectionStore for SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage("change an entry connection"))?;
+        // A sign-in decided through the connection before this change does
+        // not commit after it (see `StorageBackend::update_entry_connection`).
+        Self::advance_login_policy_epoch(&mut tx).await?;
         Self::commit_mutation(tx, &chain(connection.handle), ctx).await?;
         Ok(true)
     }
@@ -202,6 +205,7 @@ impl EntryConnectionStore for SqliteBackend {
                 .rows_affected()
                 == 1;
         if removed {
+            Self::advance_login_policy_epoch(&mut tx).await?;
             Self::commit_mutation(tx, &chain(handle), ctx).await?;
         }
         Ok(removed)

@@ -1116,6 +1116,7 @@ entry_connection_store!(
     a_change_applies_over_the_revision_it_read,
     a_change_never_alters_the_registration,
     a_removal_applies_over_the_revision_it_read,
+    connection_writes_move_the_login_policy_epoch,
     concurrent_writers_end_at_one_state,
 );
 

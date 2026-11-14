@@ -38,7 +38,10 @@ pub trait EntryConnectionStore: Send + Sync {
     /// revision on; `false` when it was removed or changed since. What
     /// identifies the registration
     /// ([`EntryConnection::same_registration`]) is never written: a change
-    /// that alters it is `Validation` and nothing is written.
+    /// that alters it is `Validation` and nothing is written. A written
+    /// change advances the login-policy epoch in the same commit, so a
+    /// sign-in decided through the connection before it (disabled, its
+    /// client changed) does not commit after it.
     async fn update_entry_connection(
         &self,
         connection: &EntryConnection,
@@ -46,7 +49,8 @@ pub trait EntryConnectionStore: Send + Sync {
     ) -> Result<bool>;
 
     /// Remove the connection `handle` names at `revision`; `false` when it
-    /// is gone or changed since.
+    /// is gone or changed since. A removal advances the login-policy epoch
+    /// in the same commit, as a change does.
     async fn remove_entry_connection(
         &self,
         handle: EntryHandle,

@@ -76,6 +76,10 @@ pub enum Refused {
     /// the assignment the organization confirmed, never as an outside one.
     #[error("the identity is the organization's own")]
     Own,
+    /// The connection the entry went through was disabled, changed or
+    /// removed since the entry used it: nothing is completed through it.
+    #[error("the entry connection was withdrawn or changed")]
+    ConnectionChanged,
     /// A dependency could not answer; the same return may be retried.
     #[error("not decided now: {0}")]
     Unavailable(String),
@@ -222,6 +226,16 @@ pub async fn admit(
         .await
         .map_err(unavailable)?
         .map(|epoch| ActorFence::LoginPolicy { epoch });
+    // The connection as the entry used it, read again after the epoch: a
+    // change or removal that landed meanwhile refuses here, and one landing
+    // later moves the epoch past this read and fences the commit.
+    let current = storage
+        .entry_connection(connection.handle)
+        .await
+        .map_err(unavailable)?;
+    if !current.is_some_and(|c| c.enabled && c.revision == connection.revision) {
+        return Err(Refused::ConnectionChanged);
+    }
     let settings = crate::login_settings::in_force(storage)
         .await
         .map_err(unavailable)?;

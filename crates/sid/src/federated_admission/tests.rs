@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{SubsecRound, Utc};
 use sid_core::models::{
     ClientCredential, EntryHandle, IssuerAuthority, IssuerHandle, IssuerId, LoginSettings,
     MutationContext, ProfileType,
@@ -16,6 +16,7 @@ use sid_fed::test_support::{
     Issued, PASSPORT_SERIAL, corporate, organization_ca, organization_status, personal,
     platform_cas,
 };
+use sid_plugin::entry_connection::EntryConnectionStore;
 
 use super::*;
 use crate::test_support::storage;
@@ -70,9 +71,14 @@ async fn installed(owner: ConnectionOwner, source: Option<OrgId>) -> Installed {
         }),
         enabled: true,
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Utc::now().trunc_subsecs(6),
+        updated_at: Utc::now().trunc_subsecs(6),
     };
+    // Admission reads the connection back as the entry used it.
+    storage
+        .create_entry_connection(&connection, audit())
+        .await
+        .unwrap();
     Installed {
         storage,
         recipient,
@@ -272,6 +278,55 @@ async fn an_admission_holds_its_session_to_the_settings_it_read() {
     let second = i.fence_of(subject, &jws).await;
     assert!(second.is_some());
     assert_ne!(second, first);
+}
+
+// An entry whose connection an administrator disabled, changed or removed
+// after the entry used it admits nobody, and the change moves the epoch a
+// session decided before it is fenced on. Bug prevented: a return already
+// in flight completing a session through a connection that was withdrawn
+// while its code was being exchanged.
+#[tokio::test]
+async fn a_withdrawn_connection_admits_nobody() {
+    let i = installed(ConnectionOwner::Administration, None).await;
+    let subject = Uuid::now_v7();
+    let jws = i.present(&personal(subject, i.organization()));
+    i.settings(true, false, &[]).await;
+    let before = i.fence_of(subject, &jws).await;
+
+    let mut disabled = i.connection.clone();
+    disabled.enabled = false;
+    assert!(
+        i.storage
+            .update_entry_connection(&disabled, audit())
+            .await
+            .unwrap()
+    );
+    let refused = i.admit(subject, Some(&jws)).await;
+    assert!(
+        matches!(refused, Err(Refused::ConnectionChanged)),
+        "{refused:?}"
+    );
+    assert!(!refused.unwrap_err().retryable());
+    assert_ne!(
+        i.storage
+            .export_login_policy_epoch()
+            .await
+            .unwrap()
+            .map(|epoch| ActorFence::LoginPolicy { epoch }),
+        before
+    );
+
+    assert!(
+        i.storage
+            .remove_entry_connection(i.connection.handle, 1, audit())
+            .await
+            .unwrap()
+    );
+    let removed = i.admit(subject, Some(&jws)).await;
+    assert!(
+        matches!(removed, Err(Refused::ConnectionChanged)),
+        "{removed:?}"
+    );
 }
 
 #[tokio::test]
