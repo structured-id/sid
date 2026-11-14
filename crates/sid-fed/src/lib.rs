@@ -33,6 +33,7 @@ pub mod binding_passport;
 pub mod cross_instance_linking;
 pub mod dns_verifier;
 pub mod organization_scope;
+pub mod participant;
 pub mod passport_path;
 pub mod presentation;
 pub mod purpose;

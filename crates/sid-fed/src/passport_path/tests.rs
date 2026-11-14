@@ -519,3 +519,151 @@ fn an_organization_ca_must_be_usable_as_an_issuer() {
         ))
     );
 }
+
+const SITE: u8 = 5;
+const MOUNT: &str = "https://hosted.sid.example.com/i/0123456789abcdef0123456789abcdef";
+
+fn site() -> Uuid {
+    Uuid::from_u128(0x0192_f3a4_0000_7000_8000_0000_0000_0c0c)
+}
+
+/// The participant certificate of the recipient organization's site with
+/// `extensions`, signed by `issuer_key` under `issuer`.
+fn enrolled(extensions: Vec<Extension>, issuer: &Name, issuer_key: u8) -> Vec<u8> {
+    Stated {
+        subject: crate::participant::participant_subject(recipient(), site()).unwrap(),
+        serial: 11,
+        validity: valid(HOUR, HOUR),
+        extensions,
+    }
+    .signed(&key(SITE), issuer, &key(issuer_key))
+}
+
+/// The extensions of a participant certificate entered at [`MOUNT`], with
+/// the extended key usage `usage`.
+fn participant(usage: der::asn1::ObjectIdentifier) -> Vec<Extension> {
+    use der::oid::AssociatedOid;
+    use x509_cert::ext::pkix::{BasicConstraints, SubjectAltName};
+    let mounts = [crate::participant::Mount::parse(MOUNT).unwrap()];
+    vec![
+        crate::test_certificates::extension(
+            BasicConstraints::OID,
+            true,
+            &BasicConstraints {
+                ca: false,
+                path_len_constraint: None,
+            },
+        ),
+        signs(),
+        purposes(&[usage]),
+        crate::test_certificates::extension(
+            SubjectAltName::OID,
+            false,
+            &crate::participant::mounts_name(&mounts).unwrap(),
+        ),
+    ]
+}
+
+fn accept_site(
+    certificate: &[u8],
+    chain: &[&[u8]],
+    anchors: &[&[u8]],
+) -> Result<AcceptedParticipant, PathError> {
+    accept_participant(
+        &Classical,
+        &DEVELOPMENT_PURPOSES,
+        certificate,
+        &owned(chain),
+        &owned(anchors),
+        SystemTime::now(),
+    )
+}
+
+// A site the platform enrolled is accepted to the platform intermediate:
+// its organization, its site, its mounts and the key its statements are
+// verified under, good no longer than the shortest certificate of the path.
+// Bug prevented: a site's statement verified under a key nobody checked, or
+// an acceptance outliving the certificate it rests on.
+#[test]
+fn an_enrolled_site_is_accepted_to_the_platform_intermediate() {
+    use der::Encode;
+    let anchor = intermediate(Some(1), current());
+    let certificate = enrolled(
+        participant(DEVELOPMENT_PURPOSES.federation_participant),
+        &name(INTERMEDIATE_NAME),
+        INTERMEDIATE,
+    );
+    let accepted = accept_site(&certificate, &[&anchor, &root()], &[&anchor]).unwrap();
+    assert_eq!(accepted.participant.organization, recipient());
+    assert_eq!(accepted.participant.site, site());
+    assert_eq!(
+        accepted.participant.mounts,
+        [crate::participant::Mount::parse(MOUNT).unwrap()]
+    );
+    assert_eq!(
+        accepted.public_key,
+        decoded(&certificate)
+            .tbs_certificate()
+            .subject_public_key_info()
+            .to_der()
+            .unwrap()
+    );
+    assert_eq!(accepted.until, not_after_of(&certificate));
+    assert!(accepted.path.issuers.is_empty());
+    assert_eq!(accepted.path.anchor, anchor);
+}
+
+// Only the platform enrolls a site. An organization's authority signing a
+// participant certificate for a site of its own organization passes every
+// signature and name constraint, and is still refused; so is a certificate
+// of another purpose, one no admitted intermediate signed, and one a
+// stranger signed under the intermediate's name. Bug prevented: an
+// organization conferring platform membership on a site, or a passport or
+// TLS certificate taken as a site's enrollment.
+#[test]
+fn only_the_platform_enrolls_a_site() {
+    let anchor = intermediate(Some(1), current());
+    let authority = organization_ca(recipient(), scoped(recipient()), current());
+    let by_organization = enrolled(
+        participant(DEVELOPMENT_PURPOSES.federation_participant),
+        &name(&format!("O={}", recipient())),
+        ORGANIZATION,
+    );
+    assert_eq!(
+        accept_site(&by_organization, &[&authority], &[&anchor]),
+        Err(PathError::Purpose(
+            "an organization's authority issues only for its organization"
+        ))
+    );
+
+    for usage in [
+        DEVELOPMENT_PASSPORT.key_usage,
+        DEVELOPMENT_PURPOSES.key_association,
+        der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.1"),
+    ] {
+        let other = enrolled(participant(usage), &name(INTERMEDIATE_NAME), INTERMEDIATE);
+        assert_eq!(
+            accept_site(&other, &[], &[&anchor]),
+            Err(PathError::Participant(
+                crate::participant::ParticipantError::Purpose
+            )),
+            "{usage}"
+        );
+    }
+
+    let genuine = enrolled(
+        participant(DEVELOPMENT_PURPOSES.federation_participant),
+        &name(INTERMEDIATE_NAME),
+        INTERMEDIATE,
+    );
+    assert_eq!(accept_site(&genuine, &[], &[]), Err(PathError::NoAnchor));
+    let forged = enrolled(
+        participant(DEVELOPMENT_PURPOSES.federation_participant),
+        &name(INTERMEDIATE_NAME),
+        HOLDER,
+    );
+    assert!(matches!(
+        accept_site(&forged, &[], &[&anchor]),
+        Err(PathError::Rejected(_))
+    ));
+}

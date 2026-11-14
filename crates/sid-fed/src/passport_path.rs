@@ -33,6 +33,7 @@ use structured_pkix::path::{self, RejectionReason, Validation, Verified};
 
 use crate::binding_passport::{Passport, PassportError, PassportProfile};
 use crate::organization_scope::check_organization_scope;
+use crate::participant::{Participant, ParticipantError, read_participant};
 use crate::purpose::{Issued, IssuerRole, PurposeProfile};
 
 /// `ecdsa-with-SHA256` (RFC 5758 §3.2).
@@ -64,6 +65,9 @@ pub enum PathError {
     /// The passport is for another recipient organization.
     #[error("the passport is for another recipient organization")]
     Recipient,
+    /// The certificate is not an enrolled site's participant certificate.
+    #[error(transparent)]
+    Participant(#[from] ParticipantError),
     /// A certificate on the path holds no SID role permitting what it issued.
     #[error("{0}")]
     Purpose(&'static str),
@@ -308,6 +312,56 @@ pub fn accept_organization_ca(
         PathError::Purpose("the organization's authority is not scoped to its organization")
     })?;
     Ok(path)
+}
+
+/// An enrolled site accepted on its path, with the key its statements are
+/// verified under and the moment the acceptance stops holding by the
+/// certificates alone. Status bounds a reuse further; it is the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedParticipant {
+    pub participant: Participant,
+    /// The site's public key (DER `SubjectPublicKeyInfo`).
+    pub public_key: Vec<u8>,
+    pub until: SystemTime,
+    /// The path it was accepted on, for the caller's status checks.
+    pub path: ValidatedPath,
+}
+
+/// Verify and accept the participant certificate `certificate` (DER) of an
+/// enrolled site at `at` on a path to one of the platform intermediates
+/// `anchors`: the same path validation and SID roles as a passport's, and
+/// the participant profile. Only the platform enrolls a site: a path
+/// through an organization's authority is refused whatever it signed.
+pub fn accept_participant(
+    policy: &impl PathPolicy,
+    purposes: &PurposeProfile,
+    certificate: &[u8],
+    chain: &[Vec<u8>],
+    anchors: &[Vec<u8>],
+    at: SystemTime,
+) -> Result<AcceptedParticipant, PathError> {
+    let path = validate_path(policy, certificate, chain, anchors, at)?;
+    let leaf = read(certificate)?;
+    let participant = read_participant(purposes, &leaf)?;
+    admit_roles(
+        purposes,
+        Trust::Platform,
+        &path,
+        Issued::FederationParticipant,
+        None,
+    )?;
+    let public_key = der::Encode::to_der(leaf.tbs_certificate().subject_public_key_info())
+        .map_err(|e| PathError::Encoding(e.to_string()))?;
+    let mut until = not_after(&leaf);
+    for der in path.issuers.iter().chain(std::iter::once(&path.anchor)) {
+        until = until.min(not_after(&read(der)?));
+    }
+    Ok(AcceptedParticipant {
+        participant,
+        public_key,
+        until,
+        path,
+    })
 }
 
 /// Verify `certificate` (DER) at `at` on a path to one of `anchors` (RFC
