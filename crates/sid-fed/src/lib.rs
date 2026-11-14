@@ -27,6 +27,7 @@
 //!   platform authorities it admits, the status it holds, and the
 //!   acceptance of a presented identity.
 
+pub mod admission;
 mod admitted_paths;
 pub mod allocation;
 pub mod binding_passport;
