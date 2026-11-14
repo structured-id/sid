@@ -12,6 +12,7 @@
 use std::time::Duration;
 
 use prost::Message;
+use sid_plugin::platform_ca::{PlatformCa, PlatformCaSet, PlatformCaSource, PlatformCaState};
 use sid_proto::sid::v1::PlatformCas;
 
 pub mod discovery;
@@ -140,6 +141,146 @@ impl PlatformCaPublication {
             .map_err(|e| PublicationError::Malformed(e.to_string()))?;
         PlatformCas::decode(message.encode_to_vec().as_slice())
             .map_err(|e| PublicationError::Malformed(e.to_string()))
+    }
+}
+
+/// Why a published message states no set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{field}: expected {reason}")]
+pub struct WireError {
+    pub field: &'static str,
+    pub reason: &'static str,
+}
+
+/// The set a `PlatformCas` message states, as pushed by a managing service
+/// or read from the publication. Only decoded: its holder checks it.
+pub fn set_of(wire: PlatformCas) -> Result<PlatformCaSet, WireError> {
+    use sid_proto::sid::v1::PlatformCaState as Wire;
+    let generations = wire
+        .generations
+        .into_iter()
+        .map(|g| {
+            let state = match Wire::try_from(g.state) {
+                Ok(Wire::Active) => PlatformCaState::Active,
+                Ok(Wire::VerificationOnly) => PlatformCaState::VerificationOnly,
+                Ok(Wire::Withdrawn) => PlatformCaState::Withdrawn,
+                _ => {
+                    return Err(WireError {
+                        field: "generations.state",
+                        reason: "active, verification-only or withdrawn",
+                    });
+                }
+            };
+            Ok(PlatformCa {
+                generation: g.generation,
+                certificate: g.certificate,
+                state,
+                overlap_end: g.overlap_end.map(|t| t.seconds),
+                crl: (!g.crl.is_empty()).then_some(g.crl),
+            })
+        })
+        .collect::<Result<Vec<_>, WireError>>()?;
+    let seconds = |field: &'static str, seconds: Option<i64>| {
+        seconds.ok_or(WireError {
+            field,
+            reason: "a timestamp",
+        })
+    };
+    Ok(PlatformCaSet {
+        revision: wire.revision,
+        generations,
+        issued_at: seconds("issued_at", wire.issued_at.map(|t| t.seconds))?,
+        next_update: seconds("next_update", wire.next_update.map(|t| t.seconds))?,
+    })
+}
+
+/// The platform's records for a publication, read from a secure answer.
+#[async_trait::async_trait]
+pub trait DiscoverySource: Send + Sync {
+    async fn records(
+        &self,
+        publication: &url::Url,
+    ) -> Result<Vec<discovery::DiscoveryRecord>, String>;
+}
+
+#[cfg(feature = "platform-ca-dns")]
+#[async_trait::async_trait]
+impl DiscoverySource for discovery::DiscoveryResolver {
+    async fn records(
+        &self,
+        publication: &url::Url,
+    ) -> Result<Vec<discovery::DiscoveryRecord>, String> {
+        discovery::DiscoveryResolver::records(self, publication)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The configured publication as the source an installation refreshes its
+/// platform CA set from: the set is fetched over HTTPS from exactly the
+/// configured endpoint, and with discovery configured the platform's DNS
+/// records are read alongside. A set the records announce exactly is taken
+/// on the DNS step; records that are not usable or do not match reject that
+/// candidate, and the set is taken on the HTTPS step from the configured
+/// endpoint. Either way its holder applies it under the same rules, so
+/// neither step can bring back an older set or a withdrawn generation.
+#[derive(Default)]
+pub struct PublishedPlatformCas {
+    discovery: Option<std::sync::Arc<dyn DiscoverySource>>,
+}
+
+impl PublishedPlatformCas {
+    /// The source over HTTPS alone.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The source reading the platform's discovery records through
+    /// `discovery` before it takes a fetched set.
+    pub fn with_discovery(mut self, discovery: std::sync::Arc<dyn DiscoverySource>) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
+
+    /// The set `wire`, fetched from `endpoint`, with what the discovery
+    /// records said of it.
+    fn taken(
+        wire: PlatformCas,
+        records: Option<Result<Vec<discovery::DiscoveryRecord>, String>>,
+        endpoint: &url::Url,
+    ) -> Result<PlatformCaSet, String> {
+        match records {
+            None => {}
+            Some(Ok(records)) => match discovery::check(&wire, &records, endpoint) {
+                Ok(()) => tracing::debug!("platform CA set announced by its discovery records"),
+                Err(mismatch) => tracing::warn!(
+                    %mismatch,
+                    "platform CA discovery candidate rejected; the HTTPS publication supplies the set"
+                ),
+            },
+            Some(Err(reason)) => tracing::warn!(
+                %reason,
+                "platform CA discovery not usable; the HTTPS publication supplies the set"
+            ),
+        }
+        set_of(wire).map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformCaSource for PublishedPlatformCas {
+    async fn fetch(&self, endpoint: &url::Url) -> Result<PlatformCaSet, String> {
+        let publication =
+            PlatformCaPublication::new(endpoint.clone()).map_err(|e| e.to_string())?;
+        let (records, wire) = match &self.discovery {
+            Some(discovery) => {
+                let (records, wire) =
+                    tokio::join!(discovery.records(endpoint), publication.fetch());
+                (Some(records), wire)
+            }
+            None => (None, publication.fetch().await),
+        };
+        Self::taken(wire.map_err(|e| e.to_string())?, records, endpoint)
     }
 }
 

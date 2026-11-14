@@ -208,3 +208,71 @@ async fn a_malformed_answer_is_refused() {
         );
     }
 }
+
+// A published message reads to the set its holder applies: states by their
+// meaning, an overlap end and the times in seconds, a list only where one is
+// published. Bug prevented: an unknown state or a missing freshness time
+// read as some default, so a holder would apply a set that never said it.
+#[test]
+fn a_published_message_states_the_set() {
+    use sid_plugin::platform_ca as held;
+    let set = set_of(published()).unwrap();
+    assert_eq!(set.revision, 6);
+    assert_eq!(
+        (set.issued_at, set.next_update),
+        (1_800_000_000, 1_800_003_600)
+    );
+    assert_eq!(
+        set.generations,
+        vec![
+            held::PlatformCa {
+                generation: 2,
+                certificate: vec![2; 600],
+                state: held::PlatformCaState::Active,
+                overlap_end: None,
+                crl: Some(vec![0x30, 0x82, 0xff, 0x00, 0x7f]),
+            },
+            held::PlatformCa {
+                generation: 1,
+                certificate: vec![1; 600],
+                state: held::PlatformCaState::VerificationOnly,
+                overlap_end: Some(1_900_000_000),
+                crl: Some(vec![0x30, 0x03, 0x02, 0x01, 0x01]),
+            },
+        ]
+    );
+
+    let mut unlisted = published();
+    unlisted.generations[0].crl.clear();
+    assert_eq!(set_of(unlisted).unwrap().generations[0].crl, None);
+
+    let mut stateless = published();
+    stateless.generations[0].state = 0;
+    assert_eq!(set_of(stateless).unwrap_err().field, "generations.state");
+    let mut undated = published();
+    undated.next_update = None;
+    assert_eq!(set_of(undated).unwrap_err().field, "next_update");
+}
+
+// Discovery records never replace the publication: whatever they say of a
+// fetched set (announce it, name another, or fail to resolve), the set taken
+// is the one the configured endpoint answered. Bug prevented: a DNS failure
+// or mismatch stopping the refresh, or DNS content standing in for the set.
+#[test]
+fn discovery_only_qualifies_the_fetched_set() {
+    let endpoint: url::Url = "https://platform.sid.example.com/.well-known/sid-ca/index.json"
+        .parse()
+        .unwrap();
+    let expected = set_of(published()).unwrap();
+    for records in [
+        None,
+        Some(Err("no answer".to_owned())),
+        // No record at all: the candidate is rejected, the set still taken.
+        Some(Ok(Vec::new())),
+    ] {
+        assert_eq!(
+            PublishedPlatformCas::taken(published(), records, &endpoint).unwrap(),
+            expected
+        );
+    }
+}

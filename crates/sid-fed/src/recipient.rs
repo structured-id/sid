@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use sid_core::models::{AuditEntry, MutationContext};
 use sid_plugin::platform_ca::{
     Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCaError, PlatformCaSet,
-    PlatformCaState, PlatformCaStore, StatusRefusal,
+    PlatformCaSource, PlatformCaState, PlatformCaStore, StatusRefusal,
 };
 use uuid::Uuid;
 use x509_cert::Certificate;
@@ -92,14 +92,6 @@ impl Verdict for ClassicalVerdict {
             &proof.signature,
         )
     }
-}
-
-/// Where a newer platform CA set is fetched from: the publication the
-/// installation configured, read by its transport.
-#[async_trait::async_trait]
-pub trait PlatformCaSource: Send + Sync {
-    /// The set the platform publishes at `endpoint` now.
-    async fn fetch(&self, endpoint: &url::Url) -> Result<PlatformCaSet, String>;
 }
 
 /// The status of the passports this installation's own authority issued,

@@ -250,6 +250,15 @@ pub enum PlatformCaError {
     Occupied,
 }
 
+/// Where a newer platform CA set is fetched from: the publication the
+/// installation configured, read by its transport. What it answers is only
+/// transported: the holder checks and applies it under the store's rules.
+#[async_trait]
+pub trait PlatformCaSource: Send + Sync {
+    /// The set the platform publishes at `endpoint` now.
+    async fn fetch(&self, endpoint: &url::Url) -> Result<PlatformCaSet, String>;
+}
+
 /// The admitted platform CA set of one installation.
 #[async_trait]
 pub trait PlatformCaStore: Send + Sync {

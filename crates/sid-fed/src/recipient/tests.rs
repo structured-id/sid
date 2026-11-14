@@ -49,9 +49,52 @@ fn binding() -> Uuid {
     Uuid::from_u128(0x0192_f3a4_7c1e_7b2a_9d4e_3f5a_6b7c_8d9e)
 }
 
+/// The certificates of the tests, built once per process: a certificate is
+/// named by its exact bytes (its issuer's status, an accepted path's key),
+/// so every use of one must be the same certificate, not one built again a
+/// second later with other validity times.
+struct Chain {
+    intermediate: Vec<u8>,
+    organization_ca: Vec<u8>,
+    personal: Vec<u8>,
+    corporate: Vec<u8>,
+}
+
+fn chain() -> &'static Chain {
+    static CHAIN: std::sync::OnceLock<Chain> = std::sync::OnceLock::new();
+    CHAIN.get_or_init(|| Chain {
+        intermediate: build_intermediate(),
+        organization_ca: build_organization_ca(),
+        personal: issued(&stated(None), INTERMEDIATE_NAME, INTERMEDIATE),
+        corporate: issued(
+            &stated(Some(source())),
+            &format!("O={}", source()),
+            ORGANIZATION,
+        ),
+    })
+}
+
+fn intermediate() -> Vec<u8> {
+    chain().intermediate.clone()
+}
+
+fn organization_ca() -> Vec<u8> {
+    chain().organization_ca.clone()
+}
+
+/// A Personal passport: issued by the platform intermediate itself.
+fn personal() -> Vec<u8> {
+    chain().personal.clone()
+}
+
+/// A Corporate passport: issued by the source organization's authority.
+fn corporate() -> Vec<u8> {
+    chain().corporate.clone()
+}
+
 /// The platform intermediate under the Root: it signs certificates and
 /// revocation lists and names its key `[2; 20]`.
-fn intermediate() -> Vec<u8> {
+fn build_intermediate() -> Vec<u8> {
     Stated {
         subject: name(INTERMEDIATE_NAME),
         serial: 2,
@@ -68,7 +111,7 @@ fn intermediate() -> Vec<u8> {
 
 /// The authority of the source organization under the intermediate, naming
 /// its key `[3; 20]`.
-fn organization_ca() -> Vec<u8> {
+fn build_organization_ca() -> Vec<u8> {
     Stated {
         subject: name(&format!("O={}", source())),
         serial: ORGANIZATION_SERIAL,
@@ -109,20 +152,6 @@ fn issued(passport: &Passport, issuer: &str, issuer_key: u8) -> Vec<u8> {
         extensions,
     }
     .signed(&key(HOLDER), &name(issuer), &key(issuer_key))
-}
-
-/// A Personal passport: issued by the platform intermediate itself.
-fn personal() -> Vec<u8> {
-    issued(&stated(None), INTERMEDIATE_NAME, INTERMEDIATE)
-}
-
-/// A Corporate passport: issued by the source organization's authority.
-fn corporate() -> Vec<u8> {
-    issued(
-        &stated(Some(source())),
-        &format!("O={}", source()),
-        ORGANIZATION,
-    )
 }
 
 /// The intermediate's list `number`, revoking `serials`.
