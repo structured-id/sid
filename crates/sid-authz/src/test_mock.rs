@@ -338,6 +338,22 @@ impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
     ) -> std::result::Result<bool, sid_plugin::platform_ca::PlatformCaError> {
         unimplemented!()
     }
+    async fn record_issuer_status(
+        &self,
+        _: &sid_plugin::platform_ca::IssuerStatus,
+        _: MutationContext,
+    ) -> std::result::Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn held_issuer_status(
+        &self,
+        _: &[u8; 32],
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::AnchorStatus,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
     async fn export_platform_cas(
         &self,
     ) -> std::result::Result<

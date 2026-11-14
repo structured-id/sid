@@ -141,10 +141,9 @@ impl path::Verify for EcdsaP256 {
     fn verify(
         &self,
         algorithm: &structured_pkix::algorithm::AlgorithmIdentifier<'_>,
-        // The issuer's public key the signature is checked with. The type's
-        // name is RFC 5280 §6.1.2 (d) `working_public_key`: the key in use at
-        // this step of the path.
-        issuer_key: structured_pkix::path::WorkingKey<'_>,
+        // The issuer's public key the signature is checked with: the key in
+        // effect at this step of the path (RFC 5280 §6.1.2 (d)).
+        issuer_key: structured_pkix::path::EffectiveKey<'_>,
         signed: &[u8],
         signature: structured_pkix::signature::SignatureValue<'_>,
         _execution: &Memory,

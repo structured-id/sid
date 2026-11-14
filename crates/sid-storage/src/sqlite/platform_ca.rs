@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use sid_core::Error as SidError;
 use sid_core::models::MutationContext;
 use sid_plugin::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet, IssuerStatus,
     PlatformCaArchive, PlatformCaError, PlatformCaSet, PlatformCaState, PlatformCaStore,
 };
 
@@ -101,16 +101,102 @@ async fn archive(conn: &mut sqlx::SqliteConnection) -> Result<PlatformCaArchive,
             revoked,
         });
     }
+    let rows: Vec<(Vec<u8>, i64, i64)> =
+        sqlx::query_as("SELECT issuer, number, next_update FROM ca_issuer_status ORDER BY issuer")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage("read the issuer status"))?;
+    let mut issuers = Vec::with_capacity(rows.len());
+    for (issuer, number, next_update) in rows {
+        let revoked = sqlx::query_scalar(
+            "SELECT serial FROM ca_issuer_revoked WHERE issuer = ? ORDER BY serial",
+        )
+        .bind(issuer.as_slice())
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(storage("read the issuer revocations"))?;
+        issuers.push(IssuerStatus {
+            issuer: issuer.try_into().map_err(|_| {
+                PlatformCaError::Storage(SidError::Storage("a stored issuer name".into()))
+            })?,
+            number: unsigned(number, "CRL number")?,
+            next_update,
+            revoked,
+        });
+    }
     Ok(PlatformCaArchive {
         publication,
         set,
         generations,
         status,
+        issuers,
     })
+}
+
+/// Hold one issuer's CRL in `tx`: its number and time when not older than
+/// the held one, and every serial it revokes whatever the number.
+async fn hold_issuer_status(
+    tx: &mut sqlx::SqliteConnection,
+    crl: &IssuerStatus,
+) -> Result<(), PlatformCaError> {
+    sqlx::query(
+        "INSERT INTO ca_issuer_status (issuer, number, next_update) VALUES (?, ?, ?)
+         ON CONFLICT (issuer) DO UPDATE SET number = excluded.number,
+             next_update = excluded.next_update
+         WHERE ca_issuer_status.number <= excluded.number",
+    )
+    .bind(crl.issuer.as_slice())
+    .bind(stored(crl.number, "CRL number")?)
+    .bind(crl.next_update)
+    .execute(&mut *tx)
+    .await
+    .map_err(storage("hold an issuer's CRL"))?;
+    for serial in &crl.revoked {
+        sqlx::query(
+            "INSERT INTO ca_issuer_revoked (issuer, serial) VALUES (?, ?)
+             ON CONFLICT (issuer, serial) DO NOTHING",
+        )
+        .bind(crl.issuer.as_slice())
+        .bind(serial.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("hold an issuer's revocation"))?;
+    }
+    Ok(())
 }
 
 #[async_trait]
 impl PlatformCaStore for SqliteBackend {
+    async fn record_issuer_status(
+        &self,
+        status: &IssuerStatus,
+        ctx: MutationContext,
+    ) -> Result<(), PlatformCaError> {
+        let mut tx = self.begin_write().await?;
+        hold_issuer_status(&mut tx, status).await?;
+        Self::commit_mutation(tx, CHAIN, ctx).await?;
+        Ok(())
+    }
+
+    async fn held_issuer_status(&self, issuer: &[u8; 32]) -> Result<AnchorStatus, PlatformCaError> {
+        // One read transaction: the evidence's end and the revocations are
+        // one committed state.
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        let until = sqlx::query_scalar("SELECT next_update FROM ca_issuer_status WHERE issuer = ?")
+            .bind(issuer.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage("read an issuer's status"))?;
+        let revoked = sqlx::query_scalar(
+            "SELECT serial FROM ca_issuer_revoked WHERE issuer = ? ORDER BY serial",
+        )
+        .bind(issuer.as_slice())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage("read an issuer's revocations"))?;
+        Ok(AnchorStatus { until, revoked })
+    }
+
     async fn export_platform_cas(&self) -> Result<PlatformCaArchive, PlatformCaError> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
         archive(&mut tx).await
@@ -183,6 +269,10 @@ impl PlatformCaStore for SqliteBackend {
                     .await
                     .map_err(storage("move a revocation"))?;
             }
+        }
+        // The target held none: the same writes that record one hold it.
+        for crl in &moved.issuers {
+            hold_issuer_status(&mut tx, crl).await?;
         }
         Self::commit_mutation(tx, CHAIN, ctx).await?;
         Ok(true)

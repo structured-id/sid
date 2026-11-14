@@ -1097,6 +1097,19 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             )
             .await
             .unwrap();
+        // And what an organization's CA published of its passports.
+        source
+            .record_issuer_status(
+                &sid_plugin::platform_ca::IssuerStatus {
+                    issuer: [4; 32],
+                    number: 2,
+                    next_update: 1_800_003_600,
+                    revoked: vec![vec![5]],
+                },
+                ctx(),
+            )
+            .await
+            .unwrap();
     }
     source
         .put_ceremony_state(

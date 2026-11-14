@@ -10,7 +10,7 @@ use coordinode_core::graph::types::Value;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet, IssuerStatus,
     PlatformCaArchive, PlatformCaError, PlatformCaSet, PlatformCaState, PlatformCaStore,
 };
 
@@ -125,11 +125,29 @@ fn archive(tx: &Statements<'_>) -> SidResult<PlatformCaArchive> {
         });
     }
     status.sort_unstable_by_key(|c| c.generation);
+    let mut issuers = Vec::new();
+    for row in tx.run(
+        "MATCH (c:SidCaIssuerStatus)
+         RETURN c.issuer AS issuer, c.number AS number, c.next_update AS next_update,
+                c.revoked AS revoked",
+        Params::default(),
+    )? {
+        issuers.push(IssuerStatus {
+            issuer: get_bytes(&row, "issuer")?
+                .try_into()
+                .map_err(|_| SidError::Storage("a stored issuer name".into()))?,
+            number: unsigned(get_int(&row, "number")?, "CRL number")?,
+            next_update: get_int(&row, "next_update")?,
+            revoked: get_serials(&row, "revoked")?,
+        });
+    }
+    issuers.sort_unstable_by_key(|c| c.issuer);
     Ok(PlatformCaArchive {
         publication,
         set,
         generations,
         status,
+        issuers,
     })
 }
 
@@ -201,8 +219,67 @@ fn import(
                 .with("revoked", serials(&revoked)),
         )?;
     }
+    // The target held none: the same write that records one holds it.
+    for crl in &moved.issuers {
+        record_issuer(tx, crl)?;
+    }
     finalize(tx, CHAIN, ctx.clone())?;
     Ok(Decision::Commit(Moved::Written))
+}
+
+fn issuer(name: &[u8; 32]) -> Params {
+    Params::default().with("issuer", Value::Binary(name.to_vec()))
+}
+
+/// Hold one issuer's authenticated CRL: its number and time when not older
+/// than the held one, and every serial it revokes beside those held.
+fn record_issuer(tx: &Statements<'_>, crl: &IssuerStatus) -> SidResult<()> {
+    let number = stored(crl.number, "CRL number")?;
+    let rows = tx.run(
+        "MATCH (c:SidCaIssuerStatus) WHERE c.issuer = $issuer
+         RETURN id(c) AS node, c.number AS number, c.next_update AS next_update,
+                c.revoked AS revoked",
+        issuer(&crl.issuer),
+    )?;
+    let Some(row) = rows.first() else {
+        let mut revoked = crl.revoked.clone();
+        revoked.sort_unstable();
+        revoked.dedup();
+        // Concurrent first recorders meet on the unique node: the one that
+        // lost runs again and merges into it.
+        tx.create_absent(
+            "CREATE (c:SidCaIssuerStatus {issuer: $issuer, number: $number,
+                 next_update: $next_update, revoked: $revoked})",
+            issuer(&crl.issuer)
+                .with("number", Value::Int(number))
+                .with("next_update", Value::Int(crl.next_update))
+                .with("revoked", serials(&revoked)),
+        )?;
+        return Ok(());
+    };
+    if !hold_first(tx, &rows)? {
+        return Err(SidError::Storage("an issuer's status vanished".into()));
+    }
+    // A lower number changes neither the number nor its time; its
+    // revocations are kept all the same.
+    let (number, next_update) = if get_int(row, "number")? <= number {
+        (number, crl.next_update)
+    } else {
+        (get_int(row, "number")?, get_int(row, "next_update")?)
+    };
+    let mut revoked = get_serials(row, "revoked")?;
+    revoked.extend(crl.revoked.iter().cloned());
+    revoked.sort_unstable();
+    revoked.dedup();
+    tx.run(
+        "MATCH (c:SidCaIssuerStatus) WHERE c.issuer = $issuer
+         SET c.number = $number, c.next_update = $next_update, c.revoked = $revoked",
+        issuer(&crl.issuer)
+            .with("number", Value::Int(number))
+            .with("next_update", Value::Int(next_update))
+            .with("revoked", serials(&revoked)),
+    )?;
+    Ok(())
 }
 
 /// Hold `set` unless a newer one is held; see [`PlatformCaStore`].
@@ -422,6 +499,40 @@ fn held(tx: &Statements<'_>, now: i64) -> SidResult<Result<HeldAnchors, Platform
 
 #[async_trait]
 impl PlatformCaStore for CoordinodeBackend {
+    async fn record_issuer_status(
+        &self,
+        status: &IssuerStatus,
+        ctx: MutationContext,
+    ) -> Result<(), PlatformCaError> {
+        let status = status.clone();
+        self.transaction(move |tx| {
+            record_issuer(tx, &status)?;
+            finalize(tx, CHAIN, ctx.clone())?;
+            Ok(Decision::Commit(()))
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn held_issuer_status(&self, name: &[u8; 32]) -> Result<AnchorStatus, PlatformCaError> {
+        let name = *name;
+        Ok(self
+            .read(move |tx| {
+                let rows = tx.run(
+                    "MATCH (c:SidCaIssuerStatus) WHERE c.issuer = $issuer
+                     RETURN c.next_update AS next_update, c.revoked AS revoked",
+                    issuer(&name),
+                )?;
+                rows.first().map_or(Ok(AnchorStatus::default()), |row| {
+                    Ok(AnchorStatus {
+                        until: Some(get_int(row, "next_update")?),
+                        revoked: get_serials(row, "revoked")?,
+                    })
+                })
+            })
+            .await?)
+    }
+
     async fn export_platform_cas(&self) -> Result<PlatformCaArchive, PlatformCaError> {
         Ok(self.read(archive).await?)
     }

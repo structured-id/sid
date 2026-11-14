@@ -85,6 +85,9 @@ pub struct PlatformCaArchive {
     pub set: Option<HeldSet>,
     pub generations: Vec<HeldGeneration>,
     pub status: Vec<GenerationStatus>,
+    /// The status held of the authorities below the platform, in the order
+    /// of their names.
+    pub issuers: Vec<IssuerStatus>,
 }
 
 impl PlatformCaArchive {
@@ -94,6 +97,7 @@ impl PlatformCaArchive {
             + usize::from(self.set.is_some())
             + self.generations.len()
             + self.status.len()
+            + self.issuers.len()
     }
 
     /// Whether the source held nothing.
@@ -132,7 +136,26 @@ pub struct GenerationStatus {
     pub revoked: Vec<Vec<u8>>,
 }
 
-/// What is known of the CA certificates one anchor issued.
+/// The CRL of an authority below the platform (an organization's CA),
+/// authenticated under that authority's certificate: the status of the
+/// certificates it issued. An issuer is one exact certificate, named by the
+/// SHA-256 of its DER: a serial means something only under the key and
+/// generation that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuerStatus {
+    /// SHA-256 of the issuing certificate (DER).
+    pub issuer: [u8; 32],
+    /// The CRL's number: a lower one than the one held changes nothing.
+    pub number: u64,
+    /// The CRL's nextUpdate (seconds since the epoch): after it the status is
+    /// no evidence.
+    pub next_update: i64,
+    /// The serials it revokes, as their DER INTEGER contents.
+    pub revoked: Vec<Vec<u8>>,
+}
+
+/// What is known of the certificates one authority issued: a platform
+/// generation's CA certificates, or an organization CA's passports.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnchorStatus {
     /// Until when the held CRL is evidence (seconds since the epoch); none
@@ -273,6 +296,22 @@ pub trait PlatformCaStore: Send + Sync {
         publication: &str,
         ctx: MutationContext,
     ) -> Result<bool, PlatformCaError>;
+
+    /// Hold the CRL `status` of an authority below the platform, which the
+    /// caller authenticated under that authority's certificate on an
+    /// accepted path. It replaces the issuer's held one only with a number
+    /// not lower, and every serial it revokes is kept from then on, whatever
+    /// its number.
+    async fn record_issuer_status(
+        &self,
+        status: &IssuerStatus,
+        ctx: MutationContext,
+    ) -> Result<(), PlatformCaError>;
+
+    /// What is held of the certificates `issuer` (the SHA-256 of its DER
+    /// certificate) issued; nothing known of an issuer is the default
+    /// status, which admits no certificate.
+    async fn held_issuer_status(&self, issuer: &[u8; 32]) -> Result<AnchorStatus, PlatformCaError>;
 
     /// Everything the store holds, as stored.
     async fn export_platform_cas(&self) -> Result<PlatformCaArchive, PlatformCaError>;

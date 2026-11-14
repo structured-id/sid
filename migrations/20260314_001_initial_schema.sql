@@ -448,6 +448,22 @@ CREATE TABLE login_settings (
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );
 
+CREATE TABLE ca_issuer_revoked (
+    issuer bytea NOT NULL,
+    serial bytea NOT NULL,
+    CONSTRAINT ca_issuer_revoked_issuer_check CHECK ((octet_length(issuer) = 32)),
+    CONSTRAINT ca_issuer_revoked_pkey PRIMARY KEY (issuer, serial)
+);
+
+CREATE TABLE ca_issuer_status (
+    issuer bytea NOT NULL,
+    number bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT ca_issuer_status_issuer_check CHECK ((octet_length(issuer) = 32)),
+    CONSTRAINT ca_issuer_status_number_check CHECK ((number >= 0)),
+    CONSTRAINT ca_issuer_status_pkey PRIMARY KEY (issuer)
+);
+
 CREATE TABLE platform_ca_generations (
     generation bigint NOT NULL,
     certificate bytea NOT NULL,

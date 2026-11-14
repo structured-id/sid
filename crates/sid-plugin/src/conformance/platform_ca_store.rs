@@ -6,8 +6,8 @@
 use sid_core::models::{AuditEntry, MutationContext};
 
 use crate::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, PlatformCa, PlatformCaError,
-    PlatformCaSet, PlatformCaState, PlatformCaStore, StatusRefusal,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCa,
+    PlatformCaError, PlatformCaSet, PlatformCaState, PlatformCaStore, StatusRefusal,
 };
 
 const NOW: i64 = 1_800_000_000;
@@ -329,6 +329,90 @@ pub async fn the_publication_is_configured_once(backend: &dyn PlatformCaStore) {
     );
 }
 
+fn issuer_crl(issuer: u8, number: u64, next_update: i64, revoked: &[&[u8]]) -> IssuerStatus {
+    IssuerStatus {
+        issuer: [issuer; 32],
+        number,
+        next_update,
+        revoked: revoked.iter().map(|serial| serial.to_vec()).collect(),
+    }
+}
+
+/// Nothing held of an issuer shows nothing of what it issued; a held CRL
+/// admits an unlisted serial until its next update and no longer, and
+/// refuses a listed one. Bug prevented: absence of status read as good
+/// status, or a CRL past its time still relied on.
+pub async fn issuer_status_is_evidence_only_in_its_time(backend: &dyn PlatformCaStore) {
+    let unknown = backend.held_issuer_status(&[1; 32]).await.unwrap();
+    assert_eq!(unknown.admits(&[7], NOW), Err(StatusRefusal::Unavailable));
+
+    backend
+        .record_issuer_status(&issuer_crl(1, 5, NOW + 3600, &[&[9]]), audit())
+        .await
+        .unwrap();
+    let held = backend.held_issuer_status(&[1; 32]).await.unwrap();
+    assert_eq!(held.until, Some(NOW + 3600));
+    assert_eq!(held.admits(&[7], NOW + 3600), Ok(()));
+    assert_eq!(
+        held.admits(&[7], NOW + 3601),
+        Err(StatusRefusal::Unavailable)
+    );
+    assert_eq!(held.admits(&[9], NOW), Err(StatusRefusal::Revoked));
+    // Another issuer's status says nothing of this one's serials.
+    assert_eq!(
+        backend.held_issuer_status(&[2; 32]).await.unwrap(),
+        AnchorStatus::default()
+    );
+}
+
+/// What is held of an issuer only narrows: an older CRL does not shorten or
+/// replace the held evidence but its revocations are kept, and a newer CRL
+/// that omits a serial seen revoked does not bring it back. Bug prevented:
+/// a replayed or rolled-back CRL restoring a revoked certificate.
+pub async fn an_issuers_revocation_seen_once_stays(backend: &dyn PlatformCaStore) {
+    let record = |crl: IssuerStatus| async move {
+        backend.record_issuer_status(&crl, audit()).await.unwrap();
+    };
+    record(issuer_crl(1, 5, NOW + 3600, &[&[9]])).await;
+    // An older number: its end is not taken, its revocation is.
+    record(issuer_crl(1, 4, NOW + 9000, &[&[8]])).await;
+    let held = backend.held_issuer_status(&[1; 32]).await.unwrap();
+    assert_eq!(held.until, Some(NOW + 3600));
+    assert_eq!(held.admits(&[8], NOW), Err(StatusRefusal::Revoked));
+    assert_eq!(held.admits(&[9], NOW), Err(StatusRefusal::Revoked));
+
+    // A newer number listing nothing extends the evidence only.
+    record(issuer_crl(1, 6, NOW + 7200, &[])).await;
+    let held = backend.held_issuer_status(&[1; 32]).await.unwrap();
+    assert_eq!(held.until, Some(NOW + 7200));
+    assert_eq!(held.admits(&[9], NOW), Err(StatusRefusal::Revoked));
+    assert_eq!(held.admits(&[7], NOW), Ok(()));
+    // The same CRL again changes nothing.
+    record(issuer_crl(1, 6, NOW + 7200, &[])).await;
+    assert_eq!(backend.held_issuer_status(&[1; 32]).await.unwrap(), held);
+}
+
+/// Recorders of one issuer's CRLs at once leave the highest number and
+/// every revocation, whichever commits last. A store that refuses a
+/// concurrent writer is asked again.
+pub async fn concurrent_issuer_status_keeps_the_newest(backend: &dyn PlatformCaStore) {
+    let newer = issuer_crl(1, 6, NOW + 7200, &[&[9]]);
+    let older = issuer_crl(1, 5, NOW + 3600, &[&[8]]);
+    let (a, b) = tokio::join!(
+        backend.record_issuer_status(&newer, audit()),
+        backend.record_issuer_status(&older, audit())
+    );
+    if a.is_err() {
+        backend.record_issuer_status(&newer, audit()).await.unwrap();
+    }
+    if b.is_err() {
+        backend.record_issuer_status(&older, audit()).await.unwrap();
+    }
+    let held = backend.held_issuer_status(&[1; 32]).await.unwrap();
+    assert_eq!(held.until, Some(NOW + 7200));
+    assert_eq!(held.revoked, vec![vec![8u8], vec![9u8]]);
+}
+
 /// A move carries everything the source held, as it held it: the target
 /// answers as the source did, keeps a generation the held revision no longer
 /// lists withdrawn when a later set lists it active again, and keeps every
@@ -365,8 +449,13 @@ pub async fn a_move_keeps_every_narrowing(
     from.record_platform_ca_status(&[status(3, 5, NOW + 3600, &[&[9], &[7]])])
         .await
         .unwrap();
+    from.0
+        .record_issuer_status(&issuer_crl(4, 2, NOW + 3600, &[&[5]]), audit())
+        .await
+        .unwrap();
     let archive = from.0.export_platform_cas().await.unwrap();
     assert_eq!(archive.generations.len(), 3);
+    assert_eq!(archive.issuers.len(), 1);
 
     assert!(to.0.import_platform_cas(&archive, audit()).await.unwrap());
     assert_eq!(to.0.export_platform_cas().await.unwrap(), archive);
@@ -377,6 +466,13 @@ pub async fn a_move_keeps_every_narrowing(
     assert_eq!(
         to.platform_ca_publication().await.unwrap().as_deref(),
         Some(PUBLICATION)
+    );
+    assert_eq!(
+        to.0.held_issuer_status(&[4; 32])
+            .await
+            .unwrap()
+            .admits(&[5], NOW),
+        Err(StatusRefusal::Revoked)
     );
     // A resumed move finds it held.
     assert!(!to.0.import_platform_cas(&archive, audit()).await.unwrap());

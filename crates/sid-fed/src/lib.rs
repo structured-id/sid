@@ -20,7 +20,9 @@
 //! - [`passport_path`] verifies the signatures up to the trust point and
 //!   applies those rules;
 //! - [`presentation`] verifies that the passport's holder signed for this
-//!   very request.
+//!   very request;
+//! - [`status`] verifies the list an authority publishes of the
+//!   certificates it revoked.
 
 pub mod allocation;
 pub mod binding_passport;
@@ -30,6 +32,7 @@ pub mod organization_scope;
 pub mod passport_path;
 pub mod presentation;
 pub mod purpose;
+pub mod status;
 
 #[cfg(test)]
 mod test_certificates;

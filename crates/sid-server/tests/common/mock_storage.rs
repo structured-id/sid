@@ -1712,6 +1712,20 @@ impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
     ) -> Result<bool, sid_plugin::platform_ca::PlatformCaError> {
         Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
     }
+    async fn record_issuer_status(
+        &self,
+        _status: &sid_plugin::platform_ca::IssuerStatus,
+        _ctx: MutationContext,
+    ) -> Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn held_issuer_status(
+        &self,
+        _issuer: &[u8; 32],
+    ) -> Result<sid_plugin::platform_ca::AnchorStatus, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Ok(Default::default())
+    }
     async fn export_platform_cas(
         &self,
     ) -> Result<sid_plugin::platform_ca::PlatformCaArchive, sid_plugin::platform_ca::PlatformCaError>

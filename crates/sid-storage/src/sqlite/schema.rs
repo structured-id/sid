@@ -1910,4 +1910,18 @@ CREATE TABLE IF NOT EXISTS platform_ca_revoked (
     serial          BLOB NOT NULL,
     PRIMARY KEY (generation, serial)
 ) STRICT, WITHOUT ROWID;
+
+-- What the authorities below the platform (organization CAs) published of
+-- the certificates they issued. An issuer is the SHA-256 of its certificate.
+CREATE TABLE IF NOT EXISTS ca_issuer_status (
+    issuer          BLOB PRIMARY KEY CHECK (length(issuer) = 32),
+    number          INTEGER NOT NULL CHECK (number >= 0),
+    next_update     INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS ca_issuer_revoked (
+    issuer          BLOB NOT NULL CHECK (length(issuer) = 32),
+    serial          BLOB NOT NULL,
+    PRIMARY KEY (issuer, serial)
+) STRICT, WITHOUT ROWID;
 "#;

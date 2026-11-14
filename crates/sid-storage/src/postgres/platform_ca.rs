@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use sid_core::Error as SidError;
 use sid_core::models::MutationContext;
 use sid_plugin::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, HeldGeneration, HeldSet, IssuerStatus,
     PlatformCaArchive, PlatformCaError, PlatformCaSet, PlatformCaState, PlatformCaStore,
 };
 
@@ -98,16 +98,104 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
             revoked,
         });
     }
+    let rows: Vec<(Vec<u8>, i64, i64, Vec<Vec<u8>>)> = sqlx::query_as(
+        "SELECT c.issuer, c.number, c.next_update,
+                COALESCE((SELECT array_agg(r.serial ORDER BY r.serial)
+                          FROM ca_issuer_revoked r WHERE r.issuer = c.issuer), '{}')
+         FROM ca_issuer_status c ORDER BY c.issuer",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("read the issuer status"))?;
+    let mut issuers = Vec::with_capacity(rows.len());
+    for (issuer, number, next_update, revoked) in rows {
+        issuers.push(IssuerStatus {
+            issuer: issuer.try_into().map_err(|_| {
+                PlatformCaError::Storage(SidError::Storage("a stored issuer name".into()))
+            })?,
+            number: unsigned(number, "CRL number")?,
+            next_update,
+            revoked,
+        });
+    }
     Ok(PlatformCaArchive {
         publication,
         set,
         generations,
         status,
+        issuers,
     })
+}
+
+/// Hold one issuer's CRL in `tx`: its number and time when not older than
+/// the held one (concurrent recorders serialize on the issuer's row, so the
+/// highest number stands), and every serial it revokes whatever the number.
+async fn hold_issuer_status(
+    tx: &mut sqlx::PgConnection,
+    crl: &IssuerStatus,
+) -> Result<(), PlatformCaError> {
+    sqlx::query(
+        "INSERT INTO ca_issuer_status (issuer, number, next_update) VALUES ($1, $2, $3)
+         ON CONFLICT (issuer) DO UPDATE SET number = EXCLUDED.number,
+             next_update = EXCLUDED.next_update
+         WHERE ca_issuer_status.number <= EXCLUDED.number",
+    )
+    .bind(crl.issuer.as_slice())
+    .bind(stored(crl.number, "CRL number")?)
+    .bind(crl.next_update)
+    .execute(&mut *tx)
+    .await
+    .map_err(storage("hold an issuer's CRL"))?;
+    if !crl.revoked.is_empty() {
+        sqlx::query(
+            "INSERT INTO ca_issuer_revoked (issuer, serial)
+             SELECT $1, serial FROM UNNEST($2::bytea[]) AS revoked(serial)
+             ON CONFLICT (issuer, serial) DO NOTHING",
+        )
+        .bind(crl.issuer.as_slice())
+        .bind(&crl.revoked)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("hold an issuer's revocations"))?;
+    }
+    Ok(())
 }
 
 #[async_trait]
 impl PlatformCaStore for PostgresBackend {
+    async fn record_issuer_status(
+        &self,
+        status: &IssuerStatus,
+        ctx: MutationContext,
+    ) -> Result<(), PlatformCaError> {
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        hold_issuer_status(&mut tx, status).await?;
+        Self::audit_in_tx(&mut tx, CHAIN, ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(())
+    }
+
+    async fn held_issuer_status(&self, issuer: &[u8; 32]) -> Result<AnchorStatus, PlatformCaError> {
+        // One statement: the evidence's end and the revocations are one
+        // committed state. An issuer with revocations always has its row.
+        let held: Option<(i64, Vec<Vec<u8>>)> = sqlx::query_as(
+            "SELECT c.next_update,
+                    COALESCE((SELECT array_agg(r.serial ORDER BY r.serial)
+                              FROM ca_issuer_revoked r WHERE r.issuer = c.issuer), '{}')
+             FROM ca_issuer_status c WHERE c.issuer = $1",
+        )
+        .bind(issuer.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage("read an issuer's status"))?;
+        Ok(
+            held.map_or_else(AnchorStatus::default, |(until, revoked)| AnchorStatus {
+                until: Some(until),
+                revoked,
+            }),
+        )
+    }
+
     async fn export_platform_cas(&self) -> Result<PlatformCaArchive, PlatformCaError> {
         // One snapshot for every table: the archive is one committed state.
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
@@ -197,6 +285,10 @@ impl PlatformCaStore for PostgresBackend {
                 .await
                 .map_err(storage("move the revocations"))?;
             }
+        }
+        // The target held none: the same writes that record one hold it.
+        for crl in &moved.issuers {
+            hold_issuer_status(&mut tx, crl).await?;
         }
         Self::audit_in_tx(&mut tx, CHAIN, ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;

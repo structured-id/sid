@@ -1121,6 +1121,9 @@ platform_ca_store!(
     a_generation_keeps_its_certificate,
     concurrent_applies_never_widen,
     an_older_set_racing_a_newer_one_leaves_nothing,
+    issuer_status_is_evidence_only_in_its_time,
+    an_issuers_revocation_seen_once_stays,
+    concurrent_issuer_status_keeps_the_newest,
 );
 
 #[tokio::test]
