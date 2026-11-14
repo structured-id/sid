@@ -22,8 +22,12 @@
 //! - [`presentation`] verifies that the passport's holder signed for this
 //!   very request;
 //! - [`status`] verifies the list an authority publishes of the
-//!   certificates it revoked.
+//!   certificates it revoked;
+//! - [`recipient`] puts them together over the installation's store: the
+//!   platform authorities it admits, the status it holds, and the
+//!   acceptance of a presented identity.
 
+mod admitted_paths;
 pub mod allocation;
 pub mod binding_passport;
 pub mod cross_instance_linking;
@@ -32,6 +36,7 @@ pub mod organization_scope;
 pub mod passport_path;
 pub mod presentation;
 pub mod purpose;
+pub mod recipient;
 pub mod status;
 
 #[cfg(test)]

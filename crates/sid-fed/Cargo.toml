@@ -9,7 +9,13 @@ authors.workspace = true
 
 [dependencies]
 sid-core = { workspace = true }
+# The store of the admitted platform CA set and of published status.
+sid-plugin = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+url = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -29,3 +35,6 @@ p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 [dev-dependencies]
 # Tests build their own certificates.
 x509-cert = { version = "0.3", features = ["builder"] }
+# The recipient is exercised over a real store.
+sid-storage = { workspace = true, features = ["storage-sqlite"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

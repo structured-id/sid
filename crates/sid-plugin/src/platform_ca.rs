@@ -259,8 +259,8 @@ pub trait PlatformCaStore: Send + Sync {
     /// revision's generations anchor, while a generation a later set omits
     /// keeps its narrowed state. A generation number arriving with another
     /// certificate than the one held is [`PlatformCaError::Conflict`] and
-    /// nothing of the set is held. A set that changes nothing records no
-    /// audit entry.
+    /// nothing of the set is held. A set older than the one held writes
+    /// nothing, its audit entry included.
     async fn apply_platform_cas(
         &self,
         set: &PlatformCaSet,

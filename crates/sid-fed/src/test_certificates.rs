@@ -8,15 +8,19 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use der::Encode;
-use der::asn1::{ObjectIdentifier, OctetString};
+use der::asn1::{BitString, ObjectIdentifier, OctetString, Uint};
 use der::oid::AssociatedOid;
 use p256::ecdsa::SigningKey;
 use x509_cert::builder::profile::BuilderProfile;
 use x509_cert::builder::{Builder, CertificateBuilder};
+use x509_cert::crl::{CertificateList, RevokedCert, TbsCertList};
 use x509_cert::ext::Extension;
 use x509_cert::ext::pkix::constraints::name::{GeneralSubtree, NameConstraints};
 use x509_cert::ext::pkix::name::GeneralName;
-use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages};
+use x509_cert::ext::pkix::{
+    AuthorityKeyIdentifier, BasicConstraints, CrlNumber, ExtendedKeyUsage, KeyUsage, KeyUsages,
+    SubjectKeyIdentifier,
+};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
@@ -184,4 +188,107 @@ impl Stated {
 pub(crate) fn read(der: &[u8]) -> x509_cert::Certificate {
     use der::Decode;
     x509_cert::Certificate::from_der(der).expect("a DER certificate")
+}
+
+/// `ecdsa-with-SHA256` (RFC 5758 §3.2).
+const ECDSA_WITH_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+
+/// The subject key identifier `id`, by which a list names its issuer's key.
+pub(crate) fn key_id(id: &[u8]) -> Extension {
+    extension(
+        SubjectKeyIdentifier::OID,
+        false,
+        &SubjectKeyIdentifier(OctetString::new(id).expect("an octet string")),
+    )
+}
+
+/// The number `n` of a revocation list.
+pub(crate) fn list_number(n: u8) -> Extension {
+    extension(
+        CrlNumber::OID,
+        false,
+        &CrlNumber(Uint::new(&[n]).expect("a list number")),
+    )
+}
+
+/// The authority key identifier `id` of a revocation list.
+pub(crate) fn names_key(id: &[u8]) -> Extension {
+    extension(
+        AuthorityKeyIdentifier::OID,
+        false,
+        &AuthorityKeyIdentifier {
+            key_identifier: Some(OctetString::new(id).expect("an octet string")),
+            authority_cert_issuer: None,
+            authority_cert_serial_number: None,
+        },
+    )
+}
+
+/// The entry revoking `serial` a minute ago, with `extensions`.
+pub(crate) fn revoked_entry(serial: u32, extensions: Option<Vec<Extension>>) -> RevokedCert {
+    RevokedCert {
+        serial_number: SerialNumber::from(serial),
+        revocation_date: Time::try_from(SystemTime::now() - Duration::from_secs(60))
+            .expect("a list time"),
+        crl_entry_extensions: extensions,
+    }
+}
+
+/// One revocation list as a test states it.
+pub(crate) struct StatedList {
+    pub issuer: Name,
+    pub this_update: SystemTime,
+    pub next_update: Option<SystemTime>,
+    pub revoked: Vec<RevokedCert>,
+    pub extensions: Vec<Extension>,
+}
+
+impl StatedList {
+    /// List `number` of `issuer`, whose key is named `key_id`, issued a
+    /// minute ago with an hour of evidence left, revoking `serials`.
+    pub(crate) fn new(issuer: &str, key_id: &[u8], number: u8, serials: &[u32]) -> Self {
+        let now = SystemTime::now();
+        Self {
+            issuer: name(issuer),
+            this_update: now - Duration::from_secs(60),
+            next_update: Some(now + Duration::from_secs(3600)),
+            revoked: serials
+                .iter()
+                .map(|serial| revoked_entry(*serial, None))
+                .collect(),
+            extensions: vec![list_number(number), names_key(key_id)],
+        }
+    }
+
+    /// The fields the issuer signs.
+    pub(crate) fn tbs(&self) -> TbsCertList {
+        let time = |at: SystemTime| Time::try_from(at).expect("a list time");
+        TbsCertList {
+            version: x509_cert::certificate::Version::V2,
+            signature: x509_cert::spki::AlgorithmIdentifierOwned {
+                oid: ECDSA_WITH_SHA256,
+                parameters: None,
+            },
+            issuer: self.issuer.clone(),
+            this_update: time(self.this_update),
+            next_update: self.next_update.map(time),
+            revoked_certificates: (!self.revoked.is_empty()).then(|| self.revoked.clone()),
+            crl_extensions: (!self.extensions.is_empty()).then(|| self.extensions.clone()),
+        }
+    }
+
+    /// The list (DER) signed with `key`.
+    pub(crate) fn signed(&self, key: &SigningKey) -> Vec<u8> {
+        use p256::ecdsa::signature::Signer;
+        let tbs = self.tbs();
+        let signature: p256::ecdsa::DerSignature =
+            key.sign(&tbs.to_der().expect("the signed fields"));
+        CertificateList {
+            signature_algorithm: tbs.signature.clone(),
+            tbs_cert_list: tbs,
+            signature: BitString::from_bytes(signature.as_bytes()).expect("a signature"),
+        }
+        .to_der()
+        .expect("a DER list")
+    }
 }
