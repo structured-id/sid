@@ -139,42 +139,15 @@ pub fn credential_context(handle: EntryHandle) -> String {
     format!("entry-connection:{handle}:client-credential")
 }
 
-/// The path, below an installation issuer's URL, of the entry routes: each
-/// connection has its own start and its own callback under its handle, so a
-/// return always names the connection it was registered for (RFC 9700
-/// §4.4.2.2: a distinct redirect URI per issuer).
-const ROUTES: &str = "/auth/federation/";
+/// The route, below an installation issuer's URL, that starts an entry: the
+/// browser leaves for the issuer of the connection it names.
+pub const START: &str = "/auth/federation/start";
 
-/// A browser route of one connection, below an installation issuer's URL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryRoute {
-    /// Starts an entry: the browser leaves for the connection's issuer.
-    Start(EntryHandle),
-    /// The issuer's return: the connection's registered redirect URI.
-    Callback(EntryHandle),
-}
-
-impl EntryRoute {
-    /// The route `endpoint` (a path below `/i/{issuer handle}`) names; `None`
-    /// for any other path.
-    pub fn of(endpoint: &str) -> Option<Self> {
-        let (handle, step) = endpoint.strip_prefix(ROUTES)?.split_once('/')?;
-        let handle = EntryHandle::parse(handle).ok()?;
-        match step {
-            "start" => Some(Self::Start(handle)),
-            "callback" => Some(Self::Callback(handle)),
-            _ => None,
-        }
-    }
-
-    /// The path of the route below an installation issuer's URL.
-    pub fn path(self) -> String {
-        match self {
-            Self::Start(handle) => format!("{ROUTES}{handle}/start"),
-            Self::Callback(handle) => format!("{ROUTES}{handle}/callback"),
-        }
-    }
-}
+/// The route, below an installation issuer's URL, an issuer returns the
+/// browser to: the one redirect URI every connection of that installation
+/// issuer registers. Whoever registers this installation as a client
+/// derives it from the installation issuer's URL and this path alone.
+pub const CALLBACK: &str = "/auth/federation/callback";
 
 /// Whether `issuer` is an OpenID Connect Issuer Identifier: an https URL
 /// with a host and no query or fragment (OpenID Connect Core 1.0 §1.2).

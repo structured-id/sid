@@ -118,10 +118,7 @@ async fn a_registered_connection_serves_an_entry() {
     let handle = EntryHandle::parse(&created.handle).unwrap();
     assert_eq!(
         created.callback,
-        format!(
-            "{}/auth/federation/{handle}/callback",
-            i.issuer.canonical_url
-        )
+        format!("{}/auth/federation/callback", i.issuer.canonical_url)
     );
     assert_eq!(created.issuer_handle, i.issuer.handle.to_string());
     assert_eq!(

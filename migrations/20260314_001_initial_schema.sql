@@ -514,13 +514,6 @@ CREATE TABLE platform_ca_set (
     CONSTRAINT platform_ca_set_pkey PRIMARY KEY (id)
 );
 
-CREATE TABLE platform_ca_source (
-    id smallint NOT NULL,
-    publication text NOT NULL,
-    CONSTRAINT platform_ca_source_id_check CHECK ((id = 1)),
-    CONSTRAINT platform_ca_source_pkey PRIMARY KEY (id)
-);
-
 CREATE TABLE platform_ca_status (
     generation bigint NOT NULL,
     number bigint NOT NULL,

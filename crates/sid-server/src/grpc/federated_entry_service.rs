@@ -3,8 +3,9 @@
 //! connection.
 //!
 //! In plain words: the sign-in page sends a browser without a session to
-//! the start of a connection; the connection's issuer authenticates the
-//! holder and returns a code to that connection's own callback; the return
+//! the entry's start, naming a connection; the connection's issuer
+//! authenticates the holder and returns a code to the installation issuer's
+//! one callback; the return
 //! is exchanged, the identity it signs in is resolved and admitted
 //! ([`sid::federated_admission`]) under this installation's sign-in policy,
 //! and the browser continues the authorization it came from with this
@@ -87,32 +88,44 @@ impl FederatedEntryServiceImpl {
         }
     }
 
-    /// The step the path's `issuer_handle` and `connection` name.
+    /// The step at the installation issuer `issuer_handle` names, through
+    /// the connection `connection` names. No name is the authority the
+    /// installation's provisioning set for that issuer, never the first
+    /// connection of some list.
     async fn step(&self, issuer_handle: &str, connection: &str) -> Result<Step, NoStep> {
+        let unavailable = |e: &dyn std::fmt::Display, what: &'static str| {
+            warn!(error = %e, "{what}");
+            NoStep::Unavailable
+        };
         let handle = IssuerHandle::parse(issuer_handle).map_err(|_| NoStep::UnknownIssuer)?;
         let issuer = self
             .storage
             .oidc_issuer_by_handle(&handle)
             .await
-            .map_err(|e| {
-                warn!(error = %e, "installation issuer lookup");
-                NoStep::Unavailable
-            })?
+            .map_err(|e| unavailable(&e, "installation issuer lookup"))?
             .ok_or(NoStep::UnknownIssuer)?;
-        let handle = EntryHandle::parse(connection).map_err(|_| NoStep::NoConnection)?;
+        let handle = if connection.is_empty() {
+            self.connections
+                .provisioned(&issuer)
+                .await
+                .map_err(|e| unavailable(&e, "provisioned authority"))?
+                .ok_or(NoStep::NoConnection)?
+                .handle
+        } else {
+            EntryHandle::parse(connection).map_err(|_| NoStep::NoConnection)?
+        };
         let (connection, trusted) = self
             .connections
             .for_entry(&issuer, handle)
             .await
-            .map_err(|e| {
-                warn!(error = %e, "entry connection");
-                NoStep::Unavailable
-            })?
+            .map_err(|e| unavailable(&e, "entry connection"))?
             .ok_or(NoStep::NoConnection)?;
         Ok(Step {
             issuer,
+            // Every connection of the issuer returns to one callback: the
+            // state of an entry names the connection it was started through.
+            entry: (self.entries)(trusted).routed_by(connection.handle.to_string()),
             connection,
-            entry: (self.entries)(trusted),
         })
     }
 
@@ -474,7 +487,14 @@ impl FederatedEntryService for FederatedEntryServiceImpl {
         request: Request<CompleteFederatedEntryRequest>,
     ) -> Result<Response<HttpBody>, Status> {
         let message = request.get_ref();
-        let step = match self.step(&message.issuer_handle, &message.connection).await {
+        // The state names the connection the entry was started through. It
+        // only selects: the entry is found by that connection's issuer and
+        // client alone, so a state naming another connection completes
+        // nothing. A state naming none started no entry here.
+        let Some(connection) = sid_authn::federated_entry::route_of(&message.state) else {
+            return Ok(oauth_http::page(400, "Sign-in was not completed"));
+        };
+        let step = match self.step(&message.issuer_handle, connection).await {
             Ok(step) => step,
             Err(NoStep::UnknownIssuer) => return Ok(oauth_http::page(404, "Unknown issuer")),
             // The connection is gone or disabled since the entry started:
@@ -484,10 +504,12 @@ impl FederatedEntryService for FederatedEntryServiceImpl {
             }
             Err(NoStep::Unavailable) => return Ok(oauth_http::page(503, Refusal::retry().text)),
         };
-        // RFC 9207 §2.4: a return naming another issuer is refused before
-        // anything is exchanged.
-        if !message.iss.is_empty() && message.iss != step.entry.issuer() {
-            warn!("federated entry returned by another issuer");
+        // Several issuers return to this one callback, so a return must say
+        // which issuer it comes from, and that is the connection's exactly
+        // (RFC 9207 §2.4; RFC 9700 §4.4.2.1): an error return too. Refused
+        // before anything is exchanged.
+        if message.iss != step.entry.issuer() {
+            warn!("federated entry returned without its issuer, or by another");
             return Ok(oauth_http::page(400, "Sign-in was not completed"));
         }
         // OpenID Connect Core 1.0 §3.1.2.6: an error return completes nothing.

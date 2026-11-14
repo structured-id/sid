@@ -36,6 +36,9 @@ sid-infra = { workspace = true, features = [
     "issuer-client",
     "password-operation",
     "oauth-http",
+    # The platform CA set a recipient verifies under: its publication's
+    # client and the discovery records beside it.
+    "platform-ca-dns",
 ] }
 sid-serve = { workspace = true }
 sid-notify = { workspace = true }

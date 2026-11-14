@@ -903,8 +903,8 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         storage.clone(),
         key_manager.clone(),
     ));
-    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> =
-        Arc::new(classical_recipient(storage.clone()));
+    let recipient = classical_recipient(storage.clone())?;
+    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> = Arc::new(recipient);
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
@@ -1091,14 +1091,25 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     })
 }
 
-/// The recipient a self-managed installation verifies presented identities
-/// with: classical signature checks, under the platform CA set held in
-/// `storage`. The set is refreshed from the publication the installation
-/// configured, if it configured one, with the platform's discovery records
-/// read beside it; without a usable resolver the HTTPS step alone refreshes.
-pub fn classical_recipient(storage: Arc<dyn StorageBackend>) -> sid_fed::recipient::Recipient {
+/// `recipient` refreshing its platform CA set from the publication of the
+/// platform this build was made for. The platform is a constant of the
+/// build, never a setting of the installation: an operator does not choose
+/// whose certificates it trusts. The publication is only the quick way to a
+/// newer set between two builds: what the installation already holds keeps
+/// deciding without it, and a build made for no platform asks nobody. The
+/// platform's discovery records are read beside the publication; without a
+/// usable resolver the HTTPS step alone refreshes.
+pub fn of_build_platform<V: sid_fed::recipient::Verdict>(
+    recipient: sid_fed::recipient::Recipient<V>,
+) -> anyhow::Result<sid_fed::recipient::Recipient<V>> {
     use sid_infra::platform_ca::PublishedPlatformCas;
     use sid_infra::platform_ca::discovery::DiscoveryResolver;
+    let Some(publication) =
+        sid_infra::platform_ca::build_publication().context("the build's platform")?
+    else {
+        info!("this build names no platform: its platform CA set is refreshed from nowhere");
+        return Ok(recipient);
+    };
     let mut source = PublishedPlatformCas::new();
     match DiscoveryResolver::new() {
         Ok(discovery) => source = source.with_discovery(Arc::new(discovery)),
@@ -1107,8 +1118,22 @@ pub fn classical_recipient(storage: Arc<dyn StorageBackend>) -> sid_fed::recipie
             "no DNS resolver for the platform CA discovery records; the HTTPS publication alone refreshes the set"
         ),
     }
-    sid_fed::recipient::Recipient::new(storage, sid_fed::recipient::ClassicalVerdict)
-        .with_source(Arc::new(source))
+    info!(%publication, "platform CA publication");
+    recipient
+        .with_source(publication, Arc::new(source))
+        .map_err(|e| anyhow::anyhow!("the build's platform CA publication: {e}"))
+}
+
+/// The recipient a self-managed installation verifies presented identities
+/// with: classical signature checks, under the platform CA set held in
+/// `storage`.
+pub fn classical_recipient(
+    storage: Arc<dyn StorageBackend>,
+) -> anyhow::Result<sid_fed::recipient::Recipient> {
+    of_build_platform(sid_fed::recipient::Recipient::new(
+        storage,
+        sid_fed::recipient::ClassicalVerdict,
+    ))
 }
 
 /// Make the installation's JWT key pair if neither file exists; `true` when

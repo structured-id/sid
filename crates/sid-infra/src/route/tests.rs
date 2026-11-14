@@ -65,11 +65,9 @@ fn each_endpoint_gets_its_own_cookie_capability() {
         "/api/sid.v1.authn.AuthService/VerifyRecoveryCode",
         "/api/sid.v1.IdentityService/GetCurrentProfile",
         "/apix/sid.v1.authn.AuthService/OpaqueLoginFinish",
-        "/auth/federation/callback",
-        "/auth/federation/start",
         "/auth/federation/connections",
-        "/auth/federation/0123456789abcdef0123456789abcdef/callback/x",
-        "/auth/federation/not-a-handle/callback",
+        "/auth/federation/callback/x",
+        "/auth/federation/0123456789abcdef0123456789abcdef/callback",
     ] {
         assert_eq!(
             issuer_cookies(endpoint),
@@ -86,16 +84,15 @@ fn each_endpoint_gets_its_own_cookie_capability() {
 /// that hands the session cookie to the start.
 #[test]
 fn a_federated_entry_gets_its_correlation_cookie() {
-    let connection = "0123456789abcdef0123456789abcdef";
     assert_eq!(
-        issuer_cookies(&format!("/auth/federation/{connection}/start")),
+        issuer_cookies("/auth/federation/start"),
         IssuerCookies {
             session: None,
             entry: Some(EntryCookieUse::Start),
         }
     );
     assert_eq!(
-        issuer_cookies(&format!("/auth/federation/{connection}/callback")),
+        issuer_cookies("/auth/federation/callback"),
         IssuerCookies {
             session: Some(SessionCookieUse::Issue),
             entry: Some(EntryCookieUse::Return),

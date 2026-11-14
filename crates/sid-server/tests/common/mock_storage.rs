@@ -1745,18 +1745,6 @@ impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
     {
         Err(sid_plugin::platform_ca::PlatformCaError::NotProvisioned)
     }
-    async fn platform_ca_publication(
-        &self,
-    ) -> Result<Option<String>, sid_plugin::platform_ca::PlatformCaError> {
-        Ok(None)
-    }
-    async fn configure_platform_ca_publication(
-        &self,
-        _publication: &str,
-        _ctx: MutationContext,
-    ) -> Result<bool, sid_plugin::platform_ca::PlatformCaError> {
-        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
-    }
     async fn record_issuer_status(
         &self,
         _status: &sid_plugin::platform_ca::IssuerStatus,

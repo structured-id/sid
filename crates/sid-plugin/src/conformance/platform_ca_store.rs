@@ -11,7 +11,6 @@ use crate::platform_ca::{
 };
 
 const NOW: i64 = 1_800_000_000;
-const PUBLICATION: &str = "https://platform.sid.example.com/.well-known/sid-ca/index.json";
 
 fn ca(generation: u32, state: PlatformCaState, overlap_end: Option<i64>) -> PlatformCa {
     PlatformCa {
@@ -68,19 +67,6 @@ impl Audited<'_> {
 
     async fn held_platform_cas(&self, now: i64) -> Result<HeldAnchors, PlatformCaError> {
         self.0.held_platform_cas(now).await
-    }
-
-    async fn platform_ca_publication(&self) -> Result<Option<String>, PlatformCaError> {
-        self.0.platform_ca_publication().await
-    }
-
-    async fn configure_platform_ca_publication(
-        &self,
-        publication: &str,
-    ) -> Result<bool, PlatformCaError> {
-        self.0
-            .configure_platform_ca_publication(publication, audit())
-            .await
     }
 }
 
@@ -304,31 +290,6 @@ pub async fn status_is_per_generation(backend: &dyn PlatformCaStore) {
     );
 }
 
-/// The publication is configured once: none at first, the first value reads
-/// back, and a repeated provisioning with another value replaces nothing.
-pub async fn the_publication_is_configured_once(backend: &dyn PlatformCaStore) {
-    let store = &Audited(backend);
-    assert_eq!(store.platform_ca_publication().await.unwrap(), None);
-    assert!(
-        store
-            .configure_platform_ca_publication(PUBLICATION)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .configure_platform_ca_publication(
-                "https://sid.example.com/.well-known/sid-ca/index.json"
-            )
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        store.platform_ca_publication().await.unwrap().as_deref(),
-        Some(PUBLICATION)
-    );
-}
-
 fn issuer_crl(issuer: u8, number: u64, next_update: i64, revoked: &[&[u8]]) -> IssuerStatus {
     IssuerStatus {
         issuer: [issuer; 32],
@@ -424,9 +385,6 @@ pub async fn a_move_keeps_every_narrowing(
 ) {
     let (from, to) = (&Audited(source), &Audited(target));
     assert!(from.0.export_platform_cas().await.unwrap().is_empty());
-    from.configure_platform_ca_publication(PUBLICATION)
-        .await
-        .unwrap();
     from.apply_platform_cas(&set(
         1,
         vec![
@@ -464,10 +422,6 @@ pub async fn a_move_keeps_every_narrowing(
         from.held_platform_cas(NOW).await.unwrap()
     );
     assert_eq!(
-        to.platform_ca_publication().await.unwrap().as_deref(),
-        Some(PUBLICATION)
-    );
-    assert_eq!(
         to.0.held_issuer_status(&[4; 32])
             .await
             .unwrap()
@@ -496,7 +450,7 @@ pub async fn a_move_keeps_every_narrowing(
 
     // The source holds its own state: another archive is refused whole.
     let mut other = archive.clone();
-    other.publication = Some("https://sid.example.com/.well-known/sid-ca/index.json".into());
+    other.issuers.clear();
     assert!(matches!(
         from.0.import_platform_cas(&other, audit()).await,
         Err(PlatformCaError::Occupied)

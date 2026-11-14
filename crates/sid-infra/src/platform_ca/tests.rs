@@ -21,6 +21,35 @@ fn loopback(endpoint: &str) -> PlatformCaPublication {
     PlatformCaPublication::with_client(client, endpoint.parse().unwrap()).unwrap()
 }
 
+/// The platform a build names is its public https origin, and its
+/// publication is the published path below it. Anything else a build could
+/// be given (plain http, a path, a query, credentials, text that is no URL)
+/// names no platform. Bug prevented: a build asking some other address, or
+/// an unprotected one, for the certificates it will trust.
+#[test]
+fn a_build_names_its_platform_by_origin() {
+    for platform in ["https://sid.example.com", "https://sid.example.com/"] {
+        assert_eq!(
+            publication_of(platform).unwrap().as_str(),
+            "https://sid.example.com/.well-known/sid-ca/index.json"
+        );
+    }
+    for other in [
+        "http://sid.example.com",
+        "https://sid.example.com/platform",
+        "https://sid.example.com/?a=1",
+        "https://sid.example.com/#f",
+        "https://u:p@sid.example.com",
+        "sid.example.com",
+        "",
+    ] {
+        assert!(
+            matches!(publication_of(other), Err(PublicationError::NotHttps)),
+            "{other}"
+        );
+    }
+}
+
 fn published() -> PlatformCas {
     PlatformCas {
         revision: 6,

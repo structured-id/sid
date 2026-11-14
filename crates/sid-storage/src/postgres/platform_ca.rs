@@ -40,10 +40,6 @@ fn unsigned<T: TryFrom<i64>>(value: i64, field: &str) -> Result<T, PlatformCaErr
 
 /// Everything the store holds, as `conn`'s transaction sees it.
 async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, PlatformCaError> {
-    let publication = sqlx::query_scalar("SELECT publication FROM platform_ca_source WHERE id = 1")
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(storage("read the publication"))?;
     let set: Option<(i64, i64, i64)> =
         sqlx::query_as("SELECT revision, issued_at, next_update FROM platform_ca_set WHERE id = 1")
             .fetch_optional(&mut *conn)
@@ -119,7 +115,6 @@ async fn archive(conn: &mut sqlx::PgConnection) -> Result<PlatformCaArchive, Pla
         });
     }
     Ok(PlatformCaArchive {
-        publication,
         set,
         generations,
         status,
@@ -227,13 +222,6 @@ impl PlatformCaStore for PostgresBackend {
         }
         // A plain insert: state another writer committed meanwhile collides
         // on its key and the move is refused whole.
-        if let Some(publication) = &moved.publication {
-            sqlx::query("INSERT INTO platform_ca_source (id, publication) VALUES (1, $1)")
-                .bind(publication)
-                .execute(&mut *tx)
-                .await
-                .map_err(storage("move the publication"))?;
-        }
         if let Some(set) = &moved.set {
             sqlx::query(
                 "INSERT INTO platform_ca_set (id, revision, issued_at, next_update)
@@ -462,35 +450,5 @@ impl PlatformCaStore for PostgresBackend {
             // once.
             renew_at: issued_at + (next_update - issued_at).max(0) / 2,
         })
-    }
-
-    async fn platform_ca_publication(&self) -> Result<Option<String>, PlatformCaError> {
-        sqlx::query_scalar("SELECT publication FROM platform_ca_source WHERE id = 1")
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage("read the publication"))
-    }
-
-    async fn configure_platform_ca_publication(
-        &self,
-        publication: &str,
-        ctx: MutationContext,
-    ) -> Result<bool, PlatformCaError> {
-        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
-        let written = sqlx::query(
-            "INSERT INTO platform_ca_source (id, publication) VALUES (1, $1)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(publication)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage("configure the publication"))?
-        .rows_affected()
-            == 1;
-        if written {
-            Self::audit_in_tx(&mut tx, CHAIN, ctx).await?;
-            tx.commit().await.map_err(storage("commit"))?;
-        }
-        Ok(written)
     }
 }

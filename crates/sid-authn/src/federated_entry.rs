@@ -227,7 +227,22 @@ pub struct FederatedEntry {
     /// is named after it, so authorities sharing a host never read each
     /// other's.
     cookie: BrowserCookie,
+    /// What the state of every entry started here begins with, when the
+    /// caller names one: see [`Self::routed_by`].
+    route: Option<String>,
 }
+
+/// The route the state of a returned entry names, when its relying party
+/// was [`FederatedEntry::routed_by`] one. Only a selector: an entry is
+/// found only by the relying party of its own issuer and client, whatever
+/// its state names.
+pub fn route_of(state: &str) -> Option<&str> {
+    state.split_once(ROUTE_SEPARATOR).map(|(route, _)| route)
+}
+
+/// What separates a route from the random part of a state. Not a character
+/// of either: the random part is base64url and a route is given without it.
+const ROUTE_SEPARATOR: char = '.';
 
 impl FederatedEntry {
     /// The relying party of `trusted`, reaching it over `http`, its pending
@@ -245,7 +260,18 @@ impl FederatedEntry {
             http,
             pending: ChallengeStore::new(ceremonies, keys, NAMESPACE, PENDING_TTL),
             cookie,
+            route: None,
         }
+    }
+
+    /// Begin the state of every entry started here with `route`, so a
+    /// caller that receives the returns of several relying parties at one
+    /// redirect URI finds, by [`route_of`], which of them a return belongs
+    /// to. `route` holds no `.`. The state stays opaque to the issuer
+    /// (RFC 6749 §4.1.1) and the route authorizes nothing.
+    pub fn routed_by(mut self, route: impl Into<String>) -> Self {
+        self.route = Some(route.into());
+        self
     }
 
     /// The correlation cookie of the entry `state` names: one per entry, so
@@ -286,7 +312,10 @@ impl FederatedEntry {
         let discovery = discover(&self.http, &self.trusted.issuer)
             .await
             .map_err(|e| EntryError::Issuer(e.to_string()))?;
-        let state = random_token();
+        let state = match &self.route {
+            Some(route) => format!("{route}{ROUTE_SEPARATOR}{}", random_token()),
+            None => random_token(),
+        };
         let nonce = random_token();
         let code_verifier = random_token();
         let challenge = pkce_challenge(&code_verifier);

@@ -1089,15 +1089,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             issued_at: 1_800_000_000,
             next_update: 1_800_003_600,
         };
-        assert!(
-            source
-                .configure_platform_ca_publication(
-                    "https://platform.sid.example.com/.well-known/sid-ca/index.json",
-                    ctx(),
-                )
-                .await
-                .unwrap()
-        );
         source
             .apply_platform_cas(
                 &published(

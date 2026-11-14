@@ -391,7 +391,6 @@ platform_ca_store!(
     an_anchor_answers_for_the_cas_it_issued,
     a_revocation_seen_once_stays,
     status_is_per_generation,
-    the_publication_is_configured_once,
     a_generation_keeps_its_certificate,
     concurrent_applies_never_widen,
     an_older_set_racing_a_newer_one_leaves_nothing,

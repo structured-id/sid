@@ -81,7 +81,6 @@ pub struct HeldGeneration {
 /// order. A moved installation keeps every narrowing the source had seen.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlatformCaArchive {
-    pub publication: Option<String>,
     pub set: Option<HeldSet>,
     pub generations: Vec<HeldGeneration>,
     pub status: Vec<GenerationStatus>,
@@ -93,8 +92,7 @@ pub struct PlatformCaArchive {
 impl PlatformCaArchive {
     /// How many stored records the archive carries.
     pub fn len(&self) -> usize {
-        usize::from(self.publication.is_some())
-            + usize::from(self.set.is_some())
+        usize::from(self.set.is_some())
             + self.generations.len()
             + self.status.len()
             + self.issuers.len()
@@ -293,18 +291,6 @@ pub trait PlatformCaStore: Send + Sync {
     /// ([`PlatformCaError::NotProvisioned`]) or the held one is past its
     /// refresh time ([`PlatformCaError::Stale`]).
     async fn held_platform_cas(&self, now: i64) -> Result<HeldAnchors, PlatformCaError>;
-
-    /// The publication the set is refreshed from, when one is configured.
-    async fn platform_ca_publication(&self) -> Result<Option<String>, PlatformCaError>;
-
-    /// Configure the publication the set is refreshed from, unless one is
-    /// configured already: a stored value is never replaced by a repeated
-    /// provisioning. Whether it was written.
-    async fn configure_platform_ca_publication(
-        &self,
-        publication: &str,
-        ctx: MutationContext,
-    ) -> Result<bool, PlatformCaError>;
 
     /// Hold the CRL `status` of an authority below the platform, which the
     /// caller authenticated under that authority's certificate on an

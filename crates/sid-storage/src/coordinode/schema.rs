@@ -167,7 +167,6 @@ const UNIQUE: &[(&str, &str, &str)] = &[
         "SidPlatformCaStatus",
         "generation",
     ),
-    ("sid_platform_ca_source", "SidPlatformCaSource", "id"),
     ("sid_ca_issuer_status", "SidCaIssuerStatus", "issuer"),
     (
         "sid_entry_connection_handle",

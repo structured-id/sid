@@ -28,6 +28,10 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/structured-id/sid
+  # The platform these images are made for, compiled into the server: it
+  # asks this platform, and no other, for the platform CA set it verifies
+  # under. Images published here are releases, made for production.
+  SID_BUILD_PLATFORM: https://structured.id
 
 jobs:
   build:
@@ -100,6 +104,10 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
+          # The embedded image compiles inside its build; the CE image packs
+          # the binary the step above built under the same value.
+          build-args: |
+            SID_BUILD_PLATFORM=${{ env.SID_BUILD_PLATFORM }}
           # A pull request only proves the image builds; a release pushes it
           # untagged, by digest, for the manifest job below.
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}

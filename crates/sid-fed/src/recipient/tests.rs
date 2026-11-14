@@ -584,35 +584,49 @@ impl PlatformCaSource for Publication {
     }
 }
 
-/// An installation holding no set asks its configured publication on the
-/// first request and accepts under what it published; without a configured
-/// publication nothing is asked.
+const PUBLICATION: &str = "https://platform.sid.example.com/.well-known/sid-ca/index.json";
+
+/// A recipient over a fresh store that refreshes from `publication`.
+async fn sourced(publication: &Arc<Publication>) -> Recipient {
+    Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication.clone())
+        .unwrap()
+}
+
+/// An installation holding no set asks the platform's publication on the
+/// first request and accepts under what it published. One composed without
+/// a publication asks nothing and decides on what it holds alone, and a
+/// publication that is not `https` is not taken.
 #[tokio::test]
-async fn the_configured_publication_supplies_the_set() {
+async fn the_platforms_publication_supplies_the_set() {
     let publication = Arc::new(Publication {
         answer: Ok(set(1, PlatformCaState::Active, None)),
         asked: AtomicUsize::new(0),
     });
-    let recipient =
-        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
+    let alone = recipient().await;
     assert!(matches!(
-        accept(&recipient, &personal(), &[]).await,
+        accept(&alone, &personal(), &[]).await,
         Err(RecipientError::Platform(PlatformCaError::NotProvisioned))
     ));
-    assert_eq!(publication.asked.load(Ordering::Relaxed), 0);
-
-    let endpoint =
-        url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json").unwrap();
+    // What it holds decides, with nothing to refresh from.
+    alone
+        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .await
+        .unwrap();
+    accept(&alone, &personal(), &[]).await.unwrap();
     assert!(matches!(
-        recipient
-            .configure_publication(&url::Url::parse("http://platform.sid.example.com/").unwrap())
-            .await,
+        Recipient::new(store().await, ClassicalVerdict).with_source(
+            "http://platform.sid.example.com/".parse().unwrap(),
+            publication.clone()
+        ),
         Err(RecipientError::Invalid {
             field: "publication",
             ..
         })
     ));
-    assert!(recipient.configure_publication(&endpoint).await.unwrap());
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 0);
+
+    let recipient = sourced(&publication).await;
     accept(&recipient, &personal(), &[]).await.unwrap();
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
     // The held set is current: the next request asks nothing.
@@ -630,20 +644,12 @@ async fn a_set_halfway_through_its_freshness_is_renewed() {
         answer: Ok(set(2, PlatformCaState::Withdrawn, None)),
         asked: AtomicUsize::new(0),
     });
-    let recipient =
-        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
+    let recipient = sourced(&publication).await;
     // Issued 2000 s ago and current for an hour: past its halfway point.
     let mut aged = set(1, PlatformCaState::Active, None);
     aged.issued_at = epoch(SystemTime::now()) - 2_000;
     aged.next_update = aged.issued_at + 3_600;
     recipient.record_platform_cas(&aged).await.unwrap();
-    recipient
-        .configure_publication(
-            &url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json")
-                .unwrap(),
-        )
-        .await
-        .unwrap();
     assert!(matches!(
         accept(&recipient, &personal(), &[]).await,
         Err(RecipientError::Path(PathError::NoAnchor))
@@ -662,15 +668,7 @@ async fn a_publication_that_states_no_set_is_not_held() {
         answer: Ok(stated),
         asked: AtomicUsize::new(0),
     });
-    let recipient =
-        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
-    recipient
-        .configure_publication(
-            &url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json")
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let recipient = sourced(&publication).await;
     assert!(matches!(
         accept(&recipient, &personal(), &[]).await,
         Err(RecipientError::Platform(PlatformCaError::NotProvisioned))
@@ -687,11 +685,7 @@ async fn a_failing_publication_is_not_asked_on_every_request() {
         answer: Err("unreachable".into()),
         asked: AtomicUsize::new(0),
     });
-    let recipient =
-        Recipient::new(store().await, ClassicalVerdict).with_source(publication.clone());
-    let endpoint =
-        url::Url::parse("https://platform.sid.example.com/.well-known/sid-ca/index.json").unwrap();
-    recipient.configure_publication(&endpoint).await.unwrap();
+    let recipient = sourced(&publication).await;
     for _ in 0..3 {
         assert!(matches!(
             accept(&recipient, &personal(), &[]).await,

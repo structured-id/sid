@@ -26,40 +26,6 @@ fn a_handle_has_one_spelling() {
     }
 }
 
-/// A connection's two routes read back as themselves, and nothing else below
-/// an issuer is one of them. Bug prevented: a return reaching the callback
-/// of a connection other than the one its path names.
-#[test]
-fn a_route_names_one_connection_and_step() {
-    let handle = EntryHandle::generate();
-    for route in [EntryRoute::Start(handle), EntryRoute::Callback(handle)] {
-        assert_eq!(EntryRoute::of(&route.path()), Some(route));
-    }
-    assert_eq!(
-        EntryRoute::Callback(handle).path(),
-        format!("/auth/federation/{handle}/callback")
-    );
-    for other in [
-        "/auth/federation/start".to_owned(),
-        "/auth/federation/callback".to_owned(),
-        format!("/auth/federation/{handle}"),
-        format!("/auth/federation/{handle}/"),
-        format!("/auth/federation/{handle}/callback/x"),
-        format!("/auth/federation/{handle}/connections"),
-        format!(
-            "/auth/federation/{}/start",
-            handle.to_string().to_uppercase()
-        ),
-        format!("/oauth2/{handle}/start"),
-    ] {
-        // A handle of digits only has no upper case to differ by.
-        if other == EntryRoute::Start(handle).path() {
-            continue;
-        }
-        assert_eq!(EntryRoute::of(&other), None, "{other}");
-    }
-}
-
 /// An issuer identifier is an https URL without query or fragment (OpenID
 /// Connect Core 1.0 §1.2); plain http only on a loopback host.
 #[test]

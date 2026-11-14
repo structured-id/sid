@@ -42,6 +42,11 @@ COPY proto/ proto/
 # not load without it, whatever the feature selection.
 COPY zkpp/ zkpp/
 
+# The platform the build is made for, compiled into the binary: the build
+# that publishes the image names it. Without it the binary names none.
+ARG SID_BUILD_PLATFORM
+ENV SID_BUILD_PLATFORM=${SID_BUILD_PLATFORM}
+
 # Build embedded mode: SQLite backend, REST beside gRPC (`http`), no
 # telemetry. The event bus is the in-process one: required work lives in
 # SQLite and the work runner executes it, so the image carries no broker.

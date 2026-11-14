@@ -106,21 +106,21 @@ pub const PENDING_COMPLETING_METHOD: &str = "/sid.v1.authn.AuthService/VerifyTot
 /// session it admits. Discovery, keys, token, UserInfo, introspection,
 /// revocation and every other method use no cookie.
 pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
-    use sid_core::models::entry_connection::EntryRoute;
-    match EntryRoute::of(endpoint) {
-        Some(EntryRoute::Start(_)) => {
+    use sid_core::models::entry_connection::{CALLBACK, START};
+    match endpoint {
+        START => {
             return IssuerCookies {
                 session: None,
                 entry: Some(EntryCookieUse::Start),
             };
         }
-        Some(EntryRoute::Callback(_)) => {
+        CALLBACK => {
             return IssuerCookies {
                 session: Some(SessionCookieUse::Issue),
                 entry: Some(EntryCookieUse::Return),
             };
         }
-        None => {}
+        _ => {}
     }
     let session = match endpoint {
         "/oauth2/authorize" => Some(SessionCookieUse::Read),

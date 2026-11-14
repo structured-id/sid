@@ -493,6 +493,47 @@ async fn an_entry_completes_only_at_the_issuer_it_was_started_for() {
     assert_eq!(returned.continuation, CONTINUATION);
 }
 
+// Two relying parties receive their returns at one redirect URI. The state
+// of an entry names the route of the one that started it, so the receiver
+// finds it; a state rewritten to name the other route selects a relying
+// party that does not hold the entry and completes nothing. Bug prevented:
+// a route in the state treated as authority, so a return could be completed
+// through another issuer's relying party.
+#[tokio::test]
+async fn a_route_in_the_state_selects_and_authorizes_nothing() {
+    let a = TestIssuer::start().await;
+    let b = TestIssuer::start().await;
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let at_a = entry_on(&a, ceremonies.clone()).routed_by("aaaa");
+    let at_b = entry_on(&b, ceremonies).routed_by("bbbb");
+    let browser = begin(&at_a, &EntryRequest::default()).await;
+    let state = browser.state();
+    assert_eq!(route_of(&state), Some("aaaa"));
+    a.issue_for(&browser.url, json!({}));
+    b.issue_for(&browser.url, json!({}));
+
+    // The same return with its state renamed to the other route.
+    let renamed = state.replacen("aaaa", "bbbb", 1);
+    assert_eq!(route_of(&renamed), Some("bbbb"));
+    let cookies = [browser.cookie.as_str()];
+    for forged in [&renamed, &state] {
+        let refused = at_b.complete(forged, cookies, "c", REDIRECT).await;
+        assert!(
+            matches!(refused, Err(EntryError::Unknown | EntryError::OtherBrowser)),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(b.exchanges(), 0, "B's token endpoint saw A's entry");
+    let returned = browser.complete(&at_a, "c", REDIRECT).await.unwrap();
+    assert_eq!(returned.continuation, CONTINUATION);
+
+    // A relying party that names no route starts entries whose state names
+    // none.
+    let plain = entry(&a);
+    let unrouted = begin(&plain, &EntryRequest::default()).await;
+    assert_eq!(route_of(&unrouted.state()), None);
+}
+
 // Regression guard: an ID Token of another issuer, for another audience or
 // another nonce is refused (OpenID Connect Core 1.0 §3.1.3.7).
 #[tokio::test]

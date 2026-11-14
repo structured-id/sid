@@ -28,6 +28,45 @@ pub const MAX_BODY: usize = 1 << 20;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The platform this build was made for: the origin of its public site,
+/// given to the compiler by the build that made it (`SID_BUILD_PLATFORM`).
+/// The installation asks that platform, and no other, for the admitted
+/// platform CA set. A build made without it names no platform.
+const BUILD_PLATFORM: Option<&str> = option_env!("SID_BUILD_PLATFORM");
+
+/// Where a platform publishes its admitted CA set, below its origin.
+const PUBLICATION_PATH: &str = "/.well-known/sid-ca/index.json";
+
+/// The publication of the platform this build was made for; `None` for a
+/// build made for none, which then verifies no identity under a platform
+/// set until one is supplied to its store otherwise.
+pub fn build_publication() -> Result<Option<url::Url>, PublicationError> {
+    // A build argument left empty is one not given.
+    BUILD_PLATFORM
+        .filter(|platform| !platform.is_empty())
+        .map(publication_of)
+        .transpose()
+}
+
+/// The publication of the platform whose public origin is `platform`: an
+/// `https` origin, nothing after its authority.
+fn publication_of(platform: &str) -> Result<url::Url, PublicationError> {
+    let origin = url::Url::parse(platform).map_err(|_| PublicationError::NotHttps)?;
+    let bare = origin.scheme() == "https"
+        && origin.host_str().is_some()
+        && matches!(origin.path(), "" | "/")
+        && origin.query().is_none()
+        && origin.fragment().is_none()
+        && origin.username().is_empty()
+        && origin.password().is_none();
+    if !bare {
+        return Err(PublicationError::NotHttps);
+    }
+    origin
+        .join(PUBLICATION_PATH)
+        .map_err(|_| PublicationError::NotHttps)
+}
+
 /// Why the publication was not read.
 #[derive(Debug, thiserror::Error)]
 pub enum PublicationError {

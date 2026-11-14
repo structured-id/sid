@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The admitted platform CA set in CoordiNode: one node for the set's
-//! revision and freshness, one per published generation, one per
-//! generation's status and one for the configured publication. Every apply
+//! revision and freshness, one per published generation and one per
+//! generation's status. Every apply
 //! holds and rewrites the set's node, so two applies are decided one after
 //! the other: the later one reads what the earlier one committed.
 
@@ -67,14 +67,6 @@ fn unsigned<T: TryFrom<i64>>(value: i64, field: &str) -> SidResult<T> {
 
 /// Everything the store holds, as the transaction sees it.
 fn archive(tx: &Statements<'_>) -> SidResult<PlatformCaArchive> {
-    let publication = tx
-        .run(
-            "MATCH (p:SidPlatformCaSource) WHERE p.id = 1 RETURN p.publication AS publication",
-            Params::default(),
-        )?
-        .first()
-        .map(|row| super::get_text(row, "publication"))
-        .transpose()?;
     let set = tx
         .run(
             "MATCH (s:SidPlatformCaSet) WHERE s.id = 1
@@ -143,7 +135,6 @@ fn archive(tx: &Statements<'_>) -> SidResult<PlatformCaArchive> {
     }
     issuers.sort_unstable_by_key(|c| c.issuer);
     Ok(PlatformCaArchive {
-        publication,
         set,
         generations,
         status,
@@ -174,12 +165,6 @@ fn import(
     }
     if !held.is_empty() {
         return Ok(Decision::Abandon(Moved::Occupied));
-    }
-    if let Some(publication) = &moved.publication {
-        tx.create_absent(
-            "CREATE (p:SidPlatformCaSource {id: 1, publication: $publication})",
-            Params::default().with("publication", Value::String(publication.clone())),
-        )?;
     }
     if let Some(set) = &moved.set {
         tx.create_absent(
@@ -581,47 +566,5 @@ impl PlatformCaStore for CoordinodeBackend {
 
     async fn held_platform_cas(&self, now: i64) -> Result<HeldAnchors, PlatformCaError> {
         self.read(move |tx| held(tx, now)).await?
-    }
-
-    async fn platform_ca_publication(&self) -> Result<Option<String>, PlatformCaError> {
-        Ok(self
-            .read(|tx| {
-                let rows = tx.run(
-                    "MATCH (p:SidPlatformCaSource) WHERE p.id = 1
-                     RETURN p.publication AS publication",
-                    Params::default(),
-                )?;
-                rows.first()
-                    .map(|row| super::get_text(row, "publication"))
-                    .transpose()
-            })
-            .await?)
-    }
-
-    async fn configure_platform_ca_publication(
-        &self,
-        publication: &str,
-        ctx: MutationContext,
-    ) -> Result<bool, PlatformCaError> {
-        let publication = publication.to_owned();
-        Ok(self
-            .transaction(move |tx| {
-                let rows = tx.run(
-                    "MATCH (p:SidPlatformCaSource) WHERE p.id = 1 RETURN p.id AS id",
-                    Params::default(),
-                )?;
-                if !rows.is_empty() {
-                    return Ok(Decision::Abandon(false));
-                }
-                // Concurrent first provisionings meet on the unique node:
-                // the one that lost runs again and finds it configured.
-                tx.create_absent(
-                    "CREATE (p:SidPlatformCaSource {id: 1, publication: $publication})",
-                    Params::default().with("publication", Value::String(publication.clone())),
-                )?;
-                finalize(tx, CHAIN, ctx.clone())?;
-                Ok(Decision::Commit(true))
-            })
-            .await?)
     }
 }

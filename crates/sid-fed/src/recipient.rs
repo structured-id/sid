@@ -167,10 +167,10 @@ impl From<PlatformCaError> for RecipientError {
     }
 }
 
-/// What asking the configured source did.
+/// What asking the platform's publication did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pulled {
-    /// No source or no publication is configured.
+    /// The recipient was composed with no publication to ask.
     Unconfigured,
     /// The held set is current: nothing was asked.
     Current,
@@ -284,8 +284,9 @@ pub struct Recipient<V = ClassicalVerdict> {
     /// The held platform anchors and the passports accepted under them,
     /// while that answer is current.
     view: tokio::sync::RwLock<Option<Arc<AnchorView>>>,
-    /// How the configured publication is fetched; none fetches nothing.
-    source: Option<Arc<dyn PlatformCaSource>>,
+    /// The platform's publication and how it is fetched; none fetches
+    /// nothing, and the held set alone decides.
+    source: Option<(url::Url, Arc<dyn PlatformCaSource>)>,
     /// The installation's own authority, when it issues passports itself.
     own: Option<Arc<dyn OwnIssuer>>,
     /// When the last fetch failed (seconds since the epoch), so a failing
@@ -305,11 +306,23 @@ impl<V: Verdict> Recipient<V> {
         }
     }
 
-    /// The recipient refreshing its platform set from the configured
-    /// publication through `source`.
-    pub fn with_source(mut self, source: Arc<dyn PlatformCaSource>) -> Self {
-        self.source = Some(source);
-        self
+    /// The recipient refreshing its platform set from the platform's
+    /// `publication` (an `https` URL) through `source`. The publication is
+    /// the composing build's, held nowhere else: nothing stored or received
+    /// replaces it.
+    pub fn with_source(
+        mut self,
+        publication: url::Url,
+        source: Arc<dyn PlatformCaSource>,
+    ) -> Result<Self, RecipientError> {
+        if publication.scheme() != "https" {
+            return Err(RecipientError::Invalid {
+                field: "publication",
+                reason: "an https URL".into(),
+            });
+        }
+        self.source = Some((publication, source));
+        Ok(self)
     }
 
     /// The recipient answering for the passports of its own authority from
@@ -322,25 +335,6 @@ impl<V: Verdict> Recipient<V> {
     /// The verdict signatures are checked with.
     pub fn verdict(&self) -> &V {
         &self.verdict
-    }
-
-    /// Configure the publication the platform set is refreshed from: an
-    /// `https` URL, which a refresh never replaces with one it receives. A
-    /// configured one is kept; whether this one was written.
-    pub async fn configure_publication(&self, endpoint: &url::Url) -> Result<bool, RecipientError> {
-        if endpoint.scheme() != "https" {
-            return Err(RecipientError::Invalid {
-                field: "publication",
-                reason: "an https URL".into(),
-            });
-        }
-        Ok(self
-            .store
-            .configure_platform_ca_publication(
-                endpoint.as_str(),
-                audit("platform_ca.configure_publication"),
-            )
-            .await?)
     }
 
     /// A platform set's generations are CA certificates, a verification-only
@@ -450,7 +444,9 @@ impl<V: Verdict> Recipient<V> {
             Err(_) => false,
         };
         let pulled = match &self.source {
-            Some(source) if due => self.pull(source.as_ref(), now).await,
+            Some((publication, source)) if due => {
+                self.pull(publication, source.as_ref(), now).await
+            }
             Some(_) => Pulled::Current,
             None => Pulled::Unconfigured,
         };
@@ -473,27 +469,23 @@ impl<V: Verdict> Recipient<V> {
         Ok(view)
     }
 
-    /// Fetch the configured publication and hold the set it states, unless
-    /// none is configured or the last fetch failed less than the backoff
-    /// ago. The store applies it under its own rules, so a fetch can bring
-    /// back neither an older set nor a withdrawn generation. A failure is
-    /// logged, never answered: the held set decides.
-    async fn pull(&self, source: &dyn PlatformCaSource, now: i64) -> Pulled {
+    /// Fetch the platform's `publication` and hold the set it states, unless
+    /// the last fetch failed less than the backoff ago. The store applies
+    /// it under its own rules, so a fetch can bring back neither an older
+    /// set nor a withdrawn generation. A failure is logged, never answered:
+    /// the held set decides.
+    async fn pull(
+        &self,
+        publication: &url::Url,
+        source: &dyn PlatformCaSource,
+        now: i64,
+    ) -> Pulled {
         // `failed_at` starts at i64::MIN, so the sum stays in range.
         if now < self.failed_at.load(Ordering::Relaxed) + SOURCE_BACKOFF {
             return Pulled::Failed;
         }
         let outcome = async {
-            let Some(endpoint) = self
-                .store
-                .platform_ca_publication()
-                .await
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok(Pulled::Unconfigured);
-            };
-            let endpoint = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
-            let set = source.fetch(&endpoint).await?;
+            let set = source.fetch(publication).await?;
             let applied = self.hold(&set).await.map_err(|e| e.to_string())?;
             tracing::info!(
                 revision = set.revision,

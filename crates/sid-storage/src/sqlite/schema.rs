@@ -1893,9 +1893,8 @@ CREATE TABLE IF NOT EXISTS entry_connections (
 ) STRICT, WITHOUT ROWID;
 
 -- The admitted platform CA set: its revision and freshness (one row), the
--- generations ever published, the publication it is refreshed from (one
--- row), and what each generation's CRLs said of the CA certificates it
--- issued. Times are seconds since the epoch.
+-- generations ever published, and what each generation's CRLs said of the
+-- CA certificates it issued. Times are seconds since the epoch.
 CREATE TABLE IF NOT EXISTS platform_ca_set (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     revision        INTEGER NOT NULL CHECK (revision >= 0),
@@ -1911,11 +1910,6 @@ CREATE TABLE IF NOT EXISTS platform_ca_generations (
     overlap_end     INTEGER,
     -- The revision that last listed the generation.
     listed_in       INTEGER NOT NULL
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS platform_ca_source (
-    id              INTEGER PRIMARY KEY CHECK (id = 1),
-    publication     TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS platform_ca_status (

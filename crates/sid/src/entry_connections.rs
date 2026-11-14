@@ -23,7 +23,7 @@ use sid_authn::federated_entry::TrustedIssuer;
 use sid_authn::operation::{KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::entry_connection::{
-    EntryRoute, MAX_NAME, credential_context, is_issuer_identifier,
+    CALLBACK, MAX_NAME, credential_context, is_issuer_identifier,
 };
 use sid_core::models::{
     AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerHandle,
@@ -128,13 +128,9 @@ fn handle_of(text: &str) -> Result<EntryHandle, EntryConnectionError> {
     EntryHandle::parse(text).map_err(|e| invalid("handle", e.to_string()))
 }
 
-/// The exact redirect URI of connection `handle` below `issuer`.
-fn callback(issuer: &OidcIssuer, handle: EntryHandle) -> String {
-    format!(
-        "{}{}",
-        issuer.canonical_url,
-        EntryRoute::Callback(handle).path()
-    )
+/// The exact redirect URI every connection of `issuer` registers.
+fn callback(issuer: &OidcIssuer) -> String {
+    format!("{}{CALLBACK}", issuer.canonical_url)
 }
 
 /// What the installation's provisioning names of the authority its own
@@ -264,7 +260,7 @@ impl EntryConnections {
                 issuer: req.issuer.clone(),
                 source,
                 recipient_issuer: issuer.id,
-                callback: callback(&issuer, handle),
+                callback: callback(&issuer),
                 client_id: req.client_id.clone(),
                 credential: self.seal(handle, &req.client_secret).await?,
                 enabled: req.enabled,
@@ -533,7 +529,7 @@ impl EntryConnections {
             issuer: authority.issuer.clone(),
             source: authority.source,
             recipient_issuer: issuer.id,
-            callback: callback(issuer, handle),
+            callback: callback(issuer),
             client_id: authority.client_id.clone(),
             credential: self
                 .seal(handle, authority.client_secret.expose_secret())
