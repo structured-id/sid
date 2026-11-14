@@ -683,6 +683,8 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
     elevation_until TEXT,
     -- The kept authorization request the code was issued from, if any.
     request_origin  BLOB CHECK (length(request_origin) = 16),
+    -- The holder's proof made for this code's sign-in, if one was.
+    presentation    BLOB,
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
 ) STRICT;

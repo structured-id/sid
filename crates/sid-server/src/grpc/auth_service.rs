@@ -649,6 +649,16 @@ impl AuthServiceImpl {
         self
     }
 
+    /// Make the proofs of this installation's own Profiles for sign-ins at
+    /// other organizations with `presentations`, the host's signer.
+    pub fn with_own_presentations(
+        mut self,
+        presentations: Arc<dyn sid::oauth::OwnPresentations>,
+    ) -> Self {
+        self.oauth.set_own_presentations(presentations);
+        self
+    }
+
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
     /// not enabled magic links. The answer does not depend on the address asked
     /// about.

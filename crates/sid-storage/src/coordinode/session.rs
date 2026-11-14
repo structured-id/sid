@@ -57,7 +57,7 @@ const CODE: &str = "a.code_hash AS code_hash, a.profile_id AS profile_id,
     a.amr AS amr, a.assurance_level AS assurance_level, a.elevation_level AS elevation_level,
     a.elevation_until AS elevation_until, a.expires_at AS expires_at,
     a.created_at AS created_at, a.used AS used, a.session_id AS session_id,
-    a.request_origin AS request_origin";
+    a.request_origin AS request_origin, a.presentation AS presentation";
 
 const GENERATION: &str = "g.id AS id, g.session_id AS session_id, g.key_jkt AS key_jkt,
     g.expires_at AS expires_at, g.created_at AS created_at, g.exchange AS exchange,
@@ -568,6 +568,7 @@ fn code(row: &Row) -> SidResult<AuthorizationCode> {
         session_id: get_opt_id(row, "session_id")?,
         request_origin: get_opt_uuid(row, "request_origin")?
             .map(sid_core::models::RequestOrigin::from_uuid),
+        presentation: get_opt_bytes(row, "presentation")?,
     })
 }
 
@@ -1311,9 +1312,14 @@ fn insert_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
             resource_id: $resource_id, authorizing_session_id: $authorizing,
             authenticated_at: $authenticated_at, amr: $amr,
             assurance_level: $assurance_level, elevation_level: $elevation_level,
-            elevation_until: $elevation_until, request_origin: $request_origin})",
+            elevation_until: $elevation_until, request_origin: $request_origin,
+            presentation: $presentation})",
         grant_authentication_params(
             Params::default()
+                .with(
+                    "presentation",
+                    code.presentation.clone().map_or(Value::Null, Value::Binary),
+                )
                 .with(
                     "request_origin",
                     opt_uuid(code.request_origin.map(|o| o.into_uuid()).as_ref()),

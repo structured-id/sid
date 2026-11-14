@@ -118,6 +118,46 @@ fn internal(operation: &'static str, cause: impl std::fmt::Display) -> OAuthErro
     OAuthError::Internal
 }
 
+/// One sign-in of one of this installation's own Profiles at another
+/// organization's installation, as its authorization request states it.
+#[derive(Debug, Clone, Copy)]
+pub struct PresentedSignIn<'a> {
+    /// The Profile whose session authorizes the code.
+    pub profile: ProfileId,
+    /// The organization the issuer serves: the recipient.
+    pub recipient: OrgId,
+    /// The Profile's Binding to that organization: the token's subject.
+    pub binding: sid_core::models::BindingId,
+    /// The request's `nonce`, never empty.
+    pub challenge: &'a str,
+    /// The request's exact `redirect_uri`.
+    pub verifier_context: &'a str,
+}
+
+/// Why no proof was made for a sign-in.
+#[derive(Debug, thiserror::Error)]
+pub enum PresentationRefused {
+    /// The Profile may not be presented to this recipient now: nothing is
+    /// authorized for it.
+    #[error("the Profile is not presented to this recipient: {0}")]
+    Denied(String),
+    /// What the proof is made with cannot answer now; the request may be
+    /// retried.
+    #[error("the presentation cannot be made now: {0}")]
+    Unavailable(String),
+}
+
+/// Makes the holder's proof of one of this installation's own Profiles for
+/// one sign-in at another organization (a JWS in General JSON
+/// Serialization, bound to the request's `nonce` and exact `redirect_uri`),
+/// on the authority of the Profile's own session here. The engine issues
+/// to a foreign recipient without it too; then the token carries the
+/// Binding and no proof.
+#[async_trait::async_trait]
+pub trait OwnPresentations: Send + Sync {
+    async fn present(&self, sign_in: PresentedSignIn<'_>) -> Result<Vec<u8>, PresentationRefused>;
+}
+
 /// What the OAuth endpoints of one installation are built from.
 pub struct OAuthParts {
     pub storage: Arc<dyn StorageBackend>,
@@ -160,6 +200,9 @@ pub struct OAuth {
     rate_limit_stats: Arc<RateLimitStats>,
     login_policy: Arc<dyn LoginPolicySource>,
     installation_url: String,
+    /// Makes the proof of an own Profile for a sign-in at another
+    /// organization; none in an installation that issues no such proof.
+    presentations: Option<Arc<dyn OwnPresentations>>,
 }
 
 impl OAuth {
@@ -180,6 +223,62 @@ impl OAuth {
             cascade: parts.cascade,
             login_policy: parts.login_policy,
             installation_url: parts.installation_url,
+            presentations: None,
+        }
+    }
+
+    /// Make the proofs of own Profiles for sign-ins at other organizations
+    /// with `presentations` from now on.
+    pub fn set_own_presentations(&mut self, presentations: Arc<dyn OwnPresentations>) {
+        self.presentations = Some(presentations);
+    }
+
+    /// The proof for the sign-in `request` asks of `profile_id` at the
+    /// foreign recipient `issuer` serves, when this installation makes one:
+    /// only for a recipient that is not the installation's own organization,
+    /// only with a nonce to answer. The request's own values bind it, never
+    /// a second copy of them.
+    pub(crate) async fn presentation_for(
+        &self,
+        issuer: &OidcIssuer,
+        client: &OAuth2Client,
+        profile_id: ProfileId,
+        nonce: Option<&str>,
+        redirect_uri: &str,
+    ) -> Result<Option<Vec<u8>>, authorization::AuthorizationError> {
+        use authorization::AuthorizationError;
+        if issuer.recipient_org == self.installation_org {
+            return Ok(None);
+        }
+        let (Some(presentations), Some(challenge)) =
+            (&self.presentations, nonce.filter(|n| !n.is_empty()))
+        else {
+            return Ok(None);
+        };
+        // The proof names the subject the token will carry.
+        let subject = self.subject_for(issuer, profile_id, client).await?;
+        let binding = sid_core::models::BindingId::parse(&subject).map_err(|e| {
+            tracing::error!(error = %e, "a foreign recipient's subject is no Binding");
+            AuthorizationError::Internal
+        })?;
+        match presentations
+            .present(PresentedSignIn {
+                profile: profile_id,
+                recipient: issuer.recipient_org,
+                binding,
+                challenge,
+                verifier_context: redirect_uri,
+            })
+            .await
+        {
+            Ok(presentation) => Ok(Some(presentation)),
+            Err(PresentationRefused::Denied(reason)) => {
+                tracing::info!(client = %client.client_id, %reason, "no presentation for this sign-in");
+                Err(sid_authn::oauth2::AuthorizeError::AccessDenied.into())
+            }
+            Err(PresentationRefused::Unavailable(cause)) => {
+                Err(OAuthError::unavailable("presentation", cause).into())
+            }
         }
     }
 

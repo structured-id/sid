@@ -71,6 +71,7 @@ pub(super) fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<Autho
         session_id: col(row, "session_id")?,
         request_origin: col::<Option<uuid::Uuid>>(row, "request_origin")?
             .map(sid_core::models::RequestOrigin::from_uuid),
+        presentation: col(row, "presentation")?,
     })
 }
 
@@ -131,8 +132,8 @@ pub(super) async fn insert_auth_code(
     sqlx::query(
         "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri, scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
             authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id, session_id,
-            request_origin)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            request_origin, presentation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&code.code_hash).bind(code.profile_id)
     .bind(&code.client_id)
@@ -152,6 +153,7 @@ pub(super) async fn insert_auth_code(
     .bind(code.authentication.session)
     .bind(code.session_id)
     .bind(code.request_origin.map(|origin| origin.into_uuid()))
+    .bind(&code.presentation)
     .execute(&mut **tx)
     .await
     .map_err(|e| match &e {

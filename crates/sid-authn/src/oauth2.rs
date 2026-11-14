@@ -73,6 +73,10 @@ pub enum AuthorizeError {
     /// Core §3.1.2.1).
     #[error("prompt is not a valid combination of none, login, consent, select_account")]
     InvalidPrompt,
+    /// The authorization server does not grant the request for this user
+    /// (RFC 6749 §4.1.2.1 `access_denied`).
+    #[error("the request is not granted for this user")]
+    AccessDenied,
 }
 
 impl AuthorizeError {
@@ -87,6 +91,7 @@ impl AuthorizeError {
             | Self::InvalidPrompt => "invalid_request",
             Self::UnsupportedResponseType => "unsupported_response_type",
             Self::UnauthorizedClient => "unauthorized_client",
+            Self::AccessDenied => "access_denied",
         }
     }
 }
@@ -399,6 +404,8 @@ impl OAuth2Server {
             authentication,
             // Set only by the authorization endpoint, for a request it kept.
             request_origin: None,
+            // Made by the authorization endpoint, for a foreign recipient.
+            presentation: None,
         };
 
         Ok((raw_code, code))

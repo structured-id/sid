@@ -344,6 +344,9 @@ pub struct CeHost {
     /// Where the login requirements come from; none keeps the installation's
     /// fixed security policy.
     pub login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
+    /// Makes the proofs of this installation's own Profiles for sign-ins at
+    /// other organizations; none issues the Binding subject without a proof.
+    pub own_presentations: Option<Arc<dyn sid::oauth::OwnPresentations>>,
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -877,6 +880,10 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     .with_browser_cookie(browser_cookie);
     let auth_svc = match host.login_policy {
         Some(source) => auth_svc.with_login_policy(source),
+        None => auth_svc,
+    };
+    let auth_svc = match host.own_presentations {
+        Some(presentations) => auth_svc.with_own_presentations(presentations),
         None => auth_svc,
     };
     let auth_svc = match &ceremony_page {

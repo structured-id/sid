@@ -1459,6 +1459,7 @@ CREATE TABLE authorization_codes (
     elevation_level text,
     elevation_until timestamp with time zone,
     request_origin uuid,
+    presentation bytea,
     CONSTRAINT authorization_codes_pkey PRIMARY KEY (code_hash),
     CONSTRAINT authorization_codes_authorizing_session_id_fkey FOREIGN KEY (authorizing_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     CONSTRAINT authorization_codes_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,

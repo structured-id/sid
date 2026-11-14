@@ -255,10 +255,19 @@ pub async fn redeem_code<H: GrantHost>(
         .map_err(GrantFailure::Host)?;
 
     let proof = host.proof().await.map_err(GrantFailure::Host)?;
-    let claims = host
+    let mut claims = host
         .claims(&account, &issuer, &client, exchanged.scopes())
         .await
         .map_err(GrantFailure::Host)?;
+    // The proof made when the code was authorized goes into the ID Token of
+    // this redemption and nowhere else: a refresh carries none.
+    if let (Some(made), Some(id_token)) = (exchanged.presentation(), claims.id_token.as_mut()) {
+        id_token.presentation = Some(serde_json::from_slice(made).map_err(|e| {
+            GrantFailure::Issuance(sid_core::Error::Internal(format!(
+                "the code's presentation is not JSON: {e}"
+            )))
+        })?);
+    }
     let signer = host.signer(&issuer).await.map_err(GrantFailure::Host)?;
     let (response, refresh) = host
         .oauth2()

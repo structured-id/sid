@@ -343,6 +343,18 @@ impl OAuth {
                 AuthorizationError::Internal
             })?;
         auth_code.request_origin = origin;
+        // Made now, while the session that authorizes the code stands, and
+        // kept with the code: its redemption carries it and nothing else
+        // does.
+        auth_code.presentation = self
+            .presentation_for(
+                issuer,
+                client,
+                profile_id,
+                validated.nonce.as_deref(),
+                &validated.redirect_uri,
+            )
+            .await?;
         let mut ctx: MutationContext = AuditEntry::user(
             profile_id.to_string(),
             "auth_code.create",
