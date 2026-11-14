@@ -260,8 +260,9 @@ impl CeServices {
 
 /// The federated entry over `c`: every entry reads its connection from the
 /// store, and its pending state is held there too, so an entry started on
-/// one replica finishes on another with or without the cache.
-fn federated_entry(
+/// one replica finishes on another with or without the cache. It accepts a
+/// presented identity with `c.identities`, which a host may have replaced.
+pub fn federated_entry(
     c: &CeComponents,
 ) -> anyhow::Result<crate::grpc::federated_entry_service::FederatedEntryServiceImpl> {
     use sid_authn::federated_entry::FederatedEntry;
