@@ -4101,6 +4101,20 @@ impl StorageBackend for MockStorage {
         Ok(true)
     }
 
+    async fn insert_organization_reference(
+        &self,
+        _org: &sid_core::models::OrganizationReference,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("the server tests register no recipient organization")
+    }
+
+    async fn organization_references(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        Ok(Vec::new())
+    }
+
     async fn assign_unowned_clients(
         &self,
         org_id: sid_core::models::OrgId,

@@ -4192,6 +4192,65 @@ impl StorageBackend for PostgresBackend {
         Ok(inserted)
     }
 
+    async fn insert_organization_reference(
+        &self,
+        reference: &sid_core::models::OrganizationReference,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let org = reference.id;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let inserted = sqlx::query(
+            "INSERT INTO organizations (id, is_instance, created_at) VALUES ($1, FALSE, $2)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(org)
+        .bind(reference.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("organization reference", e))?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            // Held already: a reference stays as it is, the instance is not one.
+            let instance: bool =
+                sqlx::query_scalar("SELECT is_instance FROM organizations WHERE id = $1")
+                    .bind(org)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| SidError::Storage(e.to_string()))?;
+            if instance {
+                return Err(SidError::Conflict(format!(
+                    "organization {org} is this installation's own"
+                )));
+            }
+            return Ok(false);
+        }
+        Self::audit_in_tx(&mut tx, &format!("organization:{org}"), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(true)
+    }
+
+    async fn organization_references(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        let rows: Vec<(sid_core::models::OrgId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT id, created_at FROM organizations WHERE NOT is_instance ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("organization references: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, created_at)| sid_core::models::OrganizationReference { id, created_at })
+            .collect())
+    }
+
     async fn assign_unowned_clients(
         &self,
         org_id: sid_core::models::OrgId,

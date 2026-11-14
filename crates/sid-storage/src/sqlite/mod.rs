@@ -1776,6 +1776,20 @@ impl StorageBackend for SqliteBackend {
         self.insert_instance_organization_impl(org, audit).await
     }
 
+    async fn insert_organization_reference(
+        &self,
+        org: &sid_core::models::OrganizationReference,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.insert_organization_reference_impl(org, audit).await
+    }
+
+    async fn organization_references(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        self.organization_references_impl().await
+    }
+
     async fn assign_unowned_clients(
         &self,
         org_id: sid_core::models::OrgId,

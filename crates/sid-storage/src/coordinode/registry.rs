@@ -949,6 +949,67 @@ impl CoordinodeBackend {
         .await
     }
 
+    pub(super) async fn insert_organization_reference(
+        &self,
+        reference: sid_core::models::OrganizationReference,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let org = reference.id;
+        let held = self
+            .transaction(move |tx| {
+                let rows = tx.run(
+                    "MATCH (o:SidOrganization) WHERE o.id = $id RETURN o.is_instance AS instance",
+                    Params::default().with("id", uuid(org.as_uuid())),
+                )?;
+                if let Some(row) = rows.first() {
+                    // Held already: a reference stays, the instance is none.
+                    return Ok(Decision::Abandon(Some(get_bool(row, "instance")?)));
+                }
+                tx.create_absent(
+                    "CREATE (o:SidOrganization {id: $id, is_instance: false,
+                        created_at: $created_at})",
+                    Params::default()
+                        .with("id", uuid(org.as_uuid()))
+                        .with("created_at", time(reference.created_at)),
+                )?;
+                finalize(tx, &format!("organization:{org}"), ctx.clone())?;
+                Ok(Decision::Commit(None))
+            })
+            .await?;
+        match held {
+            None => Ok(true),
+            Some(false) => Ok(false),
+            Some(true) => Err(sid_core::Error::Conflict(format!(
+                "organization {org} is this installation's own"
+            ))),
+        }
+    }
+
+    pub(super) async fn organization_references(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                "MATCH (o:SidOrganization) WHERE o.is_instance = false
+                 RETURN o.id AS id, o.created_at AS created_at",
+                Params::default(),
+            )?;
+            let mut held = rows
+                .iter()
+                .map(|row| {
+                    Ok(sid_core::models::OrganizationReference {
+                        id: OrgId::from_uuid(get_uuid(row, "id")?)
+                            .map_err(|e| sid_core::Error::Storage(e.to_string()))?,
+                        created_at: get_time(row, "created_at")?,
+                    })
+                })
+                .collect::<SidResult<Vec<_>>>()?;
+            held.sort_unstable_by_key(|reference| reference.id.into_uuid());
+            Ok(held)
+        })
+        .await
+    }
+
     pub(super) async fn assign_unowned_clients(
         &self,
         org: OrgId,

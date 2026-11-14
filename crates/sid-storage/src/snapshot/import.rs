@@ -432,6 +432,19 @@ pub async fn import(
             return Err(target("the target took another installation organization"));
         }
     }
+    // The organizations this one issues to, before the issuers and clients
+    // that name them: their identity alone, as the source held them.
+    for reference in &snapshot.organization_references {
+        if backend
+            .insert_organization_reference(
+                reference,
+                audit("import_organization_reference", &reference.id.to_string()),
+            )
+            .await?
+        {
+            result.organizations += 1;
+        }
+    }
     for entry in &snapshot.oidc_issuers {
         if backend
             .import_oidc_issuer(

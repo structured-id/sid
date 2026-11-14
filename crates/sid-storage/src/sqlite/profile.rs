@@ -1188,6 +1188,58 @@ impl SqliteBackend {
         Ok(inserted)
     }
 
+    pub(crate) async fn insert_organization_reference_impl(
+        &self,
+        reference: &sid_core::models::OrganizationReference,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let org = reference.id;
+        let mut tx = self.begin_write().await?;
+        let held: Option<bool> =
+            sqlx::query_scalar("SELECT is_instance FROM organizations WHERE id = ?")
+                .bind(org)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
+        match held {
+            Some(true) => Err(SidError::Conflict(format!(
+                "organization {org} is this installation's own"
+            ))),
+            Some(false) => Ok(false),
+            None => {
+                sqlx::query(
+                    "INSERT INTO organizations (id, is_instance, created_at) VALUES (?, 0, ?)",
+                )
+                .bind(org)
+                .bind(fmt_dt(&reference.created_at))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
+                Self::commit_mutation(tx, &format!("organization:{org}"), audit).await?;
+                Ok(true)
+            }
+        }
+    }
+
+    pub(crate) async fn organization_references_impl(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        let rows = sqlx::query(
+            "SELECT id, created_at FROM organizations WHERE NOT is_instance ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        rows.iter()
+            .map(|row| {
+                Ok(sid_core::models::OrganizationReference {
+                    id: col(row, "id")?,
+                    created_at: dt_col(row, "created_at")?,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) async fn assign_unowned_clients_impl(
         &self,
         org_id: sid_core::models::OrgId,

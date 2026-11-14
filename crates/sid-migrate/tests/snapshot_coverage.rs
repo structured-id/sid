@@ -198,6 +198,14 @@ async fn installation(source: &SqliteBackend) -> Installation {
         .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
+    // An organization the installation issues to, held as a reference.
+    source
+        .insert_organization_reference(
+            &sid_core::models::OrganizationReference::new(sid_core::models::OrgId::generate()),
+            ctx(),
+        )
+        .await
+        .unwrap();
     let now = Utc::now().trunc_subsecs(3);
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {

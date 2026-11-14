@@ -1232,6 +1232,20 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::insert_instance_organization(self, org, ctx).await
     }
 
+    async fn insert_organization_reference(
+        &self,
+        org: &sid_core::models::OrganizationReference,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::insert_organization_reference(self, *org, ctx).await
+    }
+
+    async fn organization_references(
+        &self,
+    ) -> Result<Vec<sid_core::models::OrganizationReference>> {
+        CoordinodeBackend::organization_references(self).await
+    }
+
     async fn assign_unowned_clients(
         &self,
         org_id: sid_core::models::OrgId,
