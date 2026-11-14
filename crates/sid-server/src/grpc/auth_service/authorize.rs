@@ -123,6 +123,41 @@ impl AuthServiceImpl {
         .ok_or_else(|| authorization_refusal(AuthorizationError::NotWaiting))
     }
 
+    /// Keep the ordinary authorization `request` of a registered client for
+    /// its browser to continue at the authorization endpoint (see
+    /// [`sid::oauth::authorization::Authorizations::prepare`]): what a
+    /// composition of this installation calls in process to have a user
+    /// authenticate for one operation of its own.
+    pub async fn prepare_authorization(
+        &self,
+        request: OAuth2AuthorizeRequest,
+    ) -> Result<sid::oauth::authorization::Prepared, Status> {
+        self.authorizations
+            .prepare(&self.oauth, request)
+            .await
+            .map_err(authorization_refusal)
+    }
+
+    /// What redeeming the code of the kept request `origin` of `client_id`
+    /// committed, with the live session it was redeemed into (see
+    /// [`sid::oauth::OAuth::redeemed_request`]).
+    pub async fn redeemed_request(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> Result<
+        Option<(
+            sid_core::models::RedeemedAuthorization,
+            sid_core::models::Session,
+        )>,
+        Status,
+    > {
+        self.oauth
+            .redeemed_request(client_id, origin)
+            .await
+            .map_err(authorization_refusal)
+    }
+
     /// The request kept under `reference`, taken: a reference continues once.
     pub(crate) async fn continue_authorization(
         &self,

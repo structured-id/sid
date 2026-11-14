@@ -1631,6 +1631,20 @@ impl GrantStore for MockStorage {
             .insert(refresh_token.token_hash.clone(), refresh_token.clone());
         Ok(AuthCodeRedemption::Redeemed)
     }
+
+    async fn redeemed_authorization(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> SidResult<Option<sid_core::models::RedeemedAuthorization>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .auth_codes_by_hash
+            .values()
+            .find(|code| code.client_id == client_id && code.request_origin == Some(origin))
+            .cloned()
+            .and_then(AuthorizationCode::redeemed))
+    }
 }
 
 #[async_trait]

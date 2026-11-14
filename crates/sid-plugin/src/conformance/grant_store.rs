@@ -164,6 +164,9 @@ async fn code<H: GrantHarness>(
         created_at: Utc::now(),
         used: false,
         session_id: None,
+        // Issued from a kept request: every case that stores, redeems,
+        // exports or imports a code carries its origin too.
+        request_origin: Some(sid_core::models::RequestOrigin::generate()),
     }
 }
 
@@ -1164,6 +1167,103 @@ pub async fn auth_code_concurrent_redeem<H: GrantHarness>(h: &H) {
     }
 }
 
+/// The result of a kept authorization request is answered only once its code
+/// is redeemed, and for its own client: nothing while the code is unused,
+/// then who authorized it, how, for which resource and into which session;
+/// never for another client, another request, or a code issued from no kept
+/// request. Bug prevented: a pending request, or an issued but unused code,
+/// taken for a completed sign-in.
+pub async fn redeemed_authorization_follows_the_redemption<H: GrantHarness>(h: &H) {
+    use sid_core::models::{RedeemedAuthorization, RequestOrigin};
+    let owner = h.owner().await;
+    let resource = h.resource().await;
+    let code = code(h, owner.clone(), resource).await;
+    let origin = code.request_origin.expect("the code of a kept request");
+    h.store().create_auth_code(&code, ctx()).await.unwrap();
+    // A code answered as its request arrived has no origin to be read by.
+    let mut direct = self::code(h, owner.clone(), resource).await;
+    direct.request_origin = None;
+    h.store().create_auth_code(&direct, ctx()).await.unwrap();
+    let answer = |client: &'static str, origin: RequestOrigin| async move {
+        h.store()
+            .redeemed_authorization(client, origin)
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(
+        answer("conformance-client", origin).await,
+        None,
+        "an unused code is no result"
+    );
+
+    let redeemed_into = session(owner.clone());
+    let token = refresh(&redeemed_into, Uuid::now_v7(), resource);
+    h.store()
+        .redeem_auth_code(&code.code_hash, &redeemed_into, &token, ctx())
+        .await
+        .unwrap();
+    let direct_session = session(owner.clone());
+    let direct_token = refresh(&direct_session, Uuid::now_v7(), resource);
+    h.store()
+        .redeem_auth_code(&direct.code_hash, &direct_session, &direct_token, ctx())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        answer("conformance-client", origin).await,
+        Some(RedeemedAuthorization {
+            profile_id: owner,
+            resource,
+            authentication: code.authentication.clone(),
+            session_id: redeemed_into.id,
+        })
+    );
+    assert_eq!(
+        answer("another-client", origin).await,
+        None,
+        "another client's request"
+    );
+    assert_eq!(
+        answer("conformance-client", RequestOrigin::generate()).await,
+        None,
+        "a request that was never kept"
+    );
+}
+
+/// Concurrent redemptions of the code of a kept request leave one result:
+/// the session of the redemption that won.
+pub async fn redeemed_authorization_names_the_one_redemption<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let resource = h.resource().await;
+    let code = code(h, owner.clone(), resource).await;
+    let origin = code.request_origin.expect("the code of a kept request");
+    h.store().create_auth_code(&code, ctx()).await.unwrap();
+    let sessions: Vec<_> = (0..4).map(|_| session(owner.clone())).collect();
+    let tokens: Vec<_> = sessions
+        .iter()
+        .map(|s| refresh(s, Uuid::now_v7(), resource))
+        .collect();
+    let redeem = |i: usize| {
+        h.store()
+            .redeem_auth_code(&code.code_hash, &sessions[i], &tokens[i], ctx())
+    };
+
+    let (a, b, c, d) = tokio::join!(redeem(0), redeem(1), redeem(2), redeem(3));
+
+    let results: Vec<_> = [a, b, c, d].into_iter().map(Result::unwrap).collect();
+    let winner = (0..4)
+        .find(|&i| results[i] == AuthCodeRedemption::Redeemed)
+        .expect("one redemption");
+    let answered = h
+        .store()
+        .redeemed_authorization(&code.client_id, origin)
+        .await
+        .unwrap()
+        .expect("the redeemed result");
+    assert_eq!(answered.session_id, sessions[winner].id);
+}
+
 /// A redeemed refresh token reads back with its owner, family, resource and
 /// key binding.
 pub async fn refresh_token_roundtrip<H: GrantHarness>(h: &H) {
@@ -1790,6 +1890,10 @@ fn rekeyed<O: Clone>(grants: &SessionGrants<O>, session: SessionId) -> SessionGr
     }
     for code in &mut moved.authorization_codes {
         code.code_hash = fresh_bytes(code.code_hash.len());
+        // A kept request has one code: another session's is another request.
+        code.request_origin = code
+            .request_origin
+            .map(|_| sid_core::models::RequestOrigin::generate());
         code.authentication.session = session;
     }
     for stored in &mut moved.native_generations {

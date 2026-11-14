@@ -30,6 +30,51 @@ impl fmt::Display for AuthCodeError {
 
 impl std::error::Error for AuthCodeError {}
 
+/// The identity of an authorization request the issuer kept on its server,
+/// given when the request is first kept and unchanged while it is continued
+/// under new single-use references. It is drawn by the issuer and never
+/// taken from a request, so it names that kept request and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestOrigin(uuid::Uuid);
+
+impl RequestOrigin {
+    /// A new origin, for a request kept now.
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    /// The origin a store holds as `id`.
+    pub fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn into_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl fmt::Display for RequestOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// What redeeming the code of a kept authorization request committed: who
+/// authorized it and how, for which resource, and the session it was
+/// redeemed into. An unused code is no such result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedeemedAuthorization<O = ProfileId> {
+    /// The user who authorized the request.
+    pub profile_id: O,
+    /// The resource the authorization was granted for.
+    pub resource: ResourceId,
+    /// How and when that user authenticated in the authorizing session.
+    pub authentication: GrantAuthentication,
+    /// The session the code was redeemed into.
+    pub session_id: SessionId,
+}
+
 /// Authorization code (stored as SHA-256 hash, never plaintext). `O` is how
 /// the serving authority represents its stable user: a local Profile by
 /// default.
@@ -74,6 +119,11 @@ pub struct AuthorizationCode<O = ProfileId> {
     /// Session the code was redeemed into; a second use revokes it.
     #[serde(default)]
     pub session_id: Option<SessionId>,
+
+    /// The kept authorization request the code was issued from; `None` for
+    /// a request that was answered as it arrived.
+    #[serde(default)]
+    pub request_origin: Option<RequestOrigin>,
 }
 
 /// Outcome of redeeming an authorization code in storage.
@@ -181,6 +231,18 @@ impl<O> AuthorizationCode<O> {
     /// Scopes as space-separated string.
     pub fn scopes_string(&self) -> String {
         self.scopes.join(" ")
+    }
+
+    /// What this code's redemption committed; `None` for a code that was
+    /// not redeemed into a session.
+    pub fn redeemed(self) -> Option<RedeemedAuthorization<O>> {
+        let session_id = self.session_id.filter(|_| self.used)?;
+        Some(RedeemedAuthorization {
+            profile_id: self.profile_id,
+            resource: self.resource,
+            authentication: self.authentication,
+            session_id,
+        })
     }
 }
 

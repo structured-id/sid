@@ -732,6 +732,14 @@ impl GrantStore for SqliteBackend {
         self.redeem_auth_code_impl(code_hash, session, refresh_token, audit)
             .await
     }
+
+    async fn redeemed_authorization(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> SidResult<Option<sid_core::models::RedeemedAuthorization>> {
+        self.redeemed_authorization_impl(client_id, origin).await
+    }
 }
 
 #[async_trait]

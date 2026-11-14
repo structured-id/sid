@@ -69,6 +69,8 @@ pub(super) fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<Autho
         created_at: dt_col(row, "created_at")?,
         used: col(row, "used")?,
         session_id: col(row, "session_id")?,
+        request_origin: col::<Option<uuid::Uuid>>(row, "request_origin")?
+            .map(sid_core::models::RequestOrigin::from_uuid),
     })
 }
 
@@ -128,8 +130,9 @@ pub(super) async fn insert_auth_code(
 ) -> SidResult<()> {
     sqlx::query(
         "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri, scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
-            authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id, session_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id, session_id,
+            request_origin)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&code.code_hash).bind(code.profile_id)
     .bind(&code.client_id)
@@ -148,6 +151,7 @@ pub(super) async fn insert_auth_code(
     .bind(code.authentication.elevation.map(|e| fmt_dt(&e.until)))
     .bind(code.authentication.session)
     .bind(code.session_id)
+    .bind(code.request_origin.map(|origin| origin.into_uuid()))
     .execute(&mut **tx)
     .await
     .map_err(|e| match &e {
@@ -317,6 +321,28 @@ impl SqliteBackend {
         insert_refresh_token(&mut tx, refresh_token).await?;
         Self::commit_mutation(tx, &format!("session:{}", session.id), audit).await?;
         Ok(AuthCodeRedemption::Redeemed)
+    }
+
+    pub(crate) async fn redeemed_authorization_impl(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> SidResult<Option<sid_core::models::RedeemedAuthorization>> {
+        // One code per kept request: the unique index over the pair answers.
+        let row = sqlx::query(
+            "SELECT * FROM authorization_codes
+             WHERE client_id = ? AND request_origin = ? AND used = 1",
+        )
+        .bind(client_id)
+        .bind(origin.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(row
+            .as_ref()
+            .map(row_to_auth_code)
+            .transpose()?
+            .and_then(AuthorizationCode::redeemed))
     }
 
     // === InitialAccessToken ===

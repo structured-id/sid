@@ -239,6 +239,7 @@ const INDEXES: &[&str] = &[
     "CREATE INDEX sid_refresh_token_profile ON :SidRefreshToken(profile_id)",
     "CREATE INDEX sid_auth_code_session ON :SidAuthCode(authorizing_session_id)",
     "CREATE INDEX sid_auth_code_profile ON :SidAuthCode(profile_id)",
+    "CREATE INDEX sid_auth_code_request_origin ON :SidAuthCode(request_origin)",
     "CREATE INDEX sid_native_generation_session ON :SidNativeGeneration(session_id)",
     "CREATE INDEX sid_native_credential_generation ON :SidNativeCredential(generation_id)",
     "CREATE INDEX sid_issuer_key_issuer ON :SidIssuerKey(issuer_id)",

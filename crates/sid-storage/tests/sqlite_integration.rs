@@ -465,6 +465,8 @@ mod grant_store {
         auth_code_needs_its_authorizing_session,
         auth_code_redeem_once,
         auth_code_concurrent_redeem,
+        redeemed_authorization_follows_the_redemption,
+        redeemed_authorization_names_the_one_redemption,
         refresh_token_roundtrip,
         rotate_refresh_token,
         rotate_after_sign_out_is_refused,

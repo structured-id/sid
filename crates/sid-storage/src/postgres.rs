@@ -2419,6 +2419,26 @@ impl GrantStore for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(AuthCodeRedemption::Redeemed)
     }
+
+    async fn redeemed_authorization(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> SidResult<Option<sid_core::models::RedeemedAuthorization>> {
+        // One code per kept request: the unique index over the pair answers.
+        let row = sqlx::query_as::<_, crate::pg_row::AuthCodeRow>(
+            "SELECT * FROM authorization_codes
+             WHERE client_id = $1 AND request_origin = $2 AND used",
+        )
+        .bind(client_id)
+        .bind(origin.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("redeemed authorization: {e}")))?;
+        row.map(|row| row.into_domain())
+            .transpose()
+            .map(|code| code.and_then(AuthorizationCode::redeemed))
+    }
 }
 
 #[async_trait]

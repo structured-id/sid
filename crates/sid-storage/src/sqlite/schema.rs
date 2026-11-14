@@ -681,11 +681,15 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
     assurance_level TEXT NOT NULL CHECK (assurance_level IN ('basic', 'standard')),
     elevation_level TEXT,
     elevation_until TEXT,
+    -- The kept authorization request the code was issued from, if any.
+    request_origin  BLOB CHECK (length(request_origin) = 16),
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON authorization_codes(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_codes_request_origin
+    ON authorization_codes(client_id, request_origin) WHERE request_origin IS NOT NULL;
 
 --------------------------------------------------------------------------------
 -- initial_access_tokens

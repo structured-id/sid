@@ -27,8 +27,9 @@ pub(super) async fn insert_auth_code(tx: &mut Tx<'_>, code: &AuthorizationCode) 
         "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri,
             scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
             authenticated_at, amr, assurance_level, elevation_level, elevation_until,
-            authorizing_session_id, session_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+            authorizing_session_id, session_id, request_origin)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+            $19)",
     )
     .bind(&code.code_hash)
     .bind(code.profile_id)
@@ -48,6 +49,7 @@ pub(super) async fn insert_auth_code(tx: &mut Tx<'_>, code: &AuthorizationCode) 
     .bind(code.authentication.elevation.map(|e| e.until))
     .bind(code.authentication.session)
     .bind(code.session_id)
+    .bind(code.request_origin.map(|origin| origin.into_uuid()))
     .execute(&mut **tx)
     .await
     .map_err(|e| match &e {

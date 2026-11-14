@@ -257,6 +257,14 @@ impl GrantStore for CoordinodeBackend {
     ) -> Result<AuthCodeRedemption> {
         CoordinodeBackend::redeem_auth_code(self, code_hash, session, refresh_token, ctx).await
     }
+
+    async fn redeemed_authorization(
+        &self,
+        client_id: &str,
+        origin: sid_core::models::RequestOrigin,
+    ) -> Result<Option<sid_core::models::RedeemedAuthorization>> {
+        CoordinodeBackend::redeemed_authorization(self, client_id, origin).await
+    }
 }
 
 #[async_trait]
