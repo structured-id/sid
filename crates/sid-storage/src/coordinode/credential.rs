@@ -143,6 +143,13 @@ pub(super) fn insert(tx: &Statements<'_>, credential: &Credential) -> SidResult<
     let (verified, policy_version, artifact) =
         crate::policy_evidence::columns(&credential.policy_evidence)?;
     credential_turn(tx, credential.profile_id)?;
+    // A federated reference authenticates at its issuer: it holds no
+    // credential here, by whichever path one would be added.
+    if super::profile::get(tx, credential.profile_id)?.is_some_and(|p| !p.profile_type.is_local()) {
+        return Err(SidError::InvalidState(
+            crate::FEDERATED_HOLDS_NO_CREDENTIAL.into(),
+        ));
+    }
     if get(tx, credential.id)?.is_some() {
         return Err(SidError::Conflict("credential already exists".into()));
     }

@@ -65,6 +65,14 @@ fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::model
     stored
 }
 
+/// Refusal of a credential for a federated reference: the identity it
+/// refers to authenticates at its issuer and holds none here.
+const FEDERATED_HOLDS_NO_CREDENTIAL: &str = "a federated reference holds no local credential";
+
+/// Refusal of a login name for a federated reference: it is reached only by
+/// the subject its trusted issuer names.
+const FEDERATED_HOLDS_NO_LOGIN_NAME: &str = "a federated reference holds no local login name";
+
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
 /// its row).
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]

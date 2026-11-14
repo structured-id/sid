@@ -21,6 +21,14 @@ pub enum ProfileType {
     Personal,
     /// Corporate profile owned by an organization.
     Corporate,
+    /// This installation's local reference to an identity it admitted
+    /// through federation: another SID installation signs that identity in,
+    /// and this record is what its sessions and permissions here attach to.
+    /// It is not a third kind of Profile at the issuing side and tells
+    /// nothing about what that side holds. It has no local credentials,
+    /// login names or keys, and is reached only through its
+    /// `(trusted issuer, subject)` assignment.
+    Federated,
 }
 
 impl ProfileType {
@@ -28,7 +36,15 @@ impl ProfileType {
         match self {
             Self::Personal => "personal",
             Self::Corporate => "corporate",
+            Self::Federated => "federated",
         }
+    }
+
+    /// Whether the record is one of this installation's own Profiles: it
+    /// may hold local credentials and login names. A [`Self::Federated`]
+    /// record may not: the identity it refers to authenticates elsewhere.
+    pub fn is_local(&self) -> bool {
+        !matches!(self, Self::Federated)
     }
 }
 
@@ -541,7 +557,11 @@ impl std::fmt::Display for ProfileVisibility {
     }
 }
 
-parse_stored!(ProfileType, "profile type", [Personal, Corporate]);
+parse_stored!(
+    ProfileType,
+    "profile type",
+    [Personal, Corporate, Federated]
+);
 parse_stored!(
     ProfileStatus,
     "profile status",
@@ -813,6 +833,31 @@ impl<'a> ClosedProfile<'a> {
 }
 
 impl Profile {
+    /// A federated reference has no user name: it is reached only by the
+    /// subject its issuer names. Every store checks this on each write of a
+    /// Profile; a local Profile passes.
+    pub fn check_reference(&self) -> crate::Result<()> {
+        if self.profile_type.is_local() || self.username.is_none() {
+            return Ok(());
+        }
+        Err(crate::Error::InvalidState(
+            "a federated reference has no user name".into(),
+        ))
+    }
+
+    /// Whether a stored Profile of `stored` type may be written as this
+    /// one: a Profile never becomes a federated reference nor stops being
+    /// one. A reference made local could be given a password; a local
+    /// Profile made a reference would keep the ones it holds.
+    pub fn check_reference_kept(&self, stored: ProfileType) -> crate::Result<()> {
+        if stored.is_local() == self.profile_type.is_local() {
+            return Ok(());
+        }
+        Err(crate::Error::InvalidState(
+            "a Profile neither becomes nor stops being a federated reference".into(),
+        ))
+    }
+
     /// Gateway: obtain typed wrapper if profile is Active.
     pub fn as_active(&mut self) -> Option<ActiveProfile<'_>> {
         if self.status == ProfileStatus::Active {

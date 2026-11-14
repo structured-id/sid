@@ -232,6 +232,15 @@ fn count_claims(tx: &Statements<'_>, id: PrincipalId) -> SidResult<u64> {
 /// gains the claim and keeps its assignment and proof. A login handle is
 /// never shared: held by another Profile it is `Conflict`.
 pub(super) fn bind(tx: &Statements<'_>, p: &Principal) -> SidResult<PrincipalId> {
+    // A federated reference is reached only by the subject its trusted
+    // issuer names: it claims no email, phone or user name here.
+    if p.principal_type != PrincipalType::FederatedSubject
+        && profile::get(tx, p.profile_id)?.is_some_and(|holder| !holder.profile_type.is_local())
+    {
+        return Err(SidError::InvalidState(
+            crate::FEDERATED_HOLDS_NO_LOGIN_NAME.into(),
+        ));
+    }
     let id = match by_value(tx, p.principal_type, &p.value)? {
         Some(existing) => existing.id,
         None => {

@@ -115,9 +115,13 @@ where
 {
     let (verified, policy_version, artifact) =
         crate::policy_evidence::columns(&credential.policy_evidence)?;
-    sqlx::query(
+    // A federated reference authenticates at its issuer: it holds no
+    // credential here, by whichever path one would be added. Decided in the
+    // statement that writes.
+    let written = sqlx::query(
         "INSERT INTO credentials (id, profile_id, credential_type, status, data, label, policy_version, zkpp_verified, opaque_curve, legacy_algorithm, opaque_credential_identifier, zkpp_artifact, created_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+         WHERE NOT EXISTS (SELECT 1 FROM profiles WHERE id = ?2 AND profile_type = 'federated')",
     )
     .bind(credential.id.0)
     .bind(credential.profile_id)
@@ -135,7 +139,13 @@ where
     .bind(fmt_dt_opt(credential.last_used_at))
     .execute(exec)
     .await
-    .map_err(|e| insert_error("credential", e))?;
+    .map_err(|e| insert_error("credential", e))?
+    .rows_affected();
+    if written == 0 {
+        return Err(SidError::InvalidState(
+            crate::FEDERATED_HOLDS_NO_CREDENTIAL.into(),
+        ));
+    }
     Ok(())
 }
 
@@ -435,6 +445,7 @@ impl SqliteBackend {
         registration: &NewRegistration,
         audit: MutationContext,
     ) -> SidResult<()> {
+        registration.check_reference()?;
         let NewRegistration {
             profile,
             principal,

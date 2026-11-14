@@ -151,6 +151,29 @@ pub enum SourceRecording {
 }
 
 impl NewRegistration {
+    /// A federated reference registers bare: reached by its issuer's
+    /// subject alone, with no user name, contact or credential of its own
+    /// (it authenticates at its issuer). Every store checks this before it
+    /// writes anything of the registration; any other Profile passes.
+    pub fn check_reference(&self) -> Result<()> {
+        if self.profile.profile_type.is_local() {
+            return Ok(());
+        }
+        self.profile.check_reference()?;
+        let bare = self.principal.principal_type == super::PrincipalType::FederatedSubject
+            && self.email.is_none()
+            && self.phone.is_none()
+            && self.credential.is_none()
+            && self.history.is_none();
+        if bare {
+            Ok(())
+        } else {
+            Err(crate::Error::InvalidState(
+                "a federated reference registers with its issuer's subject only".into(),
+            ))
+        }
+    }
+
     /// Admit this self-registration through `gate` when it is committed.
     pub fn admitted_by(mut self, gate: EnrollmentGate) -> Self {
         self.enrollment = Some(gate);

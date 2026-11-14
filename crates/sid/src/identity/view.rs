@@ -45,6 +45,7 @@ pub(crate) fn profile_to_proto_with_contacts(
     let profile_type = match p.profile_type {
         ProfileType::Personal => v1::ProfileType::Personal,
         ProfileType::Corporate => v1::ProfileType::Corporate,
+        ProfileType::Federated => v1::ProfileType::Federated,
     };
     let status = match p.status {
         ProfileStatus::Active => v1::ProfileStatus::Active,

@@ -266,3 +266,234 @@ pub async fn test_profile_by_principal_is_assigned_holder(backend: &dyn StorageB
         .expect("the holder resolves");
     assert_eq!(resolved.id, holder.id);
 }
+
+/// The registration of a federated reference: a record with no login name,
+/// contact or credential, reached by the subject a trusted issuer names.
+fn reference(issuer: &str, subject: Uuid) -> sid_core::models::NewRegistration {
+    let mut profile = Profile::new(None::<&str>);
+    profile.profile_type = sid_core::models::ProfileType::Federated;
+    let principal = Principal::new_federated_subject(profile.id, issuer, &subject.to_string());
+    sid_core::models::NewRegistration {
+        profile,
+        principal,
+        email: None,
+        phone: None,
+        credential: None,
+        source: None,
+        instance_claim: None,
+        history: None,
+        enrollment: None,
+        source_recording: sid_core::models::SourceRecording::AsGiven,
+    }
+}
+
+/// A federated reference authenticates at its issuer and is reached only by
+/// the subject that issuer names: the store refuses it a password, a
+/// passkey, a second factor, an email and a user name, and stores none of
+/// them, whichever caller asks. A registration that would create a
+/// reference together with a credential is refused whole. Bug prevented: an
+/// outside identity gaining a way to sign in here without its issuer.
+pub async fn test_federated_reference_holds_nothing_local(backend: &dyn StorageBackend) {
+    use sid_core::models::{Credential, CredentialType};
+    let issuer = format!(
+        "https://issuer{}.sid.example.com/i/r",
+        Uuid::now_v7().simple()
+    );
+    let visitor = reference(&issuer, Uuid::now_v7());
+    backend
+        .register_profile(&visitor, test_audit())
+        .await
+        .unwrap();
+    let id = visitor.profile.id;
+
+    for kind in [
+        CredentialType::Opaque,
+        CredentialType::WebAuthn,
+        CredentialType::Totp,
+    ] {
+        let refused = backend
+            .create_credential(
+                &Credential::new(id, kind, vec![7u8; 32], None),
+                test_audit(),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::InvalidState(_))),
+            "{kind:?}: {refused:?}"
+        );
+    }
+    assert!(
+        backend
+            .get_credentials_by_profile(id, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let name = format!("visitor{}", Uuid::now_v7().simple());
+    for claim in [
+        Principal::new_email(id, address()),
+        Principal::new_username(id, &name),
+    ] {
+        let refused = backend.save_principal(&claim, test_audit()).await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::InvalidState(_))),
+            "{:?}: {refused:?}",
+            claim.principal_type
+        );
+    }
+    let held = backend.get_principals_by_profile(id).await.unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].principal_type, PrincipalType::FederatedSubject);
+
+    // Nor through a directory write to it.
+    let mut write = sid_core::models::DirectoryUserWrite::new(
+        sid_core::models::DirectoryWriteMode::Update,
+        backend.get_profile(id).await.unwrap().expect("the record"),
+    );
+    write.bind = vec![Principal::new_username(
+        id,
+        format!("directory{}", Uuid::now_v7().simple()),
+    )];
+    let refused = backend.write_directory_user(&write, test_audit()).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::InvalidState(_))),
+        "{refused:?}"
+    );
+    let held = backend.get_principals_by_profile(id).await.unwrap();
+    assert_eq!(held.len(), 1);
+
+    // A write of the record itself gives it no user name, and never turns
+    // it into a local account, which could then hold a password; nor does
+    // a local account, with whatever it holds, become a reference.
+    let stored = backend.get_profile(id).await.unwrap().expect("the record");
+    let mut renamed = stored.clone();
+    renamed.username = Some(format!("renamed{}", Uuid::now_v7().simple()));
+    let mut localized = stored.clone();
+    localized.profile_type = sid_core::models::ProfileType::Personal;
+    // As stored: the store keeps times at its own resolution.
+    let local = profile(backend, "local").await.id;
+    let local = backend.get_profile(local).await.unwrap().expect("stored");
+    let mut referenced = local.clone();
+    referenced.profile_type = sid_core::models::ProfileType::Federated;
+    referenced.username = None;
+    for written in [&renamed, &localized, &referenced] {
+        let outcome = backend.update_profile(written, test_audit()).await;
+        assert!(
+            matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(backend.get_profile(id).await.unwrap(), Some(stored));
+    assert_eq!(
+        backend.get_profile(local.id).await.unwrap(),
+        Some(local),
+        "a refused write changed the account"
+    );
+    let mut created = Profile::new(Some(format!("created{}", Uuid::now_v7().simple())));
+    created.profile_type = sid_core::models::ProfileType::Federated;
+    let outcome = backend.create_profile(&created, test_audit()).await;
+    assert!(
+        matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+        "{outcome:?}"
+    );
+
+    // A reference never registers under a local name: not as the principal
+    // it is reached by, and not as a user name of its own.
+    let mut named = reference(&issuer, Uuid::now_v7());
+    named.principal = Principal::new_email(named.profile.id, address());
+    let mut titled = reference(&issuer, Uuid::now_v7());
+    titled.profile.username = Some(format!("titled{}", Uuid::now_v7().simple()));
+    for refused in [named, titled] {
+        let outcome = backend.register_profile(&refused, test_audit()).await;
+        assert!(
+            matches!(outcome, Err(sid_core::Error::InvalidState(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(backend.get_profile(refused.profile.id).await.unwrap(), None);
+    }
+
+    // A reference never arrives with a credential of its own.
+    let mut armed = reference(&issuer, Uuid::now_v7());
+    armed.credential = Some(Credential::new(
+        armed.profile.id,
+        CredentialType::Opaque,
+        vec![9u8; 32],
+        None,
+    ));
+    assert!(matches!(
+        backend.register_profile(&armed, test_audit()).await,
+        Err(sid_core::Error::InvalidState(_))
+    ));
+    assert_eq!(backend.get_profile(armed.profile.id).await.unwrap(), None);
+}
+
+/// An identity admitted through federation gets one local record: it is
+/// stored as a federated reference without a login name and assigned its
+/// issuer's subject, and a second registration of that subject, alone or at
+/// the same moment, is a conflict that writes nothing. Bug prevented: two
+/// records for one outside identity, each gathering its own permissions.
+pub async fn test_federated_reference_is_registered_once(backend: &dyn StorageBackend) {
+    let issuer = format!(
+        "https://issuer{}.sid.example.com/i/r",
+        Uuid::now_v7().simple()
+    );
+    let subject = Uuid::now_v7();
+    let value = sid_core::models::federated_subject_value(&issuer, &subject.to_string());
+
+    let first = reference(&issuer, subject);
+    backend
+        .register_profile(&first, test_audit())
+        .await
+        .expect("a reference registers without a login name or credential");
+    let stored = backend
+        .get_profile(first.profile.id)
+        .await
+        .unwrap()
+        .expect("the record");
+    assert_eq!(
+        stored.profile_type,
+        sid_core::models::ProfileType::Federated
+    );
+    assert_eq!(stored.username, None);
+    let assigned = backend
+        .get_principal_by_value(PrincipalType::FederatedSubject, &value)
+        .await
+        .unwrap()
+        .expect("the assignment");
+    assert_eq!(assigned.assigned_profile_id, Some(first.profile.id));
+
+    let second = reference(&issuer, subject);
+    assert!(matches!(
+        backend.register_profile(&second, test_audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        backend.get_profile(second.profile.id).await.unwrap(),
+        None,
+        "a refused registration left a record"
+    );
+
+    // Two first entries of another identity at once: one record.
+    let other = Uuid::now_v7();
+    let (a, b) = (reference(&issuer, other), reference(&issuer, other));
+    let (ra, rb) = tokio::join!(
+        backend.register_profile(&a, test_audit()),
+        backend.register_profile(&b, test_audit())
+    );
+    assert_eq!(
+        [&ra, &rb].iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{ra:?} {rb:?}"
+    );
+    let winner = if ra.is_ok() { &a } else { &b };
+    let assigned = backend
+        .get_principal_by_value(
+            PrincipalType::FederatedSubject,
+            &sid_core::models::federated_subject_value(&issuer, &other.to_string()),
+        )
+        .await
+        .unwrap()
+        .expect("the assignment");
+    assert_eq!(assigned.assigned_profile_id, Some(winner.profile.id));
+}
