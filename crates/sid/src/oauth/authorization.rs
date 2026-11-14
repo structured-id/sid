@@ -255,10 +255,23 @@ impl OAuth {
     /// `issuer`: the client's and the request's assurance judged against the
     /// session, the request validated, the code bound to its resource and
     /// carrying the session's authentication. The code commits only while
-    /// the policy it was judged under holds. `origin` is the kept request
-    /// this one continues, which the code records; `None` for a request
-    /// answered as it arrived.
+    /// the policy it was judged under holds. The request is answered as it
+    /// was given: its code names no kept request.
     pub async fn authorize_with(
+        &self,
+        client: &OAuth2Client,
+        issuer: &OidcIssuer,
+        session: &Session,
+        request: OAuth2AuthorizeRequest,
+    ) -> Result<OAuth2AuthorizeResponse, AuthorizationError> {
+        self.authorize_from(client, issuer, session, request, None)
+            .await
+    }
+
+    /// [`Self::authorize_with`] for a request continued from the kept
+    /// request `origin`, which the code records. Only the browser endpoint
+    /// calls it, with the origin it read from its own store.
+    async fn authorize_from(
         &self,
         client: &OAuth2Client,
         issuer: &OidcIssuer,
@@ -395,9 +408,7 @@ impl OAuth {
                     .is_none_or(|after| session.authenticated_at >= after)
             })
             .ok_or(AuthorizationError::SessionEnded)?;
-        // The typed RPC answers the request it was given: nothing was kept.
-        self.authorize_with(client, issuer, &session, request, None)
-            .await
+        self.authorize_with(client, issuer, &session, request).await
     }
 
     /// What redeeming the code of the kept request `origin` of `client_id`
@@ -477,7 +488,7 @@ impl Authorizations {
         match session {
             Some(session) if !interaction_owed => {
                 match oauth
-                    .authorize_with(&client, &issuer, &session, request, origin)
+                    .authorize_from(&client, &issuer, &session, request, origin)
                     .await
                 {
                     Ok(answer) => {
