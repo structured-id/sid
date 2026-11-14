@@ -448,6 +448,28 @@ CREATE TABLE login_settings (
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );
 
+CREATE TABLE entry_connections (
+    handle uuid NOT NULL,
+    owner text NOT NULL,
+    name text NOT NULL,
+    issuer text NOT NULL,
+    source uuid,
+    recipient_issuer uuid NOT NULL,
+    callback text NOT NULL,
+    client_id text NOT NULL,
+    credential_method text NOT NULL,
+    credential bytea NOT NULL,
+    enabled boolean NOT NULL,
+    revision bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT entry_connections_owner_check CHECK ((owner = ANY (ARRAY['provisioning'::text, 'administration'::text]))),
+    CONSTRAINT entry_connections_credential_method_check CHECK ((credential_method = 'client_secret_basic'::text)),
+    CONSTRAINT entry_connections_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT entry_connections_pkey PRIMARY KEY (handle),
+    CONSTRAINT entry_connections_issuer_key UNIQUE (issuer)
+);
+
 CREATE TABLE ca_issuer_revoked (
     issuer bytea NOT NULL,
     serial bytea NOT NULL,

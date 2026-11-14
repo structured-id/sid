@@ -1,0 +1,196 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! The registered connections an installation receives federated sign-ins
+//! through.
+//!
+//! In plain words: to let people sign in here with an identity issued by
+//! another SID installation, this installation is first registered there as
+//! a client. A connection is the record of one such registration: the exact
+//! issuer it trusts for that sign-in, its own client there with the
+//! credential it authenticates with, and the exact address the issuer
+//! returns the browser to.
+//!
+//! A connection is transport configuration only. It does not admit anyone:
+//! whether an identity signed in through it is let in is decided by the
+//! installation's login settings and, after that, by its ordinary
+//! permissions. A browser may name a registered connection by its handle; it
+//! never supplies an issuer, an endpoint or a credential.
+
+use std::fmt;
+
+use chrono::{DateTime, Utc};
+use rand::TryRng;
+use serde::{Deserialize, Serialize};
+use sid_keys::EncryptedField;
+
+use super::{IssuerId, OrgId};
+
+/// The public routing name of a connection: 16 random bytes, shown as
+/// lowercase hex. It reveals nothing about the issuer or organization
+/// behind it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct EntryHandle([u8; 16]);
+
+impl EntryHandle {
+    /// Length of a handle's text in characters.
+    pub const LEN: usize = 32;
+
+    /// A new random handle.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 16];
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("the operating system random source is available");
+        Self(bytes)
+    }
+
+    /// The handle `text` spells: exactly 32 lowercase hex characters.
+    pub fn parse(text: &str) -> Result<Self, MalformedHandle> {
+        let canonical = text.len() == Self::LEN
+            && text
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+        if !canonical {
+            return Err(MalformedHandle);
+        }
+        let mut bytes = [0u8; 16];
+        hex::decode_to_slice(text, &mut bytes).map_err(|_| MalformedHandle)?;
+        Ok(Self(bytes))
+    }
+
+    /// The handle a store kept as its 16 bytes.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl fmt::Display for EntryHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
+impl fmt::Debug for EntryHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EntryHandle({self})")
+    }
+}
+
+/// Text that is not a connection handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("not an entry connection handle")]
+pub struct MalformedHandle;
+
+/// Who may write a connection. The two are not interchangeable: sharing the
+/// store gives neither writer the other's authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionOwner {
+    /// Set by the installation's provisioning: the authority the
+    /// installation's own Profiles sign in through. An administrator's
+    /// command never creates, changes or removes it.
+    Provisioning,
+    /// Managed by the installation's administrators: a connection to an
+    /// outside issuer.
+    Administration,
+}
+
+impl ConnectionOwner {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisioning => "provisioning",
+            Self::Administration => "administration",
+        }
+    }
+}
+
+parse_stored!(
+    ConnectionOwner,
+    "entry connection owner",
+    [Provisioning, Administration]
+);
+
+/// How this installation authenticates as the issuer's client, with the
+/// credential it does so with. The method is the one actually registered at
+/// the issuer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientCredential {
+    /// `client_secret_basic` (RFC 6749 §2.3.1): the client secret, sealed
+    /// under the installation's key manager in [`credential_context`].
+    SecretBasic(EncryptedField),
+}
+
+impl ClientCredential {
+    /// The stored name of the method.
+    pub const fn method(&self) -> &'static str {
+        match self {
+            Self::SecretBasic(_) => "client_secret_basic",
+        }
+    }
+}
+
+/// The context a connection's client credential is sealed and opened under:
+/// a credential copied to another connection does not open.
+pub fn credential_context(handle: EntryHandle) -> String {
+    format!("entry-connection:{handle}:client-credential")
+}
+
+/// The longest display name of a connection.
+pub const MAX_NAME: usize = 128;
+
+/// One registered connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryConnection {
+    /// Names the connection in the browser's routes; never changes.
+    pub handle: EntryHandle,
+    /// Who may write it; never changes.
+    pub owner: ConnectionOwner,
+    /// How the sign-in page names it; presentation only.
+    pub name: String,
+    /// The exact issuer identifier, as its ID Tokens name it; never changes.
+    /// An identity recorded here is found by this issuer and its subject, so
+    /// one issuer has one connection and a changed issuer is another one.
+    pub issuer: String,
+    /// The organization whose installation issues there, when the
+    /// registration names one: a Corporate Profile signed in through the
+    /// connection is that organization's. None for an issuer that signs in
+    /// identities of more than one origin.
+    pub source: Option<OrgId>,
+    /// The installation's issuer whose sign-in the connection serves.
+    pub recipient_issuer: IssuerId,
+    /// The exact redirect URI registered at the issuer; never changes.
+    pub callback: String,
+    /// This installation's client id at the issuer.
+    pub client_id: String,
+    pub credential: ClientCredential,
+    /// Whether entries are started and completed through it now.
+    pub enabled: bool,
+    /// Stored revision: 0 when created, moved on by every change. A change
+    /// applies only over the revision it was read at.
+    pub revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl EntryConnection {
+    /// Whether `changed` is this same registration with only what may
+    /// change: its name, its client and credential, and whether it is
+    /// enabled. Its handle, owner, issuer, source, recipient issuer and
+    /// callback are its identity.
+    pub fn same_registration(&self, changed: &Self) -> bool {
+        self.handle == changed.handle
+            && self.owner == changed.owner
+            && self.issuer == changed.issuer
+            && self.source == changed.source
+            && self.recipient_issuer == changed.recipient_issuer
+            && self.callback == changed.callback
+            && self.created_at == changed.created_at
+    }
+}
+
+#[cfg(test)]
+mod tests;

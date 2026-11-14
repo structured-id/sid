@@ -9854,6 +9854,7 @@ mod device_auth;
 mod directory;
 mod history_keys;
 pub use history_keys::PgHistoryKeyStore;
+mod entry_connection;
 mod instance_secret;
 mod job_lock;
 mod login_policy;

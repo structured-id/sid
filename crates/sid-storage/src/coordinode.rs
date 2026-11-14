@@ -29,6 +29,7 @@ mod credential;
 mod device;
 mod directory;
 mod enrollment;
+mod entry_connection;
 mod flow;
 mod history;
 mod history_keys;

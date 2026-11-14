@@ -1873,6 +1873,25 @@ CREATE TABLE IF NOT EXISTS login_settings (
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
+-- The registered connections federated sign-ins arrive through. One issuer
+-- has one connection: identities recorded here are found by their issuer.
+CREATE TABLE IF NOT EXISTS entry_connections (
+    handle            BLOB PRIMARY KEY CHECK (length(handle) = 16),
+    owner             TEXT NOT NULL CHECK (owner IN ('provisioning', 'administration')),
+    name              TEXT NOT NULL,
+    issuer            TEXT NOT NULL UNIQUE,
+    source            BLOB CHECK (source IS NULL OR length(source) = 16),
+    recipient_issuer  BLOB NOT NULL CHECK (length(recipient_issuer) = 16),
+    callback          TEXT NOT NULL,
+    client_id         TEXT NOT NULL,
+    credential_method TEXT NOT NULL CHECK (credential_method IN ('client_secret_basic')),
+    credential        BLOB NOT NULL,
+    enabled           INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    revision          INTEGER NOT NULL CHECK (revision >= 0),
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
 -- The admitted platform CA set: its revision and freshness (one row), the
 -- generations ever published, the publication it is refreshed from (one
 -- row), and what each generation's CRLs said of the CA certificates it

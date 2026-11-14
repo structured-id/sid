@@ -28,6 +28,7 @@ mod contact;
 mod device;
 mod directory;
 mod enrollment;
+mod entry_connection;
 mod flow_action;
 mod governance;
 mod grants;

@@ -299,6 +299,47 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
+    async fn entry_connection(
+        &self,
+        _: sid_core::models::EntryHandle,
+    ) -> Result<Option<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn entry_connection_of_issuer(
+        &self,
+        _: &str,
+    ) -> Result<Option<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn list_entry_connections(&self) -> Result<Vec<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn create_entry_connection(
+        &self,
+        _: &sid_core::models::EntryConnection,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn update_entry_connection(
+        &self,
+        _: &sid_core::models::EntryConnection,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn remove_entry_connection(
+        &self,
+        _: sid_core::models::EntryHandle,
+        _: u64,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
     async fn apply_platform_cas(
         &self,

@@ -1675,6 +1675,51 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
     }
 }
 
+/// The double registers no entry connection: none is found, and a write is
+/// refused, so a test that needs one uses a real store.
+#[async_trait]
+impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
+    async fn entry_connection(
+        &self,
+        _handle: sid_core::models::EntryHandle,
+    ) -> SidResult<Option<sid_core::models::EntryConnection>> {
+        Ok(None)
+    }
+    async fn entry_connection_of_issuer(
+        &self,
+        _issuer: &str,
+    ) -> SidResult<Option<sid_core::models::EntryConnection>> {
+        Ok(None)
+    }
+    async fn list_entry_connections(&self) -> SidResult<Vec<sid_core::models::EntryConnection>> {
+        Ok(Vec::new())
+    }
+    async fn create_entry_connection(
+        &self,
+        _connection: &sid_core::models::EntryConnection,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        Err(sid_core::Error::Storage(
+            "the double keeps no entry connection".into(),
+        ))
+    }
+    async fn update_entry_connection(
+        &self,
+        _connection: &sid_core::models::EntryConnection,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        Ok(false)
+    }
+    async fn remove_entry_connection(
+        &self,
+        _handle: sid_core::models::EntryHandle,
+        _revision: u64,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        Ok(false)
+    }
+}
+
 /// The double holds no platform CA set: it reads as never provisioned and
 /// refuses every write, so a test that needs one uses a real store.
 #[async_trait]

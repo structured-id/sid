@@ -22,6 +22,7 @@ pub mod client_registry;
 pub mod conformance;
 pub mod credential_store;
 pub mod crypto;
+pub mod entry_connection;
 pub mod event_bus;
 pub mod geoip;
 pub mod grant_store;

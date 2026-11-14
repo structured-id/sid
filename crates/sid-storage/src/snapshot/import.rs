@@ -1150,6 +1150,20 @@ pub async fn import(
         )
         .await?;
     }
+    for connection in &snapshot.entry_connections {
+        result.policies += created(
+            backend
+                .create_entry_connection(
+                    connection,
+                    audit("import_entry_connection", &connection.handle.to_string()),
+                )
+                .await,
+            || async {
+                Ok(backend.entry_connection(connection.handle).await?.as_ref() == Some(connection))
+            },
+        )
+        .await?;
+    }
     for identity in &snapshot.upstream_identities {
         result.upstream_identities += created(
             backend

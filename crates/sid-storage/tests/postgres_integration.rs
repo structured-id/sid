@@ -1097,6 +1097,28 @@ async fn setup_isolated() -> PostgresBackend {
     backend
 }
 
+/// Run entry connection store conformance `scenario` against a schema of its
+/// own: every scenario starts from a store that holds no connection.
+macro_rules! entry_connection_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::entry_connection_store::$scenario(&setup_isolated().await)
+                .await;
+        }
+    )*};
+}
+
+entry_connection_store!(
+    a_connection_reads_back_as_stored,
+    one_issuer_has_one_connection,
+    connections_are_listed_in_one_order,
+    a_change_applies_over_the_revision_it_read,
+    a_change_never_alters_the_registration,
+    a_removal_applies_over_the_revision_it_read,
+    concurrent_writers_end_at_one_state,
+);
+
 /// Run platform CA store conformance `scenario` against a schema of its own:
 /// the admitted set is one per database, and every scenario starts from a
 /// store that holds none.

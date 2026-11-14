@@ -250,6 +250,10 @@ pub struct Snapshot {
     /// Upstream identity links (profile↔provider).
     pub upstream_identities: Vec<UpstreamIdentity>,
 
+    /// The registered connections federated sign-ins arrive through, their
+    /// client credentials sealed as stored.
+    pub entry_connections: Vec<sid_core::models::EntryConnection>,
+
     /// Personal access tokens.
     pub personal_access_tokens: Vec<PersonalAccessToken>,
 
@@ -492,6 +496,7 @@ impl Snapshot {
             device_auth_codes: Vec::new(),
             profile_grants: Vec::new(),
             upstream_providers: Vec::new(),
+            entry_connections: Vec::new(),
             upstream_identities: Vec::new(),
             personal_access_tokens: Vec::new(),
             machine_users: Vec::new(),
@@ -591,6 +596,7 @@ impl Snapshot {
             self.device_auth_codes.len() as u64,
             self.profile_grants.len() as u64,
             self.upstream_providers.len() as u64,
+            self.entry_connections.len() as u64,
             self.upstream_identities.len() as u64,
             self.personal_access_tokens.len() as u64,
             self.machine_users.len() as u64,

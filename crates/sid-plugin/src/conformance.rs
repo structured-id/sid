@@ -9,6 +9,7 @@ pub mod cache;
 pub mod ceremony_state;
 pub mod client_registry;
 pub mod credential_store;
+pub mod entry_connection_store;
 pub mod grant_store;
 pub mod history_key_store;
 pub mod instance_secret_store;

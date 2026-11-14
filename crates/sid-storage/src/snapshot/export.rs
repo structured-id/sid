@@ -359,6 +359,7 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     snapshot.login_settings = backend.login_settings().await?;
     snapshot.login_policy_epoch = backend.export_login_policy_epoch().await?;
     snapshot.platform_cas = backend.export_platform_cas().await?;
+    snapshot.entry_connections = backend.list_entry_connections().await?;
     snapshot.ip_allowlist = backend.list_ip_allowlist_entries().await?;
     // What the sign-in rules learned and fired.
     snapshot.ip_reputation = backend.export_ip_reputation().await?;

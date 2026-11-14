@@ -632,6 +632,45 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
         .create_upstream_provider(&provider, ctx())
         .await
         .unwrap();
+    // A registered entry connection that was changed since it was made:
+    // the move carries its revision and its sealed credential as stored.
+    {
+        use sid_plugin::entry_connection::EntryConnectionStore;
+        let handle = EntryHandle::generate();
+        let now = Utc::now().trunc_subsecs(6);
+        let connection = EntryConnection {
+            handle,
+            owner: ConnectionOwner::Administration,
+            name: "Source organization".into(),
+            issuer: "https://source.sid.example.com/i/0123456789abcdef0123456789abcdef".into(),
+            source: Some(OrgId::generate()),
+            recipient_issuer: IssuerId::generate(),
+            callback: format!("https://sid.example.com/i/handle/auth/federation/{handle}/callback"),
+            client_id: "recipient-client".into(),
+            credential: ClientCredential::SecretBasic(sid_keys::EncryptedField {
+                ciphertext: vec![5; 48],
+                nonce: [5; 12],
+                key_version: 1,
+                context: sid_core::models::entry_connection::credential_context(handle),
+            }),
+            enabled: true,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        source
+            .create_entry_connection(&connection, ctx())
+            .await
+            .unwrap();
+        let mut disabled = connection;
+        disabled.enabled = false;
+        assert!(
+            source
+                .update_entry_connection(&disabled, ctx())
+                .await
+                .unwrap()
+        );
+    }
     source
         .create_upstream_identity(
             &UpstreamIdentity::new(profile.id, provider.id, "upstream-subject"),
