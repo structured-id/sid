@@ -103,7 +103,9 @@ async fn handler(storage: Arc<MockStorage>) -> (BackChannelLogoutHandler, Issuer
     let issuers = Arc::new(IssuerRegistry::new(storage.clone(), keys));
     let verifier = issuers.verifier(&issuer).await.unwrap();
     (
-        common::crypto::with_tls(|| BackChannelLogoutHandler::new(issuers, storage)),
+        common::crypto::with_tls(|| {
+            BackChannelLogoutHandler::new(issuers, storage, common::test_org())
+        }),
         verifier,
     )
 }

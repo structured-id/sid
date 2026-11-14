@@ -352,7 +352,9 @@ async fn asking() -> Asking {
         .unwrap(),
     );
     let audit = common::RecordingAuditLog::shared();
-    let authz = authz_recording(&svc, audit.clone()).with_service_tokens(tokens.clone());
+    // The installation's issuer serves its own organization.
+    let authz = authz_recording(&svc, audit.clone())
+        .with_service_tokens(tokens.clone(), svc.issuer.recipient_org);
     Asking {
         svc,
         authz,
@@ -385,7 +387,7 @@ impl Asking {
         ))
         .unwrap();
         self.authz = authz_recording(&self.svc, self.audit.clone())
-            .with_service_tokens(self.tokens.clone())
+            .with_service_tokens(self.tokens.clone(), self.svc.issuer.recipient_org)
             .with_request_verifiers(verifiers);
     }
 
@@ -1512,7 +1514,7 @@ async fn serve_issuer(
     // of requests that ask none, as in a server.
     let authz = Arc::new(
         authz_recording(&a.svc, a.audit.clone())
-            .with_service_tokens(service_tokens)
+            .with_service_tokens(service_tokens, a.svc.issuer.recipient_org)
             .with_request_verifiers(verifiers),
     );
     let routes = tonic::service::Routes::new(InterceptedService::new(

@@ -97,10 +97,45 @@ fn test_local_issuer_to_own_application_is_managed_profile() {
     let issuer = local_issuer(org_a());
     for subject_type in [SubjectType::Public, SubjectType::Pairwise] {
         assert_eq!(
-            SubjectRule::for_hop(&issuer, &make_client(subject_type)).unwrap(),
+            SubjectRule::for_hop(&issuer, &make_client(subject_type), org_a()).unwrap(),
             SubjectRule::ManagedProfile
         );
     }
+}
+
+/// An installation's issuer for another organization (its registered foreign
+/// recipient) does not make that recipient internal: the hop to that
+/// organization's application carries the Profile's Binding to it, never
+/// the ProfileId, whatever subject type the client registered with. Bug
+/// prevented: an installation that issues directly to a partner disclosing
+/// its own Profile identifiers there because the issuing process is local.
+#[tokio::test]
+async fn test_local_issuer_to_a_foreign_recipient_is_its_binding() {
+    let issuer = local_issuer(org_b());
+    let mut client = make_client(SubjectType::Public);
+    client.org_id = Some(org_b());
+    for subject_type in [SubjectType::Public, SubjectType::Pairwise] {
+        client.subject_type = subject_type;
+        assert_eq!(
+            SubjectRule::for_hop(&issuer, &client, org_a()).unwrap(),
+            SubjectRule::OrganizationBinding
+        );
+    }
+    assert_eq!(
+        SubjectRule::for_resource(&issuer, org_a()),
+        SubjectRule::OrganizationBinding
+    );
+    // What the token carries is the Binding to that organization.
+    let (storage, pid) = storage_with_profile().await;
+    let rule = SubjectRule::for_hop(&issuer, &client, org_a()).unwrap();
+    let sub = resolve_subject(&storage, pid, &client, rule).await.unwrap();
+    assert_ne!(sub, pid.to_string());
+    let binding = storage
+        .find_service_binding(pid, &binding_scope(&client).unwrap())
+        .await
+        .unwrap()
+        .expect("the Binding to the foreign recipient");
+    assert_eq!(sub, binding.binding_id.to_string());
 }
 
 /// A registered resource of a local issuer belongs to its organization: the
@@ -109,8 +144,12 @@ fn test_local_issuer_to_own_application_is_managed_profile() {
 fn test_local_issuer_to_its_resource_is_managed_profile() {
     let issuer = local_issuer(org_a());
     assert_eq!(
-        SubjectRule::for_resource(&issuer),
-        SubjectRule::for_hop(&issuer, &make_client(SubjectType::Public)).unwrap()
+        SubjectRule::for_resource(&issuer, org_a()),
+        SubjectRule::for_hop(&issuer, &make_client(SubjectType::Public), org_a()).unwrap()
+    );
+    assert_eq!(
+        SubjectRule::for_resource(&issuer, org_a()),
+        SubjectRule::ManagedProfile
     );
 }
 
@@ -119,10 +158,14 @@ fn test_local_issuer_to_its_resource_is_managed_profile() {
 #[test]
 fn test_client_outside_the_issuers_organization_has_no_rule() {
     let issuer = local_issuer(org_b());
-    assert!(SubjectRule::for_hop(&issuer, &make_client(SubjectType::Public)).is_err());
+    for managing in [org_a(), org_b()] {
+        assert!(
+            SubjectRule::for_hop(&issuer, &make_client(SubjectType::Public), managing).is_err()
+        );
+    }
     let mut orphan = make_client(SubjectType::Public);
     orphan.org_id = None;
-    assert!(SubjectRule::for_hop(&local_issuer(org_a()), &orphan).is_err());
+    assert!(SubjectRule::for_hop(&local_issuer(org_a()), &orphan, org_a()).is_err());
 }
 
 /// The managed Profile rule gives the ProfileId and allocates no binding,

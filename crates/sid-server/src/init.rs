@@ -965,7 +965,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             revocation_cache.clone(),
             audit_log.clone(),
         )
-        .with_service_tokens(checker_tokens)
+        .with_service_tokens(checker_tokens, organization.id)
         .with_request_verifiers(request_verifiers)
         .with_sod_warnings(sod_warnings),
     );
@@ -1235,6 +1235,7 @@ pub fn engine(
         maintenance,
     } = sid::work::CeWork::assemble(sid::work::CeWorkParts {
         storage: c.storage.clone(),
+        organization: c.organization.id,
         issuers: c.issuers.clone(),
         revocation: c.revocation_cache.clone(),
         event_bus: c.event_bus.clone(),

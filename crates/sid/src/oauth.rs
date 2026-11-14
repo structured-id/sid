@@ -219,7 +219,7 @@ impl OAuth {
         profile_id: ProfileId,
         client: &OAuth2Client,
     ) -> Result<String, OAuthError> {
-        let rule = SubjectRule::for_hop(issuer, client).map_err(|e| {
+        let rule = SubjectRule::for_hop(issuer, client, self.installation_org).map_err(|e| {
             tracing::error!(error = %e, client = %client.client_id, "no subject rule for this hop");
             OAuthError::Internal
         })?;

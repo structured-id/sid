@@ -57,6 +57,7 @@ fn parts(storage: Arc<dyn StorageBackend>, links: bool) -> CeWorkParts {
         }),
     };
     CeWorkParts {
+        organization: sid_core::models::OrgId::generate(),
         issuers: Arc::new(IssuerRegistry::new(storage.clone(), keys())),
         closures: Arc::new(AccountClosureService::new(
             storage.clone(),

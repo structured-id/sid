@@ -530,6 +530,7 @@ async fn the_issuers_back_channel_logout_signs_the_browser_out() {
         sid_authn::backchannel_logout::BackChannelLogoutHandler::new(
             deployment.svc.issuers.clone(),
             storage.clone(),
+            deployment.svc.issuer.recipient_org,
         )
     });
     let outcome = handler
