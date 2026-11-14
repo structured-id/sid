@@ -48,6 +48,11 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     snapshot.opaque_server_setup = backend
         .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
         .await?;
+    // Sealed as stored: the site certificate the snapshot carries certifies
+    // this key, and the master key that opens it is never included.
+    snapshot.federation_site_key = backend
+        .get_instance_secret(sid_core::models::InstanceSecret::FederationSiteKey)
+        .await?;
 
     info!("exporting projects...");
     let mut offset = 0u64;

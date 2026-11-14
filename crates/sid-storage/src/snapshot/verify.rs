@@ -76,6 +76,10 @@ pub async fn verify(
     if source.get_instance_secret(setup).await? != target.get_instance_secret(setup).await? {
         issues.push("OPAQUE server setup differs".into());
     }
+    let site_key = sid_core::models::InstanceSecret::FederationSiteKey;
+    if source.get_instance_secret(site_key).await? != target.get_instance_secret(site_key).await? {
+        issues.push("federation site key differs".into());
+    }
     let organization = source.instance_organization().await?;
     if organization != target.instance_organization().await? {
         issues.push("installation organization differs".into());
@@ -253,6 +257,7 @@ const COMPARED_APART: &[&str] = &[
     "key_versions",
     "history_key_versions",
     "opaque_server_setup",
+    "federation_site_key",
     "history_write_cutoff",
     "history_key_write_cutoff",
 ];

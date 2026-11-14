@@ -42,6 +42,19 @@ pub fn validate(snapshot: &Snapshot, rules: &dyn SnapshotRules) -> Result<()> {
     validate_identity(snapshot)?;
     validate_audit(snapshot)?;
     validate_opaque_setup(snapshot, rules)?;
+    // A held site certificate certifies the site's own key: without it the
+    // restored installation could neither read its enrollment nor sign.
+    ensure(
+        snapshot.site_enrollment.is_none() || snapshot.federation_site_key.is_some(),
+        "snapshot holds a site enrollment without the site's key",
+    )?;
+    ensure(
+        snapshot
+            .federation_site_key
+            .as_ref()
+            .is_none_or(|key| key.len() <= MAX_OPAQUE_SETUP),
+        "sealed federation site key is oversized",
+    )?;
     validate_history(snapshot, rules)
 }
 
@@ -336,6 +349,12 @@ pub async fn import(
     if current_setup.is_some() && current_setup != snapshot.opaque_server_setup {
         return Err(target("target OPAQUE setup conflicts with snapshot"));
     }
+    let current_site_key = backend
+        .get_instance_secret(sid_core::models::InstanceSecret::FederationSiteKey)
+        .await?;
+    if current_site_key.is_some() && current_site_key != snapshot.federation_site_key {
+        return Err(target("target federation site key conflicts with snapshot"));
+    }
     for (owner, archive) in &snapshot.password_histories {
         let current = backend.export_password_history(*owner).await?;
         if current.is_some() && current.as_ref() != archive.as_ref() {
@@ -465,6 +484,21 @@ pub async fn import(
             .await?
     {
         result.policies += 1;
+    }
+    // The site's key first, insert-only and read back: the enrollment held
+    // next certifies it, and a concurrent initializer never replaces it.
+    if let Some(key) = &snapshot.federation_site_key {
+        let kind = sid_core::models::InstanceSecret::FederationSiteKey;
+        backend
+            .insert_instance_secret(
+                kind,
+                key,
+                audit("import_federation_site_key", "federation_site_key"),
+            )
+            .await?;
+        if backend.get_instance_secret(kind).await?.as_ref() != Some(key) {
+            return Err(target("target federation site key changed during import"));
+        }
     }
     // The moved installation is the same site: its enrollment is held as the
     // source held it. A resumed import finds it already held; a target that

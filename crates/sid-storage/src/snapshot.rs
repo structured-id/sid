@@ -128,6 +128,11 @@ pub struct Snapshot {
     /// has not initialized OPAQUE; such a snapshot cannot contain OPAQUE files.
     pub opaque_server_setup: Option<Vec<u8>>,
 
+    /// The sealed key of the installation's federation site, which its held
+    /// site certificate certifies. None while it never made one; a snapshot
+    /// holding a site enrollment always carries it.
+    pub federation_site_key: Option<Vec<u8>>,
+
     /// Projects (including system project).
     pub projects: Vec<Project>,
 
@@ -468,6 +473,7 @@ impl Snapshot {
             projects: Vec::new(),
             key_versions: Vec::new(),
             opaque_server_setup: None,
+            federation_site_key: None,
             profiles: Vec::new(),
             profile_emails: Vec::new(),
             profile_phones: Vec::new(),
@@ -558,6 +564,7 @@ impl Snapshot {
             self.oidc_issuers.iter().map(|i| i.keys.len() as u64).sum(),
             self.key_versions.len() as u64,
             u64::from(self.opaque_server_setup.is_some()),
+            u64::from(self.federation_site_key.is_some()),
             self.projects.len() as u64,
             self.profiles.len() as u64,
             self.profile_emails.len() as u64,

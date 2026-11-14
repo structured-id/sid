@@ -1084,8 +1084,16 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             .await
             .unwrap()
     );
-    // The site's enrollment, with a chain of two: the moved installation is
-    // the same site.
+    // The site's sealed key and its enrollment, with a chain of two: the
+    // moved installation is the same site, signing with the same key.
+    sid_plugin::instance_secret_store::InstanceSecretStore::insert_instance_secret(
+        source,
+        sid_core::models::InstanceSecret::FederationSiteKey,
+        &[0x5e; 120],
+        ctx(),
+    )
+    .await
+    .unwrap();
     assert!(
         source
             .set_site_enrollment(
