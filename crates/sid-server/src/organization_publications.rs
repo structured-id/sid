@@ -32,29 +32,44 @@ impl ConnectedPublications {
 #[async_trait::async_trait]
 impl OrganizationPublications for ConnectedPublications {
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String> {
-        // Only a connection registered for exactly this organization: one
+        // Only connections registered for exactly this organization: one
         // that brings identities of several organizations (the platform's)
-        // is no association with any of them.
-        let connection = self
+        // is no association with any of them. The enabled ones first; each
+        // is asked in turn until one answers.
+        let mut connections: Vec<_> = self
             .connections
             .list_entry_connections()
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
-            .find(|c| {
+            .filter(|c| {
                 c.source
                     .is_some_and(|source| source.into_uuid() == organization)
-            });
-        let Some(connection) = connection else {
-            return Ok(None);
-        };
-        let issuer = url::Url::parse(&connection.issuer).map_err(|e| e.to_string())?;
-        let publication =
-            PlatformCaPublication::new(publication_at(&issuer).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        let wire = publication.fetch().await.map_err(|e| e.to_string())?;
-        set_of(wire).map(Some).map_err(|e| e.to_string())
+            })
+            .collect();
+        connections.sort_by_key(|c| !c.enabled);
+        let mut failed = None;
+        for connection in &connections {
+            match read(&connection.issuer).await {
+                Ok(set) => return Ok(Some(set)),
+                Err(reason) => failed = Some(reason),
+            }
+        }
+        match failed {
+            Some(reason) => Err(reason),
+            None => Ok(None),
+        }
     }
+}
+
+/// The publication at the installation whose issuer is `issuer`.
+async fn read(issuer: &str) -> Result<PlatformCaSet, String> {
+    let issuer = url::Url::parse(issuer).map_err(|e| e.to_string())?;
+    let publication =
+        PlatformCaPublication::new(publication_at(&issuer).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let wire = publication.fetch().await.map_err(|e| e.to_string())?;
+    set_of(wire).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

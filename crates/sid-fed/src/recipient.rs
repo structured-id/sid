@@ -388,6 +388,24 @@ pub trait PresentedIdentities: Send + Sync {
     ) -> Result<VerifiedAdmission, RecipientError>;
 }
 
+/// Whether the list `verified` was issued by `at`: one whose thisUpdate is
+/// still ahead is not yet the issuer's status (RFC 5280 §5.1.2.4, §6.3.3),
+/// and holding it would both count as fresh and, by its number, keep the
+/// current list out. Such a list is not recorded.
+fn issued_by_now(
+    verified: &IssuedStatus,
+    at: SystemTime,
+    field: &'static str,
+) -> Result<(), RecipientError> {
+    if verified.this_update > at {
+        return Err(RecipientError::Invalid {
+            field,
+            reason: "a list issued later than now".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Where an organization's own publication is read from: its CA generations
 /// and the list each publishes of the passports it issued
 /// (`arch/auth/org-ca-architecture.md` §organization-status-publication),
@@ -595,6 +613,7 @@ impl<V: Verdict> Recipient<V> {
                         field: "generations.crl",
                         reason: e.to_string(),
                     })?;
+                issued_by_now(&verified, SystemTime::now(), "generations.crl")?;
                 status.push(GenerationStatus {
                     generation: generation.generation,
                     certificate: generation.certificate.clone(),
@@ -1107,6 +1126,7 @@ impl<V: Verdict> Recipient<V> {
             .verdict
             .status(crl, certificate)
             .map_err(RecipientError::List)?;
+        issued_by_now(&verified, at, "crl")?;
         let mut slot = self.view.write().await;
         self.store
             .record_issuer_status(

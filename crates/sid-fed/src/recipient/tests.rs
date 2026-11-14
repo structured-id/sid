@@ -393,6 +393,42 @@ async fn a_corporate_passport_is_accepted_as_the_policy_says() {
     }
 }
 
+/// A correctly signed list issued later than now is not yet its issuer's
+/// status: it is refused, nothing is held, and the passport stays
+/// undecided. Bug prevented: a list from an issuer whose clock runs ahead
+/// counted as fresh, and by its higher number kept the current list out.
+#[tokio::test]
+async fn a_list_issued_in_the_future_is_not_held() {
+    let recipient = recipient().await;
+    let chain = [organization_ca()];
+    recipient
+        .record_platform_cas(&set(
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        ))
+        .await
+        .unwrap();
+    let mut early = StatedList::new(&format!("O={}", source()), &[3; 20], 5, &[]);
+    early.this_update = SystemTime::now() + Duration::from_secs(600);
+    let refused = record_organization_list(&recipient, &early.signed(&key(ORGANIZATION))).await;
+    assert!(
+        matches!(refused, Err(RecipientError::Invalid { field: "crl", .. })),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        accept_strict(&recipient, &corporate(), &chain).await,
+        Err(RecipientError::PassportStatusUnavailable)
+    ));
+    // The current list is still taken after it.
+    record_organization_list(&recipient, &organization_list(1, &[]))
+        .await
+        .unwrap();
+    accept_strict(&recipient, &corporate(), &chain)
+        .await
+        .unwrap();
+}
+
 /// An issuing organization's publication as a test serves it: one answer,
 /// and how often it was read.
 struct Published {
