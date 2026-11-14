@@ -26,6 +26,64 @@ fn a_handle_has_one_spelling() {
     }
 }
 
+/// A connection's two routes read back as themselves, and nothing else below
+/// an issuer is one of them. Bug prevented: a return reaching the callback
+/// of a connection other than the one its path names.
+#[test]
+fn a_route_names_one_connection_and_step() {
+    let handle = EntryHandle::generate();
+    for route in [EntryRoute::Start(handle), EntryRoute::Callback(handle)] {
+        assert_eq!(EntryRoute::of(&route.path()), Some(route));
+    }
+    assert_eq!(
+        EntryRoute::Callback(handle).path(),
+        format!("/auth/federation/{handle}/callback")
+    );
+    for other in [
+        "/auth/federation/start".to_owned(),
+        "/auth/federation/callback".to_owned(),
+        format!("/auth/federation/{handle}"),
+        format!("/auth/federation/{handle}/"),
+        format!("/auth/federation/{handle}/callback/x"),
+        format!("/auth/federation/{handle}/connections"),
+        format!(
+            "/auth/federation/{}/start",
+            handle.to_string().to_uppercase()
+        ),
+        format!("/oauth2/{handle}/start"),
+    ] {
+        // A handle of digits only has no upper case to differ by.
+        if other == EntryRoute::Start(handle).path() {
+            continue;
+        }
+        assert_eq!(EntryRoute::of(&other), None, "{other}");
+    }
+}
+
+/// An issuer identifier is an https URL without query or fragment (OpenID
+/// Connect Core 1.0 §1.2); plain http only on a loopback host.
+#[test]
+fn an_issuer_identifier_is_an_https_url() {
+    for issuer in [
+        "https://sid.example.com",
+        "https://sid.example.com/i/0123456789abcdef0123456789abcdef",
+        "http://localhost:8080/i/x",
+        "http://127.0.0.1:8080",
+    ] {
+        assert!(is_issuer_identifier(issuer), "{issuer}");
+    }
+    for other in [
+        "http://sid.example.com",
+        "https://sid.example.com/?a=1",
+        "https://sid.example.com/#f",
+        "ftp://sid.example.com",
+        "sid.example.com",
+        "",
+    ] {
+        assert!(!is_issuer_identifier(other), "{other}");
+    }
+}
+
 /// The credential of one connection is sealed in a context no other
 /// connection shares.
 #[test]

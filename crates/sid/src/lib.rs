@@ -14,6 +14,7 @@ pub mod devices;
 pub mod email_provider;
 pub mod email_sign_in;
 pub mod enrollment;
+pub mod entry_connections;
 pub mod federated_record;
 pub mod flows;
 pub mod identity;
