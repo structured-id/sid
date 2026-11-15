@@ -18,7 +18,7 @@ use super::{CONNECT_TIMEOUT, PublicationError, TIMEOUT, build_platform};
 const PUBLISH_PATH: &str = "/v1/federation/site-admissions";
 
 /// The reason of a refusal because a newer revision already stands.
-const SUPERSEDED: &str = "SITE_ADMISSION_SUPERSEDED";
+const SUPERSEDED: &str = crate::grpc_error::ErrorReason::SiteAdmissionSuperseded.as_str();
 
 /// The longest refusal read for its reason.
 const MAX_ERROR_BODY: usize = 1 << 16;

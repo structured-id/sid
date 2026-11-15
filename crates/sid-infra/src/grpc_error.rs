@@ -81,6 +81,7 @@ pub enum ErrorReason {
     SignInRefused,
     RegistrationRestricted,
     CsrfTokenInvalid,
+    SiteAdmissionNotAuthentic,
 
     // ALREADY_EXISTS
     ProfileAlreadyExists,
@@ -124,6 +125,8 @@ pub enum ErrorReason {
     FeatureNotConfigured,
     RegistrationDisabled,
     RoleAssignmentSetChanged,
+    SiteAdmissionRevisionConflict,
+    SiteAdmissionSuperseded,
 
     // RESOURCE_EXHAUSTED
     RateLimitExceeded,
@@ -150,7 +153,10 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every reason, for exhaustive checks against the proto enum.
-    pub const ALL: [ErrorReason; 87] = [
+    pub const ALL: [ErrorReason; 90] = [
+        Self::SiteAdmissionNotAuthentic,
+        Self::SiteAdmissionRevisionConflict,
+        Self::SiteAdmissionSuperseded,
         Self::EntryConnectionNotFound,
         Self::EntryConnectionAlreadyExists,
         Self::RoleAssignmentSetChanged,
@@ -241,7 +247,7 @@ impl ErrorReason {
     ];
 
     /// The `ErrorInfo.reason` string (the proto enum value name).
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::ProfileNotFound => "PROFILE_NOT_FOUND",
             Self::ApplicationNotFound => "APPLICATION_NOT_FOUND",
@@ -327,6 +333,9 @@ impl ErrorReason {
             Self::FeatureNotConfigured => "FEATURE_NOT_CONFIGURED",
             Self::RegistrationDisabled => "REGISTRATION_DISABLED",
             Self::RoleAssignmentSetChanged => "ROLE_ASSIGNMENT_SET_CHANGED",
+            Self::SiteAdmissionNotAuthentic => "SITE_ADMISSION_NOT_AUTHENTIC",
+            Self::SiteAdmissionRevisionConflict => "SITE_ADMISSION_REVISION_CONFLICT",
+            Self::SiteAdmissionSuperseded => "SITE_ADMISSION_SUPERSEDED",
             Self::ServiceMaintenance => "SERVICE_MAINTENANCE",
             Self::DependencyUnavailable => "DEPENDENCY_UNAVAILABLE",
             Self::InternalError => "INTERNAL_ERROR",
@@ -377,7 +386,8 @@ impl ErrorReason {
             | Self::ScopeNotGranted
             | Self::SignInRefused
             | Self::RegistrationRestricted
-            | Self::CsrfTokenInvalid => Code::PermissionDenied,
+            | Self::CsrfTokenInvalid
+            | Self::SiteAdmissionNotAuthentic => Code::PermissionDenied,
 
             Self::ProfileAlreadyExists
             | Self::EmailAlreadyRegistered
@@ -417,7 +427,9 @@ impl ErrorReason {
             | Self::InvalidState
             | Self::FeatureNotConfigured
             | Self::RegistrationDisabled
-            | Self::RoleAssignmentSetChanged => Code::FailedPrecondition,
+            | Self::RoleAssignmentSetChanged
+            | Self::SiteAdmissionRevisionConflict
+            | Self::SiteAdmissionSuperseded => Code::FailedPrecondition,
 
             Self::PasswordHistoryUnavailable
             | Self::ServiceMaintenance
