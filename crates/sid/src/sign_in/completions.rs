@@ -185,8 +185,9 @@ impl SignIn {
     /// association admits nothing. It completes as every sign-in does: only
     /// an active Profile, after the sign-in rules and this authority's
     /// policy weigh that authentication under the login requirements of
-    /// `client_id` (the application the sign-in continues to), with a
-    /// session of this authority's lifetime and limit recording it. The
+    /// `client_id` (the application the sign-in continues to; none for a
+    /// sign-in that continues no application, under the organization's),
+    /// with a session of this authority's lifetime and limit recording it. The
     /// browser at `client_ip` gets the IdP session cookie.
     ///
     /// With `completion`, the host's keyed operation (a federated entry's
@@ -208,7 +209,7 @@ impl SignIn {
         assignment: PrincipalAssignmentFence,
         admission: Option<ActorFence>,
         authentication: &SessionAuthentication,
-        client_id: &str,
+        client_id: Option<&str>,
         completion: Option<AdmittedCompletion<'_>>,
         client_ip: Option<IpAddr>,
         context: AttemptContext<'_>,
@@ -235,7 +236,7 @@ impl SignIn {
         if let Some(completion) = &completion
             && let Some((delivery, session)) = self.admitted_session(completion, assignment).await?
         {
-            let requirements = requirements_for(login_policy, Some(client_id)).await?;
+            let requirements = requirements_for(login_policy, client_id).await?;
             self.check(
                 profile.id,
                 client_ip,
@@ -255,7 +256,7 @@ impl SignIn {
                 profile.id,
                 client_ip,
                 (attempt(), context),
-                Some(client_id),
+                client_id,
             )
             .await?;
         // One fence holds the commit to both the policy and the admission:
@@ -391,7 +392,7 @@ impl SignIn {
         &self,
         login_policy: &dyn LoginPolicySource,
         completion: &AdmittedCompletion<'_>,
-        client_id: &str,
+        client_id: Option<&str>,
         assignment: PrincipalAssignmentFence,
     ) -> Result<Option<SignedIn>, SignInError> {
         match self.admitted_session(completion, assignment).await? {
@@ -463,7 +464,7 @@ impl SignIn {
         login_policy: &dyn LoginPolicySource,
         delivery: RetainedDelivery,
         session: &Session,
-        client_id: &str,
+        client_id: Option<&str>,
         assignment: PrincipalAssignmentFence,
     ) -> Result<SignedIn, SignInError> {
         let current = self
@@ -481,7 +482,7 @@ impl SignIn {
         // the client's own are applied where the sign-in continues.
         let requirements = self
             .for_account(
-                &requirements_for(login_policy, Some(client_id)).await?,
+                &requirements_for(login_policy, client_id).await?,
                 session.profile_id,
             )
             .await?;
