@@ -153,6 +153,18 @@ fn installation(storage: Arc<dyn StorageBackend>, pool: sqlx::PgPool) -> Install
             magic_links: None,
             resets: None,
         },
+        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
+            Arc::new(sid::federation_site::FederationSite::new(
+                storage.clone(),
+                keys.clone(),
+                Arc::new(sid_fed::recipient::Recipient::new(
+                    storage.clone(),
+                    sid_fed::recipient::ClassicalVerdict,
+                )),
+                sid_core::models::OrgId::generate(),
+            )),
+            None,
+        )),
         audit_retention: sid::AuditRetention::default(),
         migration_deadline_days: sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
         source: "test".into(),

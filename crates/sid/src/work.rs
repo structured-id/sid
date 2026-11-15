@@ -55,6 +55,8 @@ pub struct CeWorkParts {
     pub issuer: String,
     pub closures: Arc<AccountClosureService>,
     pub mail: CeMail,
+    /// Delivers the site's admission statements to the build's platform.
+    pub site_admissions: Arc<crate::federation_site::AdmissionPublications>,
     pub audit_retention: AuditRetention,
     pub migration_deadline_days: i64,
     /// The source the maintenance's alerts name.
@@ -90,6 +92,7 @@ impl CeWork {
             issuer,
             closures,
             mail,
+            site_admissions,
             audit_retention,
             migration_deadline_days,
             source,
@@ -112,6 +115,7 @@ impl CeWork {
             Arc::new(EnrollmentHandler::new(storage.clone(), evaluator.clone())),
             Arc::new(OwnerPurgeHandler::new(storage.clone(), evaluator)),
             mail.codes,
+            site_admissions,
         ];
         if let Some(links) = mail.magic_links {
             handlers.push(links);

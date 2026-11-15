@@ -279,7 +279,7 @@ pub use session_end::{
     SESSION_REVOCATION_ATTEMPTS, SESSION_REVOCATION_KIND, SESSION_REVOCATION_WINDOW, SessionEnd,
     SessionRevocation,
 };
-pub use site_enrollment::SiteEnrollment;
+pub use site_enrollment::{AdmissionPublication, SITE_ADMISSION_PUBLICATION_KIND, SiteEnrollment};
 pub use status_policy::{OfflineLimits, StatusEvidence, StatusPolicy, StatusRequirement};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{

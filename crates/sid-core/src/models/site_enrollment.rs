@@ -9,6 +9,51 @@
 //! is not here: it is one of the installation's sealed secrets.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::durable_work::{NewWork, WorkId, WorkKind};
+
+/// Work kind handing the platform the site's current admission statements:
+/// owed by every change of the login settings and every certificate held.
+pub const SITE_ADMISSION_PUBLICATION_KIND: &str = "federation.site_admission";
+
+/// Attempts of one publication: its handler's schedule, repeating its last
+/// delay of an hour, keeps trying for about two weeks of platform outage.
+/// The site enforces its own settings meanwhile; only the platform's
+/// selection waits.
+pub const SITE_ADMISSION_PUBLICATION_ATTEMPTS: u32 = 340;
+
+/// Namespace of publication work ids.
+const PUBLICATION_NAMESPACE: Uuid = Uuid::from_u128(0x9c41_7a0e_3b5d_4f62_8e1a_d7c3_05b9_f428);
+
+/// What owes a publication: the change that makes the held statements stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionPublication<'a> {
+    /// The login settings committed at this revision.
+    Settings(u64),
+    /// This certificate was held: a first enrollment or a renewal.
+    Enrollment(&'a SiteEnrollment),
+}
+
+impl AdmissionPublication<'_> {
+    /// The durable work that publishes the statements in force when it runs.
+    /// Its id follows from the change, so committing the same change again
+    /// owes nothing new.
+    pub fn work(self) -> NewWork {
+        let name = match self {
+            Self::Settings(revision) => [b"settings:".as_slice(), &revision.to_be_bytes()].concat(),
+            Self::Enrollment(enrollment) => {
+                [b"enrollment:".as_slice(), &enrollment.certificate].concat()
+            }
+        };
+        let kind =
+            WorkKind::new(SITE_ADMISSION_PUBLICATION_KIND).expect("the publication kind is valid");
+        let mut work = NewWork::new(kind, Vec::new());
+        work.id = WorkId(Uuid::new_v5(&PUBLICATION_NAMESPACE, &name));
+        work.max_attempts = SITE_ADMISSION_PUBLICATION_ATTEMPTS;
+        work
+    }
+}
 
 /// The most certificates kept above the site's own.
 pub const MAX_CHAIN: usize = 8;

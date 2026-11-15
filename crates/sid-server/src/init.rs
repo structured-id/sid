@@ -1272,6 +1272,15 @@ pub fn engine(
             magic_links: c.magic_link_mail.clone(),
             resets: c.reset_mail.clone(),
         },
+        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
+            Arc::new(sid::federation_site::FederationSite::new(
+                c.storage.clone(),
+                c.key_manager.clone(),
+                c.identities.clone(),
+                c.organization.id,
+            )),
+            build_platform_admissions()?,
+        )),
         audit_retention: c.audit_retention,
         migration_deadline_days: c.migration_deadline_days,
         source: "sid-server".into(),
@@ -1284,6 +1293,19 @@ pub fn engine(
         maintenance,
     })
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The transport of the site's admission statements to the platform this
+/// build was made for; none for a build made for no platform.
+fn build_platform_admissions()
+-> anyhow::Result<Option<Arc<dyn sid_plugin::site_admission::AdmissionPublisher>>> {
+    Ok(
+        sid_infra::platform_ca::site_admission::PlatformAdmissions::of_build()
+            .context("the build's platform")?
+            .map(|platform| {
+                Arc::new(platform) as Arc<dyn sid_plugin::site_admission::AdmissionPublisher>
+            }),
+    )
 }
 
 /// The receivers `SID_EVENT_RECEIVERS` names (comma-separated; `none` for a

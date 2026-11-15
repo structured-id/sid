@@ -17,20 +17,24 @@
 //! stored login settings.
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::instance_secret::{self, InstanceSecretError};
+use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::Error as SidError;
 use sid_core::models::{
-    AuditEntry, InstanceSecret, IssuerAuthority, MutationContext, OrgId, SiteEnrollment,
+    AdmissionPublication, AuditEntry, InstanceSecret, IssuerAuthority, MutationContext, OrgId,
+    SiteEnrollment,
 };
+use sid_core::models::{ClaimedWork, NewWork, SITE_ADMISSION_PUBLICATION_KIND, WorkKind};
 use sid_fed::admission::{Admission, sealed};
 use sid_fed::participant::{Mount, Participant, key_record};
 use sid_fed::passport_path::AcceptedParticipant;
 use sid_fed::recipient::{PresentedIdentities, RecipientError};
 use sid_fed::site_key::{SiteKey, SiteKeyError};
 use sid_keys::KeyManager;
+use sid_plugin::site_admission::{AdmissionPublisher, PublishError, Published};
 use sid_plugin::storage::StorageBackend;
 
 /// How many times a certificate is held again when another one lands
@@ -235,11 +239,16 @@ impl FederationSite {
             if held.as_ref() == Some(&enrollment) {
                 return Ok(accepted.participant);
             }
-            let audit = MutationContext::from(AuditEntry::admin(
+            let mut audit = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "federation_site.hold_enrollment",
                 "site_enrollment",
             ));
+            // The platform holds statements signed under the certificate it
+            // knows; a first or renewed one owes it the current statements.
+            audit
+                .work
+                .push(AdmissionPublication::Enrollment(&enrollment).work());
             if self
                 .storage
                 .set_site_enrollment(&enrollment, held.as_ref(), audit)
@@ -290,6 +299,34 @@ impl FederationSite {
         if !accepted.participant.admits(mount) {
             return Err(FederationSiteError::NotAnEntry(mount.to_string()));
         }
+        self.signed(held, &accepted, mount, now).await
+    }
+
+    /// The statements of every entry the held certificate lists, signed now
+    /// from the stored settings: what the platform is owed. None before a
+    /// certificate is held.
+    pub(crate) async fn statements(&self) -> Result<Vec<Vec<u8>>, FederationSiteError> {
+        let now = SystemTime::now();
+        let Some(held) = self.storage.site_enrollment().await? else {
+            return Ok(Vec::new());
+        };
+        let accepted = self.accept(&held.certificate, &held.chain, now).await?;
+        let mut statements = Vec::with_capacity(accepted.participant.mounts.len());
+        for mount in &accepted.participant.mounts {
+            statements.push(self.signed(held.clone(), &accepted, mount, now).await?);
+        }
+        Ok(statements)
+    }
+
+    /// The statement of `mount` under the held certificate `held`, accepted
+    /// as `accepted`, signed at `now` from the settings stored now.
+    async fn signed(
+        &self,
+        held: SiteEnrollment,
+        accepted: &AcceptedParticipant,
+        mount: &Mount,
+        now: SystemTime,
+    ) -> Result<Vec<u8>, FederationSiteError> {
         let settings = crate::login_settings::in_force(self.storage.as_ref()).await?;
         let second = |at: SystemTime| {
             at.duration_since(SystemTime::UNIX_EPOCH)
@@ -322,6 +359,78 @@ impl FederationSite {
         sealed(&statement.payload(), |input| {
             Ok::<_, FederationSiteError>(key.sign(input))
         })
+    }
+}
+
+/// Delivers the site's statements to the platform its build names, as the
+/// login settings and the held certificate stand when the work runs: a
+/// later change owes its own delivery, and a lost one is tried again.
+/// Delivery never gates the site: it enforces its own settings meanwhile.
+pub struct AdmissionPublications {
+    kind: WorkKind,
+    site: Arc<FederationSite>,
+    /// The transport; none for a build that names no platform, which has
+    /// nobody to tell.
+    publisher: Option<Arc<dyn AdmissionPublisher>>,
+}
+
+impl AdmissionPublications {
+    pub fn new(site: Arc<FederationSite>, publisher: Option<Arc<dyn AdmissionPublisher>>) -> Self {
+        Self {
+            kind: WorkKind::new(SITE_ADMISSION_PUBLICATION_KIND)
+                .expect("the publication kind is valid"),
+            site,
+            publisher,
+        }
+    }
+}
+
+/// The delays between attempts: soon after a blip, then hourly while the
+/// platform stays away.
+const PUBLICATION_RETRIES: RetrySchedule = RetrySchedule::new(&[
+    Duration::from_secs(10),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+    Duration::from_secs(900),
+    Duration::from_secs(3600),
+]);
+
+#[async_trait::async_trait]
+impl WorkHandler for AdmissionPublications {
+    fn kind(&self) -> &WorkKind {
+        &self.kind
+    }
+
+    fn retry_schedule(&self) -> RetrySchedule {
+        PUBLICATION_RETRIES
+    }
+
+    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
+        None
+    }
+
+    async fn handle(&self, _work: &ClaimedWork) -> WorkOutcome {
+        let Some(publisher) = &self.publisher else {
+            return WorkOutcome::Done(Some("this build names no platform".into()));
+        };
+        let statements = match self.site.statements().await {
+            Ok(statements) => statements,
+            Err(e) if e.undecided() => return WorkOutcome::Retry(e.to_string()),
+            // A certificate that no longer stands has nothing to state; a
+            // renewal held later owes its own delivery.
+            Err(e) => return WorkOutcome::Done(Some(format!("nothing to publish: {e}"))),
+        };
+        if statements.is_empty() {
+            return WorkOutcome::Done(Some("not enrolled".into()));
+        }
+        for statement in &statements {
+            match publisher.publish(statement).await {
+                Ok(Published::Held | Published::Superseded) => {}
+                Err(PublishError::Unavailable(why)) => return WorkOutcome::Retry(why),
+                Err(PublishError::Refused(why)) => return WorkOutcome::Permanent(why),
+            }
+        }
+        WorkOutcome::Done(Some(format!("{} entries published", statements.len())))
     }
 }
 
