@@ -20,6 +20,8 @@ pub(crate) fn sign_in_refusal(e: SignInError) -> Status {
     match e {
         SignInError::Rules(refusal) => rules_refusal(refusal),
         SignInError::Fenced => authentication_failed(),
+        // Nothing committed: the host decides the admission again.
+        SignInError::AdmissionChanged => sid_infra::grpc_error::refuse::changed_concurrently(),
         SignInError::AlreadyCompleted => ApiError::new(
             ErrorReason::ConcurrentModification,
             "the sign-in already completed",

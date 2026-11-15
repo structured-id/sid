@@ -66,6 +66,17 @@ pub enum SnapshotError {
     Audit(#[from] sid_core::models::audit::AuditError),
 }
 
+impl From<sid_plugin::platform_ca::PlatformCaError> for SnapshotError {
+    fn from(e: sid_plugin::platform_ca::PlatformCaError) -> Self {
+        use sid_plugin::platform_ca::PlatformCaError;
+        match e {
+            PlatformCaError::Storage(e) => Self::Store(e),
+            // The target holds another platform CA set than the snapshot's.
+            other => Self::Target(other.to_string()),
+        }
+    }
+}
+
 /// The result of snapshot operations.
 pub type Result<T> = std::result::Result<T, SnapshotError>;
 
@@ -116,6 +127,11 @@ pub struct Snapshot {
     /// The independent master key is never included. None means the source
     /// has not initialized OPAQUE; such a snapshot cannot contain OPAQUE files.
     pub opaque_server_setup: Option<Vec<u8>>,
+
+    /// The sealed key of the installation's federation site, which its held
+    /// site certificate certifies. None while it never made one; a snapshot
+    /// holding a site enrollment always carries it.
+    pub federation_site_key: Option<Vec<u8>>,
 
     /// Projects (including system project).
     pub projects: Vec<Project>,
@@ -239,6 +255,10 @@ pub struct Snapshot {
     /// Upstream identity links (profile↔provider).
     pub upstream_identities: Vec<UpstreamIdentity>,
 
+    /// The registered connections federated sign-ins arrive through, their
+    /// client credentials sealed as stored.
+    pub entry_connections: Vec<sid_core::models::EntryConnection>,
+
     /// Personal access tokens.
     pub personal_access_tokens: Vec<PersonalAccessToken>,
 
@@ -320,9 +340,19 @@ pub struct Snapshot {
     /// identities it admits), when an administrator set them.
     pub login_settings: Option<LoginSettings>,
 
+    /// The installation's enrollment as a site of the federation, when it
+    /// holds one: the moved installation is the same site.
+    #[serde(default)]
+    pub site_enrollment: Option<sid_core::models::SiteEnrollment>,
+
     /// The login policy epoch: a decision taken under an earlier policy
     /// never commits after the move.
     pub login_policy_epoch: Option<i64>,
+
+    /// The admitted platform CA set with every narrowing the source had
+    /// seen: a withdrawn generation or a revoked CA certificate is never
+    /// relied on again after the move.
+    pub platform_cas: sid_plugin::platform_ca::PlatformCaArchive,
 
     /// The IP allowlist, with when each entry was added.
     pub ip_allowlist: Vec<(String, String, DateTime<Utc>)>,
@@ -375,7 +405,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -443,6 +473,7 @@ impl Snapshot {
             projects: Vec::new(),
             key_versions: Vec::new(),
             opaque_server_setup: None,
+            federation_site_key: None,
             profiles: Vec::new(),
             profile_emails: Vec::new(),
             profile_phones: Vec::new(),
@@ -476,6 +507,7 @@ impl Snapshot {
             device_auth_codes: Vec::new(),
             profile_grants: Vec::new(),
             upstream_providers: Vec::new(),
+            entry_connections: Vec::new(),
             upstream_identities: Vec::new(),
             personal_access_tokens: Vec::new(),
             machine_users: Vec::new(),
@@ -506,7 +538,9 @@ impl Snapshot {
             enrollment_policy: None,
             bootstrap_policy: BootstrapPolicy::SelfManaged,
             login_settings: None,
+            site_enrollment: None,
             login_policy_epoch: None,
+            platform_cas: Default::default(),
             ip_allowlist: Vec::new(),
             ip_reputation: Vec::new(),
             anomaly_events: Vec::new(),
@@ -530,6 +564,7 @@ impl Snapshot {
             self.oidc_issuers.iter().map(|i| i.keys.len() as u64).sum(),
             self.key_versions.len() as u64,
             u64::from(self.opaque_server_setup.is_some()),
+            u64::from(self.federation_site_key.is_some()),
             self.projects.len() as u64,
             self.profiles.len() as u64,
             self.profile_emails.len() as u64,
@@ -574,6 +609,7 @@ impl Snapshot {
             self.device_auth_codes.len() as u64,
             self.profile_grants.len() as u64,
             self.upstream_providers.len() as u64,
+            self.entry_connections.len() as u64,
             self.upstream_identities.len() as u64,
             self.personal_access_tokens.len() as u64,
             self.machine_users.len() as u64,
@@ -601,7 +637,9 @@ impl Snapshot {
             u64::from(self.enrollment_policy.is_some()),
             u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
             u64::from(self.login_settings.is_some()),
+            u64::from(self.site_enrollment.is_some()),
             u64::from(self.login_policy_epoch.is_some()),
+            self.platform_cas.len() as u64,
             self.ip_allowlist.len() as u64,
             self.ip_reputation.len() as u64,
             self.anomaly_events.len() as u64,

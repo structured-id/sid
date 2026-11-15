@@ -36,6 +36,10 @@ pub struct CeMail {
 /// What the CE work is assembled from.
 pub struct CeWorkParts {
     pub storage: Arc<dyn StorageBackend>,
+    /// The installation's organization, which manages its Profiles: a
+    /// relying party of another organization is told of a Profile by its
+    /// Binding, as its tokens named it.
+    pub organization: sid_core::models::OrgId,
     /// The installation's issuers, whose relying parties are owed logouts.
     pub issuers: Arc<IssuerRegistry>,
     /// Where ended sessions' tokens stop, in every process.
@@ -77,6 +81,7 @@ impl CeWork {
     pub fn assemble(parts: CeWorkParts) -> Result<Self, CeWorkError> {
         let CeWorkParts {
             storage,
+            organization,
             issuers,
             revocation,
             event_bus,
@@ -94,7 +99,11 @@ impl CeWork {
             None => EvaluatorDelivery::Relay { source: issuer },
         };
         let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
-            Arc::new(BackChannelLogoutHandler::new(issuers, storage.clone())?),
+            Arc::new(BackChannelLogoutHandler::new(
+                issuers,
+                storage.clone(),
+                organization,
+            )?),
             Arc::new(EventRelayHandler::new(storage.clone(), required_receivers)),
             Arc::new(EventFanoutHandler::new(event_bus.clone(), storage.clone())),
             Arc::new(EventDeliveryHandler::new(event_bus)),

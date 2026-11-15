@@ -127,6 +127,13 @@ pub struct CeComponents {
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
+    /// The registered connections federated sign-ins arrive through.
+    pub entry_connections: Arc<sid::entry_connections::EntryConnections>,
+    /// Accepts the Binding Passport and presentation of an identity signed
+    /// in through a connection: the classical recipient over the
+    /// installation's store, or, set by the host before serving, the one
+    /// with the signature checks its edition adds.
+    pub identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
     /// Emails requested sign-in links, when magic links are enabled.
     pub magic_link_mail: Option<Arc<sid::auth_mail::MagicLinkMail>>,
     /// Emails requested sign-in codes.
@@ -337,6 +344,9 @@ pub struct CeHost {
     /// Where the login requirements come from; none keeps the installation's
     /// fixed security policy.
     pub login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
+    /// Makes the proofs of this installation's own Profiles for sign-ins at
+    /// other organizations; none issues the Binding subject without a proof.
+    pub own_presentations: Option<Arc<dyn sid::oauth::OwnPresentations>>,
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -872,6 +882,10 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(source) => auth_svc.with_login_policy(source),
         None => auth_svc,
     };
+    let auth_svc = match host.own_presentations {
+        Some(presentations) => auth_svc.with_own_presentations(presentations),
+        None => auth_svc,
+    };
     let auth_svc = match &ceremony_page {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
@@ -891,6 +905,14 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         revocation_cache.clone(),
         auth_svc.clone(),
     ));
+
+    let entry_connections = Arc::new(sid::entry_connections::EntryConnections::new(
+        storage.clone(),
+        key_manager.clone(),
+    ));
+    let recipient = classical_recipient(storage.clone())?;
+    hold_build_platform_cas(&recipient).await?;
+    let identities: Arc<dyn sid_fed::recipient::PresentedIdentities> = Arc::new(recipient);
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
@@ -950,7 +972,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             revocation_cache.clone(),
             audit_log.clone(),
         )
-        .with_service_tokens(checker_tokens)
+        .with_service_tokens(checker_tokens, organization.id)
         .with_request_verifiers(request_verifiers)
         .with_sod_warnings(sod_warnings),
     );
@@ -1072,7 +1094,86 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         security_svc,
         account_svc,
         upstream_svc,
+        entry_connections,
+        identities,
     })
+}
+
+/// `recipient` refreshing its platform CA set from the publication of the
+/// platform this build was made for. The platform is a constant of the
+/// build, never a setting of the installation: an operator does not choose
+/// whose certificates it trusts. The publication is only the quick way to a
+/// newer set between two builds: what the installation already holds keeps
+/// deciding without it, and a build made for no platform asks nobody. The
+/// platform's discovery records are read beside the publication; without a
+/// usable resolver the HTTPS step alone refreshes.
+pub fn of_build_platform<V: sid_fed::recipient::Verdict>(
+    recipient: sid_fed::recipient::Recipient<V>,
+) -> anyhow::Result<sid_fed::recipient::Recipient<V>> {
+    use sid_infra::platform_ca::PublishedPlatformCas;
+    use sid_infra::platform_ca::discovery::DiscoveryResolver;
+    let Some(publication) =
+        sid_infra::platform_ca::build_publication().context("the build's platform")?
+    else {
+        info!("this build names no platform: its platform CA set is refreshed from nowhere");
+        return Ok(recipient);
+    };
+    let mut source = PublishedPlatformCas::new();
+    match DiscoveryResolver::new() {
+        Ok(discovery) => source = source.with_discovery(Arc::new(discovery)),
+        Err(reason) => tracing::warn!(
+            %reason,
+            "no DNS resolver for the platform CA discovery records; the HTTPS publication alone refreshes the set"
+        ),
+    }
+    info!(%publication, "platform CA publication");
+    recipient
+        .with_source(publication, Arc::new(source))
+        .map_err(|e| anyhow::anyhow!("the build's platform CA publication: {e}"))
+}
+
+/// Hold the platform CA set this build carries, so the installation
+/// verifies under its platform's certificates from the first start with no
+/// network. It is applied as any received set is: one older than the set
+/// already held changes nothing, and a generation a newer held set withdrew
+/// stays withdrawn. A carried set that cannot be held stops the start: the
+/// delivery is broken, and serving without it would refuse every identity
+/// without saying why.
+pub async fn hold_build_platform_cas<V: sid_fed::recipient::Verdict>(
+    recipient: &sid_fed::recipient::Recipient<V>,
+) -> anyhow::Result<()> {
+    let Some(set) =
+        sid_infra::platform_ca::build_platform_cas().context("the build's platform CA set")?
+    else {
+        info!("this build carries no platform CA set");
+        return Ok(());
+    };
+    let applied = recipient
+        .record_platform_cas(&set)
+        .await
+        .map_err(|e| anyhow::anyhow!("hold the build's platform CA set: {e}"))?;
+    info!(
+        revision = set.revision,
+        ?applied,
+        "the build's platform CA set"
+    );
+    Ok(())
+}
+
+/// The recipient a self-managed installation verifies presented identities
+/// with: classical signature checks, under the platform CA set held in
+/// `storage`.
+pub fn classical_recipient(
+    storage: Arc<dyn StorageBackend>,
+) -> anyhow::Result<sid_fed::recipient::Recipient> {
+    // An organization's list missing or past its time is read where the
+    // installation is connected to that organization.
+    let publications =
+        Arc::new(crate::organization_publications::ConnectedPublications::new(storage.clone()));
+    of_build_platform(
+        sid_fed::recipient::Recipient::new(storage, sid_fed::recipient::ClassicalVerdict)
+            .with_organization_publications(publications),
+    )
 }
 
 /// Make the installation's JWT key pair if neither file exists; `true` when
@@ -1145,6 +1246,7 @@ pub fn engine(
         maintenance,
     } = sid::work::CeWork::assemble(sid::work::CeWorkParts {
         storage: c.storage.clone(),
+        organization: c.organization.id,
         issuers: c.issuers.clone(),
         revocation: c.revocation_cache.clone(),
         event_bus: c.event_bus.clone(),

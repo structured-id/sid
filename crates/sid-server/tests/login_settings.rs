@@ -13,7 +13,8 @@ use sid_infra::grpc_error::extract_error_info;
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::admin::realm_service_server::RealmService;
 use sid_proto::sid::v1::admin::{
-    GetLoginSettingsRequest, LoginSettings, RequiredAction, UpdateLoginSettingsRequest,
+    AdmittedSourceOrganizations, GetLoginSettingsRequest, LoginSettings, RequiredAction,
+    UpdateLoginSettingsRequest,
 };
 use sid_server::grpc::realm_service::RealmServiceImpl;
 use std::sync::Arc;
@@ -53,10 +54,34 @@ async fn read(svc: &RealmServiceImpl, token: &str) -> LoginSettings {
         .into_inner()
 }
 
-fn admissions(personal: bool, corporate: bool) -> LoginSettings {
+/// The two admissions as answered after `revision` changes of them, with no
+/// source organization named and the status policy never changed: a list
+/// in its time from the issuer, the authorities above on what is held.
+fn admissions(personal: bool, corporate: bool, revision: u64) -> LoginSettings {
+    use sid_proto::sid::v1::admin::{OfflineStatusLimits, StatusPolicy, StatusRequirement};
     LoginSettings {
         allow_personal_profiles: personal,
         allow_foreign_corporate_profiles: corporate,
+        revision,
+        status_policy: Some(StatusPolicy {
+            issuer: Some(StatusRequirement { offline: None }),
+            authorities: Some(StatusRequirement {
+                offline: Some(OfflineStatusLimits {
+                    missing: true,
+                    max_stale_seconds: None,
+                }),
+            }),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A change replacing the admitted source organizations with `sources`.
+fn replace_sources(sources: &[sid_core::models::OrgId]) -> UpdateLoginSettingsRequest {
+    UpdateLoginSettingsRequest {
+        admitted_source_organizations: Some(AdmittedSourceOrganizations {
+            organizations: sources.iter().map(|id| (*id).into()).collect(),
+        }),
         ..Default::default()
     }
 }
@@ -71,7 +96,7 @@ fn admissions(personal: bool, corporate: bool) -> LoginSettings {
 async fn each_admission_is_changed_on_its_own() {
     let (svc, storage) = services();
     let token = admin_token();
-    assert_eq!(read(&svc, &token).await, admissions(false, false));
+    assert_eq!(read(&svc, &token).await, admissions(false, false, 0));
     assert_eq!(storage.login_settings().await.unwrap(), None);
 
     let change = |personal: Option<bool>, corporate: Option<bool>| UpdateLoginSettingsRequest {
@@ -80,12 +105,14 @@ async fn each_admission_is_changed_on_its_own() {
         ..Default::default()
     };
     for (personal, corporate, expected) in [
-        (None, Some(true), admissions(false, true)),
-        (Some(true), None, admissions(true, true)),
-        (None, Some(false), admissions(true, false)),
-        (Some(false), None, admissions(false, false)),
-        // Nothing named: nothing changes.
-        (None, None, admissions(false, false)),
+        (None, Some(true), admissions(false, true, 1)),
+        (Some(true), None, admissions(true, true, 2)),
+        (None, Some(false), admissions(true, false, 3)),
+        (Some(false), None, admissions(false, false, 4)),
+        // Nothing named: nothing changes, and the revision stays.
+        (None, None, admissions(false, false, 4)),
+        // A switch set to the value it has: the same.
+        (Some(false), None, admissions(false, false, 4)),
     ] {
         let answered = svc
             .update_login_settings(from(change(personal, corporate), &token, None))
@@ -96,6 +123,118 @@ async fn each_admission_is_changed_on_its_own() {
         assert_eq!(answered.self_registration, None);
         assert_eq!(read(&svc, &token).await, expected);
     }
+}
+
+// The admitted source organizations are read as stored and replaced whole:
+// an organization left out is no longer admitted, a present empty list
+// admits none, and a change that names no list keeps it. Each change of the
+// list is one revision; the switches keep their values. Bug prevented: a
+// list that only grows, a removal that needs the other organizations sent
+// again and loses them, or a toggle change wiping the list.
+#[tokio::test]
+async fn the_admitted_source_organizations_are_replaced_whole() {
+    use sid_core::models::OrgId;
+    let (svc, storage) = services();
+    let token = admin_token();
+    let (a, b) = (OrgId::generate(), OrgId::generate());
+    let (first, second) = if a < b { (a, b) } else { (b, a) };
+    let listed = |answer: &LoginSettings| -> Vec<sid_ids_proto::OrgId> {
+        answer.admitted_source_organizations.clone()
+    };
+
+    // Named in any order and twice: answered in id order, each once.
+    let answered = svc
+        .update_login_settings(from(
+            replace_sources(&[second, first, second]),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed(&answered), vec![first.into(), second.into()]);
+    assert_eq!(answered.revision, 1);
+    // Naming organizations turns no switch on.
+    assert!(!answered.allow_foreign_corporate_profiles);
+
+    // A switch change keeps the list.
+    let answered = svc
+        .update_login_settings(from(
+            UpdateLoginSettingsRequest {
+                allow_foreign_corporate_profiles: Some(true),
+                ..Default::default()
+            },
+            &token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed(&answered), vec![first.into(), second.into()]);
+    assert_eq!(answered.revision, 2);
+
+    // One organization is left out: only it is no longer admitted.
+    let answered = svc
+        .update_login_settings(from(replace_sources(&[second]), &token, None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed(&answered), vec![second.into()]);
+    assert_eq!(answered.revision, 3);
+    let stored = storage.login_settings().await.unwrap().unwrap();
+    assert!(stored.admits_corporate_of(second));
+    assert!(!stored.admits_corporate_of(first));
+
+    // The same list again changes nothing.
+    let answered = svc
+        .update_login_settings(from(replace_sources(&[second]), &token, None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(answered.revision, 3);
+
+    // A present empty list admits nobody, with the switch still on.
+    let answered = svc
+        .update_login_settings(from(replace_sources(&[]), &token, None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(listed(&answered).is_empty());
+    assert!(answered.allow_foreign_corporate_profiles);
+    assert_eq!(answered.revision, 4);
+    assert_eq!(read(&svc, &token).await, answered);
+}
+
+// A list naming something that is no organization id, or more organizations
+// than the settings hold, is refused before anything is changed, the switch
+// sent with it included. Bug prevented: a half-applied change, or a stored
+// list no reader can decode.
+#[tokio::test]
+async fn an_invalid_source_list_is_refused_and_changes_nothing() {
+    use sid_core::models::{MAX_ADMITTED_SOURCES, OrgId};
+    let (svc, storage) = services();
+    let token = admin_token();
+    let with_switch = |list: AdmittedSourceOrganizations| UpdateLoginSettingsRequest {
+        allow_foreign_corporate_profiles: Some(true),
+        admitted_source_organizations: Some(list),
+        ..Default::default()
+    };
+    let malformed = AdmittedSourceOrganizations {
+        organizations: vec![sid_ids_proto::OrgId { value: vec![7; 15] }],
+    };
+    let too_many = AdmittedSourceOrganizations {
+        organizations: (0..=MAX_ADMITTED_SOURCES)
+            .map(|_| OrgId::generate().into())
+            .collect(),
+    };
+    for list in [malformed, too_many] {
+        let refused = svc
+            .update_login_settings(from(with_switch(list), &token, None))
+            .await
+            .expect_err("an invalid list was accepted");
+        assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
+    }
+    assert_eq!(storage.login_settings().await.unwrap(), None);
 }
 
 // A change naming a setting this build does not serve is refused whole:
@@ -201,7 +340,7 @@ async fn a_repeated_change_answers_its_first_result() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(first, admissions(true, false));
+    assert_eq!(first, admissions(true, false, 1));
 
     svc.update_login_settings(from(personal(false), &token, Some("turn-off")))
         .await
@@ -213,7 +352,7 @@ async fn a_repeated_change_answers_its_first_result() {
         .unwrap()
         .into_inner();
     assert_eq!(repeated, first);
-    assert_eq!(read(&svc, &token).await, admissions(false, false));
+    assert_eq!(read(&svc, &token).await, admissions(false, false, 2));
 
     let reused = svc
         .update_login_settings(from(personal(false), &token, Some("turn-on")))

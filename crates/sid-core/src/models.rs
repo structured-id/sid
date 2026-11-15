@@ -43,6 +43,7 @@ pub mod durable_work;
 pub mod email_provider;
 pub mod enforcement;
 pub mod enterprise_registration;
+pub mod entry_connection;
 pub mod event;
 pub mod incident;
 pub mod instance_secret;
@@ -81,7 +82,8 @@ pub mod security_policy;
 pub mod service_binding;
 pub mod session;
 pub mod session_end;
-pub mod site_registration;
+pub mod site_enrollment;
+pub mod status_policy;
 pub mod upstream_identity;
 pub mod upstream_provider;
 pub mod username;
@@ -158,6 +160,7 @@ pub use email_provider::{
 };
 pub use enforcement::{EnforcementAction, EnforcementDecision, PolicyViolation, RequiredAction};
 pub use enterprise_registration::{EnterpriseId, EnterpriseRegistration};
+pub use entry_connection::{ClientCredential, ConnectionOwner, EntryConnection, EntryHandle};
 pub use event::{
     EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EVENT_RELAY_ATTEMPTS, EVENT_RELAY_KIND, Event,
     EventDelivery, EventFamily, EventFanout, EventFilter, EventRoute, RequiredReceiver,
@@ -173,7 +176,7 @@ pub use invite::{
     InviteStatus, generate_invite_code, normalize_invite_code,
 };
 pub use ip_reputation::IpReputation;
-pub use login_settings::LoginSettings;
+pub use login_settings::{AdmittedSources, LoginSettings, MAX_ADMITTED_SOURCES, Origin};
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,
     MachineOwner, MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId,
@@ -276,7 +279,8 @@ pub use session_end::{
     SESSION_REVOCATION_ATTEMPTS, SESSION_REVOCATION_KIND, SESSION_REVOCATION_WINDOW, SessionEnd,
     SessionRevocation,
 };
-pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
+pub use site_enrollment::SiteEnrollment;
+pub use status_policy::{OfflineLimits, StatusEvidence, StatusPolicy, StatusRequirement};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{
     ProviderTrustCategory, UpstreamProtocol, UpstreamProvider, UpstreamProviderId,

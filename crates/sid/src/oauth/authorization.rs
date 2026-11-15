@@ -165,6 +165,30 @@ impl PendingAuthorization {
         self.state.as_deref()
     }
 
+    /// What this request asks of the sign-in at `now` (OpenID Connect Core
+    /// 1.0 §3.1.2.1): the highest level `acr_values` names, and how recent
+    /// an authentication must be. `prompt=login` asks for one after the
+    /// request arrived and `max_age` for one within its seconds, both
+    /// counted from arrival as the authorization counts them.
+    pub fn sign_in_requirements(&self, now: DateTime<Utc>) -> SignInRequirements {
+        let elapsed = (now - self.arrived_at).to_std().unwrap_or_default();
+        let login = self
+            .prompt
+            .as_deref()
+            .is_some_and(|p| p.split_whitespace().any(|v| v == "login"))
+            .then_some(elapsed);
+        let max_age = self.max_age.map(|seconds| {
+            std::time::Duration::from_secs(u64::from(seconds)).saturating_sub(elapsed)
+        });
+        SignInRequirements {
+            acr: self.acr_values.as_deref().and_then(requested_acr),
+            max_age: match (login, max_age) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
     /// The request as the typed RPC carries it.
     pub fn request(&self) -> OAuth2AuthorizeRequest {
         OAuth2AuthorizeRequest {
@@ -184,6 +208,15 @@ impl PendingAuthorization {
             request_uri: None,
         }
     }
+}
+
+/// What a kept authorization request asks of the sign-in it waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SignInRequirements {
+    /// The level asked for, if any the installation knows.
+    pub acr: Option<AuthLevel>,
+    /// How recent the authentication must be now, if a limit is asked.
+    pub max_age: Option<std::time::Duration>,
 }
 
 /// What the browser endpoint answers an authorization request with.
@@ -343,6 +376,18 @@ impl OAuth {
                 AuthorizationError::Internal
             })?;
         auth_code.request_origin = origin;
+        // Made now, while the session that authorizes the code stands, and
+        // kept with the code: its redemption carries it and nothing else
+        // does.
+        auth_code.presentation = self
+            .presentation_for(
+                issuer,
+                client,
+                profile_id,
+                validated.nonce.as_deref(),
+                &validated.redirect_uri,
+            )
+            .await?;
         let mut ctx: MutationContext = AuditEntry::user(
             profile_id.to_string(),
             "auth_code.create",
@@ -636,6 +681,18 @@ impl Authorizations {
             issuer: issuer.canonical_url,
             client_name: client.client_name,
         })
+    }
+
+    /// What the kept request `authorization_request` continues asks of the
+    /// sign-in now, checked as [`Self::sign_in_context`] checks it and read,
+    /// not taken.
+    pub async fn sign_in_requirements(
+        &self,
+        oauth: &OAuth,
+        authorization_request: &str,
+    ) -> Result<SignInRequirements, AuthorizationError> {
+        let (_, kept, _, _) = self.kept(oauth, authorization_request, None).await?;
+        Ok(kept.sign_in_requirements(Utc::now()))
     }
 
     /// The user declined to sign in for the kept request

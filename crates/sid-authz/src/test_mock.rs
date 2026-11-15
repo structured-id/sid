@@ -299,6 +299,108 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
+    async fn entry_connection(
+        &self,
+        _: sid_core::models::EntryHandle,
+    ) -> Result<Option<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn entry_connection_of_issuer(
+        &self,
+        _: &str,
+    ) -> Result<Option<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn list_entry_connections(&self) -> Result<Vec<sid_core::models::EntryConnection>> {
+        unimplemented!()
+    }
+    async fn create_entry_connection(
+        &self,
+        _: &sid_core::models::EntryConnection,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn update_entry_connection(
+        &self,
+        _: &sid_core::models::EntryConnection,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn remove_entry_connection(
+        &self,
+        _: sid_core::models::EntryHandle,
+        _: u64,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
+    async fn apply_platform_cas(
+        &self,
+        _: &sid_plugin::platform_ca::PlatformCaSet,
+        _: MutationContext,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::Applied,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn record_platform_ca_status(
+        &self,
+        _: &[sid_plugin::platform_ca::GenerationStatus],
+        _: MutationContext,
+    ) -> std::result::Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn held_platform_cas(
+        &self,
+        _: i64,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::HeldAnchors,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn record_issuer_status(
+        &self,
+        _: &sid_plugin::platform_ca::IssuerStatus,
+        _: MutationContext,
+    ) -> std::result::Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+    async fn held_issuer_status(
+        &self,
+        _: &[u8; 32],
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::AnchorStatus,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn export_platform_cas(
+        &self,
+    ) -> std::result::Result<
+        sid_plugin::platform_ca::PlatformCaArchive,
+        sid_plugin::platform_ca::PlatformCaError,
+    > {
+        unimplemented!()
+    }
+    async fn import_platform_cas(
+        &self,
+        _: &sid_plugin::platform_ca::PlatformCaArchive,
+        _: MutationContext,
+    ) -> std::result::Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::InstanceSecretStore for MockStorage {
     async fn get_instance_secret(
         &self,
@@ -2247,6 +2349,17 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {
+        unimplemented!()
+    }
+    async fn site_enrollment(&self) -> Result<Option<sid_core::models::SiteEnrollment>> {
+        unimplemented!()
+    }
+    async fn set_site_enrollment(
+        &self,
+        _: &sid_core::models::SiteEnrollment,
+        _: Option<&sid_core::models::SiteEnrollment>,
+        _: MutationContext,
+    ) -> Result<bool> {
         unimplemented!()
     }
     async fn set_login_settings(

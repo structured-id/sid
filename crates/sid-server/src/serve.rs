@@ -33,6 +33,9 @@ use sid_proto::sid::v1::test_service_server::TestServiceServer;
 use sid_proto::sid::v1::{
     admin_service_server::AdminServiceServer, auth_service_server::AuthServiceServer,
     authz_service_server::AuthzServiceServer, branding_service_server::BrandingServiceServer,
+    entry_connection_service_server::EntryConnectionServiceServer,
+    federated_entry_service_server::FederatedEntryServiceServer,
+    federation_site_service_server::FederationSiteServiceServer,
     flow_action_service_server::FlowActionServiceServer,
     flow_config_service_server::FlowConfigServiceServer,
     identity_service_server::IdentityServiceServer,
@@ -136,6 +139,31 @@ impl CeServices {
             .add(AccountServiceServer::from_arc(c.account_svc.clone()))
             .await
             .add(UpstreamServiceServer::from_arc(c.upstream_svc.clone()))
+            .await
+            .add(EntryConnectionServiceServer::new(
+                crate::grpc::entry_connection_service::EntryConnectionServiceImpl::new(
+                    c.entry_connections.clone(),
+                    c.jwt.clone(),
+                    c.revocation_cache.clone(),
+                ),
+            ))
+            .await
+            .add(FederatedEntryServiceServer::new(federated_entry(c)?))
+            .await
+            // Built here, after a host has set the recipient side its
+            // composition verifies with.
+            .add(FederationSiteServiceServer::new(
+                crate::grpc::federation_site_service::FederationSiteServiceImpl::new(
+                    std::sync::Arc::new(sid::federation_site::FederationSite::new(
+                        c.storage.clone(),
+                        c.key_manager.clone(),
+                        c.identities.clone(),
+                        c.organization.id,
+                    )),
+                    c.jwt.clone(),
+                    c.revocation_cache.clone(),
+                ),
+            ))
             .await
             .add(SystemIntegrationServiceServer::new(
                 crate::grpc::system_integration_service::SystemIntegrationServiceImpl::new(
@@ -244,6 +272,41 @@ impl CeServices {
         let _ = descriptors;
         self.add(svc).await
     }
+}
+
+/// The federated entry over `c`: every entry reads its connection from the
+/// store, and its pending state is held there too, so an entry started on
+/// one replica finishes on another with or without the cache. It accepts a
+/// presented identity with `c.identities`, which a host may have replaced.
+pub fn federated_entry(
+    c: &CeComponents,
+) -> anyhow::Result<crate::grpc::federated_entry_service::FederatedEntryServiceImpl> {
+    use sid_authn::federated_entry::FederatedEntry;
+    let http = sid_plugin::client_builder()
+        .map_err(|e| anyhow::anyhow!("entry connection issuer client: {e}"))?
+        .build()
+        .map_err(|e| anyhow::anyhow!("entry connection issuer client: {e}"))?;
+    let ceremonies: std::sync::Arc<dyn sid_plugin::CeremonyStateStore> = c.storage.clone();
+    let (keys, cookie) = (c.key_manager.clone(), c.auth_svc.browser_cookie().clone());
+    let entries: crate::grpc::federated_entry_service::Entries =
+        std::sync::Arc::new(move |trusted| {
+            FederatedEntry::new(
+                trusted,
+                http.clone(),
+                ceremonies.clone(),
+                keys.clone(),
+                cookie.clone(),
+            )
+        });
+    Ok(
+        crate::grpc::federated_entry_service::FederatedEntryServiceImpl::new(
+            entries,
+            c.entry_connections.clone(),
+            c.storage.clone(),
+            c.auth_svc.clone(),
+            c.identities.clone(),
+        ),
+    )
 }
 
 /// The URL the SCIM endpoint is served under (its `/scim/v2` paths follow).

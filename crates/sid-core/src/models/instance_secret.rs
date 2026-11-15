@@ -13,6 +13,10 @@ pub enum InstanceSecret {
     /// Token that makes its holder the first administrator. Exists only
     /// while the instance has no administrator; claiming it removes it.
     AdminClaim,
+    /// The private key of the installation's site in the federation
+    /// (PKCS#8). The platform enrolls its public half; the site signs with
+    /// it what it states about itself. Every replica signs as the one site.
+    FederationSiteKey,
 }
 
 impl InstanceSecret {
@@ -22,6 +26,7 @@ impl InstanceSecret {
             Self::OpaqueServerSetup => "opaque_server_setup",
             Self::CaptchaKey => "captcha_key",
             Self::AdminClaim => "admin_claim",
+            Self::FederationSiteKey => "federation_site_key",
         }
     }
 }

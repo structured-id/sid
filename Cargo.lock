@@ -6300,15 +6300,23 @@ dependencies = [
  "der 0.8.3",
  "hex",
  "p256",
+ "rand 0.10.3",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sid-core",
+ "sid-plugin",
+ "sid-storage",
  "structured-asn1",
  "structured-pkix",
  "subtle",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
  "uuid",
  "x509-cert",
+ "zeroize",
 ]
 
 [[package]]
@@ -7337,9 +7345,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "structured-asn1"
-version = "0.21.4"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a70ff47de2a40f540bcea31a65a01dbfa76adc0544f8f14de4f7e585dba43dda"
+checksum = "fa839e1d1c947eb93fe77571adb4c812d563b6dcfdcd0db3c7aba6df89be2171"
 dependencies = [
  "allocator-api2 0.2.21",
  "allocator-api2 0.4.0",
@@ -7384,6 +7392,7 @@ dependencies = [
  "sid-authz",
  "sid-core",
  "sid-crypto",
+ "sid-fed",
  "sid-ids",
  "sid-ids-proto",
  "sid-keys",
@@ -7404,9 +7413,9 @@ dependencies = [
 
 [[package]]
 name = "structured-pkix"
-version = "0.21.4"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d04a9461ba4cad509fff870a8b9fc5466c10443a81a61cafac958f90f43cac0f"
+checksum = "7493a8f243bb81c16bae3338bc5c992f34bc038b5774658eb7986410fba74f9d"
 dependencies = [
  "structured-asn1",
  "structured-email-address",

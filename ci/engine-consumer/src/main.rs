@@ -891,6 +891,7 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
         maintenance,
     } = CeWork::assemble(CeWorkParts {
         storage: storage.clone(),
+        organization: installation.organization.id,
         issuers: installation.issuers.clone(),
         revocation: installation.revocation_cache.clone(),
         event_bus: Arc::new(sid_plugin::event_bus::InProcessEventBus::new()),

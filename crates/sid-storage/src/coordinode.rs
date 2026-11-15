@@ -29,6 +29,7 @@ mod credential;
 mod device;
 mod directory;
 mod enrollment;
+mod entry_connection;
 mod flow;
 mod history;
 mod history_keys;
@@ -41,6 +42,7 @@ mod lifecycle;
 mod login_policy;
 mod machine;
 mod operation;
+mod platform_ca;
 mod principal;
 mod profile;
 mod project;
@@ -51,6 +53,7 @@ mod schema;
 mod scim;
 mod session;
 mod signals;
+mod site_enrollment;
 mod work;
 
 #[cfg(test)]

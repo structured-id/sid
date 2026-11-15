@@ -40,6 +40,9 @@ pub struct PurposeProfile {
     pub key_association: ObjectIdentifier,
     /// `id-sid-agent-part`: an agent part's credential.
     pub agent_part: ObjectIdentifier,
+    /// `id-sid-federation-participant`: an enrolled site's own statements
+    /// about whom it admits; it issues no certificate.
+    pub federation_participant: ObjectIdentifier,
 }
 
 /// The temporary allocation of development installations, continuing the
@@ -50,6 +53,7 @@ pub const DEVELOPMENT_PURPOSES: PurposeProfile = PurposeProfile {
     agent_member_issuer: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.2.8"),
     key_association: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.2.9"),
     agent_part: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.2.10"),
+    federation_participant: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.2.11"),
 };
 
 /// The registered structured.id allocation: none until the enterprise number
@@ -88,19 +92,24 @@ pub enum Issued {
     PersonalPassport,
     /// A Corporate passport: issued for a source organization.
     CorporatePassport,
+    /// An enrolled site's participant certificate.
+    FederationParticipant,
 }
 
 impl IssuerRole {
     /// The SID issuance transitions: the platform intermediate issues
-    /// organization authorities and Personal passports; an organization's
-    /// authority issues its Corporate passports and an agent candidate
-    /// authority. Nothing else.
+    /// organization authorities, Personal passports and the participant
+    /// certificates of enrolled sites; an organization's authority issues
+    /// its Corporate passports and an agent candidate authority. Nothing
+    /// else: an organization cannot confer platform membership.
     pub fn may_issue(self, issued: Issued) -> bool {
         matches!(
             (self, issued),
             (
                 Self::PlatformIntermediate,
-                Issued::Ca(Self::OrganizationCa) | Issued::PersonalPassport
+                Issued::Ca(Self::OrganizationCa)
+                    | Issued::PersonalPassport
+                    | Issued::FederationParticipant
             ) | (
                 Self::OrganizationCa,
                 Issued::CorporatePassport | Issued::Ca(Self::AgentMemberIssuer)
@@ -121,14 +130,41 @@ impl PurposeProfile {
         }
     }
 
-    fn identifiers(&self) -> [ObjectIdentifier; 5] {
+    fn identifiers(&self) -> [ObjectIdentifier; 6] {
         [
             self.platform_intermediate,
             self.organization_ca,
             self.agent_member_issuer,
             self.key_association,
             self.agent_part,
+            self.federation_participant,
         ]
+    }
+
+    /// The extended key usage of an enrolled site's participant certificate.
+    pub fn participant_usage(&self) -> ExtendedKeyUsage {
+        ExtendedKeyUsage(vec![self.federation_participant])
+    }
+
+    /// Whether `certificate` is for the participant purpose and no other:
+    /// exactly that one extended key usage. An absent usage, another SID
+    /// purpose or a general one beside it is not a participant certificate.
+    /// A development purpose read under another profile is refused.
+    pub fn is_participant(&self, certificate: &Certificate) -> Result<bool, PurposeError> {
+        let usages = usages(certificate)?;
+        self.refuse_development(&usages)?;
+        Ok(usages == [self.federation_participant])
+    }
+
+    fn refuse_development(&self, usages: &[ObjectIdentifier]) -> Result<(), PurposeError> {
+        if *self != DEVELOPMENT_PURPOSES
+            && usages
+                .iter()
+                .any(|oid| DEVELOPMENT_PURPOSES.identifiers().contains(oid))
+        {
+            return Err(PurposeError::DevelopmentPurpose);
+        }
+        Ok(())
     }
 
     fn shares_identifiers_with(&self, other: &Self) -> bool {
@@ -159,13 +195,7 @@ impl PurposeProfile {
     /// purpose read under another profile is refused.
     pub fn issuer_roles(&self, certificate: &Certificate) -> Result<Vec<IssuerRole>, PurposeError> {
         let usages = usages(certificate)?;
-        if *self != DEVELOPMENT_PURPOSES
-            && usages
-                .iter()
-                .any(|oid| DEVELOPMENT_PURPOSES.identifiers().contains(oid))
-        {
-            return Err(PurposeError::DevelopmentPurpose);
-        }
+        self.refuse_development(&usages)?;
         Ok(usages
             .iter()
             .filter_map(|oid| {

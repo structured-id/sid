@@ -4359,6 +4359,20 @@ impl StorageBackend for PostgresBackend {
         self.import_login_settings_impl(settings, ctx).await
     }
 
+    async fn site_enrollment(&self) -> SidResult<Option<sid_core::models::SiteEnrollment>> {
+        self.site_enrollment_impl().await
+    }
+
+    async fn set_site_enrollment(
+        &self,
+        enrollment: &sid_core::models::SiteEnrollment,
+        expected: Option<&sid_core::models::SiteEnrollment>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_site_enrollment_impl(enrollment, expected, ctx)
+            .await
+    }
+
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         Self::login_policy_epoch(&self.pool).await
     }
@@ -9854,12 +9868,15 @@ mod device_auth;
 mod directory;
 mod history_keys;
 pub use history_keys::PgHistoryKeyStore;
+mod entry_connection;
 mod instance_secret;
 mod job_lock;
 mod login_policy;
 mod machine_credential;
 mod native_session;
 mod operation;
+mod platform_ca;
+mod site_enrollment;
 pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;

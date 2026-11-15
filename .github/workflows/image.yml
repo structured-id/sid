@@ -28,6 +28,15 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/structured-id/sid
+  # The platform these images are made for, compiled into the server with
+  # that platform's CA set, fetched below from its publication: the server
+  # verifies under it from its first start, and asks this platform, and no
+  # other, for a newer one. A published image is a release, made for
+  # production. A pull request only proves the image builds and publishes
+  # nothing, so it is made for no platform: the development platform is
+  # reachable only from inside its network, where its own builds are made.
+  SID_BUILD_PLATFORM: ${{ github.event_name != 'pull_request' && 'https://structured.id' || '' }}
+  SID_BUILD_PLATFORM_CAS: ${{ github.event_name != 'pull_request' && format('{0}/platform-cas.json', github.workspace) || '' }}
 
 jobs:
   build:
@@ -69,6 +78,19 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+      # No redirect is followed and only the publication's JSON is taken: a
+      # platform that does not publish its set stops the build, so no image
+      # goes out without the certificates it verifies under.
+      - name: Platform CA set
+        if: steps.scope.outputs.run == 'true' && env.SID_BUILD_PLATFORM != ''
+        run: |
+          type="$(curl --fail --silent --show-error --max-time 30 \
+            --output "$SID_BUILD_PLATFORM_CAS" --write-out '%{content_type}' \
+            "$SID_BUILD_PLATFORM/.well-known/sid-ca/index.json")"
+          case "$type" in
+            application/json*) ;;
+            *) echo "::error::$SID_BUILD_PLATFORM publishes no platform CA set (answered $type)"; exit 1 ;;
+          esac
       # The CE image packs a binary built on the runner (Dockerfile copies
       # target/release/sid); the embedded image compiles inside its build.
       - name: Latest stable toolchain
@@ -100,6 +122,10 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
+          # The embedded image compiles inside its build; the CE image packs
+          # the binary the step above built under the same value.
+          build-args: |
+            SID_BUILD_PLATFORM=${{ env.SID_BUILD_PLATFORM }}
           # A pull request only proves the image builds; a release pushes it
           # untagged, by digest, for the manifest job below.
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}

@@ -42,6 +42,17 @@ COPY proto/ proto/
 # not load without it, whatever the feature selection.
 COPY zkpp/ zkpp/
 
+# The platform the build is made for, compiled into the binary with that
+# platform's CA set: the build that publishes the image names the platform
+# and fetches the set into the context as platform-cas.json. Without a
+# platform the binary names none and carries no set.
+ARG SID_BUILD_PLATFORM
+ENV SID_BUILD_PLATFORM=${SID_BUILD_PLATFORM}
+ENV SID_BUILD_PLATFORM_CAS=${SID_BUILD_PLATFORM:+/build/platform-cas.json}
+# The bracket makes the copy match nothing, and succeed, when no set was
+# fetched.
+COPY platform-cas.jso[n] ./
+
 # Build embedded mode: SQLite backend, REST beside gRPC (`http`), no
 # telemetry. The event bus is the in-process one: required work lives in
 # SQLite and the work runner executes it, so the image carries no broker.

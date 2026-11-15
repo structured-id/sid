@@ -30,6 +30,7 @@ fn make_code(expires_in: Duration, used: bool) -> AuthorizationCode {
         used,
         session_id: None,
         request_origin: None,
+        presentation: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn test_exchange_valid_code_consumes_self() {
         used: false,
         session_id: None,
         request_origin: None,
+        presentation: None,
     };
 
     let exchanged = code.exchange().expect("exchange should succeed");
@@ -136,6 +138,7 @@ fn test_exchanged_code_reads_without_a_copy_profile_id() {
         used: false,
         session_id: None,
         request_origin: None,
+        presentation: None,
     };
     let exchanged = code.exchange().expect("exchange should succeed");
     assert_eq!(exchanged.client_id(), "test-client");

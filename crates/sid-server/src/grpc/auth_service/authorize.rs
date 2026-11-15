@@ -123,6 +123,18 @@ impl AuthServiceImpl {
         .ok_or_else(|| authorization_refusal(AuthorizationError::NotWaiting))
     }
 
+    /// What the kept request `authorization_request` continues asks of the
+    /// sign-in now (its level and freshness), read without taking it.
+    pub async fn sign_in_requirements(
+        &self,
+        authorization_request: &str,
+    ) -> Result<sid::oauth::authorization::SignInRequirements, Status> {
+        self.authorizations
+            .sign_in_requirements(&self.oauth, authorization_request)
+            .await
+            .map_err(authorization_refusal)
+    }
+
     /// Keep the ordinary authorization `request` of a registered client for
     /// its browser to continue at the authorization endpoint (see
     /// [`sid::oauth::authorization::Authorizations::prepare`]): what a

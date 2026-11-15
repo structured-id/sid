@@ -11,7 +11,7 @@ use crate::issuer::IssuerRegistry;
 use crate::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use async_trait::async_trait;
 use sid_core::models::{
-    ClaimedWork, LOGOUT_DELIVERY_KIND, LogoutDelivery, NewWork, ProfileId, WorkKind,
+    ClaimedWork, LOGOUT_DELIVERY_KIND, LogoutDelivery, NewWork, OrgId, ProfileId, WorkKind,
 };
 use sid_plugin::StorageBackend;
 use std::sync::Arc;
@@ -34,15 +34,19 @@ pub struct BackChannelLogoutHandler {
     kind: WorkKind,
     issuers: Arc<IssuerRegistry>,
     storage: Arc<dyn StorageBackend>,
+    /// The organization that manages this installation's Profiles.
+    managing: OrgId,
     http: reqwest::Client,
 }
 
 impl BackChannelLogoutHandler {
     /// A handler issuing each logout token as the client's issuer, naming the
-    /// subject as the client's ID tokens did.
+    /// subject as the client's ID tokens did, in the installation whose
+    /// organization `managing` manages its Profiles.
     pub fn new(
         issuers: Arc<IssuerRegistry>,
         storage: Arc<dyn StorageBackend>,
+        managing: OrgId,
     ) -> Result<Self, sid_plugin::http::HttpClientError> {
         let http = sid_plugin::client_builder()?
             .timeout(DELIVERY_TIMEOUT)
@@ -51,6 +55,7 @@ impl BackChannelLogoutHandler {
             kind: WorkKind::new(LOGOUT_DELIVERY_KIND).expect("the logout kind is valid"),
             issuers,
             storage,
+            managing,
             http,
         })
     }
@@ -102,7 +107,7 @@ impl WorkHandler for BackChannelLogoutHandler {
         };
         // The subject is the one this client's ID tokens carried, under the
         // rule of the same hop.
-        let rule = match crate::subject::SubjectRule::for_hop(&issuer, &client) {
+        let rule = match crate::subject::SubjectRule::for_hop(&issuer, &client, self.managing) {
             Ok(rule) => rule,
             Err(e) => return WorkOutcome::Permanent(format!("subject rule: {e}")),
         };

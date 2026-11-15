@@ -44,6 +44,7 @@ pub struct MockStorageInner {
     access_requests: HashMap<sid_core::models::AccessRequestId, sid_core::models::AccessRequest>,
     email_provider: Option<sid_core::models::EmailProviderConfig>,
     login_settings: Option<sid_core::models::LoginSettings>,
+    site_enrollment: Option<sid_core::models::SiteEnrollment>,
     machine_users: HashMap<MachineUserId, sid_core::models::MachineUser>,
     machine_credentials: Vec<sid_core::models::MachineUserCredential>,
     provisioning_connectors: HashMap<ProvisioningConnectorId, ProvisioningConnector>,
@@ -1672,6 +1673,105 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
         }
         sid_plugin::SingleUseAdmissions::admit_for(&self.ceremonies, namespace, key, holder, ttl)
             .await
+    }
+}
+
+/// The double registers no entry connection: none is found, and a write is
+/// refused, so a test that needs one uses a real store.
+#[async_trait]
+impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
+    async fn entry_connection(
+        &self,
+        _handle: sid_core::models::EntryHandle,
+    ) -> SidResult<Option<sid_core::models::EntryConnection>> {
+        Ok(None)
+    }
+    async fn entry_connection_of_issuer(
+        &self,
+        _issuer: &str,
+    ) -> SidResult<Option<sid_core::models::EntryConnection>> {
+        Ok(None)
+    }
+    async fn list_entry_connections(&self) -> SidResult<Vec<sid_core::models::EntryConnection>> {
+        Ok(Vec::new())
+    }
+    async fn create_entry_connection(
+        &self,
+        _connection: &sid_core::models::EntryConnection,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        Err(sid_core::Error::Storage(
+            "the double keeps no entry connection".into(),
+        ))
+    }
+    async fn update_entry_connection(
+        &self,
+        _connection: &sid_core::models::EntryConnection,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        Ok(false)
+    }
+    async fn remove_entry_connection(
+        &self,
+        _handle: sid_core::models::EntryHandle,
+        _revision: u64,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        Ok(false)
+    }
+}
+
+/// The double holds no platform CA set: it reads as never provisioned and
+/// refuses every write, so a test that needs one uses a real store.
+#[async_trait]
+impl sid_plugin::platform_ca::PlatformCaStore for MockStorage {
+    async fn apply_platform_cas(
+        &self,
+        _set: &sid_plugin::platform_ca::PlatformCaSet,
+        _ctx: MutationContext,
+    ) -> Result<sid_plugin::platform_ca::Applied, sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn record_platform_ca_status(
+        &self,
+        _status: &[sid_plugin::platform_ca::GenerationStatus],
+        _ctx: MutationContext,
+    ) -> Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn held_platform_cas(
+        &self,
+        _now: i64,
+    ) -> Result<sid_plugin::platform_ca::HeldAnchors, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Err(sid_plugin::platform_ca::PlatformCaError::NotProvisioned)
+    }
+    async fn record_issuer_status(
+        &self,
+        _status: &sid_plugin::platform_ca::IssuerStatus,
+        _ctx: MutationContext,
+    ) -> Result<(), sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
+    }
+    async fn held_issuer_status(
+        &self,
+        _issuer: &[u8; 32],
+    ) -> Result<sid_plugin::platform_ca::AnchorStatus, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Ok(Default::default())
+    }
+    async fn export_platform_cas(
+        &self,
+    ) -> Result<sid_plugin::platform_ca::PlatformCaArchive, sid_plugin::platform_ca::PlatformCaError>
+    {
+        Ok(Default::default())
+    }
+    async fn import_platform_cas(
+        &self,
+        _archive: &sid_plugin::platform_ca::PlatformCaArchive,
+        _ctx: MutationContext,
+    ) -> Result<bool, sid_plugin::platform_ca::PlatformCaError> {
+        Err(sid_core::Error::Storage("the double keeps no platform CA set".into()).into())
     }
 }
 
@@ -6050,7 +6150,7 @@ impl StorageBackend for MockStorage {
         unimplemented!("instance transfer is tested against the real backends")
     }
     async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
-        Ok(self.inner.lock().unwrap().login_settings)
+        Ok(self.inner.lock().unwrap().login_settings.clone())
     }
     async fn set_login_settings(
         &self,
@@ -6062,7 +6162,7 @@ impl StorageBackend for MockStorage {
         if inner.login_settings.as_ref() != expected {
             return Ok(false);
         }
-        inner.login_settings = Some(*settings);
+        inner.login_settings = Some(settings.clone());
         inner.owe(&ctx)?;
         Ok(true)
     }
@@ -6072,6 +6172,24 @@ impl StorageBackend for MockStorage {
         _: MutationContext,
     ) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
+    }
+    async fn site_enrollment(&self) -> SidResult<Option<sid_core::models::SiteEnrollment>> {
+        Ok(self.inner.lock().unwrap().site_enrollment.clone())
+    }
+    async fn set_site_enrollment(
+        &self,
+        enrollment: &sid_core::models::SiteEnrollment,
+        expected: Option<&sid_core::models::SiteEnrollment>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        enrollment.check()?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.site_enrollment.as_ref() != expected {
+            return Ok(false);
+        }
+        inner.site_enrollment = Some(enrollment.clone());
+        inner.owe(&ctx)?;
+        Ok(true)
     }
     async fn export_login_policy_epoch(&self) -> SidResult<Option<i64>> {
         unimplemented!("instance transfer is tested against the real backends")

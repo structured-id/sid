@@ -68,6 +68,7 @@ pub enum ErrorReason {
     InviteNotFound,
     OrganizationNotFound,
     ProvisioningConnectorNotFound,
+    EntryConnectionNotFound,
 
     // UNAUTHENTICATED
     AuthenticationFailed,
@@ -95,6 +96,7 @@ pub enum ErrorReason {
     GroupAlreadyExists,
     PolicyAlreadyExists,
     AttestationAlreadyExists,
+    EntryConnectionAlreadyExists,
 
     // INVALID_ARGUMENT
     InvalidFieldValue,
@@ -148,7 +150,9 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every reason, for exhaustive checks against the proto enum.
-    pub const ALL: [ErrorReason; 85] = [
+    pub const ALL: [ErrorReason; 87] = [
+        Self::EntryConnectionNotFound,
+        Self::EntryConnectionAlreadyExists,
         Self::RoleAssignmentSetChanged,
         Self::CsrfTokenInvalid,
         Self::InviteNotFound,
@@ -311,6 +315,8 @@ impl ErrorReason {
             Self::InviteNotFound => "INVITE_NOT_FOUND",
             Self::OrganizationNotFound => "ORGANIZATION_NOT_FOUND",
             Self::ProvisioningConnectorNotFound => "PROVISIONING_CONNECTOR_NOT_FOUND",
+            Self::EntryConnectionNotFound => "ENTRY_CONNECTION_NOT_FOUND",
+            Self::EntryConnectionAlreadyExists => "ENTRY_CONNECTION_ALREADY_EXISTS",
             Self::AttestationAlreadyExists => "ATTESTATION_ALREADY_EXISTS",
             Self::GroupAlreadyExists => "GROUP_ALREADY_EXISTS",
             Self::PolicyAlreadyExists => "POLICY_ALREADY_EXISTS",
@@ -360,7 +366,8 @@ impl ErrorReason {
             | Self::FlowActionNotFound
             | Self::InviteNotFound
             | Self::OrganizationNotFound
-            | Self::ProvisioningConnectorNotFound => Code::NotFound,
+            | Self::ProvisioningConnectorNotFound
+            | Self::EntryConnectionNotFound => Code::NotFound,
 
             Self::AuthenticationFailed | Self::TokenExpired | Self::TokenInvalid => {
                 Code::Unauthenticated
@@ -384,7 +391,8 @@ impl ErrorReason {
             | Self::PrincipalAlreadyHeld
             | Self::GroupAlreadyExists
             | Self::PolicyAlreadyExists
-            | Self::AttestationAlreadyExists => Code::AlreadyExists,
+            | Self::AttestationAlreadyExists
+            | Self::EntryConnectionAlreadyExists => Code::AlreadyExists,
 
             Self::InvalidFieldValue | Self::RequiredFieldMissing | Self::PasswordProofInvalid => {
                 Code::InvalidArgument

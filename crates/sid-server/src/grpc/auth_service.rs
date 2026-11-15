@@ -649,6 +649,16 @@ impl AuthServiceImpl {
         self
     }
 
+    /// Make the proofs of this installation's own Profiles for sign-ins at
+    /// other organizations with `presentations`, the host's signer.
+    pub fn with_own_presentations(
+        mut self,
+        presentations: Arc<dyn sid::oauth::OwnPresentations>,
+    ) -> Self {
+        self.oauth.set_own_presentations(presentations);
+        self
+    }
+
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
     /// not enabled magic links. The answer does not depend on the address asked
     /// about.
@@ -928,11 +938,15 @@ impl AuthServiceImpl {
     /// its delivery sealed for a lost response: a repeat of the operation
     /// gets the same live session again, after the current checks, never a
     /// second one (the recoverable federation callback completion contract).
+    /// `admission` holds the session to the login settings an outside
+    /// identity was admitted under (see `SignIn::admitted_sign_in`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn complete_admitted_sign_in<T>(
         &self,
         request: &Request<T>,
         profile: &sid_core::models::Profile,
         assignment: sid_core::models::PrincipalAssignmentFence,
+        admission: Option<sid_core::models::ActorFence>,
         authentication: &sid_core::models::session::SessionAuthentication,
         client_id: &str,
         completion: Option<AdmittedCompletion<'_>>,
@@ -945,6 +959,7 @@ impl AuthServiceImpl {
                 self.oauth.login_policy(),
                 profile,
                 assignment,
+                admission,
                 authentication,
                 client_id,
                 completion,

@@ -167,6 +167,8 @@ async fn code<H: GrantHarness>(
         // Issued from a kept request: every case that stores, redeems,
         // exports or imports a code carries its origin too.
         request_origin: Some(sid_core::models::RequestOrigin::generate()),
+        // And the holder's proof made for its sign-in: bytes kept as given.
+        presentation: Some(br#"{"payload":"e30","signatures":[]}"#.to_vec()),
     }
 }
 

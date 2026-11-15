@@ -295,7 +295,8 @@ impl TestIssuer {
                 revocation.clone(),
                 audit_log,
             )
-            .with_service_tokens(service_tokens)
+            // The test installation's issuer serves its own organization.
+            .with_service_tokens(service_tokens, issuer.recipient_org)
             .with_request_verifiers(verifiers),
         );
         let auth = auth_service(

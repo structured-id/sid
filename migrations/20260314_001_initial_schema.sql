@@ -440,9 +440,102 @@ CREATE TABLE login_settings (
     scope text NOT NULL,
     allow_personal_profiles boolean NOT NULL,
     allow_foreign_corporate_profiles boolean NOT NULL,
+    admitted_sources uuid[] NOT NULL,
+    status_policy bytea NOT NULL,
+    revision bigint NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT login_settings_status_policy_check CHECK ((octet_length(status_policy) = 20)),
+    CONSTRAINT login_settings_revision_check CHECK ((revision >= 0)),
     CONSTRAINT login_settings_scope_check CHECK ((scope = 'installation'::text)),
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
+);
+
+-- The certificate the platform issued for this installation's site, and the
+-- certificates above it: each behind its four-byte length, in order.
+CREATE TABLE site_enrollment (
+    scope text NOT NULL,
+    certificate bytea NOT NULL,
+    chain bytea NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT site_enrollment_certificate_check CHECK ((octet_length(certificate) > 0)),
+    CONSTRAINT site_enrollment_scope_check CHECK ((scope = 'installation'::text)),
+    CONSTRAINT site_enrollment_pkey PRIMARY KEY (scope)
+);
+
+CREATE TABLE entry_connections (
+    handle uuid NOT NULL,
+    owner text NOT NULL,
+    name text NOT NULL,
+    issuer text NOT NULL,
+    source uuid,
+    recipient_issuer uuid NOT NULL,
+    callback text NOT NULL,
+    client_id text NOT NULL,
+    credential_method text NOT NULL,
+    credential bytea NOT NULL,
+    enabled boolean NOT NULL,
+    revision bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT entry_connections_owner_check CHECK ((owner = ANY (ARRAY['provisioning'::text, 'administration'::text]))),
+    CONSTRAINT entry_connections_credential_method_check CHECK ((credential_method = 'client_secret_basic'::text)),
+    CONSTRAINT entry_connections_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT entry_connections_pkey PRIMARY KEY (handle),
+    CONSTRAINT entry_connections_issuer_key UNIQUE (issuer)
+);
+
+CREATE TABLE ca_issuer_revoked (
+    issuer bytea NOT NULL,
+    serial bytea NOT NULL,
+    CONSTRAINT ca_issuer_revoked_issuer_check CHECK ((octet_length(issuer) = 32)),
+    CONSTRAINT ca_issuer_revoked_pkey PRIMARY KEY (issuer, serial)
+);
+
+CREATE TABLE ca_issuer_status (
+    issuer bytea NOT NULL,
+    number bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT ca_issuer_status_issuer_check CHECK ((octet_length(issuer) = 32)),
+    CONSTRAINT ca_issuer_status_number_check CHECK ((number >= 0)),
+    CONSTRAINT ca_issuer_status_pkey PRIMARY KEY (issuer)
+);
+
+CREATE TABLE platform_ca_generations (
+    generation bigint NOT NULL,
+    certificate bytea NOT NULL,
+    state smallint NOT NULL,
+    overlap_end bigint,
+    listed_in bigint NOT NULL,
+    CONSTRAINT platform_ca_generations_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_generations_state_check CHECK ((state = ANY (ARRAY[0, 1, 2]))),
+    CONSTRAINT platform_ca_generations_pkey PRIMARY KEY (generation)
+);
+
+CREATE TABLE platform_ca_revoked (
+    generation bigint NOT NULL,
+    serial bytea NOT NULL,
+    CONSTRAINT platform_ca_revoked_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_revoked_pkey PRIMARY KEY (generation, serial)
+);
+
+CREATE TABLE platform_ca_set (
+    id smallint NOT NULL,
+    revision bigint NOT NULL,
+    issued_at bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT platform_ca_set_id_check CHECK ((id = 1)),
+    CONSTRAINT platform_ca_set_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT platform_ca_set_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE platform_ca_status (
+    generation bigint NOT NULL,
+    certificate bytea NOT NULL,
+    number bigint NOT NULL,
+    next_update bigint NOT NULL,
+    CONSTRAINT platform_ca_status_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT platform_ca_status_number_check CHECK ((number >= 0)),
+    CONSTRAINT platform_ca_status_pkey PRIMARY KEY (generation)
 );
 
 CREATE TABLE magic_link_sessions (
@@ -1379,6 +1472,7 @@ CREATE TABLE authorization_codes (
     elevation_level text,
     elevation_until timestamp with time zone,
     request_origin uuid,
+    presentation bytea,
     CONSTRAINT authorization_codes_pkey PRIMARY KEY (code_hash),
     CONSTRAINT authorization_codes_authorizing_session_id_fkey FOREIGN KEY (authorizing_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     CONSTRAINT authorization_codes_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,

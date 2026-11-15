@@ -12,9 +12,13 @@ use prost::Message;
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
-use sid_core::models::{AuditEntry, LoginSettings, MutationContext, OperationContext};
+use sid_core::models::{
+    AdmittedSources, AuditEntry, LoginSettings, MAX_ADMITTED_SOURCES, MutationContext,
+    OfflineLimits, OperationContext, StatusPolicy, StatusRequirement,
+};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::realm_service as keyed;
+use sid_proto::sid::v1::admin as wire;
 use sid_proto::sid::v1::admin::{LoginSettings as LoginSettingsView, UpdateLoginSettingsRequest};
 
 /// How many times a change is decided again when another change lands
@@ -38,6 +42,9 @@ pub enum LoginSettingsError {
     /// The change names a setting this build does not serve.
     #[error("{0} is not served by this build")]
     NotServed(&'static str),
+    /// A field of the change is not a value its setting takes.
+    #[error("{field}: {reason}")]
+    InvalidField { field: &'static str, reason: String },
     /// Other changes kept landing between this one's read and its write.
     #[error("the login settings kept changing")]
     Contended,
@@ -55,14 +62,105 @@ impl From<CommandError<LoginSettingsError>> for LoginSettingsError {
     }
 }
 
-/// The settings as an administrator reads them: the two admissions, and no
-/// value for a setting this build does not serve.
-fn view(settings: LoginSettings) -> LoginSettingsView {
+/// The settings as an administrator reads them: the two admissions, the
+/// admitted source organizations and the revision, and no value for a
+/// setting this build does not serve.
+fn view(settings: &LoginSettings) -> LoginSettingsView {
     LoginSettingsView {
         allow_personal_profiles: settings.allow_personal_profiles,
         allow_foreign_corporate_profiles: settings.allow_foreign_corporate_profiles,
+        admitted_source_organizations: settings
+            .admitted_sources
+            .as_slice()
+            .iter()
+            .map(|id| sid_ids_proto::OrgId::from(*id))
+            .collect(),
+        revision: settings.revision,
+        status_policy: Some(policy_view(settings.status_policy)),
         ..LoginSettingsView::default()
     }
+}
+
+/// The status policy as an administrator reads it.
+fn policy_view(policy: StatusPolicy) -> wire::StatusPolicy {
+    let requirement = |requirement: StatusRequirement| wire::StatusRequirement {
+        offline: match requirement {
+            StatusRequirement::Fresh => None,
+            StatusRequirement::Offline(limits) => Some(wire::OfflineStatusLimits {
+                missing: limits.missing,
+                max_stale_seconds: limits.max_stale,
+            }),
+        },
+    };
+    wire::StatusPolicy {
+        issuer: Some(requirement(policy.issuer)),
+        authorities: Some(requirement(policy.authorities)),
+    }
+}
+
+/// The field of a change that replaces the status policy.
+const POLICY_FIELD: &str = "status_policy";
+
+/// The status policy `req` replaces the stored one with; `None` when it
+/// keeps the stored one. A change names both requirements: one left out is
+/// not read as the strict one or as the stored one.
+fn replacement_policy(
+    req: &UpdateLoginSettingsRequest,
+) -> Result<Option<StatusPolicy>, LoginSettingsError> {
+    let Some(policy) = &req.status_policy else {
+        return Ok(None);
+    };
+    let requirement = |given: &Option<wire::StatusRequirement>, name: &str| {
+        let given = given
+            .as_ref()
+            .ok_or_else(|| LoginSettingsError::InvalidField {
+                field: POLICY_FIELD,
+                reason: format!("{name} is required"),
+            })?;
+        Ok::<_, LoginSettingsError>(match &given.offline {
+            None => StatusRequirement::Fresh,
+            Some(limits) => StatusRequirement::Offline(OfflineLimits {
+                missing: limits.missing,
+                max_stale: limits.max_stale_seconds,
+            }),
+        })
+    };
+    Ok(Some(StatusPolicy {
+        issuer: requirement(&policy.issuer, "issuer")?,
+        authorities: requirement(&policy.authorities, "authorities")?,
+    }))
+}
+
+/// The field of a change that replaces the admitted source organizations.
+const SOURCES_FIELD: &str = "admitted_source_organizations";
+
+/// The complete set of source organizations `req` replaces the stored one
+/// with; `None` when it keeps the stored set. Every id is validated before
+/// anything is read or written.
+fn replacement_sources(
+    req: &UpdateLoginSettingsRequest,
+) -> Result<Option<AdmittedSources>, LoginSettingsError> {
+    let Some(replacement) = &req.admitted_source_organizations else {
+        return Ok(None);
+    };
+    let invalid = |reason: String| LoginSettingsError::InvalidField {
+        field: SOURCES_FIELD,
+        reason,
+    };
+    // The bound is checked on what was sent, before any id is decoded.
+    if replacement.organizations.len() > MAX_ADMITTED_SOURCES {
+        return Err(invalid(format!(
+            "at most {MAX_ADMITTED_SOURCES} organizations"
+        )));
+    }
+    let ids = replacement
+        .organizations
+        .iter()
+        .map(|id| crate::wire::wire_id(Some(id), SOURCES_FIELD).map_err(|e| invalid(e.reason)))
+        .collect::<Result<Vec<_>, _>>()?;
+    AdmittedSources::try_from(ids)
+        .map(Some)
+        .map_err(|e| invalid(e.to_string()))
 }
 
 /// The first setting `req` names that this build does not serve.
@@ -102,14 +200,16 @@ impl LoginSettingsAdmin {
     /// The settings in force, for an administrator.
     pub async fn settings(&self, caller: &Caller) -> Result<LoginSettingsView, LoginSettingsError> {
         caller.require_admin()?;
-        Ok(view(in_force(self.storage.as_ref()).await?))
+        Ok(view(&in_force(self.storage.as_ref()).await?))
     }
 
-    /// Change the settings `req` names and keep the others as stored. A
-    /// change of one admission never overwrites a concurrent change of the
-    /// other: it is written against the settings it read, and decided again
-    /// when those changed. A retry of a completed change answers with the
-    /// settings that change left and never writes them over a later change.
+    /// Change the settings `req` names and keep the others as stored; the
+    /// admitted source organizations are replaced whole when named. A change
+    /// of one setting never overwrites a concurrent change of another: it is
+    /// written against the settings it read, and decided again when those
+    /// changed. Every change that lands is the next revision. A retry of a
+    /// completed change answers with the settings that change left and never
+    /// writes them over a later change.
     pub async fn update(
         &self,
         caller: &Caller,
@@ -120,6 +220,8 @@ impl LoginSettingsAdmin {
         if let Some(setting) = unserved(&req) {
             return Err(LoginSettingsError::NotServed(setting));
         }
+        let sources = replacement_sources(&req)?;
+        let policy = replacement_policy(&req)?;
         let command = KeyedCommand::by_profile::<keyed::UpdateLoginSettings>(
             caller.profile_id,
             operation,
@@ -129,16 +231,28 @@ impl LoginSettingsAdmin {
             .execute(&*self.storage, || async {
                 for _ in 0..WRITE_ATTEMPTS {
                     let stored = self.storage.login_settings().await?;
-                    let held = stored.unwrap_or_default();
-                    let changed = LoginSettings {
+                    let held = stored.clone().unwrap_or_default();
+                    let mut changed = LoginSettings {
                         allow_personal_profiles: req
                             .allow_personal_profiles
                             .unwrap_or(held.allow_personal_profiles),
                         allow_foreign_corporate_profiles: req
                             .allow_foreign_corporate_profiles
                             .unwrap_or(held.allow_foreign_corporate_profiles),
+                        admitted_sources: sources
+                            .clone()
+                            .unwrap_or_else(|| held.admitted_sources.clone()),
+                        status_policy: policy.unwrap_or(held.status_policy),
+                        revision: held.revision,
                     };
-                    let response = view(changed);
+                    // The revision numbers the changes of what is admitted:
+                    // a command that leaves it as it was keeps the revision,
+                    // so one revision never names two different contents.
+                    // It counts landed changes, far below the type's end.
+                    if changed != held {
+                        changed.revision += 1;
+                    }
+                    let response = view(&changed);
                     let audit = MutationContext::from(AuditEntry::admin(
                         caller.profile_id.to_string(),
                         "login_settings.update",
@@ -154,6 +268,8 @@ impl LoginSettingsAdmin {
                             allow_personal_profiles = changed.allow_personal_profiles,
                             allow_foreign_corporate_profiles =
                                 changed.allow_foreign_corporate_profiles,
+                            admitted_sources = changed.admitted_sources.as_slice().len(),
+                            revision = changed.revision,
                             "login settings updated"
                         );
                         return Ok(response);
@@ -165,3 +281,6 @@ impl LoginSettingsAdmin {
             .map_err(CommandError::<LoginSettingsError>::refusal)
     }
 }
+
+#[cfg(test)]
+mod tests;

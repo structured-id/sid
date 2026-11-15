@@ -17,7 +17,9 @@ use sid_authz::cedar::CedarService;
 use sid_authz::decision::AuthzCheckRequest;
 use sid_authz::engine::CeAuthzEngine;
 use sid_core::models::audit::AuditOutcome;
-use sid_core::models::{AUTHZ_CHECK, AuditEntry, ProfileId, ProjectId, ResourceId, ResourceState};
+use sid_core::models::{
+    AUTHZ_CHECK, AuditEntry, OrgId, ProfileId, ProjectId, ResourceId, ResourceState,
+};
 use sid_infra::authn::caller::authenticate;
 use sid_infra::authn::operation::metadata_context;
 use sid_infra::authn::own_token::authenticate_service;
@@ -253,6 +255,10 @@ pub struct AuthzServiceImpl {
     /// installation's authorization API; without it no service may ask
     /// about others (D054).
     service_tokens: Option<Arc<ResourceTokenVerifier>>,
+    /// The organization that manages this installation's Profiles: a user
+    /// named by an issuer's subject is one of them only where that issuer
+    /// serves this organization.
+    managing: Option<OrgId>,
     /// Services the deployment trusts to confirm checks of an original
     /// request; nobody unless configured.
     request_verifiers: sid_authz::request_verifier::RequestVerifiers,
@@ -481,6 +487,7 @@ impl AuthzServiceImpl {
             jwt,
             revocation,
             service_tokens: None,
+            managing: None,
             request_verifiers: Default::default(),
             audit,
         }
@@ -504,9 +511,15 @@ impl AuthzServiceImpl {
     }
 
     /// Lets services holding the checker role ask about others, with their
-    /// own tokens for the authorization API `tokens` verifies.
-    pub fn with_service_tokens(mut self, tokens: Arc<ResourceTokenVerifier>) -> Self {
+    /// own tokens for the authorization API `tokens` verifies, in the
+    /// installation whose organization `managing` manages its Profiles.
+    pub fn with_service_tokens(
+        mut self,
+        tokens: Arc<ResourceTokenVerifier>,
+        managing: OrgId,
+    ) -> Self {
         self.service_tokens = Some(tokens);
+        self.managing = Some(managing);
         self
     }
 
@@ -880,7 +893,8 @@ impl AuthzServiceImpl {
             return Err(not_ours());
         }
         debug_assert_eq!(registered.issuer_id, tokens.issuer_id());
-        match SubjectRule::for_resource(tokens.oidc_issuer()) {
+        let managing = self.managing.ok_or_else(not_ours)?;
+        match SubjectRule::for_resource(tokens.oidc_issuer(), managing) {
             SubjectRule::ManagedProfile => ProfileId::parse(&named.subject)
                 .map(|profile| format!("user:{profile}"))
                 .map_err(|_| not_ours()),

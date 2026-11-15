@@ -63,6 +63,11 @@ pub enum SignInError {
     /// completes ended: it completes nothing and is started again.
     #[error("the sign-in's proof or policy changed")]
     Fenced,
+    /// The login settings an outside identity was admitted under changed
+    /// before its session committed: nothing committed, and the admission
+    /// is decided again under the settings in force.
+    #[error("the login settings changed since the identity was admitted")]
+    AdmissionChanged,
     /// The keyed operation it completes already committed its session.
     #[error("the sign-in already completed")]
     AlreadyCompleted,

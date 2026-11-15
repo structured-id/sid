@@ -36,6 +36,9 @@ sid-infra = { workspace = true, features = [
     "issuer-client",
     "password-operation",
     "oauth-http",
+    # The platform CA set a recipient verifies under: its publication's
+    # client and the discovery records beside it.
+    "platform-ca-dns",
 ] }
 sid-serve = { workspace = true }
 sid-notify = { workspace = true }
@@ -163,6 +166,9 @@ p256 = { workspace = true, features = ["pkcs8"] }
 sqlx = { workspace = true }
 # Startup steps are tested against a real in-memory engine.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
+# The site service is tested against certificates a development platform
+# really issues.
+sid-fed = { workspace = true, features = ["test-support"] }
 # Protocol endpoints are checked through the transcoder that serves them, over
 # the service's own descriptors: the HTTP shape comes from the annotations.
 structured-proxy = { version = "8.1.4", default-features = false }

@@ -124,6 +124,14 @@ pub struct AuthorizationCode<O = ProfileId> {
     /// a request that was answered as it arrived.
     #[serde(default)]
     pub request_origin: Option<RequestOrigin>,
+
+    /// The holder's proof for this one sign-in, when the client is another
+    /// organization's installation and the proof was made while the session
+    /// that authorized the code stood: a JWS in General JSON Serialization,
+    /// bound to the request's `nonce` and exact `redirect_uri`. It is
+    /// returned once, in the ID Token this code is redeemed for.
+    #[serde(default)]
+    pub presentation: Option<Vec<u8>>,
 }
 
 /// Outcome of redeeming an authorization code in storage.
@@ -184,6 +192,11 @@ impl<O> ExchangedCode<O> {
     /// How the user authenticated in the session that authorized the code.
     pub fn authentication(&self) -> &GrantAuthentication {
         &self.inner.authentication
+    }
+
+    /// The holder's proof made for this code's sign-in, if one was.
+    pub fn presentation(&self) -> Option<&[u8]> {
+        self.inner.presentation.as_deref()
     }
 
     /// SHA-256 hash of the code (for storage marking).

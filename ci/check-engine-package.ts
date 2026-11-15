@@ -24,6 +24,9 @@ const ENGINE = [
   "sid-authn",
   "sid-authz",
   "sid-storage",
+  // The recipient's verification of presented identities and site
+  // statements, which the embedded engine runs as the service does.
+  "sid-fed",
   "structured-id",
 ];
 
@@ -37,7 +40,6 @@ const FORBIDDEN = [
   "sid-auth-proxy",
   "sid-serve",
   "sid-admin",
-  "sid-fed",
   "sid-notify",
   "sid-ui-host",
   "sid-attestation",

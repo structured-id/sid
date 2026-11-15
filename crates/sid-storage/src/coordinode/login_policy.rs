@@ -24,10 +24,87 @@ pub(super) fn check_fence(tx: &Statements<'_>, epoch: i64) -> SidResult<()> {
     Ok(())
 }
 
+/// Advance the login-policy epoch in `tx`: a sign-in decided under the
+/// earlier one no longer commits. The first policy write of any kind starts
+/// it; one racing this one makes the transaction run again.
+pub(super) fn advance_epoch(tx: &Statements<'_>) -> SidResult<()> {
+    let advanced = tx.run(
+        "MATCH (e:SidLoginPolicyEpoch) WHERE e.id = 1 SET e.epoch = e.epoch + 1
+         RETURN e.epoch AS epoch",
+        Params::default(),
+    )?;
+    if advanced.is_empty() {
+        tx.create_absent(
+            "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: 1})",
+            Params::default(),
+        )?;
+    }
+    Ok(())
+}
+
 /// The one scope login settings are stored for.
 fn settings_scope() -> coordinode_core::graph::types::Value {
     coordinode_core::graph::types::Value::String("installation".into())
 }
+
+/// What a read of the stored settings returns of them.
+const SETTINGS: &str = "s.allow_personal_profiles AS personal,
+    s.allow_foreign_corporate_profiles AS corporate,
+    s.admitted_sources AS sources, s.status_policy AS status_policy,
+    s.revision AS revision";
+
+/// The stored settings of `row`, read with [`SETTINGS`].
+fn stored(row: &super::Row) -> SidResult<sid_core::models::LoginSettings> {
+    let corrupt = |what: &str| SidError::Storage(format!("stored login settings: {what}"));
+    Ok(sid_core::models::LoginSettings {
+        allow_personal_profiles: super::get_bool(row, "personal")?,
+        allow_foreign_corporate_profiles: super::get_bool(row, "corporate")?,
+        admitted_sources: sid_core::models::AdmittedSources::from_bytes(&super::get_bytes(
+            row, "sources",
+        )?)
+        .map_err(|e| corrupt(&e.to_string()))?,
+        status_policy: sid_core::models::StatusPolicy::from_tag(&super::get_bytes(
+            row,
+            "status_policy",
+        )?)
+        .ok_or_else(|| corrupt("a status policy no policy encodes"))?,
+        revision: u64::try_from(get_int(row, "revision")?)
+            .map_err(|_| corrupt("negative revision"))?,
+    })
+}
+
+/// The values of `settings` as a write binds them.
+fn values(settings: &sid_core::models::LoginSettings) -> SidResult<Params> {
+    use coordinode_core::graph::types::Value;
+    let revision = i64::try_from(settings.revision)
+        .map_err(|_| SidError::Validation("login settings revision out of range".into()))?;
+    Ok(Params::default()
+        .with("scope", settings_scope())
+        .with("personal", Value::Bool(settings.allow_personal_profiles))
+        .with(
+            "corporate",
+            Value::Bool(settings.allow_foreign_corporate_profiles),
+        )
+        // Organization ids one after another, 16 bytes each, in id order.
+        .with(
+            "sources",
+            Value::Binary(settings.admitted_sources.to_bytes()),
+        )
+        // What must be known of withdrawals, as the policy's encoding.
+        .with(
+            "status_policy",
+            Value::Binary(settings.status_policy.tag().to_vec()),
+        )
+        .with("revision", Value::Int(revision))
+        .with("now", super::time(chrono::Utc::now())))
+}
+
+/// Creates the settings node from [`values`].
+const CREATE_SETTINGS: &str = "CREATE (s:SidLoginSettings {scope: $scope,
+    allow_personal_profiles: $personal,
+    allow_foreign_corporate_profiles: $corporate,
+    admitted_sources: $sources, status_policy: $status_policy,
+    revision: $revision, updated_at: $now})";
 
 impl CoordinodeBackend {
     /// Advance the login-policy epoch in `tx`, a transaction of the host's
@@ -74,19 +151,10 @@ impl CoordinodeBackend {
     ) -> SidResult<Option<sid_core::models::LoginSettings>> {
         self.read(|tx| {
             let rows = tx.run(
-                "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
-                 RETURN s.allow_personal_profiles AS personal,
-                        s.allow_foreign_corporate_profiles AS corporate",
+                &format!("MATCH (s:SidLoginSettings) WHERE s.scope = $scope RETURN {SETTINGS}"),
                 Params::default().with("scope", settings_scope()),
             )?;
-            rows.first()
-                .map(|row| {
-                    Ok(sid_core::models::LoginSettings {
-                        allow_personal_profiles: super::get_bool(row, "personal")?,
-                        allow_foreign_corporate_profiles: super::get_bool(row, "corporate")?,
-                    })
-                })
-                .transpose()
+            rows.first().map(stored).transpose()
         })
         .await
     }
@@ -97,72 +165,40 @@ impl CoordinodeBackend {
         expected: Option<&sid_core::models::LoginSettings>,
         ctx: sid_core::models::MutationContext,
     ) -> SidResult<bool> {
-        use coordinode_core::graph::types::Value;
-        let settings = *settings;
-        let expected = expected.copied();
+        let settings = settings.clone();
+        let expected = expected.cloned();
         self.transaction(move |tx| {
             // The stored settings, held for the commit: a write committed
             // meanwhile conflicts with this one.
             let rows = tx.run(
-                "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
-                 RETURN id(s) AS node, s.allow_personal_profiles AS personal,
-                        s.allow_foreign_corporate_profiles AS corporate",
+                &format!(
+                    "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
+                     RETURN id(s) AS node, {SETTINGS}"
+                ),
                 Params::default().with("scope", settings_scope()),
             )?;
-            let stored = rows
-                .first()
-                .map(|row| {
-                    Ok::<_, SidError>(sid_core::models::LoginSettings {
-                        allow_personal_profiles: super::get_bool(row, "personal")?,
-                        allow_foreign_corporate_profiles: super::get_bool(row, "corporate")?,
-                    })
-                })
-                .transpose()?;
-            if stored != expected || (stored.is_some() && !hold_first(tx, &rows)?) {
+            let held = rows.first().map(stored).transpose()?;
+            if held != expected || (held.is_some() && !hold_first(tx, &rows)?) {
                 return Ok(super::Decision::Abandon(false));
             }
-            let values = || {
-                Params::default()
-                    .with("scope", settings_scope())
-                    .with("personal", Value::Bool(settings.allow_personal_profiles))
-                    .with(
-                        "corporate",
-                        Value::Bool(settings.allow_foreign_corporate_profiles),
-                    )
-                    .with("now", super::time(chrono::Utc::now()))
-            };
             let updated = tx.run(
                 "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
                  SET s.allow_personal_profiles = $personal,
-                     s.allow_foreign_corporate_profiles = $corporate, s.updated_at = $now
+                     s.allow_foreign_corporate_profiles = $corporate,
+                     s.admitted_sources = $sources, s.status_policy = $status_policy,
+                     s.revision = $revision,
+                     s.updated_at = $now
                  RETURN s.scope AS scope",
-                values(),
+                values(&settings)?,
             )?;
             if updated.is_empty() {
                 // Another first write may have created the node since this
                 // transaction looked: it then runs again, finds settings it
                 // did not expect and writes nothing.
-                tx.create_absent(
-                    "CREATE (s:SidLoginSettings {scope: $scope,
-                         allow_personal_profiles: $personal,
-                         allow_foreign_corporate_profiles: $corporate, updated_at: $now})",
-                    values(),
-                )?;
+                tx.create_absent(CREATE_SETTINGS, values(&settings)?)?;
             }
             // A sign-in decided under the earlier settings no longer commits.
-            let advanced = tx.run(
-                "MATCH (e:SidLoginPolicyEpoch) WHERE e.id = 1 SET e.epoch = e.epoch + 1
-                 RETURN e.epoch AS epoch",
-                Params::default(),
-            )?;
-            if advanced.is_empty() {
-                // The first policy write of any kind starts the epoch: one
-                // racing this one makes the transaction run again.
-                tx.create_absent(
-                    "CREATE (e:SidLoginPolicyEpoch {id: 1, epoch: 1})",
-                    Params::default(),
-                )?;
-            }
+            advance_epoch(tx)?;
             super::finalize(tx, "installation:login_settings", ctx.clone())?;
             Ok(super::Decision::Commit(true))
         })
@@ -174,37 +210,18 @@ impl CoordinodeBackend {
         settings: &sid_core::models::LoginSettings,
         ctx: sid_core::models::MutationContext,
     ) -> SidResult<bool> {
-        use coordinode_core::graph::types::Value;
-        let settings = *settings;
+        let settings = settings.clone();
         self.transaction(move |tx| {
             let rows = tx.run(
-                "MATCH (s:SidLoginSettings) WHERE s.scope = $scope
-                 RETURN s.allow_personal_profiles AS personal,
-                        s.allow_foreign_corporate_profiles AS corporate",
+                &format!("MATCH (s:SidLoginSettings) WHERE s.scope = $scope RETURN {SETTINGS}"),
                 Params::default().with("scope", settings_scope()),
             )?;
             if let Some(row) = rows.first() {
-                let held = sid_core::models::LoginSettings {
-                    allow_personal_profiles: super::get_bool(row, "personal")?,
-                    allow_foreign_corporate_profiles: super::get_bool(row, "corporate")?,
-                };
-                return crate::transfer_repeat(&held, &settings, "login settings")
+                return crate::transfer_repeat(&stored(row)?, &settings, "login settings")
                     .map(super::Decision::Abandon);
             }
             // Concurrent importers meet on the unique node.
-            tx.create_absent(
-                "CREATE (s:SidLoginSettings {scope: $scope,
-                     allow_personal_profiles: $personal,
-                     allow_foreign_corporate_profiles: $corporate, updated_at: $now})",
-                Params::default()
-                    .with("scope", settings_scope())
-                    .with("personal", Value::Bool(settings.allow_personal_profiles))
-                    .with(
-                        "corporate",
-                        Value::Bool(settings.allow_foreign_corporate_profiles),
-                    )
-                    .with("now", super::time(chrono::Utc::now())),
-            )?;
+            tx.create_absent(CREATE_SETTINGS, values(&settings)?)?;
             super::finalize(tx, "installation:login_settings", ctx.clone())?;
             Ok(super::Decision::Commit(true))
         })

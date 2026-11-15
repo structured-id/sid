@@ -194,12 +194,19 @@ impl SignIn {
     /// delivery sealed for a lost response: a repeat of the operation gets
     /// the same live session again, after the current checks, never a second
     /// one (the recoverable federation callback completion contract).
+    ///
+    /// `admission`, the login settings an outside identity was admitted
+    /// under, holds the new session to them as the policy fence does: a
+    /// settings write since then fences the commit with
+    /// [`SignInError::AdmissionChanged`], and the host decides the admission
+    /// again under the settings in force.
     #[allow(clippy::too_many_arguments)]
     pub async fn admitted_sign_in(
         &self,
         login_policy: &dyn LoginPolicySource,
         profile: &Profile,
         assignment: PrincipalAssignmentFence,
+        admission: Option<ActorFence>,
         authentication: &SessionAuthentication,
         client_id: &str,
         completion: Option<AdmittedCompletion<'_>>,
@@ -251,12 +258,27 @@ impl SignIn {
                 Some(client_id),
             )
             .await?;
+        // One fence holds the commit to both the policy and the admission:
+        // both are the login-policy epoch, and two different epochs mean the
+        // settings moved between the two reads.
+        let policy = match (policy, admission) {
+            (policy, None) => policy,
+            (None, admission) => admission,
+            (Some(policy), Some(admission)) if policy == admission => Some(policy),
+            (Some(_), Some(_)) => return Err(SignInError::AdmissionChanged),
+        };
         let mut session = self.new_session(profile.id, client_ip);
         session.device_id = context.user_agent.map(device_id);
         session.assurance_level = authentication.assurance_level;
         session.elevation = authentication.elevation;
         session.authenticated_at = authentication.authenticated_at;
         session.amr = authentication.amr.clone();
+        // A commit fenced under an admission is the admission's to decide
+        // again; without one, a fenced commit stays refused as before.
+        let fenced = |e: SignInError| match e {
+            SignInError::Fenced if admission.is_some() => SignInError::AdmissionChanged,
+            e => e,
+        };
         let Some(completion) = completion else {
             return self
                 .sign_in(
@@ -268,7 +290,8 @@ impl SignIn {
                     policy,
                     None,
                 )
-                .await;
+                .await
+                .map_err(fenced);
         };
         // The delivery lives no longer than the operation, nor than the
         // session it delivers.
@@ -300,7 +323,7 @@ impl SignIn {
                 .await
             {
                 Ok(Some(signed_in)) => Ok(signed_in),
-                Ok(None) | Err(_) => Err(refused),
+                Ok(None) | Err(_) => Err(fenced(refused)),
             },
             Ok(signed_in) => Ok(signed_in),
         }

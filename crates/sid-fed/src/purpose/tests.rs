@@ -8,13 +8,14 @@ fn holding(usages: Vec<x509_cert::ext::Extension>) -> Certificate {
     read(&Stated::new("CN=Authority", extensions).self_signed(&key(1)))
 }
 
-// The issuance transitions are exactly four: the platform intermediate
-// issues organization authorities and Personal passports, an organization's
-// authority issues its Corporate passports and an agent candidate authority.
-// Bug prevented: a verifier accepting a passport from an authority whose
-// role does not issue it (an organization's authority minting a Personal
-// passport, an intermediate minting a Corporate one, a chain of organization
-// authorities).
+// The issuance transitions are exactly five: the platform intermediate
+// issues organization authorities, Personal passports and the participant
+// certificates of enrolled sites; an organization's authority issues its
+// Corporate passports and an agent candidate authority. Bug prevented: a
+// verifier accepting a certificate from an authority whose role does not
+// issue it (an organization's authority minting a Personal passport or
+// enrolling a site into the platform, an intermediate minting a Corporate
+// passport, a chain of organization authorities).
 #[test]
 fn only_the_stated_transitions_are_issued() {
     use IssuerRole::{AgentMemberIssuer, OrganizationCa, PlatformIntermediate};
@@ -24,10 +25,12 @@ fn only_the_stated_transitions_are_issued() {
         Issued::Ca(AgentMemberIssuer),
         Issued::PersonalPassport,
         Issued::CorporatePassport,
+        Issued::FederationParticipant,
     ];
     let allowed = [
         (PlatformIntermediate, Issued::Ca(OrganizationCa)),
         (PlatformIntermediate, Issued::PersonalPassport),
+        (PlatformIntermediate, Issued::FederationParticipant),
         (OrganizationCa, Issued::CorporatePassport),
         (OrganizationCa, Issued::Ca(AgentMemberIssuer)),
     ];
@@ -93,6 +96,40 @@ fn roles_are_the_purposes_the_certificate_names() {
     );
 }
 
+// A participant certificate names the participant purpose and nothing else.
+// No usage at all, a server or client purpose, a Binding or issuer purpose,
+// or the participant purpose with another beside it is not one, and the
+// participant purpose is no issuer role. Bug prevented: a TLS certificate,
+// an organization's authority or a passport standing in for a site's
+// enrollment, or an enrolled site read as an issuer.
+#[test]
+fn a_participant_names_that_purpose_alone() {
+    let profile = DEVELOPMENT_PURPOSES;
+    let server_auth = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.1");
+    let client_auth = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.2");
+    let enrolled = holding(vec![purposes(&[profile.federation_participant])]);
+    assert_eq!(profile.is_participant(&enrolled), Ok(true));
+    assert_eq!(profile.issuer_roles(&enrolled), Ok(vec![]));
+    assert_eq!(
+        profile.participant_usage().0,
+        vec![profile.federation_participant]
+    );
+    for other in [
+        vec![],
+        vec![purposes(&[server_auth])],
+        vec![purposes(&[client_auth])],
+        vec![purposes(&[profile.organization_ca])],
+        vec![purposes(&[profile.key_association])],
+        vec![purposes(&[profile.federation_participant, server_auth])],
+        vec![purposes(&[
+            profile.federation_participant,
+            profile.organization_ca,
+        ])],
+    ] {
+        assert_eq!(profile.is_participant(&holding(other)), Ok(false));
+    }
+}
+
 // Two extended key usage extensions are refused (RFC 5280 §4.2: an extension
 // appears once), as is one that does not decode. Bug prevented: reading the
 // first of two and ignoring a second that names another role.
@@ -133,7 +170,17 @@ fn development_purposes_stay_in_development() {
         agent_member_issuer: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.99999.1.3"),
         key_association: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.99999.1.4"),
         agent_part: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.99999.1.5"),
+        federation_participant: ObjectIdentifier::new_unwrap("1.3.6.1.4.1.99999.1.6"),
     };
+    // The participant purpose stays in its allocation like every other.
+    let enrolled = holding(vec![purposes(&[
+        DEVELOPMENT_PURPOSES.federation_participant
+    ])]);
+    assert_eq!(
+        registered.is_participant(&enrolled),
+        Err(PurposeError::DevelopmentPurpose)
+    );
+    assert_eq!(DEVELOPMENT_PURPOSES.is_participant(&enrolled), Ok(true));
     let development = holding(vec![purposes(&[DEVELOPMENT_PURPOSES.organization_ca])]);
     assert_eq!(
         registered.issuer_roles(&development),

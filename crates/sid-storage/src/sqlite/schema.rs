@@ -683,6 +683,8 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
     elevation_until TEXT,
     -- The kept authorization request the code was issued from, if any.
     request_origin  BLOB CHECK (length(request_origin) = 16),
+    -- The holder's proof made for this code's sign-in, if one was.
+    presentation    BLOB,
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
 ) STRICT;
@@ -1867,6 +1869,87 @@ CREATE TABLE IF NOT EXISTS login_settings (
     allow_personal_profiles          INTEGER NOT NULL CHECK (allow_personal_profiles IN (0, 1)),
     allow_foreign_corporate_profiles INTEGER NOT NULL
         CHECK (allow_foreign_corporate_profiles IN (0, 1)),
+    -- Organization ids one after another, 16 bytes each, in id order.
+    admitted_sources                 BLOB NOT NULL CHECK (length(admitted_sources) % 16 = 0),
+    -- What must be known of withdrawals, as the policy's 20-byte encoding.
+    status_policy                    BLOB NOT NULL CHECK (length(status_policy) = 20),
+    revision                         INTEGER NOT NULL CHECK (revision >= 0),
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
+
+-- The certificate the platform issued for this installation's site, and the
+-- certificates above it: each behind its four-byte length, in order.
+CREATE TABLE IF NOT EXISTS site_enrollment (
+    scope       TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    certificate BLOB NOT NULL CHECK (length(certificate) > 0),
+    chain       BLOB NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
+
+-- The registered connections federated sign-ins arrive through. One issuer
+-- has one connection: identities recorded here are found by their issuer.
+CREATE TABLE IF NOT EXISTS entry_connections (
+    handle            BLOB PRIMARY KEY CHECK (length(handle) = 16),
+    owner             TEXT NOT NULL CHECK (owner IN ('provisioning', 'administration')),
+    name              TEXT NOT NULL,
+    issuer            TEXT NOT NULL UNIQUE,
+    source            BLOB CHECK (source IS NULL OR length(source) = 16),
+    recipient_issuer  BLOB NOT NULL CHECK (length(recipient_issuer) = 16),
+    callback          TEXT NOT NULL,
+    client_id         TEXT NOT NULL,
+    credential_method TEXT NOT NULL CHECK (credential_method IN ('client_secret_basic')),
+    credential        BLOB NOT NULL,
+    enabled           INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    revision          INTEGER NOT NULL CHECK (revision >= 0),
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
+-- The admitted platform CA set: its revision and freshness (one row), the
+-- generations ever published, and what each generation's CRLs said of the
+-- CA certificates it issued. Times are seconds since the epoch.
+CREATE TABLE IF NOT EXISTS platform_ca_set (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    revision        INTEGER NOT NULL CHECK (revision >= 0),
+    issued_at       INTEGER NOT NULL,
+    next_update     INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_generations (
+    generation      INTEGER PRIMARY KEY CHECK (generation >= 0),
+    certificate     BLOB NOT NULL,
+    -- 0 active, 1 verification-only, 2 withdrawn: only ever raised.
+    state           INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    overlap_end     INTEGER,
+    -- The revision that last listed the generation.
+    listed_in       INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_status (
+    generation      INTEGER PRIMARY KEY CHECK (generation >= 0),
+    -- The generation certificate (DER) the CRL was authenticated under.
+    certificate     BLOB NOT NULL,
+    number          INTEGER NOT NULL CHECK (number >= 0),
+    next_update     INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS platform_ca_revoked (
+    generation      INTEGER NOT NULL CHECK (generation >= 0),
+    serial          BLOB NOT NULL,
+    PRIMARY KEY (generation, serial)
+) STRICT, WITHOUT ROWID;
+
+-- What the authorities below the platform (organization CAs) published of
+-- the certificates they issued. An issuer is the SHA-256 of its certificate.
+CREATE TABLE IF NOT EXISTS ca_issuer_status (
+    issuer          BLOB PRIMARY KEY CHECK (length(issuer) = 32),
+    number          INTEGER NOT NULL CHECK (number >= 0),
+    next_update     INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS ca_issuer_revoked (
+    issuer          BLOB NOT NULL CHECK (length(issuer) = 32),
+    serial          BLOB NOT NULL,
+    PRIMARY KEY (issuer, serial)
+) STRICT, WITHOUT ROWID;
 "#;

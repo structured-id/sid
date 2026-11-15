@@ -52,7 +52,7 @@ pub const STATEMENT_TYPE: &str = "SIDBindingPresentation";
 pub const AUTHENTICATION: &str = "authentication";
 
 /// The largest integer JSON carries exactly (RFC 8259 §6).
-const MAX_EXACT_INTEGER: i64 = (1 << 53) - 1;
+pub(crate) const MAX_EXACT_INTEGER: i64 = (1 << 53) - 1;
 
 /// Why a presentation was not accepted.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -90,7 +90,7 @@ pub enum PresentationError {
 /// A JSON value read with duplicate property names refused: with a
 /// duplicate, two readers of the same bytes can see two different
 /// statements (RFC 8259 §4, RFC 7515 §10.12).
-struct Strict(Value);
+pub(crate) struct Strict(pub(crate) Value);
 
 impl<'de> serde::Deserialize<'de> for Strict {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -151,7 +151,7 @@ impl<'de> serde::Deserialize<'de> for Strict {
 }
 
 /// The object `value` is, holding exactly the members `names`.
-fn exactly<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Map<String, Value>> {
+pub(crate) fn exactly<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Map<String, Value>> {
     let object = value.as_object()?;
     (object.len() == names.len() && names.iter().all(|name| object.contains_key(*name)))
         .then_some(object)
@@ -195,6 +195,13 @@ impl Envelope {
     /// unprotected header, a key-discovery header or any other option is
     /// refused before the statement is looked at. Nothing is verified here.
     pub fn parse(jws: &[u8]) -> Result<Self, PresentationError> {
+        Self::parse_typed(jws, PRESENTATION_TYP)
+    }
+
+    /// Parse `jws` as the same envelope of the statement kind `typ`: the
+    /// envelope is shared, and the protected type keeps one kind of
+    /// statement from being read as another.
+    pub fn parse_typed(jws: &[u8], typ: &str) -> Result<Self, PresentationError> {
         let Strict(document) = serde_json::from_slice(jws)
             .map_err(|_| PresentationError::Envelope("not JSON without duplicate names"))?;
         let envelope = exactly(&document, &["payload", "signatures"]).ok_or(
@@ -212,7 +219,7 @@ impl Envelope {
             .ok_or(PresentationError::Envelope("without signatures"))?;
         let proofs = signatures
             .iter()
-            .map(Self::proof)
+            .map(|entry| Self::proof(entry, typ))
             .collect::<Result<_, _>>()?;
         Ok(Self {
             encoded_payload: encoded_payload.to_owned(),
@@ -221,7 +228,7 @@ impl Envelope {
         })
     }
 
-    fn proof(entry: &Value) -> Result<Proof, PresentationError> {
+    fn proof(entry: &Value, typ: &str) -> Result<Proof, PresentationError> {
         let entry = exactly(entry, &["protected", "signature"]).ok_or(
             PresentationError::Envelope("a signature with other than protected and signature"),
         )?;
@@ -239,7 +246,7 @@ impl Envelope {
         let header = exactly(&header, &["alg", "typ"]).ok_or(PresentationError::Envelope(
             "a protected header with other than alg and typ",
         ))?;
-        if header["typ"].as_str() != Some(PRESENTATION_TYP) {
+        if header["typ"].as_str() != Some(typ) {
             return Err(PresentationError::Envelope("of another type"));
         }
         let algorithm = header["alg"]
@@ -297,7 +304,7 @@ pub struct Statement {
 }
 
 /// The UUID `text` spells in its canonical form (RFC 9562 §4).
-fn canonical_uuid(text: &str) -> Option<Uuid> {
+pub(crate) fn canonical_uuid(text: &str) -> Option<Uuid> {
     let uuid = Uuid::parse_str(text).ok()?;
     (uuid.hyphenated().to_string() == text).then_some(uuid)
 }
@@ -532,6 +539,7 @@ pub fn verify_presentation(
         policy,
         profile,
         purposes,
+        crate::passport_path::Trust::Platform,
         &statement.certificate,
         &statement.chain,
         anchors,

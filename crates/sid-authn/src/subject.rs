@@ -12,7 +12,9 @@
 //! - **Organization Binding**: the selected identity is outside the recipient
 //!   organization's management; `sub` is the BindingId of the Profile's
 //!   stored binding to that organization, an opaque UUIDv7 allocated on the
-//!   first visit and unlinkable across organizations.
+//!   first visit and unlinkable across organizations. This includes an
+//!   installation issuing directly to another organization: the recipient,
+//!   not the issuing process, decides.
 //!
 //! A token carries this subject and no other identifier of the user: moving
 //! an application's accounts to another subject is a dedicated continuity
@@ -23,7 +25,7 @@
 //! doi:[10.5281/zenodo.19387768](https://doi.org/10.5281/zenodo.19387768)
 
 use sid_core::models::oidc_issuer::IssuerAuthority;
-use sid_core::models::{AuditEntry, BindingScope, OAuth2Client, OidcIssuer, ProfileId};
+use sid_core::models::{AuditEntry, BindingScope, OAuth2Client, OidcIssuer, OrgId, ProfileId};
 use sid_plugin::storage::StorageBackend;
 
 /// Which subject the selected Profile gets at a recipient application.
@@ -39,30 +41,37 @@ pub enum SubjectRule {
 
 impl SubjectRule {
     /// The rule of the hop from `issuer` to `client`, for a Profile the
-    /// issuing authority manages. A client that is not a recipient of the
-    /// issuer has no rule: the association is never guessed.
-    ///
-    /// A local issuer serves its installation's own organization, whose
-    /// Profiles it manages, so its applications get the ProfileId; CE has no
-    /// opt-in for internal application isolation.
-    pub fn for_hop(issuer: &OidcIssuer, client: &OAuth2Client) -> sid_core::Result<Self> {
+    /// organization `managing` manages (the installation's own). A client
+    /// that is not a recipient of the issuer has no rule: the association is
+    /// never guessed.
+    pub fn for_hop(
+        issuer: &OidcIssuer,
+        client: &OAuth2Client,
+        managing: OrgId,
+    ) -> sid_core::Result<Self> {
         if client.org_id != Some(issuer.recipient_org) {
             return Err(sid_core::Error::Validation(format!(
                 "client {} is not a recipient of issuer {}",
                 client.client_id, issuer.canonical_url
             )));
         }
-        match issuer.authority {
-            IssuerAuthority::Local => Ok(Self::ManagedProfile),
-        }
+        Ok(Self::for_resource(issuer, managing))
     }
 
     /// The rule of the hop from `issuer` to one of its registered resources,
     /// which belong to its recipient organization: the same as for that
     /// organization's clients.
-    pub fn for_resource(issuer: &OidcIssuer) -> Self {
+    ///
+    /// The installation's issuer for its own organization serves the
+    /// organization that manages the Profile, so its applications get the
+    /// ProfileId; CE has no opt-in for internal application isolation. Its
+    /// issuer for another organization serves a foreign recipient: issuing
+    /// locally does not make that recipient internal, and it gets the
+    /// Profile's Binding to it.
+    pub fn for_resource(issuer: &OidcIssuer, managing: OrgId) -> Self {
         match issuer.authority {
-            IssuerAuthority::Local => Self::ManagedProfile,
+            IssuerAuthority::Local if issuer.recipient_org == managing => Self::ManagedProfile,
+            IssuerAuthority::Local => Self::OrganizationBinding,
         }
     }
 }

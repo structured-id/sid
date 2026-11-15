@@ -712,6 +712,73 @@ mod history_key_store {
     );
 }
 
+/// Run entry connection store conformance `scenario` on a database of its
+/// own: every scenario starts from a store that holds no connection.
+macro_rules! entry_connection_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::entry_connection_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod entry_connection_store {
+    use super::*;
+
+    entry_connection_store!(
+        a_connection_reads_back_as_stored,
+        one_issuer_has_one_connection,
+        connections_are_listed_in_one_order,
+        a_change_applies_over_the_revision_it_read,
+        a_change_never_alters_the_registration,
+        a_removal_applies_over_the_revision_it_read,
+        connection_writes_move_the_login_policy_epoch,
+        concurrent_writers_end_at_one_state,
+    );
+}
+
+/// Run platform CA store conformance `scenario` on a database of its own:
+/// every scenario starts from a store that holds no set.
+macro_rules! platform_ca_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::platform_ca_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod platform_ca_store {
+    use super::*;
+
+    platform_ca_store!(
+        anchors_follow_the_published_states,
+        a_set_past_its_refresh_time_still_anchors,
+        what_is_held_only_narrows,
+        only_the_held_revision_anchors,
+        an_anchor_answers_for_the_cas_it_issued,
+        a_revocation_seen_once_stays,
+        status_is_per_generation,
+        status_belongs_to_its_generation_certificate,
+        a_generation_keeps_its_certificate,
+        concurrent_applies_never_widen,
+        an_older_set_racing_a_newer_one_leaves_nothing,
+        issuer_status_is_evidence_only_in_its_time,
+        an_issuers_revocation_seen_once_stays,
+        concurrent_issuer_status_keeps_the_newest,
+    );
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_keeps_every_narrowing() {
+        sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(
+            &setup().await,
+            &setup().await,
+        )
+        .await;
+    }
+}
+
 /// The principal store harness the SQL backends use: owners are Profiles.
 mod common {
     pub use sid_plugin::conformance::backend::*;

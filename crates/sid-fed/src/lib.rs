@@ -20,21 +20,34 @@
 //! - [`passport_path`] verifies the signatures up to the trust point and
 //!   applies those rules;
 //! - [`presentation`] verifies that the passport's holder signed for this
-//!   very request.
+//!   very request;
+//! - [`status`] verifies the list an authority publishes of the
+//!   certificates it revoked;
+//! - [`recipient`] puts them together over the installation's store: the
+//!   platform authorities it admits, the status it holds, and the
+//!   acceptance of a presented identity.
 
+pub mod admission;
+mod admitted_paths;
 pub mod allocation;
 pub mod binding_passport;
 pub mod cross_instance_linking;
-pub mod dns_verifier;
 pub mod organization_scope;
+pub mod participant;
 pub mod passport_path;
 pub mod presentation;
 pub mod purpose;
+pub mod recipient;
+pub mod site_key;
+pub mod status;
 
-#[cfg(test)]
+// The fixture uses part of these builders; the crate's own tests use all.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod test_certificates;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cross_instance_linking::{
     CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkStatus, LinkingError,
 };
-pub use dns_verifier::{DnsVerifyResult, dns_query_name, parse_dns_txt_token, verify_site_dns};

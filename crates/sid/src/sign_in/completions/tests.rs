@@ -292,6 +292,7 @@ async fn admitted_sign_in_refuses_an_assignment_of_another_profile() {
             &fixed_policy(),
             &profile,
             assignment_of(ProfileId::generate()),
+            None,
             &evidence(),
             "app",
             None,
@@ -301,6 +302,46 @@ async fn admitted_sign_in_refuses_an_assignment_of_another_profile() {
         .await;
 
     assert!(matches!(refused, Err(SignInError::AuthenticationFailed)));
+}
+
+// An outside identity admitted under one reading of the login settings, whose
+// sign-in policy is read after a settings write, commits no session: the
+// admission is decided again. Bug prevented: a session created on an
+// admission the current settings no longer make.
+#[tokio::test]
+async fn an_admission_of_older_settings_commits_no_session() {
+    let storage = storage().await;
+    let sign_in = sign_in(storage.clone());
+    let id = stored_profile(storage.as_ref(), "frank").await;
+    let profile = storage.get_profile(id).await.unwrap().unwrap();
+    let policy = WrittenAfterRead::new(storage.clone(), 0).await;
+    let held = sid_storage::sqlite::SqliteBackend::login_policy_epoch(storage.pool())
+        .await
+        .unwrap()
+        .unwrap();
+    // The admission read the settings before the last write.
+    policy.write().await;
+
+    let refused = sign_in
+        .admitted_sign_in(
+            &policy,
+            &profile,
+            assignment_of(id),
+            Some(sid_core::models::ActorFence::LoginPolicy { epoch: held }),
+            &evidence(),
+            "app",
+            None,
+            Some(CLIENT_IP),
+            AttemptContext::default(),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(SignInError::AdmissionChanged)),
+        "{:?}",
+        refused.err()
+    );
+    assert!(storage.list_sessions(&id).await.unwrap().is_empty());
 }
 
 // An operation past its deadline admits neither a new sign-in nor a repeat.
@@ -317,6 +358,7 @@ async fn admitted_sign_in_refuses_an_operation_past_its_deadline() {
             &fixed_policy(),
             &profile,
             assignment_of(id),
+            None,
             &evidence(),
             "app",
             Some(AdmittedCompletion {

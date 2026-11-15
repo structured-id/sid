@@ -99,6 +99,11 @@ const OWN_COLUMNS: &[(&str, &str, &str)] = &[
         "updated_at",
         "when this store recorded the settings; never read",
     ),
+    (
+        "site_enrollment",
+        "updated_at",
+        "when this store recorded the enrollment; never read",
+    ),
 ];
 
 fn ctx() -> MutationContext {
@@ -328,6 +333,8 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         session_id: None,
         // A snapshot carries the kept request a code came from.
         request_origin: Some(sid_core::models::RequestOrigin::generate()),
+        // And the proof made for its sign-in.
+        presentation: Some(br#"{"payload":"e30","signatures":[]}"#.to_vec()),
     };
     source.create_auth_code(&code, ctx()).await.unwrap();
     let session = Session::new(profile.id, None, expires);
@@ -632,6 +639,45 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
         .create_upstream_provider(&provider, ctx())
         .await
         .unwrap();
+    // A registered entry connection that was changed since it was made:
+    // the move carries its revision and its sealed credential as stored.
+    {
+        use sid_plugin::entry_connection::EntryConnectionStore;
+        let handle = EntryHandle::generate();
+        let now = Utc::now().trunc_subsecs(6);
+        let connection = EntryConnection {
+            handle,
+            owner: ConnectionOwner::Administration,
+            name: "Source organization".into(),
+            issuer: "https://source.sid.example.com/i/0123456789abcdef0123456789abcdef".into(),
+            source: Some(OrgId::generate()),
+            recipient_issuer: IssuerId::generate(),
+            callback: format!("https://sid.example.com/i/handle/auth/federation/{handle}/callback"),
+            client_id: "recipient-client".into(),
+            credential: ClientCredential::SecretBasic(sid_keys::EncryptedField {
+                ciphertext: vec![5; 48],
+                nonce: [5; 12],
+                key_version: 1,
+                context: sid_core::models::entry_connection::credential_context(handle),
+            }),
+            enabled: true,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        source
+            .create_entry_connection(&connection, ctx())
+            .await
+            .unwrap();
+        let mut disabled = connection;
+        disabled.enabled = false;
+        assert!(
+            source
+                .update_entry_connection(&disabled, ctx())
+                .await
+                .unwrap()
+        );
+    }
     source
         .create_upstream_identity(
             &UpstreamIdentity::new(profile.id, provider.id, "upstream-subject"),
@@ -1016,6 +1062,44 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                 &LoginSettings {
                     allow_personal_profiles: false,
                     allow_foreign_corporate_profiles: true,
+                    // A named source organization and a revision past the
+                    // first: the move must carry both.
+                    admitted_sources: vec![org.id].try_into().unwrap(),
+                    // A policy that is not the default: the move must not
+                    // turn it into one.
+                    status_policy: sid_core::models::StatusPolicy {
+                        issuer: sid_core::models::StatusRequirement::Offline(
+                            sid_core::models::OfflineLimits {
+                                missing: false,
+                                max_stale: Some(86_400),
+                            },
+                        ),
+                        authorities: sid_core::models::StatusRequirement::Fresh,
+                    },
+                    revision: 3,
+                },
+                None,
+                ctx(),
+            )
+            .await
+            .unwrap()
+    );
+    // The site's sealed key and its enrollment, with a chain of two: the
+    // moved installation is the same site, signing with the same key.
+    sid_plugin::instance_secret_store::InstanceSecretStore::insert_instance_secret(
+        source,
+        sid_core::models::InstanceSecret::FederationSiteKey,
+        &[0x5e; 120],
+        ctx(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        source
+            .set_site_enrollment(
+                &sid_core::models::SiteEnrollment {
+                    certificate: vec![0x30; 700],
+                    chain: vec![vec![0x31; 650], vec![0x32; 500]],
                 },
                 None,
                 ctx(),
@@ -1027,6 +1111,78 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
         source.adopt_central_management(ctx()).await.unwrap(),
         CentralAdoption::Adopted
     );
+    // The admitted platform CA set: its publication, a held revision, a
+    // withdrawn generation that revision no longer lists and a revocation.
+    {
+        use sid_plugin::platform_ca::{
+            GenerationStatus, PlatformCa, PlatformCaSet, PlatformCaState, PlatformCaStore,
+        };
+        let generation = |generation: u32, state, overlap_end| PlatformCa {
+            generation,
+            certificate: vec![generation as u8; 32],
+            state,
+            overlap_end,
+            crl: None,
+        };
+        let published = |revision, generations| PlatformCaSet {
+            revision,
+            generations,
+            issued_at: 1_800_000_000,
+            next_update: 1_800_003_600,
+        };
+        source
+            .apply_platform_cas(
+                &published(
+                    1,
+                    vec![
+                        generation(1, PlatformCaState::Withdrawn, None),
+                        generation(2, PlatformCaState::Active, None),
+                    ],
+                ),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        source
+            .apply_platform_cas(
+                &published(
+                    2,
+                    vec![
+                        generation(3, PlatformCaState::Active, None),
+                        generation(2, PlatformCaState::VerificationOnly, Some(1_800_000_600)),
+                    ],
+                ),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        source
+            .record_platform_ca_status(
+                &[GenerationStatus {
+                    generation: 3,
+                    certificate: vec![3; 32],
+                    number: 5,
+                    next_update: 1_800_003_600,
+                    revoked: vec![vec![7], vec![9]],
+                }],
+                ctx(),
+            )
+            .await
+            .unwrap();
+        // And what an organization's CA published of its passports.
+        source
+            .record_issuer_status(
+                &sid_plugin::platform_ca::IssuerStatus {
+                    issuer: [4; 32],
+                    number: 2,
+                    next_update: 1_800_003_600,
+                    revoked: vec![vec![5]],
+                },
+                ctx(),
+            )
+            .await
+            .unwrap();
+    }
     source
         .put_ceremony_state(
             "webauthn",
