@@ -115,3 +115,23 @@ fn rss_is_read_in_bytes_and_zero_without_it() {
     // A kernel thread has no VmRSS line.
     assert_eq!(parse_rss("Name:\tkworker/0:1\nThreads:\t1\n"), 0);
 }
+
+// Regression: a replica that exited before reporting ready (or before the
+// backlog drained) left the run waiting forever. A replica ending fails a
+// wait that cannot complete, naming the replica.
+#[tokio::test]
+#[should_panic(expected = "replica 2: its output ended")]
+async fn a_replica_ending_fails_a_pending_wait() {
+    let (failed, mut ended) = tokio::sync::mpsc::unbounded_channel();
+    failed
+        .send("replica 2: its output ended".to_string())
+        .unwrap();
+    unless_ended(std::future::pending::<()>(), &mut ended).await;
+}
+
+// Progress that arrives is passed through while every replica keeps running.
+#[tokio::test]
+async fn a_wait_completes_while_replicas_run() {
+    let (_running, mut ended) = tokio::sync::mpsc::unbounded_channel::<String>();
+    assert_eq!(unless_ended(async { 7 }, &mut ended).await, 7);
+}

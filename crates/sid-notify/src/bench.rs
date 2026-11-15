@@ -1248,6 +1248,10 @@ pub async fn process_replicas(
     let completed = Arc::new(Progress::default());
     let ready = Arc::new(Progress::default());
     let ledger = Arc::new(Ledger::default());
+    // Set before the replicas are told to stop: output ending earlier is a
+    // replica that failed.
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ended_tx, mut ended) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut children = Vec::with_capacity(replicas);
     let mut reading = Vec::with_capacity(replicas);
     for replica in 0..replicas {
@@ -1263,38 +1267,54 @@ pub async fn process_replicas(
         }
         let mut child = command.spawn().expect("a replica process starts");
         let stdout = child.stdout.take().expect("piped stdout");
-        let (sent, completed, ready, ledger) = (
+        let (sent, completed, ready, ledger, stopping, ended_tx) = (
             sent.clone(),
             completed.clone(),
             ready.clone(),
             ledger.clone(),
+            stopping.clone(),
+            ended_tx.clone(),
         );
         reading.push(tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
-            while let Some(line) = lines.next_line().await.unwrap() {
+            let failure = loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) if stopping.load(std::sync::atomic::Ordering::Acquire) => break None,
+                    Ok(None) => break Some("its output ended".to_string()),
+                    Err(e) => break Some(format!("its output could not be read: {e}")),
+                };
                 let mut words = line.split(' ');
                 match (words.next(), words.next(), words.next()) {
                     (Some("ready"), None, None) => ready.add(),
                     (Some("sent"), Some(event), Some(channel)) => {
-                        let channel = CHANNELS
-                            .into_iter()
-                            .find(|c| *c == channel)
-                            .expect("a send names one of the route's channels");
+                        let Some(channel) = CHANNELS.into_iter().find(|c| *c == channel) else {
+                            break Some(format!("it sent on an unknown channel: {line:?}"));
+                        };
                         ledger.record(event, channel);
                         sent.add();
                     }
                     (Some("completed"), Some(n), None) => {
-                        for _ in 0..n.parse::<usize>().expect("a completion count") {
+                        let Ok(n) = n.parse::<usize>() else {
+                            break Some(format!("it reported no count: {line:?}"));
+                        };
+                        for _ in 0..n {
                             completed.add();
                         }
                     }
-                    _ => panic!("unexpected replica line {line:?}"),
+                    _ => break Some(format!("it wrote an unexpected line: {line:?}")),
                 }
+            };
+            if let Some(failure) = failure {
+                ended_tx
+                    .send(format!("replica {replica}: {failure}"))
+                    .expect("the run holds the receiver until its readers finish");
             }
         }));
         children.push(child);
     }
-    ready.reach(replicas).await;
+    drop(ended_tx);
+    unless_ended(ready.reach(replicas), &mut ended).await;
     println!(
         "{mode:<10} processes {replicas} replica processes x 32 concurrent, {PRODUCERS} producers, {BACKLOG} events"
     );
@@ -1336,8 +1356,8 @@ pub async fn process_replicas(
         owed_events.extend(events);
     }
     let enqueued = started.elapsed();
-    let done = sent.reach(BACKLOG * FAN_OUT).await;
-    let settled = completed.reach(BACKLOG * COMPLETIONS).await;
+    let done = unless_ended(sent.reach(BACKLOG * FAN_OUT), &mut ended).await;
+    let settled = unless_ended(completed.reach(BACKLOG * COMPLETIONS), &mut ended).await;
     usage(&measured, mode, "processes");
     let replicas_after = replica_usage(&pids);
     let wall = (settled - started).as_secs_f64();
@@ -1360,6 +1380,10 @@ pub async fn process_replicas(
     }
     tokio::time::sleep(QUIET).await;
     tallied(mode, &ledger, &owed_events);
+    if let Ok(failure) = ended.try_recv() {
+        panic!("{failure}");
+    }
+    stopping.store(true, std::sync::atomic::Ordering::Release);
     for child in &mut children {
         // Closing stdin stops the replica.
         drop(child.stdin.take());
@@ -1369,6 +1393,21 @@ pub async fn process_replicas(
     }
     for read in reading {
         read.await.unwrap();
+    }
+    if let Ok(failure) = ended.try_recv() {
+        panic!("{failure}");
+    }
+}
+
+/// `wait`'s value, unless a replica ends first: that fails the run at once
+/// instead of leaving it waiting for progress that cannot come.
+async fn unless_ended<T>(
+    wait: impl std::future::Future<Output = T>,
+    ended: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> T {
+    tokio::select! {
+        value = wait => value,
+        Some(failure) = ended.recv() => panic!("{failure}"),
     }
 }
 
