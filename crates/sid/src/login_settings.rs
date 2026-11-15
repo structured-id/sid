@@ -13,8 +13,8 @@ use sid_authn::caller::{Caller, CallerError};
 use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
-    AdmittedSources, AuditEntry, LoginSettings, MAX_ADMITTED_SOURCES, MutationContext,
-    OfflineLimits, OperationContext, StatusPolicy, StatusRequirement,
+    AdmissionPublication, AdmittedSources, AuditEntry, LoginSettings, MAX_ADMITTED_SOURCES,
+    MutationContext, OfflineLimits, OperationContext, StatusPolicy, StatusRequirement,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::realm_service as keyed;
@@ -253,12 +253,20 @@ impl LoginSettingsAdmin {
                         changed.revision += 1;
                     }
                     let response = view(&changed);
-                    let audit = MutationContext::from(AuditEntry::admin(
+                    let mut audit = MutationContext::from(AuditEntry::admin(
                         caller.profile_id.to_string(),
                         "login_settings.update",
                         "login_settings",
                     ))
                     .with_operation(command.completion(response.encode_to_vec()));
+                    // A new revision owes the platform the site's statements
+                    // of it, committed with it: a lost delivery is retried,
+                    // and the settings are enforced here meanwhile.
+                    if changed.revision != held.revision {
+                        audit
+                            .work
+                            .push(AdmissionPublication::Settings(changed.revision).work());
+                    }
                     if self
                         .storage
                         .set_login_settings(&changed, stored.as_ref(), audit)

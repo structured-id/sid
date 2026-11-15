@@ -74,6 +74,18 @@ fn parts(storage: Arc<dyn StorageBackend>, links: bool) -> CeWorkParts {
         history_evaluation: None,
         issuer: "https://id.sid.example.com".into(),
         mail,
+        site_admissions: Arc::new(crate::federation_site::AdmissionPublications::new(
+            Arc::new(crate::federation_site::FederationSite::new(
+                storage.clone(),
+                keys(),
+                Arc::new(sid_fed::recipient::Recipient::new(
+                    storage.clone(),
+                    sid_fed::recipient::ClassicalVerdict,
+                )),
+                sid_core::models::OrgId::generate(),
+            )),
+            None,
+        )),
         audit_retention: AuditRetention::default(),
         migration_deadline_days: crate::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
         source: "test".into(),
@@ -106,6 +118,7 @@ async fn every_owed_kind_has_its_handler() {
         ENROLLMENT_ADMISSION_KIND,
         OWNER_PURGE_KIND,
         sid_authn::otp::OTP_EMAIL_KIND,
+        SITE_ADMISSION_PUBLICATION_KIND,
     ];
     let without = CeWork::assemble(parts(storage.clone(), false)).unwrap();
     assert_eq!(

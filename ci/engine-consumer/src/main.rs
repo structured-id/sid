@@ -907,6 +907,20 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
             magic_links: None,
             resets: None,
         },
+        // The host serves no platform: its site's admission has nobody to
+        // be delivered to, and the owed work ends without a call.
+        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
+            Arc::new(sid::federation_site::FederationSite::new(
+                storage.clone(),
+                installation.key_manager.clone(),
+                Arc::new(sid_fed::recipient::Recipient::new(
+                    storage.clone(),
+                    sid_fed::recipient::ClassicalVerdict,
+                )),
+                installation.organization.id,
+            )),
+            None,
+        )),
         audit_retention: sid::AuditRetention::default(),
         migration_deadline_days: sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
         source: "engine-package-consumer".into(),

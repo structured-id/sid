@@ -38,6 +38,7 @@ pub mod otp;
 pub mod platform_ca;
 pub mod principal_store;
 pub mod sign_in_history;
+pub mod site_admission;
 pub mod snapshot_rules;
 pub mod storage;
 pub mod upstream;

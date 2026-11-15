@@ -16,6 +16,7 @@ use sid_plugin::platform_ca::{PlatformCa, PlatformCaSet, PlatformCaSource, Platf
 use sid_proto::sid::v1::PlatformCas;
 
 pub mod discovery;
+pub mod site_admission;
 
 /// The proto file the publication's message is defined in.
 const PUBLICATION_FILE: &str = sid_proto::PLATFORM_CA_PROTO;
@@ -47,10 +48,22 @@ const CRL_TYPE: &str = "application/pkix-crl";
 /// build made for none, which then verifies no identity under a platform
 /// set until one is supplied to its store otherwise.
 pub fn build_publication() -> Result<Option<url::Url>, PublicationError> {
+    build_platform()?
+        .map(|origin| {
+            origin
+                .join(PUBLICATION_PATH)
+                .map_err(|_| PublicationError::NotHttps)
+        })
+        .transpose()
+}
+
+/// The public origin of the platform this build was made for; `None` for a
+/// build made for none. An `https` origin, nothing after its authority.
+pub fn build_platform() -> Result<Option<url::Url>, PublicationError> {
     // A build argument left empty is one not given.
     BUILD_PLATFORM
         .filter(|platform| !platform.is_empty())
-        .map(publication_of)
+        .map(platform_origin)
         .transpose()
 }
 
@@ -112,6 +125,14 @@ fn decode(
 /// The publication of the platform whose public origin is `platform`: an
 /// `https` origin, nothing after its authority.
 fn publication_of(platform: &str) -> Result<url::Url, PublicationError> {
+    platform_origin(platform)?
+        .join(PUBLICATION_PATH)
+        .map_err(|_| PublicationError::NotHttps)
+}
+
+/// `platform` read as a platform's public origin: an `https` origin,
+/// nothing after its authority.
+fn platform_origin(platform: &str) -> Result<url::Url, PublicationError> {
     let origin = url::Url::parse(platform).map_err(|_| PublicationError::NotHttps)?;
     let bare = origin.scheme() == "https"
         && origin.host_str().is_some()
@@ -123,9 +144,7 @@ fn publication_of(platform: &str) -> Result<url::Url, PublicationError> {
     if !bare {
         return Err(PublicationError::NotHttps);
     }
-    origin
-        .join(PUBLICATION_PATH)
-        .map_err(|_| PublicationError::NotHttps)
+    Ok(origin)
 }
 
 /// The publication of the installation whose issuer is `issuer`: the same

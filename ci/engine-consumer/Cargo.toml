@@ -21,6 +21,8 @@ sid = { package = "structured-id", version = "0.2" }
 sid-authn = { version = "0.2", features = ["soft-authenticator"] }
 sid-authz = { version = "0.2", default-features = false }
 sid-core = "0.2"
+# Verifies the site's own enrollment for the admission it publishes.
+sid-fed = "0.2"
 sid-plugin = "0.2"
 sid-proto = "0.2"
 sid-storage = { version = "0.2", default-features = false }
