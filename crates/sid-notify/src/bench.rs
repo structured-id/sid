@@ -537,8 +537,16 @@ struct Process {
 struct Snapshot {
     at: Instant,
     own: Process,
-    owned: Vec<(String, Process)>,
+    owned: Vec<(String, Charged)>,
     servers: std::collections::HashMap<u32, (String, Process)>,
+}
+
+/// CPU time and charged memory of one cgroup. Either can be missing where
+/// its controller is not delegated; one missing does not hide the other.
+#[derive(Clone, Copy)]
+struct Charged {
+    cpu: Option<Duration>,
+    memory: Option<u64>,
 }
 
 /// The cgroups of the servers this run owns, named by the run's script in
@@ -568,15 +576,14 @@ fn parse_cpu_stat(stat: &str) -> Option<Duration> {
 }
 
 /// A cgroup's CPU time and charged memory (`memory.current`, bytes: each
-/// page charged once to the cgroup, unlike summed per-process RSS).
-fn cgroup(dir: &std::path::Path) -> Option<Process> {
-    let cpu = parse_cpu_stat(&std::fs::read_to_string(dir.join("cpu.stat")).ok()?)?;
-    let rss = std::fs::read_to_string(dir.join("memory.current"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Process { cpu, rss })
+/// page charged once to the cgroup, unlike summed per-process RSS), each
+/// as far as it can be read.
+fn cgroup(dir: &std::path::Path) -> Charged {
+    let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok();
+    Charged {
+        cpu: read("cpu.stat").and_then(|stat| parse_cpu_stat(&stat)),
+        memory: read("memory.current").and_then(|bytes| bytes.trim().parse().ok()),
+    }
 }
 
 /// The server processes measured beside this one.
@@ -635,11 +642,11 @@ impl Snapshot {
                 servers.insert(pid, (name, measured));
             }
         }
-        // A named cgroup that cannot be read is left out, and reported as
+        // What a named cgroup does not let be read is reported as
         // unavailable rather than as zero usage.
         let owned = owned_cgroups()
             .into_iter()
-            .filter_map(|(name, dir)| cgroup(&dir).map(|measured| (name, measured)))
+            .map(|(name, dir)| (name, cgroup(&dir)))
             .collect();
         Some(Self {
             at,
@@ -670,13 +677,16 @@ impl Snapshot {
                     .find(|(owned, _)| owned == name)
                     .map(|(_, p)| *p)
             };
-            match (measured(self), measured(end)) {
-                (Some(before), Some(after)) if before.cpu <= after.cpu => line.push_str(&format!(
-                    " run:{name}={:.2} cores mem={:.0}MiB",
-                    cores(after.cpu - before.cpu),
-                    mib(after.rss)
-                )),
-                _ => line.push_str(&format!(" run:{name}=unavailable")),
+            let (before, after) = (measured(self), measured(end));
+            match (before.and_then(|c| c.cpu), after.and_then(|c| c.cpu)) {
+                (Some(before), Some(after)) if before <= after => {
+                    line.push_str(&format!(" run:{name}={:.2} cores", cores(after - before)));
+                }
+                _ => line.push_str(&format!(" run:{name}=cpu-unavailable")),
+            }
+            match after.and_then(|c| c.memory) {
+                Some(memory) => line.push_str(&format!(" mem={:.0}MiB", mib(memory))),
+                None => line.push_str(" mem=unavailable"),
             }
         }
         let mut by_name: std::collections::BTreeMap<&str, (Duration, u64, usize)> =
