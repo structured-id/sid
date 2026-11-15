@@ -340,9 +340,7 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         created_at: Utc::now(),
         used: false,
         session_id: None,
-        // A snapshot carries the kept request a code came from.
-        request_origin: Some(sid_core::models::RequestOrigin::generate()),
-        // And the proof made for its sign-in.
+        // A snapshot carries the proof made for the code's sign-in.
         presentation: Some(br#"{"payload":"e30","signatures":[]}"#.to_vec()),
     };
     source.create_auth_code(&code, ctx()).await.unwrap();
