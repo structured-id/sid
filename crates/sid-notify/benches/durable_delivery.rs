@@ -22,8 +22,19 @@ fn modes() -> Vec<String> {
     }
 }
 
+/// The variable a replica process reads its PostgreSQL database URL from.
+const REPLICA_URL: &str = "SID_BENCH_REPLICA_URL";
+
 #[tokio::main]
 async fn main() {
+    if bench::replica_role() {
+        // Started by the `processes` phase: one service replica on a pool of
+        // its own, measured by its parent.
+        let url = std::env::var(REPLICA_URL).expect("a replica is given its database");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        bench::serve_replica(Arc::new(sid_storage::PgWorkStore::new(pool))).await;
+        return;
+    }
     if let Ok(phase) = std::env::var("CXBR_BENCHMARK_PHASE") {
         // The measurement host's quiet window: everything below is measured.
         std::process::Command::new(&phase)
@@ -44,13 +55,25 @@ async fn main() {
                 bench::store_modes("sqlite", sqlite.clone(), None).await;
                 // Embedded SQLite is one process: concurrent producers on its
                 // one runner, not replicas.
-                bench::replicas("sqlite", vec![sqlite]).await;
+                bench::replicas("sqlite", vec![sqlite], None).await;
             }
             "postgres" => {
                 let (store, pool) = bench::postgres().await;
                 bench::durability(&pool).await;
                 bench::store_modes("postgres", store, Some(&pool)).await;
-                bench::replicas("postgres", bench::postgres_replicas(REPLICAS).await).await;
+                let (stores, pool) = bench::postgres_replicas(REPLICAS).await;
+                bench::replicas("postgres", stores, Some(&pool)).await;
+                // The same drain by separate replica processes.
+                let (producer, pool, url) =
+                    bench::postgres_named("sid_notify_bench_processes").await;
+                bench::process_replicas(
+                    "postgres",
+                    REPLICAS,
+                    producer,
+                    Some(&pool),
+                    &[(REPLICA_URL, url)],
+                )
+                .await;
             }
             "jetstream" => bench::handoff(bench::postgres().await.0).await,
             other => panic!("unknown mode {other}: sqlite, postgres or jetstream"),
