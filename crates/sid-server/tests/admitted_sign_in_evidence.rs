@@ -52,7 +52,7 @@ async fn repeats_record_no_further_sign_in() {
                 assignment,
                 None,
                 &authentication,
-                "an-application",
+                Some("an-application"),
                 Some(completion()),
             )
             .await

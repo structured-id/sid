@@ -941,7 +941,8 @@ impl AuthServiceImpl {
     /// browser's return the host checked by its state: its client address
     /// and device are the sign-in's, and the browser gets the IdP session
     /// cookie. `client_id` is the application the sign-in continues to: its
-    /// login requirements are the ones weighed.
+    /// login requirements are the ones weighed; none for a sign-in that
+    /// continues no application, under the organization's.
     ///
     /// With `completion`, the host's keyed operation (a federated entry's
     /// return), the session commits with that operation's completion and
@@ -958,7 +959,7 @@ impl AuthServiceImpl {
         assignment: sid_core::models::PrincipalAssignmentFence,
         admission: Option<sid_core::models::ActorFence>,
         authentication: &sid_core::models::session::SessionAuthentication,
-        client_id: &str,
+        client_id: Option<&str>,
         completion: Option<AdmittedCompletion<'_>>,
     ) -> Result<SignedIn, Status> {
         let client_ip = self.client_ip(request)?;

@@ -3,14 +3,62 @@ use super::*;
 
 const ISSUER: &str = "https://platform.sid.example.com/i/c33049901234268c3b5523658a5fb92b";
 
-/// The continuation the issuer's sign-in step names is accepted as given.
+/// The host page the tests register.
+const HOST: HostContinuation = HostContinuation {
+    path: "/corporate-use",
+    parameter: "continuation",
+};
+
+/// The URL `rd` continues at `issuer` with `HOST` registered; `None` when
+/// refused.
+fn continuation_of(issuer: &str, rd: &str) -> Option<String> {
+    continuation_at(issuer, rd, &[HOST]).map(|c| c.url().to_string())
+}
+
+/// The continuation the issuer's sign-in step names is accepted as given,
+/// with its application deciding.
 #[test]
 fn the_issuers_authorization_continuation_is_accepted() {
     let rd = format!("{ISSUER}/oauth2/authorize?client_id=ops&request_uri=urn%3Ax");
-    assert_eq!(
-        continuation_of(ISSUER, &rd).map(String::from),
-        Some(rd.clone())
-    );
+    assert_eq!(continuation_of(ISSUER, &rd), Some(rd.clone()));
+    let continued = continuation_at(ISSUER, &rd, &[HOST]).unwrap();
+    assert_eq!(continued.client_id(), Some("ops"));
+}
+
+/// A registered page of the host at the issuer, addressed by its one
+/// parameter, is accepted and decided by no application (the
+/// organization's requirements): a host page waits for no OAuth client.
+#[test]
+fn a_registered_host_page_is_accepted_without_an_application() {
+    let rd = format!("{ISSUER}/corporate-use?continuation=abc");
+    let continued = continuation_at(ISSUER, &rd, &[HOST]).unwrap();
+    assert!(matches!(continued, Continuation::Host(_)));
+    assert_eq!(continued.client_id(), None);
+    assert_eq!(continued.url().as_str(), rd);
+}
+
+/// A host page is accepted only as registered: not when none is registered,
+/// not at another issuer or origin, not with no, an empty, another or a
+/// second parameter, a fragment or credentials. Otherwise the sign-in start
+/// would return a signed-in browser to an address of the requester's choice.
+#[test]
+fn a_host_page_is_accepted_only_as_registered() {
+    let rd = format!("{ISSUER}/corporate-use?continuation=abc");
+    assert!(continuation_at(ISSUER, &rd, &[]).is_none());
+    for rd in [
+        "https://platform.sid.example.com/i/00000000000000000000000000000000/corporate-use?continuation=abc".to_owned(),
+        "https://evil.sid.example.com/i/c33049901234268c3b5523658a5fb92b/corporate-use?continuation=abc".to_owned(),
+        format!("{ISSUER}/corporate-use"),
+        format!("{ISSUER}/corporate-use?continuation="),
+        format!("{ISSUER}/corporate-use?return=https://evil.sid.example.com"),
+        format!("{ISSUER}/corporate-use?continuation=abc&continuation=def"),
+        format!("{ISSUER}/corporate-use?continuation=abc&next=x"),
+        format!("{ISSUER}/corporate-use?continuation=abc#x"),
+        "https://u:p@platform.sid.example.com/i/c33049901234268c3b5523658a5fb92b/corporate-use?continuation=abc".to_owned(),
+        format!("{ISSUER}/corporate-use/x?continuation=abc"),
+    ] {
+        assert_eq!(continuation_of(ISSUER, &rd), None, "{rd}");
+    }
 }
 
 /// The entry never returns the browser anywhere else: another host, another
