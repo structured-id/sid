@@ -211,7 +211,7 @@ pub use operation::{
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
     OperationRecord, OperationResourceBinding,
 };
-pub use organization::{OrgId, OrgStatus, OrgType, Organization};
+pub use organization::{OrgId, OrgStatus, OrgType, Organization, OrganizationReference};
 pub use password_history::{
     AbandonedEnrollment, CLEANUP_SETTLED_NAMESPACE, CleanupSettled, ENROLLMENT_ADMISSION_KIND,
     EnrollmentAdmission, EnrollmentCleanup, HistoryArchive, HistoryCommit, HistoryEntry,

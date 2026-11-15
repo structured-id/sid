@@ -30,6 +30,23 @@ fn test_only_this_format_is_read() {
     assert!(matches!(refused, SnapshotError::Format(7)), "{refused}");
 }
 
+// A snapshot of the format before organization references (13) does not
+// have them: it is refused by its version, never read with an empty list
+// it never stated. Bug prevented: the body rejected by a missing field
+// under a version this build claims to read.
+#[test]
+fn test_a_snapshot_before_references_is_refused_by_its_version() {
+    let snapshot = Snapshot::new("sqlite");
+    let mut earlier = serde_json::to_value(&snapshot).unwrap();
+    earlier["metadata"]["version"] = serde_json::json!(13);
+    earlier
+        .as_object_mut()
+        .unwrap()
+        .remove("organization_references");
+    let refused = Snapshot::parse(earlier.to_string().as_bytes()).unwrap_err();
+    assert!(matches!(refused, SnapshotError::Format(13)), "{refused}");
+}
+
 // A session exported in a snapshot names its Profile as `profile_id` and is
 // read back with the same Profile and session.
 #[test]

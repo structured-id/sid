@@ -14,7 +14,7 @@ use common::{issue_admin_token, issue_token, test_jwt, test_key_manager, test_re
 use sid::federation_site::FederationSite;
 use sid_core::models::{ProfileId, StatusPolicy};
 use sid_fed::recipient::{ClassicalVerdict, Recipient};
-use sid_fed::test_support::{enroll, platform_cas};
+use sid_fed::test_support::{enroll, hold_platform};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::federation_site_service_server::FederationSiteService;
 use sid_proto::sid::v1::{
@@ -51,10 +51,7 @@ async fn installed() -> Installed {
     .await
     .unwrap();
     let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(recipient.as_ref(), 1, &[]).await;
     Installed {
         svc: FederationSiteServiceImpl::new(
             Arc::new(FederationSite::new(
@@ -176,10 +173,7 @@ async fn an_administrator_enrolls_the_site_and_gets_its_statement() {
             .unwrap(),
     );
     let reader = Recipient::new(elsewhere, ClassicalVerdict);
-    reader
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(&reader, 1, &[]).await;
     let read = reader
         .accept_admission(&statement, &StatusPolicy::default(), SystemTime::now())
         .await
@@ -187,6 +181,149 @@ async fn an_administrator_enrolls_the_site_and_gets_its_statement() {
     assert_eq!(read.admission.recipient_org, i.organization);
     assert_eq!(read.admission.mount.as_str(), mount);
     assert!(!read.admission.allow_foreign_corporate_profiles);
+}
+
+// A federation site registered at another installation A is a client of
+// A's authorization endpoint only while its admission stands: before A's
+// platform status revokes the site's certificate the endpoint establishes
+// the client (and asks the caller to sign in), after it the client is
+// unknown there and nothing is started or redirected. Bug prevented: a
+// revoked site still starting sign-ins and receiving redirects, refused
+// only when it redeems the code.
+#[tokio::test]
+async fn a_revoked_site_starts_no_authorization() {
+    use sid_core::models::{
+        Application, ApplicationId, AuditEntry, OAuth2Client, OrgId, OrganizationReference,
+        ProjectId,
+    };
+    use sid_proto::sid::v1::OAuth2AuthorizeRequest;
+    use sid_proto::sid::v1::auth_service_server::AuthService;
+
+    // B enrolls its site and signs its statement.
+    let b = installed().await;
+    let token = admin();
+    let prepared = b
+        .svc
+        .prepare_site_enrollment(from(PrepareSiteEnrollmentRequest {}, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    let mount = prepared.mounts[0].clone();
+    let certificate = enroll(b.organization, site_id(), &prepared.public_key, &[&mount]);
+    b.svc
+        .hold_site_certificate(from(
+            HoldSiteCertificateRequest {
+                certificate,
+                chain: vec![],
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+    let statement = b
+        .svc
+        .sign_site_admission(from(
+            SignSiteAdmissionRequest {
+                mount: mount.clone(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .statement;
+
+    // A holds B as a reference, its own issuer for B and B's site client.
+    let storage: Arc<dyn StorageBackend> = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let org_b = OrgId::from_uuid(b.organization).unwrap();
+    storage
+        .insert_organization_reference(
+            &OrganizationReference::new(org_b),
+            AuditEntry::system("test", "reference").into(),
+        )
+        .await
+        .unwrap();
+    let issuer = sid_authn::issuer::ensure_local_issuer(
+        storage.as_ref(),
+        test_key_manager().as_ref(),
+        &url::Url::parse("https://a.sid.example.com").unwrap(),
+        org_b,
+    )
+    .await
+    .unwrap();
+    storage
+        .ensure_system_project(AuditEntry::system("test", "project").into())
+        .await
+        .unwrap();
+    let callback = sid_fed::participant::Mount::parse(&mount)
+        .unwrap()
+        .at(sid_core::models::entry_connection::CALLBACK);
+    let now = chrono::Utc::now();
+    let app = Application {
+        id: ApplicationId::generate(),
+        project_id: ProjectId::SYSTEM,
+        name: "Site B".into(),
+        system: None,
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let client = OAuth2Client {
+        client_id: "site-b".into(),
+        project_id: ProjectId::SYSTEM,
+        application_id: app.id,
+        redirect_uris: vec![callback.clone()],
+        org_id: Some(org_b),
+        participant_admission: Some(statement),
+        ..common::test_client()
+    };
+    storage
+        .create_application(
+            &app,
+            Some(&client),
+            None,
+            AuditEntry::system("test", "client").into(),
+        )
+        .await
+        .unwrap();
+    let recipient = Arc::new(Recipient::new(storage.clone(), ClassicalVerdict));
+    hold_platform(recipient.as_ref(), 1, &[]).await;
+    let auth = common::auth_service_with_sites(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::NoCacheBackend),
+        recipient.clone(),
+    );
+    let authorize = || {
+        Request::new(OAuth2AuthorizeRequest {
+            client_id: "site-b".into(),
+            redirect_uri: callback.clone(),
+            response_type: "code".into(),
+            scope: Some("openid".into()),
+            code_challenge: Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into()),
+            code_challenge_method: Some("S256".into()),
+            issuer_handle: issuer.handle.to_string(),
+            ..Default::default()
+        })
+    };
+    let standing = auth.o_auth2_authorize(authorize()).await.unwrap_err();
+    assert_eq!(standing.code(), Code::Unauthenticated, "{standing:?}");
+
+    hold_platform(
+        recipient.as_ref(),
+        2,
+        &[sid_fed::test_support::PARTICIPANT_SERIAL],
+    )
+    .await;
+    let revoked = auth.o_auth2_authorize(authorize()).await.unwrap_err();
+    assert_ne!(revoked.code(), Code::Unauthenticated, "{revoked:?}");
+    assert!(
+        matches!(revoked.code(), Code::NotFound | Code::InvalidArgument),
+        "{revoked:?}"
+    );
 }
 
 // Each refusal is told apart: a caller who is not an administrator is

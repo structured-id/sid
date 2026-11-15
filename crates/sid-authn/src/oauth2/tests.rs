@@ -26,6 +26,7 @@ fn create_test_client() -> OAuth2Client {
         application_type: sid_core::models::ApplicationType::Spa,
         client_secret_hash: None, // public client
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec![
             "openid".to_string(),

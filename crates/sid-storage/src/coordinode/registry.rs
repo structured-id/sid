@@ -46,7 +46,8 @@ const ACCESS: &str = "x.client_id AS client_id, x.resource_id AS resource_id,
 const CLIENT: &str = "c.client_id AS client_id, c.project_id AS project_id,
     c.application_id AS application_id, c.default_resource AS default_resource,
     c.application_type AS application_type, c.client_secret_hash AS client_secret_hash,
-    c.jwks AS jwks, c.redirect_uris AS redirect_uris, c.allowed_scopes AS allowed_scopes,
+    c.jwks AS jwks, c.participant_admission AS participant_admission,
+    c.redirect_uris AS redirect_uris, c.allowed_scopes AS allowed_scopes,
     c.grant_types AS grant_types, c.client_name AS client_name, c.logo_uri AS logo_uri,
     c.active AS active, c.token_endpoint_auth_method AS token_endpoint_auth_method,
     c.response_types AS response_types, c.subject_type AS subject_type,
@@ -451,6 +452,7 @@ fn client(row: &Row) -> SidResult<OAuth2Client> {
                     .map_err(|e| SidError::Storage(format!("jwks: {e}")))
             })
             .transpose()?,
+        participant_admission: get_opt_bytes(row, "participant_admission")?,
         redirect_uris: get_texts(row, "redirect_uris")?,
         allowed_scopes: get_texts(row, "allowed_scopes")?,
         grant_types: get_texts(row, "grant_types")?,
@@ -521,6 +523,13 @@ fn client_params(client: &OAuth2Client) -> SidResult<Params> {
                 .jwks
                 .as_ref()
                 .map_or(Value::Null, |k| Value::String(k.to_json())),
+        )
+        .with(
+            "participant_admission",
+            client
+                .participant_admission
+                .as_ref()
+                .map_or(Value::Null, |a| Value::Binary(a.clone())),
         )
         .with("redirect_uris", texts(&client.redirect_uris))
         .with("allowed_scopes", texts(&client.allowed_scopes))
@@ -623,7 +632,8 @@ const CLIENT_SET: &str = "c.client_secret_hash = $client_secret_hash,
     c.login_strategy = $login_strategy, c.show_federation_button = $show_federation_button,
     c.federation_timeout_ms = $federation_timeout_ms, c.unified_input = $unified_input,
     c.org_id = $org_id, c.default_resource = $default_resource,
-    c.post_logout_redirect_uris = $post_logout_redirect_uris, c.jwks = $jwks";
+    c.post_logout_redirect_uris = $post_logout_redirect_uris, c.jwks = $jwks,
+    c.participant_admission = $participant_admission";
 
 fn get_client(tx: &Statements<'_>, client_id: &str) -> SidResult<Option<OAuth2Client>> {
     let rows = tx.run(
@@ -689,7 +699,8 @@ pub(super) fn insert_client(
         "CREATE (c:SidClient {client_id: $client_id, project_id: $project_id,
             application_id: $application_id, default_resource: $default_resource,
             application_type: $application_type, client_secret_hash: $client_secret_hash,
-            jwks: $jwks, redirect_uris: $redirect_uris, allowed_scopes: $allowed_scopes,
+            jwks: $jwks, participant_admission: $participant_admission,
+            redirect_uris: $redirect_uris, allowed_scopes: $allowed_scopes,
             grant_types: $grant_types, client_name: $client_name, logo_uri: $logo_uri,
             active: $active, token_endpoint_auth_method: $token_endpoint_auth_method,
             response_types: $response_types, subject_type: $subject_type,
@@ -945,6 +956,67 @@ impl CoordinodeBackend {
             )?;
             finalize(tx, &format!("organization:{}", org.id), ctx.clone())?;
             Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn insert_organization_reference(
+        &self,
+        reference: sid_core::models::OrganizationReference,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let org = reference.id;
+        let held = self
+            .transaction(move |tx| {
+                let rows = tx.run(
+                    "MATCH (o:SidOrganization) WHERE o.id = $id RETURN o.is_instance AS instance",
+                    Params::default().with("id", uuid(org.as_uuid())),
+                )?;
+                if let Some(row) = rows.first() {
+                    // Held already: a reference stays, the instance is none.
+                    return Ok(Decision::Abandon(Some(get_bool(row, "instance")?)));
+                }
+                tx.create_absent(
+                    "CREATE (o:SidOrganization {id: $id, is_instance: false,
+                        created_at: $created_at})",
+                    Params::default()
+                        .with("id", uuid(org.as_uuid()))
+                        .with("created_at", time(reference.created_at)),
+                )?;
+                finalize(tx, &format!("organization:{org}"), ctx.clone())?;
+                Ok(Decision::Commit(None))
+            })
+            .await?;
+        match held {
+            None => Ok(true),
+            Some(false) => Ok(false),
+            Some(true) => Err(sid_core::Error::Conflict(format!(
+                "organization {org} is this installation's own"
+            ))),
+        }
+    }
+
+    pub(super) async fn organization_references(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
+        self.read(|tx| {
+            let rows = tx.run(
+                "MATCH (o:SidOrganization) WHERE o.is_instance = false
+                 RETURN o.id AS id, o.created_at AS created_at",
+                Params::default(),
+            )?;
+            let mut held = rows
+                .iter()
+                .map(|row| {
+                    Ok(sid_core::models::OrganizationReference {
+                        id: OrgId::from_uuid(get_uuid(row, "id")?)
+                            .map_err(|e| sid_core::Error::Storage(e.to_string()))?,
+                        created_at: get_time(row, "created_at")?,
+                    })
+                })
+                .collect::<SidResult<Vec<_>>>()?;
+            held.sort_unstable_by_key(|reference| reference.id.into_uuid());
+            Ok(held)
         })
         .await
     }

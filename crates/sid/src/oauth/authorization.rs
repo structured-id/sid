@@ -272,12 +272,17 @@ impl OAuth {
             .storage
             .get_oauth2_client(&request.client_id)
             .await?
-            .filter(|client| client.active)
             .ok_or(AuthorizationError::UnknownClient)?;
+        // The same check as at the token endpoint: an inactive client, one of
+        // another issuer, or a federation site whose admission no longer
+        // stands starts no interaction and is redirected nowhere.
         let issuer = self
-            .issuer_serving(&request.issuer_handle, client.org_id)
-            .await?
-            .ok_or(AuthorizationError::UnknownClient)?;
+            .client_issuer(&request.issuer_handle, &client)
+            .await
+            .map_err(|e| match e {
+                OAuthError::ClientRefused => AuthorizationError::UnknownClient,
+                other => other.into(),
+            })?;
         if !client.is_redirect_uri_allowed(&request.redirect_uri) {
             return Err(AuthorizeError::UnregisteredRedirectUri.into());
         }

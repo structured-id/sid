@@ -113,5 +113,25 @@ impl Organization {
     }
 }
 
+/// Another organization this installation issues to: its identity alone.
+/// It holds no lifecycle, domain or local management, and is never the
+/// installation's own organization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationReference {
+    pub id: OrgId,
+    /// When this installation first held it.
+    pub created_at: DateTime<Utc>,
+}
+
+impl OrganizationReference {
+    /// A reference to `id`, held from now.
+    pub fn new(id: OrgId) -> Self {
+        Self {
+            id,
+            created_at: Utc::now(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

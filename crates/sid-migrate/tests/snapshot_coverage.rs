@@ -198,6 +198,14 @@ async fn installation(source: &SqliteBackend) -> Installation {
         .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
+    // An organization the installation issues to, held as a reference.
+    source
+        .insert_organization_reference(
+            &sid_core::models::OrganizationReference::new(sid_core::models::OrgId::generate()),
+            ctx(),
+        )
+        .await
+        .unwrap();
     let now = Utc::now().trunc_subsecs(3);
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
@@ -270,6 +278,7 @@ fn client_for(app: &Application, org: OrgId) -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: Some(vec![0x5a; 64]),
         redirect_uris: vec!["https://app.sid.example.com/cb".into()],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into()],
@@ -1122,7 +1131,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             certificate: vec![generation as u8; 32],
             state,
             overlap_end,
-            crl: None,
         };
         let published = |revision, generations| PlatformCaSet {
             revision,

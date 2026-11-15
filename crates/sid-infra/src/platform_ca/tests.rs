@@ -59,8 +59,6 @@ fn published() -> PlatformCas {
                 certificate: vec![2; 600],
                 state: PlatformCaState::Active as i32,
                 overlap_end: None,
-                // The generation's CRL travels as bytes (base64 in the JSON).
-                crl: vec![0x30, 0x82, 0xff, 0x00, 0x7f],
             },
             PlatformCa {
                 generation: 1,
@@ -70,7 +68,6 @@ fn published() -> PlatformCas {
                     seconds: 1_900_000_000,
                     nanos: 0,
                 }),
-                crl: vec![0x30, 0x03, 0x02, 0x01, 0x01],
             },
         ],
         roots: vec![vec![9; 400]],
@@ -126,6 +123,9 @@ fn what_this_build_carries_is_a_set() {
 
 struct Publishing(PlatformCas);
 
+/// The DER bytes the test publication serves as generation 2's CRL.
+const SERVED_CRL: &[u8] = &[0x30, 0x82, 0xff, 0x00, 0x7f];
+
 #[tonic::async_trait]
 impl PlatformCaService for Publishing {
     async fn get_platform_cas(
@@ -133,6 +133,20 @@ impl PlatformCaService for Publishing {
         _: tonic::Request<GetPlatformCasRequest>,
     ) -> Result<tonic::Response<PlatformCas>, tonic::Status> {
         Ok(tonic::Response::new(self.0.clone()))
+    }
+
+    async fn get_platform_ca_crl(
+        &self,
+        request: tonic::Request<sid_proto::sid::v1::GetPlatformCaCrlRequest>,
+    ) -> Result<tonic::Response<sid_proto::google::api::HttpBody>, tonic::Status> {
+        if request.into_inner().generation != 2 {
+            return Err(tonic::Status::not_found("no such generation"));
+        }
+        Ok(tonic::Response::new(sid_proto::google::api::HttpBody {
+            content_type: CRL_TYPE.into(),
+            data: SERVED_CRL.to_vec(),
+            extensions: vec![],
+        }))
     }
 }
 
@@ -161,11 +175,15 @@ async fn the_served_publication_reads_back() {
         )
         .await
     });
-    let fetched = loopback(&format!("http://{bind}/.well-known/sid-ca/index.json"))
-        .fetch()
-        .await
-        .unwrap();
+    let publication = loopback(&format!("http://{bind}/.well-known/sid-ca/index.json"));
+    let fetched = publication.fetch().await.unwrap();
     assert_eq!(fetched, published());
+    // A generation's CRL is read apart, as the DER the service answered.
+    assert_eq!(publication.fetch_crl(2).await.unwrap(), SERVED_CRL);
+    assert!(matches!(
+        publication.fetch_crl(7).await,
+        Err(PublicationError::Status(404))
+    ));
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
@@ -278,9 +296,9 @@ async fn a_malformed_answer_is_refused() {
 }
 
 // A published message reads to the set its holder applies: states by their
-// meaning, an overlap end and the times in seconds, a list only where one is
-// published. Bug prevented: an unknown state or a missing freshness time
-// read as some default, so a holder would apply a set that never said it.
+// meaning, an overlap end and the times in seconds. Bug prevented: an
+// unknown state or a missing freshness time read as some default, so a
+// holder would apply a set that never said it.
 #[test]
 fn a_published_message_states_the_set() {
     use sid_plugin::platform_ca as held;
@@ -298,21 +316,15 @@ fn a_published_message_states_the_set() {
                 certificate: vec![2; 600],
                 state: held::PlatformCaState::Active,
                 overlap_end: None,
-                crl: Some(vec![0x30, 0x82, 0xff, 0x00, 0x7f]),
             },
             held::PlatformCa {
                 generation: 1,
                 certificate: vec![1; 600],
                 state: held::PlatformCaState::VerificationOnly,
                 overlap_end: Some(1_900_000_000),
-                crl: Some(vec![0x30, 0x03, 0x02, 0x01, 0x01]),
             },
         ]
     );
-
-    let mut unlisted = published();
-    unlisted.generations[0].crl.clear();
-    assert_eq!(set_of(unlisted).unwrap().generations[0].crl, None);
 
     let mut stateless = published();
     stateless.generations[0].state = 0;

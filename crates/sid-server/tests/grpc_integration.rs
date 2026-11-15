@@ -2898,6 +2898,7 @@ fn client_settings(kind: ApplicationType) -> ClientRoleSettings {
         grant_types: vec!["authorization_code".to_string()],
         jwks: None,
         post_logout_redirect_uris: vec![],
+        participant_admission: None,
     }
 }
 
@@ -4529,6 +4530,7 @@ async fn test_e2e_admin_project_and_application_flow() {
                     grant_types: vec!["authorization_code".to_string()],
                     jwks: None,
                     post_logout_redirect_uris: vec![],
+                    participant_admission: None,
                 }),
                 resource: None,
                 org_id: None,

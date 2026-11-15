@@ -82,4 +82,55 @@ pub async fn test_instance_organization_and_clients(backend: &dyn StorageBackend
             .unwrap(),
         0
     );
+
+    // Another organization this installation issues to is held as a
+    // reference: its identity alone. Concurrent first holds agree, a repeat
+    // writes nothing, and the installation's own organization is never one.
+    assert!(backend.organization_references().await.unwrap().is_empty());
+    let reference = sid_core::models::OrganizationReference {
+        id: sid_core::models::OrgId::generate(),
+        // Stores keep times to the microsecond.
+        created_at: chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 6),
+    };
+    let recipient = reference.id;
+    let (ra, rb) = tokio::join!(
+        backend.insert_organization_reference(&reference, test_audit()),
+        backend.insert_organization_reference(&reference, test_audit()),
+    );
+    let (ra, rb) = (ra.unwrap(), rb.unwrap());
+    assert!(ra ^ rb, "inserts: {ra} {rb}");
+    assert!(
+        !backend
+            .insert_organization_reference(&reference, test_audit())
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        backend
+            .insert_organization_reference(
+                &sid_core::models::OrganizationReference::new(stored.id),
+                test_audit()
+            )
+            .await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        backend.organization_references().await.unwrap(),
+        vec![reference]
+    );
+    // The instance organization is unchanged by its references.
+    assert_eq!(backend.instance_organization().await.unwrap(), Some(stored));
+    // A client may belong to the referenced organization.
+    let mut theirs = create_test_oauth2_client(&format!("recipient-{}", uuid::Uuid::now_v7()));
+    theirs.org_id = Some(recipient);
+    store_client(backend, &theirs, test_audit()).await.unwrap();
+    assert_eq!(
+        backend
+            .get_oauth2_client(&theirs.client_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .org_id,
+        Some(recipient)
+    );
 }

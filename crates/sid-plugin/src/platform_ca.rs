@@ -114,10 +114,6 @@ pub struct PlatformCa {
     /// End of a verification-only generation's overlap (seconds since the
     /// epoch); none for the other states.
     pub overlap_end: Option<i64>,
-    /// The generation's CRL (DER) as published; none when it publishes none.
-    /// A store does not keep it: its caller authenticates it and records
-    /// what it says with [`PlatformCaStore::record_platform_ca_status`].
-    pub crl: Option<Vec<u8>>,
 }
 
 /// A generation's CRL, authenticated under the generation's certificate: the
@@ -260,8 +256,15 @@ pub enum PlatformCaError {
 /// transported: the holder checks and applies it under the store's rules.
 #[async_trait]
 pub trait PlatformCaSource: Send + Sync {
-    /// The set the platform publishes at `endpoint` now.
+    /// The set the platform publishes at `endpoint` now. It carries
+    /// certificates and their admission, never status.
     async fn fetch(&self, endpoint: &url::Url) -> Result<PlatformCaSet, String>;
+
+    /// The current CRL (DER) of generation `generation` of the platform
+    /// whose set is published at `endpoint`, read apart from the set: status
+    /// changes with every revocation, the set does not. Only transported: its caller authenticates it under that generation's
+    /// certificate and records what it says.
+    async fn crl(&self, endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String>;
 }
 
 /// The admitted platform CA set of one installation.

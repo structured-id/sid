@@ -15,7 +15,8 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::authn::caller::{authenticate, bearer_token};
 use sid_infra::authn::operation::context;
 use sid_infra::grpc_error::refuse::{
-    changed_concurrently, invalid_field, maintenance, missing_field, not_found, storage_failure,
+    changed_concurrently, dependency_unavailable, invalid_field, maintenance, missing_field,
+    not_found, storage_failure,
 };
 use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 use sid_plugin::storage::StorageBackend;
@@ -38,9 +39,14 @@ impl ProjectServiceImpl {
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
         issuer: sid_core::models::OidcIssuer,
+        sites: Option<sid::projects::SiteRegistrar>,
     ) -> Self {
+        let projects = Projects::new(storage, issuer);
         Self {
-            projects: Projects::new(storage, issuer),
+            projects: match sites {
+                Some(sites) => projects.with_site_registrar(sites),
+                None => projects,
+            },
             feature_flags,
             jwt,
             revocation,
@@ -96,6 +102,10 @@ fn refusal(e: ProjectError) -> Status {
         ProjectError::Operation(e) => e.into_status(),
         ProjectError::Store(e) => storage_failure(e),
         ProjectError::Internal => ApiError::internal().into(),
+        // No current status to decide the site on: the same request is retried.
+        ProjectError::SiteEvidenceUnavailable(reason) => {
+            dependency_unavailable("the platform's certificate status", reason)
+        }
         ProjectError::MissingField(field) => missing_field(field),
         ProjectError::InvalidField { field, reason } => invalid_field(field, reason),
         ProjectError::Metadata { field, message } => metadata_refusal(field, message),

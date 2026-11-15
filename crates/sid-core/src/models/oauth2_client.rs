@@ -271,6 +271,14 @@ pub struct OAuth2Client {
     #[serde(default)]
     pub jwks: Option<ClientKeySet>,
 
+    /// For the client of another organization's federation site: that
+    /// site's signed admission statement as received (a JWS carrying its
+    /// participant certificate and path), the evidence the client's
+    /// organization and return address were verified against when it was
+    /// registered. None for every other client.
+    #[serde(default)]
+    pub participant_admission: Option<Vec<u8>>,
+
     /// Allowed redirect URIs (exact match required).
     pub redirect_uris: Vec<String>,
 

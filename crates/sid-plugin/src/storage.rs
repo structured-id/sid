@@ -970,6 +970,21 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
+    /// Hold `org` as an organization this installation issues to: a
+    /// reference holding its identity alone, never a lifecycle, a domain or
+    /// local management. Returns whether it was written; one already held
+    /// writes nothing. The installation's own organization is never a
+    /// reference: naming it is a `Conflict`.
+    async fn insert_organization_reference(
+        &self,
+        org: &sid_core::models::OrganizationReference,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// The organizations held as references, in identifier order.
+    async fn organization_references(&self)
+    -> Result<Vec<sid_core::models::OrganizationReference>>;
+
     /// Give every client that belongs to no organization `org_id`; returns
     /// how many were assigned. Clients already in an organization keep it.
     async fn assign_unowned_clients(

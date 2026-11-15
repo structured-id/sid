@@ -48,8 +48,9 @@ use sid_core::models::{
     AuditEntry, MutationContext, StatusEvidence, StatusPolicy, StatusRequirement,
 };
 use sid_plugin::platform_ca::{
-    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCaError,
-    PlatformCaSet, PlatformCaSource, PlatformCaState, PlatformCaStore, StatusRefusal,
+    AnchorStatus, Applied, GenerationStatus, HeldAnchors, IssuerStatus, PlatformCa,
+    PlatformCaError, PlatformCaSet, PlatformCaSource, PlatformCaState, PlatformCaStore,
+    StatusRefusal,
 };
 use uuid::Uuid;
 use x509_cert::Certificate;
@@ -72,6 +73,22 @@ const SOURCE_BACKOFF: i64 = 30;
 /// How long a view of a set past its refresh time is kept before the store
 /// is read again: another replica may have held a newer set meanwhile.
 const STALE_SET_REREAD: i64 = 60;
+
+/// How long before a held platform CRL stops being evidence a configured
+/// publication is asked for the generation's current one, so the status
+/// is renewed while the held one still serves.
+const STATUS_RENEW_LEAD: i64 = 600;
+
+/// When the status of the held anchors is next asked for (seconds since the
+/// epoch): at once for an anchor with no CRL held, else [`STATUS_RENEW_LEAD`]
+/// before the earliest held CRL ends.
+fn status_renew_at(held: &HeldAnchors) -> i64 {
+    held.status
+        .iter()
+        .map(|s| s.until.map_or(i64::MIN, |until| until - STATUS_RENEW_LEAD))
+        .min()
+        .unwrap_or(i64::MAX)
+}
 
 /// An accepted passport, with what was known of withdrawals when it was
 /// accepted. Stale or unknown status is an accepted passport the policy
@@ -407,15 +424,19 @@ fn issued_by_now(
 }
 
 /// Where an organization's own publication is read from: its CA generations
-/// and the list each publishes of the passports it issued
-/// (`arch/auth/org-ca-architecture.md` §organization-status-publication),
-/// in the platform publication's format. Where it is read grants nothing:
+/// and the list each publishes of the passports it issued, in the platform
+/// publication's format. Where it is read grants nothing:
 /// every certificate and list is checked as the recipient checks any.
 #[async_trait::async_trait]
 pub trait OrganizationPublications: Send + Sync {
     /// What `organization` publishes now; `Ok(None)` when no location of its
     /// publication is known to this installation.
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String>;
+
+    /// The current CRL (DER) of `organization`'s generation `generation`,
+    /// read apart from its publication; `Ok(None)` when no location of it is
+    /// known to this installation.
+    async fn crl(&self, organization: Uuid, generation: u32) -> Result<Option<Vec<u8>>, String>;
 }
 
 /// The recipient side of one installation over its store.
@@ -515,16 +536,32 @@ impl<V: Verdict> Recipient<V> {
                 return false;
             }
         };
-        let Some(crl) = published
+        // The generation is the one whose certificate issued the passport;
+        // its status is read apart from the publication.
+        let Some(generation) = published
             .generations
             .iter()
-            .find(|g| g.certificate == issuer)
-            .and_then(|g| g.crl.as_deref())
+            .find(|g| g.certificate == issuer && g.state != PlatformCaState::Withdrawn)
+            .map(|g| g.generation)
         else {
             return false;
         };
+        let crl = match publications.crl(organization, generation).await {
+            Ok(Some(crl)) => crl,
+            Ok(None) => return false,
+            Err(reason) => {
+                tracing::warn!(%organization, %reason, "organization list not read");
+                backoff(
+                    &mut self
+                        .publication_failed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                return false;
+            }
+        };
         match self
-            .record_issuer_status(allocation, organization, issuer, chain, crl, at)
+            .record_issuer_status(allocation, organization, issuer, chain, &crl, at)
             .await
         {
             Ok(()) => true,
@@ -572,12 +609,9 @@ impl<V: Verdict> Recipient<V> {
         &self.verdict
     }
 
-    /// A platform set's generations are CA certificates, a verification-only
-    /// one names its overlap end, and a list a generation publishes is its
-    /// own, by this verdict. The authenticated lists are returned for the
-    /// store.
-    fn check_set(&self, set: &PlatformCaSet) -> Result<Vec<GenerationStatus>, RecipientError> {
-        let mut status = Vec::new();
+    /// A platform set's generations are CA certificates and a
+    /// verification-only one names its overlap end.
+    fn check_set(&self, set: &PlatformCaSet) -> Result<(), RecipientError> {
         for generation in &set.generations {
             let certificate = Certificate::from_der(&generation.certificate).map_err(|e| {
                 RecipientError::Invalid {
@@ -605,40 +639,60 @@ impl<V: Verdict> Recipient<V> {
                     reason: "a verification-only generation names its overlap end".into(),
                 });
             }
-            if let Some(crl) = &generation.crl {
-                let verified = self
-                    .verdict
-                    .status(crl, &generation.certificate)
-                    .map_err(|e| RecipientError::Invalid {
-                        field: "generations.crl",
-                        reason: e.to_string(),
-                    })?;
-                issued_by_now(&verified, SystemTime::now(), "generations.crl")?;
-                status.push(GenerationStatus {
-                    generation: generation.generation,
-                    certificate: generation.certificate.clone(),
-                    number: verified.number,
-                    next_update: seconds(verified.next_update)?,
-                    revoked: verified.revoked,
-                });
-            }
         }
-        Ok(status)
+        Ok(())
     }
 
-    /// Hold the status and then the set: an anchor is never held ahead of
-    /// what its generation revoked.
+    /// Hold the set after checking it. Its status is read and recorded
+    /// apart ([`Self::record_platform_ca_crl`]).
     async fn hold(&self, set: &PlatformCaSet) -> Result<Applied, RecipientError> {
-        let status = self.check_set(set)?;
-        if !status.is_empty() {
-            self.store
-                .record_platform_ca_status(&status, audit("platform_ca.record_status"))
-                .await?;
-        }
+        self.check_set(set)?;
         Ok(self
             .store
             .apply_platform_cas(set, audit("platform_ca.apply"))
             .await?)
+    }
+
+    /// Hold the CRL `crl` of the platform generation `generation`, after
+    /// authenticating it under that generation's certificate by this
+    /// verdict: the status of the certificates the generation issued.
+    pub async fn record_platform_ca_crl(
+        &self,
+        generation: &PlatformCa,
+        crl: &[u8],
+    ) -> Result<(), RecipientError> {
+        let mut view = self.view.write().await;
+        self.hold_crl(generation, crl).await?;
+        // Paths accepted under the earlier status are read again.
+        *view = None;
+        Ok(())
+    }
+
+    /// Authenticate and hold `crl` of `generation`; the caller holds the
+    /// view and drops it.
+    async fn hold_crl(&self, generation: &PlatformCa, crl: &[u8]) -> Result<(), RecipientError> {
+        let verified = self
+            .verdict
+            .status(crl, &generation.certificate)
+            .map_err(|e| RecipientError::Invalid {
+                field: "crl",
+                reason: e.to_string(),
+            })?;
+        issued_by_now(&verified, SystemTime::now(), "crl")?;
+        let status = GenerationStatus {
+            generation: generation.generation,
+            certificate: generation.certificate.clone(),
+            number: verified.number,
+            next_update: seconds(verified.next_update)?,
+            revoked: verified.revoked,
+        };
+        self.store
+            .record_platform_ca_status(
+                std::slice::from_ref(&status),
+                audit("platform_ca.record_status"),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Hold the platform's admitted CA set `set`, after checking it.
@@ -676,8 +730,11 @@ impl<V: Verdict> Recipient<V> {
             return Ok(view.clone());
         }
         let mut held = self.store.held_platform_cas(now).await;
+        // The set and its status have their own times: a set just received
+        // is current while the status of its generations may be missing or
+        // ending, and status is read from the publication either way.
         let due = match &held {
-            Ok(held) => now >= held.renew_at,
+            Ok(held) => now >= held.renew_at || now >= status_renew_at(held),
             Err(PlatformCaError::NotProvisioned) => true,
             Err(_) => false,
         };
@@ -688,7 +745,10 @@ impl<V: Verdict> Recipient<V> {
             Some(_) => Pulled::Current,
             None => Pulled::Unconfigured,
         };
-        if due && pulled == Pulled::Applied {
+        // A pull that failed part way may have held a newer set (a withdrawal
+        // included) before a status read failed: what is held is read again
+        // after every attempt, never kept from before it.
+        if due && matches!(pulled, Pulled::Applied | Pulled::Failed) {
             held = self.store.held_platform_cas(now).await;
         }
         let held = held?;
@@ -703,10 +763,19 @@ impl<V: Verdict> Recipient<V> {
             }
             Pulled::Unconfigured => held.until,
             Pulled::Failed => held.until.min(now + SOURCE_BACKOFF),
-            Pulled::Current | Pulled::Applied if held.renew_at > now => {
-                held.until.min(held.renew_at)
+            Pulled::Current | Pulled::Applied => {
+                // Read again when the set or a generation's status is next
+                // to be asked for, whichever comes first.
+                let next = held.renew_at.min(status_renew_at(&held));
+                if next > now {
+                    held.until.min(next)
+                } else {
+                    // Still due after the fetch (the publication answered
+                    // the same list near its end): asked again after the
+                    // backoff, not only when the set's answer ends.
+                    held.until.min(now + SOURCE_BACKOFF)
+                }
             }
-            Pulled::Current | Pulled::Applied => held.until,
         };
         let view = Arc::new(AnchorView::new(held, until));
         *slot = Some(view.clone());
@@ -736,7 +805,32 @@ impl<V: Verdict> Recipient<V> {
                 ?applied,
                 "platform CA set refreshed"
             );
-            Ok::<Pulled, String>(Pulled::Applied)
+            // The status of every generation a path may still end at, read
+            // apart from the set: a withdrawn one, or a verification-only
+            // one whose overlap has ended, anchors nothing. One list that
+            // cannot be read does not keep the others from being renewed;
+            // the pull still counts as failed, so it is retried.
+            let mut failed = None;
+            for generation in set.generations.iter().filter(|g| match g.state {
+                PlatformCaState::Active => true,
+                PlatformCaState::VerificationOnly => g.overlap_end.is_none_or(|end| end > now),
+                PlatformCaState::Withdrawn => false,
+            }) {
+                let read = async {
+                    let crl = source.crl(publication, generation.generation).await?;
+                    self.hold_crl(generation, &crl)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                if let Err(reason) = read {
+                    failed.get_or_insert(format!("generation {}: {reason}", generation.generation));
+                }
+            }
+            match failed {
+                Some(reason) => Err(reason),
+                None => Ok::<Pulled, String>(Pulled::Applied),
+            }
         }
         .await;
         match outcome {

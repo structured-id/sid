@@ -171,8 +171,8 @@ fn epoch(at: SystemTime) -> i64 {
 }
 
 /// The platform's set at `revision`: the intermediate as generation 1 in
-/// `state`, publishing `crl`.
-fn set(revision: u64, state: PlatformCaState, crl: Option<Vec<u8>>) -> PlatformCaSet {
+/// `state`. Its status is read apart: see [`hold`].
+fn set(revision: u64, state: PlatformCaState) -> PlatformCaSet {
     let now = SystemTime::now();
     PlatformCaSet {
         revision,
@@ -181,11 +181,28 @@ fn set(revision: u64, state: PlatformCaState, crl: Option<Vec<u8>>) -> PlatformC
             certificate: intermediate(),
             state,
             overlap_end: None,
-            crl,
         }],
         issued_at: epoch(now) - 60,
         next_update: epoch(now) + 3600,
     }
+}
+
+/// Have `recipient` hold the set at `revision` in `state` and, read apart
+/// from it as a recipient reads it, the generation's list `crl` when given.
+async fn hold(
+    recipient: &Recipient,
+    revision: u64,
+    state: PlatformCaState,
+    crl: Option<Vec<u8>>,
+) -> Result<(), RecipientError> {
+    let set = set(revision, state);
+    recipient.record_platform_cas(&set).await?;
+    if let Some(crl) = crl {
+        recipient
+            .record_platform_ca_crl(&set.generations[0], &crl)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn store() -> Arc<SqliteBackend> {
@@ -284,7 +301,7 @@ async fn a_personal_passport_is_accepted_under_the_held_set() {
     let recipient = recipient().await;
     assert_eq!(
         recipient
-            .record_platform_cas(&set(1, PlatformCaState::Active, None))
+            .record_platform_cas(&set(1, PlatformCaState::Active))
             .await
             .unwrap(),
         Applied::Current
@@ -324,8 +341,7 @@ async fn a_corporate_passport_is_accepted_as_the_policy_says() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
     let default = StatusPolicy::default();
-    recipient
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+    hold(&recipient, 1, PlatformCaState::Active, None)
         .await
         .unwrap();
 
@@ -365,14 +381,14 @@ async fn a_corporate_passport_is_accepted_as_the_policy_says() {
     ));
 
     // The platform's list arrives: the organization's authority stands.
-    recipient
-        .record_platform_cas(&set(
-            2,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        2,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let refused = accept_strict(&recipient, &corporate(), &chain)
         .await
         .unwrap_err();
@@ -401,14 +417,14 @@ async fn a_corporate_passport_is_accepted_as_the_policy_says() {
 async fn a_list_issued_in_the_future_is_not_held() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let mut early = StatedList::new(&format!("O={}", source()), &[3; 20], 5, &[]);
     early.this_update = SystemTime::now() + Duration::from_secs(600);
     let refused = record_organization_list(&recipient, &early.signed(&key(ORGANIZATION))).await;
@@ -429,15 +445,23 @@ async fn a_list_issued_in_the_future_is_not_held() {
         .unwrap();
 }
 
+/// What an organization's installation publishes: its CA generations and,
+/// served apart, generation 1's list.
+#[derive(Clone)]
+struct OrganizationPublished {
+    set: PlatformCaSet,
+    crl: Vec<u8>,
+}
+
 /// An issuing organization's publication as a test serves it: one answer,
-/// and how often it was read.
+/// and how often it was read (the set and its list together count once).
 struct Published {
-    answer: std::sync::Mutex<Result<Option<PlatformCaSet>, String>>,
+    answer: std::sync::Mutex<Result<Option<OrganizationPublished>, String>>,
     reads: AtomicUsize,
 }
 
 impl Published {
-    fn of(answer: Result<Option<PlatformCaSet>, String>) -> Arc<Self> {
+    fn of(answer: Result<Option<OrganizationPublished>, String>) -> Arc<Self> {
         Arc::new(Self {
             answer: std::sync::Mutex::new(answer),
             reads: AtomicUsize::new(0),
@@ -454,25 +478,41 @@ impl OrganizationPublications for Published {
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String> {
         assert_eq!(organization, source(), "the passport's own organization");
         self.reads.fetch_add(1, Ordering::SeqCst);
-        self.answer.lock().unwrap().clone()
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|published| published.map(|p| p.set))
+    }
+
+    async fn crl(&self, organization: Uuid, generation: u32) -> Result<Option<Vec<u8>>, String> {
+        assert_eq!(organization, source(), "the passport's own organization");
+        assert_eq!(generation, 1, "the generation that issued the passport");
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|published| published.map(|p| p.crl))
     }
 }
 
-/// The organization's publication: its authority as generation 1 with
-/// `crl`.
-fn organization_publication(crl: Vec<u8>) -> PlatformCaSet {
+/// The organization's publication: its authority as generation 1, and
+/// that generation's list `crl` served apart.
+fn organization_publication(crl: Vec<u8>) -> OrganizationPublished {
     let now = epoch(SystemTime::now());
-    PlatformCaSet {
-        revision: 1,
-        generations: vec![PlatformCa {
-            generation: 1,
-            certificate: organization_ca(),
-            state: PlatformCaState::Active,
-            overlap_end: None,
-            crl: Some(crl),
-        }],
-        issued_at: now,
-        next_update: now + 3600,
+    OrganizationPublished {
+        set: PlatformCaSet {
+            revision: 1,
+            generations: vec![PlatformCa {
+                generation: 1,
+                certificate: organization_ca(),
+                state: PlatformCaState::Active,
+                overlap_end: None,
+            }],
+            issued_at: now,
+            next_update: now + 3600,
+        },
+        crl,
     }
 }
 
@@ -496,14 +536,14 @@ async fn an_offline_policy_still_reads_a_reachable_list() {
     let recipient = recipient()
         .await
         .with_organization_publications(revoking.clone());
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         accept_under(&recipient, &corporate(), &chain, &offline).await,
         Err(RecipientError::PassportRevoked)
@@ -524,14 +564,14 @@ async fn an_organizations_list_is_read_from_its_publication() {
     let chain = [organization_ca()];
     let with = |published: Arc<Published>| async move {
         let recipient = recipient().await.with_organization_publications(published);
-        recipient
-            .record_platform_cas(&set(
-                1,
-                PlatformCaState::Active,
-                Some(platform_list(1, &[])),
-            ))
-            .await
-            .unwrap();
+        hold(
+            &recipient,
+            1,
+            PlatformCaState::Active,
+            Some(platform_list(1, &[])),
+        )
+        .await
+        .unwrap();
         recipient
     };
 
@@ -592,8 +632,7 @@ async fn an_organizations_list_is_read_from_its_publication() {
 async fn a_personal_passport_stands_by_its_generations_list() {
     let recipient = recipient().await;
     let default = StatusPolicy::default();
-    recipient
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+    hold(&recipient, 1, PlatformCaState::Active, None)
         .await
         .unwrap();
     let undecided = accept_under(&recipient, &personal(), &[], &default)
@@ -609,14 +648,14 @@ async fn a_personal_passport_stands_by_its_generations_list() {
         .unwrap();
     assert_eq!(offline.issuer, StatusEvidence::Unknown);
 
-    recipient
-        .record_platform_cas(&set(
-            2,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        2,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let fresh = accept_under(&recipient, &personal(), &[], &default)
         .await
         .unwrap();
@@ -624,14 +663,14 @@ async fn a_personal_passport_stands_by_its_generations_list() {
     assert_eq!(fresh.issuer, StatusEvidence::Fresh);
 
     // The generation withdraws the passport.
-    recipient
-        .record_platform_cas(&set(
-            3,
-            PlatformCaState::Active,
-            Some(platform_list(2, &[PASSPORT_SERIAL])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        3,
+        PlatformCaState::Active,
+        Some(platform_list(2, &[PASSPORT_SERIAL])),
+    )
+    .await
+    .unwrap();
     for policy in [&STRICT, &default, &RELAXED] {
         let refused = accept_under(&recipient, &personal(), &[], policy)
             .await
@@ -648,14 +687,14 @@ async fn a_personal_passport_stands_by_its_generations_list() {
 async fn an_expired_list_admits_only_within_the_policys_age() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     record_organization_list(&recipient, &organization_list(1, &[]))
         .await
         .unwrap();
@@ -700,14 +739,14 @@ async fn an_expired_list_admits_only_within_the_policys_age() {
 #[tokio::test]
 async fn a_set_past_its_refresh_time_anchors_by_policy() {
     let recipient = recipient().await;
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let later = SystemTime::now() + Duration::from_secs(2 * 3600);
     let at = |policy: StatusPolicy| {
         let recipient = &recipient;
@@ -731,14 +770,14 @@ async fn a_set_past_its_refresh_time_anchors_by_policy() {
 #[tokio::test]
 async fn a_revoked_organization_authority_takes_its_passports_along() {
     let recipient = recipient().await;
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[ORGANIZATION_SERIAL])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[ORGANIZATION_SERIAL])),
+    )
+    .await
+    .unwrap();
     let refused = accept(&recipient, &corporate(), &[organization_ca()])
         .await
         .unwrap_err();
@@ -760,14 +799,14 @@ async fn a_revoked_organization_authority_takes_its_passports_along() {
 async fn a_revoked_passport_is_refused_though_accepted_before() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     record_organization_list(&recipient, &organization_list(1, &[]))
         .await
         .unwrap();
@@ -795,14 +834,14 @@ async fn a_revoked_passport_is_refused_though_accepted_before() {
 #[tokio::test]
 async fn a_list_of_another_key_is_not_recorded() {
     let recipient = recipient().await;
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let forged = StatedList::new(&format!("O={}", source()), &[3; 20], 9, &[]).signed(&key(HOLDER));
     assert!(matches!(
         record_organization_list(&recipient, &forged).await,
@@ -822,12 +861,12 @@ async fn a_list_of_another_key_is_not_recorded() {
 async fn a_withdrawn_generation_anchors_nothing() {
     let recipient = recipient().await;
     recipient
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .record_platform_cas(&set(1, PlatformCaState::Active))
         .await
         .unwrap();
     accept(&recipient, &personal(), &[]).await.unwrap();
     recipient
-        .record_platform_cas(&set(2, PlatformCaState::Withdrawn, None))
+        .record_platform_cas(&set(2, PlatformCaState::Withdrawn))
         .await
         .unwrap();
     assert!(matches!(
@@ -844,7 +883,7 @@ async fn a_withdrawn_generation_anchors_nothing() {
     // An older set listing it active again changes nothing.
     assert_eq!(
         recipient
-            .record_platform_cas(&set(1, PlatformCaState::Active, None))
+            .record_platform_cas(&set(1, PlatformCaState::Active))
             .await
             .unwrap(),
         Applied::Stale
@@ -852,12 +891,12 @@ async fn a_withdrawn_generation_anchors_nothing() {
     assert!(accept(&recipient, &personal(), &[]).await.is_err());
 }
 
-/// A set whose generation is no authority, or whose list is not that
-/// generation's, is refused whole.
+/// A set whose generation is no authority is refused whole, and a list that
+/// is not that generation's is not recorded as its status.
 #[tokio::test]
 async fn a_malformed_set_is_not_held() {
     let recipient = recipient().await;
-    let mut leaf = set(1, PlatformCaState::Active, None);
+    let mut leaf = set(1, PlatformCaState::Active);
     leaf.generations[0].certificate = personal();
     assert!(matches!(
         recipient.record_platform_cas(&leaf).await,
@@ -866,13 +905,12 @@ async fn a_malformed_set_is_not_held() {
             ..
         })
     ));
-    let foreign = set(1, PlatformCaState::Active, Some(organization_list(1, &[])));
+    let generation = &set(1, PlatformCaState::Active).generations[0];
     assert!(matches!(
-        recipient.record_platform_cas(&foreign).await,
-        Err(RecipientError::Invalid {
-            field: "generations.crl",
-            ..
-        })
+        recipient
+            .record_platform_ca_crl(generation, &organization_list(1, &[]))
+            .await,
+        Err(RecipientError::Invalid { field: "crl", .. })
     ));
     assert!(matches!(
         accept(&recipient, &personal(), &[]).await,
@@ -945,14 +983,14 @@ fn expected() -> Expected<'static> {
 #[tokio::test]
 async fn a_presentation_answers_one_pending_request() {
     let recipient = recipient().await;
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let identities: &dyn PresentedIdentities = &recipient;
     let accept = |jws: Vec<u8>| async move {
         identities
@@ -992,10 +1030,20 @@ async fn a_presentation_answers_one_pending_request() {
     assert!(undecided.undecided());
 }
 
-/// The configured publication, as a test answers it.
+/// The configured publication, as a test answers it: the set, and generation
+/// 1's list read apart, revoking nothing.
 struct Publication {
     answer: Result<PlatformCaSet, String>,
     asked: AtomicUsize,
+}
+
+impl Publication {
+    fn of(answer: Result<PlatformCaSet, String>) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            asked: AtomicUsize::new(0),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -1003,6 +1051,11 @@ impl PlatformCaSource for Publication {
     async fn fetch(&self, _endpoint: &url::Url) -> Result<PlatformCaSet, String> {
         self.asked.fetch_add(1, Ordering::Relaxed);
         self.answer.clone()
+    }
+
+    async fn crl(&self, _endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String> {
+        assert_eq!(generation, 1, "only a published generation's list is read");
+        Ok(platform_list(1, &[]))
     }
 }
 
@@ -1016,15 +1069,14 @@ async fn sourced(publication: &Arc<Publication>) -> Recipient {
 }
 
 /// An installation holding no set asks the platform's publication on the
-/// first request and accepts under what it published. One composed without
-/// a publication asks nothing and decides on what it holds alone, and a
-/// publication that is not `https` is not taken.
+/// first request and accepts under what it published, with the
+/// generation's list read apart from the set: a Personal passport is then
+/// decided on fresh status. One composed without a publication asks nothing
+/// and decides on what it holds alone, and a publication that is not
+/// `https` is not taken.
 #[tokio::test]
 async fn the_platforms_publication_supplies_the_set() {
-    let publication = Arc::new(Publication {
-        answer: Ok(set(1, PlatformCaState::Active, None)),
-        asked: AtomicUsize::new(0),
-    });
+    let publication = Publication::of(Ok(set(1, PlatformCaState::Active)));
     let alone = recipient().await;
     assert!(matches!(
         accept(&alone, &personal(), &[]).await,
@@ -1032,7 +1084,7 @@ async fn the_platforms_publication_supplies_the_set() {
     ));
     // What it holds decides, with nothing to refresh from.
     alone
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+        .record_platform_cas(&set(1, PlatformCaState::Active))
         .await
         .unwrap();
     accept(&alone, &personal(), &[]).await.unwrap();
@@ -1049,11 +1101,237 @@ async fn the_platforms_publication_supplies_the_set() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 0);
 
     let recipient = sourced(&publication).await;
-    accept(&recipient, &personal(), &[]).await.unwrap();
+    let fresh = accept_under(&recipient, &personal(), &[], &StatusPolicy::default())
+        .await
+        .unwrap();
+    assert_eq!(fresh.issuer, StatusEvidence::Fresh);
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
     // The held set is current: the next request asks nothing.
     accept(&recipient, &personal(), &[]).await.unwrap();
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+}
+
+/// A set the managing service handed over is current, but carries no
+/// status: the generation's list is read from the publication on the first
+/// request all the same, and the passport is decided on it, fresh. Once the
+/// list is held the next request asks nothing. Bug prevented: status read
+/// only together with a due set, so an installation given a fresh set never
+/// learned of its generation's revocations until the set aged.
+#[tokio::test]
+async fn status_is_read_although_the_set_is_current() {
+    let publication = Publication::of(Ok(set(1, PlatformCaState::Active)));
+    let recipient = sourced(&publication).await;
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active))
+        .await
+        .unwrap();
+    let decided = accept_under(&recipient, &personal(), &[], &StatusPolicy::default())
+        .await
+        .expect("decided on the list read from the publication");
+    assert_eq!(decided.issuer, StatusEvidence::Fresh);
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+    accept(&recipient, &personal(), &[]).await.unwrap();
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+}
+
+/// The key of the platform intermediate's successor generation.
+const SUCCESSOR: u8 = 6;
+
+/// A successor of the platform intermediate under the Root: the same name,
+/// a key of its own (`[6; 20]`), so nothing the first generation issued
+/// verifies under it.
+fn successor() -> Vec<u8> {
+    static SUCCESSOR_CERTIFICATE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SUCCESSOR_CERTIFICATE
+        .get_or_init(|| {
+            Stated {
+                subject: name(INTERMEDIATE_NAME),
+                serial: 21,
+                validity: current(),
+                extensions: vec![
+                    authority(Some(1)),
+                    signs_certificates(),
+                    purposes(&[DEVELOPMENT_PURPOSES.platform_intermediate]),
+                    key_id(&[SUCCESSOR; 20]),
+                ],
+            }
+            .signed(&key(SUCCESSOR), &name(ROOT_NAME), &key(ROOT))
+        })
+        .clone()
+}
+
+/// A publication answering a fixed set and, for each generation in turn,
+/// the list or failure it is given, counting the lists asked for.
+struct PerGeneration {
+    set: PlatformCaSet,
+    lists: Vec<(u32, Result<Vec<u8>, String>)>,
+}
+
+#[async_trait::async_trait]
+impl PlatformCaSource for PerGeneration {
+    async fn fetch(&self, _endpoint: &url::Url) -> Result<PlatformCaSet, String> {
+        Ok(self.set.clone())
+    }
+
+    async fn crl(&self, _endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String> {
+        self.lists
+            .iter()
+            .find(|(g, _)| *g == generation)
+            .map(|(_, list)| list.clone())
+            .unwrap_or_else(|| Err(format!("no list of generation {generation}")))
+    }
+}
+
+/// A generation whose list cannot be read does not keep the others' lists
+/// from being read: the replaced generation, listed first, fails, and the
+/// active one's list is held all the same, so a passport it issued is
+/// decided on fresh status. Bug prevented: one failing list endpoint
+/// leaving every later generation without status until its list ends.
+#[tokio::test]
+async fn one_failing_list_does_not_stop_the_others() {
+    let now = epoch(SystemTime::now());
+    let mut published = set(2, PlatformCaState::VerificationOnly);
+    published.generations[0].overlap_end = Some(now + 3_600);
+    published.generations.push(PlatformCa {
+        generation: 2,
+        certificate: successor(),
+        state: PlatformCaState::Active,
+        overlap_end: None,
+    });
+    let publication = Arc::new(PerGeneration {
+        set: published,
+        lists: vec![
+            (1, Err("unreachable".into())),
+            (
+                2,
+                Ok(StatedList::new(INTERMEDIATE_NAME, &[SUCCESSOR; 20], 1, &[])
+                    .signed(&key(SUCCESSOR))),
+            ),
+        ],
+    });
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication)
+        .unwrap();
+    let under_successor = issued(&stated(None), INTERMEDIATE_NAME, SUCCESSOR);
+    let decided = recipient
+        .accept_passport(
+            &under_successor,
+            &[],
+            recipient_org(),
+            &STRICT,
+            SystemTime::now(),
+        )
+        .await;
+    assert!(decided.is_ok(), "{decided:?}");
+}
+
+/// A publication answering a fixed set and, for every generation, a fixed
+/// list or failure, counting the lists asked for.
+struct Scripted {
+    set: PlatformCaSet,
+    crl: Result<Vec<u8>, String>,
+    lists: AtomicUsize,
+}
+
+impl Scripted {
+    fn of(set: PlatformCaSet, crl: Result<Vec<u8>, String>) -> Arc<Self> {
+        Arc::new(Self {
+            set,
+            crl,
+            lists: AtomicUsize::new(0),
+        })
+    }
+
+    fn lists(&self) -> usize {
+        self.lists.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformCaSource for Scripted {
+    async fn fetch(&self, _endpoint: &url::Url) -> Result<PlatformCaSet, String> {
+        Ok(self.set.clone())
+    }
+
+    async fn crl(&self, _endpoint: &url::Url, _generation: u32) -> Result<Vec<u8>, String> {
+        self.lists.fetch_add(1, Ordering::Relaxed);
+        self.crl.clone()
+    }
+}
+
+/// A publication that answers, near its end, the same list it holds is asked
+/// again after the backoff, not only when the set's answer ends. Bug
+/// prevented: a recipient that keeps an ending list until its set is due,
+/// and decides nothing under a strict policy once that list has ended
+/// although the publication has a newer one.
+#[tokio::test]
+async fn a_list_near_its_end_is_asked_for_again_after_the_backoff() {
+    let mut ending = StatedList::new(INTERMEDIATE_NAME, &[2; 20], 1, &[]);
+    ending.next_update = Some(SystemTime::now() + Duration::from_secs(300));
+    let publication = Scripted::of(
+        set(1, PlatformCaState::Active),
+        Ok(ending.signed(&key(INTERMEDIATE))),
+    );
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication.clone())
+        .unwrap();
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active))
+        .await
+        .unwrap();
+    let now = SystemTime::now();
+    let at = |ahead: u64| now + Duration::from_secs(ahead);
+    let decide = async |at: SystemTime| {
+        recipient
+            .accept_passport(&personal(), &[], recipient_org(), &STRICT, at)
+            .await
+    };
+    decide(at(0)).await.unwrap();
+    assert_eq!(publication.lists(), 1);
+    decide(at(10)).await.unwrap();
+    assert_eq!(
+        publication.lists(),
+        1,
+        "within the backoff nothing is asked"
+    );
+    decide(at(31)).await.unwrap();
+    assert_eq!(publication.lists(), 2, "after it the list is asked again");
+}
+
+/// A pull that holds a newer set and then fails to read a list decides on
+/// what it held: a generation the newer set withdrew anchors nothing at
+/// once. Bug prevented: a view rebuilt from the anchors before the pull,
+/// accepting under a withdrawn generation until the backoff ends.
+#[tokio::test]
+async fn a_withdrawal_held_before_a_failed_list_read_applies_at_once() {
+    let mut newer = set(2, PlatformCaState::Withdrawn);
+    newer.generations.push(PlatformCa {
+        generation: 2,
+        certificate: successor(),
+        state: PlatformCaState::Active,
+        overlap_end: None,
+    });
+    let publication = Scripted::of(newer, Err("unreachable".into()));
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication.clone())
+        .unwrap();
+    // The held set is past its halfway point, with its generation's list.
+    let mut aged = set(1, PlatformCaState::Active);
+    aged.issued_at = epoch(SystemTime::now()) - 2_000;
+    aged.next_update = aged.issued_at + 3_600;
+    recipient.record_platform_cas(&aged).await.unwrap();
+    recipient
+        .record_platform_ca_crl(&aged.generations[0], &platform_list(1, &[]))
+        .await
+        .unwrap();
+    // The withdrawn generation anchors nothing: the path finds no anchor
+    // that verifies it (its successor has the same name, another key).
+    let decided = accept(&recipient, &personal(), &[]).await;
+    assert!(
+        matches!(decided, Err(RecipientError::Path(_))),
+        "{decided:?}"
+    );
+    assert_eq!(publication.lists(), 1);
 }
 
 /// Halfway through the held set's freshness the publication is asked for a
@@ -1062,13 +1340,10 @@ async fn the_platforms_publication_supplies_the_set() {
 /// last second while the platform had already withdrawn a generation.
 #[tokio::test]
 async fn a_set_halfway_through_its_freshness_is_renewed() {
-    let publication = Arc::new(Publication {
-        answer: Ok(set(2, PlatformCaState::Withdrawn, None)),
-        asked: AtomicUsize::new(0),
-    });
+    let publication = Publication::of(Ok(set(2, PlatformCaState::Withdrawn)));
     let recipient = sourced(&publication).await;
     // Issued 2000 s ago and current for an hour: past its halfway point.
-    let mut aged = set(1, PlatformCaState::Active, None);
+    let mut aged = set(1, PlatformCaState::Active);
     aged.issued_at = epoch(SystemTime::now()) - 2_000;
     aged.next_update = aged.issued_at + 3_600;
     recipient.record_platform_cas(&aged).await.unwrap();
@@ -1084,12 +1359,9 @@ async fn a_set_halfway_through_its_freshness_is_renewed() {
 /// anchored.
 #[tokio::test]
 async fn a_publication_that_states_no_set_is_not_held() {
-    let mut stated = set(1, PlatformCaState::Active, None);
+    let mut stated = set(1, PlatformCaState::Active);
     stated.generations[0].certificate = vec![0x30, 0x00];
-    let publication = Arc::new(Publication {
-        answer: Ok(stated),
-        asked: AtomicUsize::new(0),
-    });
+    let publication = Publication::of(Ok(stated));
     let recipient = sourced(&publication).await;
     assert!(matches!(
         accept(&recipient, &personal(), &[]).await,
@@ -1103,10 +1375,7 @@ async fn a_publication_that_states_no_set_is_not_held() {
 /// here) decides.
 #[tokio::test]
 async fn a_failing_publication_is_not_asked_on_every_request() {
-    let publication = Arc::new(Publication {
-        answer: Err("unreachable".into()),
-        asked: AtomicUsize::new(0),
-    });
+    let publication = Publication::of(Err("unreachable".into()));
     let recipient = sourced(&publication).await;
     for _ in 0..3 {
         assert!(matches!(
@@ -1213,14 +1482,14 @@ async fn an_organization_accepts_its_own_passport_offline() {
 async fn an_acceptance_is_kept_no_longer_than_its_status() {
     let recipient = recipient().await;
     let chain = [organization_ca()];
-    recipient
-        .record_platform_cas(&set(
-            1,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        1,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     record_organization_list(&recipient, &organization_list(1, &[]))
         .await
         .unwrap();
@@ -1324,8 +1593,7 @@ async fn an_enrolled_site_stands_by_its_generations_list() {
     let recipient = recipient().await;
     let default = StatusPolicy::default();
     let now = SystemTime::now;
-    recipient
-        .record_platform_cas(&set(1, PlatformCaState::Active, None))
+    hold(&recipient, 1, PlatformCaState::Active, None)
         .await
         .unwrap();
     let undecided = recipient
@@ -1344,14 +1612,14 @@ async fn an_enrolled_site_stands_by_its_generations_list() {
     assert_eq!(offline.participant.organization, recipient_org());
     assert_eq!(offline.participant.site, site());
 
-    recipient
-        .record_platform_cas(&set(
-            2,
-            PlatformCaState::Active,
-            Some(platform_list(1, &[])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        2,
+        PlatformCaState::Active,
+        Some(platform_list(1, &[])),
+    )
+    .await
+    .unwrap();
     let verified = recipient
         .accept_admission(&admission_by(SITE), &default, now())
         .await
@@ -1372,14 +1640,14 @@ async fn an_enrolled_site_stands_by_its_generations_list() {
     assert!(!forged.undecided());
 
     // The generation withdraws the site's certificate.
-    recipient
-        .record_platform_cas(&set(
-            3,
-            PlatformCaState::Active,
-            Some(platform_list(2, &[SITE_SERIAL])),
-        ))
-        .await
-        .unwrap();
+    hold(
+        &recipient,
+        3,
+        PlatformCaState::Active,
+        Some(platform_list(2, &[SITE_SERIAL])),
+    )
+    .await
+    .unwrap();
     for policy in [&STRICT, &default, &RELAXED] {
         let refused = recipient
             .accept_admission(&admission_by(SITE), policy, now())

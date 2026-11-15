@@ -1065,6 +1065,18 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<bool> {
         unimplemented!()
     }
+    async fn insert_organization_reference(
+        &self,
+        _: &sid_core::models::OrganizationReference,
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn organization_references(
+        &self,
+    ) -> Result<Vec<sid_core::models::OrganizationReference>> {
+        unimplemented!()
+    }
     async fn assign_unowned_clients(&self, _: OrgId, _audit: MutationContext) -> Result<u64> {
         unimplemented!()
     }

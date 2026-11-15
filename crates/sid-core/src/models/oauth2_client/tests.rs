@@ -9,6 +9,7 @@ fn make_public_client() -> OAuth2Client {
         application_type: ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec![
             "https://app.sid.example.com/callback".to_string(),
             "https://app.sid.example.com/auth".to_string(),
@@ -56,6 +57,7 @@ fn make_confidential_client() -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: Some(b"$argon2id$fake_hash".to_vec()),
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://api.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into(), "profile".into()],
         grant_types: vec![

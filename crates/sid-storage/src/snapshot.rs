@@ -119,6 +119,10 @@ pub struct Snapshot {
     /// clients, protected resources and tokens name these issuers.
     pub oidc_issuers: Vec<IssuerSnapshot>,
 
+    /// The organizations this installation issues to, held as references:
+    /// their identity alone, in identifier order.
+    pub organization_references: Vec<sid_core::models::OrganizationReference>,
+
     /// Public derivation parameters for sealed fields. No master key or
     /// unwrapped epoch secret is included.
     pub key_versions: Vec<sid_keys::KeyVersionParams>,
@@ -405,7 +409,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -470,6 +474,7 @@ impl Snapshot {
             audit_chains: Vec::new(),
             organization: None,
             oidc_issuers: Vec::new(),
+            organization_references: Vec::new(),
             projects: Vec::new(),
             key_versions: Vec::new(),
             opaque_server_setup: None,
@@ -562,6 +567,7 @@ impl Snapshot {
             u64::from(self.organization.is_some()),
             self.oidc_issuers.len() as u64,
             self.oidc_issuers.iter().map(|i| i.keys.len() as u64).sum(),
+            self.organization_references.len() as u64,
             self.key_versions.len() as u64,
             u64::from(self.opaque_server_setup.is_some()),
             u64::from(self.federation_site_key.is_some()),

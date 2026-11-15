@@ -506,6 +506,9 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     client_secret_hash                  BLOB,
     -- Public keys of a private_key_jwt client: a JWK Set as JSON text.
     jwks                                TEXT,
+    -- A federation site's signed admission statement the client was
+    -- registered on; only for another organization's site.
+    participant_admission               BLOB,
     -- Redirect URIs: a JSON array of strings (a URI may hold a comma).
     redirect_uris                       TEXT NOT NULL DEFAULT '[]',
     allowed_scopes                      TEXT NOT NULL DEFAULT 'openid profile email',
@@ -902,14 +905,20 @@ CREATE TABLE IF NOT EXISTS enrollment_policy (
 
 CREATE TABLE IF NOT EXISTS organizations (
     id                BLOB PRIMARY KEY CHECK (length(id) = 16),
-    org_type          TEXT NOT NULL
+    org_type          TEXT
         CHECK (org_type IN ('family', 'community', 'commercial', 'government')),
-    status            TEXT NOT NULL
+    status            TEXT
         CHECK (status IN ('pending_dns', 'pending_claim', 'active_trial', 'active',
                           'suspended', 'deprovisioning', 'deleted')),
-    canonical_domain  TEXT NOT NULL,
-    is_instance       INTEGER NOT NULL DEFAULT 0,
-    created_at        TEXT NOT NULL
+    canonical_domain  TEXT,
+    is_instance       INTEGER NOT NULL DEFAULT 0 CHECK (is_instance IN (0, 1)),
+    created_at        TEXT NOT NULL,
+    -- The installation's own organization holds its lifecycle; another
+    -- organization this one issues to is a reference and holds none.
+    CHECK ((is_instance = 1 AND org_type IS NOT NULL AND status IS NOT NULL
+                AND canonical_domain IS NOT NULL)
+        OR (is_instance = 0 AND org_type IS NULL AND status IS NULL
+                AND canonical_domain IS NULL))
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS organizations_one_instance

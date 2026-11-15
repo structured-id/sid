@@ -618,11 +618,12 @@ CREATE INDEX operation_resources_period ON operation_resources USING btree (peri
 
 CREATE TABLE organizations (
     id uuid NOT NULL,
-    org_type text NOT NULL,
-    status text NOT NULL,
-    canonical_domain text NOT NULL,
+    org_type text,
+    status text,
+    canonical_domain text,
     is_instance boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT organizations_lifecycle_check CHECK (((is_instance AND (org_type IS NOT NULL) AND (status IS NOT NULL) AND (canonical_domain IS NOT NULL)) OR ((NOT is_instance) AND (org_type IS NULL) AND (status IS NULL) AND (canonical_domain IS NULL)))),
     CONSTRAINT organizations_org_type_check CHECK ((org_type = ANY (ARRAY['family'::text, 'community'::text, 'commercial'::text, 'government'::text]))),
     CONSTRAINT organizations_status_check CHECK ((status = ANY (ARRAY['pending_dns'::text, 'pending_claim'::text, 'active_trial'::text, 'active'::text, 'suspended'::text, 'deprovisioning'::text, 'deleted'::text]))),
     CONSTRAINT organizations_pkey PRIMARY KEY (id)
@@ -1581,6 +1582,7 @@ CREATE TABLE oauth2_clients (
     default_resource uuid,
     jwks text,
     post_logout_redirect_uris text[] DEFAULT '{}'::text[] NOT NULL,
+    participant_admission bytea,
     CONSTRAINT oauth2_clients_revision_non_negative CHECK ((revision >= 0)),
     CONSTRAINT oauth2_clients_application_unique UNIQUE (application_id),
     CONSTRAINT oauth2_clients_pkey PRIMARY KEY (client_id),

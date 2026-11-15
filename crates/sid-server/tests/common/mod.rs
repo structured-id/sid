@@ -358,6 +358,7 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         application_type: sid_core::models::ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into(), "profile".into(), "email".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],
@@ -989,6 +990,28 @@ fn auth_service_keyed(
     options: AuthOptions,
     keys_ready: bool,
 ) -> Arc<AuthServiceImpl> {
+    Arc::new(build_auth_service(storage, cache, options, keys_ready))
+}
+
+/// The authentication service over `storage` and `cache`, with the CE
+/// defaults, verifying the admissions of other organizations' federation
+/// sites with `identities`, as a server that registers sites builds it.
+#[allow(dead_code)]
+pub fn auth_service_with_sites(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
+) -> Arc<AuthServiceImpl> {
+    let options = default_auth_options(storage.clone(), None, None, None, test_revocation());
+    Arc::new(build_auth_service(storage, cache, options, true).with_site_evidence(identities))
+}
+
+fn build_auth_service(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    options: AuthOptions,
+    keys_ready: bool,
+) -> AuthServiceImpl {
     let AuthOptions {
         opaque_router,
         jwt,
@@ -1079,10 +1102,10 @@ fn auth_service_keyed(
         Some(policy) => service.with_security_policy(policy),
         None => service,
     };
-    Arc::new(match login_policy {
+    match login_policy {
         Some(source) => service.with_login_policy(source),
         None => service,
-    })
+    }
 }
 
 /// The authentication service over `storage` and `cache` with the test
@@ -1233,34 +1256,48 @@ pub fn auth_service_revoking(
     login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     revocation_cache: Arc<RevocationCache>,
 ) -> Arc<AuthServiceImpl> {
-    let jwt = test_jwt();
-    auth_service(
+    let options = default_auth_options(
         storage.clone(),
-        cache.clone(),
-        AuthOptions {
-            opaque_router: test_opaque_router(),
-            oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
-            jwt,
-            webauthn: test_webauthn(storage.clone()),
-            revocation_cache: revocation_cache.clone(),
-            feature_flags: FeatureFlagService::disabled(),
-            magic_link: None,
-            zkpp: None,
-            issuers: Arc::new(sid_authn::issuer::IssuerRegistry::new(
-                storage.clone(),
-                test_key_manager(),
-            )),
-            org: test_org(),
-            cascade: Arc::new(RevocationCascadeService::new(storage, revocation_cache)),
-            security_policy,
-            // Passwords are not set by these tests.
-            history_keys: Arc::new(mock_storage::MockStorage::new()),
-            enrollment_pin,
-            browser_cookie: None,
-            without_sign_in_page: false,
-            login_policy,
-        },
-    )
+        security_policy,
+        enrollment_pin,
+        login_policy,
+        revocation_cache,
+    );
+    auth_service(storage, cache, options)
+}
+
+/// The CE defaults of the authentication service over `storage`.
+fn default_auth_options(
+    storage: Arc<dyn StorageBackend>,
+    security_policy: Option<sid_core::models::SecurityPolicy>,
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
+    revocation_cache: Arc<RevocationCache>,
+) -> AuthOptions {
+    let jwt = test_jwt();
+    AuthOptions {
+        opaque_router: test_opaque_router(),
+        oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
+        jwt,
+        webauthn: test_webauthn(storage.clone()),
+        revocation_cache: revocation_cache.clone(),
+        feature_flags: FeatureFlagService::disabled(),
+        magic_link: None,
+        zkpp: None,
+        issuers: Arc::new(sid_authn::issuer::IssuerRegistry::new(
+            storage.clone(),
+            test_key_manager(),
+        )),
+        org: test_org(),
+        cascade: Arc::new(RevocationCascadeService::new(storage, revocation_cache)),
+        security_policy,
+        // Passwords are not set by these tests.
+        history_keys: Arc::new(mock_storage::MockStorage::new()),
+        enrollment_pin,
+        browser_cookie: None,
+        without_sign_in_page: false,
+        login_policy,
+    }
 }
 
 /// The authentication service over `storage` with the CE defaults, while
@@ -1828,6 +1865,9 @@ impl TestServices {
             jwt.clone(),
             revocation_cache.clone(),
             issuer.clone(),
+            // This harness verifies no federation evidence; registering a
+            // federation site is covered where a recipient is set up.
+            None,
         ));
         let admin = AdminServiceImpl::new(
             storage.clone(),

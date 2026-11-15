@@ -48,6 +48,7 @@ fn make_client(subject_type: SubjectType) -> OAuth2Client {
         application_type: ApplicationType::Web,
         client_secret_hash: Some(b"hash".to_vec()),
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/callback".to_string()],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into()],

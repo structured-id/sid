@@ -13,8 +13,8 @@ use sid_core::models::{
 use sid_fed::allocation::ContextAllocation;
 use sid_fed::recipient::{ClassicalVerdict, Recipient};
 use sid_fed::test_support::{
-    Issued, PASSPORT_SERIAL, corporate, organization_ca, organization_status, personal,
-    platform_cas,
+    Issued, PASSPORT_SERIAL, corporate, hold_platform, organization_ca, organization_status,
+    personal,
 };
 use sid_plugin::entry_connection::EntryConnectionStore;
 
@@ -40,10 +40,7 @@ struct Installed {
 async fn installed(owner: ConnectionOwner, source: Option<OrgId>) -> Installed {
     let storage = storage().await;
     let recipient = Recipient::new(storage.clone(), ClassicalVerdict);
-    recipient
-        .record_platform_cas(&platform_cas(1, &[]))
-        .await
-        .unwrap();
+    hold_platform(&recipient, 1, &[]).await;
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),

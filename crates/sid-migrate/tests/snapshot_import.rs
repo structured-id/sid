@@ -1517,6 +1517,74 @@ async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
     assert!(verify(&source, &target).await.unwrap().passed);
 }
 
+/// The issuer this installation keeps for another organization it issues to
+/// moves with that organization's reference: export and import accept an
+/// issuer serving a held reference, and the target serves it as the source
+/// did. An issuer serving an organization the snapshot neither is nor
+/// references is still refused. Bug prevented: an installation that
+/// registered one foreign site never being able to back up or move again.
+#[tokio::test]
+async fn an_issuer_for_a_referenced_organization_moves_with_it() {
+    use chrono::{SubsecRound, Utc};
+    use sid_core::models::*;
+    let org = Organization::implicit_community("sid.example.com");
+    let now = Utc::now().trunc_subsecs(3);
+    let issuer_for = |recipient_org: OrgId| {
+        let handle = IssuerHandle::generate();
+        OidcIssuer {
+            id: IssuerId::generate(),
+            canonical_url: format!("https://sid.example.com/i/{handle}"),
+            handle,
+            authority: IssuerAuthority::Local,
+            recipient_org,
+            created_at: now,
+        }
+    };
+    let own = issuer_for(org.id);
+    let source = uninitialized().await;
+    provision_issuer(&source, &org, &own).await;
+    let reference = OrganizationReference {
+        id: OrgId::generate(),
+        created_at: now,
+    };
+    source
+        .insert_organization_reference(&reference, AuditEntry::system("test", "reference").into())
+        .await
+        .unwrap();
+    let foreign = issuer_for(reference.id);
+    let key = IssuerSigningKey {
+        issuer_id: foreign.id,
+        generation: 1,
+        key_id: "kid-foreign".into(),
+        public_key: [4; 32],
+        sealed_private_key: vec![2],
+        created_at: now,
+    };
+    source
+        .insert_oidc_issuer(&foreign, &key, AuditEntry::system("test", "issuer").into())
+        .await
+        .unwrap();
+
+    let snapshot = export(&source)
+        .await
+        .expect("an issuer for a reference exports");
+    assert_eq!(snapshot.oidc_issuers.len(), 2);
+    let target = uninitialized().await;
+    import(&target, &snapshot)
+        .await
+        .expect("an issuer for a reference imports");
+    assert_eq!(
+        target.oidc_issuer_by_handle(&foreign.handle).await.unwrap(),
+        Some(foreign.clone())
+    );
+    assert!(verify(&source, &target).await.unwrap().passed);
+
+    // An issuer for an organization the snapshot does not name.
+    let mut stray = snapshot.clone();
+    stray.organization_references.clear();
+    assert!(import(&uninitialized().await, &stray).await.is_err());
+}
+
 /// An archive carries the snapshot encrypted under the operator's key: it
 /// opens into the same snapshot, imports, and does not open under another
 /// key.
@@ -2113,6 +2181,7 @@ fn client_for(app: &sid_core::models::Application) -> sid_core::models::OAuth2Cl
         application_type: ApplicationType::Web,
         client_secret_hash: None,
         jwks: None,
+        participant_admission: None,
         redirect_uris: vec!["https://app.sid.example.com/cb".into()],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into()],
