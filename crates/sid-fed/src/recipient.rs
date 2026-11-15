@@ -806,18 +806,31 @@ impl<V: Verdict> Recipient<V> {
                 "platform CA set refreshed"
             );
             // The status of every generation a path may still end at, read
-            // apart from the set: a withdrawn one anchors nothing.
-            for generation in set
-                .generations
-                .iter()
-                .filter(|g| g.state != PlatformCaState::Withdrawn)
-            {
-                let crl = source.crl(publication, generation.generation).await?;
-                self.hold_crl(generation, &crl)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            // apart from the set: a withdrawn one, or a verification-only
+            // one whose overlap has ended, anchors nothing. One list that
+            // cannot be read does not keep the others from being renewed;
+            // the pull still counts as failed, so it is retried.
+            let mut failed = None;
+            for generation in set.generations.iter().filter(|g| match g.state {
+                PlatformCaState::Active => true,
+                PlatformCaState::VerificationOnly => g.overlap_end.is_none_or(|end| end > now),
+                PlatformCaState::Withdrawn => false,
+            }) {
+                let read = async {
+                    let crl = source.crl(publication, generation.generation).await?;
+                    self.hold_crl(generation, &crl)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                if let Err(reason) = read {
+                    failed.get_or_insert(format!("generation {}: {reason}", generation.generation));
+                }
             }
-            Ok::<Pulled, String>(Pulled::Applied)
+            match failed {
+                Some(reason) => Err(reason),
+                None => Ok::<Pulled, String>(Pulled::Applied),
+            }
         }
         .await;
         match outcome {

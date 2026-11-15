@@ -1134,6 +1134,97 @@ async fn status_is_read_although_the_set_is_current() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
 }
 
+/// The key of the platform intermediate's successor generation.
+const SUCCESSOR: u8 = 6;
+
+/// A successor of the platform intermediate under the Root: the same name,
+/// a key of its own (`[6; 20]`), so nothing the first generation issued
+/// verifies under it.
+fn successor() -> Vec<u8> {
+    static SUCCESSOR_CERTIFICATE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SUCCESSOR_CERTIFICATE
+        .get_or_init(|| {
+            Stated {
+                subject: name(INTERMEDIATE_NAME),
+                serial: 21,
+                validity: current(),
+                extensions: vec![
+                    authority(Some(1)),
+                    signs_certificates(),
+                    purposes(&[DEVELOPMENT_PURPOSES.platform_intermediate]),
+                    key_id(&[SUCCESSOR; 20]),
+                ],
+            }
+            .signed(&key(SUCCESSOR), &name(ROOT_NAME), &key(ROOT))
+        })
+        .clone()
+}
+
+/// A publication answering a fixed set and, for each generation in turn,
+/// the list or failure it is given, counting the lists asked for.
+struct PerGeneration {
+    set: PlatformCaSet,
+    lists: Vec<(u32, Result<Vec<u8>, String>)>,
+}
+
+#[async_trait::async_trait]
+impl PlatformCaSource for PerGeneration {
+    async fn fetch(&self, _endpoint: &url::Url) -> Result<PlatformCaSet, String> {
+        Ok(self.set.clone())
+    }
+
+    async fn crl(&self, _endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String> {
+        self.lists
+            .iter()
+            .find(|(g, _)| *g == generation)
+            .map(|(_, list)| list.clone())
+            .unwrap_or_else(|| Err(format!("no list of generation {generation}")))
+    }
+}
+
+/// A generation whose list cannot be read does not keep the others' lists
+/// from being read: the replaced generation, listed first, fails, and the
+/// active one's list is held all the same, so a passport it issued is
+/// decided on fresh status. Bug prevented: one failing list endpoint
+/// leaving every later generation without status until its list ends.
+#[tokio::test]
+async fn one_failing_list_does_not_stop_the_others() {
+    let now = epoch(SystemTime::now());
+    let mut published = set(2, PlatformCaState::VerificationOnly);
+    published.generations[0].overlap_end = Some(now + 3_600);
+    published.generations.push(PlatformCa {
+        generation: 2,
+        certificate: successor(),
+        state: PlatformCaState::Active,
+        overlap_end: None,
+    });
+    let publication = Arc::new(PerGeneration {
+        set: published,
+        lists: vec![
+            (1, Err("unreachable".into())),
+            (
+                2,
+                Ok(StatedList::new(INTERMEDIATE_NAME, &[SUCCESSOR; 20], 1, &[])
+                    .signed(&key(SUCCESSOR))),
+            ),
+        ],
+    });
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication)
+        .unwrap();
+    let under_successor = issued(&stated(None), INTERMEDIATE_NAME, SUCCESSOR);
+    let decided = recipient
+        .accept_passport(
+            &under_successor,
+            &[],
+            recipient_org(),
+            &STRICT,
+            SystemTime::now(),
+        )
+        .await;
+    assert!(decided.is_ok(), "{decided:?}");
+}
+
 /// A publication answering a fixed set and, for every generation, a fixed
 /// list or failure, counting the lists asked for.
 struct Scripted {
@@ -1213,24 +1304,10 @@ async fn a_list_near_its_end_is_asked_for_again_after_the_backoff() {
 /// accepting under a withdrawn generation until the backoff ends.
 #[tokio::test]
 async fn a_withdrawal_held_before_a_failed_list_read_applies_at_once() {
-    let successor = Stated {
-        subject: name(INTERMEDIATE_NAME),
-        serial: 21,
-        validity: current(),
-        extensions: vec![
-            authority(Some(1)),
-            signs_certificates(),
-            purposes(&[DEVELOPMENT_PURPOSES.platform_intermediate]),
-            key_id(&[6; 20]),
-        ],
-    }
-    // A key of its own: nothing the withdrawn generation issued verifies
-    // under it.
-    .signed(&key(6), &name(ROOT_NAME), &key(ROOT));
     let mut newer = set(2, PlatformCaState::Withdrawn);
     newer.generations.push(PlatformCa {
         generation: 2,
-        certificate: successor,
+        certificate: successor(),
         state: PlatformCaState::Active,
         overlap_end: None,
     });
