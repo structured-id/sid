@@ -59,6 +59,7 @@ async fn installed(owner: ConnectionOwner, source: Option<OrgId>) -> Installed {
         source,
         recipient_issuer: issuer.id,
         callback: format!("{}/auth/federation/{handle}/callback", issuer.canonical_url),
+        use_return: None,
         client_id: "recipient-client".into(),
         credential: ClientCredential::SecretBasic(sid_keys::EncryptedField {
             ciphertext: vec![5; 48],

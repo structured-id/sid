@@ -38,6 +38,10 @@ fn connection(n: u8, owner: ConnectionOwner) -> EntryConnection {
         source: (n % 2 == 1).then(OrgId::generate),
         recipient_issuer: IssuerId::generate(),
         callback: format!("https://sid.example.com/i/handle/auth/federation/{n}/callback"),
+        // Kept as given and absent as absent: provisioning sets one, an
+        // administrator's connection has none.
+        use_return: (owner == ConnectionOwner::Provisioning)
+            .then(|| format!("https://source{n}.sid.example.com/corporate-use/return")),
         client_id: format!("client-{n}"),
         credential: sealed(n),
         enabled: true,
@@ -181,17 +185,19 @@ pub async fn a_change_applies_over_the_revision_it_read(store: &dyn EntryConnect
 }
 
 /// Bug prevented: a change that rebinds a registration (another issuer,
-/// owner, source, callback or recipient issuer under the same handle), so
-/// identities recorded under the old issuer would be reached through the
-/// new one. Such a change is refused and nothing is written.
+/// owner, source, callback, use return or recipient issuer under the same
+/// handle), so identities recorded under the old issuer would be reached
+/// through the new one, or a holder sent back somewhere else. Such a change
+/// is refused and nothing is written.
 pub async fn a_change_never_alters_the_registration(store: &dyn EntryConnectionStore) {
     let held = connection(1, ConnectionOwner::Administration);
     store.create_entry_connection(&held, audit()).await.unwrap();
-    let rebound: [fn(&mut EntryConnection); 5] = [
+    let rebound: [fn(&mut EntryConnection); 6] = [
         |c| c.issuer = "https://another.sid.example.com/i/handle".into(),
         |c| c.owner = ConnectionOwner::Provisioning,
         |c| c.source = None,
         |c| c.callback.push('x'),
+        |c| c.use_return = Some("https://elsewhere.sid.example.com/return".into()),
         |c| c.recipient_issuer = IssuerId::generate(),
     ];
     for alter in rebound {

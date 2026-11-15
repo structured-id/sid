@@ -17,6 +17,7 @@ fn connection(issuer: &str, source: Option<OrgId>) -> EntryConnection {
         source,
         recipient_issuer: IssuerId::generate(),
         callback: "https://sid.example.com/auth/federation/callback".into(),
+        use_return: None,
         client_id: "client".into(),
         credential: ClientCredential::SecretBasic(EncryptedField {
             ciphertext: vec![1; 48],

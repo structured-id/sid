@@ -65,6 +65,7 @@ fn connection_of(row: &sqlx::postgres::PgRow) -> SidResult<EntryConnection> {
             .try_get::<IssuerId, _>("recipient_issuer")
             .map_err(column("recipient_issuer"))?,
         callback: row.try_get("callback").map_err(column("callback"))?,
+        use_return: row.try_get("use_return").map_err(column("use_return"))?,
         client_id: row.try_get("client_id").map_err(column("client_id"))?,
         credential,
         enabled: row.try_get("enabled").map_err(column("enabled"))?,
@@ -133,9 +134,9 @@ impl EntryConnectionStore for PostgresBackend {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
         sqlx::query(
             "INSERT INTO entry_connections (handle, owner, name, issuer, source,
-                 recipient_issuer, callback, client_id, credential_method, credential, enabled,
-                 revision, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                 recipient_issuer, callback, use_return, client_id, credential_method,
+                 credential, enabled, revision, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(key(connection.handle))
         .bind(connection.owner.as_str())
@@ -144,6 +145,7 @@ impl EntryConnectionStore for PostgresBackend {
         .bind(connection.source)
         .bind(connection.recipient_issuer)
         .bind(&connection.callback)
+        .bind(&connection.use_return)
         .bind(&connection.client_id)
         .bind(connection.credential.method())
         .bind(credential_bytes(&connection.credential))

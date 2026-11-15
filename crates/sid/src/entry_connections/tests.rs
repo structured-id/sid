@@ -103,7 +103,85 @@ impl Installed {
             source: None,
             client_id: "installation-client".into(),
             client_secret: SecretString::from("provisioned secret".to_owned()),
+            use_return: Some(USE_RETURN.into()),
         }
+    }
+}
+
+/// Where the provisioned authority resumes a holder's use.
+const USE_RETURN: &str = "https://central.sid.example.com/corporate-use/return";
+
+/// The provisioned authority's issuer.
+const PROVISIONED_ISSUER: &str =
+    "https://central.sid.example.com/i/fedcba9876543210fedcba9876543210";
+
+/// The provisioned authority keeps the use return its provisioning supplied,
+/// and a repeated provisioning, even with another value, keeps the first: a
+/// holder is never sent back to an address the authority did not state
+/// first. An administrator's connection has none, and a value that is not
+/// an https URL without query or fragment is refused, so the continuation
+/// appended to it is its only parameter.
+#[tokio::test]
+async fn the_provisioned_use_return_is_kept_as_first_stated() {
+    let i = installed().await;
+    let set = i
+        .connections
+        .provision("provisioning", &i.issuer, i.authority(PROVISIONED_ISSUER))
+        .await
+        .unwrap();
+    assert_eq!(set.use_return.as_deref(), Some(USE_RETURN));
+    let again = i
+        .connections
+        .provision(
+            "provisioning",
+            &i.issuer,
+            Provisioned {
+                use_return: Some("https://elsewhere.sid.example.com/return".into()),
+                ..i.authority(PROVISIONED_ISSUER)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.use_return.as_deref(), Some(USE_RETURN));
+    let created = i.create("create-1", OUTSIDE).await;
+    let handle = EntryHandle::parse(&created.handle).unwrap();
+    assert_eq!(
+        i.storage
+            .entry_connection(handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .use_return,
+        None
+    );
+
+    let other = installed().await;
+    for bad in [
+        "http://central.sid.example.com/return",
+        "https://central.sid.example.com/return?next=1",
+        "https://central.sid.example.com/return#x",
+        "not a url",
+    ] {
+        assert!(
+            matches!(
+                other
+                    .connections
+                    .provision(
+                        "provisioning",
+                        &other.issuer,
+                        Provisioned {
+                            use_return: Some(bad.into()),
+                            ..other.authority(PROVISIONED_ISSUER)
+                        },
+                    )
+                    .await,
+                Err(EntryConnectionError::InvalidField {
+                    field: "use_return",
+                    ..
+                })
+            ),
+            "{bad}"
+        );
     }
 }
 

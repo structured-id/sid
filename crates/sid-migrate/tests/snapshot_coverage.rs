@@ -660,6 +660,7 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
             source: Some(OrgId::generate()),
             recipient_issuer: IssuerId::generate(),
             callback: format!("https://sid.example.com/i/handle/auth/federation/{handle}/callback"),
+            use_return: Some("https://source.sid.example.com/corporate-use/return".into()),
             client_id: "recipient-client".into(),
             credential: ClientCredential::SecretBasic(sid_keys::EncryptedField {
                 ciphertext: vec![5; 48],

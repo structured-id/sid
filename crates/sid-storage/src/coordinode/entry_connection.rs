@@ -16,13 +16,13 @@ use uuid::Uuid;
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, finalize, get_bool, get_bytes, get_id,
-    get_int, get_opt_id, get_parsed, get_text, get_time, hold_first, opt_uuid, stored_time, time,
-    uuid,
+    get_int, get_opt_id, get_opt_text, get_parsed, get_text, get_time, hold_first, opt_text,
+    opt_uuid, stored_time, time, uuid,
 };
 
 const FIELDS: &str = "c.handle AS handle, c.owner AS owner, c.name AS name, c.issuer AS issuer,
     c.source AS source, c.recipient_issuer AS recipient_issuer, c.callback AS callback,
-    c.client_id AS client_id, c.credential_method AS credential_method,
+    c.use_return AS use_return, c.client_id AS client_id, c.credential_method AS credential_method,
     c.credential AS credential, c.enabled AS enabled, c.revision AS revision,
     c.created_at AS created_at, c.updated_at AS updated_at";
 
@@ -59,6 +59,7 @@ fn connection_of(row: &Row) -> SidResult<EntryConnection> {
         source: get_opt_id::<OrgId>(row, "source")?,
         recipient_issuer: get_id::<IssuerId>(row, "recipient_issuer")?,
         callback: get_text(row, "callback")?,
+        use_return: get_opt_text(row, "use_return")?,
         client_id: get_text(row, "client_id")?,
         credential,
         enabled: get_bool(row, "enabled")?,
@@ -166,7 +167,7 @@ impl EntryConnectionStore for CoordinodeBackend {
             tx.create_absent(
                 "CREATE (c:SidEntryConnection {handle: $handle, owner: $owner, name: $name,
                      issuer: $issuer, source: $source, recipient_issuer: $recipient_issuer,
-                     callback: $callback, client_id: $client_id,
+                     callback: $callback, use_return: $use_return, client_id: $client_id,
                      credential_method: $credential_method, credential: $credential,
                      enabled: $enabled, revision: $revision, created_at: $created_at,
                      updated_at: $updated_at})",
@@ -179,6 +180,7 @@ impl EntryConnectionStore for CoordinodeBackend {
                         uuid(&Uuid::from(connection.recipient_issuer)),
                     )
                     .with("callback", Value::String(connection.callback.clone()))
+                    .with("use_return", opt_text(connection.use_return.as_deref()))
                     .with(
                         "revision",
                         Value::Int(i64::try_from(connection.revision).map_err(|e| {

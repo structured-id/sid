@@ -470,6 +470,7 @@ CREATE TABLE entry_connections (
     source uuid,
     recipient_issuer uuid NOT NULL,
     callback text NOT NULL,
+    use_return text,
     client_id text NOT NULL,
     credential_method text NOT NULL,
     credential bytea NOT NULL,

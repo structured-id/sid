@@ -23,7 +23,7 @@ use sid_authn::federated_entry::TrustedIssuer;
 use sid_authn::operation::{KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::entry_connection::{
-    CALLBACK, MAX_NAME, credential_context, is_issuer_identifier,
+    CALLBACK, MAX_NAME, credential_context, is_issuer_identifier, is_use_return,
 };
 use sid_core::models::{
     AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerHandle,
@@ -147,6 +147,10 @@ pub struct Provisioned {
     pub client_id: String,
     /// The client secret registered for it.
     pub client_secret: SecretString,
+    /// Where a holder returns to the authority's side after authenticating
+    /// here for a use that side coordinates, as the authority computed it;
+    /// none when it coordinates no such use.
+    pub use_return: Option<String>,
 }
 
 /// The entry connections of one installation.
@@ -261,6 +265,8 @@ impl EntryConnections {
                 source,
                 recipient_issuer: issuer.id,
                 callback: callback(&issuer),
+                // An administrator's connection coordinates no holder use.
+                use_return: None,
                 client_id: req.client_id.clone(),
                 credential: self.seal(handle, &req.client_secret).await?,
                 enabled: req.enabled,
@@ -510,6 +516,14 @@ impl EntryConnections {
         if authority.client_id.is_empty() {
             return Err(EntryConnectionError::MissingField("client_id"));
         }
+        if let Some(url) = &authority.use_return
+            && !is_use_return(url)
+        {
+            return Err(invalid(
+                "use_return",
+                "an https URL without query or fragment",
+            ));
+        }
         let established = |set: EntryConnection| {
             if set.issuer == authority.issuer {
                 Ok(set)
@@ -530,6 +544,7 @@ impl EntryConnections {
             source: authority.source,
             recipient_issuer: issuer.id,
             callback: callback(issuer),
+            use_return: authority.use_return.clone(),
             client_id: authority.client_id.clone(),
             credential: self
                 .seal(handle, authority.client_secret.expose_secret())
