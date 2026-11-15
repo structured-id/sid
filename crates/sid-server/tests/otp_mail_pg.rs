@@ -179,7 +179,9 @@ impl Installation {
     /// A Profile whose email key `key` routes to the contact `mailbox`, as
     /// registration binds them.
     async fn holder(&self, key: &str, mailbox: &str) -> Profile {
-        let holder = Profile::new(Some("mail-holder"));
+        // Named after its key, so the scenarios' holders in the suite's one
+        // database are distinct accounts.
+        let holder = Profile::new(Some(key.split('@').next().unwrap()));
         self.storage
             .create_profile(&holder, AuditEntry::system("test", "profile").into())
             .await
@@ -239,14 +241,24 @@ impl Installation {
             .into_inner()
     }
 
-    /// The code mail work rows in `state`.
-    async fn code_mails(&self, state: &str) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM durable_work WHERE kind = $1 AND state = $2")
-            .bind(sid_authn::otp::OTP_EMAIL_KIND)
-            .bind(state)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap()
+    /// The code mail work rows in `state`: of the sign-in `pending` when
+    /// given, of every sign-in otherwise. A code mail's payload starts with
+    /// its sign-in's id.
+    async fn code_mails(&self, state: &str, pending: Option<&RequestOtpResponse>) -> i64 {
+        let query = sqlx::query_scalar(
+            "SELECT count(*) FROM durable_work WHERE kind = $1 AND state = $2
+             AND ($3::bytea IS NULL OR substring(payload from 1 for 16) = $3)",
+        )
+        .bind(sid_authn::otp::OTP_EMAIL_KIND)
+        .bind(state)
+        .bind(pending.map(|p| {
+            sid_ids_proto::required(p.otp_session_id.as_ref())
+                .unwrap()
+                .into_uuid()
+                .as_bytes()
+                .to_vec()
+        }));
+        query.fetch_one(&self.pool).await.unwrap()
     }
 
     /// Run the engine until it has no code mail left to attempt, then drain
@@ -255,7 +267,8 @@ impl Installation {
         let running = self.engine.take().expect("the engine runs once").start();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
-            if self.code_mails("pending").await + self.code_mails("claimed").await == 0 {
+            if self.code_mails("pending", None).await + self.code_mails("claimed", None).await == 0
+            {
                 break;
             }
             assert!(
@@ -279,13 +292,12 @@ fn code_in(message: &RenderedMessage) -> String {
         .unwrap_or_else(|| panic!("no code in the mail: {}", message.body))
 }
 
-/// Run `scenario` on an installation in a PostgreSQL schema of its own, so
-/// the runner sees this test's work alone, and drop the schema afterwards.
-async fn in_own_schema<F, Fut>(scenario: F)
-where
-    F: FnOnce(Installation) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
+/// The suite's database: one PostgreSQL schema of its own, migrated once, so
+/// the runner sees this suite's work alone. Each scenario runs on a new
+/// installation (service and engine) over it with data of its own; the
+/// schema is dropped once at the end, also after a failed scenario.
+#[tokio::test]
+async fn sign_in_codes_through_the_servers_work() {
     let schema = format!("otp_mail_{}", uuid::Uuid::now_v7().simple());
     let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
         .await
@@ -299,7 +311,18 @@ where
         .ensure_system_project(AuditEntry::system("test", "system").into())
         .await
         .unwrap();
-    let outcome = tokio::spawn(scenario(installation(storage, pool.clone()))).await;
+    let outcome = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            requested_code_reaches_the_mailbox_and_signs_in(installation(
+                storage.clone(),
+                pool.clone(),
+            ))
+            .await;
+            resent_code_replaces_the_mail_of_the_first(installation(storage, pool)).await;
+        })
+        .await
+    };
     // The migrations also create the schema's database-wide reader role.
     for statement in [
         format!("DROP SCHEMA \"{schema}\" CASCADE"),
@@ -320,24 +343,20 @@ where
 /// and that code signs the account in. Bug prevented: a code committed with
 /// no handler registered to send it, or sent to the lookup key instead of
 /// the bound mailbox.
-#[tokio::test]
-async fn requested_code_reaches_the_mailbox_and_signs_in() {
-    in_own_schema(|mut i| async move {
-        let mailbox = "John.Smith+id@sid.example.com";
-        let holder = i.holder("johnsmith@sid.example.com", mailbox).await;
-        let pending = i.request("J.O.H.N.Smith@sid.example.com").await;
+async fn requested_code_reaches_the_mailbox_and_signs_in(mut i: Installation) {
+    let mailbox = "John.Smith+id@sid.example.com";
+    let holder = i.holder("johnsmith@sid.example.com", mailbox).await;
+    let pending = i.request("J.O.H.N.Smith@sid.example.com").await;
 
-        let sent = i.run_owed_mail().await;
+    let sent = i.run_owed_mail().await;
 
-        assert_eq!(i.code_mails("completed").await, 1);
-        assert_eq!(sent.len(), 1, "one mail per requested code");
-        assert_eq!(sent[0].0, mailbox);
-        let verified = i.verify(&pending, &code_in(&sent[0].1)).await;
-        assert!(verified.verified);
-        let sessions = i.storage.list_sessions(&holder.id).await.unwrap();
-        assert_eq!(sessions.len(), 1, "the holder was not signed in");
-    })
-    .await;
+    assert_eq!(i.code_mails("completed", Some(&pending)).await, 1);
+    assert_eq!(sent.len(), 1, "one mail per requested code");
+    assert_eq!(sent[0].0, mailbox);
+    let verified = i.verify(&pending, &code_in(&sent[0].1)).await;
+    assert!(verified.verified);
+    let sessions = i.storage.list_sessions(&holder.id).await.unwrap();
+    assert_eq!(sessions.len(), 1, "the holder was not signed in");
 }
 
 /// A resent code replaces the requested one before either mail goes out:
@@ -345,24 +364,20 @@ async fn requested_code_reaches_the_mailbox_and_signs_in() {
 /// mailbox and signs in within the original sign-in. Bug prevented: a
 /// superseded code still mailed (two live-looking codes in the inbox), or
 /// the resent code going anywhere but the bound mailbox.
-#[tokio::test]
-async fn resent_code_replaces_the_mail_of_the_first() {
-    in_own_schema(|mut i| async move {
-        let mailbox = "Ann.Lee+login@sid.example.com";
-        let holder = i.holder("annlee@sid.example.com", mailbox).await;
-        let pending = i.request("A.N.N.Lee@sid.example.com").await;
-        i.resend(&pending).await;
+async fn resent_code_replaces_the_mail_of_the_first(mut i: Installation) {
+    let mailbox = "Ann.Lee+login@sid.example.com";
+    let holder = i.holder("annlee@sid.example.com", mailbox).await;
+    let pending = i.request("A.N.N.Lee@sid.example.com").await;
+    i.resend(&pending).await;
 
-        let sent = i.run_owed_mail().await;
+    let sent = i.run_owed_mail().await;
 
-        // Both mails were attempted and ended; only the resent code's sent.
-        assert_eq!(i.code_mails("completed").await, 2);
-        assert_eq!(sent.len(), 1, "the replaced code's mail sent a code");
-        assert_eq!(sent[0].0, mailbox);
-        let verified = i.verify(&pending, &code_in(&sent[0].1)).await;
-        assert!(verified.verified);
-        let sessions = i.storage.list_sessions(&holder.id).await.unwrap();
-        assert_eq!(sessions.len(), 1, "the holder was not signed in");
-    })
-    .await;
+    // Both mails were attempted and ended; only the resent code's sent.
+    assert_eq!(i.code_mails("completed", Some(&pending)).await, 2);
+    assert_eq!(sent.len(), 1, "the replaced code's mail sent a code");
+    assert_eq!(sent[0].0, mailbox);
+    let verified = i.verify(&pending, &code_in(&sent[0].1)).await;
+    assert!(verified.verified);
+    let sessions = i.storage.list_sessions(&holder.id).await.unwrap();
+    assert_eq!(sessions.len(), 1, "the holder was not signed in");
 }
