@@ -283,18 +283,29 @@ impl SmtpChannel {
         Ok(email)
     }
 
-    /// Map a lettre SMTP error to a `DeliveryError`: a 5xx reply is a
-    /// permanent rejection (RFC 5321 4.2.1), a timeout may have followed an
-    /// accepted DATA so its outcome is unknown, anything else is transient.
+    /// Map a lettre SMTP error to a `DeliveryError`. A reply decides it: 5xx
+    /// is a permanent rejection, 4xx transient (RFC 5321 4.2.1). Failing to
+    /// connect sent nothing, so it is transient too. A broken or unreadable
+    /// exchange (network, malformed or missing reply, timeout) may have
+    /// followed the end of the message data, which the server may already
+    /// have accepted (RFC 5321 4.5.4.1, 6.1): its outcome is unknown.
     pub(crate) fn map_smtp_error(e: &lettre::transport::smtp::Error) -> DeliveryError {
         let msg = e.to_string();
         if e.is_permanent() {
             DeliveryError::Rejected(msg)
-        } else if e.is_timeout() {
+        } else if e.is_transient() {
+            DeliveryError::Failed(msg)
+        } else if e.is_response() || e.is_timeout() || Self::is_exchange_broken(e) {
             DeliveryError::Ambiguous(msg)
         } else {
             DeliveryError::Failed(msg)
         }
+    }
+
+    /// The connection failed during the exchange, not while it was being
+    /// established: lettre reports the latter as a connection error.
+    fn is_exchange_broken(e: &lettre::transport::smtp::Error) -> bool {
+        e.to_string().starts_with("network error")
     }
 }
 
@@ -394,297 +405,4 @@ impl NotificationChannel for SmtpChannel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sid_plugin::notification::NotificationPriority;
-
-    fn test_recipient() -> Recipient {
-        Recipient {
-            profile_id: "prof_123".into(),
-            email: Some("alice@sid.example.com".into()),
-            phone: None,
-            push_endpoint: None,
-            device_token: None,
-            locale: "en".into(),
-        }
-    }
-
-    fn test_message() -> RenderedMessage {
-        RenderedMessage {
-            subject: Some("Test Subject".into()),
-            body: "<p>Test body</p>".into(),
-            body_text: Some("Test body".into()),
-            priority: NotificationPriority::Transactional,
-            event_type: "sid.test.v1".into(),
-        }
-    }
-
-    /// Config pointing to a port that will always refuse connections.
-    fn unreachable_config() -> SmtpConfig {
-        SmtpConfig {
-            host: "127.0.0.1".into(),
-            port: 1, // port 1 is privileged and never in use
-            tls_mode: SmtpTlsMode::None,
-            ..SmtpConfig::default()
-        }
-    }
-
-    // ── Construction tests ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_smtp_new_default_config_ok() {
-        // Default config (None auth, StartTls to localhost:587) must build successfully.
-        // lettre's pool spawns tokio tasks — requires tokio runtime.
-        let result = SmtpChannel::new(SmtpConfig::default());
-        assert!(
-            result.is_ok(),
-            "default SmtpConfig must build: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_smtp_new_plain_auth_requires_username() {
-        let config = SmtpConfig {
-            auth_method: EmailAuthMethod::Plain,
-            username: None,
-            password: Some("secret".into()),
-            ..SmtpConfig::default()
-        };
-        let err = SmtpChannel::new(config).unwrap_err();
-        assert!(matches!(err, SmtpBuildError::MissingCredentials(_)));
-        assert!(err.to_string().contains("username"));
-    }
-
-    #[test]
-    fn test_smtp_new_plain_auth_requires_password() {
-        let config = SmtpConfig {
-            auth_method: EmailAuthMethod::Plain,
-            username: Some("user@sid.example.com".into()),
-            password: None,
-            ..SmtpConfig::default()
-        };
-        let err = SmtpChannel::new(config).unwrap_err();
-        assert!(matches!(err, SmtpBuildError::MissingCredentials(_)));
-        assert!(err.to_string().contains("password"));
-    }
-
-    #[test]
-    fn test_smtp_new_xoauth2_not_yet_implemented() {
-        let config = SmtpConfig {
-            auth_method: EmailAuthMethod::XOAuth2,
-            ..SmtpConfig::default()
-        };
-        let err = SmtpChannel::new(config).unwrap_err();
-        assert!(matches!(err, SmtpBuildError::XOAuth2NotYetImplemented));
-    }
-
-    #[tokio::test]
-    async fn test_smtp_new_plain_with_credentials_ok() {
-        let config = SmtpConfig {
-            auth_method: EmailAuthMethod::Plain,
-            username: Some("user@sid.example.com".into()),
-            password: Some("correct-horse-battery".into()),
-            tls_mode: SmtpTlsMode::StartTls,
-            ..SmtpConfig::default()
-        };
-        let result = SmtpChannel::new(config);
-        assert!(
-            result.is_ok(),
-            "plain auth with credentials must build: {:?}",
-            result
-        );
-    }
-
-    // ── channel_id ───────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_smtp_channel_id() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        assert_eq!(channel.channel_id(), "email");
-    }
-
-    // ── SmtpConfig default values ─────────────────────────────────────────────
-
-    #[test]
-    fn test_smtp_config_default() {
-        let config = SmtpConfig::default();
-        assert_eq!(config.port, 587);
-        assert_eq!(config.tls_mode, SmtpTlsMode::StartTls);
-        assert_eq!(config.auth_method, EmailAuthMethod::None);
-        assert!(config.username.is_none());
-        assert!(config.password.is_none());
-        assert_eq!(config.pool_size, 5);
-    }
-
-    // ── deliver: pre-network error paths ─────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_smtp_deliver_no_email() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        let recipient = Recipient {
-            profile_id: "prof_123".into(),
-            email: None,
-            phone: None,
-            push_endpoint: None,
-            device_token: None,
-            locale: "en".into(),
-        };
-
-        let err = channel
-            .deliver(&recipient, &test_message())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DeliveryError::NotReachable));
-    }
-
-    #[tokio::test]
-    async fn test_smtp_deliver_invalid_email() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        let recipient = Recipient {
-            profile_id: "prof_123".into(),
-            email: Some("not-an-email".into()),
-            phone: None,
-            push_endpoint: None,
-            device_token: None,
-            locale: "en".into(),
-        };
-
-        let err = channel
-            .deliver(&recipient, &test_message())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DeliveryError::InvalidRecipient(_)));
-    }
-
-    // ── deliver: connection failure ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_smtp_deliver_no_server_returns_failed() {
-        let channel = SmtpChannel::new(unreachable_config()).unwrap();
-        let result = channel.deliver(&test_recipient(), &test_message()).await;
-        assert!(result.is_err(), "deliver to unreachable host must fail");
-        assert!(
-            matches!(result.unwrap_err(), DeliveryError::Failed(_)),
-            "expected DeliveryError::Failed for connection error"
-        );
-    }
-
-    /// Captures everything logged while it is the default subscriber.
-    #[derive(Clone, Default)]
-    pub(crate) struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl CapturedLog {
-        /// Log at debug level into this capture while the guard lives.
-        pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
-            let writer = self.clone();
-            tracing::subscriber::set_default(
-                tracing_subscriber::fmt()
-                    .with_max_level(tracing::Level::DEBUG)
-                    .with_writer(move || writer.clone())
-                    .finish(),
-            )
-        }
-
-        pub(crate) fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-    }
-
-    /// A subject can carry a sign-in code (the otp template puts it there),
-    /// so sending logs no subject at any level: a log reader never sees the
-    /// code. Sending once logged the whole subject at debug level.
-    #[tokio::test]
-    async fn test_smtp_deliver_logs_no_subject() {
-        let log = CapturedLog::default();
-        let _guard = log.install();
-        let channel = SmtpChannel::new(unreachable_config()).unwrap();
-        let message = RenderedMessage {
-            subject: Some("Your code: 31415926".into()),
-            ..test_message()
-        };
-
-        let _ = channel.deliver(&test_recipient(), &message).await;
-
-        let text = log.text();
-        assert!(text.contains("sending email via SMTP"), "{text}");
-        assert!(!text.contains("31415926"), "the code was logged: {text}");
-    }
-
-    // ── health: unreachable server ────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_smtp_health_unreachable_returns_unhealthy() {
-        let channel = SmtpChannel::new(unreachable_config()).unwrap();
-        let health = channel.health().await.unwrap();
-        assert!(
-            !health.healthy,
-            "health must be false for unreachable server"
-        );
-        assert!(health.message.is_some());
-        assert!(health.last_success.is_none());
-    }
-
-    // ── build_message ─────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_build_message_multipart() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        let msg = RenderedMessage {
-            subject: Some("Hello".into()),
-            body: "<p>HTML body</p>".into(),
-            body_text: Some("Plain body".into()),
-            priority: NotificationPriority::Transactional,
-            event_type: "sid.test.v1".into(),
-        };
-        let result = channel.build_message("bob@sid.example.com", &msg, "test-id-123");
-        assert!(result.is_ok(), "multipart message must build: {:?}", result);
-    }
-
-    #[tokio::test]
-    async fn test_build_message_html_only() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        let msg = RenderedMessage {
-            subject: Some("Hello".into()),
-            body: "<p>HTML only</p>".into(),
-            body_text: None,
-            priority: NotificationPriority::Transactional,
-            event_type: "sid.test.v1".into(),
-        };
-        let result = channel.build_message("bob@sid.example.com", &msg, "test-id-456");
-        assert!(result.is_ok(), "HTML-only message must build: {:?}", result);
-    }
-
-    #[tokio::test]
-    async fn test_build_message_invalid_recipient_address() {
-        let channel = SmtpChannel::new(SmtpConfig::default()).unwrap();
-        let msg = test_message();
-        // "no-at-sign" will fail lettre's Mailbox parse.
-        let result = channel.build_message("not-an-email", &msg, "test-id");
-        assert!(matches!(result, Err(SmtpBuildError::InvalidAddress(_))));
-    }
-
-    // ── SmtpBuildError display ────────────────────────────────────────────────
-
-    #[test]
-    fn test_smtp_build_error_display() {
-        let e = SmtpBuildError::MissingCredentials("username".into());
-        assert!(e.to_string().contains("username"));
-
-        let e = SmtpBuildError::XOAuth2NotYetImplemented;
-        assert!(e.to_string().contains("XOAuth2SmtpChannel"));
-
-        let e = SmtpBuildError::InvalidAddress("bad addr".into());
-        assert!(e.to_string().contains("bad addr"));
-    }
-}
+mod tests;
