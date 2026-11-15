@@ -987,7 +987,6 @@ history_key_store!(
     lifecycle_follows_the_live_set,
     stale_live_set_cannot_retire,
     key_archive_round_trip,
-    key_records_round_trip,
     abandoned_enrollment_is_reclaimed,
     cleanup_races_preparation,
     key_versions_are_insert_only,
@@ -1006,7 +1005,14 @@ macro_rules! history_key_store_isolated {
     )*};
 }
 
-history_key_store_isolated!(abandoned_fences_are_compacted, purged_owner_keeps_nothing);
+// `key_records_round_trip` exports and imports every record of the store:
+// another scenario's abandoned or purged owner written in between is a
+// record the import was not given.
+history_key_store_isolated!(
+    abandoned_fences_are_compacted,
+    purged_owner_keeps_nothing,
+    key_records_round_trip,
+);
 
 // ─── User directory query ───
 
