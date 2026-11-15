@@ -108,6 +108,24 @@ fn cgroup_cpu_is_read_in_microseconds() {
     assert_eq!(parse_cpu_stat("user_usec 1\n"), None);
 }
 
+// Regression: a cgroup without the memory controller delegated (no
+// `memory.current`) was reported as wholly unavailable, hiding its CPU. Each
+// is read on its own.
+#[test]
+fn a_cgroup_reports_what_it_lets_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cpu.stat"), "usage_usec 1500000\n").unwrap();
+    let charged = cgroup(dir.path());
+    assert_eq!(charged.cpu, Some(Duration::from_millis(1_500)));
+    assert_eq!(charged.memory, None);
+
+    std::fs::remove_file(dir.path().join("cpu.stat")).unwrap();
+    std::fs::write(dir.path().join("memory.current"), "4096\n").unwrap();
+    let charged = cgroup(dir.path());
+    assert_eq!(charged.cpu, None);
+    assert_eq!(charged.memory, Some(4096));
+}
+
 #[test]
 fn rss_is_read_in_bytes_and_zero_without_it() {
     let status = "Name:\tpostgres\nVmHWM:\t  9000 kB\nVmRSS:\t  4096 kB\nThreads:\t1\n";
