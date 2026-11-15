@@ -1846,182 +1846,60 @@ async fn authorize_sends_an_anonymous_user_to_sign_in() {
     assert!(!query.contains_key("code"));
 }
 
-/// The stored code a redirect to the client carries.
-async fn issued_code(
-    browser: &Browser,
-    query: &std::collections::HashMap<String, String>,
-) -> sid_core::models::AuthorizationCode {
-    use sha2::Digest as _;
-    browser
-        .user
-        .svc
-        .storage
-        .get_auth_code_by_hash(&sha2::Sha256::digest(query["code"].as_bytes()))
-        .await
-        .unwrap()
-        .expect("the issued code")
-}
-
-/// A request this installation prepared for its client is continued by its
-/// reference and nothing else, and its code keeps the request's origin
-/// through the user's sign-in; the origin answers who authorized it only
-/// once that code is redeemed. A request answered as it arrived has no
-/// origin, and a browser that adds parameters to a kept request's reference
-/// changes nothing. Bug prevented: a browser stamping another request's
-/// identity onto its own, or an issued but unredeemed code read as a
-/// completed sign-in.
+/// A Profile's own sign-in session is relied on only while it stands and
+/// satisfies the installation's sign-in policy for that Profile now: the
+/// session of another Profile, one that is not stored, and one below a
+/// second factor the account enabled after signing in are not answered.
+/// Bug prevented: a component relying on the wrong Profile's session, an
+/// ended one, or one admitted before the account required more.
 #[tokio::test]
-async fn a_prepared_request_keeps_its_origin_through_redemption() {
+async fn a_standing_session_is_judged_at_every_read() {
     let mut browser = browser(Some(LOGIN_URL)).await;
     let auth = browser.user.svc.auth.clone();
     let storage = browser.user.svc.storage.clone();
-    let prepared_request = || sid_proto::sid::v1::OAuth2AuthorizeRequest {
-        client_id: "test-client".into(),
-        redirect_uri: REDIRECT_URI.into(),
-        response_type: "code".into(),
-        scope: Some("openid".into()),
-        state: Some("prepared".into()),
-        code_challenge: Some(sid_authn::oauth2::compute_s256_challenge(VERIFIER)),
-        code_challenge_method: Some("S256".into()),
-        nonce: Some("n-prepared".into()),
-        issuer_handle: browser.user.svc.issuer.handle.to_string(),
-        ..Default::default()
-    };
-    let continue_at = |reference: &str| {
-        with_query(
-            &browser.authorize,
-            &[
-                ("client_id", "test-client"),
-                (
-                    "request_uri",
-                    &format!("urn:ietf:params:oauth:request_uri:{reference}"),
-                ),
-            ],
-        )
-    };
-
-    // A request answered as it arrived has no origin.
-    let direct = browser
-        .get(&with_query(
-            &browser.authorize,
-            &authorize_query(REDIRECT_URI),
-        ))
-        .await;
-    let direct = issued_code(&browser, &redirect_query(&direct, REDIRECT_URI)).await;
-    assert_eq!(direct.request_origin, None);
-
-    // What the endpoint would refuse is not kept.
-    let mut unregistered = prepared_request();
-    unregistered.redirect_uri = "https://evil.sid.example.com/cb".into();
-    assert!(auth.prepare_authorization(unregistered).await.is_err());
-
-    // Prepared, then continued by a browser that must sign in first: the
-    // code carries the prepared origin, with the prepared parameters.
-    let prepared = auth
-        .prepare_authorization(prepared_request())
-        .await
-        .unwrap();
-    let anonymous = no_redirects()
-        .get(format!(
-            "{}&state=forged&redirect_uri=https%3A%2F%2Fevil.sid.example.com%2Fcb",
-            continue_at(&prepared.reference)
-        ))
-        .send()
-        .await
-        .unwrap();
-    let back = browser.continuation(&redirect_query(&anonymous, LOGIN_URL)["rd"]);
-    assert_eq!(
-        auth.redeemed_request("test-client", prepared.origin)
-            .await
-            .unwrap(),
-        None,
-        "a pending request is no result"
-    );
+    let profile = browser.user.profile.id;
     let signed_in = sign_in_again(&mut browser).await;
-    let query = redirect_query(&browser.get(&back).await, REDIRECT_URI);
-    assert_eq!(query["state"], "prepared");
-    let code = issued_code(&browser, &query).await;
-    assert_eq!(code.request_origin, Some(prepared.origin));
-    assert_eq!(code.nonce.as_deref(), Some("n-prepared"));
-    assert_eq!(code.authentication.session, signed_in.id);
+
+    let standing = |profile, session| {
+        let auth = auth.clone();
+        async move {
+            auth.standing_session(profile, session)
+                .await
+                .unwrap()
+                .map(|s| s.id)
+        }
+    };
+    assert_eq!(standing(profile, signed_in.id).await, Some(signed_in.id));
     assert_eq!(
-        auth.redeemed_request("test-client", prepared.origin)
-            .await
-            .unwrap(),
+        standing(sid_core::models::ProfileId::generate(), signed_in.id).await,
         None,
-        "an unused code is no result"
+        "another Profile's"
+    );
+    assert_eq!(
+        standing(profile, sid_core::models::SessionId::generate()).await,
+        None,
+        "not stored"
     );
 
-    // Redeemed: the origin answers who authorized it and into which session.
-    let redeemed_into = sid_core::models::Session::new(
-        browser.user.profile.id,
+    // A second factor enabled after the password sign-in: that session no
+    // longer satisfies the account's protection.
+    let totp = sid_core::models::Credential::new(
+        profile,
+        sid_core::models::CredentialType::Totp,
+        sid_core::models::CredentialData::new(vec![7; 32]),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
     );
-    let refresh = sid_core::models::RefreshToken {
-        id: uuid::Uuid::now_v7(),
-        token_hash: uuid::Uuid::now_v7().as_bytes().to_vec(),
-        session_id: redeemed_into.id,
-        profile_id: browser.user.profile.id,
-        client_id: "test-client".into(),
-        scopes: vec!["openid".into()],
-        resource: code.resource,
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        created_at: chrono::Utc::now(),
-        revoked: false,
-        replaced_by: None,
-        family_id: uuid::Uuid::now_v7(),
-        grace_expires_at: None,
-        dpop_jkt: None,
-    };
     storage
-        .redeem_auth_code(
-            &code.code_hash,
-            &redeemed_into,
-            &refresh,
-            sid_core::models::AuditEntry::system("test", "redeem").into(),
+        .create_credential(
+            &totp,
+            sid_core::models::AuditEntry::system("test", "totp").into(),
         )
         .await
         .unwrap();
-    let (redeemed, session) = auth
-        .redeemed_request("test-client", prepared.origin)
-        .await
-        .unwrap()
-        .expect("the redeemed result");
-    assert_eq!(redeemed.profile_id, browser.user.profile.id);
-    assert_eq!(redeemed.authentication.session, signed_in.id);
-    assert_eq!(redeemed.session_id, redeemed_into.id);
-    assert_eq!(session.id, redeemed_into.id);
     assert_eq!(
-        auth.redeemed_request("another-client", prepared.origin)
-            .await
-            .unwrap(),
-        None
-    );
-
-    // The result is judged again when it is read: once the client requires
-    // a method the redeemed session does not have, it is not answered.
-    let mut stricter = storage
-        .get_oauth2_client("test-client")
-        .await
-        .unwrap()
-        .expect("the test client");
-    stricter.required_amr = vec!["hwk".into()];
-    assert!(
-        storage
-            .update_oauth2_client(
-                &stricter,
-                sid_core::models::AuditEntry::system("test", "client.update").into(),
-            )
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        auth.redeemed_request("test-client", prepared.origin)
-            .await
-            .unwrap(),
+        standing(profile, signed_in.id).await,
         None,
-        "a result below the client's current requirement"
+        "below the account's protection"
     );
 }
 

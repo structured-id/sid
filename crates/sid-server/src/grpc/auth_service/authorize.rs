@@ -135,37 +135,17 @@ impl AuthServiceImpl {
             .map_err(authorization_refusal)
     }
 
-    /// Keep the ordinary authorization `request` of a registered client for
-    /// its browser to continue at the authorization endpoint (see
-    /// [`sid::oauth::authorization::Authorizations::prepare`]): what a
-    /// composition of this installation calls in process to have a user
-    /// authenticate for one operation of its own.
-    pub async fn prepare_authorization(
+    /// The session `session_id` of `profile` while it stands and satisfies
+    /// the installation's current sign-in policy for that Profile (see
+    /// [`sid::oauth::OAuth::standing_session`]): what a composition of this
+    /// installation reads to rely on a user's own sign-in for an operation.
+    pub async fn standing_session(
         &self,
-        request: OAuth2AuthorizeRequest,
-    ) -> Result<sid::oauth::authorization::Prepared, Status> {
-        self.authorizations
-            .prepare(&self.oauth, request)
-            .await
-            .map_err(authorization_refusal)
-    }
-
-    /// What redeeming the code of the kept request `origin` of `client_id`
-    /// committed, with the live session it was redeemed into (see
-    /// [`sid::oauth::OAuth::redeemed_request`]).
-    pub async fn redeemed_request(
-        &self,
-        client_id: &str,
-        origin: sid_core::models::RequestOrigin,
-    ) -> Result<
-        Option<(
-            sid_core::models::RedeemedAuthorization,
-            sid_core::models::Session,
-        )>,
-        Status,
-    > {
+        profile: sid_core::models::ProfileId,
+        session_id: sid_core::models::SessionId,
+    ) -> Result<Option<sid_core::models::Session>, Status> {
         self.oauth
-            .redeemed_request(client_id, origin)
+            .standing_session(profile, session_id)
             .await
             .map_err(authorization_refusal)
     }

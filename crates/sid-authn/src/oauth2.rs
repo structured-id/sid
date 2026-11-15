@@ -402,8 +402,6 @@ impl OAuth2Server {
             used: false,
             session_id: None,
             authentication,
-            // Set only by the authorization endpoint, for a request it kept.
-            request_origin: None,
             // Made by the authorization endpoint, for a foreign recipient.
             presentation: None,
         };

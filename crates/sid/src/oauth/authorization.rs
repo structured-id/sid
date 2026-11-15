@@ -19,8 +19,7 @@ use sid_authn::oauth2::prompt::Prompt;
 use sid_core::Error as SidError;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
-    AuditEntry, MutationContext, OAuth2Client, OidcIssuer, RedeemedAuthorization, RequestOrigin,
-    Session, SessionId,
+    AuditEntry, MutationContext, OAuth2Client, OidcIssuer, ProfileId, Session, SessionId,
 };
 use sid_proto::sid::v1::{
     OAuth2AuthorizeRequest, OAuth2AuthorizeResponse, SignInContext, o_auth2_authorize_response,
@@ -114,10 +113,6 @@ pub struct PendingAuthorization {
     /// The interaction `prompt` asked for (account selection, consent) has
     /// been offered on the sign-in page.
     interacted: bool,
-    /// The identity this request got when it was first kept; `None` until
-    /// then. Only [`Authorizations::keep`] gives one, so a request read
-    /// from a browser never carries it.
-    origin: Option<RequestOrigin>,
 }
 
 impl PendingAuthorization {
@@ -139,14 +134,7 @@ impl PendingAuthorization {
             max_age: request.max_age,
             arrived_at: Utc::now(),
             interacted: false,
-            origin: None,
         }
-    }
-
-    /// The identity of the kept request this continues; `None` for a
-    /// request that was never kept.
-    pub fn origin(&self) -> Option<RequestOrigin> {
-        self.origin
     }
 
     pub fn client_id(&self) -> &str {
@@ -231,16 +219,6 @@ pub enum BrowserAuthorization {
     NoInteraction(&'static str),
 }
 
-/// An authorization request kept by [`Authorizations::prepare`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prepared {
-    /// What the browser continues the request by: the `request_uri` is
-    /// [`REQUEST_URI_PREFIX`] followed by it. Single use.
-    pub reference: String,
-    /// The request's identity, under which its redeemed result is read.
-    pub origin: RequestOrigin,
-}
-
 /// The authorization response telling a client the user declined to sign in
 /// for its request: `access_denied` (RFC 6749 §4.1.2.1) at `redirect_uri`,
 /// with the request's `state` and the issuer (RFC 9207 §2).
@@ -293,29 +271,13 @@ impl OAuth {
     /// `issuer`: the client's and the request's assurance judged against the
     /// session, the request validated, the code bound to its resource and
     /// carrying the session's authentication. The code commits only while
-    /// the policy it was judged under holds. The request is answered as it
-    /// was given: its code names no kept request.
+    /// the policy it was judged under holds.
     pub async fn authorize_with(
         &self,
         client: &OAuth2Client,
         issuer: &OidcIssuer,
         session: &Session,
         request: OAuth2AuthorizeRequest,
-    ) -> Result<OAuth2AuthorizeResponse, AuthorizationError> {
-        self.authorize_from(client, issuer, session, request, None)
-            .await
-    }
-
-    /// [`Self::authorize_with`] for a request continued from the kept
-    /// request `origin`, which the code records. Only the browser endpoint
-    /// calls it, with the origin it read from its own store.
-    async fn authorize_from(
-        &self,
-        client: &OAuth2Client,
-        issuer: &OidcIssuer,
-        session: &Session,
-        request: OAuth2AuthorizeRequest,
-        origin: Option<RequestOrigin>,
     ) -> Result<OAuth2AuthorizeResponse, AuthorizationError> {
         let profile_id = session.profile_id;
         // Every authorization is judged, over an existing session too: the
@@ -380,7 +342,6 @@ impl OAuth {
                 tracing::error!(error = %e, "generate authorization code");
                 AuthorizationError::Internal
             })?;
-        auth_code.request_origin = origin;
         // Made now, while the session that authorizes the code stands, and
         // kept with the code: its redemption carries it and nothing else
         // does.
@@ -461,55 +422,35 @@ impl OAuth {
         self.authorize_with(client, issuer, &session, request).await
     }
 
-    /// What redeeming the code of the kept request `origin` of `client_id`
-    /// committed, while it still stands: the session it was redeemed into
-    /// is live, the client is active, and that session's authentication
-    /// satisfies the requirements the login policy states for the client
-    /// now, with the account's own enabled protection. `None` until the
-    /// code is redeemed and once any of that no longer holds. The caller
-    /// compares the answer with what it expects: this says who authorized
-    /// the request, never that anyone was allowed to.
-    pub async fn redeemed_request(
+    /// The session `session_id` of `profile` while it still stands and its
+    /// authentication satisfies the installation's current sign-in policy
+    /// for that Profile, with the account's own enabled protection; `None`
+    /// for another Profile's session, an ended or expired one, and one below
+    /// the policy now. Judged at every read: nothing is renewed by it.
+    pub async fn standing_session(
         &self,
-        client_id: &str,
-        origin: RequestOrigin,
-    ) -> Result<Option<(RedeemedAuthorization, Session)>, AuthorizationError> {
-        let Some(redeemed) = self
-            .storage
-            .redeemed_authorization(client_id, origin)
-            .await?
-        else {
-            return Ok(None);
-        };
+        profile: ProfileId,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, AuthorizationError> {
         // A session that ended is no longer stored; one past its time is
         // not live either.
         let Some(session) = self
             .storage
-            .get_session(redeemed.session_id)
+            .get_session(session_id)
             .await?
-            .filter(|session| !session.is_expired())
+            .filter(|session| session.profile_id == profile && !session.is_expired())
         else {
             return Ok(None);
         };
-        let Some(client) = self
-            .storage
-            .get_oauth2_client(client_id)
-            .await?
-            .filter(|client| client.active)
-        else {
-            return Ok(None);
-        };
-        // Judged again at the read, as every authorization is: a policy
-        // tightened or a second factor enabled since the redemption leaves
-        // the result unusable.
+        // Judged again at the read: a policy tightened or a second factor
+        // enabled since the sign-in leaves the session insufficient.
         let requirements = self
-            .login_requirements(Some(client_id))
+            .login_requirements(None)
             .await?
-            .with_client(&client, None)
-            .for_account(self.storage.as_ref(), session.profile_id)
+            .for_account(self.storage.as_ref(), profile)
             .await?;
         Ok(match requirements.decide(&session, Utc::now()) {
-            LoginDecision::Allow { .. } => Some((redeemed, session)),
+            LoginDecision::Allow { .. } => Some(session),
             LoginDecision::StepUp(_) => None,
         })
     }
@@ -550,7 +491,6 @@ impl Authorizations {
         pending: PendingAuthorization,
     ) -> Result<BrowserAuthorization, AuthorizationError> {
         let request = pending.request();
-        let origin = pending.origin;
         // The endpoint's own path named the issuer the request was kept for.
         let (client, issuer) = oauth.authorize_client(&request, None).await?;
         let prompt = Prompt::parse(pending.prompt.as_deref())?;
@@ -564,7 +504,7 @@ impl Authorizations {
         match session {
             Some(session) if !interaction_owed => {
                 match oauth
-                    .authorize_from(&client, &issuer, &session, request, origin)
+                    .authorize_with(&client, &issuer, &session, request)
                     .await
                 {
                     Ok(answer) => {
@@ -600,64 +540,14 @@ impl Authorizations {
         })
     }
 
-    /// Keep `pending` under a fresh random reference. A request kept for
-    /// the first time gets its origin here; one kept again (after a sign-in
-    /// or step-up it was continued for) keeps the origin it has.
-    pub async fn keep(&self, pending: &PendingAuthorization) -> Result<String, AuthorizationError> {
-        let mut kept = pending.clone();
-        kept.origin.get_or_insert_with(RequestOrigin::generate);
-        self.keep_as_is(&kept).await
-    }
-
-    async fn keep_as_is(&self, kept: &PendingAuthorization) -> Result<String, AuthorizationError> {
+    /// Keep `pending` under a fresh random reference.
+    pub async fn keep(&self, kept: &PendingAuthorization) -> Result<String, AuthorizationError> {
         let mut bytes = [0u8; 32];
         rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut bytes)
             .map_err(|_| AuthorizationError::RandomUnavailable)?;
         let reference = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         self.continuations.insert(&reference, kept).await?;
         Ok(reference)
-    }
-
-    /// Keep the ordinary authorization `request` for its browser to continue
-    /// at the authorization endpoint, as a composition of this installation
-    /// prepares one for a registered client: the client, its redirect URI,
-    /// the request and its resource are checked as the endpoint checks them,
-    /// so nothing is kept that it would refuse. The answer is the reference
-    /// the browser continues it by (`request_uri`) and the origin its
-    /// redeemed result is read by ([`OAuth::redeemed_request`]). Neither
-    /// authorizes anything: the user still signs in and the client still
-    /// redeems its code. This is not a pushed authorization request
-    /// endpoint; it is called in process.
-    pub async fn prepare(
-        &self,
-        oauth: &OAuth,
-        request: OAuth2AuthorizeRequest,
-    ) -> Result<Prepared, AuthorizationError> {
-        let (client, issuer) = oauth.authorize_client(&request, None).await?;
-        Prompt::parse(request.prompt.as_deref())?;
-        oauth.oauth2.validate_authorize_request(
-            &client,
-            &sid_authn::oauth2::AuthorizeRequest {
-                client_id: request.client_id.clone(),
-                redirect_uri: request.redirect_uri.clone(),
-                response_type: request.response_type.clone(),
-                scope: request.scope.clone(),
-                state: request.state.clone(),
-                code_challenge: request.code_challenge.clone(),
-                code_challenge_method: request.code_challenge_method.clone(),
-                nonce: request.nonce.clone(),
-            },
-        )?;
-        oauth
-            .select_target(&issuer, &client, &request.resource)
-            .await?;
-        let origin = RequestOrigin::generate();
-        let mut kept = PendingAuthorization::arrived(request);
-        kept.origin = Some(origin);
-        Ok(Prepared {
-            reference: self.keep_as_is(&kept).await?,
-            origin,
-        })
     }
 
     /// The request kept under `reference`, taken: a reference continues once.
