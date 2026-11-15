@@ -59,8 +59,9 @@ use crate::{
 
 /// Events committed one at a time for `enqueue`: enough for a P999.
 const ENQUEUES: usize = 10_000;
-/// Events delivered one at a time for `deliver`.
-const SINGLES: usize = 500;
+/// Events delivered one at a time for `deliver` and `settled`: enough for a
+/// P999.
+const SINGLES: usize = 10_000;
 /// Events owed at once for `drain` and `replicas`.
 const BACKLOG: usize = 5_000;
 /// Events handed to JetStream one at a time for `publish`: enough for a P999.
