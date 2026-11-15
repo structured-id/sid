@@ -40,6 +40,74 @@ fn a_truncated_stat_line_is_refused() {
     assert_eq!(parse_stat("no name here"), None);
 }
 
+// A repeated delivery and a lost one in the same run are both reported: an
+// aggregate send count would show them cancelling out as zero excess. A send
+// to no owed delivery is reported apart from both.
+#[test]
+fn a_repeat_and_a_loss_do_not_cancel_out() {
+    let ledger = Ledger::default();
+    let owed = vec!["e1".to_owned(), "e2".to_owned()];
+    // e1: both channels, its email twice. e2: email only. e3: never owed.
+    ledger.record("e1", "email");
+    ledger.record("e1", "email");
+    ledger.record("e1", "webhook");
+    ledger.record("e2", "email");
+    ledger.record("e3", "webhook");
+    assert_eq!(
+        ledger.tally(&owed),
+        Tally {
+            missing: 1,
+            repeated: 1,
+            unexpected: 1,
+        }
+    );
+    // Four sends for four owed deliveries plus one stray: a count would say
+    // one excess and hide the loss.
+}
+
+// Every owed delivery made once is a clean tally.
+#[test]
+fn each_delivery_once_tallies_clean() {
+    let ledger = Ledger::default();
+    let owed = vec!["e1".to_owned()];
+    for channel in CHANNELS {
+        ledger.record("e1", channel);
+    }
+    assert_eq!(ledger.tally(&owed), Tally::default());
+}
+
+// The run's script names its servers' cgroups; a malformed pair is
+// ignored rather than read as some other server's path.
+#[test]
+fn owned_cgroups_are_named_pairs() {
+    let parsed = parse_cgroups(
+        " postgres=/sys/fs/cgroup/system.slice/docker-a.scope , broken, nats=/sys/fs/cgroup/b ",
+    );
+    assert_eq!(
+        parsed,
+        vec![
+            (
+                "postgres".to_owned(),
+                std::path::PathBuf::from("/sys/fs/cgroup/system.slice/docker-a.scope")
+            ),
+            (
+                "nats".to_owned(),
+                std::path::PathBuf::from("/sys/fs/cgroup/b")
+            ),
+        ]
+    );
+    assert!(parse_cgroups("").is_empty());
+}
+
+// cgroup v2 `cpu.stat` counts microseconds; a file without `usage_usec` is
+// no measurement, not a zero.
+#[test]
+fn cgroup_cpu_is_read_in_microseconds() {
+    let stat = "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n";
+    assert_eq!(parse_cpu_stat(stat), Some(Duration::from_millis(2_500)));
+    assert_eq!(parse_cpu_stat("user_usec 1\n"), None);
+}
+
 #[test]
 fn rss_is_read_in_bytes_and_zero_without_it() {
     let status = "Name:\tpostgres\nVmHWM:\t  9000 kB\nVmRSS:\t  4096 kB\nThreads:\t1\n";

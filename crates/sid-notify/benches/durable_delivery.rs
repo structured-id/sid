@@ -44,13 +44,14 @@ async fn main() {
                 bench::store_modes("sqlite", sqlite.clone(), None).await;
                 // Embedded SQLite is one process: concurrent producers on its
                 // one runner, not replicas.
-                bench::replicas("sqlite", vec![sqlite]).await;
+                bench::replicas("sqlite", vec![sqlite], None).await;
             }
             "postgres" => {
                 let (store, pool) = bench::postgres().await;
                 bench::durability(&pool).await;
                 bench::store_modes("postgres", store, Some(&pool)).await;
-                bench::replicas("postgres", bench::postgres_replicas(REPLICAS).await).await;
+                let (stores, pool) = bench::postgres_replicas(REPLICAS).await;
+                bench::replicas("postgres", stores, Some(&pool)).await;
             }
             "jetstream" => bench::handoff(bench::postgres().await.0).await,
             other => panic!("unknown mode {other}: sqlite, postgres or jetstream"),

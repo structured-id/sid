@@ -130,14 +130,18 @@ fn event() -> Event {
     Event::new("sid-bench", event_types::SECURITY_BRUTE_FORCE).with_subject("profile/p-bench")
 }
 
-/// One recipient for every event, resolved without a lookup.
+/// The channels every event's route delivers to.
+const CHANNELS: [&str; FAN_OUT] = ["email", "webhook"];
+
+/// One recipient for every event, resolved without a lookup. Its id is the
+/// event's, so a channel knows which delivery it is sending.
 struct Fixed;
 
 #[async_trait]
 impl RecipientSource for Fixed {
-    async fn resolve(&self, _event: &Event) -> Result<Recipient, ResolveError> {
+    async fn resolve(&self, event: &Event) -> Result<Recipient, ResolveError> {
         Ok(Recipient {
-            profile_id: "p-bench".into(),
+            profile_id: event.id.clone(),
             email: Some("bench@sid.example.com".into()),
             phone: None,
             push_endpoint: None,
@@ -147,10 +151,78 @@ impl RecipientSource for Fixed {
     }
 }
 
-/// A channel accepting every message at once, counting them in `sent`.
+/// Every delivery the channels made, by event and channel. What a run owed
+/// is checked delivery by delivery: in a count, a repeat and a loss cancel
+/// out.
+#[derive(Default)]
+struct Ledger {
+    sends: std::sync::Mutex<std::collections::HashMap<(String, &'static str), u32>>,
+}
+
+/// How the deliveries made compare with those owed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Tally {
+    /// Owed deliveries never made.
+    missing: usize,
+    /// Owed deliveries made more than once, counting each extra send.
+    repeated: usize,
+    /// Sends to no owed delivery.
+    unexpected: usize,
+}
+
+impl Ledger {
+    fn record(&self, event: &str, channel: &'static str) {
+        *self
+            .sends
+            .lock()
+            .unwrap()
+            .entry((event.to_owned(), channel))
+            .or_default() += 1;
+    }
+
+    /// The deliveries of `owed` events to every channel, against those made.
+    fn tally(&self, owed: &[String]) -> Tally {
+        let sends = self.sends.lock().unwrap();
+        let mut tally = Tally::default();
+        let mut expected = std::collections::HashSet::with_capacity(owed.len() * FAN_OUT);
+        for event in owed {
+            for channel in CHANNELS {
+                expected.insert((event.as_str(), channel));
+                match sends.get(&(event.clone(), channel)) {
+                    None => tally.missing += 1,
+                    // An entry exists only once a send recorded it: at least one.
+                    Some(made) => tally.repeated += *made as usize - 1,
+                }
+            }
+        }
+        tally.unexpected = sends
+            .iter()
+            .filter(|((event, channel), _)| !expected.contains(&(event.as_str(), *channel)))
+            .map(|(_, made)| *made as usize)
+            .sum();
+        tally
+    }
+}
+
+/// `tally` of a run's `owed` deliveries, printed under `mode`.
+fn tallied(mode: &str, ledger: &Ledger, owed: &[String]) {
+    let Tally {
+        missing,
+        repeated,
+        unexpected,
+    } = ledger.tally(owed);
+    println!(
+        "{mode:<10} ledger    {} deliveries owed: {missing} missing, {repeated} repeated, {unexpected} unexpected",
+        owed.len() * FAN_OUT
+    );
+}
+
+/// A channel accepting every message at once, counting them in `sent` and
+/// recording each in `ledger`.
 struct Immediate {
     id: &'static str,
     sent: Arc<Progress>,
+    ledger: Arc<Ledger>,
 }
 
 #[async_trait]
@@ -161,9 +233,10 @@ impl NotificationChannel for Immediate {
 
     async fn deliver(
         &self,
-        _recipient: &Recipient,
+        recipient: &Recipient,
         _message: &RenderedMessage,
     ) -> Result<DeliveryReceipt, DeliveryError> {
+        self.ledger.record(&recipient.profile_id, self.id);
         self.sent.add();
         Ok(DeliveryReceipt {
             message_id: "m".into(),
@@ -458,12 +531,52 @@ struct Process {
     rss: u64,
 }
 
-/// The processes measured in one snapshot: this one, and every process on
-/// the host named like a store or broker server, whichever run it serves.
+/// The processes measured in one snapshot: this one, the servers this run
+/// owns (by their cgroups), and every process on the host named like a
+/// store or broker server, whichever run it serves.
 struct Snapshot {
     at: Instant,
     own: Process,
+    owned: Vec<(String, Process)>,
     servers: std::collections::HashMap<u32, (String, Process)>,
+}
+
+/// The cgroups of the servers this run owns, named by the run's script in
+/// `SID_BENCH_CGROUPS` as comma-separated `name=path` pairs, each path a
+/// cgroup v2 directory (a server container started for this run). Their
+/// usage is this run's; nothing else on the host is attributed to it.
+fn owned_cgroups() -> Vec<(String, std::path::PathBuf)> {
+    std::env::var("SID_BENCH_CGROUPS")
+        .map(|list| parse_cgroups(&list))
+        .unwrap_or_default()
+}
+
+/// `name=path` pairs, comma-separated; a pair without `=` is ignored.
+fn parse_cgroups(list: &str) -> Vec<(String, std::path::PathBuf)> {
+    list.split(',')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .map(|(name, path)| (name.trim().to_owned(), path.trim().into()))
+        .collect()
+}
+
+/// CPU time from a cgroup v2 `cpu.stat` (`usage_usec`, microseconds).
+fn parse_cpu_stat(stat: &str) -> Option<Duration> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))
+        .and_then(|usec| usec.trim().parse::<u64>().ok())
+        .map(Duration::from_micros)
+}
+
+/// A cgroup's CPU time and charged memory (`memory.current`, bytes: each
+/// page charged once to the cgroup, unlike summed per-process RSS).
+fn cgroup(dir: &std::path::Path) -> Option<Process> {
+    let cpu = parse_cpu_stat(&std::fs::read_to_string(dir.join("cpu.stat")).ok()?)?;
+    let rss = std::fs::read_to_string(dir.join("memory.current"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Process { cpu, rss })
 }
 
 /// The server processes measured beside this one.
@@ -522,7 +635,18 @@ impl Snapshot {
                 servers.insert(pid, (name, measured));
             }
         }
-        Some(Self { at, own, servers })
+        // A named cgroup that cannot be read is left out, and reported as
+        // unavailable rather than as zero usage.
+        let owned = owned_cgroups()
+            .into_iter()
+            .filter_map(|(name, dir)| cgroup(&dir).map(|measured| (name, measured)))
+            .collect();
+        Some(Self {
+            at,
+            own,
+            owned,
+            servers,
+        })
     }
 
     /// Each one's busy cores and resident memory between `self` and `end`.
@@ -537,6 +661,24 @@ impl Snapshot {
             cores(end.own.cpu - self.own.cpu),
             mib(end.own.rss),
         );
+        let named = owned_cgroups();
+        for (name, _) in &named {
+            let measured = |snapshot: &Self| {
+                snapshot
+                    .owned
+                    .iter()
+                    .find(|(owned, _)| owned == name)
+                    .map(|(_, p)| *p)
+            };
+            match (measured(self), measured(end)) {
+                (Some(before), Some(after)) if before.cpu <= after.cpu => line.push_str(&format!(
+                    " run:{name}={:.2} cores mem={:.0}MiB",
+                    cores(after.cpu - before.cpu),
+                    mib(after.rss)
+                )),
+                _ => line.push_str(&format!(" run:{name}=unavailable")),
+            }
+        }
         let mut by_name: std::collections::BTreeMap<&str, (Duration, u64, usize)> =
             Default::default();
         for (pid, (name, measured)) in &end.servers {
@@ -556,7 +698,7 @@ impl Snapshot {
             // server, and resident memory summed per process, which counts
             // shared pages once per process.
             line.push_str(&format!(
-                " host:{name}={:.2} cores rss-sum={:.0}MiB ({processes} processes)",
+                " unattributed:{name}={:.2} cores rss-sum={:.0}MiB ({processes} processes)",
                 cores(cpu),
                 mib(rss)
             ));
@@ -579,13 +721,15 @@ fn runner(
     store: &Arc<dyn WorkStore>,
     worker: &str,
     sent: &Arc<Progress>,
+    ledger: &Arc<Ledger>,
     templates: &Arc<TemplateStore>,
 ) -> WorkRunner {
     let mut dispatcher = NotificationDispatcher::new();
-    for id in ["email", "webhook"] {
+    for id in CHANNELS {
         dispatcher.register_channel(Arc::new(Immediate {
             id,
             sent: sent.clone(),
+            ledger: ledger.clone(),
         }));
     }
     let source: Arc<dyn RecipientSource> = Arc::new(Fixed);
@@ -636,22 +780,25 @@ async fn templates() -> Arc<TemplateStore> {
 pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option<&sqlx::PgPool>) {
     let templates = templates().await;
     let mut samples = Vec::with_capacity(ENQUEUES);
-    let mut owed = 0;
+    let mut owed_events = Vec::with_capacity(ENQUEUES + BACKLOG + SINGLES);
     let measured = Snapshot::take();
     for _ in 0..ENQUEUES {
         let event = event();
         let started = Instant::now();
         accept_event(store.as_ref(), &event).await.unwrap();
         samples.push(started.elapsed());
-        owed += 1;
+        owed_events.push(event.id);
     }
     usage(&measured, mode, "enqueue");
     report(mode, "enqueue", samples);
 
     for _ in 0..BACKLOG {
-        accept_event(store.as_ref(), &event()).await.unwrap();
-        owed += 1;
+        let event = event();
+        accept_event(store.as_ref(), &event).await.unwrap();
+        owed_events.push(event.id);
     }
+    let owed = owed_events.len();
+    let ledger = Arc::new(Ledger::default());
     let sent = Arc::new(Progress::default());
     let completed = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -663,7 +810,7 @@ pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option
     };
     let measured = Snapshot::take();
     let started = Instant::now();
-    let runner = runner(&timed_store, "bench", &sent, &templates);
+    let runner = runner(&timed_store, "bench", &sent, &ledger, &templates);
     // Woken after each acceptance, as the notifier's consumer does.
     let waker = runner.waker();
     let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
@@ -685,8 +832,10 @@ pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option
     for _ in 0..SINGLES {
         let before = sent.count();
         let committed = completed.count();
+        let event = event();
         let started = Instant::now();
-        accept_event(store.as_ref(), &event()).await.unwrap();
+        accept_event(store.as_ref(), &event).await.unwrap();
+        owed_events.push(event.id);
         waker.wake();
         let delivered = sent.reach(before + FAN_OUT).await;
         samples.push(delivered - started);
@@ -695,6 +844,9 @@ pub async fn store_modes(mode: &str, store: Arc<dyn WorkStore>, sessions: Option
     }
     report(mode, "deliver", samples);
     report(mode, "settled", settled_samples);
+    // Quiet before the ledger is read: a late repeat would come now.
+    tokio::time::sleep(QUIET).await;
+    tallied(mode, &ledger, &owed_events);
     stop.send(()).unwrap();
     running.await.unwrap();
 }
@@ -706,16 +858,27 @@ const QUIET: Duration = Duration::from_secs(2);
 /// `replicas`: one runner on each of `stores` (each a client of its own, as
 /// separate service replicas hold), draining while `PRODUCERS` producers
 /// enqueue `BACKLOG` events between them, each producer on one of the
-/// stores in turn. Printed under `mode`.
-pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
+/// stores in turn. Printed under `mode`. `sessions`, a PostgreSQL pool on
+/// the stores' database when they have one, is sampled for where the
+/// replicas' sessions wait.
+pub async fn replicas(
+    mode: &str,
+    stores: Vec<Arc<dyn WorkStore>>,
+    sessions: Option<&sqlx::PgPool>,
+) {
     assert!(!stores.is_empty(), "replicas needs at least one store");
     let templates = templates().await;
     let sent = Arc::new(Progress::default());
+    let ledger = Arc::new(Ledger::default());
     let completed = Arc::new(Progress::default());
     let mut stops = Vec::with_capacity(stores.len());
     let mut running = Vec::with_capacity(stores.len());
     let mut wakers = Vec::with_capacity(stores.len());
     let mut timed = Vec::with_capacity(stores.len());
+    let waits = match sessions {
+        Some(pool) => Some(Waits::start(pool).await),
+        None => None,
+    };
     // From the runners' start, so every call they make falls in the wall time.
     let measured = Snapshot::take();
     let started = Instant::now();
@@ -727,6 +890,7 @@ pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
             &measured_store,
             &format!("bench-{replica}"),
             &sent,
+            &ledger,
             &templates,
         );
         wakers.push(runner.waker());
@@ -749,21 +913,26 @@ pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
         let wakers = wakers.clone();
         producing.spawn(async move {
             let mut samples = Vec::with_capacity(BACKLOG / PRODUCERS + 1);
+            let mut events = Vec::with_capacity(BACKLOG / PRODUCERS + 1);
             for _ in (producer..BACKLOG).step_by(PRODUCERS) {
                 let event = event();
                 let enqueued = Instant::now();
                 accept_event(store.as_ref(), &event).await.unwrap();
                 samples.push(enqueued.elapsed());
+                events.push(event.id);
                 for waker in wakers.iter() {
                     waker.wake();
                 }
             }
-            samples
+            (samples, events)
         });
     }
     let mut samples = Vec::with_capacity(BACKLOG);
+    let mut owed_events = Vec::with_capacity(BACKLOG);
     while let Some(produced) = producing.join_next().await {
-        samples.extend(produced.unwrap());
+        let (produced, events) = produced.unwrap();
+        samples.extend(produced);
+        owed_events.extend(events);
     }
     let enqueued = produced.elapsed();
     let done = sent.reach(BACKLOG * FAN_OUT).await;
@@ -778,17 +947,12 @@ pub async fn replicas(mode: &str, stores: Vec<Arc<dyn WorkStore>>) {
     for (replica, measured) in timed.iter().enumerate() {
         measured.report(&format!("{mode}#{replica}"), settled - started);
     }
-    // A delivery sent twice would show as more than the events' fan-out once
-    // the runners are quiet.
+    if let Some(waits) = waits {
+        waits.report(mode).await;
+    }
+    // A late repeat would come once the runners are quiet.
     tokio::time::sleep(QUIET).await;
-    println!(
-        // The channel's send count above the deliveries owed: an aggregate,
-        // so a repeat and a loss would cancel out here; the conformance
-        // tests own per-delivery uniqueness.
-        "{mode:<10} excess    {} sends over {} deliveries owed",
-        sent.count() - BACKLOG * FAN_OUT,
-        BACKLOG * FAN_OUT
-    );
+    tallied(mode, &ledger, &owed_events);
     for stop in stops {
         stop.send(()).unwrap();
     }
@@ -828,8 +992,8 @@ pub async fn postgres() -> (Arc<dyn WorkStore>, sqlx::PgPool) {
 }
 
 /// `replicas` stores on one fresh PostgreSQL database, each on a pool of its
-/// own as separate service replicas connect.
-pub async fn postgres_replicas(replicas: usize) -> Vec<Arc<dyn WorkStore>> {
+/// own as separate service replicas connect, and the first store's pool.
+pub async fn postgres_replicas(replicas: usize) -> (Vec<Arc<dyn WorkStore>>, sqlx::PgPool) {
     let (first, pool) = postgres().await;
     let mut stores = vec![first];
     for _ in 1..replicas {
@@ -838,7 +1002,7 @@ pub async fn postgres_replicas(replicas: usize) -> Vec<Arc<dyn WorkStore>> {
             .unwrap();
         stores.push(Arc::new(sid_storage::PgWorkStore::new(own)) as Arc<dyn WorkStore>);
     }
-    stores
+    (stores, pool)
 }
 
 /// The PostgreSQL server's durability settings the measurement ran under.
