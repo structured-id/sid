@@ -252,7 +252,7 @@ impl EntryConnections {
         let answer: Result<v1::EntryConnection, EntryConnectionError> = async {
             let issuer = self.issuer(&req.issuer_handle).await?;
             let handle = EntryHandle::generate();
-            let now = chrono::Utc::now();
+            let now = stored_now();
             let connection = EntryConnection {
                 handle,
                 owner: ConnectionOwner::Administration,
@@ -349,7 +349,7 @@ impl EntryConnections {
             if let Some(enabled) = req.enabled {
                 connection.enabled = enabled;
             }
-            connection.updated_at = chrono::Utc::now();
+            connection.updated_at = stored_now();
             // The answer is the connection as the change leaves it: at the
             // next revision.
             let mut left = connection.clone();
@@ -521,7 +521,7 @@ impl EntryConnections {
             return established(set);
         }
         let handle = EntryHandle::generate();
-        let now = chrono::Utc::now();
+        let now = stored_now();
         let connection = EntryConnection {
             handle,
             owner: ConnectionOwner::Provisioning,
@@ -563,6 +563,13 @@ impl EntryConnections {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Now, at the microsecond precision every backend stores a time in: the
+/// connection a command answers with is the one a later read returns.
+fn stored_now() -> chrono::DateTime<chrono::Utc> {
+    use chrono::SubsecRound as _;
+    chrono::Utc::now().trunc_subsecs(6)
 }
 
 /// The key of the record that installation issuer `issuer` has its
