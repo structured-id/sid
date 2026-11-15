@@ -15,7 +15,7 @@ use sid_core::models::{AuditEntry, EnrollmentMode, Profile, SecurityPolicy};
 use sid_plugin::storage::StorageBackend;
 
 /// The application each sign-in continues to.
-const CLIENT: &str = "an-application";
+const CLIENT: Option<&str> = Some("an-application");
 
 async fn storage() -> Arc<dyn StorageBackend> {
     let url = std::env::var("DATABASE_URL")
@@ -160,6 +160,66 @@ async fn insufficient_evidence_is_refused() {
         Some("STEP_UP_REQUIRED")
     );
     assert!(storage.list_sessions(&profile.id).await.unwrap().is_empty());
+}
+
+// A sign-in that continues no application (a page of the host composition)
+// is weighed by the organization's requirements: short evidence is refused
+// with the same step-up, sufficient evidence signs in. No client stands in
+// for the organization, and none is needed.
+#[tokio::test]
+async fn a_sign_in_for_no_application_is_weighed_by_the_organization() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Standard);
+    let profile = profile(storage.as_ref()).await;
+    let short = evidence("urn:sid:acr:basic", &["pwd"], Duration::minutes(1))
+        .authentication(Utc::now())
+        .unwrap();
+    let refused = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            None,
+            &short,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .expect("refused under the organization's level");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("STEP_UP_REQUIRED")
+    );
+    assert!(storage.list_sessions(&profile.id).await.unwrap().is_empty());
+
+    let sufficient = evidence(
+        "urn:sid:acr:standard",
+        &["pwd", "otp"],
+        Duration::minutes(1),
+    )
+    .authentication(Utc::now())
+    .unwrap();
+    let signed_in = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            None,
+            &sufficient,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .list_sessions(&profile.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == signed_in.session_id)
+    );
 }
 
 // An Elevated attestation satisfies an Elevated policy only within the

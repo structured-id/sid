@@ -48,6 +48,47 @@ pub struct FederatedEntryServiceImpl {
     /// Accepts the presentation of an identity the organization did not
     /// issue.
     identities: Arc<dyn PresentedIdentities>,
+    /// Pages of the host composition an entry may also return to.
+    hosts: Vec<HostContinuation>,
+}
+
+/// A page of the host composition, at each installation issuer, that an
+/// entry may return the browser to: `<issuer>{path}?{parameter}=<value>`, one
+/// parameter and nothing else. The page continues something the host keeps
+/// and checks itself; the sign-in it waits for continues no application, so
+/// the organization's login requirements decide it.
+#[derive(Clone, Copy, Debug)]
+pub struct HostContinuation {
+    /// Path below the issuer's canonical URL, starting with `/`.
+    pub path: &'static str,
+    /// The one query parameter the page is addressed by.
+    pub parameter: &'static str,
+}
+
+/// Where an entry returns the browser once it has signed in.
+enum Continuation {
+    /// A kept authorization request at the issuer's own authorization
+    /// endpoint: the login requirements of its application, `client_id`,
+    /// decide the sign-in.
+    Authorization { url: url::Url, client_id: String },
+    /// A registered page of the host composition at the issuer: the
+    /// organization's login requirements decide the sign-in.
+    Host(url::Url),
+}
+
+impl Continuation {
+    fn url(&self) -> &url::Url {
+        match self {
+            Continuation::Authorization { url, .. } | Continuation::Host(url) => url,
+        }
+    }
+
+    fn client_id(&self) -> Option<&str> {
+        match self {
+            Continuation::Authorization { client_id, .. } => Some(client_id),
+            Continuation::Host(_) => None,
+        }
+    }
 }
 
 /// One step of an entry: the installation issuer and the connection the
@@ -85,7 +126,20 @@ impl FederatedEntryServiceImpl {
             storage,
             auth,
             identities,
+            hosts: Vec::new(),
         }
+    }
+
+    /// The entry also returning to the host's pages `hosts`.
+    #[must_use]
+    pub fn with_host_continuations(mut self, hosts: Vec<HostContinuation>) -> Self {
+        self.hosts = hosts;
+        self
+    }
+
+    /// `rd` as a continuation at `issuer_url` (see [`continuation_at`]).
+    fn continuation_of(&self, issuer_url: &str, rd: &str) -> Option<Continuation> {
+        continuation_at(issuer_url, rd, &self.hosts)
     }
 
     /// The step at the installation issuer `issuer_handle` names, through
@@ -186,12 +240,12 @@ impl FederatedEntryServiceImpl {
             warn!("federated entry evidence is no longer current");
             return Err(Refusal::over("Sign-in was not completed"));
         };
-        // The application whose authorization the entry continues: its
-        // login policy decides the sign-in.
-        let Ok(continuation) = url::Url::parse(&returned.continuation) else {
-            return Err(Refusal::over("Sign-in was not completed"));
-        };
-        let Some(client_id) = client_of(&continuation) else {
+        // What the entry continues: an application's authorization, whose
+        // login requirements decide the sign-in, or a page of the host, under
+        // the organization's.
+        let Some(continuation) =
+            self.continuation_of(&step.issuer.canonical_url, &returned.continuation)
+        else {
             return Err(Refusal::over("Sign-in was not completed"));
         };
         // The admission and its session commit hold to one reading of the
@@ -238,7 +292,7 @@ impl FederatedEntryServiceImpl {
                     resolved.assignment,
                     resolved.admission,
                     &authentication,
-                    &client_id,
+                    continuation.client_id(),
                     Some(completion),
                 )
                 .await
@@ -256,7 +310,7 @@ impl FederatedEntryServiceImpl {
             // retried.
             if let Some(further) = further_request(&status, &returned.requested) {
                 return self
-                    .begin(step, &continuation, &further)
+                    .begin(step, continuation.url(), &further)
                     .await
                     .ok_or_else(Refusal::retry);
             }
@@ -269,7 +323,7 @@ impl FederatedEntryServiceImpl {
                 _ => Refusal::over("Sign-in was refused"),
             });
         };
-        let mut response = oauth_http::redirect(&continuation);
+        let mut response = oauth_http::redirect(continuation.url());
         signed_in
             .delivery
             .deliver(response.metadata_mut())
@@ -302,6 +356,17 @@ impl FederatedEntryServiceImpl {
             .decline(&message.state, cookies, &step.connection.callback)
             .await
         {
+            // A page of the host waits for no application's answer: the
+            // sign-in it waited for did not happen, and the host's own
+            // operation stays as it was.
+            Ok(continuation)
+                if matches!(
+                    self.continuation_of(&step.issuer.canonical_url, &continuation),
+                    Some(Continuation::Host(_))
+                ) =>
+            {
+                oauth_http::page(403, "Sign-in was not completed")
+            }
             Ok(continuation) => match self.auth.declined_sign_in(&continuation).await {
                 Ok(answer) => oauth_http::redirect(&answer),
                 Err(status) => {
@@ -461,18 +526,32 @@ fn further_request(refusal: &Status, asked: &EntryRequest) -> Option<EntryReques
     Some(further)
 }
 
-/// `rd` when it continues an authorization at `issuer_url`'s own
-/// authorization endpoint (the continuation its sign-in step names), else
-/// `None`: the entry never returns the browser anywhere else.
-fn continuation_of(issuer_url: &str, rd: &str) -> Option<url::Url> {
-    let endpoint = url::Url::parse(&format!("{issuer_url}/oauth2/authorize")).ok()?;
+/// `rd` as a continuation at `issuer_url`: a kept authorization request at
+/// its own authorization endpoint naming one application, or one of the
+/// host's pages `hosts` addressed by its one parameter; else `None`: the
+/// entry never returns the browser anywhere else.
+fn continuation_at(issuer_url: &str, rd: &str, hosts: &[HostContinuation]) -> Option<Continuation> {
     let rd = url::Url::parse(rd).ok()?;
-    let here = rd.origin() == endpoint.origin()
-        && rd.path() == endpoint.path()
-        && rd.fragment().is_none()
-        && rd.username().is_empty()
-        && rd.password().is_none();
-    (here && client_of(&rd).is_some()).then_some(rd)
+    let at = |path: &str| {
+        url::Url::parse(&format!("{issuer_url}{path}")).is_ok_and(|endpoint| {
+            rd.origin() == endpoint.origin()
+                && rd.path() == endpoint.path()
+                && rd.fragment().is_none()
+                && rd.username().is_empty()
+                && rd.password().is_none()
+        })
+    };
+    if at("/oauth2/authorize") {
+        let client_id = client_of(&rd)?;
+        return Some(Continuation::Authorization { url: rd, client_id });
+    }
+    let host = hosts.iter().find(|h| at(h.path))?;
+    let mut pairs = rd.query_pairs();
+    match (pairs.next(), pairs.next()) {
+        (Some((name, value)), None) if name == host.parameter && !value.is_empty() => {}
+        _ => return None,
+    }
+    Some(Continuation::Host(rd))
 }
 
 /// The one `client_id` an authorization request names (RFC 6749 §4.1.1;
@@ -504,26 +583,33 @@ impl FederatedEntryService for FederatedEntryServiceImpl {
             }
             Err(NoStep::Unavailable) => return Ok(oauth_http::page(503, Refusal::retry().text)),
         };
-        let Some(continuation) = continuation_of(&step.issuer.canonical_url, &message.rd) else {
+        let Some(continuation) = self.continuation_of(&step.issuer.canonical_url, &message.rd)
+        else {
             return Ok(oauth_http::page(400, "Sign-in request refused"));
         };
         // This installation's policy weighs whatever the issuer returns; the
         // first request asks the issuer for what the kept authorization it
         // continues asks of the sign-in, so a reused authentication that
-        // authorization would refuse is not brought back.
-        let required = match self.auth.sign_in_requirements(continuation.as_str()).await {
-            Ok(required) => required,
-            Err(status) => {
-                warn!(error = %status, "the continued authorization is not waiting");
-                return Ok(oauth_http::page(400, "Sign-in request refused"));
+        // authorization would refuse is not brought back. A page of the host
+        // asks for nothing upfront: a return short of the organization's
+        // requirements starts one further entry asking for them.
+        let request = match &continuation {
+            Continuation::Authorization { url, .. } => {
+                match self.auth.sign_in_requirements(url.as_str()).await {
+                    Ok(required) => EntryRequest {
+                        acr: required.acr,
+                        max_age: required.max_age,
+                    },
+                    Err(status) => {
+                        warn!(error = %status, "the continued authorization is not waiting");
+                        return Ok(oauth_http::page(400, "Sign-in request refused"));
+                    }
+                }
             }
-        };
-        let request = EntryRequest {
-            acr: required.acr,
-            max_age: required.max_age,
+            Continuation::Host(_) => EntryRequest::default(),
         };
         Ok(self
-            .begin(&step, &continuation, &request)
+            .begin(&step, continuation.url(), &request)
             .await
             .unwrap_or_else(unavailable))
     }

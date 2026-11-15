@@ -39,11 +39,9 @@ impl AuthServiceImpl {
     }
 
     /// The session this authority's IdP session cookie in `metadata` names,
-    /// if it still exists.
-    pub(super) async fn browser_session(
-        &self,
-        metadata: &MetadataMap,
-    ) -> Result<Option<Session>, Status> {
+    /// if it still exists: what a page of a composition served at this
+    /// authority's issuer reads to know who is signed in here.
+    pub async fn browser_session(&self, metadata: &MetadataMap) -> Result<Option<Session>, Status> {
         let cookies = metadata
             .get_all("cookie")
             .iter()

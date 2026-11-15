@@ -134,6 +134,10 @@ pub struct CeComponents {
     /// installation's store, or, set by the host before serving, the one
     /// with the signature checks its edition adds.
     pub identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
+    /// Pages of the host composition at each issuer that a federated entry
+    /// may return to, besides an application's authorization: none in CE,
+    /// set by the host before serving.
+    pub entry_continuations: Vec<crate::grpc::federated_entry_service::HostContinuation>,
     /// Emails requested sign-in links, when magic links are enabled.
     pub magic_link_mail: Option<Arc<sid::auth_mail::MagicLinkMail>>,
     /// Emails requested sign-in codes.
@@ -1104,6 +1108,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         upstream_svc,
         entry_connections,
         identities,
+        entry_continuations: Vec::new(),
     })
 }
 
