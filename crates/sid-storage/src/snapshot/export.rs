@@ -32,6 +32,8 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     }
     snapshot.organization = backend.instance_organization().await?;
     snapshot.metadata.installation_org = snapshot.organization.as_ref().map(|o| o.id);
+    // The organizations this installation issues to: the issuers it keeps
+    // for them, listed next, serve them and are valid only beside them.
     snapshot.organization_references = backend.organization_references().await?;
     for issuer in backend.list_oidc_issuers().await? {
         let keys = backend.oidc_issuer_signing_keys(issuer.id).await?;

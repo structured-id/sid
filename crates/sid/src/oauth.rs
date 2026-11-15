@@ -463,9 +463,11 @@ impl OAuth {
         Ok((client, issuer))
     }
 
-    /// The issuer `issuer_handle` names, when it serves the active `client`.
-    /// A client this issuer does not serve is refused exactly like one that
-    /// does not exist (`invalid_client`).
+    /// The issuer `issuer_handle` names, when it serves the active `client`
+    /// and, for another organization's federation site, its admission still
+    /// stands. A client this issuer does not serve is refused exactly like
+    /// one that does not exist (`invalid_client`). The authorization and the
+    /// token endpoints both establish their client through it.
     pub async fn client_issuer(
         &self,
         issuer_handle: &str,
