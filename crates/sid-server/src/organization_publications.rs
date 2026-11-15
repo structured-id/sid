@@ -28,10 +28,15 @@ impl ConnectedPublications {
     }
 
     /// The publications at the installations of the connections registered
-    /// for exactly `organization`, the enabled ones first. One that brings
-    /// identities of several organizations (the platform's) is no
-    /// association with any of them.
-    async fn publications(&self, organization: Uuid) -> Result<Vec<PlatformCaPublication>, String> {
+    /// for exactly `organization`, the enabled ones first, each as it can be
+    /// read or why not: one that names no publication is one failed
+    /// candidate, never the end of the lookup. One that brings identities
+    /// of several organizations (the platform's) is no association with any
+    /// of them.
+    async fn publications(
+        &self,
+        organization: Uuid,
+    ) -> Result<Vec<Result<PlatformCaPublication, String>>, String> {
         let mut connections: Vec<_> = self
             .connections
             .list_entry_connections()
@@ -44,10 +49,10 @@ impl ConnectedPublications {
             })
             .collect();
         connections.sort_by_key(|c| !c.enabled);
-        connections
+        Ok(connections
             .iter()
             .map(|connection| publication(&connection.issuer))
-            .collect()
+            .collect())
     }
 }
 
@@ -56,10 +61,14 @@ impl OrganizationPublications for ConnectedPublications {
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String> {
         // Each is asked in turn until one answers.
         let mut failed = None;
-        for publication in self.publications(organization).await? {
-            match publication.fetch().await {
+        for candidate in self.publications(organization).await? {
+            let read = match candidate {
+                Ok(publication) => publication.fetch().await.map_err(|e| e.to_string()),
+                Err(reason) => Err(reason),
+            };
+            match read {
                 Ok(wire) => return set_of(wire).map(Some).map_err(|e| e.to_string()),
-                Err(reason) => failed = Some(reason.to_string()),
+                Err(reason) => failed = Some(reason),
             }
         }
         failed.map_or(Ok(None), Err)
@@ -67,10 +76,17 @@ impl OrganizationPublications for ConnectedPublications {
 
     async fn crl(&self, organization: Uuid, generation: u32) -> Result<Option<Vec<u8>>, String> {
         let mut failed = None;
-        for publication in self.publications(organization).await? {
-            match publication.fetch_crl(generation).await {
+        for candidate in self.publications(organization).await? {
+            let read = match candidate {
+                Ok(publication) => publication
+                    .fetch_crl(generation)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(reason) => Err(reason),
+            };
+            match read {
                 Ok(crl) => return Ok(Some(crl)),
-                Err(reason) => failed = Some(reason.to_string()),
+                Err(reason) => failed = Some(reason),
             }
         }
         failed.map_or(Ok(None), Err)
