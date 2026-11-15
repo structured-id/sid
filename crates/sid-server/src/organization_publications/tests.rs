@@ -72,6 +72,39 @@ async fn an_organization_is_read_only_where_it_is_connected() {
     assert_eq!(publications.fetch(Uuid::now_v7()).await, Ok(None));
 }
 
+/// The organization's candidates are read in turn until one gives a usable
+/// answer: one that could not be built, one whose answer cannot be used
+/// (a set that does not convert) and one that fails to answer are each a
+/// failure, and the next is still read. Only when none gives an answer is
+/// the last failure reported; no candidate at all is no answer. Bug
+/// prevented: a malformed answer from one installation ending the lookup
+/// although another one of the organization answers.
+#[tokio::test]
+async fn any_failed_candidate_passes_to_the_next() {
+    let candidates = vec![Err("no publication".to_owned()), Ok(1u32), Ok(2), Ok(3)];
+    let read = |n: u32| async move {
+        match n {
+            1 => Err("unusable answer".to_owned()),
+            2 => Ok("answer of 2"),
+            _ => Ok("never asked"),
+        }
+    };
+    assert_eq!(
+        first_answer(candidates, read).await,
+        Ok(Some("answer of 2"))
+    );
+
+    let failing = vec![Ok(1u32), Err("no publication".to_owned())];
+    assert_eq!(
+        first_answer(failing, read).await,
+        Err("no publication".to_owned())
+    );
+    assert_eq!(
+        first_answer(Vec::<Result<u32, String>>::new(), read).await,
+        Ok(None)
+    );
+}
+
 /// A connection whose issuer names no publication (a loopback HTTP issuer
 /// of development) is one failed candidate, not the end of the lookup: the
 /// organization's other connections are still tried, enabled ones first.

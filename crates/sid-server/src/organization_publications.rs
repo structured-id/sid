@@ -59,38 +59,53 @@ impl ConnectedPublications {
 #[async_trait::async_trait]
 impl OrganizationPublications for ConnectedPublications {
     async fn fetch(&self, organization: Uuid) -> Result<Option<PlatformCaSet>, String> {
-        // Each is asked in turn until one answers.
-        let mut failed = None;
-        for candidate in self.publications(organization).await? {
-            let read = match candidate {
-                Ok(publication) => publication.fetch().await.map_err(|e| e.to_string()),
-                Err(reason) => Err(reason),
-            };
-            match read {
-                Ok(wire) => return set_of(wire).map(Some).map_err(|e| e.to_string()),
-                Err(reason) => failed = Some(reason),
-            }
-        }
-        failed.map_or(Ok(None), Err)
+        first_answer(
+            self.publications(organization).await?,
+            |publication: PlatformCaPublication| async move {
+                let wire = publication.fetch().await.map_err(|e| e.to_string())?;
+                set_of(wire).map_err(|e| e.to_string())
+            },
+        )
+        .await
     }
 
     async fn crl(&self, organization: Uuid, generation: u32) -> Result<Option<Vec<u8>>, String> {
-        let mut failed = None;
-        for candidate in self.publications(organization).await? {
-            let read = match candidate {
-                Ok(publication) => publication
+        first_answer(
+            self.publications(organization).await?,
+            move |publication: PlatformCaPublication| async move {
+                publication
                     .fetch_crl(generation)
                     .await
-                    .map_err(|e| e.to_string()),
-                Err(reason) => Err(reason),
-            };
-            match read {
-                Ok(crl) => return Ok(Some(crl)),
-                Err(reason) => failed = Some(reason),
-            }
-        }
-        failed.map_or(Ok(None), Err)
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await
     }
+}
+
+/// The first usable answer `read` gives for `candidates`, read in turn: a
+/// candidate that could not be built, failed to answer or answered
+/// something unusable is a failure, and the next is still read. The last
+/// failure when none answers; none when there is no candidate.
+async fn first_answer<C, T, Read>(
+    candidates: Vec<Result<C, String>>,
+    read: impl Fn(C) -> Read,
+) -> Result<Option<T>, String>
+where
+    Read: std::future::Future<Output = Result<T, String>>,
+{
+    let mut failed = None;
+    for candidate in candidates {
+        let answer = match candidate {
+            Ok(candidate) => read(candidate).await,
+            Err(reason) => Err(reason),
+        };
+        match answer {
+            Ok(answer) => return Ok(Some(answer)),
+            Err(reason) => failed = Some(reason),
+        }
+    }
+    failed.map_or(Ok(None), Err)
 }
 
 /// The publication at the installation whose issuer is `issuer`.
