@@ -483,6 +483,95 @@ async fn a_site_client_is_usable_only_while_its_admission_stands() {
     ));
 }
 
+// A registered site signs in as any OIDC client of the issuer A keeps for
+// its organization: that issuer's UserInfo resource exists from the
+// registration, the administrator gives the site access to it and makes it
+// the site's default target, and the token target is then selected under
+// that issuer. Access to A's own UserInfo is refused, and the system
+// project listing shows the site issuer's resource. Bug prevented: a site
+// registered but unable to complete any sign-in, or access that bridges
+// A's own issuer.
+#[tokio::test]
+async fn a_registered_site_gets_the_sign_in_target_of_its_issuer() {
+    let b = site_b(site_id(8)).await;
+    let a = installation_a().await;
+    let client_id = a
+        .register("site-8", site_settings(&b.statement), None)
+        .await
+        .unwrap()
+        .response
+        .application
+        .unwrap()
+        .client
+        .unwrap()
+        .client_id;
+    let issuer = a
+        .storage
+        .oidc_issuer_for(IssuerAuthority::Local, b.org)
+        .await
+        .unwrap()
+        .unwrap();
+    let userinfo = a
+        .storage
+        .protected_resource_by_indicator(
+            issuer.id,
+            &model::ResourceIndicator::parse(&sid_authn::issuer::userinfo_endpoint(
+                &issuer.canonical_url,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the site issuer's UserInfo resource");
+    let grant = async |key: &str, resource: model::ResourceId| {
+        a.projects
+            .set_resource_access(
+                &a.admin,
+                operation(a.storage.as_ref(), key).await,
+                SetResourceAccessRequest {
+                    client_id: client_id.clone(),
+                    resource_id: Some(resource.into()),
+                    scopes: vec!["openid".into()],
+                },
+            )
+            .await
+    };
+    grant("access-8", userinfo.id)
+        .await
+        .expect("access to its issuer's UserInfo");
+    let own = sid_authn::issuer::ensure_userinfo_resource(a.storage.as_ref(), &a.projects.issuer)
+        .await
+        .unwrap();
+    assert!(matches!(
+        grant("access-8-own", own.id).await,
+        Err(ProjectError::IssuerMismatch(_))
+    ));
+
+    let mut client = a
+        .storage
+        .get_oauth2_client(&client_id)
+        .await
+        .unwrap()
+        .unwrap();
+    client.default_resource = Some(userinfo.id);
+    let target = sid_authn::target::select_target(a.storage.as_ref(), issuer.id, &client, None)
+        .await
+        .unwrap()
+        .expect("a target under the site's issuer");
+    assert_eq!(target.resource_id(), userinfo.id);
+
+    a.projects
+        .list_applications(
+            &a.admin,
+            ListApplicationsRequest {
+                project_id: Some(model::ProjectId::SYSTEM.into()),
+                ..ListApplicationsRequest::default()
+            },
+        )
+        .await
+        .expect("the system project lists the site issuer's resource");
+}
+
 // An installation that registers no sites refuses the statement instead of
 // registering an ordinary client without it. Bug prevented: the evidence
 // silently dropped and a typed client created under A's own organization.

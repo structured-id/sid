@@ -745,7 +745,10 @@ impl<V: Verdict> Recipient<V> {
             Some(_) => Pulled::Current,
             None => Pulled::Unconfigured,
         };
-        if due && pulled == Pulled::Applied {
+        // A pull that failed part way may have held a newer set (a withdrawal
+        // included) before a status read failed: what is held is read again
+        // after every attempt, never kept from before it.
+        if due && matches!(pulled, Pulled::Applied | Pulled::Failed) {
             held = self.store.held_platform_cas(now).await;
         }
         let held = held?;
@@ -767,7 +770,10 @@ impl<V: Verdict> Recipient<V> {
                 if next > now {
                     held.until.min(next)
                 } else {
-                    held.until
+                    // Still due after the fetch (the publication answered
+                    // the same list near its end): asked again after the
+                    // backoff, not only when the set's answer ends.
+                    held.until.min(now + SOURCE_BACKOFF)
                 }
             }
         };

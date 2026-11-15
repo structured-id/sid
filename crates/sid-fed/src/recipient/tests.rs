@@ -1134,6 +1134,129 @@ async fn status_is_read_although_the_set_is_current() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
 }
 
+/// A publication answering a fixed set and, for every generation, a fixed
+/// list or failure, counting the lists asked for.
+struct Scripted {
+    set: PlatformCaSet,
+    crl: Result<Vec<u8>, String>,
+    lists: AtomicUsize,
+}
+
+impl Scripted {
+    fn of(set: PlatformCaSet, crl: Result<Vec<u8>, String>) -> Arc<Self> {
+        Arc::new(Self {
+            set,
+            crl,
+            lists: AtomicUsize::new(0),
+        })
+    }
+
+    fn lists(&self) -> usize {
+        self.lists.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformCaSource for Scripted {
+    async fn fetch(&self, _endpoint: &url::Url) -> Result<PlatformCaSet, String> {
+        Ok(self.set.clone())
+    }
+
+    async fn crl(&self, _endpoint: &url::Url, _generation: u32) -> Result<Vec<u8>, String> {
+        self.lists.fetch_add(1, Ordering::Relaxed);
+        self.crl.clone()
+    }
+}
+
+/// A publication that answers, near its end, the same list it holds is asked
+/// again after the backoff, not only when the set's answer ends. Bug
+/// prevented: a recipient that keeps an ending list until its set is due,
+/// and decides nothing under a strict policy once that list has ended
+/// although the publication has a newer one.
+#[tokio::test]
+async fn a_list_near_its_end_is_asked_for_again_after_the_backoff() {
+    let mut ending = StatedList::new(INTERMEDIATE_NAME, &[2; 20], 1, &[]);
+    ending.next_update = Some(SystemTime::now() + Duration::from_secs(300));
+    let publication = Scripted::of(
+        set(1, PlatformCaState::Active),
+        Ok(ending.signed(&key(INTERMEDIATE))),
+    );
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication.clone())
+        .unwrap();
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active))
+        .await
+        .unwrap();
+    let now = SystemTime::now();
+    let at = |ahead: u64| now + Duration::from_secs(ahead);
+    let decide = async |at: SystemTime| {
+        recipient
+            .accept_passport(&personal(), &[], recipient_org(), &STRICT, at)
+            .await
+    };
+    decide(at(0)).await.unwrap();
+    assert_eq!(publication.lists(), 1);
+    decide(at(10)).await.unwrap();
+    assert_eq!(
+        publication.lists(),
+        1,
+        "within the backoff nothing is asked"
+    );
+    decide(at(31)).await.unwrap();
+    assert_eq!(publication.lists(), 2, "after it the list is asked again");
+}
+
+/// A pull that holds a newer set and then fails to read a list decides on
+/// what it held: a generation the newer set withdrew anchors nothing at
+/// once. Bug prevented: a view rebuilt from the anchors before the pull,
+/// accepting under a withdrawn generation until the backoff ends.
+#[tokio::test]
+async fn a_withdrawal_held_before_a_failed_list_read_applies_at_once() {
+    let successor = Stated {
+        subject: name(INTERMEDIATE_NAME),
+        serial: 21,
+        validity: current(),
+        extensions: vec![
+            authority(Some(1)),
+            signs_certificates(),
+            purposes(&[DEVELOPMENT_PURPOSES.platform_intermediate]),
+            key_id(&[6; 20]),
+        ],
+    }
+    // A key of its own: nothing the withdrawn generation issued verifies
+    // under it.
+    .signed(&key(6), &name(ROOT_NAME), &key(ROOT));
+    let mut newer = set(2, PlatformCaState::Withdrawn);
+    newer.generations.push(PlatformCa {
+        generation: 2,
+        certificate: successor,
+        state: PlatformCaState::Active,
+        overlap_end: None,
+    });
+    let publication = Scripted::of(newer, Err("unreachable".into()));
+    let recipient = Recipient::new(store().await, ClassicalVerdict)
+        .with_source(PUBLICATION.parse().unwrap(), publication.clone())
+        .unwrap();
+    // The held set is past its halfway point, with its generation's list.
+    let mut aged = set(1, PlatformCaState::Active);
+    aged.issued_at = epoch(SystemTime::now()) - 2_000;
+    aged.next_update = aged.issued_at + 3_600;
+    recipient.record_platform_cas(&aged).await.unwrap();
+    recipient
+        .record_platform_ca_crl(&aged.generations[0], &platform_list(1, &[]))
+        .await
+        .unwrap();
+    // The withdrawn generation anchors nothing: the path finds no anchor
+    // that verifies it (its successor has the same name, another key).
+    let decided = accept(&recipient, &personal(), &[]).await;
+    assert!(
+        matches!(decided, Err(RecipientError::Path(_))),
+        "{decided:?}"
+    );
+    assert_eq!(publication.lists(), 1);
+}
+
 /// Halfway through the held set's freshness the publication is asked for a
 /// newer set, and the newer set is what is held after it: a withdrawal it
 /// states takes the generation out. Bug prevented: a set relied on to its

@@ -382,13 +382,17 @@ impl Projects {
                 AuditEntry::system("organization_reference.created", org.to_string()).into(),
             )
             .await?;
-        sid_authn::issuer::ensure_local_issuer(
+        let issuer = sid_authn::issuer::ensure_local_issuer(
             self.storage.as_ref(),
             registrar.keys.as_ref(),
             &registrar.base,
             org,
         )
         .await?;
+        // The site signs in as an OIDC client of that issuer: its UserInfo
+        // is the token target the administrator gives the site access to.
+        // Its existence grants nothing.
+        sid_authn::issuer::ensure_userinfo_resource(self.storage.as_ref(), &issuer).await?;
         Ok(Some(SiteClient {
             org,
             redirect_uri: verified
@@ -411,20 +415,34 @@ impl Projects {
     /// client with neither has no issuer to report, which is an internal
     /// inconsistency, never an empty value a relying party would configure.
     async fn issuer_of(&self, client: &OAuth2Client) -> Result<String, ProjectError> {
+        match self.client_issuer(client).await? {
+            Some(issuer) => Ok(issuer.canonical_url),
+            None => {
+                warn!(client_id = %client.client_id, "application without an issuer here");
+                Err(ProjectError::Internal)
+            }
+        }
+    }
+
+    /// The issuer that serves `client`: the installation organization's for
+    /// its own applications, the one kept for another organization for that
+    /// organization's federation site, none otherwise.
+    async fn client_issuer(
+        &self,
+        client: &OAuth2Client,
+    ) -> Result<Option<model::OidcIssuer>, ProjectError> {
         if self.issuer.serves(client.org_id) {
-            return Ok(self.issuer.canonical_url.clone());
+            return Ok(Some(self.issuer.clone()));
         }
         if client.participant_admission.is_some()
             && let Some(org) = client.org_id
-            && let Some(issuer) = self
+        {
+            return Ok(self
                 .storage
                 .oidc_issuer_for(model::IssuerAuthority::Local, org)
-                .await?
-        {
-            return Ok(issuer.canonical_url);
+                .await?);
         }
-        warn!(client_id = %client.client_id, "application without an issuer here");
-        Err(ProjectError::Internal)
+        Ok(None)
     }
 
     /// `client` as the API shows it, with its issuer.
@@ -432,24 +450,41 @@ impl Projects {
         Ok(client_to_proto(client, &self.issuer_of(client).await?))
     }
 
-    /// The exact issuer whose tokens `resource` accepts. Resources here are
-    /// registered under the installation organization's issuer; any other is
-    /// an internal inconsistency.
-    fn resource_issuer(&self, resource: &model::ProtectedResource) -> Result<&str, ProjectError> {
+    /// The exact issuer whose tokens `resource` accepts: the installation
+    /// organization's, or one this installation keeps for another
+    /// organization it issues to (that issuer's UserInfo). Any other is an
+    /// internal inconsistency.
+    async fn resource_issuer(
+        &self,
+        resource: &model::ProtectedResource,
+    ) -> Result<String, ProjectError> {
         if resource.issuer_id == self.issuer.id {
-            Ok(&self.issuer.canonical_url)
-        } else {
-            warn!(resource = %resource.id, "resource of another issuer");
-            Err(ProjectError::Internal)
+            return Ok(self.issuer.canonical_url.clone());
+        }
+        match self
+            .storage
+            .list_oidc_issuers()
+            .await?
+            .into_iter()
+            .find(|issuer| issuer.id == resource.issuer_id)
+        {
+            Some(issuer) => Ok(issuer.canonical_url),
+            None => {
+                warn!(resource = %resource.id, "resource of no issuer here");
+                Err(ProjectError::Internal)
+            }
         }
     }
 
     /// `resource` as the API shows it, with its issuer.
-    fn resource_view(
+    async fn resource_view(
         &self,
         resource: &model::ProtectedResource,
     ) -> Result<v1::ProtectedResource, ProjectError> {
-        Ok(resource_to_proto(resource, self.resource_issuer(resource)?))
+        Ok(resource_to_proto(
+            resource,
+            &self.resource_issuer(resource).await?,
+        ))
     }
 
     /// `app` with the roles given.
@@ -463,11 +498,11 @@ impl Projects {
             Some(client) => Some(self.client_view(client).await?),
             None => None,
         };
-        Ok(application_to_proto(
-            app,
-            client,
-            resource.map(|r| self.resource_view(r)).transpose()?,
-        ))
+        let resource = match resource {
+            Some(resource) => Some(self.resource_view(resource).await?),
+            None => None,
+        };
+        Ok(application_to_proto(app, client, resource))
     }
 
     /// `app` with its stored roles.
@@ -508,16 +543,19 @@ impl Projects {
             .ok_or_else(|| ProjectError::ClientNotFound(client_id.to_owned()))
     }
 
-    /// Whether this issuer serves the client `client_id` names: an OAuth
-    /// client of its organization, or a live machine user, which belongs to
-    /// the installation. Neither is NOT_FOUND. An OAuth client is looked up
-    /// first, as the token endpoint does.
-    async fn requester_served(&self, client_id: &str) -> Result<bool, ProjectError> {
+    /// The issuer that serves the client `client_id` names: for an OAuth
+    /// client the one [`Self::client_issuer`] finds, for a live machine user
+    /// the installation organization's. Neither is NOT_FOUND. An OAuth
+    /// client is looked up first, as the token endpoint does.
+    async fn requester_issuer(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<model::IssuerId>, ProjectError> {
         if client_id.is_empty() {
             return Err(ProjectError::MissingField("client_id"));
         }
         if let Some(client) = self.storage.get_oauth2_client(client_id).await? {
-            return Ok(self.issuer.serves(client.org_id));
+            return Ok(self.client_issuer(&client).await?.map(|issuer| issuer.id));
         }
         match self
             .storage
@@ -525,7 +563,7 @@ impl Projects {
             .await?
         {
             Some(machine) if machine.status != model::machine_user::MachineUserStatus::Deleted => {
-                Ok(self.issuer.serves(Some(self.org)))
+                Ok(Some(self.issuer.id))
             }
             _ => Err(ProjectError::RequesterNotFound(client_id.to_owned())),
         }
@@ -1193,7 +1231,7 @@ impl Projects {
                     .ok_or(ProjectError::MissingField("settings"))?;
                 let resource = self.new_resource(&app, ADD_RESOURCE_FIELDS, settings)?;
                 let mut view = self.application_view(&app).await?;
-                view.resource = Some(self.resource_view(&resource)?);
+                view.resource = Some(self.resource_view(&resource).await?);
                 let ctx = admin_ctx(caller, "resource.create", resource.id.to_string())
                     .with_operation(command.completion(view.encode_to_vec()));
                 if let Err(e) = self.storage.create_protected_resource(&resource, ctx).await {
@@ -2103,7 +2141,7 @@ impl Projects {
         // only to the revision it was read at.
         let mut left = resource.clone();
         left.revision += 1;
-        let view = self.resource_view(&left)?;
+        let view = self.resource_view(&left).await?;
         let ctx = admin_ctx(caller, "resource.update", resource.id.to_string())
             .with_operation(command.completion(view.encode_to_vec()));
         if !self
@@ -2140,7 +2178,7 @@ impl Projects {
             }
             .into());
         }
-        let served = self.requester_served(&req.client_id).await?;
+        let requester = self.requester_issuer(&req.client_id).await?;
         let resource = self
             .load_resource("resource_id", req.resource_id.as_ref())
             .await?;
@@ -2149,7 +2187,7 @@ impl Projects {
         }
         // Access never bridges issuers: the client's tokens come from the
         // issuer whose tokens the resource accepts.
-        if !(served && resource.issuer_id == self.issuer.id) {
+        if requester != Some(resource.issuer_id) {
             return Err(ProjectError::IssuerMismatch(resource.id).into());
         }
         let scopes = model::scope_list(&req.scopes).map_err(|e| invalid_field("scopes", e))?;

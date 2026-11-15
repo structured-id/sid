@@ -73,9 +73,10 @@ fn validate_audit(snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
-/// The installation identity: the organization the metadata names, the one
-/// every issuer serves, and each issuer's own key history; each device
-/// binding on a snapshot device of the same Profile.
+/// The installation identity: the organization the metadata names, each
+/// organization referenced once and never the installation's own, every
+/// issuer serving one of them, and each issuer's own key history; each
+/// device binding on a snapshot device of the same Profile.
 fn validate_identity(snapshot: &Snapshot) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
     let org = snapshot.organization.as_ref().map(|o| o.id);
@@ -87,10 +88,24 @@ fn validate_identity(snapshot: &Snapshot) -> Result<()> {
         org.is_some() || (snapshot.profiles.is_empty() && snapshot.oidc_issuers.is_empty()),
         "snapshot has accounts or issuers but no installation organization",
     )?;
+    let mut referenced = BTreeSet::new();
+    for reference in &snapshot.organization_references {
+        ensure(
+            Some(reference.id) != org,
+            "snapshot references the installation's own organization",
+        )?;
+        ensure(
+            referenced.insert(reference.id),
+            "duplicate organization reference in snapshot",
+        )?;
+    }
     let mut issuers = BTreeSet::new();
     for entry in &snapshot.oidc_issuers {
+        // An issuer serves the installation's own organization, or one it
+        // issues to and holds a reference for.
         ensure(
-            Some(entry.issuer.recipient_org) == org,
+            Some(entry.issuer.recipient_org) == org
+                || referenced.contains(&entry.issuer.recipient_org),
             "snapshot issuer serves another organization",
         )?;
         ensure(
