@@ -255,8 +255,7 @@ pub struct Projects {
     sites: Option<SiteRegistrar>,
 }
 
-/// What registers another organization's federation site as a client here
-/// (`arch/auth/oidc-issuer-model.md` §direct-work-recipient-registration):
+/// What registers another organization's federation site as a client here:
 /// the verifier of its signed admission, and what this installation's issuer
 /// for that organization is made with.
 pub struct SiteRegistrar {

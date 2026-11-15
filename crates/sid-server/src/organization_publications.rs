@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Where an issuing organization's own publication is read
-//! (`arch/auth/org-ca-architecture.md` §organization-status-publication):
-//! at the installation this one is connected to for that organization. The
+//! Where an issuing organization's own publication is read: at the
+//! installation this one is connected to for that organization. The
 //! entry connection an administrator registered for exactly that source
 //! organization is the installation's association with it; its issuer's
 //! origin serves the organization's CA generations in the platform

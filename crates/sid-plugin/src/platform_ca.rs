@@ -261,9 +261,8 @@ pub trait PlatformCaSource: Send + Sync {
     async fn fetch(&self, endpoint: &url::Url) -> Result<PlatformCaSet, String>;
 
     /// The current CRL (DER) of generation `generation` of the platform
-    /// whose set is published at `endpoint`, read apart from the set
-    /// (`arch/security/revocation-lifecycle.md` §dynamic-certificate-status).
-    /// Only transported: its caller authenticates it under that generation's
+    /// whose set is published at `endpoint`, read apart from the set: status
+    /// changes with every revocation, the set does not. Only transported: its caller authenticates it under that generation's
     /// certificate and records what it says.
     async fn crl(&self, endpoint: &url::Url, generation: u32) -> Result<Vec<u8>, String>;
 }

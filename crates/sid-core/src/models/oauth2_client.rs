@@ -275,8 +275,7 @@ pub struct OAuth2Client {
     /// site's signed admission statement as received (a JWS carrying its
     /// participant certificate and path), the evidence the client's
     /// organization and return address were verified against when it was
-    /// registered (`arch/auth/oidc-issuer-model.md`
-    /// §recipient-reference-storage). None for every other client.
+    /// registered. None for every other client.
     #[serde(default)]
     pub participant_admission: Option<Vec<u8>>,
 

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Registering another organization's federation site at this installation
-//! (`arch/auth/oidc-issuer-model.md` §direct-work-recipient-registration):
+//! Registering another organization's federation site at this installation:
 //! installation B enrolls its site with the development platform of
 //! `sid_fed::test_support` and signs its admission statement; installation A
 //! registers B's site as a client from that statement alone.

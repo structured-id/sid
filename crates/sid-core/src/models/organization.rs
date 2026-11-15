@@ -115,8 +115,7 @@ impl Organization {
 
 /// Another organization this installation issues to: its identity alone.
 /// It holds no lifecycle, domain or local management, and is never the
-/// installation's own organization (`arch/auth/oidc-issuer-model.md`
-/// §recipient-reference-storage).
+/// installation's own organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrganizationReference {
     pub id: OrgId,

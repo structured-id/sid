@@ -130,8 +130,7 @@ fn publication_of(platform: &str) -> Result<url::Url, PublicationError> {
 
 /// The publication of the installation whose issuer is `issuer`: the same
 /// path at that issuer's `https` origin, where an organization publishes its
-/// CA generations and their lists
-/// (`arch/auth/org-ca-architecture.md` §organization-status-publication).
+/// CA generations and their lists.
 pub fn publication_at(issuer: &url::Url) -> Result<url::Url, PublicationError> {
     if issuer.scheme() != "https" || issuer.host_str().is_none() {
         return Err(PublicationError::NotHttps);

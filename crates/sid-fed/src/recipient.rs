@@ -424,9 +424,8 @@ fn issued_by_now(
 }
 
 /// Where an organization's own publication is read from: its CA generations
-/// and the list each publishes of the passports it issued
-/// (`arch/auth/org-ca-architecture.md` §organization-status-publication),
-/// in the platform publication's format. Where it is read grants nothing:
+/// and the list each publishes of the passports it issued, in the platform
+/// publication's format. Where it is read grants nothing:
 /// every certificate and list is checked as the recipient checks any.
 #[async_trait::async_trait]
 pub trait OrganizationPublications: Send + Sync {

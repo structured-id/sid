@@ -161,9 +161,8 @@ pub trait OwnPresentations: Send + Sync {
 /// Whether the federation site `client` was registered from still stands
 /// now, checked with `identities`: its statement verifies again under the
 /// installation's status policy, so a site whose certificate is known
-/// revoked, or whose statement's time has passed, is no usable client
-/// (`arch/auth/oidc-issuer-model.md` §direct-work-recipient-registration).
-/// Any other client is not concerned. Status the policy requires and cannot
+/// revoked, or whose statement's time has passed, is no usable client. Any
+/// other client is not concerned. Status the policy requires and cannot
 /// get now is unavailability, retried, never a pass.
 pub(crate) async fn site_admission_stands(
     storage: &dyn StorageBackend,
