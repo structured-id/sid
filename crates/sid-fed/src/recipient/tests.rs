@@ -1111,6 +1111,29 @@ async fn the_platforms_publication_supplies_the_set() {
     assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
 }
 
+/// A set the managing service handed over is current, but carries no
+/// status: the generation's list is read from the publication on the first
+/// request all the same, and the passport is decided on it, fresh. Once the
+/// list is held the next request asks nothing. Bug prevented: status read
+/// only together with a due set, so an installation given a fresh set never
+/// learned of its generation's revocations until the set aged.
+#[tokio::test]
+async fn status_is_read_although_the_set_is_current() {
+    let publication = Publication::of(Ok(set(1, PlatformCaState::Active)));
+    let recipient = sourced(&publication).await;
+    recipient
+        .record_platform_cas(&set(1, PlatformCaState::Active))
+        .await
+        .unwrap();
+    let decided = accept_under(&recipient, &personal(), &[], &StatusPolicy::default())
+        .await
+        .expect("decided on the list read from the publication");
+    assert_eq!(decided.issuer, StatusEvidence::Fresh);
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+    accept(&recipient, &personal(), &[]).await.unwrap();
+    assert_eq!(publication.asked.load(Ordering::Relaxed), 1);
+}
+
 /// Halfway through the held set's freshness the publication is asked for a
 /// newer set, and the newer set is what is held after it: a withdrawal it
 /// states takes the generation out. Bug prevented: a set relied on to its

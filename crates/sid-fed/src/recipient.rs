@@ -74,6 +74,22 @@ const SOURCE_BACKOFF: i64 = 30;
 /// is read again: another replica may have held a newer set meanwhile.
 const STALE_SET_REREAD: i64 = 60;
 
+/// How long before a held platform CRL stops being evidence a configured
+/// publication is asked for the generation's current one, so the status
+/// is renewed while the held one still serves.
+const STATUS_RENEW_LEAD: i64 = 600;
+
+/// When the status of the held anchors is next asked for (seconds since the
+/// epoch): at once for an anchor with no CRL held, else [`STATUS_RENEW_LEAD`]
+/// before the earliest held CRL ends.
+fn status_renew_at(held: &HeldAnchors) -> i64 {
+    held.status
+        .iter()
+        .map(|s| s.until.map_or(i64::MIN, |until| until - STATUS_RENEW_LEAD))
+        .min()
+        .unwrap_or(i64::MAX)
+}
+
 /// An accepted passport, with what was known of withdrawals when it was
 /// accepted. Stale or unknown status is an accepted passport the policy
 /// admitted, never one shown good.
@@ -715,8 +731,11 @@ impl<V: Verdict> Recipient<V> {
             return Ok(view.clone());
         }
         let mut held = self.store.held_platform_cas(now).await;
+        // The set and its status have their own times: a set just received
+        // is current while the status of its generations may be missing or
+        // ending, and status is read from the publication either way.
         let due = match &held {
-            Ok(held) => now >= held.renew_at,
+            Ok(held) => now >= held.renew_at || now >= status_renew_at(held),
             Err(PlatformCaError::NotProvisioned) => true,
             Err(_) => false,
         };
@@ -742,10 +761,16 @@ impl<V: Verdict> Recipient<V> {
             }
             Pulled::Unconfigured => held.until,
             Pulled::Failed => held.until.min(now + SOURCE_BACKOFF),
-            Pulled::Current | Pulled::Applied if held.renew_at > now => {
-                held.until.min(held.renew_at)
+            Pulled::Current | Pulled::Applied => {
+                // Read again when the set or a generation's status is next
+                // to be asked for, whichever comes first.
+                let next = held.renew_at.min(status_renew_at(&held));
+                if next > now {
+                    held.until.min(next)
+                } else {
+                    held.until
+                }
             }
-            Pulled::Current | Pulled::Applied => held.until,
         };
         let view = Arc::new(AnchorView::new(held, until));
         *slot = Some(view.clone());
