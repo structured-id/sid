@@ -171,6 +171,14 @@ pub fn is_issuer_identifier(issuer: &str) -> bool {
     scheme && url.host_str().is_some() && url.query().is_none() && url.fragment().is_none()
 }
 
+/// Whether `url` can be a connection's use return: an https URL with a host
+/// and neither query nor fragment, so the continuation appended to it is
+/// its only parameter. Plain `http` only on a loopback host, as for an
+/// issuer identifier.
+pub fn is_use_return(url: &str) -> bool {
+    is_issuer_identifier(url)
+}
+
 /// The longest display name of a connection.
 pub const MAX_NAME: usize = 128;
 
@@ -196,6 +204,14 @@ pub struct EntryConnection {
     pub recipient_issuer: IssuerId,
     /// The exact redirect URI registered at the issuer; never changes.
     pub callback: String,
+    /// Where a holder's browser goes back to the issuer's side after
+    /// authenticating here for a use that side coordinates: the exact URL
+    /// the connection's provisioning supplied as data (the coordinating
+    /// service derives it from its own route and mount), to which only the
+    /// use's continuation is appended. Not the callback above, which points
+    /// the other way, and never taken from a request. None for a connection
+    /// without such a route; a use that needs one is then refused.
+    pub use_return: Option<String>,
     /// This installation's client id at the issuer.
     pub client_id: String,
     pub credential: ClientCredential,
@@ -211,8 +227,8 @@ pub struct EntryConnection {
 impl EntryConnection {
     /// Whether `changed` is this same registration with only what may
     /// change: its name, its client and credential, and whether it is
-    /// enabled. Its handle, owner, issuer, source, recipient issuer and
-    /// callback are its identity.
+    /// enabled. Its handle, owner, issuer, source, recipient issuer,
+    /// callback and use return are its identity.
     pub fn same_registration(&self, changed: &Self) -> bool {
         self.handle == changed.handle
             && self.owner == changed.owner
@@ -220,6 +236,7 @@ impl EntryConnection {
             && self.source == changed.source
             && self.recipient_issuer == changed.recipient_issuer
             && self.callback == changed.callback
+            && self.use_return == changed.use_return
             && self.created_at == changed.created_at
     }
 }

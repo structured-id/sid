@@ -53,6 +53,7 @@ fn connection_of(row: &sqlx::sqlite::SqliteRow) -> SidResult<EntryConnection> {
         source: col::<Option<OrgId>>(row, "source")?,
         recipient_issuer: col::<IssuerId>(row, "recipient_issuer")?,
         callback: col(row, "callback")?,
+        use_return: col::<Option<String>>(row, "use_return")?,
         client_id: col(row, "client_id")?,
         credential,
         enabled: col(row, "enabled")?,
@@ -116,9 +117,9 @@ impl EntryConnectionStore for SqliteBackend {
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO entry_connections (handle, owner, name, issuer, source,
-                 recipient_issuer, callback, client_id, credential_method, credential, enabled,
-                 revision, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 recipient_issuer, callback, use_return, client_id, credential_method,
+                 credential, enabled, revision, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(connection.handle.as_bytes().as_slice())
         .bind(connection.owner.as_str())
@@ -127,6 +128,7 @@ impl EntryConnectionStore for SqliteBackend {
         .bind(connection.source)
         .bind(connection.recipient_issuer)
         .bind(&connection.callback)
+        .bind(&connection.use_return)
         .bind(&connection.client_id)
         .bind(connection.credential.method())
         .bind(credential_bytes(&connection.credential))

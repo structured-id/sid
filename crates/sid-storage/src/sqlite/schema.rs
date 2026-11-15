@@ -1901,6 +1901,7 @@ CREATE TABLE IF NOT EXISTS entry_connections (
     source            BLOB CHECK (source IS NULL OR length(source) = 16),
     recipient_issuer  BLOB NOT NULL CHECK (length(recipient_issuer) = 16),
     callback          TEXT NOT NULL,
+    use_return        TEXT,
     client_id         TEXT NOT NULL,
     credential_method TEXT NOT NULL CHECK (credential_method IN ('client_secret_basic')),
     credential        BLOB NOT NULL,
