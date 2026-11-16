@@ -328,6 +328,29 @@ fn only_the_signed_statement_in_its_time_is_accepted() {
     ));
 }
 
+// The one spelling is the same in every build: its members stand in the
+// order of their names, whatever map serde_json is built with. Bug
+// prevented: the order followed serde_json's `preserve_order` feature,
+// which another crate in a host's build can switch on, so a CE signer and
+// a platform verifier built apart spelled one statement two ways and every
+// genuine statement was refused as not in its one spelling. Run also with
+// `--features serde_json/preserve_order`.
+#[test]
+fn the_spelling_does_not_follow_the_map_build() {
+    let payload = String::from_utf8(stated().payload()).unwrap();
+    let mut names = Vec::new();
+    let mut rest = payload.as_str();
+    while let Some(start) = rest.find("\":") {
+        let before = &rest[..start];
+        names.push(before[before.rfind('"').unwrap() + 1..].to_owned());
+        rest = &rest[start + 2..];
+    }
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names.len(), 13, "{payload}");
+    assert_eq!(names, sorted, "{payload}");
+}
+
 // A statement has one spelling and exactly its members. Sources out of
 // order or repeated, an unknown member, another type, version or purpose,
 // spacing, and a missing certificate are refused. Bug prevented: two
