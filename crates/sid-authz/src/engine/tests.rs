@@ -1474,7 +1474,7 @@ impl Administered {
 #[tokio::test]
 async fn the_installation_administrator_holds_every_action() {
     let a = administered().await;
-    for action in ["profiles.write", "ops.org.suspend", "orders.cancel"] {
+    for action in ["profiles.write", "invoices.void", "orders.cancel"] {
         assert!(a.on_project(a.admin, action).await, "project {action}");
         assert!(a.on_resource(a.admin, action).await, "resource {action}");
         assert!(

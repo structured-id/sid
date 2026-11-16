@@ -77,15 +77,15 @@ fn a_receiver_needs_its_resource_origin_and_credential() {
     let complete = [
         ("SID_GRPC_UPSTREAM", "http://sid:50051"),
         ("SID_ISSUER_URL", "https://sid.example.com"),
-        ("SID_RECEIVER_RESOURCE", "https://ops.example.com/"),
-        ("SID_RECEIVER_ORIGIN", "https://ops.example.com"),
-        ("SID_AUTHZ_CHECKER_CLIENT_ID", "ops-receiver"),
+        ("SID_RECEIVER_RESOURCE", "https://orders.example.com/"),
+        ("SID_RECEIVER_ORIGIN", "https://orders.example.com"),
+        ("SID_AUTHZ_CHECKER_CLIENT_ID", "orders-receiver"),
         (
             "SID_AUTHZ_CHECKER_ISSUER",
             "https://sid.example.com/i/platform",
         ),
         ("SID_AUTHZ_CHECKER_METHOD", "client_secret_basic"),
-        ("SID_AUTHZ_CHECKER_SECRET_FILE", "/run/secrets/ops"),
+        ("SID_AUTHZ_CHECKER_SECRET_FILE", "/run/secrets/orders"),
     ];
     let without = |missing: &str| {
         ReceiverConfig::from_vars(|name| {
@@ -96,8 +96,8 @@ fn a_receiver_needs_its_resource_origin_and_credential() {
         })
     };
     let config = without("").unwrap();
-    assert_eq!(config.resource, "https://ops.example.com/");
-    assert_eq!(config.origin, "https://ops.example.com");
+    assert_eq!(config.resource, "https://orders.example.com/");
+    assert_eq!(config.origin, "https://orders.example.com");
     assert_eq!(config.checker.issuer, "https://sid.example.com/i/platform");
     for (name, _) in complete {
         assert!(without(name).is_err(), "{name} is required");
