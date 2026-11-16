@@ -11,6 +11,7 @@ const THINGS: &str = r#"
 syntax = "proto3";
 package acme.v1.things;
 import "google/protobuf/empty.proto";
+import "sid/v1/common/access.proto";
 import "sid/v1/common/operation.proto";
 import "acme/shared/v1/shared.proto";
 import "acme/v1/other/other.proto";
@@ -18,28 +19,38 @@ import "acme/v1/other/other.proto";
 service ThingService {
   rpc GetThing(GetThingRequest) returns (Thing) {
     option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_OWN_SESSION, CREDENTIAL_KIND_CLIENT]
+      scopes: ["thing.read"]
+    } };
   }
   rpc CreateThing(CreateThingRequest) returns (Thing) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
   rpc TouchThing(acme.shared.v1.Ref) returns (google.protobuf.Empty) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
   rpc ResetAll(google.protobuf.Empty) returns (google.protobuf.Empty) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
   rpc SetThingName(CreateThingRequest) returns (Thing) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { natural: "sets the name to the value given" };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
   rpc ExchangeCode(CreateThingRequest) returns (Thing) {
     option (sid.v1.common.retry) = { ceremony: "the code is consumed once" };
+    option (sid.v1.common.access) = { open: "the code authenticates the exchange" };
   }
   rpc WatchThings(GetThingRequest) returns (stream Thing) {
     option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
 }
 
@@ -47,6 +58,7 @@ service AuditTrail {
   rpc Seal(GetThingRequest) returns (google.protobuf.Empty) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
 }
 
@@ -67,12 +79,14 @@ message Ref { string id = 1; }
 const OTHER: &str = r#"
 syntax = "proto3";
 package acme.v1.other;
+import "sid/v1/common/access.proto";
 import "sid/v1/common/operation.proto";
 
 service OtherService {
   rpc Change(ChangeRequest) returns (ChangeRequest) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
   rpc Undeclared(ChangeRequest) returns (ChangeRequest);
 }
@@ -80,48 +94,61 @@ service OtherService {
 message ChangeRequest { string id = 1; }
 "#;
 
-/// One method per way of declaring a retry rule wrongly.
+/// One method per way of declaring a retry rule wrongly, each with a correct
+/// access rule.
 const WRONG: &str = r#"
 syntax = "proto3";
 package acme.v1.wrong;
+import "sid/v1/common/access.proto";
 import "sid/v1/common/operation.proto";
 import "acmeish/v1/unmapped.proto";
 
 service WrongService {
-  rpc Undeclared(Request) returns (Request);
+  rpc Undeclared(Request) returns (Request) {
+    option (sid.v1.common.access) = { open: "test" };
+  }
   rpc ReadWithRule(Request) returns (Request) {
     option idempotency_level = NO_SIDE_EFFECTS;
     option (sid.v1.common.retry) = { natural: "reads" };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc KeyedUnknown(Request) returns (Request) {
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc NaturalUnknown(Request) returns (Request) {
     option (sid.v1.common.retry) = { natural: "sets a value" };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc KeyedFalse(Request) returns (Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: false };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc BlankReason(Request) returns (Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { natural: "  " };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc EmptyRule(Request) returns (Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = {};
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc KeyedStream(Request) returns (stream Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc KeyedNested(Request.Inner) returns (Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { open: "test" };
   }
   rpc KeyedUnmapped(acmeish.v1.Loose) returns (Request) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { open: "test" };
   }
 }
 
@@ -129,6 +156,80 @@ message Request {
   message Inner { string id = 1; }
   string id = 1;
 }
+"#;
+
+/// One method per way of declaring an access rule wrongly; reads, so no
+/// retry rule is owed.
+const WRONG_ACCESS: &str = r#"
+syntax = "proto3";
+package acme.v1.access;
+import "sid/v1/common/access.proto";
+import "sid/v1/common/operation.proto";
+
+service AccessService {
+  rpc Undeclared(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc EmptyRule(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = {};
+  }
+  rpc BlankReason(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { open: "  " };
+  }
+  rpc NoKind(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: { scopes: ["thing.read"] } };
+  }
+  rpc UnspecifiedKind(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_UNSPECIFIED] } };
+  }
+  rpc BlankScope(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT]
+      scopes: [" "]
+    } };
+  }
+  rpc NoScope(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_OWN_SESSION, CREDENTIAL_KIND_IMPERSONATION]
+    } };
+  }
+  rpc OwnSessionOnly(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
+  }
+  rpc PermissionWithoutAction(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT]
+      scopes: ["thing.read"]
+      permission: { target: PERMISSION_TARGET_RESOURCE }
+    } };
+  }
+  rpc PermissionWithoutTarget(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT]
+      scopes: ["thing.read"]
+      permission: { action: "thing.read" }
+    } };
+  }
+  rpc ObjectPermission(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT, CREDENTIAL_KIND_DELEGATED]
+      scopes: ["thing.read"]
+      permission: { action: "thing.read" target: PERMISSION_TARGET_OBJECT }
+    } };
+  }
+}
+
+message Request { string id = 1; }
 "#;
 
 /// Messages of a package no Rust module is given for: `acme` maps whole
@@ -143,12 +244,14 @@ message Loose { string id = 1; }
 const OUTSIDE: &str = r#"
 syntax = "proto3";
 package beta.v1;
+import "sid/v1/common/access.proto";
 import "sid/v1/common/operation.proto";
 
 service OutsideService {
   rpc Change(ChangeRequest) returns (ChangeRequest) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
 }
 
@@ -159,12 +262,14 @@ message ChangeRequest { string id = 1; }
 const ACRONYM: &str = r#"
 syntax = "proto3";
 package acme.v1.ca;
+import "sid/v1/common/access.proto";
 import "sid/v1/common/operation.proto";
 
 service CaService {
   rpc RotateCA(RotateCARequest) returns (RotateCARequest) {
     option idempotency_level = IDEMPOTENT;
     option (sid.v1.common.retry) = { keyed: true };
+    option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
 }
 
@@ -191,6 +296,7 @@ impl FileResolver for Fixtures {
             "acme/shared/v1/shared.proto" => SHARED,
             "acme/v1/other/other.proto" => OTHER,
             "acme/v1/wrong/wrong.proto" => WRONG,
+            "acme/v1/access/access.proto" => WRONG_ACCESS,
             "acmeish/v1/unmapped.proto" => UNMAPPED,
             "beta/v1/outside.proto" => OUTSIDE,
             "acme/v1/plain/plain.proto" => NO_OPTION,
@@ -305,7 +411,59 @@ fn test_only_the_crates_own_files_are_checked_and_bound() {
     assert_eq!(
         lines,
         [
-            "acme.v1.other.OtherService/Undeclared: a method that changes state declares its (sid.v1.common.retry) rule"
+            "acme.v1.other.OtherService/Undeclared: a method that changes state declares its (sid.v1.common.retry) rule",
+            "acme.v1.other.OtherService/Undeclared: every method declares its (sid.v1.common.access) rule",
+        ]
+    );
+}
+
+/// Every wrong access rule fails the build, each named by its method: a
+/// method with none, an empty rule, an open rule without its reason, a
+/// protected rule admitting no kind or the unspecified one, a blank scope,
+/// and a kind beyond the caller's own session admitted without scopes. A
+/// method admitting only the own session needs no scope.
+#[test]
+fn test_every_wrong_access_rule_is_reported() {
+    let rpc = |method: &str| format!("acme.v1.access.AccessService/{method}");
+    assert_eq!(
+        errors("acme/v1/access/access.proto"),
+        [
+            format!(
+                "{}: every method declares its (sid.v1.common.access) rule",
+                rpc("Undeclared")
+            ),
+            format!(
+                "{}: the access rule is `open` or `protected`",
+                rpc("EmptyRule")
+            ),
+            format!(
+                "{}: an open access rule states why the method is open",
+                rpc("BlankReason")
+            ),
+            format!(
+                "{}: a protected method admits at least one credential kind",
+                rpc("NoKind")
+            ),
+            format!(
+                "{}: a protected method names no unspecified credential kind",
+                rpc("UnspecifiedKind")
+            ),
+            format!(
+                "{}: a scope of a protected method is not blank",
+                rpc("BlankScope")
+            ),
+            format!(
+                "{}: a protected method admitting more than the own session names its scopes",
+                rpc("NoScope")
+            ),
+            format!(
+                "{}: a receiver permission names its action",
+                rpc("PermissionWithoutAction")
+            ),
+            format!(
+                "{}: a receiver permission names its target",
+                rpc("PermissionWithoutTarget")
+            ),
         ]
     );
 }

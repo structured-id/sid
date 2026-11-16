@@ -15,13 +15,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, test_client, test_profile};
-use sid_auth::receiver::Action;
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
 use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, PERMISSION_CHECKER_ROLE, ProjectId, ResourceId, ResourceIndicator,
     TOKEN_INTROSPECT,
+};
+use sid_infra::authn::access::{
+    AccessRule, AccessRules, CredentialKind, Permission, PermissionTarget as DeclaredTarget,
 };
 use sid_proto::sid::v1::authn::{RequestConfirmation, SenderProofProfile};
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
@@ -461,6 +463,7 @@ impl Asking {
                 sid_authn::jwt::TokenAudience::Resource {
                     indicator: resource.indicator.as_str(),
                     client_id: "test-client",
+                    grant: sid_authn::jwt::UserGrant::Delegated,
                 },
                 &pairwise,
                 None,
@@ -2052,16 +2055,29 @@ async fn protected_at(a: &Asking, issuer: Issuer) -> Protected {
         .await
         .unwrap();
     let reached = OrderService::default();
-    let service = sid_auth::receiver::Guarded::new(
-        reached.clone(),
-        Arc::new(receiver),
-        Arc::new(|path: &str| match path {
-            READ => Some(Action::OnResource("orders.read")),
-            WRITE => Some(Action::OnResource("orders.write")),
-            CANCEL => Some(Action::OnObject("orders.cancel")),
-            _ => None,
-        }),
-    );
+    // The service's declared rules: a user's or a service's own token, the
+    // permission decided by the issuer on the resource or on the order.
+    let mut rules = AccessRules::default();
+    for (path, action, target) in [
+        (READ, "orders.read", DeclaredTarget::Resource),
+        (WRITE, "orders.write", DeclaredTarget::Resource),
+        (CANCEL, "orders.cancel", DeclaredTarget::Object),
+    ] {
+        rules.insert(
+            path,
+            AccessRule::protected(
+                &[CredentialKind::Delegated, CredentialKind::Client],
+                &[],
+                Some(Permission {
+                    action: action.into(),
+                    target,
+                }),
+            ),
+        );
+    }
+    let service =
+        sid_auth::receiver::Guarded::new(reached.clone(), Arc::new(receiver), Arc::new(rules))
+            .expect("every method declares its permission");
     Protected {
         service,
         reached,

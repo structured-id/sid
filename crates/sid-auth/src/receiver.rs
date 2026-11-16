@@ -40,6 +40,8 @@ use tonic::server::NamedService;
 use crate::auth::jwt::{ForwardAuthClaims, TargetAccess, TokenRefusal, presented_token};
 use crate::auth::policy::Target;
 use sid_authn::issuer_directory::IssuerDirectory;
+use sid_authn::jwt::IssuedCredential;
+use sid_infra::authn::access::{AccessRule, AccessRules, CredentialKind, PermissionTarget};
 use sid_infra::client_credential::ClientCredential;
 
 /// What a receiver admits calls against.
@@ -89,7 +91,7 @@ enum Decision {
 /// the call's verified token, action and proof confirmation, and who asks.
 struct PendingQuestion {
     receiver: Arc<Receiver>,
-    action: &'static str,
+    action: String,
     token: secrecy::SecretString,
     /// The confirmation of the call's proof, already admitted by the issuer;
     /// the question carries it again and the issuer confirms that admission.
@@ -105,25 +107,6 @@ impl std::fmt::Debug for PendingQuestion {
             .field("action", &self.action)
             .finish_non_exhaustive()
     }
-}
-
-/// The action a method performs, and on what.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// On the resource as a whole, decided before the call reaches the
-    /// service.
-    OnResource(&'static str),
-    /// On one object the request names, decided by the handler with that
-    /// object ([`authorize_object`]) before its effect.
-    OnObject(&'static str),
-    /// On one object the request names that its owner acts on by the
-    /// service's own rule: the handler lets the owner through
-    /// ([`allow_owner`]) and has any other caller decided for that object
-    /// ([`authorize_object`]). No permission question is asked of the
-    /// owner, so the token's current state is the issuer's answer to this
-    /// service's inspection of it at admission; the service's credential
-    /// holds the inspection permission on its resource for that.
-    OwnedObject(&'static str),
 }
 
 /// A call whose token and proof are verified for this resource: what its
@@ -198,9 +181,11 @@ impl Receiver {
         method: &http::Method,
         path: &str,
         headers: &HeaderMap,
+        rule: &AccessRule,
         action: &str,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
+        ceiling(rule, &verified.claims)?;
         // The question admits the call's proof at the issuer within its own
         // exchange.
         self.decide(&verified, action, "").await?;
@@ -220,10 +205,14 @@ impl Receiver {
         method: &http::Method,
         path: &str,
         headers: &HeaderMap,
-        action: &'static str,
+        rule: &AccessRule,
+        action: &str,
         owned: bool,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
+        // The credential's kind and scopes bound every caller, the owner
+        // let through by the handler included.
+        ceiling(rule, &verified.claims)?;
         // An owner is let through without a question, so whether the token is
         // still current is asked of its issuer now (RFC 7662 §2.2).
         if owned {
@@ -261,7 +250,7 @@ impl Receiver {
         }
         let pending = PendingQuestion {
             receiver: self.clone(),
-            action,
+            action: action.to_owned(),
             token: verified.presented.token().into(),
             confirmation: verified.confirmation,
             current: owned,
@@ -407,25 +396,60 @@ impl Receiver {
     }
 }
 
-/// The action each path of a service performs; `None` for a path the
-/// service does not serve, which no call reaches.
-pub type Actions = Arc<dyn Fn(&str) -> Option<Action> + Send + Sync>;
-
-/// `inner` served behind `receiver`: only admitted calls reach it.
+/// `inner` served behind `receiver`: only admitted calls reach it, each by
+/// the access rule its method declares in the schema.
 pub struct Guarded<S> {
     inner: S,
     receiver: Arc<Receiver>,
-    actions: Actions,
+    rules: Arc<AccessRules>,
 }
 
-impl<S> Guarded<S> {
-    pub fn new(inner: S, receiver: Arc<Receiver>, actions: Actions) -> Self {
-        Self {
+impl<S: NamedService> Guarded<S> {
+    /// `inner` behind `receiver`, admitting each call by `rules`. Every
+    /// method of the service declares a protected rule with the permission
+    /// its receiver asks; a service with one that does not is never served.
+    pub fn new(inner: S, receiver: Arc<Receiver>, rules: Arc<AccessRules>) -> Result<Self, String> {
+        if !rules.declares(S::NAME) {
+            return Err(format!("the schema declares no rules for {}", S::NAME));
+        }
+        for (path, rule) in rules.methods_of(S::NAME) {
+            if rule.permission().is_none() {
+                return Err(format!("{path} declares no receiver permission"));
+            }
+        }
+        Ok(Self {
             inner,
             receiver,
-            actions,
-        }
+            rules,
+        })
     }
+}
+
+/// The credential kind the issuer stated for a resource token; a token
+/// without one is no credential a receiver admits.
+fn kind_of(claims: &ForwardAuthClaims) -> Option<CredentialKind> {
+    Some(match claims.credential_kind? {
+        IssuedCredential::Client => CredentialKind::Client,
+        IssuedCredential::Delegated => CredentialKind::Delegated,
+        IssuedCredential::AccountApi => CredentialKind::AccountApi,
+    })
+}
+
+/// Admit `claims` by `rule`: an admitted credential kind carrying every
+/// required scope. The owner of an object is held to it as anyone.
+fn ceiling(rule: &AccessRule, claims: &ForwardAuthClaims) -> Result<(), Status> {
+    let kind = kind_of(claims).ok_or_else(denied)?;
+    if !rule.admits(kind) {
+        return Err(denied());
+    }
+    if !rule.granted(kind, &claims.scope) {
+        return Err(ApiError::new(
+            ErrorReason::ScopeNotGranted,
+            "the access token does not grant this operation",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 impl<S: Clone> Clone for Guarded<S> {
@@ -433,7 +457,7 @@ impl<S: Clone> Clone for Guarded<S> {
         Self {
             inner: self.inner.clone(),
             receiver: self.receiver.clone(),
-            actions: self.actions.clone(),
+            rules: self.rules.clone(),
         }
     }
 }
@@ -466,26 +490,29 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         let receiver = self.receiver.clone();
-        let actions = self.actions.clone();
+        let rules = self.rules.clone();
         Box::pin(async move {
             let path = request.uri().path().to_owned();
-            let Some(action) = actions(&path) else {
+            let Some((rule, permission)) = rules
+                .rule(&path)
+                .and_then(|rule| rule.permission().map(|p| (rule, p)))
+            else {
                 return Ok(Status::unimplemented("no such method").into_http());
             };
-            let admitted = match action {
-                Action::OnResource(action) => {
+            let (method, headers) = (request.method(), request.headers());
+            let action = permission.action.as_str();
+            let admitted = match permission.target {
+                PermissionTarget::Resource => {
+                    receiver.admit(method, &path, headers, rule, action).await
+                }
+                PermissionTarget::Object => {
                     receiver
-                        .admit(request.method(), &path, request.headers(), action)
+                        .admit_pending(method, &path, headers, rule, action, false)
                         .await
                 }
-                Action::OnObject(action) => {
+                PermissionTarget::OwnedObject => {
                     receiver
-                        .admit_pending(request.method(), &path, request.headers(), action, false)
-                        .await
-                }
-                Action::OwnedObject(action) => {
-                    receiver
-                        .admit_pending(request.method(), &path, request.headers(), action, true)
+                        .admit_pending(method, &path, headers, rule, action, true)
                         .await
                 }
             };
@@ -551,7 +578,7 @@ pub async fn authorize_object<T>(
                 &admitted.claims,
                 admitted.resource,
                 pending.confirmation.as_ref(),
-                pending.action,
+                &pending.action,
                 object,
             )
             .await?;
@@ -579,7 +606,7 @@ pub fn owner_claims<T>(request: &tonic::Request<T>) -> Result<&ForwardAuthClaims
     }
 }
 
-/// Admit the call of an owned-object action ([`Action::OwnedObject`]) for
+/// Admit the call of an owned-object action ([`PermissionTarget::OwnedObject`]) for
 /// its owner, as the handler established by its own rule: the issuer found
 /// the token current at admission. Any other call is a wiring fault and is
 /// refused: an object action of another kind never established that state.

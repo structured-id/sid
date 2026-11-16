@@ -51,10 +51,25 @@ use crate::init::CeComponents;
 #[cfg(feature = "http")]
 pub mod browser_route;
 
+/// What a host serving its own services beside SID's gives the access
+/// guard: their schemas' encoded descriptor sets, and the verifier of a
+/// service's own tokens for each API that admits them, by the gRPC service
+/// serving it.
+#[derive(Default)]
+pub struct HostServices<'a> {
+    pub schemas: &'a [&'a [u8]],
+    pub service_tokens: Vec<(
+        &'static str,
+        std::sync::Arc<sid_authn::resource_token::ResourceTokenVerifier>,
+    )>,
+}
+
 /// The services one server exposes: routed and reported on the gRPC health
-/// service together.
+/// service together, each behind the access guard of the rules its schema
+/// declares.
 pub struct CeServices {
     services: sid_serve::Services,
+    access: std::sync::Arc<sid_infra::authn::access::Access>,
     /// Receivers this server runs that facts are owed to (SCIM outbound
     /// provisioning while targets are configured).
     receivers: Vec<sid_core::models::RequiredReceiver>,
@@ -66,8 +81,9 @@ pub struct CeServices {
 
 impl CeServices {
     /// Every CE service over `c`, with the SCIM outbound worker when targets
-    /// are configured.
-    pub async fn new(c: &CeComponents) -> anyhow::Result<Self> {
+    /// are configured, and the guard enforcing also the access rules of the
+    /// host's own services `host` names.
+    pub async fn new(c: &CeComponents, host: HostServices<'_>) -> anyhow::Result<Self> {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(sid_proto::FILE_DESCRIPTOR_SET)
             .build_v1()?;
@@ -77,8 +93,40 @@ impl CeServices {
         #[cfg(feature = "dev-perf-test")]
         let test_svc = spawn_test_service();
 
+        let mut rules =
+            sid_infra::authn::access::AccessRules::from_descriptors(sid_proto::FILE_DESCRIPTOR_SET)
+                .map_err(|e| anyhow::anyhow!("SID's access rules: {e}"))?;
+        for schema in host.schemas {
+            rules
+                .add(schema)
+                .map_err(|e| anyhow::anyhow!("the host's access rules: {e}"))?;
+        }
+        let mut access = sid_infra::authn::access::Access::new(
+            std::sync::Arc::new(rules),
+            c.jwt.clone(),
+            c.revocation_cache.clone(),
+            c.storage.clone(),
+            c.revocation_cache.clone(),
+        );
+        if let Some(tokens) = c.authz_svc.service_tokens() {
+            access = access.with_service_tokens(
+                <AuthzServiceServer<crate::grpc::authz_service::AuthzServiceImpl> as NamedService>::NAME,
+                tokens,
+            );
+        }
+        if let Some(tokens) = c.enrollment_svc.invite_tokens() {
+            access = access.with_service_tokens(
+                <EnrollmentServiceServer<crate::grpc::enrollment_service::EnrollmentServiceImpl> as NamedService>::NAME,
+                tokens,
+            );
+        }
+        for (service, tokens) in host.service_tokens {
+            access = access.with_service_tokens(service, tokens);
+        }
+
         let mut services = Self {
             services: served,
+            access: std::sync::Arc::new(access),
             receivers: Vec::new(),
             #[cfg(feature = "http")]
             transcoded: Vec::new(),
@@ -237,7 +285,12 @@ impl CeServices {
         Ok(services)
     }
 
-    /// Serves `svc` beside the CE services and reports it serving.
+    /// Serves `svc` behind its access guard beside the CE services and
+    /// reports it serving.
+    ///
+    /// # Panics
+    /// When no schema given to [`Self::new`] declares `svc`'s rules: a
+    /// service is never served without them.
     pub async fn add<S>(&mut self, svc: S) -> &mut Self
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
@@ -248,7 +301,11 @@ impl CeServices {
             + 'static,
         S::Future: Send + 'static,
     {
-        self.services.add(svc).await;
+        let guarded = self
+            .access
+            .guard(svc)
+            .expect("every served service's schema is given to CeServices::new");
+        self.services.add(guarded).await;
         self
     }
 

@@ -93,6 +93,12 @@ impl EnrollmentServiceImpl {
         self
     }
 
+    /// The verifier of invite-issuing services' own tokens, when they are
+    /// admitted: the access guard verifies them with it.
+    pub fn invite_tokens(&self) -> Option<Arc<ResourceTokenVerifier>> {
+        self.invite_services.as_ref().map(|s| s.tokens.clone())
+    }
+
     /// Report `mode` as the one in force and refuse updates changing it: the
     /// deployment pins it (`SID_ENROLLMENT_MODE`).
     pub fn with_pinned_mode(mut self, mode: Option<EnrollmentMode>) -> Self {

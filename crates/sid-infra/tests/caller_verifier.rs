@@ -155,6 +155,7 @@ async fn token_exchanged_from_unbound_pat_is_refused() {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     };
     let key = jsonwebtoken::EncodingKey::from_ed_pem(PRIVATE_KEY).expect("signing key");
     let token = jsonwebtoken::encode(
@@ -194,6 +195,7 @@ fn installation_claims() -> sid_authn::jwt::AccessTokenClaims {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     }
 }
 

@@ -4,8 +4,8 @@ use super::*;
 use crate::auth::decision::tests::{ISSUER, ORDERS, SUBJECT, access_token, keypair, sign};
 use crate::issuers::{IssuerRecord, ResourceRecord};
 
-const ORIGIN: &str = "https://ops.example.com";
-const PATH: &str = "/sid.ops.v1.OrgAdminService/BanOrg";
+const ORIGIN: &str = "https://orders.example.com";
+const PATH: &str = "/orders.v1.Orders/Cancel";
 /// RFC 7638 thumbprint of the fixture proof key.
 const FIXTURE_JKT: &str = "IzldvVrK202QRbmgX2y6_CaeNdfk9cCd6-2B-mLPdBA";
 
@@ -57,7 +57,7 @@ fn fixture_with(registered: bool) -> Fixture {
     let checker = ClientCredential::checker(
         &sid_infra::client_credential::ClientCredentialConfig {
             issuer: ISSUER.into(),
-            client_id: "ops-receiver".into(),
+            client_id: "orders-receiver".into(),
             authentication: sid_infra::client_credential::ClientAuthentication::ClientSecretBasic {
                 secret_file: secret.0.display().to_string(),
             },
@@ -67,7 +67,7 @@ fn fixture_with(registered: bool) -> Fixture {
     )
     .unwrap();
     let receiver = Receiver::new(
-        "ops",
+        "orders",
         issuers,
         Target {
             issuer: ISSUER.into(),
@@ -106,10 +106,24 @@ fn bound_token(key: &jsonwebtoken::EncodingKey) -> String {
         key,
         "at+jwt",
         serde_json::json!({
-            "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS], "client_id": "ops-console",
+            "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS], "client_id": "orders-console",
             "exp": now + 300, "iat": now, "auth_time": now,
             "acr": "urn:sid:acr:basic", "scope": "", "roles": "",
-            "sid": "sess_ops", "jti": "tok_ops", "cnf": { "jkt": FIXTURE_JKT },
+            "sid": "sess_orders", "jti": "tok_orders", "cnf": { "jkt": FIXTURE_JKT },
+            "credential_kind": "delegated",
+        }),
+    )
+}
+
+/// The rule [`PATH`] declares: a delegated token, no scope required, the
+/// ban decided for its object.
+fn rule() -> AccessRule {
+    AccessRule::protected(
+        &[CredentialKind::Delegated],
+        &[],
+        Some(sid_infra::authn::access::Permission {
+            action: "orders.cancel".into(),
+            target: PermissionTarget::Object,
         }),
     )
 }
@@ -140,7 +154,7 @@ fn proof(htm: &str, htu: &str, token: &str) -> String {
 
 async fn admit(f: &Fixture, method: http::Method, headers: &HeaderMap) -> Result<Admitted, Status> {
     f.receiver
-        .admit(&method, PATH, headers, "ops.orgs.ban")
+        .admit(&method, PATH, headers, &rule(), "orders.cancel")
         .await
 }
 
@@ -203,10 +217,10 @@ async fn a_token_of_another_kind_is_unauthenticated() {
             "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS],
             "exp": now + 300, "iat": now, "auth_time": now,
             "acr": "urn:sid:acr:basic", "scope": "", "roles": "",
-            "sid": "sess_ops", "jti": "tok_kind",
+            "sid": "sess_orders", "jti": "tok_kind",
         });
         if client {
-            claims["client_id"] = "ops-console".into();
+            claims["client_id"] = "orders-console".into();
         }
         claims
     };
@@ -244,6 +258,77 @@ async fn a_token_of_another_kind_is_unauthenticated() {
     }
 }
 
+/// The credential's kind, as its issuer stated it, and its scopes bound
+/// every call before the issuer is asked: a token without a stated kind, one
+/// of a kind the method does not admit, and one without the required scope
+/// are refused here; a token within the bound is asked about, which in this
+/// fixture (authorization API unreachable) answers unavailable.
+#[tokio::test]
+async fn the_credentials_kind_and_scopes_bound_the_call() {
+    let f = fixture();
+    let now = chrono::Utc::now().timestamp();
+    let token = |kind: Option<&str>, scope: &str| {
+        let mut claims = serde_json::json!({
+            "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS], "client_id": "orders-console",
+            "exp": now + 300, "iat": now, "auth_time": now,
+            "acr": "urn:sid:acr:basic", "scope": scope, "roles": "",
+            "sid": "sess_orders", "jti": uuid::Uuid::now_v7().to_string(),
+        });
+        if let Some(kind) = kind {
+            claims["credential_kind"] = kind.into();
+        }
+        sign(&f.key, "at+jwt", claims)
+    };
+    let rule = AccessRule::protected(
+        &[CredentialKind::Delegated],
+        &["orders.write"],
+        Some(sid_infra::authn::access::Permission {
+            action: "orders.cancel".into(),
+            target: PermissionTarget::Resource,
+        }),
+    );
+    let call = |token: String| {
+        let headers = headers(&[("authorization", &format!("Bearer {token}"))]);
+        let receiver = &f.receiver;
+        let rule = &rule;
+        async move {
+            receiver
+                .admit(&http::Method::POST, PATH, &headers, rule, "orders.cancel")
+                .await
+        }
+    };
+
+    for (case, token, expected) in [
+        (
+            "no stated kind",
+            token(None, "orders.write"),
+            "INSUFFICIENT_PERMISSIONS",
+        ),
+        (
+            "a client's own token",
+            token(Some("client"), "orders.write"),
+            "INSUFFICIENT_PERMISSIONS",
+        ),
+        (
+            "without the scope",
+            token(Some("delegated"), "orders.read"),
+            "SCOPE_NOT_GRANTED",
+        ),
+    ] {
+        let status = call(token).await.expect_err(case);
+        assert_eq!(
+            status.code(),
+            tonic::Code::PermissionDenied,
+            "{case}: {status:?}"
+        );
+        assert_eq!(reason(&status), expected, "{case}");
+    }
+    let asked = call(token(Some("delegated"), "orders.read orders.write"))
+        .await
+        .expect_err("the issuer is unreachable here");
+    assert_eq!(asked.code(), tonic::Code::Unavailable, "{asked:?}");
+}
+
 /// gRPC is POST: a call by any other method is no call of this service.
 #[tokio::test]
 async fn a_call_other_than_post_is_unauthenticated() {
@@ -270,11 +355,7 @@ async fn a_bound_token_needs_a_proof_for_this_call() {
     let uri = format!("{ORIGIN}{PATH}");
     for wrong in [
         proof("GET", &uri, &token),
-        proof(
-            "POST",
-            &format!("{ORIGIN}/sid.ops.v1.OrgAdminService/Other"),
-            &token,
-        ),
+        proof("POST", &format!("{ORIGIN}/orders.v1.Orders/Other"), &token),
         proof(
             "POST",
             &format!("https://elsewhere.example.com{PATH}"),
@@ -351,7 +432,7 @@ async fn an_unregistered_resource_opens_nothing() {
 struct Inner(Arc<std::sync::atomic::AtomicUsize>);
 
 impl NamedService for Inner {
-    const NAME: &'static str = "sid.ops.v1.OrgAdminService";
+    const NAME: &'static str = "orders.v1.Orders";
 }
 
 impl Service<http::Request<Body>> for Inner {
@@ -389,11 +470,10 @@ async fn only_admitted_calls_reach_the_service() {
     let f = fixture();
     let inner = Inner::default();
     let reached = inner.0.clone();
-    let mut guarded = Guarded::new(
-        inner,
-        Arc::new(f.receiver),
-        Arc::new(|path: &str| (path == PATH).then_some(Action::OnObject("ops.orgs.ban"))),
-    );
+    let mut rules = AccessRules::default();
+    rules.insert(PATH, rule());
+    let mut guarded = Guarded::new(inner, Arc::new(f.receiver), Arc::new(rules))
+        .expect("every method declares its permission");
     let call = |path: &str| {
         http::Request::builder()
             .method(http::Method::POST)
@@ -402,7 +482,7 @@ async fn only_admitted_calls_reach_the_service() {
             .unwrap()
     };
     let unknown = guarded
-        .call(call("/sid.ops.v1.OrgAdminService/Unlisted"))
+        .call(call("/orders.v1.Orders/Unlisted"))
         .await
         .unwrap();
     assert_eq!(grpc_status(&unknown), Some(tonic::Code::Unimplemented));
@@ -439,6 +519,7 @@ fn admitted_call(resource: sid_core::models::ResourceId, decision: Decision) -> 
             preferred_username: None,
             groups: None,
             cnf: None,
+            credential_kind: Some(sid_authn::jwt::IssuedCredential::Delegated),
         },
         resource,
         decision,
@@ -494,7 +575,7 @@ fn pending(receiver: Receiver) -> Arc<PendingQuestion> {
 fn pending_with(receiver: Receiver, current: bool) -> Arc<PendingQuestion> {
     Arc::new(PendingQuestion {
         receiver: Arc::new(receiver),
-        action: "ops.orgs.ban",
+        action: "orders.cancel".into(),
         token: "t".into(),
         confirmation: None,
         current,

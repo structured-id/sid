@@ -76,6 +76,13 @@ pub struct Issued {
     pub subject: String,
 }
 
+/// An access token a client obtained for itself.
+pub struct ServiceToken {
+    pub token: String,
+    /// The token's `sub`: the client's own principal.
+    pub subject: String,
+}
+
 /// The running issuer.
 pub struct TestIssuer {
     pub storage: Arc<dyn StorageBackend>,
@@ -427,8 +434,37 @@ impl TestIssuer {
 
     /// A system machine user `client_id` authenticating with `secret`,
     /// allowed to obtain client credentials tokens for the resource
-    /// `indicator`. What it may do there is what its grants allow.
-    pub async fn machine(&self, client_id: &str, secret: &str, indicator: &str) -> MachineUser {
+    /// `indicator` carrying `scopes`, which the resource supports from now
+    /// on. What it may do there is what its grants allow.
+    pub async fn machine(
+        &self,
+        client_id: &str,
+        secret: &str,
+        indicator: &str,
+        scopes: &[&str],
+    ) -> MachineUser {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+        let mut resource = self
+            .storage
+            .get_protected_resource(self.resource(indicator).id)
+            .await
+            .expect("resource lookup")
+            .expect("a registered resource");
+        let missing: Vec<String> = scopes
+            .iter()
+            .filter(|s| !resource.scopes.contains(s))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            resource.scopes.extend(missing);
+            assert!(
+                self.storage
+                    .update_protected_resource(&resource, audit("resource.update"))
+                    .await
+                    .expect("resource update"),
+                "the resource changed meanwhile"
+            );
+        }
         let machine = MachineUser::new(
             ProjectId::SYSTEM,
             client_id,
@@ -456,8 +492,8 @@ impl TestIssuer {
             .set_resource_access(
                 &ResourceAccess {
                     client_id: client_id.into(),
-                    resource_id: self.resource(indicator).id,
-                    scopes: vec![],
+                    resource_id: resource.id,
+                    scopes,
                     created_at: chrono::Utc::now(),
                 },
                 audit("resource_access.set"),
@@ -465,6 +501,57 @@ impl TestIssuer {
             .await
             .expect("resource access");
         machine
+    }
+
+    /// An access token `machine` obtains for itself for the resource
+    /// `indicator` (client credentials, RFC 6749 §4.4), granted `scopes` and
+    /// bound to the key `jkt` when given: its subject is the machine, its
+    /// credential the one [`Self::machine`] stored, as the token endpoint
+    /// issues it.
+    pub async fn service_token(
+        &self,
+        machine: &MachineUser,
+        indicator: &str,
+        scopes: &[&str],
+        jkt: Option<&str>,
+    ) -> ServiceToken {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+        let binding = jkt.map(sid_core::models::dpop::DPopBinding::new);
+        let signer = self.issuers.signer(&self.issuer).await.expect("signer");
+        let subject = machine.id.to_string();
+        let credential = format!("kid_{}", machine.client_id);
+        let token = self
+            .jwt
+            .client_access_token_signed_by(
+                signer.as_ref(),
+                &sid_authn::jwt::ClientGrant {
+                    resource: indicator,
+                    client_id: &machine.client_id,
+                    subject: &subject,
+                    credential: &credential,
+                    scopes: &scopes,
+                    dpop: binding.as_ref(),
+                    max_lifetime: None,
+                },
+            )
+            .expect("client access token");
+        ServiceToken { token, subject }
+    }
+
+    /// Revoke the credential [`Self::machine`] stored for `machine`: tokens
+    /// it obtained with it are no longer current.
+    pub async fn revoke_machine(&self, machine: &MachineUser) {
+        assert!(
+            self.storage
+                .revoke_machine_credential(
+                    machine.id,
+                    &format!("kid_{}", machine.client_id),
+                    audit("machine_user.credential_revoked"),
+                )
+                .await
+                .expect("revoke the credential"),
+            "the machine had its credential"
+        );
     }
 
     /// Assign `role` to `machine` on the resource `indicator`.
@@ -534,9 +621,18 @@ impl TestIssuer {
     }
 
     /// An access token of `profile` for the resource `indicator`, from a
-    /// stored sign-in; bound to the key `jkt` when given. Its subject is
-    /// pairwise, never the ProfileId.
-    pub async fn token(&self, profile: &Profile, indicator: &str, jkt: Option<&str>) -> Issued {
+    /// stored sign-in through its application under `grant`, granted
+    /// `scopes`; bound to the key `jkt` when given. Its subject is pairwise,
+    /// never the ProfileId.
+    pub async fn token(
+        &self,
+        profile: &Profile,
+        indicator: &str,
+        grant: sid_authn::jwt::UserGrant,
+        scopes: &[&str],
+        jkt: Option<&str>,
+    ) -> Issued {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
         let session = Session::new(
             profile.id,
             None,
@@ -557,12 +653,13 @@ impl TestIssuer {
                 sid_authn::jwt::TokenAudience::Resource {
                     indicator,
                     client_id: &client,
+                    grant,
                 },
                 &pairwise,
                 None,
                 &profile.roles,
                 &session,
-                &[],
+                &scopes,
                 binding.as_ref(),
                 None,
             )

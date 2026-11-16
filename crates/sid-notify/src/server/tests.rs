@@ -197,28 +197,42 @@ async fn test_resolver_no_data() {
     assert!(recipient.phone.is_none());
 }
 
-/// Every template method has an action, and nothing else is served.
+/// Every template method declares, in the schema, an account API token, the
+/// read or write scope, and its template action on the resource: reading
+/// never admits a write, and nothing else is served.
 #[test]
-fn test_every_template_method_has_an_action() {
-    use crate::access::{TEMPLATE_CHANGE, TEMPLATE_READ, TEMPLATE_TEST, action};
-    use sid_auth::receiver::Action::OnResource;
+fn test_every_template_method_declares_its_permission() {
+    use sid_infra::authn::access::{
+        AccessRule, AccessRules, CredentialKind, Permission, PermissionTarget,
+    };
+    let rules = AccessRules::from_descriptors(sid_proto::FILE_DESCRIPTOR_SET).unwrap();
     let path = |m: &str| format!("/sid.v1.admin.NotificationTemplateService/{m}");
-    for (method, expected) in [
-        ("ListTemplates", TEMPLATE_READ),
-        ("GetTemplate", TEMPLATE_READ),
-        ("PreviewTemplate", TEMPLATE_READ),
-        ("UpdateTemplate", TEMPLATE_CHANGE),
-        ("ResetTemplate", TEMPLATE_CHANGE),
-        ("SendTestNotification", TEMPLATE_TEST),
+    for (method, scope, action) in [
+        ("ListTemplates", "account.read", "notify.template.read"),
+        ("GetTemplate", "account.read", "notify.template.read"),
+        ("PreviewTemplate", "account.read", "notify.template.read"),
+        ("UpdateTemplate", "account.write", "notify.template.change"),
+        ("ResetTemplate", "account.write", "notify.template.change"),
+        (
+            "SendTestNotification",
+            "account.write",
+            "notify.template.test",
+        ),
     ] {
         assert_eq!(
-            action(&path(method)),
-            Some(OnResource(expected)),
+            rules.rule(&path(method)),
+            Some(&AccessRule::protected(
+                &[CredentialKind::AccountApi],
+                &[scope],
+                Some(Permission {
+                    action: action.into(),
+                    target: PermissionTarget::Resource,
+                }),
+            )),
             "{method}"
         );
     }
-    assert_eq!(action(&path("DeleteEverything")), None);
-    assert_eq!(action("/sid.v1.identity.IdentityService/GetProfile"), None);
+    assert_eq!(rules.rule(&path("DeleteEverything")), None);
 }
 
 // ── Handlers ──
@@ -524,10 +538,10 @@ async fn served(
             .expect("receiver"),
     );
     let operations = svc.operations.clone();
-    let routes = tonic::service::Routes::new(crate::access::guarded(
-        NotificationTemplateServiceServer::new(svc),
-        &receiver,
-    ))
+    let routes = tonic::service::Routes::new(
+        crate::access::guarded(NotificationTemplateServiceServer::new(svc), &receiver)
+            .expect("every template method declares its permission"),
+    )
     .add_service(
         sid_proto::sid::v1::operation_service_server::OperationServiceServer::new(
             OperationPeriods::new(operations.clone()),
@@ -632,7 +646,7 @@ async fn test_the_installation_administrator_manages_templates() {
     let mut s = served(test_grpc_service().await, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let token = i.issuer.token(&admin, API, None).await.token;
+    let token = account_token(&i, &admin, ACCOUNT_SCOPES).await.token;
 
     let listed = s
         .client
@@ -658,7 +672,7 @@ async fn test_a_user_without_the_action_is_denied_and_changes_nothing() {
     let i = installation().await;
     let mut s = served(test_grpc_service().await, &i.api).await;
     let user = i.issuer.profile().await;
-    let token = i.issuer.token(&user, API, None).await.token;
+    let token = account_token(&i, &user, ACCOUNT_SCOPES).await.token;
 
     let err = s
         .client
@@ -672,7 +686,7 @@ async fn test_a_user_without_the_action_is_denied_and_changes_nothing() {
 
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let admin_token = i.issuer.token(&admin, API, None).await.token;
+    let admin_token = account_token(&i, &admin, ACCOUNT_SCOPES).await.token;
     let customized = s
         .client
         .list_templates(bearer(customized_only(), &admin_token))
@@ -694,10 +708,10 @@ async fn test_a_reader_reads_but_does_not_change_or_send() {
     let reader = i.issuer.profile().await;
     let role = i
         .issuer
-        .role("template-reader", &[crate::access::TEMPLATE_READ])
+        .role("template-reader", &["notify.template.read"])
         .await;
     i.issuer.grant(&reader, &role, API).await;
-    let token = i.issuer.token(&reader, API, None).await.token;
+    let token = account_token(&i, &reader, ACCOUNT_SCOPES).await.token;
 
     s.client
         .list_templates(bearer(Default::default(), &token))
@@ -736,7 +750,17 @@ async fn test_a_token_of_another_purpose_is_unauthenticated() {
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
 
-    let other = i.issuer.token(&admin, OTHER, None).await.token;
+    let other = i
+        .issuer
+        .token(
+            &admin,
+            OTHER,
+            sid_authn::jwt::UserGrant::Delegated,
+            ACCOUNT_SCOPES,
+            None,
+        )
+        .await
+        .token;
     let err = client
         .list_templates(bearer(Default::default(), &other))
         .await
@@ -786,7 +810,7 @@ async fn test_an_ended_session_is_refused_warm_and_cold() {
     let mut warm = served(test_grpc_service().await, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let issued = i.issuer.token(&admin, API, None).await;
+    let issued = account_token(&i, &admin, ACCOUNT_SCOPES).await;
     warm.client
         .list_templates(bearer(Default::default(), &issued.token))
         .await
@@ -818,7 +842,7 @@ async fn test_without_the_issuer_calls_are_unavailable_and_change_nothing() {
     let mut s = served(svc, &i.api).await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let token = i.issuer.token(&admin, API, None).await.token;
+    let token = account_token(&i, &admin, ACCOUNT_SCOPES).await.token;
 
     i.issuer.stop().await;
     let req = s
@@ -841,7 +865,7 @@ async fn test_test_sends_are_refused_with_their_reasons() {
     let i = installation().await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let token = i.issuer.token(&admin, API, None).await.token;
+    let token = account_token(&i, &admin, ACCOUNT_SCOPES).await.token;
 
     let mut unreachable = served(test_grpc_service().await, &i.api).await;
     // Regression: without a recipient the test went to a placeholder address.
@@ -950,11 +974,82 @@ fn counting(accepts: bool) -> Arc<Counting> {
     })
 }
 
+/// The account API's scopes the account UI obtains: reading and changing.
+const ACCOUNT_SCOPES: &[&str] = &["account.read", "account.write"];
+
+/// An account API token of `profile` granted `scopes`, as the account UI
+/// obtains it.
+async fn account_token(
+    i: &Installation,
+    profile: &sid_core::models::Profile,
+    scopes: &[&str],
+) -> sid_test_issuer::Issued {
+    i.issuer
+        .token(
+            profile,
+            API,
+            sid_authn::jwt::UserGrant::AccountApi,
+            scopes,
+            None,
+        )
+        .await
+}
+
 /// An installation's administrator and its token for the account API.
 async fn administrator(i: &Installation) -> String {
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    i.issuer.token(&admin, API, None).await.token
+    account_token(i, &admin, ACCOUNT_SCOPES).await.token
+}
+
+/// The token's capability bounds even an administrator: an account API
+/// token granted only reading reads templates but changes and sends none,
+/// and an application's ordinary token for the account API, of another
+/// kind, is refused outright; a refused change takes no effect.
+#[tokio::test]
+async fn test_the_tokens_kind_and_scope_bound_the_administrator() {
+    let i = installation().await;
+    let svc = test_grpc_service().await;
+    let store = svc.store.clone();
+    let mut s = served(svc, &i.api).await;
+    let admin = i.issuer.profile().await;
+    i.issuer.administrator(&admin).await;
+    let read_only = account_token(&i, &admin, &["account.read"]).await.token;
+
+    s.client
+        .list_templates(bearer(Default::default(), &read_only))
+        .await
+        .expect("reading is within the token's scope");
+    let req = s
+        .new_command(customize("Beyond the scope"), &read_only)
+        .await;
+    let err = s.client.update_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(reason(&err).as_deref(), Some("SCOPE_NOT_GRANTED"));
+    let req = s
+        .new_command(send_test_email("test@sid.example.com"), &read_only)
+        .await;
+    let err = s.client.send_test_notification(req).await.unwrap_err();
+    assert_eq!(reason(&err).as_deref(), Some("SCOPE_NOT_GRANTED"));
+
+    let delegated = i
+        .issuer
+        .token(
+            &admin,
+            API,
+            sid_authn::jwt::UserGrant::Delegated,
+            ACCOUNT_SCOPES,
+            None,
+        )
+        .await
+        .token;
+    let req = s.new_command(customize("Another kind"), &delegated).await;
+    let err = s.client.update_template(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert!(
+        store.list_templates(None, true).await.unwrap().is_empty(),
+        "a refused change took effect"
+    );
 }
 
 fn reset(template_id: &str) -> sid_proto::sid::v1::admin::ResetTemplateRequest {
@@ -1227,14 +1322,17 @@ async fn test_every_refusal_carries_error_info() {
     let i = installation().await;
     let admin = i.issuer.profile().await;
     i.issuer.administrator(&admin).await;
-    let token = i.issuer.token(&admin, API, None).await.token;
+    let token = account_token(&i, &admin, ACCOUNT_SCOPES).await.token;
     let receiver = Arc::new(Receiver::connect("sid-notify", &i.api).await.unwrap());
     let mut services = sid_serve::Services::new();
     services
-        .add(crate::access::guarded(
-            NotificationTemplateServiceServer::new(test_grpc_service().await),
-            &receiver,
-        ))
+        .add(
+            crate::access::guarded(
+                NotificationTemplateServiceServer::new(test_grpc_service().await),
+                &receiver,
+            )
+            .expect("every template method declares its permission"),
+        )
         .await;
     let (routes, health) = services.into_parts();
     let report = sid_serve::error_contract::probe(

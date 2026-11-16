@@ -19,6 +19,7 @@ fn test_claims() -> ForwardAuthClaims {
         preferred_username: Some("testuser".into()),
         groups: None,
         cnf: None,
+        credential_kind: None,
     }
 }
 

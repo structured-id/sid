@@ -1150,6 +1150,10 @@ impl ClientResourceRegistry for MockStorage {
             .find(|a| a.client_id == client_id && a.resource_id == resource)
             .cloned())
     }
+
+    async fn get_application(&self, id: ApplicationId) -> SidResult<Option<Application>> {
+        Ok(self.inner.lock().unwrap().applications.get(&id).cloned())
+    }
 }
 
 #[async_trait]
@@ -3639,10 +3643,6 @@ impl StorageBackend for MockStorage {
             inner.oauth2_clients.insert(c.client_id.clone(), c.clone());
         }
         Ok(())
-    }
-
-    async fn get_application(&self, id: ApplicationId) -> SidResult<Option<Application>> {
-        Ok(self.inner.lock().unwrap().applications.get(&id).cloned())
     }
 
     async fn system_application(

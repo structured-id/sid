@@ -15,12 +15,21 @@ use sid_core::models::{
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::storage::StorageBackend;
 
-/// Scopes the account API understands; its access grants exactly these.
-pub const ACCOUNT_SCOPES: [&str; 1] = ["account"];
+/// Scopes the account API understands, as its methods declare them: reading
+/// the user's own account and changing it. Its access grants exactly these.
+/// The integration is registered with them once; a store registered with
+/// another set is not this schema's and is recreated, never converted.
+pub const ACCOUNT_SCOPES: [&str; 2] = ["account.read", "account.write"];
 
 /// Scopes the account web client may request: sign-in (OIDC Core 1.0 §3.1.2.1)
 /// and the account API.
-const CLIENT_SCOPES: [&str; 4] = ["openid", "profile", "email", "account"];
+const CLIENT_SCOPES: [&str; 5] = [
+    "openid",
+    "profile",
+    "email",
+    "account.read",
+    "account.write",
+];
 
 /// The path under the account URL the BFF receives authorization responses at.
 pub const CALLBACK_PATH: &str = "/auth/callback";

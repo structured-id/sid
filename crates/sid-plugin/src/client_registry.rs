@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use sid_core::Result;
 use sid_core::models::{
-    IssuerId, OAuth2Client, ProtectedResource, ResourceAccess, ResourceId, ResourceIndicator,
+    Application, ApplicationId, IssuerId, OAuth2Client, ProtectedResource, ResourceAccess,
+    ResourceId, ResourceIndicator,
 };
 
 #[async_trait]
@@ -31,4 +32,9 @@ pub trait ClientResourceRegistry: Send + Sync {
         client_id: &str,
         resource: ResourceId,
     ) -> Result<Option<ResourceAccess>>;
+
+    /// An application by id: the registration a client or resource role
+    /// belongs to, telling whether it is one of the installation's own
+    /// integrations.
+    async fn get_application(&self, id: ApplicationId) -> Result<Option<Application>>;
 }

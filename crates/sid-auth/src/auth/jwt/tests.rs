@@ -78,8 +78,14 @@ fn test_claims_from_an_access_token() {
             jkt: "thumb".into(),
         }),
         act: None,
+        credential_kind: Some(sid_authn::jwt::IssuedCredential::Delegated),
     };
     let forwarded = ForwardAuthClaims::from(claims);
+    assert_eq!(
+        forwarded.credential_kind,
+        Some(sid_authn::jwt::IssuedCredential::Delegated),
+        "the issuer's kind reaches the receiver"
+    );
     assert_eq!(forwarded.sub, "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e");
     assert_eq!(forwarded.scope, "orders.read");
     assert_eq!(forwarded.roles, "reader");

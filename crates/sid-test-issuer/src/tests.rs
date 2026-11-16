@@ -1,8 +1,8 @@
 use super::*;
 
-const RESOURCE: &str = "https://ops.example.com/";
-const ORIGIN: &str = "https://ops.example.com";
-const PATH: &str = "/sid.ops.v1.org.OrgAdminService/GetOrg";
+const RESOURCE: &str = "https://orders.example.com/";
+const ORIGIN: &str = "https://orders.example.com";
+const PATH: &str = "/orders.v1.Orders/Get";
 
 /// The issuer serves what a receiver needs: its registry, its token
 /// endpoint for the receiver's own credential and its authorization API,
@@ -12,55 +12,76 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     let mut issuer = TestIssuer::start(Setup {
         resources: vec![RESOURCE.into()],
         checkers: vec![Checker {
-            client_id: "ops-receiver".into(),
-            secret: "ops-receiver-secret".into(),
+            client_id: "orders-receiver".into(),
+            secret: "orders-receiver-secret".into(),
             confirms_proofs: false,
         }],
     })
     .await;
     let secret = std::env::temp_dir().join(format!("sid-test-issuer-{}", uuid::Uuid::now_v7()));
-    std::fs::write(&secret, "ops-receiver-secret").unwrap();
+    std::fs::write(&secret, "orders-receiver-secret").unwrap();
     let receiver = sid_auth::receiver::Receiver::connect(
-        "ops",
-        &issuer.receiver_config(RESOURCE, ORIGIN, "ops-receiver", &secret),
+        "orders",
+        &issuer.receiver_config(RESOURCE, ORIGIN, "orders-receiver", &secret),
     )
     .await
     .unwrap();
-    let operator = issuer.profile().await;
-    assert_ne!(
-        issuer.profile().await.id,
-        operator.id,
-        "profiles are distinct"
-    );
-    let reader = issuer.role("org-reader", &["ops.org.read"]).await;
-    issuer.grant(&operator, &reader, RESOURCE).await;
-    let token = issuer.token(&operator, RESOURCE, None).await.token;
+    let user = issuer.profile().await;
+    assert_ne!(issuer.profile().await.id, user.id, "profiles are distinct");
+    let reader = issuer.role("orders-reader", &["orders.read"]).await;
+    issuer.grant(&user, &reader, RESOURCE).await;
+    let token = issuer
+        .token(
+            &user,
+            RESOURCE,
+            sid_authn::jwt::UserGrant::Delegated,
+            &["orders"],
+            None,
+        )
+        .await
+        .token;
     let mut headers = tonic::codegen::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
     let post = tonic::codegen::http::Method::POST;
+    // The method admits a user's token or a service's own, carrying the
+    // orders capability.
+    let rule = sid_infra::authn::access::AccessRule::protected(
+        &[
+            sid_infra::authn::access::CredentialKind::Delegated,
+            sid_infra::authn::access::CredentialKind::Client,
+        ],
+        &["orders"],
+        None,
+    );
 
     let admitted = receiver
-        .admit(&post, PATH, &headers, "ops.org.read")
+        .admit(&post, PATH, &headers, &rule, "orders.read")
         .await
         .unwrap();
     assert_eq!(admitted.resource, issuer.resource(RESOURCE).id);
     let denied = receiver
-        .admit(&post, PATH, &headers, "ops.org.suspend")
+        .admit(&post, PATH, &headers, &rule, "orders.cancel")
         .await
         .unwrap_err();
     assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
     // A service calling with its own client credentials token, presented
-    // per call by the channel it calls through.
+    // per call by the channel it calls through: a machine whose subject is
+    // not its client id, admitted by its kind, scope and permission.
     let caller = issuer
-        .machine("ops-caller", "ops-caller-secret", RESOURCE)
+        .machine(
+            "orders-caller",
+            "orders-caller-secret",
+            RESOURCE,
+            &["orders"],
+        )
         .await;
     issuer.grant_machine(&caller, &reader, RESOURCE).await;
     let caller_secret =
         std::env::temp_dir().join(format!("sid-test-issuer-caller-{}", uuid::Uuid::now_v7()));
-    std::fs::write(&caller_secret, "ops-caller-secret").unwrap();
+    std::fs::write(&caller_secret, "orders-caller-secret").unwrap();
     let credential = sid_infra::client_credential::ClientCredential::for_resource(
-        &issuer.client_config("ops-caller", &caller_secret),
+        &issuer.client_config("orders-caller", &caller_secret),
         INSTALLATION,
         sid_infra::deadline::issuer(
             tonic::transport::Channel::from_shared(issuer.upstream())
@@ -79,14 +100,47 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
         .unwrap(),
     );
     receiver
-        .admit(&post, PATH, &machine_headers, "ops.org.read")
+        .admit(&post, PATH, &machine_headers, &rule, "orders.read")
         .await
         .unwrap();
     std::fs::remove_file(&caller_secret).ok();
 
+    // The same machine's token as the issuer signs it directly is admitted
+    // alike, without the capability refused, and once its credential is
+    // revoked refused as no longer current.
+    let bearer = |token: &str| {
+        let mut headers = tonic::codegen::http::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        headers
+    };
+    let own = issuer
+        .service_token(&caller, RESOURCE, &["orders"], None)
+        .await;
+    assert_eq!(own.subject, caller.id.to_string());
+    assert_ne!(
+        own.subject, caller.client_id,
+        "a machine's subject is not its client id"
+    );
+    receiver
+        .admit(&post, PATH, &bearer(&own.token), &rule, "orders.read")
+        .await
+        .expect("a service's own token within its capability");
+    let narrow = issuer.service_token(&caller, RESOURCE, &[], None).await;
+    let refused = receiver
+        .admit(&post, PATH, &bearer(&narrow.token), &rule, "orders.read")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    issuer.revoke_machine(&caller).await;
+    let revoked = receiver
+        .admit(&post, PATH, &bearer(&own.token), &rule, "orders.read")
+        .await
+        .unwrap_err();
+    assert_eq!(revoked.code(), tonic::Code::Unauthenticated, "{revoked:?}");
+
     issuer.stop().await;
     let unavailable = receiver
-        .admit(&post, PATH, &headers, "ops.org.read")
+        .admit(&post, PATH, &headers, &rule, "orders.read")
         .await
         .unwrap_err();
     assert_eq!(unavailable.code(), tonic::Code::Unavailable);

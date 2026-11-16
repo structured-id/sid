@@ -153,6 +153,7 @@ fn test_access_token_audience() {
             TokenAudience::Resource {
                 indicator: "https://resources.example/orders",
                 client_id: "banking-app",
+                grant: UserGrant::Delegated,
             },
             "subject",
             None,
@@ -173,7 +174,29 @@ fn test_access_token_audience() {
         serde_json::json!(["https://resources.example/orders"])
     );
     assert_eq!(claims["client_id"], "banking-app");
+    // Obtained by the application for a user: the issuer names it delegated.
+    assert_eq!(claims["credential_kind"], "delegated");
     assert!(jwt.validate_access_token(&app).is_err());
+
+    // A grant for the account API is named as such.
+    let account = jwt
+        .access_token_signed_by(
+            &jwt,
+            TokenAudience::Resource {
+                indicator: "https://sid.example.com/account",
+                client_id: "account-web",
+                grant: UserGrant::AccountApi,
+            },
+            "subject",
+            None,
+            &profile.roles,
+            &session,
+            &scopes,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(payload(&account)["credential_kind"], "account_api");
 
     let own = jwt
         .issue_access_token(
@@ -196,7 +219,49 @@ fn test_access_token_audience() {
         serde_json::json!(["https://sid.example.com"])
     );
     assert!(claims.get("client_id").is_none(), "{claims}");
+    // The installation's own token is no resource credential.
+    assert!(claims.get("credential_kind").is_none(), "{claims}");
     assert!(jwt.validate_access_token(&own).is_ok());
+}
+
+/// The credential kind is the issuer's: a claim mapping naming it is
+/// ignored, so a mapping never turns a delegated token into a client's.
+#[test]
+fn test_a_claim_mapping_cannot_set_the_credential_kind() {
+    let (private_pem, public_pem) = generate_test_keys();
+    let jwt = JwtService::new(
+        &private_pem,
+        &public_pem,
+        "https://sid.example.com".to_string(),
+    )
+    .unwrap();
+    let profile = create_test_profile();
+    let session = create_test_session(&profile);
+    let mapped = std::collections::HashMap::from([(
+        "credential_kind".to_string(),
+        serde_json::json!("client"),
+    )]);
+    let token = jwt
+        .access_token_signed_by(
+            &jwt,
+            TokenAudience::Resource {
+                indicator: "https://resources.example/orders",
+                client_id: "banking-app",
+                grant: UserGrant::Delegated,
+            },
+            "subject",
+            None,
+            &profile.roles,
+            &session,
+            &["openid".to_string()],
+            None,
+            Some(&mapped),
+        )
+        .unwrap();
+    let part = token.split('.').nth(1).unwrap();
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap();
+    assert_eq!(claims["credential_kind"], "delegated");
 }
 
 /// A client acting for itself gets an `at+jwt` for one resource that names
@@ -244,6 +309,8 @@ fn test_client_access_token() {
     assert_eq!(claims["sub"], "mu_orchestrator");
     assert_eq!(claims["sid"], "kid_abc");
     assert_eq!(claims["scope"], "tenant.read");
+    // Obtained by the client for itself: the issuer names it a client's.
+    assert_eq!(claims["credential_kind"], "client");
     assert!(claims.get("pid").is_none(), "{claims}");
     assert!(claims.get("roles").is_none(), "{claims}");
     assert!(claims.get("amr").is_none(), "{claims}");

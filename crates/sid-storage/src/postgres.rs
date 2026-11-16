@@ -1863,6 +1863,13 @@ impl ClientResourceRegistry for PostgresBackend {
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
     }
+
+    async fn get_application(
+        &self,
+        id: sid_core::models::ApplicationId,
+    ) -> SidResult<Option<sid_core::models::Application>> {
+        self.get_application_impl(id).await
+    }
 }
 
 #[async_trait]
@@ -3599,13 +3606,6 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<()> {
         self.create_application_impl(app, client, resource, ctx)
             .await
-    }
-
-    async fn get_application(
-        &self,
-        id: sid_core::models::ApplicationId,
-    ) -> SidResult<Option<sid_core::models::Application>> {
-        self.get_application_impl(id).await
     }
 
     async fn system_application(

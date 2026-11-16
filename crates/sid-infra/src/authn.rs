@@ -3,6 +3,7 @@
 //! each reads the request's metadata, calls the owning [`sid_authn`]
 //! decision and answers its typed outcome with the one canonical status.
 
+pub mod access;
 pub mod caller;
 pub mod ceremony;
 pub mod credential_enrollment;

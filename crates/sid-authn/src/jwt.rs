@@ -220,7 +220,7 @@ pub struct CnfClaim {
 }
 
 /// Access token claims (JWT payload).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessTokenClaims {
     /// Subject, polymorphic: the ProfileId for the installation's own session
     /// and for its own users at its own applications, the stored BindingId
@@ -272,6 +272,28 @@ pub struct AccessTokenClaims {
     /// Contains `sub` = the acting party (machine user client_id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<ActClaim>,
+    /// The kind of credential a token for a resource is, set by the issuance
+    /// path that produced it; absent from the installation's own tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_kind: Option<IssuedCredential>,
+}
+
+/// The kind of credential a resource access token is, in the vocabulary of
+/// the method access contract (`sid.v1.common.CredentialKind`): what the
+/// issuance path authorized, never inferred from the token's subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssuedCredential {
+    /// Obtained by an application for a user (authorization code, device
+    /// grant, refresh of either).
+    Delegated,
+    /// Obtained by a client for itself (client credentials, RFC 6749 §4.4):
+    /// a machine user, an OAuth client or a provisioning connector.
+    Client,
+    /// Obtained for a user for the account API the installation's account
+    /// integration registers: the user's own account in an application
+    /// session, without administrator authority.
+    AccountApi,
 }
 
 /// Claims SID sets on access tokens (RFC 7519 §4.1 registered claims, OIDC and
@@ -295,6 +317,7 @@ pub const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
     "act",
     "azp",
     "client_id",
+    "credential_kind",
 ];
 
 /// JWS `typ` of an access token issued to an application (RFC 9068 §2.1).
@@ -311,7 +334,28 @@ pub enum TokenAudience<'a> {
     Resource {
         indicator: &'a str,
         client_id: &'a str,
+        /// What the grant behind the token is, as the token states it.
+        grant: UserGrant,
     },
+}
+
+/// The grant an application obtained a user's resource token under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserGrant {
+    /// An application's ordinary grant for its user.
+    Delegated,
+    /// A grant for the account API the installation's account integration
+    /// registers.
+    AccountApi,
+}
+
+impl From<UserGrant> for IssuedCredential {
+    fn from(grant: UserGrant) -> Self {
+        match grant {
+            UserGrant::Delegated => Self::Delegated,
+            UserGrant::AccountApi => Self::AccountApi,
+        }
+    }
 }
 
 /// What a client acting for itself is issued (OAuth client credentials).
@@ -618,15 +662,17 @@ impl JwtService {
         let now = Utc::now();
         let (acr, exp) = token_assurance(session, now, now + self.access_token_ttl);
         let iss = signer.iss().to_owned();
-        let (aud, client_id, typ) = match audience {
-            TokenAudience::Installation => (iss.clone(), None, None),
+        let (aud, client_id, typ, credential_kind) = match audience {
+            TokenAudience::Installation => (iss.clone(), None, None, None),
             TokenAudience::Resource {
                 indicator,
                 client_id,
+                grant,
             } => (
                 indicator.to_owned(),
                 Some(client_id.to_owned()),
                 Some(ACCESS_TOKEN_TYP),
+                Some(grant.into()),
             ),
         };
 
@@ -647,6 +693,7 @@ impl JwtService {
             jti: uuid::Uuid::now_v7().to_string(),
             cnf: dpop_binding.map(|b| CnfClaim { jkt: b.jkt.clone() }),
             act: None,
+            credential_kind,
         };
 
         // Merge custom claims; a registered claim is never replaced or introduced
@@ -704,6 +751,7 @@ impl JwtService {
             jti: uuid::Uuid::now_v7().to_string(),
             cnf: grant.dpop.map(|b| CnfClaim { jkt: b.jkt.clone() }),
             act: None,
+            credential_kind: Some(IssuedCredential::Client),
         };
         signer.sign_claims(Some(ACCESS_TOKEN_TYP), &claims)
     }
@@ -737,6 +785,8 @@ impl JwtService {
             jti: uuid::Uuid::now_v7().to_string(),
             cnf: original.cnf.clone(),
             act: original.act.clone(),
+            // The installation's own token: no resource credential kind.
+            credential_kind: None,
         };
 
         let mut header = Header::new(Algorithm::EdDSA);
@@ -902,6 +952,8 @@ impl JwtService {
             act: Some(ActClaim {
                 sub: actor_sub.to_string(),
             }),
+            // An installation token, told apart by its acr and actor.
+            credential_kind: None,
         };
 
         let mut header = Header::new(Algorithm::EdDSA);

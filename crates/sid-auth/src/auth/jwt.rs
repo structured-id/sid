@@ -54,6 +54,10 @@ pub struct ForwardAuthClaims {
     /// only with a proof by that key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Confirmation>,
+    /// The kind of credential the issuer issued the token as; a receiver
+    /// admits a method's declared kinds by it, never by the subject's shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_kind: Option<sid_authn::jwt::IssuedCredential>,
 }
 
 /// `cnf` claim of a DPoP-bound token (RFC 7800 §3.1, RFC 9449 §6.1).
@@ -83,6 +87,7 @@ impl From<sid_authn::jwt::AccessTokenClaims> for ForwardAuthClaims {
             preferred_username: None,
             groups: None,
             cnf: claims.cnf.map(|cnf| Confirmation { jkt: cnf.jkt }),
+            credential_kind: claims.credential_kind,
         }
     }
 }

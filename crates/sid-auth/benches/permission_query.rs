@@ -85,7 +85,22 @@ fn main() {
         let operator = issuer.profile().await;
         let reader = issuer.role("orders-reader", &["orders.read"]).await;
         issuer.grant(&operator, &reader, RESOURCE).await;
-        let token = issuer.token(&operator, RESOURCE, None).await.token;
+        let token = issuer
+            .token(
+                &operator,
+                RESOURCE,
+                sid_authn::jwt::UserGrant::Delegated,
+                &["orders"],
+                None,
+            )
+            .await
+            .token;
+        // The method reads orders with a user's token carrying their scope.
+        let rule = sid_infra::authn::access::AccessRule::protected(
+            &[sid_infra::authn::access::CredentialKind::Delegated],
+            &["orders"],
+            None,
+        );
         let resource = issuer.resource(RESOURCE).id;
 
         // admit
@@ -103,7 +118,7 @@ fn main() {
         let post = http::Method::POST;
         let samples = measure(QUESTIONS, || async {
             receiver
-                .admit(&post, PATH, &headers, "orders.read")
+                .admit(&post, PATH, &headers, &rule, "orders.read")
                 .await
                 .expect("admitted");
         })

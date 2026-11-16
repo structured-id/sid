@@ -523,6 +523,12 @@ impl AuthzServiceImpl {
         self
     }
 
+    /// The verifier of permission checkers' own tokens, when they are
+    /// admitted: the access guard verifies them with it.
+    pub fn service_tokens(&self) -> Option<Arc<ResourceTokenVerifier>> {
+        self.service_tokens.clone()
+    }
+
     /// Admit one original request's sender proof for the configured verifier
     /// asking (OidcIssuerService.AdmitSenderProof): the request's token is
     /// established as for a request-bound question, then its proof admitted

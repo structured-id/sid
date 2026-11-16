@@ -121,6 +121,7 @@ pub(crate) fn administrator(profile: ProfileId) -> sid_authn::caller::Caller {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     })
     .unwrap()
 }

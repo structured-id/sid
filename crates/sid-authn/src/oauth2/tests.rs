@@ -91,7 +91,7 @@ fn orders_target(client: &OAuth2Client) -> crate::target::Target {
         scopes: vec!["openid".into(), "orders.read".into()],
         created_at: Utc::now(),
     };
-    crate::target::Target::from_parts(resource, access)
+    crate::target::Target::from_parts(resource, access, crate::jwt::UserGrant::Delegated)
 }
 
 const ORDERS: &str = "https://resources.example/orders";

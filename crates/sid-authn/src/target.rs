@@ -9,8 +9,12 @@
 
 use sid_core::Result as SidResult;
 pub use sid_core::models::{IssuerId, ResourceIndicator};
-use sid_core::models::{MachineUser, OAuth2Client, ProtectedResource, ResourceAccess, ResourceId};
+use sid_core::models::{
+    MachineUser, OAuth2Client, ProtectedResource, ResourceAccess, ResourceId, SystemIntegration,
+};
 use sid_plugin::ClientResourceRegistry;
+
+pub use crate::jwt::UserGrant;
 
 /// Why a request's target is refused. Every case is `invalid_target`
 /// (RFC 8707 §2).
@@ -59,13 +63,29 @@ impl TargetRefusal {
 pub struct Target {
     resource: ProtectedResource,
     access: ResourceAccess,
+    grant: UserGrant,
 }
 
 impl Target {
     /// A target from its parts, for unit tests of issuance.
     #[cfg(test)]
-    pub(crate) fn from_parts(resource: ProtectedResource, access: ResourceAccess) -> Self {
-        Self { resource, access }
+    pub(crate) fn from_parts(
+        resource: ProtectedResource,
+        access: ResourceAccess,
+        grant: UserGrant,
+    ) -> Self {
+        Self {
+            resource,
+            access,
+            grant,
+        }
+    }
+
+    /// What a user's token for this target states its grant is: the account
+    /// integration's for the account API it registers, otherwise an
+    /// application's ordinary grant.
+    pub fn grant(&self) -> UserGrant {
+        self.grant
     }
 
     /// The token audience: the resource indicator.
@@ -239,7 +259,34 @@ async fn permitted(
     let Some(access) = storage.resource_access(client_id, resource.id).await? else {
         return Ok(Err(TargetRefusal::NotPermitted));
     };
-    Ok(Ok(Target { resource, access }))
+    let grant = grant_for(storage, &resource).await?;
+    Ok(Ok(Target {
+        resource,
+        access,
+        grant,
+    }))
+}
+
+/// The grant user tokens for `resource` are obtained under: the account
+/// integration's for the account API it registers, whichever client the
+/// account API admitted (the account API serves such a token as an account
+/// API token), else an ordinary application grant.
+async fn grant_for(
+    storage: &dyn ClientResourceRegistry,
+    resource: &ProtectedResource,
+) -> SidResult<UserGrant> {
+    let Some(application) = resource.application_id else {
+        return Ok(UserGrant::Delegated);
+    };
+    let integration = storage
+        .get_application(application)
+        .await?
+        .and_then(|app| app.system);
+    Ok(if integration == Some(SystemIntegration::Account) {
+        UserGrant::AccountApi
+    } else {
+        UserGrant::Delegated
+    })
 }
 
 #[cfg(test)]

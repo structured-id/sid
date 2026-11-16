@@ -171,7 +171,7 @@ impl CurrentToken for AtIssuer {
 }
 
 /// A verified access token and the caller it stands for.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Verified {
     pub claims: AccessTokenClaims,
     pub caller: Caller,

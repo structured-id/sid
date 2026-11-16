@@ -27,6 +27,7 @@ fn claims(jkt: Option<&str>) -> ForwardAuthClaims {
         preferred_username: None,
         groups: None,
         cnf: jkt.map(|jkt| Confirmation { jkt: jkt.into() }),
+        credential_kind: None,
     }
 }
 
