@@ -235,6 +235,11 @@ const TOKEN_INSPECTOR_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(1).unwrap
 /// of its rights (D054).
 pub const AUTHZ_CHECK: &str = "authz.check";
 
+/// The capability of administering roles, their assignments and policies
+/// through the authorization API with a service's own token; the service's
+/// current role administration still decides each change.
+pub const AUTHZ_ADMINISTER: &str = "authz.administer";
+
 /// Key of the built-in role holding [`AUTHZ_CHECK`].
 pub const PERMISSION_CHECKER_ROLE: &str = "permission-checker";
 

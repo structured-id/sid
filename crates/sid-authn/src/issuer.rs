@@ -177,7 +177,10 @@ pub async fn ensure_authorization_api_resource(
         issuer,
         "Authorization API",
         &authorization_api_endpoint(&issuer.canonical_url),
-        &[sid_core::models::AUTHZ_CHECK],
+        &[
+            sid_core::models::AUTHZ_CHECK,
+            sid_core::models::AUTHZ_ADMINISTER,
+        ],
         "authorization_api_resource.created",
     )
     .await
