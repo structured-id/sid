@@ -149,23 +149,12 @@ const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner
      WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
        AND expires_at IS NOT NULL AND expires_at <= NOW()";
 
-/// Whether a claim has anything to sweep: open work past its expiry or work
-/// abandoned on its last attempt, asked through the sweeps' own indexes. One
-/// read in the usual case instead of two updates finding nothing.
+/// Whether a claim has anything to sweep: open work past its expiry, asked
+/// through the sweep's own index. One read in the usual case instead of an
+/// update finding nothing.
 const SWEEP_DUE_SQL: &str = "SELECT EXISTS (SELECT 1 FROM durable_work
          WHERE kind = ANY($1) AND state IN ('pending', 'claimed')
-           AND expires_at IS NOT NULL AND expires_at <= NOW())
-     OR EXISTS (SELECT 1 FROM durable_work
-         WHERE kind = ANY($1) AND state = 'claimed' AND lease_until <= NOW()
-           AND attempts >= max_attempts)";
-
-/// A claim's sweep of work abandoned on its last attempt, through the lease
-/// index.
-const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
-        lease_until = NULL, updated_at = NOW(),
-        last_error = COALESCE(last_error, 'lease expired on the last attempt')
-     WHERE kind = ANY($1) AND state = 'claimed' AND lease_until <= NOW()
-       AND attempts >= max_attempts";
+           AND expires_at IS NOT NULL AND expires_at <= NOW())";
 
 /// The work a claim takes. Each kind gives its first `limit` unlocked items
 /// from the due and the lease indexes, locked as they are read, so the read
@@ -175,9 +164,10 @@ const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_own
 /// ones. The earliest `limit` of them are claimed; the rest are released at
 /// commit. The ids are an array the update looks up by key: joined as a
 /// relation, the planner hashed the whole table to find 32 rows. Each
-/// candidate is checked for its validity and, after a lapsed lease, for an
-/// attempt left: work can cross either line after the sweeps ran, and the
-/// claim reads a later clock than they did.
+/// candidate is checked for its validity: work can cross that line after
+/// the sweep ran, and the claim reads a later clock than it did. A lapsed
+/// last attempt is claimed too, beyond its maximum, for its worker to end
+/// it with its dead-letter alert.
 const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts = w.attempts + 1,
         generation = w.generation + 1, lease_owner = $2,
         lease_until = NOW() + make_interval(secs => $3), updated_at = NOW()
@@ -191,7 +181,6 @@ const CLAIM_SQL: &str = "UPDATE durable_work w SET state = 'claimed', attempts =
            SELECT lapsed.id, lapsed.not_before FROM unnest($1::text[]) k(kind)
            CROSS JOIN LATERAL (SELECT id, not_before FROM durable_work
                WHERE kind = k.kind AND state = 'claimed' AND lease_until <= NOW()
-                 AND attempts < max_attempts
                  AND (expires_at IS NULL OR expires_at > NOW())
                ORDER BY lease_until LIMIT $4 FOR UPDATE SKIP LOCKED) lapsed
          ) c
@@ -222,12 +211,6 @@ async fn claim(
     if sweep {
         // Past its validity: expired, never attempted again.
         sqlx::query(EXPIRE_SQL)
-            .bind(&kinds)
-            .execute(pool)
-            .await
-            .map_err(storage)?;
-        // Abandoned by a worker on its last attempt: failed.
-        sqlx::query(ABANDONED_SQL)
             .bind(&kinds)
             .execute(pool)
             .await

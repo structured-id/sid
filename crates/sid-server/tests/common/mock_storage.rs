@@ -7115,12 +7115,9 @@ impl sid_plugin::WorkStore for MockStorage {
                 *until = None;
                 continue;
             }
+            // A lapsed last attempt is claimed too, beyond its maximum, for
+            // its worker to end it with its dead-letter alert.
             let lease_over = record.state == WorkState::Claimed && until.is_some_and(|u| u <= now);
-            if lease_over && record.attempts >= record.max_attempts {
-                record.state = WorkState::Failed;
-                *until = None;
-                continue;
-            }
             let due =
                 (record.state == WorkState::Pending && record.not_before <= now) || lease_over;
             if !due || claimed.len() >= limit as usize {

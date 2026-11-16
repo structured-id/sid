@@ -142,17 +142,10 @@ impl WorkStore for CoordinodeBackend {
                      w.updated_at = $now",
                 at(Params::default()),
             )?;
-            // Abandoned by a worker on its last attempt: failed.
-            tx.run(
-                "MATCH (w:SidWork) WHERE w.kind IN $kinds AND w.state = 'claimed'
-                   AND w.lease_until <= $now AND w.attempts >= w.max_attempts
-                 SET w.state = 'failed', w.lease_owner = null, w.lease_until = null,
-                     w.updated_at = $now,
-                     w.last_error = coalesce(w.last_error, 'lease expired on the last attempt')",
-                at(Params::default()),
-            )?;
             // Due pending work and work whose lease ran out, asked apart: each
-            // query compares only a property every work it matches holds.
+            // query compares only a property every work it matches holds. A
+            // lapsed last attempt is claimed too, beyond its maximum, for its
+            // worker to end it with its dead-letter alert.
             let limit_value = Value::Int(i64::from(limit));
             let mut due = tx.run(
                 "MATCH (w:SidWork) WHERE w.kind IN $kinds AND w.state = 'pending'
@@ -210,8 +203,8 @@ impl WorkStore for CoordinodeBackend {
                     due_at: record.not_before,
                 });
             }
-            // Committed even with nothing claimed: the expiry and abandonment
-            // recorded above stand.
+            // Committed even with nothing claimed: the expiry recorded above
+            // stands.
             Ok(Decision::Commit(claimed))
         })
         .await

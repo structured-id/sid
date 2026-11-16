@@ -403,6 +403,435 @@ async fn test_both_sources_are_accepted() {
     drop_topology(&platform).await;
 }
 
+/// A job store in a schema of its own, so a runner claiming from it takes
+/// none of the other tests' work; and the schema, to drop afterwards.
+async fn isolated_store() -> (Arc<PgWorkStore>, String) {
+    let schema = format!("w{}", uuid::Uuid::now_v7().simple());
+    let admin = sqlx::PgPool::connect(&database_url())
+        .await
+        .expect("test PostgreSQL unreachable; start docker-compose.test.yml");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options: sqlx::postgres::PgConnectOptions = database_url().parse().unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_with(options.options([("search_path", schema.as_str())]))
+        .await
+        .unwrap();
+    let store = PgWorkStore::new(pool);
+    store.ensure_schema().await.unwrap();
+    (Arc::new(store), schema)
+}
+
+async fn drop_schema(schema: &str) {
+    let admin = sqlx::PgPool::connect(&database_url()).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
+}
+
+/// A runner over `store` with `handlers`: short leases and scans, so an
+/// abandoned claim lapses within the test.
+fn runner(
+    store: &Arc<PgWorkStore>,
+    worker: &str,
+    handlers: Vec<Arc<dyn sid_authn::work_runner::WorkHandler>>,
+) -> sid_authn::work_runner::WorkRunner {
+    sid_authn::work_runner::WorkRunner::new(
+        store.clone(),
+        worker,
+        handlers,
+        sid_authn::work_runner::RunnerConfig {
+            concurrency: 4,
+            lease: Duration::from_secs(2),
+            scan_interval: Duration::from_millis(100),
+        },
+    )
+    .unwrap()
+}
+
+/// The stored record of `id` once `done` holds for it, within `wait`.
+async fn record_when(
+    store: &PgWorkStore,
+    id: sid_core::models::WorkId,
+    wait: Duration,
+    done: impl Fn(&sid_core::models::WorkRecord) -> bool,
+) -> sid_core::models::WorkRecord {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(record) = store.get_work(id).await.unwrap()
+            && done(&record)
+        {
+            return record;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not reached: {:?}",
+            store.get_work(id).await.unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The work of `kind` `store` holds.
+async fn count_kind(store: &PgWorkStore, kind: &str) -> usize {
+    store
+        .export_work()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|w| w.record.kind.as_str() == kind)
+        .count()
+}
+
+/// A producer's bus whose history publication never returns: a producer
+/// stopped there has owed and handed over the addressed work, not the
+/// history.
+struct CutBeforeHistory(Arc<NatsEventBus>);
+
+#[async_trait::async_trait]
+impl EventBus for CutBeforeHistory {
+    async fn publish(&self, _event: Event) -> sid_plugin::event_bus::EventBusResult<()> {
+        std::future::pending().await
+    }
+
+    async fn deliver(
+        &self,
+        recipient: &WorkRecipient,
+        delivery: sid_core::models::WorkId,
+        event: &Event,
+    ) -> sid_plugin::event_bus::EventBusResult<()> {
+        self.0.deliver(recipient, delivery, event).await
+    }
+
+    async fn subscribe(
+        &self,
+        filter: sid_core::models::event::EventFilter,
+    ) -> sid_plugin::event_bus::EventBusResult<tokio::sync::mpsc::Receiver<Event>> {
+        self.0.subscribe(filter).await
+    }
+
+    async fn health_check(&self) -> sid_plugin::event_bus::EventBusResult<()> {
+        self.0.health_check().await
+    }
+}
+
+/// The producer's relay, fan-out and delivery handlers over `store`, with
+/// the history published on `history` and the work handed to `work`.
+fn producer_handlers(
+    store: &Arc<PgWorkStore>,
+    history: Arc<dyn EventBus>,
+    work: Arc<dyn EventBus>,
+) -> Vec<Arc<dyn sid_authn::work_runner::WorkHandler>> {
+    use sid_authn::event_relay::{EventDeliveryHandler, EventFanoutHandler, EventRelayHandler};
+    let owed: Arc<dyn WorkStore> = store.clone();
+    vec![
+        Arc::new(EventRelayHandler::new(
+            owed.clone(),
+            vec![sid_core::models::event::RequiredReceiver {
+                recipient: receiver(),
+                event_types: Vec::new(),
+            }],
+        )),
+        Arc::new(EventFanoutHandler::new(history, owed)),
+        Arc::new(EventDeliveryHandler::new(work)),
+    ]
+}
+
+/// A producer cut between handing a fact's addressed work to the broker and
+/// publishing its history (the process gone, its claim left to lapse)
+/// resumes the same obligations from PostgreSQL after a restart: the
+/// history is published once, the addressed work is the one already handed
+/// over (not owed or delivered again), and notify accepts the fact once.
+#[tokio::test]
+async fn test_a_producer_cut_before_history_resumes_the_same_obligations() {
+    let (store, schema) = isolated_store().await;
+    let (t, bus) = topology().await;
+    let bus = Arc::new(bus);
+    let event = Event::new("sid-test", event_types::SECURITY_BRUTE_FORCE);
+    store.enqueue_work(&event.relay()).await.unwrap();
+    let fanout = event.fanout(&[receiver()]).id;
+    let delivery = event.delivery_id(&receiver());
+
+    // The first producer hands the work over and hangs on the history.
+    let cut = runner(
+        &store,
+        "producer-1",
+        producer_handlers(&store, Arc::new(CutBeforeHistory(bus.clone())), bus.clone()),
+    );
+    let crashed = tokio::spawn(cut.run(std::future::pending()));
+    record_when(&store, delivery, Duration::from_secs(10), |r| {
+        r.state == WorkState::Completed
+    })
+    .await;
+    assert_eq!(stored(&t.work_stream()).await, 1);
+    assert_eq!(
+        store.get_work(fanout).await.unwrap().unwrap().state,
+        WorkState::Claimed
+    );
+    // The process dies: its attempt and its claim are abandoned as they are.
+    crashed.abort();
+    let _ = crashed.await;
+    assert_eq!(stored(&t.history_stream()).await, 0);
+
+    // A restarted producer takes the lapsed plan over.
+    let resumed = runner(
+        &store,
+        "producer-2",
+        producer_handlers(&store, bus.clone(), bus.clone()),
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(resumed.run(async move {
+        let _ = stopped.await;
+    }));
+    let plan = record_when(&store, fanout, Duration::from_secs(15), |r| {
+        r.state == WorkState::Completed
+    })
+    .await;
+    stop.send(()).unwrap();
+    running.await.unwrap();
+    assert_eq!(plan.attempts, 2, "the plan ran other than once more");
+    assert_eq!(
+        stored(&t.history_stream()).await,
+        1,
+        "history not published once"
+    );
+    let handed = store.get_work(delivery).await.unwrap().unwrap();
+    assert_eq!(handed.attempts, 1, "the handed-over work was handed again");
+    assert_eq!(
+        count_kind(&store, sid_core::models::EVENT_DELIVERY_KIND).await,
+        1
+    );
+    assert_eq!(
+        store
+            .get_work(event.relay_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .attempts,
+        1,
+        "the relay ran again"
+    );
+    assert_eq!(
+        stored(&t.work_stream()).await,
+        1,
+        "the work was handed twice"
+    );
+
+    // Notify accepts the fact once and settles it.
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
+    assert!(accepted(&store, &event, Duration::from_secs(10)).await);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while stored(&t.work_stream()).await > 0 {
+        assert!(tokio::time::Instant::now() < deadline, "never settled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let route = store.get_work(route_job_id(&event)).await.unwrap().unwrap();
+    assert_eq!(route.attempts, 0, "the fact was accepted again");
+    drop_topology(&t).await;
+    drop_schema(&schema).await;
+}
+
+/// The recipient source of a routed fact whose subject is gone: routing
+/// ends permanently, as a removed Profile ends it.
+struct Gone;
+
+#[async_trait::async_trait]
+impl sid_notify::recipient::RecipientSource for Gone {
+    async fn resolve(
+        &self,
+        _event: &Event,
+    ) -> Result<sid_plugin::notification::Recipient, sid_notify::recipient::ResolveError> {
+        Err(sid_notify::recipient::ResolveError::ProfileGone(
+            "subject removed".into(),
+        ))
+    }
+}
+
+/// Notify's real routing and plan handlers, over a source whose subjects
+/// are gone.
+fn routing_handlers() -> Vec<Arc<dyn sid_authn::work_runner::WorkHandler>> {
+    vec![
+        Arc::new(delivery::RouteHandler::new(
+            sid_notify::routing::RoutingTable::default_ce_rules(),
+            Arc::new(Gone),
+        )),
+        Arc::new(delivery::PlanHandler::new()),
+    ]
+}
+
+/// Delivery after a durable handoff that ends terminally: a fact notify
+/// accepted from JetStream whose routing fails for good is failed with its
+/// dead-letter alert owed in the same commit, and a later copy of the same
+/// fact (republished beyond the broker's duplicate window) is settled
+/// without reviving it or owing a second alert. The same holds for a fact
+/// whose routing claim lapsed on its last attempt (its worker gone): the
+/// next worker ends it with its own alert, and a later copy does not revive
+/// it. Bug prevented: the store failed such work by itself and its
+/// dead-letter alert was never owed.
+#[tokio::test]
+async fn test_a_terminal_outcome_after_handoff_is_not_revived() {
+    let (store, schema) = isolated_store().await;
+    let (t, bus) = topology().await;
+    let bus = Arc::new(bus);
+    let js = jetstream::new(async_nats::connect(nats_url()).await.unwrap());
+    let mut config = js
+        .get_stream(t.work_stream())
+        .await
+        .unwrap()
+        .info()
+        .await
+        .unwrap()
+        .config
+        .clone();
+    config.duplicate_window = Duration::from_secs(1);
+    js.update_stream(config).await.unwrap();
+
+    let failed = Event::new("sid-test", event_types::SECURITY_BRUTE_FORCE);
+    let abandoned = Event::new("sid-test", event_types::SECURITY_SUSPICIOUS_LOGIN);
+
+    // The first fact is accepted and routed by the real handler: its
+    // subject is gone, so its routing fails for good.
+    owe(&bus, &failed).await;
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
+    assert!(accepted(&store, &failed, Duration::from_secs(10)).await);
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let notifier = runner(&store, "notify", routing_handlers());
+    let (stop_runner, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(notifier.run(async move {
+        let _ = stopped.await;
+    }));
+    let dead = record_when(
+        &store,
+        route_job_id(&failed),
+        Duration::from_secs(15),
+        |r| r.state == WorkState::Failed,
+    )
+    .await;
+    stop_runner.send(()).unwrap();
+    running.await.unwrap();
+    let alerts = count_kind(&store, sid_core::models::EVENT_RELAY_KIND).await;
+    assert_eq!(alerts, 1, "the permanent failure owed other than one alert");
+
+    // The second fact is accepted; its routing is claimed on its last
+    // attempt by a worker that never finishes, so its claim lapses.
+    owe(&bus, &abandoned).await;
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
+    assert!(accepted(&store, &abandoned, Duration::from_secs(10)).await);
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let route_kind = sid_core::models::WorkKind::new(delivery::ROUTE).unwrap();
+    for attempt in 1.. {
+        let claimed = store
+            .claim_work(
+                std::slice::from_ref(&route_kind),
+                "lost-worker",
+                10,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+        let Some(work) = claimed
+            .into_iter()
+            .find(|w| w.id == route_job_id(&abandoned))
+        else {
+            panic!("the abandoned fact's routing was not claimed");
+        };
+        if work.attempt >= work.max_attempts {
+            break;
+        }
+        assert!(attempt < 100, "never reached the last attempt");
+        store
+            .fail_work(
+                work.id,
+                work.generation,
+                &sid_core::models::WorkFailure {
+                    error: "worker restarted".into(),
+                    ambiguous: false,
+                    retry_at: Some(chrono::Utc::now()),
+                    on_dead: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // The next routing worker ends the lapsed last attempt.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let notifier = runner(&store, "notify-restarted", routing_handlers());
+    let (stop_runner, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(notifier.run(async move {
+        let _ = stopped.await;
+    }));
+    let lapsed = record_when(
+        &store,
+        route_job_id(&abandoned),
+        Duration::from_secs(15),
+        |r| r.state == WorkState::Failed,
+    )
+    .await;
+    stop_runner.send(()).unwrap();
+    running.await.unwrap();
+    let alerts = count_kind(&store, sid_core::models::EVENT_RELAY_KIND).await;
+    assert_eq!(alerts, 2, "a terminal failure lacks its dead-letter alert");
+
+    // Later copies of both facts, beyond the broker's duplicate window.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    owe(&bus, &failed).await;
+    owe(&bus, &abandoned).await;
+    assert_eq!(
+        stored(&t.work_stream()).await,
+        2,
+        "the copies were not handed over"
+    );
+    let (stop, handle) = run_notify(bus.clone(), store.clone());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while stored(&t.work_stream()).await > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a copy was never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+
+    // A terminal routing stays as it ended: no revival, no second alert.
+    let notifier = runner(&store, "notify-again", routing_handlers());
+    let (stop_runner, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(notifier.run(async move {
+        let _ = stopped.await;
+    }));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop_runner.send(()).unwrap();
+    running.await.unwrap();
+    for (before, event) in [(&dead, &failed), (&lapsed, &abandoned)] {
+        let after = store.get_work(route_job_id(event)).await.unwrap().unwrap();
+        assert_eq!(after.state, WorkState::Failed, "revived: {after:?}");
+        assert_eq!(
+            after.attempts, before.attempts,
+            "attempted again: {after:?}"
+        );
+        assert_eq!(
+            after.generation, before.generation,
+            "claimed again: {after:?}"
+        );
+    }
+    assert_eq!(
+        count_kind(&store, sid_core::models::EVENT_RELAY_KIND).await,
+        alerts,
+        "a second alert was owed"
+    );
+    drop_topology(&t).await;
+    drop_schema(&schema).await;
+}
+
 /// The service starts with its database and the configured channels.
 #[tokio::test]
 async fn test_notify_server_init() {
