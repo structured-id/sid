@@ -51,6 +51,19 @@ use crate::init::CeComponents;
 #[cfg(feature = "http")]
 pub mod browser_route;
 
+/// What a host serving its own services beside SID's gives the access
+/// guard: their schemas' encoded descriptor sets, and the verifier of a
+/// service's own tokens for each API that admits them, by the gRPC service
+/// serving it.
+#[derive(Default)]
+pub struct HostServices<'a> {
+    pub schemas: &'a [&'a [u8]],
+    pub service_tokens: Vec<(
+        &'static str,
+        std::sync::Arc<sid_authn::resource_token::ResourceTokenVerifier>,
+    )>,
+}
+
 /// The services one server exposes: routed and reported on the gRPC health
 /// service together, each behind the access guard of the rules its schema
 /// declares.
@@ -68,10 +81,9 @@ pub struct CeServices {
 
 impl CeServices {
     /// Every CE service over `c`, with the SCIM outbound worker when targets
-    /// are configured. `schemas` are the encoded descriptor sets of the
-    /// host's own services, whose access rules the guard enforces beside
-    /// SID's.
-    pub async fn new(c: &CeComponents, schemas: &[&[u8]]) -> anyhow::Result<Self> {
+    /// are configured, and the guard enforcing also the access rules of the
+    /// host's own services `host` names.
+    pub async fn new(c: &CeComponents, host: HostServices<'_>) -> anyhow::Result<Self> {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(sid_proto::FILE_DESCRIPTOR_SET)
             .build_v1()?;
@@ -84,7 +96,7 @@ impl CeServices {
         let mut rules =
             sid_infra::authn::access::AccessRules::from_descriptors(sid_proto::FILE_DESCRIPTOR_SET)
                 .map_err(|e| anyhow::anyhow!("SID's access rules: {e}"))?;
-        for schema in schemas {
+        for schema in host.schemas {
             rules
                 .add(schema)
                 .map_err(|e| anyhow::anyhow!("the host's access rules: {e}"))?;
@@ -107,6 +119,9 @@ impl CeServices {
                 <EnrollmentServiceServer<crate::grpc::enrollment_service::EnrollmentServiceImpl> as NamedService>::NAME,
                 tokens,
             );
+        }
+        for (service, tokens) in host.service_tokens {
+            access = access.with_service_tokens(service, tokens);
         }
 
         let mut services = Self {
