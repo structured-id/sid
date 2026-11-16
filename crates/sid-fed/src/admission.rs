@@ -105,27 +105,17 @@ impl Admission {
     }
 
     /// The statement's bytes, as they are signed. One statement has one
-    /// spelling: [`Admission::read`] accepts only these bytes for it.
+    /// spelling: [`Admission::read`] accepts only these bytes for it. Its
+    /// members stand in the order of their names, and are inserted in that
+    /// order: serde_json's map keeps insertion order when another crate of
+    /// the build turns on its `preserve_order` feature and sorts otherwise,
+    /// so this order is the one both give, and a signer and a verifier
+    /// built apart spell one statement alike.
     pub fn payload(&self) -> Vec<u8> {
         let mut statement = Map::new();
         let mut put = |name: &str, value: Value| {
             statement.insert(name.to_owned(), value);
         };
-        put("type", json!(STATEMENT_TYPE));
-        put("version", json!(1));
-        put("purpose", json!(LOGIN_ADMISSION));
-        put("recipient_org", json!(self.recipient_org.to_string()));
-        put("site", json!(self.site.to_string()));
-        put("mount", json!(self.mount.as_str()));
-        put("revision", json!(self.revision));
-        put(
-            "allow_personal_profiles",
-            json!(self.allow_personal_profiles),
-        );
-        put(
-            "allow_foreign_corporate_profiles",
-            json!(self.allow_foreign_corporate_profiles),
-        );
         put(
             "admitted_sources",
             Value::Array(
@@ -135,8 +125,23 @@ impl Admission {
                     .collect(),
             ),
         );
-        put("not_before", json!(self.not_before));
+        put(
+            "allow_foreign_corporate_profiles",
+            json!(self.allow_foreign_corporate_profiles),
+        );
+        put(
+            "allow_personal_profiles",
+            json!(self.allow_personal_profiles),
+        );
+        put("mount", json!(self.mount.as_str()));
         put("not_after", json!(self.not_after));
+        put("not_before", json!(self.not_before));
+        put("purpose", json!(LOGIN_ADMISSION));
+        put("recipient_org", json!(self.recipient_org.to_string()));
+        put("revision", json!(self.revision));
+        put("site", json!(self.site.to_string()));
+        put("type", json!(STATEMENT_TYPE));
+        put("version", json!(1));
         // Certificates in `x5c` are base64, not base64url (RFC 7515 §4.1.6).
         put(
             "x5c",
