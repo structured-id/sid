@@ -17,6 +17,8 @@ use sid_plugin::storage::StorageBackend;
 
 /// Scopes the account API understands, as its methods declare them: reading
 /// the user's own account and changing it. Its access grants exactly these.
+/// The integration is registered with them once; a store registered with
+/// another set is not this schema's and is recreated, never converted.
 pub const ACCOUNT_SCOPES: [&str; 2] = ["account.read", "account.write"];
 
 /// Scopes the account web client may request: sign-in (OIDC Core 1.0 §3.1.2.1)
