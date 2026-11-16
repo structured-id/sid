@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AccessRule, AccessRules, Permission};
+use super::{AccessRule, AccessRules, CredentialKind, Permission};
 
 /// A product's own description of what it brings, against its methods, each
 /// named by its gRPC path `/package.Service/Method`.
@@ -148,7 +148,7 @@ impl Seed {
         for role in &self.roles {
             let mut permissions: BTreeSet<String> = role.permissions.iter().cloned().collect();
             for method in &role.methods {
-                let (_, permission) =
+                let (_, _, permission) =
                     protected(rules, method).map_err(|why| format!("role {}: {why}", role.key))?;
                 let permission = permission.ok_or_else(|| {
                     format!(
@@ -171,9 +171,13 @@ impl Seed {
             }
             let mut scopes = BTreeSet::new();
             for method in &requirement.methods {
-                let (declared, _) = protected(rules, method)
+                let (kinds, declared, _) = protected(rules, method)
                     .map_err(|why| format!("requirement {}: {why}", requirement.key))?;
-                if declared.is_empty() {
+                // An integration calls with a token: a method only the
+                // caller's own session reaches is none of its, whatever
+                // scopes it declares.
+                let by_token = kinds & !CredentialKind::OwnSession.bit() != 0;
+                if !by_token || declared.is_empty() {
                     return Err(format!(
                         "requirement {}: {method} admits only the caller's own session",
                         requirement.key
@@ -194,17 +198,20 @@ impl Seed {
     }
 }
 
-/// The scopes and receiver permission the protected `method` declares.
+/// The admitted credential kinds (one bit per [`CredentialKind`]), scopes
+/// and receiver permission the protected `method` declares.
 fn protected<'a>(
     rules: &'a AccessRules,
     method: &str,
-) -> Result<(&'a [String], Option<&'a Permission>), String> {
+) -> Result<(u8, &'a [String], Option<&'a Permission>), String> {
     match rules.rule(method) {
         None => Err(format!("the schema declares no method {method}")),
         Some(AccessRule::Open) => Err(format!("{method} is open")),
         Some(AccessRule::Protected {
-            scopes, permission, ..
-        }) => Ok((scopes, permission.as_ref())),
+            kinds,
+            scopes,
+            permission,
+        }) => Ok((*kinds, scopes, permission.as_ref())),
     }
 }
 

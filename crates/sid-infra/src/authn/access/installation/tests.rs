@@ -216,6 +216,26 @@ fn what_the_schema_does_not_declare_fails_the_seed() {
     );
 }
 
+// A method only the caller's own session calls is no integration's, even
+// when it declares scopes: no token reaches it, whatever it carries. Bug
+// prevented: such a method was read as callable because its scope list was
+// not empty, and the requirement asked for scopes that admit nothing.
+#[test]
+fn an_own_session_method_with_scopes_is_no_requirement() {
+    let mut rules = rules();
+    let profile = "/acme.v1.Orders/MyProfile";
+    rules.insert(
+        profile,
+        AccessRule::protected(&[CredentialKind::OwnSession], &["profile.read"], None),
+    );
+    let why = seed(serde_json::json!({
+        "requirements": [{"key": "q", "resource": "orders", "methods": [profile]}]
+    }))
+    .resolve(&rules)
+    .expect_err("refused");
+    assert!(why.contains("only the caller's own session"), "{why}");
+}
+
 // A resource whose services declare no scope offers nothing to request.
 #[test]
 fn a_resource_without_scopes_fails_the_seed() {
