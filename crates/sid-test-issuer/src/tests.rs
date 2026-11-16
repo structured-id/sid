@@ -104,6 +104,39 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
         .unwrap();
     std::fs::remove_file(&caller_secret).ok();
 
+    // The same machine's token as the issuer signs it directly is admitted
+    // alike, without the capability refused, and once its credential is
+    // revoked refused as no longer current.
+    let bearer = |token: &str| {
+        let mut headers = tonic::codegen::http::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        headers
+    };
+    let own = issuer
+        .service_token(&caller, RESOURCE, &["ops.org"], None)
+        .await;
+    assert_eq!(own.subject, caller.id.to_string());
+    assert_ne!(
+        own.subject, caller.client_id,
+        "a machine's subject is not its client id"
+    );
+    receiver
+        .admit(&post, PATH, &bearer(&own.token), &rule, "ops.org.read")
+        .await
+        .expect("a service's own token within its capability");
+    let narrow = issuer.service_token(&caller, RESOURCE, &[], None).await;
+    let refused = receiver
+        .admit(&post, PATH, &bearer(&narrow.token), &rule, "ops.org.read")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    issuer.revoke_machine(&caller).await;
+    let revoked = receiver
+        .admit(&post, PATH, &bearer(&own.token), &rule, "ops.org.read")
+        .await
+        .unwrap_err();
+    assert_eq!(revoked.code(), tonic::Code::Unauthenticated, "{revoked:?}");
+
     issuer.stop().await;
     let unavailable = receiver
         .admit(&post, PATH, &headers, &rule, "ops.org.read")
