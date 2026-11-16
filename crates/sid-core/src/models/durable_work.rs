@@ -208,20 +208,15 @@ pub struct WorkSnapshot {
 
 impl WorkSnapshot {
     /// The record as the receiving store keeps it. A claim does not travel
-    /// (its worker belongs to the other store): claimed work is due again,
-    /// or failed when that claim was its last attempt, as an abandoned claim
-    /// ends in the store it came from.
+    /// (its worker belongs to the other store): claimed work is due again
+    /// with the attempts it used. Work whose claim was its last attempt is
+    /// then claimed once more beyond its maximum and ended by its worker with
+    /// its dead-letter alert, as an abandoned last attempt is in the store it
+    /// came from.
     pub fn at_rest(&self) -> WorkRecord {
         let mut record = self.record.clone();
         if record.state == WorkState::Claimed {
-            if record.attempts >= record.max_attempts {
-                record.state = WorkState::Failed;
-                record
-                    .last_error
-                    .get_or_insert_with(|| "lease expired on the last attempt".into());
-            } else {
-                record.state = WorkState::Pending;
-            }
+            record.state = WorkState::Pending;
         }
         record
     }

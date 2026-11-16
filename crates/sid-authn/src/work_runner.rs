@@ -292,6 +292,9 @@ async fn commit_completions(
     }
 }
 
+/// Why work whose last attempt was abandoned ended.
+pub const ABANDONED_LAST_ATTEMPT: &str = "lease expired on the last attempt";
+
 /// Run one attempt and record its outcome.
 async fn attempt(
     storage: &dyn WorkStore,
@@ -299,6 +302,9 @@ async fn attempt(
     handler: &dyn WorkHandler,
     work: &ClaimedWork,
 ) -> Settled {
+    if work.attempt > work.max_attempts {
+        return abandoned(storage, handler, work).await;
+    }
     let (error, ambiguous, retry) = match handler.handle(work).await {
         WorkOutcome::Done(result) => {
             let recorded = complete(completer, work, result, Vec::new()).await;
@@ -337,6 +343,33 @@ async fn attempt(
         work,
         storage.fail_work(work.id, work.generation, &failure).await,
         settled,
+    )
+}
+
+/// End `work`, handed out past its last attempt because that attempt was
+/// abandoned (its worker gone with the lease): it is not run again, and its
+/// failure commits with the kind's dead-letter alert, as every failure that
+/// ends work does. The abandoned attempt may have had its effect, so the
+/// failure is recorded ambiguous; the alert names the last real attempt.
+async fn abandoned(
+    storage: &dyn WorkStore,
+    handler: &dyn WorkHandler,
+    work: &ClaimedWork,
+) -> Settled {
+    let last = ClaimedWork {
+        attempt: work.max_attempts,
+        ..work.clone()
+    };
+    let failure = WorkFailure {
+        on_dead: handler.on_dead(&last, ABANDONED_LAST_ATTEMPT),
+        error: ABANDONED_LAST_ATTEMPT.into(),
+        ambiguous: true,
+        retry_at: None,
+    };
+    report(
+        work,
+        storage.fail_work(work.id, work.generation, &failure).await,
+        Settled::Failed,
     )
 }
 

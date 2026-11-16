@@ -93,7 +93,6 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
     let kinds: Vec<&str> = kinds.iter().map(WorkKind::as_str).collect();
     for (name, sql, index) in [
         ("expire", EXPIRE_SQL, "idx_durable_work_expiry"),
-        ("abandoned", ABANDONED_SQL, "idx_durable_work_lease"),
         ("due", CLAIM_SQL, "idx_durable_work_due"),
     ] {
         let plan = plan(&pool, sql, &kinds).await;
@@ -103,19 +102,18 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
     let claim = plan(&pool, CLAIM_SQL, &kinds).await;
     assert!(claim.contains("idx_durable_work_lease"), "{claim}");
     let sweep = plan(&pool, SWEEP_DUE_SQL, &kinds).await;
-    for index in ["idx_durable_work_expiry", "idx_durable_work_lease"] {
-        assert!(sweep.contains(index), "{sweep}");
-    }
+    assert!(sweep.contains("idx_durable_work_expiry"), "{sweep}");
     assert!(!sweep.contains("Seq Scan on durable_work"), "{sweep}");
 }
 
-/// The claim statement itself never hands out work past its last attempt or
-/// past its validity: such work can lapse after the sweeps ran and before
-/// the claim, which runs as its own statement with a later clock. It once
-/// relied on the sweeps, and so ran a last attempt again and claimed
-/// expired work.
+/// The claim statement itself never hands out work past its validity: such
+/// work can lapse after the sweep ran and before the claim, which runs as
+/// its own statement with a later clock (it once relied on the sweep, and
+/// claimed expired work). A lapsed last attempt is handed out beyond its
+/// maximum, never as an attempt to run, for its worker to end it with its
+/// dead-letter alert.
 #[tokio::test]
-async fn the_claim_skips_exhausted_and_expired_work_itself() {
+async fn the_claim_skips_expired_work_and_marks_an_exhausted_one() {
     let pool = pool().await;
     let kind = fresh_kind();
     let rows = [
@@ -150,9 +148,23 @@ async fn the_claim_skips_exhausted_and_expired_work_itself() {
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(claimed.len(), 1, "exhausted or expired work was claimed");
-    let attempts: i32 = claimed[0].try_get("attempts").unwrap();
-    assert_eq!(attempts, 2);
+    assert_eq!(
+        claimed.len(),
+        2,
+        "expired work was claimed, or other work not"
+    );
+    let mut handed: Vec<(i32, i32)> = claimed
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("attempts").unwrap(),
+                row.try_get("max_attempts").unwrap(),
+            )
+        })
+        .collect();
+    handed.sort_unstable();
+    // The exhausted one beyond its maximum; the other on its next attempt.
+    assert_eq!(handed, vec![(2, 1), (2, 3)]);
 }
 
 /// A host's own state change and the work it owes commit together through

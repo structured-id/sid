@@ -24,22 +24,14 @@ const EXPIRE_SQL: &str = "UPDATE durable_work SET state = 'expired', lease_owner
        AND state IN ('pending', 'claimed')
        AND expires_at IS NOT NULL AND expires_at <= ?";
 
-/// A claim's sweep of work abandoned on its last attempt, through the lease
-/// index. SQLite takes a partial index only for a query naming its
-/// condition.
-const ABANDONED_SQL: &str = "UPDATE durable_work SET state = 'failed', lease_owner = NULL,
-        lease_until = NULL, updated_at = ?,
-        last_error = COALESCE(last_error, 'lease expired on the last attempt')
-     WHERE kind IN (SELECT value FROM json_each(?))
-       AND state = 'claimed' AND lease_until <= ?
-       AND attempts >= max_attempts";
-
 /// One kind's first due pending items, read in order from the due index.
 const DUE_SQL: &str = "SELECT id, not_before FROM durable_work
      WHERE kind = ? AND state = 'pending' AND not_before <= ?
      ORDER BY not_before LIMIT ?";
 
 /// One kind's first claimed items whose lease ran out, from the lease index.
+/// A lapsed last attempt is among them: claimed beyond its maximum, its
+/// worker ends it with its dead-letter alert.
 const LAPSED_SQL: &str = "SELECT id, not_before FROM durable_work
      WHERE kind = ? AND state = 'claimed' AND lease_until <= ?
      ORDER BY lease_until LIMIT ?";
@@ -146,15 +138,6 @@ impl WorkStore for SqliteBackend {
 
         // Past its validity: expired, never attempted again.
         sqlx::query(EXPIRE_SQL)
-            .bind(&now_s)
-            .bind(&kinds_json)
-            .bind(&now_s)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-
-        // Abandoned by a worker on its last attempt: failed.
-        sqlx::query(ABANDONED_SQL)
             .bind(&now_s)
             .bind(&kinds_json)
             .bind(&now_s)

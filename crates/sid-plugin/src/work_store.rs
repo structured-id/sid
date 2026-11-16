@@ -23,8 +23,12 @@ pub trait WorkStore: Send + Sync {
 
     /// Claim up to `limit` due work of `kinds` for `worker`, leased for
     /// `lease`. Work whose lease ran out is claimable again, with a new
-    /// generation; work past its expiry is recorded expired and not returned;
-    /// abandoned work with no attempts left is recorded failed.
+    /// generation; work past its expiry is recorded expired and not returned.
+    /// Work whose last attempt was abandoned (or that arrived on it by
+    /// import) is claimed once more with an attempt beyond its maximum, and
+    /// is never run again: the claim lets the worker end it with its kind's
+    /// dead-letter alert through [`Self::fail_work`], which the store cannot
+    /// compose. A store never ends such work by itself.
     async fn claim_work(
         &self,
         kinds: &[WorkKind],

@@ -489,32 +489,74 @@ pub async fn expired_and_future_are_not_claimed(store: &dyn WorkStore) {
     );
 }
 
-/// Work abandoned on its last attempt is recorded failed, not claimed again.
+/// Work abandoned on its last attempt is never ended by the store alone,
+/// which would lose its dead-letter alert: it is claimed once more, beyond
+/// its maximum, and its worker's failure ends it with the alert. The first
+/// claim's late outcome is refused, and the ended work is not claimed again.
 pub async fn abandoned_last_attempt_fails(store: &dyn WorkStore) {
     let kind = unique_kind("abandoned");
+    let alert_kind = unique_kind("abandoned_alert");
     let mut item = work(&kind);
     item.max_attempts = 1;
     store.enqueue_work(&item).await.unwrap();
-    assert_eq!(
-        store
-            .claim_work(from_ref(&kind), "w1", 10, SHORT_LEASE)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    let first = store
+        .claim_work(from_ref(&kind), "w1", 10, SHORT_LEASE)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
 
     tokio::time::sleep(PAST_SHORT_LEASE).await;
+    let disposal = store
+        .claim_work(from_ref(&kind), "w2", 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(disposal.len(), 1, "the abandoned last attempt was dropped");
+    assert_eq!(disposal[0].id, item.id);
+    assert!(
+        disposal[0].attempt > disposal[0].max_attempts,
+        "an abandoned last attempt was handed out as one to run: {:?}",
+        disposal[0]
+    );
+    assert_eq!(
+        store.get_work(item.id).await.unwrap().unwrap().state,
+        WorkState::Claimed,
+        "the store ended the work without its alert"
+    );
+    assert!(
+        !store
+            .complete_work(item.id, first[0].generation, Some("late"))
+            .await
+            .unwrap(),
+        "the abandoned claim's outcome was recorded"
+    );
+
+    let alert = work(&alert_kind);
+    let failure = WorkFailure {
+        error: "lease expired on the last attempt".into(),
+        ambiguous: true,
+        retry_at: None,
+        on_dead: Some(alert.clone()),
+    };
     assert!(
         store
-            .claim_work(&[kind], "w2", 10, LEASE)
+            .fail_work(item.id, disposal[0].generation, &failure)
+            .await
+            .unwrap()
+    );
+    let record = store.get_work(item.id).await.unwrap().unwrap();
+    assert_eq!(record.state, WorkState::Failed);
+    assert!(record.ambiguous);
+    assert!(
+        store.get_work(alert.id).await.unwrap().is_some(),
+        "the abandoned work's failure lost its alert"
+    );
+    assert!(
+        store
+            .claim_work(&[kind], "w3", 10, LEASE)
             .await
             .unwrap()
             .is_empty()
     );
-    let record = store.get_work(item.id).await.unwrap().unwrap();
-    assert_eq!(record.state, WorkState::Failed);
-    assert!(record.last_error.is_some());
 }
 
 /// Concurrent workers never receive the same work: every item goes to
@@ -558,7 +600,7 @@ pub async fn a_kind_named_twice_claims_each_item_once(store: &dyn WorkStore) {
 
 /// Export carries every piece of work with its payload and outcome; import
 /// stores it as it was, except that a claim does not travel (claimed work is
-/// due again, or failed if that claim was its last attempt), and importing
+/// due again with the attempts it used), and importing
 /// the same work twice stores it once.
 pub async fn export_import_round_trip(store: &dyn WorkStore) {
     let kind = unique_kind("export");
