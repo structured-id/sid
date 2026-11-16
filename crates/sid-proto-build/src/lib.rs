@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! What a crate's build reads from the methods of the protos it compiles:
-//! each method's `(sid.v1.common.retry)` rule checked, and a typed binding
-//! per keyed method written for the crate to include.
+//! each method's `(sid.v1.common.retry)` and `(sid.v1.common.access)` rules
+//! checked, and a typed binding per keyed method written for the crate to
+//! include.
 //!
 //! A method that changes state (any `idempotency_level` but
 //! `NO_SIDE_EFFECTS`) declares exactly one rule: `keyed: true`, a ceremony
 //! or a natural rule with its reason; keyed and natural methods are
 //! `IDEMPOTENT`, keyed ones unary, and a method without effects declares
-//! none. The proto is the only place this is declared, so anything else
-//! fails the build. Only the services of the crate's own compile inputs are
-//! checked and bound; the files they import are another crate's.
+//! none. Every method declares its access rule: open with its reason, or
+//! protected with the credential kinds it admits and, unless only the
+//! caller's own session is admitted, the scopes they carry. The proto is the
+//! only place this is declared, so anything else fails the build. Only the
+//! services of the crate's own compile inputs are checked and bound; the
+//! files they import are another crate's.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +26,10 @@ const IDEMPOTENT: i32 = 2;
 
 /// The method option holding a method's retry rule.
 const RETRY: &str = "sid.v1.common.retry";
+/// The method option holding a method's access rule.
+const ACCESS: &str = "sid.v1.common.access";
+/// `sid.v1.common.CredentialKind.CREDENTIAL_KIND_OWN_SESSION`.
+const OWN_SESSION: i32 = 1;
 
 /// Why a crate's protos cannot be bound: every method that declares its
 /// rule wrongly, one line each.
@@ -80,6 +88,11 @@ impl KeyedBindings {
                 "the descriptors define no {RETRY}: compile sid/v1/common/operation.proto with them"
             )])
         })?;
+        let access = pool.get_extension_by_name(ACCESS).ok_or_else(|| {
+            Error(vec![format!(
+                "the descriptors define no {ACCESS}: compile sid/v1/common/access.proto with them"
+            )])
+        })?;
         let mut keyed: BTreeMap<Vec<String>, Vec<Keyed>> = BTreeMap::new();
         let mut wrong = Vec::new();
         for file in pool.files().filter(|f| files.contains(&f.name())) {
@@ -93,6 +106,9 @@ impl KeyedBindings {
                         },
                         Ok(_) => {}
                         Err(why) => wrong.push(format!("{rpc}: {why}")),
+                    }
+                    if let Err(why) = access_rule(&method, &access) {
+                        wrong.push(format!("{rpc}: {why}"));
                     }
                 }
             }
@@ -299,6 +315,69 @@ impl Rule {
             Self::Ceremony => "ceremony",
             Self::Natural => "natural",
         }
+    }
+}
+
+/// Check the access rule `method` declares: an open method states why, a
+/// protected one names at least one credential kind, and a kind other than
+/// the caller's own session is admitted only with the scopes it must carry.
+fn access_rule(
+    method: &MethodDescriptor,
+    access: &prost_reflect::ExtensionDescriptor,
+) -> Result<(), String> {
+    let options = method.options();
+    if !options.has_extension(access) {
+        return Err(format!("every method declares its ({ACCESS}) rule"));
+    }
+    let declared = options.get_extension(access);
+    let Some(rule) = declared.as_message() else {
+        return Err("the access rule is a message".into());
+    };
+    match rule.fields().next() {
+        Some((field, Value::String(reason))) if field.name() == "open" => {
+            if reason.trim().is_empty() {
+                Err("an open access rule states why the method is open".into())
+            } else {
+                Ok(())
+            }
+        }
+        Some((field, Value::Message(protected))) if field.name() == "protected" => {
+            let kinds: Vec<i32> = protected
+                .get_field_by_name("credentials")
+                .and_then(|kinds| {
+                    kinds
+                        .as_list()
+                        .map(|list| list.iter().filter_map(Value::as_enum_number).collect())
+                })
+                .unwrap_or_default();
+            let scopes: Vec<String> = protected
+                .get_field_by_name("scopes")
+                .and_then(|scopes| {
+                    scopes.as_list().map(|list| {
+                        list.iter()
+                            .filter_map(|s| s.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            if kinds.is_empty() {
+                return Err("a protected method admits at least one credential kind".into());
+            }
+            if kinds.contains(&0) {
+                return Err("a protected method names no unspecified credential kind".into());
+            }
+            if scopes.iter().any(|s| s.trim().is_empty()) {
+                return Err("a scope of a protected method is not blank".into());
+            }
+            if scopes.is_empty() && kinds.iter().any(|k| *k != OWN_SESSION) {
+                return Err(
+                    "a protected method admitting more than the own session names its scopes"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+        _ => Err("the access rule is `open` or `protected`".into()),
     }
 }
 
