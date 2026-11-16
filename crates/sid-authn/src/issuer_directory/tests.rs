@@ -324,6 +324,7 @@ fn access_claims(iss: &str, aud: &str) -> AccessTokenClaims {
         jti: "jti".into(),
         cnf: None,
         act: None,
+        credential_kind: Some(crate::jwt::IssuedCredential::Delegated),
     }
 }
 

@@ -601,6 +601,7 @@ fn make_claims(roles: &str) -> ForwardAuthClaims {
         preferred_username: None,
         groups: None,
         cnf: None,
+        credential_kind: None,
     }
 }
 

@@ -579,6 +579,7 @@ async fn a_caller_without_the_administrator_role_is_refused() {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     })
     .unwrap();
     assert!(matches!(

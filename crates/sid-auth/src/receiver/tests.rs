@@ -439,6 +439,7 @@ fn admitted_call(resource: sid_core::models::ResourceId, decision: Decision) -> 
             preferred_username: None,
             groups: None,
             cnf: None,
+            credential_kind: Some(sid_authn::jwt::IssuedCredential::Delegated),
         },
         resource,
         decision,

@@ -341,6 +341,7 @@ fn claims(client_id: &str, sub: &str, sid: &str) -> AccessTokenClaims {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: Some(crate::jwt::IssuedCredential::Client),
     }
 }
 

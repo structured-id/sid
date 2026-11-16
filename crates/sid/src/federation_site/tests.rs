@@ -166,6 +166,7 @@ async fn only_this_sites_own_enrollment_is_held() {
         jti: Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     })
     .unwrap();
     assert!(matches!(

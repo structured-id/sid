@@ -34,6 +34,8 @@ fn claims(client_id: Option<&str>, sub: &str, sid: &str) -> AccessTokenClaims {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        // The current state is read from the store, never from the kind.
+        credential_kind: None,
     }
 }
 

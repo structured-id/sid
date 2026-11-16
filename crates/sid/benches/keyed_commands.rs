@@ -72,6 +72,7 @@ fn administrator() -> Caller {
         jti: uuid::Uuid::now_v7().to_string(),
         cnf: None,
         act: None,
+        credential_kind: None,
     })
     .expect("administrator claims")
 }
