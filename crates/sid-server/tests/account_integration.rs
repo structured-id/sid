@@ -106,7 +106,8 @@ async fn the_key_holder_gets_its_connection() {
     assert_eq!(connection.issuer, svc.issuer.canonical_url);
     assert_eq!(connection.client_id, integration.client.client_id);
     assert_eq!(connection.resource, "https://sid.example.com/account");
-    assert!(connection.scopes.contains(&"account".to_owned()));
+    assert!(connection.scopes.contains(&"account.read".to_owned()));
+    assert!(connection.scopes.contains(&"account.write".to_owned()));
     assert!(connection.scopes.contains(&"openid".to_owned()));
     assert_eq!(
         connection.redirect_uri,
@@ -314,7 +315,7 @@ async fn the_bff_redeems_a_code_for_the_account_api() {
     assert_eq!(claims["client_id"], connection.client_id);
     assert_eq!(claims["iss"], connection.issuer);
     assert!(claims.get("pid").is_none(), "no source pid: {claims}");
-    assert_eq!(claims["scope"], "account");
+    assert_eq!(claims["scope"], "account.read account.write");
     assert!(tokens.refresh_token.is_some());
 }
 
@@ -573,4 +574,248 @@ async fn an_unavailable_integration_serves_nothing() {
     .await
     .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+}
+
+/// An account API token for `profile` the BFF obtained with `scopes` only.
+async fn scoped_account_token(
+    svc: &TestServices,
+    profile: &sid_core::models::Profile,
+    jti: &str,
+    scopes: &[&str],
+) -> String {
+    let mut connection = connect(
+        &service(svc),
+        proof(ED_PRIVATE_PEM, KID, &audience(), &format!("p-{jti}")),
+    )
+    .await
+    .unwrap();
+    connection.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
+    let code = authorize_account(svc, &connection, profile).await;
+    let assertion = client_assertion(
+        ED_PRIVATE_PEM,
+        &connection.client_id,
+        &format!("{}/oauth2/token", connection.issuer),
+        jti,
+    );
+    redeem_account(svc, &connection, code, Some(assertion))
+        .await
+        .unwrap()
+        .access_token
+}
+
+/// The identity service as a server serves it: behind the access guard of
+/// the rules the schema declares.
+fn guarded_identity(
+    svc: &TestServices,
+) -> sid_infra::authn::access::Guarded<
+    sid_proto::sid::v1::identity_service_server::IdentityServiceServer<
+        sid_server::grpc::identity_service::IdentityServiceImpl,
+    >,
+> {
+    use sid_infra::authn::access::{Access, AccessRules};
+    let rules = AccessRules::from_descriptors(sid_proto::FILE_DESCRIPTOR_SET).unwrap();
+    let access = std::sync::Arc::new(Access::new(
+        std::sync::Arc::new(rules),
+        svc.jwt.clone(),
+        svc.revocation_cache.clone(),
+        svc.storage.clone(),
+        svc.revocation_cache.clone(),
+    ));
+    access
+        .guard(
+            sid_proto::sid::v1::identity_service_server::IdentityServiceServer::from_arc(
+                svc.identity.clone(),
+            ),
+        )
+        .unwrap()
+}
+
+/// The tokens the guard tests present, for `profile`: a read-only and a
+/// read-write account API token, an impersonation token carrying both
+/// scopes, and an administrator's own session.
+struct Tokens {
+    read: String,
+    write: String,
+    impersonation: String,
+    administrator: String,
+}
+
+async fn tokens(svc: &TestServices, profile: &sid_core::models::Profile) -> Tokens {
+    let session = common::authenticated_session(profile, sid_core::models::AuthLevel::Basic, 0);
+    svc.storage
+        .create_session(
+            &session,
+            sid_core::models::AuditEntry::system("test", "session").into(),
+        )
+        .await
+        .unwrap();
+    let impersonation = svc
+        .jwt
+        .issue_impersonation_token(
+            &profile.id.to_string(),
+            &session,
+            "machine-client",
+            &["account.read".into(), "account.write".into()],
+        )
+        .unwrap();
+    Tokens {
+        read: scoped_account_token(svc, profile, "read", &["openid", "account.read"]).await,
+        write: scoped_account_token(
+            svc,
+            profile,
+            "write",
+            &["openid", "account.read", "account.write"],
+        )
+        .await,
+        impersonation,
+        administrator: common::issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate()),
+    }
+}
+
+/// The guard enforces each method's declared rule before the service runs
+/// (oauth-resource-model.md, SID API scopes and method admission): a
+/// read-only account token reads the account but is refused a change, and
+/// the change is not made; a read-write one is admitted to the change; an
+/// account token is refused administration whatever its scopes, while an
+/// administrator's own session is admitted; an impersonation token reads but
+/// is refused an interactive-only change even holding the write scope; no
+/// token is unauthenticated.
+#[tokio::test]
+async fn the_guard_enforces_each_methods_declared_rule() {
+    use sid_proto::sid::v1::identity_service_client::IdentityServiceClient;
+    use sid_proto::sid::v1::{
+        GetCurrentProfileRequest, ListProfilesRequest, RevokeSessionRequest, UpdateProfileRequest,
+    };
+    let profile = common::test_profile();
+    let svc = provisioned_over(
+        MockStorage::new()
+            .with_system_project()
+            .with_profile(profile.clone()),
+    )
+    .await;
+    let t = tokens(&svc, &profile).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(guarded_identity(&svc))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let mut client = IdentityServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let id: sid_ids_proto::ProfileId = profile.id.into();
+    let rename = |token: &str| {
+        bearer(
+            UpdateProfileRequest {
+                id: Some(id.clone()),
+                given_name: Some("Renamed".into()),
+                ..Default::default()
+            },
+            token,
+        )
+    };
+    let denied = |code: tonic::Code| {
+        code == tonic::Code::PermissionDenied || code == tonic::Code::Unauthenticated
+    };
+
+    client
+        .get_current_profile(bearer(GetCurrentProfileRequest {}, &t.read))
+        .await
+        .expect("a read-only account token reads the account");
+    let refused = client.update_profile(rename(&t.read)).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{refused:?}");
+    let stored = svc.storage.get_profile(profile.id).await.unwrap().unwrap();
+    assert_ne!(stored.given_name.as_deref(), Some("Renamed"), "no effect");
+
+    let admitted = client.update_profile(rename(&t.write)).await;
+    assert!(
+        admitted
+            .as_ref()
+            .map_or_else(|e| !denied(e.code()), |_| true),
+        "a read-write account token is admitted to the change: {admitted:?}"
+    );
+
+    for (who, token) in [("read", &t.read), ("write", &t.write)] {
+        let refused = client
+            .list_profiles(bearer(ListProfilesRequest::default(), token))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{who}");
+    }
+    client
+        .list_profiles(bearer(ListProfilesRequest::default(), &t.administrator))
+        .await
+        .expect("an administrator's own session administers");
+
+    client
+        .get_current_profile(bearer(GetCurrentProfileRequest {}, &t.impersonation))
+        .await
+        .expect("an impersonation token reads the account");
+    let refused = client
+        .revoke_session(bearer(RevokeSessionRequest::default(), &t.impersonation))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{refused:?}");
+
+    let refused = client
+        .get_current_profile(Request::new(GetCurrentProfileRequest {}))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+}
+
+/// The HTTP form reaches the service through the same guard and refuses
+/// alike: the read-only account token reads `/v1/identity/me` and is
+/// refused the change with 403, before the service runs.
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn the_http_form_is_guarded_alike() {
+    let profile = common::test_profile();
+    let svc = provisioned_over(
+        MockStorage::new()
+            .with_system_project()
+            .with_profile(profile.clone()),
+    )
+    .await;
+    let t = tokens(&svc, &profile).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, None)
+        .unwrap()
+        .expect("a bind address gives a transcoder");
+    let routes = tonic::service::Routes::new(guarded_identity(&svc));
+    tokio::spawn(async move {
+        sid_infra::http::serve_on(
+            &proxy,
+            routes,
+            listener,
+            std::future::pending(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+    });
+    let http = common::crypto::with_tls(sid_plugin::client_builder)
+        .build()
+        .unwrap();
+
+    let me = http
+        .get(format!("http://{addr}/v1/identity/me"))
+        .bearer_auth(&t.read)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+    let rename = http
+        .patch(format!("http://{addr}/v1/identity/profiles/{}", profile.id))
+        .bearer_auth(&t.read)
+        .json(&serde_json::json!({"givenName": "Renamed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rename.status(), 403);
+    let stored = svc.storage.get_profile(profile.id).await.unwrap().unwrap();
+    assert_ne!(stored.given_name.as_deref(), Some("Renamed"), "no effect");
 }

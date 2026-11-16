@@ -98,7 +98,10 @@ async fn the_integration_is_provisioned_in_the_registry() {
         integration.resource.indicator.as_str(),
         "https://sid.example.com/account"
     );
-    assert_eq!(integration.access.as_ref().unwrap().scopes, ["account"]);
+    assert_eq!(
+        integration.access.as_ref().unwrap().scopes,
+        ["account.read", "account.write"]
+    );
     assert!(integration.is_ready());
 }
 

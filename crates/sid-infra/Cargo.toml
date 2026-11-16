@@ -89,6 +89,7 @@ authn-grpc = [
     "dep:http",
     "dep:tower",
     "dep:futures",
+    "dep:prost-reflect",
     "dep:secrecy",
     "dep:chrono",
     "dep:url",

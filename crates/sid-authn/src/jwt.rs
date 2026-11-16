@@ -220,7 +220,7 @@ pub struct CnfClaim {
 }
 
 /// Access token claims (JWT payload).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessTokenClaims {
     /// Subject, polymorphic: the ProfileId for the installation's own session
     /// and for its own users at its own applications, the stored BindingId

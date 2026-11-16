@@ -33,7 +33,7 @@ async fn run() -> anyhow::Result<()> {
     info!("Starting StructuredID v{}", env!("CARGO_PKG_VERSION"));
 
     let c = init_ce().await?;
-    let services = CeServices::new(&c).await?;
+    let services = CeServices::new(&c, &[]).await?;
     serve(c, services, shutdown::signal()).await?;
 
     info!("Server shutdown complete");

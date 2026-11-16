@@ -53,13 +53,18 @@ pub fn bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
     Ok(token)
 }
 
-/// Verify the bearer access token of `request` (see [`authenticate_token`]).
+/// Verify the bearer access token of `request` (see [`authenticate_token`]);
+/// a token the access guard already verified for this request is taken as
+/// it verified it.
 #[allow(clippy::result_large_err)]
 pub async fn verify_request<T>(
     request: &Request<T>,
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
 ) -> Result<Verified, Status> {
+    if let Some(verified) = super::access::verified(request.extensions()) {
+        return Ok(verified.clone());
+    }
     authenticate_token(bearer_token(request)?, verifier, current)
         .await
         .or_status()

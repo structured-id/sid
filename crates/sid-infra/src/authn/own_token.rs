@@ -42,7 +42,8 @@ pub async fn authenticate_machine<T>(
 }
 
 /// The service `request`'s bearer token authenticates at the API `tokens`
-/// verifies.
+/// verifies; a service the access guard already authenticated for this
+/// request is taken as it authenticated it.
 #[allow(clippy::result_large_err)]
 pub async fn authenticate_service<T>(
     request: &Request<T>,
@@ -50,6 +51,9 @@ pub async fn authenticate_service<T>(
     tokens: &ResourceTokenVerifier,
     revocation: &RevocationCache,
 ) -> Result<AuthenticatedService, Status> {
+    if let Some(service) = super::access::verified_service(request.extensions()) {
+        return Ok(service.clone());
+    }
     service_auth::authenticate_service(bearer_token(request)?, storage, tokens, revocation)
         .await
         .or_status()
