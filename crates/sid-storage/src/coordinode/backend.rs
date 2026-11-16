@@ -74,6 +74,13 @@ impl ClientResourceRegistry for CoordinodeBackend {
     ) -> Result<Option<ResourceAccess>> {
         CoordinodeBackend::resource_access(self, client_id, resource).await
     }
+
+    async fn get_application(
+        &self,
+        id: sid_core::models::ApplicationId,
+    ) -> Result<Option<sid_core::models::Application>> {
+        CoordinodeBackend::get_application(self, id).await
+    }
 }
 
 #[async_trait]
@@ -928,13 +935,6 @@ impl StorageBackend for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<()> {
         CoordinodeBackend::create_application(self, app, client, resource, ctx).await
-    }
-
-    async fn get_application(
-        &self,
-        id: sid_core::models::ApplicationId,
-    ) -> Result<Option<sid_core::models::Application>> {
-        CoordinodeBackend::get_application(self, id).await
     }
 
     async fn system_application(

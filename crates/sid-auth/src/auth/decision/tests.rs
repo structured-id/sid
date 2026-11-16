@@ -173,6 +173,8 @@ pub(crate) fn access_token(
             "exp": now + exp_offset, "iat": now, "auth_time": now,
             "acr": "urn:sid:acr:basic", "scope": "orders.read",
             "roles": "admin reader", "sid": "sess_app", "jti": "tok_app",
+            // Obtained by the application for its user, as the issuer states.
+            "credential_kind": "delegated",
         }),
     )
 }

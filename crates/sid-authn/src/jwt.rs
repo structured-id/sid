@@ -290,6 +290,10 @@ pub enum IssuedCredential {
     /// Obtained by a client for itself (client credentials, RFC 6749 §4.4):
     /// a machine user, an OAuth client or a provisioning connector.
     Client,
+    /// Obtained for a user for the account API the installation's account
+    /// integration registers: the user's own account in an application
+    /// session, without administrator authority.
+    AccountApi,
 }
 
 /// Claims SID sets on access tokens (RFC 7519 §4.1 registered claims, OIDC and
@@ -330,7 +334,28 @@ pub enum TokenAudience<'a> {
     Resource {
         indicator: &'a str,
         client_id: &'a str,
+        /// What the grant behind the token is, as the token states it.
+        grant: UserGrant,
     },
+}
+
+/// The grant an application obtained a user's resource token under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserGrant {
+    /// An application's ordinary grant for its user.
+    Delegated,
+    /// A grant for the account API the installation's account integration
+    /// registers.
+    AccountApi,
+}
+
+impl From<UserGrant> for IssuedCredential {
+    fn from(grant: UserGrant) -> Self {
+        match grant {
+            UserGrant::Delegated => Self::Delegated,
+            UserGrant::AccountApi => Self::AccountApi,
+        }
+    }
 }
 
 /// What a client acting for itself is issued (OAuth client credentials).
@@ -642,11 +667,12 @@ impl JwtService {
             TokenAudience::Resource {
                 indicator,
                 client_id,
+                grant,
             } => (
                 indicator.to_owned(),
                 Some(client_id.to_owned()),
                 Some(ACCESS_TOKEN_TYP),
-                Some(IssuedCredential::Delegated),
+                Some(grant.into()),
             ),
         };
 

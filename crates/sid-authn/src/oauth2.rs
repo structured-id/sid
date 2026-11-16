@@ -499,6 +499,7 @@ impl OAuth2Server {
             crate::jwt::TokenAudience::Resource {
                 indicator: target.audience().as_str(),
                 client_id: &client.client_id,
+                grant: target.grant(),
             },
             sub,
             None,

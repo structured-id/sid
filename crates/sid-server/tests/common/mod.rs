@@ -542,6 +542,7 @@ pub async fn issue_application_token_to(
             sid_authn::jwt::TokenAudience::Resource {
                 indicator: &userinfo,
                 client_id,
+                grant: sid_authn::jwt::UserGrant::Delegated,
             },
             &profile.id.to_string(),
             None,

@@ -110,10 +110,13 @@ async fn served(f: &Fixture) -> AttestationServiceClient<tonic::transport::Chann
             .await
             .unwrap(),
     );
-    let routes = tonic::service::Routes::new(sid_attestation::access::guarded(
-        AttestationServiceServer::new(service(f).await),
-        &receiver,
-    ));
+    let routes = tonic::service::Routes::new(
+        sid_attestation::access::guarded(
+            AttestationServiceServer::new(service(f).await),
+            &receiver,
+        )
+        .expect("every attestation method declares its permission"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -128,6 +131,23 @@ async fn served(f: &Fixture) -> AttestationServiceClient<tonic::transport::Chann
             .unwrap()
             .connect_lazy(),
     )
+}
+
+/// The account API's scopes the account UI obtains: reading and changing.
+const ACCOUNT_SCOPES: &[&str] = &["account.read", "account.write"];
+
+/// An account API token of `profile` granted `scopes`, as the account UI
+/// obtains it.
+async fn account_token(f: &Fixture, profile: &Profile, scopes: &[&str]) -> sid_test_issuer::Issued {
+    f.issuer
+        .token(
+            profile,
+            API,
+            sid_authn::jwt::UserGrant::AccountApi,
+            scopes,
+            None,
+        )
+        .await
 }
 
 fn with_token<T>(msg: T, token: &str) -> Request<T> {
@@ -240,7 +260,7 @@ async fn stored(f: &Fixture) -> bool {
 async fn test_every_refusal_carries_error_info() {
     use sid_serve::error_contract::{Caller, probe};
     let f = fixture().await;
-    let token = f.issuer.token(&f.owner, API, None).await.token;
+    let token = account_token(&f, &f.owner, ACCOUNT_SCOPES).await.token;
     let receiver = Arc::new(
         sid_auth::receiver::Receiver::connect("sid-attestation", &f.api)
             .await
@@ -248,10 +268,13 @@ async fn test_every_refusal_carries_error_info() {
     );
     let mut services = sid_serve::Services::new();
     services
-        .add(sid_attestation::access::guarded(
-            AttestationServiceServer::new(service(&f).await),
-            &receiver,
-        ))
+        .add(
+            sid_attestation::access::guarded(
+                AttestationServiceServer::new(service(&f).await),
+                &receiver,
+            )
+            .expect("every attestation method declares its permission"),
+        )
         .await;
     let (routes, health) = services.into_parts();
     let report = probe(
@@ -275,28 +298,71 @@ async fn test_every_refusal_carries_error_info() {
     );
 }
 
-/// Every attestation method has an action, and nothing else is served.
+/// Every attestation method declares, in the schema, an account API token
+/// (a reading one also a service's own), the read or write scope, and its
+/// action on an owned device; nothing else is served.
 #[test]
-fn test_every_method_has_an_action() {
-    use sid_attestation::access::{DEVICE_CHANGE, DEVICE_READ, PROFILE_READ, action};
-    use sid_auth::receiver::Action::OwnedObject;
+fn test_every_method_declares_its_permission() {
+    use sid_infra::authn::access::{
+        AccessRule, AccessRules, CredentialKind, Permission, PermissionTarget,
+    };
+    let rules = AccessRules::from_descriptors(sid_proto::FILE_DESCRIPTOR_SET).unwrap();
     let path = |m: &str| format!("/sid.v1.attestation.AttestationService/{m}");
-    for (method, expected) in [
-        ("GetDeviceAttestation", DEVICE_READ),
-        ("StartDeviceEnrollment", DEVICE_CHANGE),
-        ("FinishDeviceEnrollment", DEVICE_CHANGE),
-        ("RotateDeviceKey", DEVICE_CHANGE),
-        ("RevokeDeviceKey", DEVICE_CHANGE),
-        ("ListDeviceAttestations", PROFILE_READ),
+    let reading = [CredentialKind::AccountApi, CredentialKind::Client];
+    let changing = [CredentialKind::AccountApi];
+    for (method, kinds, scope, action) in [
+        (
+            "GetDeviceAttestation",
+            &reading[..],
+            "account.read",
+            "attestation.device.read",
+        ),
+        (
+            "StartDeviceEnrollment",
+            &changing[..],
+            "account.write",
+            "attestation.device.change",
+        ),
+        (
+            "FinishDeviceEnrollment",
+            &changing[..],
+            "account.write",
+            "attestation.device.change",
+        ),
+        (
+            "RotateDeviceKey",
+            &changing[..],
+            "account.write",
+            "attestation.device.change",
+        ),
+        (
+            "RevokeDeviceKey",
+            &changing[..],
+            "account.write",
+            "attestation.device.change",
+        ),
+        (
+            "ListDeviceAttestations",
+            &reading[..],
+            "account.read",
+            "attestation.profile.read",
+        ),
     ] {
         assert_eq!(
-            action(&path(method)),
-            Some(OwnedObject(expected)),
+            rules.rule(&path(method)),
+            Some(&AccessRule::protected(
+                kinds,
+                &[scope],
+                Some(Permission {
+                    action: action.into(),
+                    target: PermissionTarget::OwnedObject,
+                }),
+            )),
             "{method}"
         );
     }
-    assert_eq!(action(&path("RegisterDeviceKey")), None);
-    assert_eq!(action(&path("Anything")), None);
+    assert_eq!(rules.rule(&path("RegisterDeviceKey")), None);
+    assert_eq!(rules.rule(&path("Anything")), None);
 }
 
 /// Regression: without a token no ceremony starts and no key is bound.
@@ -320,7 +386,7 @@ async fn test_attestation_refuses_a_foreign_device() {
     let f = fixture().await;
     let mut client = served(&f).await;
     let mallory = f.issuer.profile().await;
-    let token = f.issuer.token(&mallory, API, None).await.token;
+    let token = account_token(&f, &mallory, ACCOUNT_SCOPES).await.token;
     let err = client
         .start_device_enrollment(with_token(enroll(&f.device), &token))
         .await
@@ -360,7 +426,7 @@ async fn test_attestation_refuses_a_foreign_device() {
 async fn test_the_owner_enrolls_without_claiming_hardware() {
     let f = fixture().await;
     let mut client = served(&f).await;
-    let token = f.issuer.token(&f.owner, API, None).await.token;
+    let token = account_token(&f, &f.owner, ACCOUNT_SCOPES).await.token;
     let challenge = client
         .start_device_enrollment(with_token(enroll(&f.device), &token))
         .await
@@ -402,13 +468,39 @@ async fn test_the_owner_enrolls_without_claiming_hardware() {
     );
 }
 
+/// The owner is held to the token's scope as anyone: with a token granted
+/// only reading it lists its own keys but starts no ceremony, and nothing is
+/// stored.
+#[tokio::test]
+async fn test_the_owner_is_bounded_by_the_tokens_scope() {
+    let f = fixture().await;
+    let mut client = served(&f).await;
+    let token = account_token(&f, &f.owner, &["account.read"]).await.token;
+    let err = client
+        .start_device_enrollment(with_token(enroll(&f.device), &token))
+        .await
+        .expect_err("beyond the token's scope");
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_eq!(reason(&err).as_deref(), Some("SCOPE_NOT_GRANTED"));
+    client
+        .list_device_attestations(with_token(
+            ListDeviceAttestationsRequest {
+                profile_id: Some(f.owner.id.into()),
+            },
+            &token,
+        ))
+        .await
+        .expect("reading is within the scope");
+    assert!(!stored(&f).await, "nothing stored");
+}
+
 /// A proof for another issuer than the one whose sign-in started the
 /// ceremony binds nothing.
 #[tokio::test]
 async fn test_a_proof_for_another_issuer_binds_nothing() {
     let f = fixture().await;
     let mut client = served(&f).await;
-    let token = f.issuer.token(&f.owner, API, None).await.token;
+    let token = account_token(&f, &f.owner, ACCOUNT_SCOPES).await.token;
     let challenge = client
         .start_device_enrollment(with_token(enroll(&f.device), &token))
         .await
@@ -433,11 +525,11 @@ async fn test_a_proof_for_another_issuer_binds_nothing() {
 async fn test_the_installation_administrator_reaches_any_device() {
     let f = fixture().await;
     let mut client = served(&f).await;
-    let owner_token = f.issuer.token(&f.owner, API, None).await.token;
+    let owner_token = account_token(&f, &f.owner, ACCOUNT_SCOPES).await.token;
     enrolled(&f, &mut client, &owner_token).await;
     let admin = f.issuer.profile().await;
     f.issuer.administrator(&admin).await;
-    let token = f.issuer.token(&admin, API, None).await.token;
+    let token = account_token(&f, &admin, ACCOUNT_SCOPES).await.token;
     client
         .get_device_attestation(with_token(
             GetDeviceAttestationRequest {
@@ -472,21 +564,25 @@ async fn test_the_installation_administrator_reaches_any_device() {
         .expect("an administrator revokes it");
 }
 
-/// A machine allowed every attestation action still starts no ceremony:
-/// key changes need a Profile's own sign-in. It may read.
+/// A machine allowed every attestation action and both scopes still starts
+/// no ceremony: key changes admit only an account API token, a user's
+/// sign-in. It may read; its subject is not its client id.
 #[tokio::test]
 async fn test_a_machine_with_the_actions_changes_no_key() {
     let f = fixture().await;
     let mut client = served(&f).await;
-    let machine = f.issuer.machine("ci-agent", "ci-agent-secret", API).await;
+    let machine = f
+        .issuer
+        .machine("ci-agent", "ci-agent-secret", API, ACCOUNT_SCOPES)
+        .await;
     let role = f
         .issuer
         .role(
             "attestation-all",
             &[
-                sid_attestation::access::DEVICE_READ,
-                sid_attestation::access::DEVICE_CHANGE,
-                sid_attestation::access::PROFILE_READ,
+                "attestation.device.read",
+                "attestation.device.change",
+                "attestation.profile.read",
             ],
         )
         .await;
@@ -514,6 +610,7 @@ async fn test_a_machine_with_the_actions_changes_no_key() {
         .await
         .expect_err("no sign-in");
     assert_eq!(err.code(), Code::PermissionDenied);
+    assert_eq!(reason(&err).as_deref(), Some("INSUFFICIENT_PERMISSIONS"));
     assert!(!stored(&f).await, "nothing stored");
 
     let mut call = Request::new(ListDeviceAttestationsRequest {
@@ -532,7 +629,7 @@ async fn test_a_machine_with_the_actions_changes_no_key() {
 #[tokio::test]
 async fn test_an_ended_session_binds_no_key() {
     let f = fixture().await;
-    let issued = f.issuer.token(&f.owner, API, None).await;
+    let issued = account_token(&f, &f.owner, ACCOUNT_SCOPES).await;
     f.issuer.end(&issued.session).await;
     let mut client = served(&f).await;
     let err = client
@@ -549,7 +646,7 @@ async fn test_an_ended_session_binds_no_key() {
 async fn test_without_the_issuer_nothing_is_bound() {
     let mut f = fixture().await;
     let mut client = served(&f).await;
-    let token = f.issuer.token(&f.owner, API, None).await.token;
+    let token = account_token(&f, &f.owner, ACCOUNT_SCOPES).await.token;
     f.issuer.stop().await;
     let err = client
         .start_device_enrollment(with_token(enroll(&f.device), &token))

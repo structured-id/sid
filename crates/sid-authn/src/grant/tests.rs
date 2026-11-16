@@ -317,7 +317,7 @@ fn target(client: &OAuth2Client) -> Target {
         scopes: vec!["account".into()],
         created_at: Utc::now(),
     };
-    Target::from_parts(resource, access)
+    Target::from_parts(resource, access, crate::jwt::UserGrant::Delegated)
 }
 
 /// A host of [`Account`]s answering one request.

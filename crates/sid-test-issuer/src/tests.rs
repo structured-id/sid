@@ -34,26 +34,46 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     );
     let reader = issuer.role("org-reader", &["ops.org.read"]).await;
     issuer.grant(&operator, &reader, RESOURCE).await;
-    let token = issuer.token(&operator, RESOURCE, None).await.token;
+    let token = issuer
+        .token(
+            &operator,
+            RESOURCE,
+            sid_authn::jwt::UserGrant::Delegated,
+            &["ops.org"],
+            None,
+        )
+        .await
+        .token;
     let mut headers = tonic::codegen::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
     let post = tonic::codegen::http::Method::POST;
+    // The method admits a user's token or a service's own, carrying the
+    // organizations capability.
+    let rule = sid_infra::authn::access::AccessRule::protected(
+        &[
+            sid_infra::authn::access::CredentialKind::Delegated,
+            sid_infra::authn::access::CredentialKind::Client,
+        ],
+        &["ops.org"],
+        None,
+    );
 
     let admitted = receiver
-        .admit(&post, PATH, &headers, "ops.org.read")
+        .admit(&post, PATH, &headers, &rule, "ops.org.read")
         .await
         .unwrap();
     assert_eq!(admitted.resource, issuer.resource(RESOURCE).id);
     let denied = receiver
-        .admit(&post, PATH, &headers, "ops.org.suspend")
+        .admit(&post, PATH, &headers, &rule, "ops.org.suspend")
         .await
         .unwrap_err();
     assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
     // A service calling with its own client credentials token, presented
-    // per call by the channel it calls through.
+    // per call by the channel it calls through: a machine whose subject is
+    // not its client id, admitted by its kind, scope and permission.
     let caller = issuer
-        .machine("ops-caller", "ops-caller-secret", RESOURCE)
+        .machine("ops-caller", "ops-caller-secret", RESOURCE, &["ops.org"])
         .await;
     issuer.grant_machine(&caller, &reader, RESOURCE).await;
     let caller_secret =
@@ -79,14 +99,14 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
         .unwrap(),
     );
     receiver
-        .admit(&post, PATH, &machine_headers, "ops.org.read")
+        .admit(&post, PATH, &machine_headers, &rule, "ops.org.read")
         .await
         .unwrap();
     std::fs::remove_file(&caller_secret).ok();
 
     issuer.stop().await;
     let unavailable = receiver
-        .admit(&post, PATH, &headers, "ops.org.read")
+        .admit(&post, PATH, &headers, &rule, "ops.org.read")
         .await
         .unwrap_err();
     assert_eq!(unavailable.code(), tonic::Code::Unavailable);

@@ -153,6 +153,7 @@ fn test_access_token_audience() {
             TokenAudience::Resource {
                 indicator: "https://resources.example/orders",
                 client_id: "banking-app",
+                grant: UserGrant::Delegated,
             },
             "subject",
             None,
@@ -176,6 +177,26 @@ fn test_access_token_audience() {
     // Obtained by the application for a user: the issuer names it delegated.
     assert_eq!(claims["credential_kind"], "delegated");
     assert!(jwt.validate_access_token(&app).is_err());
+
+    // A grant for the account API is named as such.
+    let account = jwt
+        .access_token_signed_by(
+            &jwt,
+            TokenAudience::Resource {
+                indicator: "https://sid.example.com/account",
+                client_id: "account-web",
+                grant: UserGrant::AccountApi,
+            },
+            "subject",
+            None,
+            &profile.roles,
+            &session,
+            &scopes,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(payload(&account)["credential_kind"], "account_api");
 
     let own = jwt
         .issue_access_token(
@@ -226,6 +247,7 @@ fn test_a_claim_mapping_cannot_set_the_credential_kind() {
             TokenAudience::Resource {
                 indicator: "https://resources.example/orders",
                 client_id: "banking-app",
+                grant: UserGrant::Delegated,
             },
             "subject",
             None,

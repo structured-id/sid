@@ -427,8 +427,37 @@ impl TestIssuer {
 
     /// A system machine user `client_id` authenticating with `secret`,
     /// allowed to obtain client credentials tokens for the resource
-    /// `indicator`. What it may do there is what its grants allow.
-    pub async fn machine(&self, client_id: &str, secret: &str, indicator: &str) -> MachineUser {
+    /// `indicator` carrying `scopes`, which the resource supports from now
+    /// on. What it may do there is what its grants allow.
+    pub async fn machine(
+        &self,
+        client_id: &str,
+        secret: &str,
+        indicator: &str,
+        scopes: &[&str],
+    ) -> MachineUser {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+        let mut resource = self
+            .storage
+            .get_protected_resource(self.resource(indicator).id)
+            .await
+            .expect("resource lookup")
+            .expect("a registered resource");
+        let missing: Vec<String> = scopes
+            .iter()
+            .filter(|s| !resource.scopes.contains(s))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            resource.scopes.extend(missing);
+            assert!(
+                self.storage
+                    .update_protected_resource(&resource, audit("resource.update"))
+                    .await
+                    .expect("resource update"),
+                "the resource changed meanwhile"
+            );
+        }
         let machine = MachineUser::new(
             ProjectId::SYSTEM,
             client_id,
@@ -456,8 +485,8 @@ impl TestIssuer {
             .set_resource_access(
                 &ResourceAccess {
                     client_id: client_id.into(),
-                    resource_id: self.resource(indicator).id,
-                    scopes: vec![],
+                    resource_id: resource.id,
+                    scopes,
                     created_at: chrono::Utc::now(),
                 },
                 audit("resource_access.set"),
@@ -534,9 +563,18 @@ impl TestIssuer {
     }
 
     /// An access token of `profile` for the resource `indicator`, from a
-    /// stored sign-in; bound to the key `jkt` when given. Its subject is
-    /// pairwise, never the ProfileId.
-    pub async fn token(&self, profile: &Profile, indicator: &str, jkt: Option<&str>) -> Issued {
+    /// stored sign-in through its application under `grant`, granted
+    /// `scopes`; bound to the key `jkt` when given. Its subject is pairwise,
+    /// never the ProfileId.
+    pub async fn token(
+        &self,
+        profile: &Profile,
+        indicator: &str,
+        grant: sid_authn::jwt::UserGrant,
+        scopes: &[&str],
+        jkt: Option<&str>,
+    ) -> Issued {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
         let session = Session::new(
             profile.id,
             None,
@@ -557,12 +595,13 @@ impl TestIssuer {
                 sid_authn::jwt::TokenAudience::Resource {
                     indicator,
                     client_id: &client,
+                    grant,
                 },
                 &pairwise,
                 None,
                 &profile.roles,
                 &session,
-                &[],
+                &scopes,
                 binding.as_ref(),
                 None,
             )

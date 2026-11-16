@@ -231,6 +231,59 @@ async fn a_permitted_resource_is_the_target() {
         target.granted_scopes(&["read".into(), "write".into(), "openid".into()]),
         vec!["read".to_string()]
     );
+    // An ordinary application's resource: an ordinary user grant.
+    assert_eq!(target.grant(), UserGrant::Delegated);
+}
+
+/// The account API the installation's account integration registers is
+/// served by a user's token under the account integration's grant, which
+/// the issued token states so every receiver of the account API admits it
+/// as an account API token; whichever client the account API admitted.
+#[tokio::test]
+async fn the_account_api_is_targeted_under_the_account_grant() {
+    let f = fixture().await;
+    let now = Utc::now().trunc_subsecs(3);
+    let account_app = Application {
+        id: ApplicationId::generate(),
+        project_id: ProjectId::SYSTEM,
+        name: "Account".into(),
+        system: Some(SystemIntegration::Account),
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let account = ProtectedResource {
+        id: ResourceId::generate(),
+        application_id: Some(account_app.id),
+        issuer_id: f.issuer,
+        indicator: indicator("account"),
+        scopes: vec!["account.read".into()],
+        state: ResourceState::Active,
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    f.storage
+        .create_application(&account_app, None, Some(&account), ctx())
+        .await
+        .unwrap();
+    f.storage
+        .set_resource_access(
+            &ResourceAccess {
+                client_id: f.client.client_id.clone(),
+                resource_id: account.id,
+                scopes: vec!["account.read".into()],
+                created_at: now,
+            },
+            ctx(),
+        )
+        .await
+        .unwrap();
+    let target = select_target(&f.storage, f.issuer, &f.client, Some(&account.indicator))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.grant(), UserGrant::AccountApi);
 }
 
 #[tokio::test]

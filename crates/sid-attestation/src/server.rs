@@ -59,7 +59,7 @@ impl AttestationServer {
             .add(crate::access::guarded(
                 AttestationServiceServer::new(attestation_svc),
                 &self.receiver,
-            ))
+            )?)
             .await;
         let listener = tokio::net::TcpListener::bind(self.config.grpc_bind).await?;
         info!(bind = %self.config.grpc_bind, "gRPC server starting");

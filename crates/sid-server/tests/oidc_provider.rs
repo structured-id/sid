@@ -471,6 +471,7 @@ impl SignedIn {
                 sid_authn::jwt::TokenAudience::Resource {
                     indicator: audience,
                     client_id: "test-client",
+                    grant: sid_authn::jwt::UserGrant::Delegated,
                 },
                 &self.profile.id.to_string(),
                 None,

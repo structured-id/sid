@@ -524,6 +524,13 @@ impl ClientResourceRegistry for SqliteBackend {
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
     }
+
+    async fn get_application(
+        &self,
+        id: sid_core::models::ApplicationId,
+    ) -> SidResult<Option<sid_core::models::Application>> {
+        self.get_application_impl(id).await
+    }
 }
 
 // ─── IssuerStore impl — see oidc_issuer.rs ───
@@ -1572,13 +1579,6 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<()> {
         self.create_application_impl(app, client, resource, ctx)
             .await
-    }
-
-    async fn get_application(
-        &self,
-        id: sid_core::models::ApplicationId,
-    ) -> SidResult<Option<sid_core::models::Application>> {
-        self.get_application_impl(id).await
     }
 
     async fn system_application(

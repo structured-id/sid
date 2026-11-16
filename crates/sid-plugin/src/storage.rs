@@ -649,12 +649,6 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// An application by id.
-    async fn get_application(
-        &self,
-        id: sid_core::models::ApplicationId,
-    ) -> Result<Option<sid_core::models::Application>>;
-
     /// The installation's own integration `kind`, if it was provisioned. At
     /// most one exists: creating a second is `Error::Conflict`.
     async fn system_application(

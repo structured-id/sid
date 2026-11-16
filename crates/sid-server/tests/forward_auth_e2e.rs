@@ -159,6 +159,7 @@ async fn user_token(svc: &TestServices, profile: &Profile, indicator: &str) -> S
             sid_authn::jwt::TokenAudience::Resource {
                 indicator,
                 client_id: "orders-web",
+                grant: sid_authn::jwt::UserGrant::Delegated,
             },
             &profile.id.to_string(),
             None,

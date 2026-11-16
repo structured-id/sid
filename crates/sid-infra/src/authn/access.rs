@@ -69,7 +69,7 @@ impl CredentialKind {
 }
 
 /// The access rule one method declares.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessRule {
     /// Called before or without an access token.
     Open,
@@ -116,6 +116,20 @@ impl PermissionTarget {
 }
 
 impl AccessRule {
+    /// A protected rule admitting `kinds` carrying `scopes`, with the
+    /// receiver `permission` when there is one.
+    pub fn protected(
+        kinds: &[CredentialKind],
+        scopes: &[&str],
+        permission: Option<Permission>,
+    ) -> Self {
+        Self::Protected {
+            kinds: kinds.iter().fold(0, |bits, kind| bits | kind.bit()),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            permission,
+        }
+    }
+
     /// Whether a credential of `kind` may call the method.
     pub fn admits(&self, kind: CredentialKind) -> bool {
         match self {
@@ -180,6 +194,14 @@ impl AccessRules {
             self.services.insert(service.full_name().to_owned());
         }
         Ok(())
+    }
+
+    /// Declare `rule` for the method at `path` (`/package.Service/Method`).
+    pub fn insert(&mut self, path: &str, rule: AccessRule) {
+        if let Some((service, _)) = path.strip_prefix('/').and_then(|p| p.split_once('/')) {
+            self.services.insert(service.to_owned());
+        }
+        self.methods.insert(path.to_owned(), rule);
     }
 
     /// The rule of the method at `path`.

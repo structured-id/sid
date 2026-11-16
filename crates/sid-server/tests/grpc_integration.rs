@@ -5396,6 +5396,7 @@ async fn test_introspect_expired_token() {
             sid_authn::jwt::TokenAudience::Resource {
                 indicator: &userinfo,
                 client_id: common::CONFIDENTIAL_CLIENT,
+                grant: sid_authn::jwt::UserGrant::Delegated,
             },
             &profile.id.to_string(),
             None,

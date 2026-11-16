@@ -164,6 +164,19 @@ impl sid_plugin::ClientResourceRegistry for MockStorage {
     ) -> Result<Option<sid_core::models::ResourceAccess>> {
         unimplemented!()
     }
+    async fn get_application(
+        &self,
+        id: sid_core::models::ApplicationId,
+    ) -> Result<Option<sid_core::models::Application>> {
+        self.reachable()?;
+        Ok(self
+            .applications
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.id == id)
+            .cloned())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1170,19 +1183,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: MutationContext,
     ) -> Result<()> {
         unimplemented!()
-    }
-    async fn get_application(
-        &self,
-        id: sid_core::models::ApplicationId,
-    ) -> Result<Option<sid_core::models::Application>> {
-        self.reachable()?;
-        Ok(self
-            .applications
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|a| a.id == id)
-            .cloned())
     }
     async fn system_application(
         &self,

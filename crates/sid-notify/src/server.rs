@@ -286,7 +286,7 @@ impl NotifyServer {
             .add(crate::access::guarded(
                 sid_proto::sid::v1::admin::notification_template_service_server::NotificationTemplateServiceServer::new(template_svc),
                 &self.receiver,
-            ))
+            )?)
             .await;
         // The periods the template commands are named under, from the store
         // that admits them: open to every caller, a period grants nothing.
