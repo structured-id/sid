@@ -37,12 +37,6 @@ async fn a_claim_reads_only_due_work_through_its_indexes() {
             "idx_durable_work_expiry (kind=? AND expires_at",
         ),
         (
-            "abandoned",
-            ABANDONED_SQL,
-            vec![now, kinds, now],
-            "idx_durable_work_lease (kind=? AND lease_until",
-        ),
-        (
             "due",
             DUE_SQL,
             vec!["kind.a", now, "32"],

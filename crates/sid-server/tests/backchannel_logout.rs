@@ -394,6 +394,193 @@ async fn test_revoked_session_logout_is_owed_and_delivered() {
     running.await.unwrap();
 }
 
+// ── Through a SQL store, an outage and a restart ──
+
+/// A logout runner over `storage`, with its installation issuer for `org`
+/// sealed under `keys` (provisioned on the first start, found on a later
+/// one), until the returned sender fires; and the verifier its relying
+/// parties use.
+async fn run_logouts(
+    storage: Arc<sid_storage::sqlite::SqliteBackend>,
+    keys: Arc<dyn sid_keys::KeyManager>,
+    org: sid_core::models::OrgId,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+    IssuerVerifier,
+) {
+    let issuer = sid_authn::issuer::ensure_local_issuer(
+        storage.as_ref(),
+        keys.as_ref(),
+        &url::Url::parse("https://sid.example.com").unwrap(),
+        org,
+    )
+    .await
+    .unwrap();
+    let issuers = Arc::new(IssuerRegistry::new(storage.clone(), keys));
+    let verifier = issuers.verifier(&issuer).await.unwrap();
+    let handler =
+        common::crypto::with_tls(|| BackChannelLogoutHandler::new(issuers, storage.clone(), org));
+    let runner = WorkRunner::new(
+        storage,
+        "logout-runner",
+        vec![Arc::new(handler) as Arc<dyn WorkHandler>],
+        RunnerConfig {
+            concurrency: 2,
+            lease: Duration::from_secs(30),
+            scan_interval: Duration::from_millis(50),
+        },
+    )
+    .unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(runner.run(async move {
+        stopped.await.unwrap_or(());
+    }));
+    (stop, running, verifier)
+}
+
+/// The stored record of `id` once `done` holds for it, within ten seconds.
+async fn record_when(
+    storage: &sid_storage::sqlite::SqliteBackend,
+    id: sid_core::models::WorkId,
+    done: impl Fn(&sid_core::models::WorkRecord) -> bool,
+) -> sid_core::models::WorkRecord {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let record = storage.get_work(id).await.unwrap().expect("logout owed");
+        if done(&record) {
+            return record;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not reached: {record:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// An ended session's logout, owed in the same SQL commit that ended it, is
+/// still owed after its relying party could not be reached and the worker
+/// that tried stopped; a worker started afresh on the same database delivers
+/// it to the same ended session, under the same work, once. Composes the
+/// real SQLite store, the revocation cascade, the runner and the handler;
+/// the store's own durability is the backend conformance's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_owed_logout_survives_an_unavailable_rp_and_a_worker_restart() {
+    let dir = tempfile::tempdir().expect("data directory");
+    let path = dir
+        .path()
+        .join("sid.db")
+        .to_str()
+        .expect("UTF-8 path")
+        .to_owned();
+    let open = || async {
+        Arc::new(
+            sid_storage::sqlite::SqliteBackend::new(&path)
+                .await
+                .expect("SQLite store"),
+        )
+    };
+    // The installation's key material outlives its processes.
+    let keys = common::test_key_manager();
+    // The RP's address, with nothing listening on it yet.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://127.0.0.1:{port}/backchannel-logout");
+
+    let storage = open().await;
+    let org = sid_authn::instance_org::ensure(storage.as_ref(), "sid.example.com")
+        .await
+        .unwrap()
+        .id;
+    storage
+        .ensure_system_project(AuditEntry::system("test", "system").into())
+        .await
+        .unwrap();
+    let mut profile = sid_core::models::Profile::new(Some("logout-holder"));
+    profile.id = profile_id();
+    storage
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    let mut client = rp(Some(&url), SubjectType::Public);
+    client.org_id = Some(org);
+    common::store_client(storage.as_ref(), &client)
+        .await
+        .unwrap();
+    let mut session = Session::new(
+        profile_id(),
+        None,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    session.client_id = Some("client-456".into());
+    storage
+        .create_session(&session, AuditEntry::system("test", "session").into())
+        .await
+        .unwrap();
+    RevocationCascadeService::new(
+        storage.clone(),
+        Arc::new(RevocationCache::new(
+            Duration::from_secs(900),
+            Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        )),
+    )
+    .revoke_sessions(
+        profile_id(),
+        RevocationReason::Admin,
+        "admin",
+        AuditEntry::system("test", "revoke all").into(),
+    )
+    .await
+    .unwrap();
+    let owed = LogoutDelivery::for_ended_session(&session)
+        .unwrap()
+        .work()
+        .id;
+
+    // The RP is down: the attempt fails and the logout stays owed.
+    let (stop, running, _) = run_logouts(storage.clone(), keys.clone(), org).await;
+    let failed = record_when(&storage, owed, |r| {
+        r.attempts >= 1 && r.state == WorkState::Pending && r.last_error.is_some()
+    })
+    .await;
+    assert_eq!(failed.max_attempts, 6);
+    // The worker stops with the logout owed, and its store goes with it.
+    stop.send(()).unwrap();
+    running.await.unwrap();
+    drop(storage);
+
+    // The RP is back; a worker starts afresh on the same database.
+    let mock = MockRp {
+        listener: TcpListener::bind(("127.0.0.1", port)).await.unwrap(),
+    };
+    let server = tokio::spawn(async move { mock.accept_and_respond(200).await });
+    let storage = open().await;
+    let (stop, running, verifier) = run_logouts(storage.clone(), keys, org).await;
+    let request = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("the RP is sent the logout after the restart")
+        .unwrap();
+    let claims = verifier
+        .validate_logout_token(&logout_token(&request), "client-456")
+        .unwrap();
+    assert_eq!(claims.sid.as_deref(), Some(session.id.to_string().as_str()));
+    assert_eq!(claims.sub, profile_id().to_string());
+
+    let delivered = record_when(&storage, owed, |r| r.state == WorkState::Completed).await;
+    assert_eq!(delivered.result.as_deref(), Some("HTTP 200"));
+    assert_eq!(
+        delivered.attempts,
+        failed.attempts + 1,
+        "the logout was delivered by more than one further attempt"
+    );
+    stop.send(()).unwrap();
+    running.await.unwrap();
+}
+
 // ── Helpers ──
 
 /// Simple percent-decoding for URL-encoded JWT tokens.

@@ -55,9 +55,10 @@ fn snapshot(state: WorkState, attempts: u32) -> WorkSnapshot {
     }
 }
 
-/// A claim does not travel to another store: claimed work with attempts
-/// left is due again there, and one on its last attempt is failed, as an
-/// abandoned last claim ends. Other states arrive as they were.
+/// A claim does not travel to another store: claimed work is due again
+/// there with the attempts it used, also on its last attempt (its worker
+/// then ends it with its dead-letter alert; the import itself never ends it
+/// without one). Other states arrive as they were.
 #[test]
 fn claim_does_not_travel_between_stores() {
     assert_eq!(
@@ -65,8 +66,9 @@ fn claim_does_not_travel_between_stores() {
         WorkState::Pending
     );
     let last = snapshot(WorkState::Claimed, 3).at_rest();
-    assert_eq!(last.state, WorkState::Failed);
-    assert!(last.last_error.is_some());
+    assert_eq!(last.state, WorkState::Pending);
+    assert_eq!(last.attempts, 3);
+    assert!(last.last_error.is_none());
     for state in [
         WorkState::Pending,
         WorkState::Completed,

@@ -455,6 +455,52 @@ async fn test_attempt_settles_as_the_store_records_it() {
     );
 }
 
+/// Work whose last attempt was abandoned (its worker gone with the lease)
+/// is ended by the next runner without running it again, as an ambiguous
+/// failure committed with the kind's dead-letter alert. Bug prevented: the
+/// store ended such work by itself and its alert was never owed.
+#[tokio::test]
+async fn test_an_abandoned_last_attempt_ends_with_its_alert() {
+    let storage = storage().await;
+    let id = enqueue(storage.as_ref(), 1).await;
+    // The last attempt is taken by a worker that never finishes it.
+    let abandoned = storage
+        .claim_work(&[kind()], "gone", 1, Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(abandoned.len(), 1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let probe = Probe::new(WorkOutcome::Done(None), Duration::ZERO);
+    let runner = WorkRunner::new(
+        Arc::clone(&storage),
+        "next",
+        vec![probe.clone() as Arc<dyn WorkHandler>],
+        fast_config(),
+    )
+    .unwrap();
+    let (stop, handle) = start(runner);
+    wait_for_state(storage.as_ref(), id, WorkState::Failed).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+
+    assert_eq!(
+        probe.attempts.load(Ordering::SeqCst),
+        0,
+        "the abandoned last attempt was run again"
+    );
+    let record = storage.get_work(id).await.unwrap().unwrap();
+    assert!(
+        record.ambiguous,
+        "the abandoned attempt may have had its effect"
+    );
+    assert_eq!(record.last_error.as_deref(), Some(ABANDONED_LAST_ATTEMPT));
+    assert!(
+        dead_alert(storage.as_ref(), id).await.is_some(),
+        "the abandoned work ended without its dead-letter alert"
+    );
+}
+
 /// An attempt whose claim was taken over records nothing and is observed as
 /// reclaimed, not as the outcome it would have recorded.
 #[tokio::test]
