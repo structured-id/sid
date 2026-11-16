@@ -35,6 +35,8 @@ use tonic::server::NamedService;
 
 use crate::grpc_error::{ApiError, ErrorReason, IntoStatus};
 
+pub mod installation;
+
 /// The method option holding a method's access rule.
 const ACCESS: &str = "sid.v1.common.access";
 
