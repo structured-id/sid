@@ -890,11 +890,12 @@ async fn test_closure_request_retry_answers_with_its_closure() {
     assert_eq!(retry, first);
 }
 
-/// A machine user with one active client secret, stored for the tests below.
+/// A machine user with one active client secret, stored for the tests below:
+/// its id, the secret's kid, the secret and the machine's client id.
 async fn machine_user_with_secret(
     svc: &TestServices,
     token: &str,
-) -> (sid_core::models::MachineUserId, String) {
+) -> (sid_core::models::MachineUserId, String, String, String) {
     use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
     let created = svc
         .machine_user
@@ -927,7 +928,80 @@ async fn machine_user_with_secret(
         .await
         .unwrap()
         .into_inner();
-    (id, added.credential.unwrap().kid)
+    (
+        id,
+        added.credential.unwrap().kid,
+        added.client_secret,
+        created.client_id,
+    )
+}
+
+/// Whether `secret` authenticates machine client `client_id` at the token
+/// endpoint (client credentials, RFC 6749 §4.4) for a resource registered
+/// for it under the installation's issuer.
+async fn secret_authenticates(svc: &TestServices, client_id: &str, secret: &str) -> bool {
+    use sid_core::models::{
+        Application, ApplicationId, AuditEntry, ProjectId, ProtectedResource, ResourceAccess,
+        ResourceId, ResourceIndicator, ResourceState,
+    };
+    use sid_proto::sid::v1::auth_service_server::AuthService;
+    let indicator = format!(
+        "https://api-{}.sid.example.com/",
+        uuid::Uuid::new_v4().simple()
+    );
+    let now = chrono::Utc::now();
+    let app = Application {
+        id: ApplicationId::generate(),
+        project_id: ProjectId::SYSTEM,
+        name: indicator.clone(),
+        system: None,
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let resource = ProtectedResource {
+        id: ResourceId::generate(),
+        application_id: Some(app.id),
+        issuer_id: svc.issuer.id,
+        indicator: ResourceIndicator::parse(&indicator).unwrap(),
+        scopes: vec!["api.read".into()],
+        state: ResourceState::Active,
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    svc.storage
+        .create_application(
+            &app,
+            None,
+            Some(&resource),
+            AuditEntry::system("test", "api").into(),
+        )
+        .await
+        .unwrap();
+    svc.storage
+        .set_resource_access(
+            &ResourceAccess {
+                client_id: client_id.into(),
+                resource_id: resource.id,
+                scopes: vec!["api.read".into()],
+                created_at: now,
+            },
+            AuditEntry::system("test", "access").into(),
+        )
+        .await
+        .unwrap();
+    svc.auth
+        .o_auth2_token(Request::new(OAuth2TokenRequest {
+            grant_type: "client_credentials".into(),
+            client_id: Some(client_id.into()),
+            client_secret: Some(secret.into()),
+            issuer_handle: svc.issuer.handle.to_string(),
+            resource: vec![indicator],
+            ..Default::default()
+        }))
+        .await
+        .is_ok()
 }
 
 /// A rotation's response is lost and retried: the retry answers with the
@@ -938,7 +1012,7 @@ async fn test_machine_credential_rotation_retry_rotates_once() {
     use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
     let svc = TestServices::new(MockStorage::new());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
-    let (id, kid) = machine_user_with_secret(&svc, &token).await;
+    let (id, kid, _, _) = machine_user_with_secret(&svc, &token).await;
     let rotate = || {
         keyed(
             RotateMachineCredentialRequest {
@@ -996,7 +1070,7 @@ async fn test_a_lost_rotation_is_replaced_only_by_a_new_command() {
     let svc = TestServices::new(MockStorage::new());
     let admin = ProfileId::generate();
     let token = issue_admin_token(&svc.jwt, admin);
-    let (id, old_kid) = machine_user_with_secret(&svc, &token).await;
+    let (id, old_kid, old_secret, client_id) = machine_user_with_secret(&svc, &token).await;
     let rotate = |kid: &str, key: &str| {
         keyed(
             RotateMachineCredentialRequest {
@@ -1051,10 +1125,19 @@ async fn test_a_lost_rotation_is_replaced_only_by_a_new_command() {
         "the completion holds the secret"
     );
 
-    // The old credential still authenticates through its grace period.
+    // The old credential still authenticates through its grace period: its
+    // secret obtains a token at the token endpoint.
     assert_eq!(
         status_of(old_kid.clone()).await,
         CredentialStatus::GracePeriod
+    );
+    assert!(
+        secret_authenticates(&svc, &client_id, &old_secret).await,
+        "the old secret no longer authenticates after the lost rotation"
+    );
+    assert!(
+        !secret_authenticates(&svc, &client_id, "not-a-secret-of-this-machine").await,
+        "the token endpoint accepted a secret it never issued"
     );
 
     // The secret is replaced by a new rotation of the credential it created.
@@ -1086,7 +1169,6 @@ async fn test_a_lost_rotation_is_replaced_only_by_a_new_command() {
             RevokeMachineCredentialRequest {
                 machine_user_id: Some(id.into()),
                 kid: replacement_kid.clone(),
-                ..Default::default()
             },
             &token,
             Some("op-revoke-replacement"),
@@ -1125,7 +1207,7 @@ async fn test_machine_user_suspension_retry_keeps_a_later_reactivation() {
     use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
     let svc = TestServices::new(MockStorage::new());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
-    let (id, _) = machine_user_with_secret(&svc, &token).await;
+    let (id, _, _, _) = machine_user_with_secret(&svc, &token).await;
     let suspend = || {
         keyed(
             SuspendMachineUserRequest {
