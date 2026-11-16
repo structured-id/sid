@@ -981,6 +981,142 @@ async fn test_machine_credential_rotation_retry_rotates_once() {
     );
 }
 
+/// A rotation's response is lost: its completion holds no copy of the new
+/// secret, the old credential still authenticates through its grace period, and
+/// the secret is replaced only by a new authorized rotation under its own
+/// key. A retry of the lost rotation after that replacement, and after the
+/// replacement is revoked, still answers the original outcome without a
+/// secret: it never discloses the newer secret, rotates again or restores
+/// the revoked credential. Bug this guards against: a secret kept in the
+/// result store, or a retry answered with whatever credential is current.
+#[tokio::test]
+async fn test_a_lost_rotation_is_replaced_only_by_a_new_command() {
+    use sid_core::models::machine_user::CredentialStatus;
+    use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
+    let svc = TestServices::new(MockStorage::new());
+    let admin = ProfileId::generate();
+    let token = issue_admin_token(&svc.jwt, admin);
+    let (id, old_kid) = machine_user_with_secret(&svc, &token).await;
+    let rotate = |kid: &str, key: &str| {
+        keyed(
+            RotateMachineCredentialRequest {
+                machine_user_id: Some(id.into()),
+                kid: kid.to_owned(),
+                ..Default::default()
+            },
+            &token,
+            Some(key),
+        )
+    };
+    let status_of = |kid: String| {
+        let storage = svc.storage.clone();
+        async move {
+            storage
+                .get_machine_credential_by_kid(&kid)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+        }
+    };
+
+    // The rotation commits; its response, with the only copy of the new
+    // secret, is lost.
+    let lost = svc
+        .machine_user
+        .rotate_machine_credential(rotate(&old_kid, "op-lost-rotation"))
+        .await
+        .unwrap()
+        .into_inner();
+    let lost_secret = lost.client_secret.clone();
+    assert!(!lost_secret.is_empty());
+    let new_kid = lost.new_credential.as_ref().unwrap().kid.clone();
+
+    // No recoverable copy of the hash-only secret is kept with the result.
+    let record = svc
+        .storage
+        .get_operation_result(
+            &format!("profile:{admin}"),
+            &sid_core::models::OperationKey::parse("op-lost-rotation").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the rotation recorded its completion");
+    assert!(
+        !record
+            .completion
+            .result
+            .windows(lost_secret.len())
+            .any(|w| w == lost_secret.as_bytes()),
+        "the completion holds the secret"
+    );
+
+    // The old credential still authenticates through its grace period.
+    assert_eq!(
+        status_of(old_kid.clone()).await,
+        CredentialStatus::GracePeriod
+    );
+
+    // The secret is replaced by a new rotation of the credential it created.
+    let replacement = svc
+        .machine_user
+        .rotate_machine_credential(rotate(&new_kid, "op-replacement"))
+        .await
+        .expect("an authorized new rotation replaces the lost secret")
+        .into_inner();
+    assert!(!replacement.client_secret.is_empty());
+    assert_ne!(replacement.client_secret, lost_secret);
+
+    let retried = svc
+        .machine_user
+        .rotate_machine_credential(rotate(&old_kid, "op-lost-rotation"))
+        .await
+        .expect("the lost rotation's retry answers its original outcome")
+        .into_inner();
+    assert!(
+        retried.client_secret.is_empty(),
+        "the retry disclosed a secret"
+    );
+    assert_eq!(retried.new_credential, lost.new_credential);
+
+    // The replacement revoked, the old rotation's retry restores nothing.
+    let replacement_kid = replacement.new_credential.as_ref().unwrap().kid.clone();
+    svc.machine_user
+        .revoke_machine_credential(keyed(
+            RevokeMachineCredentialRequest {
+                machine_user_id: Some(id.into()),
+                kid: replacement_kid.clone(),
+                ..Default::default()
+            },
+            &token,
+            Some("op-revoke-replacement"),
+        ))
+        .await
+        .unwrap();
+    let after_revoke = svc
+        .machine_user
+        .rotate_machine_credential(rotate(&old_kid, "op-lost-rotation"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(after_revoke.client_secret.is_empty());
+    assert_eq!(after_revoke.new_credential, lost.new_credential);
+    assert_eq!(
+        status_of(replacement_kid).await,
+        CredentialStatus::Revoked,
+        "the retry restored the revoked credential"
+    );
+    assert_eq!(
+        svc.storage
+            .list_machine_credentials_by_user(id)
+            .await
+            .unwrap()
+            .len(),
+        3,
+        "the retries created no credential"
+    );
+}
+
 /// A machine user is suspended, reactivated, then the suspension's lost
 /// response is retried: the retry answers as the suspension did and the
 /// machine user stays active.
