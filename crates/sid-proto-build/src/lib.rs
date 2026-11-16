@@ -375,6 +375,27 @@ fn access_rule(
                         .into(),
                 );
             }
+            if protected.has_field_by_name("permission") {
+                let permission = protected.get_field_by_name("permission");
+                let permission = permission
+                    .as_deref()
+                    .and_then(Value::as_message)
+                    .ok_or("the receiver permission is a message")?;
+                let action = permission
+                    .get_field_by_name("action")
+                    .and_then(|a| a.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                if action.trim().is_empty() {
+                    return Err("a receiver permission names its action".into());
+                }
+                let target = permission
+                    .get_field_by_name("target")
+                    .and_then(|t| t.as_enum_number())
+                    .unwrap_or_default();
+                if target == 0 {
+                    return Err("a receiver permission names its target".into());
+                }
+            }
             Ok(())
         }
         _ => Err("the access rule is `open` or `protected`".into()),

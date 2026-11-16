@@ -203,6 +203,30 @@ service AccessService {
     option idempotency_level = NO_SIDE_EFFECTS;
     option (sid.v1.common.access) = { protected: { credentials: [CREDENTIAL_KIND_OWN_SESSION] } };
   }
+  rpc PermissionWithoutAction(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT]
+      scopes: ["thing.read"]
+      permission: { target: PERMISSION_TARGET_RESOURCE }
+    } };
+  }
+  rpc PermissionWithoutTarget(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT]
+      scopes: ["thing.read"]
+      permission: { action: "thing.read" }
+    } };
+  }
+  rpc ObjectPermission(Request) returns (Request) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (sid.v1.common.access) = { protected: {
+      credentials: [CREDENTIAL_KIND_CLIENT, CREDENTIAL_KIND_DELEGATED]
+      scopes: ["thing.read"]
+      permission: { action: "thing.read" target: PERMISSION_TARGET_OBJECT }
+    } };
+  }
 }
 
 message Request { string id = 1; }
@@ -431,6 +455,14 @@ fn test_every_wrong_access_rule_is_reported() {
             format!(
                 "{}: a protected method admitting more than the own session names its scopes",
                 rpc("NoScope")
+            ),
+            format!(
+                "{}: a receiver permission names its action",
+                rpc("PermissionWithoutAction")
+            ),
+            format!(
+                "{}: a receiver permission names its target",
+                rpc("PermissionWithoutTarget")
             ),
         ]
     );

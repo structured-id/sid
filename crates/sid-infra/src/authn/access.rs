@@ -78,14 +78,69 @@ pub enum AccessRule {
         /// The admitted kinds, one bit per [`CredentialKind`].
         kinds: u8,
         scopes: Box<[String]>,
+        /// What a receiver asks its issuer before the call takes effect;
+        /// `None` where the service's own handlers decide.
+        permission: Option<Permission>,
     },
 }
 
+/// The permission a receiver asks its issuer for
+/// (`sid.v1.common.ReceiverPermission`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Permission {
+    pub action: String,
+    pub target: PermissionTarget,
+}
+
+/// What a receiver's permission is decided on
+/// (`sid.v1.common.PermissionTarget`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionTarget {
+    /// The resource as a whole, before the call reaches the service.
+    Resource,
+    /// One object the request names, by its handler.
+    Object,
+    /// One object whose owner acts on it by the service's own rule.
+    OwnedObject,
+}
+
+impl PermissionTarget {
+    fn from_wire(number: i32) -> Option<Self> {
+        Some(match number {
+            1 => Self::Resource,
+            2 => Self::Object,
+            3 => Self::OwnedObject,
+            _ => return None,
+        })
+    }
+}
+
 impl AccessRule {
-    fn admits(&self, kind: CredentialKind) -> bool {
+    /// Whether a credential of `kind` may call the method.
+    pub fn admits(&self, kind: CredentialKind) -> bool {
         match self {
             Self::Open => true,
             Self::Protected { kinds, .. } => kinds & kind.bit() != 0,
+        }
+    }
+
+    /// Whether `granted` carries every scope the method requires; a caller's
+    /// own session carries every scope of the installation's API.
+    pub fn granted(&self, kind: CredentialKind, granted: &str) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Protected { .. } if kind == CredentialKind::OwnSession => true,
+            Self::Protected { scopes, .. } => scopes
+                .iter()
+                .all(|s| granted.split_whitespace().any(|g| g == s)),
+        }
+    }
+
+    /// The receiver permission the method declares.
+    pub fn permission(&self) -> Option<&Permission> {
+        match self {
+            Self::Protected { permission, .. } => permission.as_ref(),
+            Self::Open => None,
         }
     }
 }
@@ -136,6 +191,17 @@ impl AccessRules {
     pub fn declares(&self, name: &str) -> bool {
         self.services.contains(name)
     }
+
+    /// Every method of the service `name` with its rule, by gRPC path.
+    pub fn methods_of<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a AccessRule)> + 'a {
+        self.methods.iter().filter_map(move |(path, rule)| {
+            let service = path.strip_prefix('/')?.split_once('/')?.0;
+            (service == name).then_some((path.as_str(), rule))
+        })
+    }
 }
 
 fn rule_of(
@@ -175,7 +241,30 @@ fn rule_of(
                         .collect::<Box<[String]>>()
                 })
                 .unwrap_or_default();
-            Ok(AccessRule::Protected { kinds, scopes })
+            let permission = match protected.get_field_by_name("permission") {
+                Some(value) if protected.has_field_by_name("permission") => {
+                    let declared = value
+                        .as_message()
+                        .ok_or("the receiver permission is a message")?;
+                    let action = declared
+                        .get_field_by_name("action")
+                        .and_then(|a| a.as_str().map(str::to_owned))
+                        .filter(|a| !a.trim().is_empty())
+                        .ok_or("a receiver permission names its action")?;
+                    let target = declared
+                        .get_field_by_name("target")
+                        .and_then(|t| t.as_enum_number())
+                        .and_then(PermissionTarget::from_wire)
+                        .ok_or("a receiver permission names its target")?;
+                    Some(Permission { action, target })
+                }
+                _ => None,
+            };
+            Ok(AccessRule::Protected {
+                kinds,
+                scopes,
+                permission,
+            })
         }
         _ => Err("the access rule is `open` or `protected`".into()),
     }
