@@ -421,7 +421,7 @@ impl AssignmentSet {
 /// Used by `AuthzCheckRequest.subject` parsing.
 /// Different from `RoleAssignmentPrincipal` — this is for CHECK operations,
 /// not for assignment (no Group variant; group membership resolves to individual roles).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AuthzPrincipal {
     /// Human user: subject format `user:<profile_id_uuid>`
     Profile(ProfileId),
