@@ -260,8 +260,8 @@ fn row_to_initial_access_token(row: &sqlx::postgres::PgRow) -> SidResult<Initial
         allowed_scopes: words("allowed_scopes"),
         allowed_grant_types: words("allowed_grant_types"),
         allowed_redirect_patterns: words("allowed_redirect_patterns"),
-        expires_at: row.get("expires_at"),
-        created_at: row.get("created_at"),
+        expires_at: row.get::<PgTime, _>("expires_at").jiff(),
+        created_at: row.get::<PgTime, _>("created_at").jiff(),
         created_by: row
             .try_get("created_by")
             .map_err(|e| SidError::Storage(format!("initial access token creator: {e}")))?,
@@ -1614,7 +1614,7 @@ impl PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let changed = sqlx::query(sql)
             .bind(id)
-            .bind(at)
+            .bind(at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("export job status: {e}")))?
@@ -1692,7 +1692,7 @@ impl PostgresBackend {
 struct BrandingRow {
     status: String,
     revision: i64,
-    updated_at: Timestamp,
+    updated_at: PgTime,
     data: serde_json::Value,
 }
 
@@ -1706,7 +1706,7 @@ impl BrandingRow {
             .map_err(|e: String| SidError::Storage(format!("column status: {e}")))?;
         config.revision = u64::try_from(self.revision)
             .map_err(|e| SidError::Storage(format!("column revision: {e}")))?;
-        config.updated_at = self.updated_at;
+        config.updated_at = self.updated_at.jiff();
         Ok(config)
     }
 }
@@ -1735,9 +1735,9 @@ struct ConsentRow {
     profile_id: ProfileId,
     client_id: String,
     status: String,
-    consented_at: Timestamp,
-    revoked_at: Option<Timestamp>,
-    updated_at: Timestamp,
+    consented_at: PgTime,
+    revoked_at: Option<PgTime>,
+    updated_at: PgTime,
 }
 
 impl ConsentRow {
@@ -1751,9 +1751,9 @@ impl ConsentRow {
             client_id: self.client_id,
             status: self.status.parse().map_err(SidError::Storage)?,
             grants,
-            consented_at: self.consented_at,
-            revoked_at: self.revoked_at,
-            updated_at: self.updated_at,
+            consented_at: self.consented_at.jiff(),
+            revoked_at: self.revoked_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1765,8 +1765,8 @@ struct ClaimGrantRow {
     consent_id: uuid::Uuid,
     claim_name: String,
     claim_type: String,
-    granted_at: Timestamp,
-    revoked_at: Option<Timestamp>,
+    granted_at: PgTime,
+    revoked_at: Option<PgTime>,
 }
 
 impl ClaimGrantRow {
@@ -1776,8 +1776,8 @@ impl ClaimGrantRow {
             consent_id: sid_core::models::consent::ConsentId(self.consent_id),
             claim_name: self.claim_name,
             claim_type: self.claim_type.parse().map_err(SidError::Storage)?,
-            granted_at: self.granted_at,
-            revoked_at: self.revoked_at,
+            granted_at: self.granted_at.jiff(),
+            revoked_at: self.revoked_at.jiff(),
         })
     }
 }
@@ -1792,7 +1792,7 @@ struct AnomalyEventRow {
     description: String,
     risk_score: i32,
     reaction: String,
-    timestamp: Timestamp,
+    timestamp: PgTime,
 }
 
 impl AnomalyEventRow {
@@ -1805,7 +1805,7 @@ impl AnomalyEventRow {
             description: self.description,
             risk_score: self.risk_score,
             reaction: self.reaction,
-            timestamp: self.timestamp,
+            timestamp: self.timestamp.jiff(),
         }
     }
 }
@@ -1815,10 +1815,10 @@ type IpReputationRow = (
     String,
     i32,
     i32,
-    Timestamp,
-    Option<Timestamp>,
-    Option<Timestamp>,
-    Timestamp,
+    PgTime,
+    Option<PgTime>,
+    Option<PgTime>,
+    PgTime,
 );
 
 fn reputation_of(row: IpReputationRow) -> sid_core::models::IpReputation {
@@ -1827,10 +1827,10 @@ fn reputation_of(row: IpReputationRow) -> sid_core::models::IpReputation {
         ip,
         failed_count: i64::from(failed),
         success_count: i64::from(succeeded),
-        first_seen_at,
-        last_failed_at,
-        last_success_at,
-        updated_at,
+        first_seen_at: first_seen_at.jiff(),
+        last_failed_at: last_failed_at.jiff(),
+        last_success_at: last_success_at.jiff(),
+        updated_at: updated_at.jiff(),
     }
 }
 
@@ -2188,7 +2188,7 @@ impl GrantStore for PostgresBackend {
             "UPDATE sessions SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
         )
         .bind(id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("touch session: {e}")))?;
@@ -2303,7 +2303,7 @@ impl GrantStore for PostgresBackend {
         )
         .bind(old_id)
         .bind(new.id)
-        .bind(grace_expires_at)
+        .bind(grace_expires_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("rotate refresh token: {e}")))?
@@ -2841,7 +2841,7 @@ impl StorageBackend for PostgresBackend {
         .bind(settings.can_receive_sms)
         .bind(settings.can_receive_fax)
         .bind(settings.can_receive_voice)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("update phone: {e}")))?
@@ -2987,7 +2987,7 @@ impl StorageBackend for PostgresBackend {
         .bind(settings.label.as_ref().map(|l| l.as_str()))
         .bind(settings.custom_label.is_some())
         .bind(settings.custom_label.clone().flatten())
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("update email: {e}")))?
@@ -5212,7 +5212,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= $1",
         )
-        .bind(deadline)
+        .bind(deadline.pg())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -5238,7 +5238,7 @@ impl StorageBackend for PostgresBackend {
                  ORDER BY id FOR UPDATE)
              RETURNING *",
         )
-        .bind(now)
+        .bind(now.pg())
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Cleanup failed: {}", e)))?
@@ -6602,7 +6602,7 @@ impl StorageBackend for PostgresBackend {
             WHERE status = 'active'
               AND ((last_used_at IS NULL AND created_at < $1) OR (last_used_at < $1))",
         )
-        .bind(cutoff)
+        .bind(cutoff.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Bulk revoke unused failed: {}", e)))?;
@@ -6877,7 +6877,7 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(old_kid)
         .bind(machine_user_id)
-        .bind(grace_until)
+        .bind(grace_until.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("rotate machine credential: {e}")))?
@@ -7490,7 +7490,7 @@ impl StorageBackend for PostgresBackend {
                  updated_at = NOW()
              WHERE updated_at < $1 AND (failed_count > 0 OR success_count > 0)",
         )
-        .bind(cutoff)
+        .bind(cutoff.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| sid_core::Error::Storage(format!("decay_ip_reputation: {e}")))?;
@@ -7640,7 +7640,7 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(cidr)
         .bind(description)
-        .bind(created_at)
+        .bind(created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("IP allowlist entry", e))?;
@@ -7659,7 +7659,7 @@ impl StorageBackend for PostgresBackend {
             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at < $1
             ORDER BY expires_at ASC",
         )
-        .bind(cutoff)
+        .bind(cutoff.pg())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -7780,7 +7780,7 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(principal_hash)
         .bind(principal_type)
-        .bind(quarantine_until)
+        .bind(quarantine_until.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Insert/update quarantine failed: {}", e)))?;
@@ -8853,7 +8853,7 @@ impl StorageBackend for PostgresBackend {
              WHERE project_id = $1 AND status = 'published'",
         )
         .bind(project_id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("archive branding: {e}")))?;
@@ -8863,7 +8863,7 @@ impl StorageBackend for PostgresBackend {
              WHERE id = $1",
         )
         .bind(id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("published branding", e))?;
@@ -9261,7 +9261,7 @@ impl StorageBackend for PostgresBackend {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT source_type::text, COUNT(*) FROM registration_sources WHERE created_at >= $1 GROUP BY source_type"
         )
-        .bind(since)
+        .bind(since.pg())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Count registrations failed: {e}")))?;
@@ -9280,7 +9280,7 @@ impl StorageBackend for PostgresBackend {
              WHERE referrer_id IS NOT NULL AND created_at >= $1
              GROUP BY referrer_id ORDER BY cnt DESC LIMIT $2",
         )
-        .bind(since)
+        .bind(since.pg())
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
