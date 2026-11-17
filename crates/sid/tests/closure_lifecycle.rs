@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
+use jiff_sqlx::ToSqlx;
 use sid::maintenance::{execute_due_closures, purge_closed_profiles};
 use sid_authn::account_closure::AccountClosureService;
 use sid_authn::revocation_cache::RevocationCache;
@@ -60,7 +61,7 @@ async fn closing_profile(
         )
         .await
         .unwrap();
-    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
+    let session = Session::new(profile.id, None, Timestamp::now() + Duration::from_hours(1));
     storage
         .create_session(&session, AuditEntry::system("test", "s").into())
         .await
@@ -74,11 +75,11 @@ async fn closing_profile(
 
 /// Move the profile's grace period end to `end`, as time passing would; no
 /// operation moves it, so the harness writes the column.
-async fn set_grace_end(pool: &sqlx::PgPool, pid: ProfileId, end: chrono::DateTime<Utc>) {
+async fn set_grace_end(pool: &sqlx::PgPool, pid: ProfileId, end: Timestamp) {
     let moved =
         sqlx::query("UPDATE closure_requests SET grace_period_end = $2 WHERE profile_id = $1")
             .bind(pid)
-            .bind(end)
+            .bind(end.to_sqlx())
             .execute(pool)
             .await
             .unwrap();
@@ -95,7 +96,7 @@ async fn status(storage: &Arc<dyn StorageBackend>, pid: ProfileId) -> ProfileSta
 async fn due_closure_is_executed() {
     let (storage, closures, pool) = setup().await;
     let (pid, email, session) = closing_profile(&storage, &closures).await;
-    set_grace_end(&pool, pid, Utc::now() - Duration::minutes(1)).await;
+    set_grace_end(&pool, pid, Timestamp::now() - Duration::from_mins(1)).await;
 
     execute_due_closures(storage.as_ref(), &closures).await;
 
@@ -129,7 +130,7 @@ async fn pending_or_held_closure_waits() {
     let hold = LegalHold {
         court_reference: "case-1".into(),
         reason: None,
-        placed_at: Utc::now(),
+        placed_at: Timestamp::now(),
         expected_end: None,
         placed_by: held,
         reviewing_counsel: None,
@@ -151,7 +152,7 @@ async fn pending_or_held_closure_waits() {
             .is_some(),
         "legal hold must be stored"
     );
-    set_grace_end(&pool, held, Utc::now() - Duration::minutes(1)).await;
+    set_grace_end(&pool, held, Timestamp::now() - Duration::from_mins(1)).await;
 
     execute_due_closures(storage.as_ref(), &closures).await;
 
@@ -205,7 +206,7 @@ async fn concurrent_execution_of_one_closure_succeeds() {
     let closures = std::sync::Arc::new(closures);
     for _ in 0..8 {
         let (pid, _, session) = closing_profile(&storage, &closures).await;
-        set_grace_end(&pool, pid, Utc::now() - Duration::minutes(1)).await;
+        set_grace_end(&pool, pid, Timestamp::now() - Duration::from_mins(1)).await;
 
         let runs: Vec<_> = (0..2)
             .map(|_| {
@@ -229,7 +230,7 @@ async fn concurrent_execution_of_one_closure_succeeds() {
 async fn executed_closure_cannot_be_cancelled() {
     let (storage, closures, pool) = setup().await;
     let (pid, _, _) = closing_profile(&storage, &closures).await;
-    set_grace_end(&pool, pid, Utc::now() - Duration::minutes(1)).await;
+    set_grace_end(&pool, pid, Timestamp::now() - Duration::from_mins(1)).await;
     closures.execute_closure(pid).await.unwrap();
 
     let err = closures.cancel_closure(pid, pid, None).await.unwrap_err();
@@ -285,10 +286,10 @@ async fn closed_profile_is_purged_at_quarantine_end() {
     let org = storage.instance_organization().await.unwrap().unwrap();
     let (recent, _, _) = closing_profile(&storage, &closures).await;
     let (old, _, _) = closing_profile(&storage, &closures).await;
-    set_grace_end(&pool, recent, Utc::now() - Duration::minutes(1)).await;
-    set_grace_end(&pool, old, Utc::now() - Duration::minutes(1)).await;
+    set_grace_end(&pool, recent, Timestamp::now() - Duration::from_mins(1)).await;
+    set_grace_end(&pool, old, Timestamp::now() - Duration::from_mins(1)).await;
     execute_due_closures(storage.as_ref(), &closures).await;
-    set_grace_end(&pool, old, Utc::now() - Duration::days(91)).await;
+    set_grace_end(&pool, old, Timestamp::now() - Duration::from_hours(91 * 24)).await;
 
     purge_closed_profiles(storage.as_ref()).await;
 

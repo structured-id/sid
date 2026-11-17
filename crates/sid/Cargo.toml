@@ -76,6 +76,8 @@ sid-fed = { workspace = true, features = ["test-support"] }
 jsonwebtoken = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
+# Writes a closure's grace end straight into `timestamptz`.
+jiff-sqlx = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # The file-backed SQLite store of the keyed command bench.
 tempfile = "3"

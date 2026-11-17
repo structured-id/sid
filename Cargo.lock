@@ -7299,6 +7299,7 @@ dependencies = [
  "hex",
  "ipnet",
  "jiff 1.0.0",
+ "jiff-sqlx",
  "jsonwebtoken",
  "opentelemetry",
  "prost",

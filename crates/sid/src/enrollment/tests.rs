@@ -82,11 +82,11 @@ fn test_validated_checks_the_pinned_mode_and_use_range() {
 /// panic; 0 hours is no expiry.
 #[test]
 fn test_default_expiry_is_bounded() {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     assert_eq!(default_expiry(now, 0), Some(None));
     assert_eq!(
         default_expiry(now, 2),
-        Some(Some(now + chrono::TimeDelta::hours(2)))
+        Some(Some(now + jiff::SignedDuration::from_hours(2)))
     );
     assert_eq!(default_expiry(now, u32::MAX), None);
 
@@ -250,7 +250,7 @@ fn test_invite_to_proto_names_its_creator() {
         use_count: 0,
         expires_at: None,
         active: true,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     assert!(matches!(
         invite_to_proto(&invite).created_by,

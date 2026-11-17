@@ -255,7 +255,7 @@ fn test_flow_config_proto() {
         flow_type: FlowType::Authentication,
         steps,
         timeout_seconds: 300,
-        updated_at: chrono::Utc::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     let proto = config_to_proto(&config);
     assert_eq!(proto.project_id, Some(config.project_id.into()));
@@ -283,8 +283,8 @@ fn test_flow_action_proto() {
         on_error: ActionOnError::Continue,
         enabled: true,
         revision: 0,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     let proto = action_to_proto(&action);
     assert_eq!(proto.action_id, Some(action.id.into()));

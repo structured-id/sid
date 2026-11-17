@@ -171,7 +171,7 @@ async fn test_decision_retry_answers_as_the_decision() {
 #[tokio::test]
 async fn test_temporary_role_retry_after_its_expiry_answers_the_grant() {
     let f = fixture().await;
-    let until = chrono::Utc::now() + chrono::Duration::milliseconds(300);
+    let until = jiff::Timestamp::now() + jiff::SignedDuration::from_millis(300);
     let grant = || GrantTemporaryRoleRequest {
         profile_id: Some(f.member.into()),
         project_id: Some(ProjectId::SYSTEM.into()),
@@ -208,7 +208,7 @@ async fn test_temporary_role_retry_after_its_expiry_answers_the_grant() {
 async fn test_temporary_role_retry_grants_once() {
     let f = fixture().await;
     // A retry sends the request it sent before.
-    let until = chrono::Utc::now() + chrono::Duration::hours(4);
+    let until = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(4);
     let grant = || GrantTemporaryRoleRequest {
         profile_id: Some(f.member.into()),
         project_id: Some(ProjectId::SYSTEM.into()),
