@@ -300,6 +300,11 @@ fn client() -> OAuth2Client {
 }
 
 fn target(client: &OAuth2Client) -> Target {
+    target_with(client, crate::jwt::UserGrant::Delegated)
+}
+
+/// The cabinet's resource target, granted to users as `grant`.
+fn target_with(client: &OAuth2Client, grant: crate::jwt::UserGrant) -> Target {
     let resource = ProtectedResource {
         id: ResourceId::generate(),
         application_id: None,
@@ -317,7 +322,7 @@ fn target(client: &OAuth2Client) -> Target {
         scopes: vec!["account".into()],
         created_at: Utc::now(),
     };
-    Target::from_parts(resource, access, crate::jwt::UserGrant::Delegated)
+    Target::from_parts(resource, access, grant)
 }
 
 /// A host of [`Account`]s answering one request.
@@ -681,6 +686,35 @@ async fn test_a_policy_changed_after_admission_commits_no_grant() {
             "the fenced redemption stored no session"
         );
     });
+}
+
+// A refresh issues the same kind of credential for the same scopes as the
+// grant it continues (RFC 6749 §6): its kind follows the grant's target, never
+// the request, and it takes no requested scope at all, so it cannot widen.
+// Shown for both user grant kinds a resource token carries.
+#[tokio::test]
+async fn test_refresh_keeps_the_grants_kind_and_scopes() {
+    use crate::jwt::{IssuedCredential, UserGrant};
+    for (grant, kind) in [
+        (UserGrant::Delegated, IssuedCredential::Delegated),
+        (UserGrant::AccountApi, IssuedCredential::AccountApi),
+    ] {
+        let mut host = Host::new().await;
+        host.target = target_with(&host.client, grant);
+        let code = host.authorize(Account(7));
+        let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+        let issued = access_claims(&host, &first).await;
+
+        let renewed = refresh(&host, first.refresh_token.as_deref())
+            .await
+            .unwrap();
+        let refreshed = access_claims(&host, &renewed).await;
+
+        assert_eq!(issued.credential_kind, Some(kind), "{kind:?}");
+        assert_eq!(refreshed.credential_kind, Some(kind), "{kind:?}");
+        assert_eq!(refreshed.scope, issued.scope, "{kind:?}");
+        assert_eq!(refreshed.scope, "account", "{kind:?}");
+    }
 }
 
 #[tokio::test]
