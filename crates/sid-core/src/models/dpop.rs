@@ -4,7 +4,7 @@
 //! RFC 9449: sender-constrained access tokens via client-generated key pairs.
 //! The client proves it holds the private key matching the token's bound public key.
 
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// HTTP method for DPoP proof binding.
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_dpop_proof_expired() {
         let mut proof = make_proof();
-        proof.iat = Timestamp::now() - SignedDuration::from_secs(200);
+        proof.iat = Timestamp::now() - jiff::SignedDuration::from_secs(200);
         assert!(proof.is_expired());
     }
 

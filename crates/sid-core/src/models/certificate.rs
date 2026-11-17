@@ -3,7 +3,7 @@
 //!
 //! Certificate hierarchy: RootCA → InstanceCA → BindingCertificate / ScopedCA / SiteCertificate.
 
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -157,8 +157,8 @@ mod tests {
             issuer_dn: "CN=Test".to_string(),
             parent_id: None,
             der: vec![],
-            not_before: now - SignedDuration::from_hours(1),
-            not_after: now + SignedDuration::from_hours(365 * 24),
+            not_before: now - jiff::SignedDuration::from_hours(1),
+            not_after: now + jiff::SignedDuration::from_hours(365 * 24),
             instance_id: None,
             org_id: None,
             site_domain: None,
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn test_certificate_expired() {
         let mut cert = make_cert(CertificateType::InstanceCa);
-        cert.not_after = Timestamp::now() - SignedDuration::from_hours(1);
+        cert.not_after = Timestamp::now() - jiff::SignedDuration::from_hours(1);
         assert!(!cert.is_valid());
         assert!(cert.is_expired());
     }
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_certificate_not_yet_valid() {
         let mut cert = make_cert(CertificateType::SiteCertificate);
-        cert.not_before = Timestamp::now() + SignedDuration::from_hours(1);
+        cert.not_before = Timestamp::now() + jiff::SignedDuration::from_hours(1);
         assert!(!cert.is_valid());
     }
 
