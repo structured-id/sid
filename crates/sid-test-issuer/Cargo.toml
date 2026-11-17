@@ -27,6 +27,8 @@ sid-auth = { path = "../sid-auth", default-features = false }
 arc-swap = { workspace = true }
 chrono = { workspace = true }
 secrecy = { workspace = true }
+# A web client's registered public keys (RFC 7517 §5).
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1.19"
