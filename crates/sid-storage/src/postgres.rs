@@ -31,6 +31,9 @@ use sid_plugin::{ClientResourceRegistry, GrantStore, IssuerStore};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::pg_time::{FromPg, PgTime, ToPg};
+use jiff::Timestamp;
+
 /// Map an insert failure: a unique-key violation means the row (account, identifier,
 /// active password) already exists, anything else is a storage fault.
 fn insert_error(what: &str, e: sqlx::Error) -> SidError {
@@ -64,8 +67,8 @@ async fn insert_dlq_entry(
         i32::try_from(entry.attempts)
             .map_err(|e| SidError::Validation(format!("dlq attempts: {e}")))?,
     )
-    .bind(entry.first_attempt)
-    .bind(entry.last_attempt)
+    .bind(entry.first_attempt.pg())
+    .bind(entry.last_attempt.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("outbound dlq entry", e))?;
@@ -101,7 +104,7 @@ type IssuerRow = (
     String,
     String,
     sid_core::models::OrgId,
-    chrono::DateTime<chrono::Utc>,
+    Timestamp,
 );
 
 fn issuer_from_row(
@@ -510,13 +513,17 @@ impl PostgresBackend {
         mut ctx: MutationContext,
     ) -> SidResult<()> {
         if ctx.operation.is_some() {
-            let left: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            let left: Vec<(String, String, PgTime)> = sqlx::query_as(
                 "SELECT cidr, description, created_at FROM ip_allowlist_entries \
                  ORDER BY created_at",
             )
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("read the allowlist: {e}")))?;
+            let left: Vec<(String, String, Timestamp)> = left
+                .into_iter()
+                .map(|(cidr, description, at)| (cidr, description, at.jiff()))
+                .collect();
             ctx.record_effect(&left)?;
         }
         Self::audit_in_tx(&mut tx, "ip_allowlist", ctx).await?;
@@ -535,8 +542,8 @@ impl PostgresBackend {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         session: sid_core::models::SessionId,
         profile: sid_core::models::ProfileId,
-        fresh_until: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        fresh_until: Option<Timestamp>,
+    ) -> SidResult<Timestamp> {
         let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
         let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
         let status: Option<String> =
@@ -553,7 +560,7 @@ impl PostgresBackend {
         }
         // The expiry is compared with the clock once the row is locked: `NOW()`
         // is the transaction's start, before any lock wait.
-        let expires_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        let expires_at: Option<PgTime> = sqlx::query_scalar(
             "SELECT expires_at FROM sessions WHERE id = $1 AND profile_id = $2 FOR SHARE",
         )
         .bind(session)
@@ -561,7 +568,7 @@ impl PostgresBackend {
         .fetch_optional(&mut **tx)
         .await
         .map_err(storage)?;
-        let Some(expires_at) = expires_at else {
+        let Some(expires_at) = expires_at.jiff() else {
             return Err(fenced("ended"));
         };
         let until = fresh_until.map_or(expires_at, |fresh| fresh.min(expires_at));
@@ -570,8 +577,8 @@ impl PostgresBackend {
     }
 
     /// Fail with `Fenced` once the sign-in's authorization ended at `until`.
-    fn session_fence_holds(until: chrono::DateTime<chrono::Utc>) -> SidResult<()> {
-        if chrono::Utc::now() >= until {
+    fn session_fence_holds(until: Timestamp) -> SidResult<()> {
+        if Timestamp::now() >= until {
             return Err(SidError::Fenced(
                 "the sign-in ended or is no longer fresh".into(),
             ));
@@ -811,7 +818,7 @@ impl PostgresBackend {
         .bind(&r.description)
         .bind(&r.group)
         .bind(r.permissions_string())
-        .bind(r.updated_at)
+        .bind(r.updated_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("role", e))?
@@ -863,8 +870,8 @@ impl PostgresBackend {
         .bind(oauth_client_id)
         .bind(connector_id).bind(assignment.role_id)
         .bind(&assignment.scope)
-        .bind(assignment.expires_at)
-        .bind(assignment.created_at)
+        .bind(assignment.expires_at.pg())
+        .bind(assignment.created_at.pg())
         .bind(provenance.map(|p| p.granted_by.as_str()))
         .bind(provenance.and_then(|p| p.basis))
         .bind(provenance.and_then(|p| p.depends_on))
@@ -943,8 +950,8 @@ impl PostgresBackend {
         .bind(&role.description)
         .bind(&role.group)
         .bind(role.permissions_string())
-        .bind(role.created_at)
-        .bind(role.updated_at)
+        .bind(role.created_at.pg())
+        .bind(role.updated_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("role", e))?;
@@ -1363,7 +1370,7 @@ impl PostgresBackend {
         .bind(request.status.as_str())
         .bind(request.reviewed_by)
         .bind(&request.review_comment)
-        .bind(request.reviewed_at)
+        .bind(request.reviewed_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("Decide access_request failed: {}", e)))?
@@ -1447,9 +1454,9 @@ impl PostgresBackend {
             .bind(client.registration_iat)
             .bind(&client.registration_access_token_hash)
             .bind(client.org_id)
-            .bind(client.client_id_issued_at)
-            .bind(client.client_secret_expires_at)
-            .bind(client.created_at)
+            .bind(client.client_id_issued_at.pg())
+            .bind(client.client_secret_expires_at.pg())
+            .bind(client.created_at.pg())
             .bind(revision)
             .bind(client.application_id)
             .bind(client.default_resource)
@@ -1537,8 +1544,8 @@ impl PostgresBackend {
         .bind(credential.status.as_str())
         .bind(credential.data.expose())
         .bind(&credential.label)
-        .bind(credential.created_at)
-        .bind(credential.last_used_at)
+        .bind(credential.created_at.pg())
+        .bind(credential.last_used_at.pg())
         .bind(policy_version)
         .bind(verified)
         .bind(credential.opaque_curve.map(|c| c as i16))
@@ -1596,7 +1603,7 @@ impl PostgresBackend {
     async fn transition_export_job(
         &self,
         id: Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         ctx: MutationContext,
         sql: &'static str,
     ) -> SidResult<bool> {
@@ -1656,8 +1663,8 @@ impl PostgresBackend {
             .bind(provider.show_on_login)
             .bind(provider.display_order)
             .bind(&provider.logo_url)
-            .bind(provider.created_at)
-            .bind(provider.updated_at)
+            .bind(provider.created_at.pg())
+            .bind(provider.updated_at.pg())
             .bind(revision)
             .execute(&mut *tx)
             .await
@@ -1685,7 +1692,7 @@ impl PostgresBackend {
 struct BrandingRow {
     status: String,
     revision: i64,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: Timestamp,
     data: serde_json::Value,
 }
 
@@ -1728,9 +1735,9 @@ struct ConsentRow {
     profile_id: ProfileId,
     client_id: String,
     status: String,
-    consented_at: chrono::DateTime<chrono::Utc>,
-    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    consented_at: Timestamp,
+    revoked_at: Option<Timestamp>,
+    updated_at: Timestamp,
 }
 
 impl ConsentRow {
@@ -1758,8 +1765,8 @@ struct ClaimGrantRow {
     consent_id: uuid::Uuid,
     claim_name: String,
     claim_type: String,
-    granted_at: chrono::DateTime<chrono::Utc>,
-    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    granted_at: Timestamp,
+    revoked_at: Option<Timestamp>,
 }
 
 impl ClaimGrantRow {
@@ -1785,7 +1792,7 @@ struct AnomalyEventRow {
     description: String,
     risk_score: i32,
     reaction: String,
-    timestamp: chrono::DateTime<chrono::Utc>,
+    timestamp: Timestamp,
 }
 
 impl AnomalyEventRow {
@@ -1808,10 +1815,10 @@ type IpReputationRow = (
     String,
     i32,
     i32,
-    chrono::DateTime<chrono::Utc>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    chrono::DateTime<chrono::Utc>,
+    Timestamp,
+    Option<Timestamp>,
+    Option<Timestamp>,
+    Timestamp,
 );
 
 fn reputation_of(row: IpReputationRow) -> sid_core::models::IpReputation {
@@ -1928,7 +1935,7 @@ impl IssuerStore for PostgresBackend {
         .bind(&issuer.canonical_url)
         .bind(issuer.authority.as_str())
         .bind(issuer.recipient_org)
-        .bind(issuer.created_at)
+        .bind(issuer.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("oidc issuer", e))?
@@ -1945,7 +1952,7 @@ impl IssuerStore for PostgresBackend {
             .bind(&first_key.key_id)
             .bind(first_key.public_key.as_slice())
             .bind(&first_key.sealed_private_key)
-            .bind(first_key.created_at)
+            .bind(first_key.created_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("oidc issuer signing key", e))?;
@@ -1967,7 +1974,7 @@ impl IssuerStore for PostgresBackend {
             String,
             Vec<u8>,
             Vec<u8>,
-            chrono::DateTime<chrono::Utc>,
+            Timestamp,
         )> = sqlx::query_as(
             "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
                  FROM oidc_issuer_signing_keys WHERE issuer_id = $1 ORDER BY generation",
@@ -2049,7 +2056,7 @@ impl IssuerStore for PostgresBackend {
         .bind(&issuer.canonical_url)
         .bind(issuer.authority.as_str())
         .bind(issuer.recipient_org)
-        .bind(issuer.created_at)
+        .bind(issuer.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("oidc issuer", e))?;
@@ -2064,7 +2071,7 @@ impl IssuerStore for PostgresBackend {
             .bind(&key.key_id)
             .bind(key.public_key.as_slice())
             .bind(&key.sealed_private_key)
-            .bind(key.created_at)
+            .bind(key.created_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("oidc issuer signing key", e))?;
@@ -2175,11 +2182,7 @@ impl GrantStore for PostgresBackend {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
-    async fn touch_session(
-        &self,
-        id: SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
+    async fn touch_session(&self, id: SessionId, at: Timestamp) -> SidResult<()> {
         // GREATEST ignores a NULL argument, so a first touch sets the value.
         sqlx::query(
             "UPDATE sessions SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
@@ -2284,7 +2287,7 @@ impl GrantStore for PostgresBackend {
         &self,
         old_id: Uuid,
         new: &RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        grace_expires_at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -2602,12 +2605,12 @@ impl StorageBackend for PostgresBackend {
         .bind(principal.principal_type.as_str())
         .bind(&principal.value)
         .bind(principal.verified)
-        .bind(principal.verified_at)
-        .bind(principal.verification_expires)
+        .bind(principal.verified_at.pg())
+        .bind(principal.verification_expires.pg())
         .bind(profile.id)
         .bind(principal.email_policy_revision)
-        .bind(principal.created_at)
-        .bind(principal.updated_at)
+        .bind(principal.created_at.pg())
+        .bind(principal.updated_at.pg())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| principal_write_error("insert principal", e))?;
@@ -2636,9 +2639,9 @@ impl StorageBackend for PostgresBackend {
             .bind(&email.custom_label)
             .bind(email.is_primary)
             .bind(email.verified)
-            .bind(email.verified_at)
-            .bind(email.created_at)
-            .bind(email.updated_at)
+            .bind(email.verified_at.pg())
+            .bind(email.created_at.pg())
+            .bind(email.updated_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("profile email", e))?;
@@ -2663,9 +2666,9 @@ impl StorageBackend for PostgresBackend {
             .bind(phone.can_receive_fax)
             .bind(phone.can_receive_voice)
             .bind(phone.verified)
-            .bind(phone.verified_at)
-            .bind(phone.created_at)
-            .bind(phone.updated_at)
+            .bind(phone.verified_at.pg())
+            .bind(phone.created_at.pg())
+            .bind(phone.updated_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("profile phone", e))?;
@@ -2684,7 +2687,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&principal.source_field)
         .bind(principal.source_email_id.map(|id| id.0))
         .bind(principal.source_phone_id.map(|id| id.0))
-        .bind(principal.created_at)
+        .bind(principal.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("principal binding", e))?;
@@ -2731,7 +2734,7 @@ impl StorageBackend for PostgresBackend {
             .bind(&source.utm.term)
             .bind(&source.utm.content)
             .bind(&source.client_id)
-            .bind(source.created_at)
+            .bind(source.created_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("registration source", e))?;
@@ -2813,7 +2816,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         settings: &PhoneSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -2859,7 +2862,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -2965,7 +2968,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         settings: &EmailSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -3005,7 +3008,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -3453,8 +3456,8 @@ impl StorageBackend for PostgresBackend {
         .bind(&proj.description)
         .bind(proj.owner_id)
         .bind(proj.is_system)
-        .bind(proj.created_at)
-        .bind(proj.updated_at)
+        .bind(proj.created_at.pg())
+        .bind(proj.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("project", e))?;
@@ -3485,7 +3488,7 @@ impl StorageBackend for PostgresBackend {
         .bind(id)
         .bind(&change.name)
         .bind(&change.description)
-        .bind(change.updated_at)
+        .bind(change.updated_at.pg())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| insert_error("project", e))?;
@@ -3970,8 +3973,8 @@ impl StorageBackend for PostgresBackend {
         .bind(token.allowed_redirect_patterns.join(" "))
         .bind(token.created_by)
         .bind(token.revoked)
-        .bind(token.expires_at)
-        .bind(token.created_at)
+        .bind(token.expires_at.pg())
+        .bind(token.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("initial access token", e))?;
@@ -4013,13 +4016,13 @@ impl StorageBackend for PostgresBackend {
         .ok_or_else(|| SidError::NotFound(format!("initial access token {iat}")))?;
         use sqlx::Row;
         let revoked: bool = row.get("revoked");
-        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
+        let expires_at: Timestamp = row.get("expires_at");
         let max_clients: i32 = row.get("max_clients");
         let registered: i32 = row.get("clients_registered");
         if revoked {
             return Err(SidError::Revoked(format!("initial access token {iat}")));
         }
-        if expires_at <= chrono::Utc::now() {
+        if expires_at <= Timestamp::now() {
             return Err(SidError::Expired(format!("initial access token {iat}")));
         }
         if max_clients > 0 && registered >= max_clients {
@@ -4113,19 +4116,14 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
     async fn instance_organization(&self) -> SidResult<Option<sid_core::models::Organization>> {
-        let row: Option<(
-            sid_core::models::OrgId,
-            String,
-            String,
-            String,
-            chrono::DateTime<chrono::Utc>,
-        )> = sqlx::query_as(
-            "SELECT id, org_type, status, canonical_domain, created_at
+        let row: Option<(sid_core::models::OrgId, String, String, String, Timestamp)> =
+            sqlx::query_as(
+                "SELECT id, org_type, status, canonical_domain, created_at
                  FROM organizations WHERE is_instance",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("instance organization: {e}")))?;
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("instance organization: {e}")))?;
         row.map(|(id, org_type, status, canonical_domain, created_at)| {
             let stored = |e: String| SidError::Storage(format!("organization {id}: {e}"));
             Ok(sid_core::models::Organization {
@@ -4158,7 +4156,7 @@ impl StorageBackend for PostgresBackend {
         .bind(org.org_type.as_str())
         .bind(org.status.as_str())
         .bind(&org.canonical_domain)
-        .bind(org.created_at)
+        .bind(org.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("organization", e))?
@@ -4189,7 +4187,7 @@ impl StorageBackend for PostgresBackend {
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(org)
-        .bind(reference.created_at)
+        .bind(reference.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("organization reference", e))?
@@ -4220,7 +4218,7 @@ impl StorageBackend for PostgresBackend {
     async fn organization_references(
         &self,
     ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
-        let rows: Vec<(sid_core::models::OrgId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let rows: Vec<(sid_core::models::OrgId, Timestamp)> = sqlx::query_as(
             "SELECT id, created_at FROM organizations WHERE NOT is_instance ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -4634,8 +4632,8 @@ impl StorageBackend for PostgresBackend {
         .bind(&r.description)
         .bind(&r.group)
         .bind(r.permissions_string())
-        .bind(r.created_at)
-        .bind(r.updated_at)
+        .bind(r.created_at.pg())
+        .bind(r.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("role", e))?;
@@ -5210,7 +5208,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         within_hours: i64,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let deadline = chrono::Utc::now() + chrono::Duration::hours(within_hours);
+        let deadline = Timestamp::now() + jiff::SignedDuration::from_hours(within_hours);
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= $1",
         )
@@ -5230,7 +5228,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         // The rows in id order before their sets, as a set replacement locks
         // them.
         let expired = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
@@ -5297,7 +5295,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&policy.policy_text)
         .bind(policy.effect.as_str())
         .bind(policy.enabled)
-        .bind(policy.updated_at)
+        .bind(policy.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("update policy: {e}")))?
@@ -5334,8 +5332,8 @@ impl StorageBackend for PostgresBackend {
         .bind(&policy.policy_text)
         .bind(policy.effect.as_str())
         .bind(policy.enabled)
-        .bind(policy.created_at)
-        .bind(policy.updated_at)
+        .bind(policy.created_at.pg())
+        .bind(policy.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("policy", e))?;
@@ -5491,9 +5489,9 @@ impl StorageBackend for PostgresBackend {
         .bind(grant.profile_id).bind(grant.project_id)
         .bind(grant.role_keys.join(" "))
         .bind(&grant.granted_by)
-        .bind(grant.expires_at)
-        .bind(grant.created_at)
-        .bind(grant.updated_at)
+        .bind(grant.expires_at.pg())
+        .bind(grant.created_at.pg())
+        .bind(grant.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("profile grant", e))?;
@@ -5578,8 +5576,8 @@ impl StorageBackend for PostgresBackend {
         .bind(device.hardware_attested)
         .bind(&device.fingerprint_hash)
         .bind(&device.last_ip_geo)
-        .bind(device.first_seen_at)
-        .bind(device.last_seen_at)
+        .bind(device.first_seen_at.pg())
+        .bind(device.last_seen_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("device", e))?;
@@ -5798,8 +5796,8 @@ impl StorageBackend for PostgresBackend {
                 .bind(device.hardware_attested)
                 .bind(&device.fingerprint_hash)
                 .bind(&device.last_ip_geo)
-                .bind(device.first_seen_at)
-                .bind(device.last_seen_at)
+                .bind(device.first_seen_at.pg())
+                .bind(device.last_seen_at.pg())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| insert_error("device", e))?;
@@ -5870,9 +5868,9 @@ impl StorageBackend for PostgresBackend {
         .bind(&att.attestation_object)
         .bind(&att.attestation_certificate)
         .bind(&att.aaguid)
-        .bind(att.created_at)
-        .bind(att.updated_at)
-        .bind(att.revoked_at)
+        .bind(att.created_at.pg())
+        .bind(att.updated_at.pg())
+        .bind(att.revoked_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("device attestation", e))?;
@@ -5932,9 +5930,9 @@ impl StorageBackend for PostgresBackend {
         .bind(&att.attestation_object)
         .bind(&att.attestation_certificate)
         .bind(&att.aaguid)
-        .bind(att.created_at)
-        .bind(att.updated_at)
-        .bind(att.revoked_at)
+        .bind(att.created_at.pg())
+        .bind(att.updated_at.pg())
+        .bind(att.revoked_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("device attestation", e))?;
@@ -6291,12 +6289,12 @@ impl StorageBackend for PostgresBackend {
         .bind(&identity.upstream_email)
         .bind(&identity.upstream_name)
         .bind(&identity.upstream_picture)
-        .bind(identity.last_login_at)
+        .bind(identity.last_login_at.pg())
         .bind(
             i64::try_from(identity.login_count)
                 .map_err(|e| SidError::Validation(format!("login count: {e}")))?,
         )
-        .bind(identity.linked_at)
+        .bind(identity.linked_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("upstream identity", e))?;
@@ -6332,7 +6330,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&login.email)
         .bind(&login.name)
         .bind(&login.picture)
-        .bind(login.at)
+        .bind(login.at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record upstream login: {e}")))?
@@ -6456,13 +6454,13 @@ impl StorageBackend for PostgresBackend {
         .bind(pat.scopes.join(" "))
         .bind(pat.ip_allowlist.join(" "))
         .bind(pat.status.as_str())
-        .bind(pat.expires_at)
-        .bind(pat.last_used_at)
+        .bind(pat.expires_at.pg())
+        .bind(pat.last_used_at.pg())
         .bind(&pat.last_used_ip)
         .bind(pat.use_count as i64)
-        .bind(pat.revoked_at)
+        .bind(pat.revoked_at.pg())
         .bind(&pat.revoked_by)
-        .bind(pat.created_at)
+        .bind(pat.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("PAT", e))?;
@@ -6597,7 +6595,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        let cutoff = Timestamp::now() - jiff::SignedDuration::from_hours(i64::from(days) * 24);
         // Single UPDATE instead of SELECT + loop: atomically revoke all unused PATs
         let result = sqlx::query(
             "UPDATE personal_access_tokens SET status = 'revoked', revoked_at = NOW(), revoked_by = 'system:auto_revoke_unused'
@@ -6665,7 +6663,7 @@ impl StorageBackend for PostgresBackend {
         .bind(mu.restrictions.ip_allowlist.join(" "))
         .bind(mu.restrictions.rate_limit_rpm as i32)
         .bind(mu.max_token_lifetime.map(|v| v as i32))
-        .bind(mu.expires_at)
+        .bind(mu.expires_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("update machine user: {e}")))?
@@ -6741,10 +6739,10 @@ impl StorageBackend for PostgresBackend {
         .bind(mu.restrictions.ip_allowlist.join(" "))
         .bind(mu.restrictions.rate_limit_rpm as i32)
         .bind(mu.max_token_lifetime.map(|v| v as i32))
-        .bind(None::<chrono::DateTime<chrono::Utc>>)
-        .bind(mu.expires_at)
-        .bind(mu.created_at)
-        .bind(mu.updated_at)
+        .bind(None::<PgTime>)
+        .bind(mu.expires_at.pg())
+        .bind(mu.created_at.pg())
+        .bind(mu.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("machine user", e))?;
@@ -6864,7 +6862,7 @@ impl StorageBackend for PostgresBackend {
         machine_user_id: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -7021,7 +7019,7 @@ impl StorageBackend for PostgresBackend {
         connector_id: sid_core::models::ProvisioningConnectorId,
         old: sid_core::models::ProvisioningCredentialId,
         new: &sid_core::models::ProvisioningCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.connector_rotate_credential(connector_id, old, new, grace_until, ctx)
@@ -7130,9 +7128,9 @@ impl StorageBackend for PostgresBackend {
         .bind(consent.profile_id)
         .bind(&consent.client_id)
         .bind(consent.status.as_str())
-        .bind(consent.consented_at)
-        .bind(consent.revoked_at)
-        .bind(consent.updated_at)
+        .bind(consent.consented_at.pg())
+        .bind(consent.revoked_at.pg())
+        .bind(consent.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("consent", e))?;
@@ -7144,8 +7142,8 @@ impl StorageBackend for PostgresBackend {
             .bind(grant.id.0).bind(consent.id.0)
             .bind(&grant.claim_name)
             .bind(grant.claim_type.as_str())
-            .bind(grant.granted_at)
-            .bind(grant.revoked_at)
+            .bind(grant.granted_at.pg())
+            .bind(grant.revoked_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("claim grant", e))?;
@@ -7561,10 +7559,10 @@ impl StorageBackend for PostgresBackend {
         .bind(&reputation.ip)
         .bind(failed)
         .bind(succeeded)
-        .bind(reputation.first_seen_at)
-        .bind(reputation.last_failed_at)
-        .bind(reputation.last_success_at)
-        .bind(reputation.updated_at)
+        .bind(reputation.first_seen_at.pg())
+        .bind(reputation.last_failed_at.pg())
+        .bind(reputation.last_success_at.pg())
+        .bind(reputation.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("IP reputation", e))?;
@@ -7607,10 +7605,8 @@ impl StorageBackend for PostgresBackend {
         Self::commit_allowlist_change(tx, ctx).await
     }
 
-    async fn list_ip_allowlist_entries(
-        &self,
-    ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
-        let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+    async fn list_ip_allowlist_entries(&self) -> SidResult<Vec<(String, String, Timestamp)>> {
+        let rows: Vec<(String, String, Timestamp)> = sqlx::query_as(
             "SELECT cidr, description, created_at FROM ip_allowlist_entries ORDER BY created_at",
         )
         .fetch_all(&self.pool)
@@ -7623,12 +7619,12 @@ impl StorageBackend for PostgresBackend {
         &self,
         cidr: &str,
         description: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("import_ip_allowlist_entry: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let held: Option<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let held: Option<(String, String, Timestamp)> = sqlx::query_as(
             "SELECT cidr, description, created_at FROM ip_allowlist_entries WHERE cidr = $1",
         )
         .bind(cidr)
@@ -7656,7 +7652,8 @@ impl StorageBackend for PostgresBackend {
         &self,
         within_days: u32,
     ) -> SidResult<Vec<MachineUserCredential>> {
-        let cutoff = chrono::Utc::now() + chrono::Duration::days(i64::from(within_days));
+        let cutoff =
+            Timestamp::now() + jiff::SignedDuration::from_hours(i64::from(within_days) * 24);
         let rows = sqlx::query_as::<_, crate::pg_row::MachineCredentialRow>(
             "SELECT * FROM machine_user_credentials
             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at < $1
@@ -7693,7 +7690,7 @@ impl StorageBackend for PostgresBackend {
         .bind(grant.target_type.as_str())
         .bind(&grant.target)
         .bind(grant.allowed_scopes.join(" "))
-        .bind(grant.created_at)
+        .bind(grant.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Insert/update failed: {}", e)))?;
@@ -7766,7 +7763,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         principal_hash: &str,
         principal_type: &str,
-        quarantine_until: chrono::DateTime<chrono::Utc>,
+        quarantine_until: Timestamp,
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self
@@ -7983,7 +7980,7 @@ impl StorageBackend for PostgresBackend {
     async fn acknowledge_export_job(
         &self,
         id: Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transition_export_job(
@@ -7999,7 +7996,7 @@ impl StorageBackend for PostgresBackend {
     async fn expire_export_job(
         &self,
         id: Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transition_export_job(
@@ -8030,9 +8027,9 @@ impl StorageBackend for PostgresBackend {
         .bind(&job.archive_path)
         .bind(job.size_bytes)
         .bind(&job.checksum_sha256)
-        .bind(job.created_at)
-        .bind(job.ready_at)
-        .bind(job.expires_at)
+        .bind(job.created_at.pg())
+        .bind(job.ready_at.pg())
+        .bind(job.expires_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("export job", e))?;
@@ -8088,8 +8085,8 @@ impl StorageBackend for PostgresBackend {
         .bind(&session.token_hash)
         .bind(&session.sealed_token)
         .bind(session.consumed)
-        .bind(session.created_at)
-        .bind(session.expires_at)
+        .bind(session.created_at.pg())
+        .bind(session.expires_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("magic link", e))?;
@@ -8236,8 +8233,8 @@ impl StorageBackend for PostgresBackend {
         .bind(&group_push_json)
         .bind(&sync_config_json)
         .bind(target.enabled)
-        .bind(target.created_at)
-        .bind(target.updated_at)
+        .bind(target.created_at.pg())
+        .bind(target.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("scim outbound target", e))?;
@@ -8322,14 +8319,14 @@ impl StorageBackend for PostgresBackend {
         .bind(record.sid_entity_id)
         .bind(record.entity_type.as_str())
         .bind(&record.downstream_id)
-        .bind(record.last_synced_at)
+        .bind(record.last_synced_at.pg())
         .bind(&record.last_error)
         .bind(
             i32::try_from(record.failure_count)
                 .map_err(|e| SidError::Validation(format!("failure count: {e}")))?,
         )
-        .bind(record.created_at)
-        .bind(record.updated_at)
+        .bind(record.created_at.pg())
+        .bind(record.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("scim outbound record", e))?;
@@ -8373,7 +8370,7 @@ impl StorageBackend for PostgresBackend {
         .bind(record.sid_entity_id)
         .bind(record.entity_type.as_str())
         .bind(&record.downstream_id)
-        .bind(record.last_synced_at)
+        .bind(record.last_synced_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record scim sync: {e}")))?;
@@ -8413,7 +8410,7 @@ impl StorageBackend for PostgresBackend {
         .bind(entry.sid_entity_id)
         .bind(entry.entity_type.as_str())
         .bind(&entry.error)
-        .bind(entry.last_attempt)
+        .bind(entry.last_attempt.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record scim failure: {e}")))?;
@@ -8554,7 +8551,7 @@ impl StorageBackend for PostgresBackend {
         .bind(config.project_id)
         .bind(config.flow_type.as_str())
         .bind(&data)
-        .bind(config.updated_at)
+        .bind(config.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Insert failed: {e}")))?;
@@ -8623,8 +8620,8 @@ impl StorageBackend for PostgresBackend {
         .bind(action.order)
         .bind(&data)
         .bind(revision)
-        .bind(action.created_at)
-        .bind(action.updated_at)
+        .bind(action.created_at.pg())
+        .bind(action.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("flow action", e))?;
@@ -8660,7 +8657,7 @@ impl StorageBackend for PostgresBackend {
         .bind(action.action_point.as_str())
         .bind(action.order)
         .bind(&data)
-        .bind(action.updated_at)
+        .bind(action.updated_at.pg())
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -8769,8 +8766,8 @@ impl StorageBackend for PostgresBackend {
         .bind(config.project_id)
         .bind(config.status.as_str())
         .bind(&data)
-        .bind(config.created_at)
-        .bind(config.updated_at)
+        .bind(config.created_at.pg())
+        .bind(config.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("branding config", e))?;
@@ -8801,7 +8798,7 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(config.id)
         .bind(&data)
-        .bind(config.updated_at)
+        .bind(config.updated_at.pg())
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -8822,7 +8819,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         id: sid_core::models::BrandingConfigId,
         project_id: ProjectId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -8995,9 +8992,9 @@ impl StorageBackend for PostgresBackend {
             .bind(metadata)
             .bind(count("max uses", invite.max_uses)?)
             .bind(count("use count", invite.use_count)?)
-            .bind(invite.expires_at)
+            .bind(invite.expires_at.pg())
             .bind(invite.active)
-            .bind(invite.created_at)
+            .bind(invite.created_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("invite", e))?;
@@ -9084,7 +9081,7 @@ impl StorageBackend for PostgresBackend {
         offset: u64,
         limit: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
-        let rows: Vec<(ProfileId, Option<Uuid>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let rows: Vec<(ProfileId, Option<Uuid>, Timestamp)> = sqlx::query_as(
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
              WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
         )
@@ -9114,16 +9111,15 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("import invite redemption: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let held: Option<(ProfileId, Option<Uuid>, chrono::DateTime<chrono::Utc>)> =
-            sqlx::query_as(
-                "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
+        let held: Option<(ProfileId, Option<Uuid>, Timestamp)> = sqlx::query_as(
+            "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
                  WHERE invite_id = $1 AND profile_id = $2",
-            )
-            .bind(id)
-            .bind(redemption.profile_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?;
+        )
+        .bind(id)
+        .bind(redemption.profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
         if let Some((profile_id, credential_id, redeemed_at)) = held {
             let stored = sid_core::models::InviteRedemption {
                 profile_id,
@@ -9139,7 +9135,7 @@ impl StorageBackend for PostgresBackend {
         .bind(id)
         .bind(redemption.profile_id)
         .bind(redemption.credential_id.map(|c| c.0))
-        .bind(redemption.redeemed_at)
+        .bind(redemption.redeemed_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("invite redemption", e))?;
@@ -9249,7 +9245,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&source.utm.term)
         .bind(&source.utm.content)
         .bind(&source.client_id)
-        .bind(source.created_at)
+        .bind(source.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("registration source", e))?;
@@ -9260,7 +9256,7 @@ impl StorageBackend for PostgresBackend {
 
     async fn count_registrations_by_source(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: Timestamp,
     ) -> SidResult<Vec<(RegistrationSourceType, u64)>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT source_type::text, COUNT(*) FROM registration_sources WHERE created_at >= $1 GROUP BY source_type"
@@ -9276,7 +9272,7 @@ impl StorageBackend for PostgresBackend {
 
     async fn top_referrers(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: Timestamp,
         limit: u64,
     ) -> SidResult<Vec<(ProfileId, u64)>> {
         let rows: Vec<(ProfileId, i64)> = sqlx::query_as(
@@ -9298,13 +9294,13 @@ impl StorageBackend for PostgresBackend {
         job_lock::try_job_lock(&self.pool, job).await
     }
 
-    async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> SidResult<bool> {
+    async fn ensure_audit_partition(&self, month_start: jiff::civil::Date) -> SidResult<bool> {
         audit_retention::ensure_partition(&self.pool, month_start).await
     }
 
     async fn drop_expired_audit_records(
         &self,
-        cut_before: chrono::DateTime<chrono::Utc>,
+        cut_before: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<u64> {
         let boundary = audit_retention::month_start(cut_before)?;
@@ -9330,7 +9326,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Option<sid_core::models::notification::NotificationPreferences>> {
-        let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let row: Option<(serde_json::Value, Timestamp)> = sqlx::query_as(
             "SELECT preferences, updated_at FROM notification_preferences WHERE profile_id = $1",
         )
         .bind(profile_id)
@@ -9383,7 +9379,7 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(preferences.profile_id)
         .bind(&prefs_json)
-        .bind(preferences.updated_at)
+        .bind(preferences.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Save notification preferences failed: {}", e)))?;
@@ -9465,9 +9461,9 @@ impl StorageBackend for PostgresBackend {
         .bind(request.status.as_str())
         .bind(request.reviewed_by)
         .bind(&request.review_comment)
-        .bind(request.created_at)
-        .bind(request.reviewed_at)
-        .bind(request.expires_at)
+        .bind(request.created_at.pg())
+        .bind(request.reviewed_at.pg())
+        .bind(request.expires_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("access request", e))?;
@@ -9581,10 +9577,10 @@ impl StorageBackend for PostgresBackend {
         .bind(&session.token_hash)
         .bind(&session.sealed_token)
         .bind(session.status.as_str())
-        .bind(session.created_at)
-        .bind(session.expires_at)
-        .bind(session.verified_at)
-        .bind(session.completed_at)
+        .bind(session.created_at.pg())
+        .bind(session.expires_at.pg())
+        .bind(session.verified_at.pg())
+        .bind(session.completed_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("reset session", e))?;
@@ -9864,9 +9860,9 @@ struct AccessRequestRow {
     status: String,
     reviewed_by: Option<ProfileId>,
     review_comment: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    reviewed_at: Option<chrono::DateTime<chrono::Utc>>,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: Timestamp,
+    reviewed_at: Option<Timestamp>,
+    expires_at: Option<Timestamp>,
 }
 
 impl AccessRequestRow {
