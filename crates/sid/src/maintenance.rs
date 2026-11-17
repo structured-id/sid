@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_authn::account_closure::AccountClosureService;
 use sid_authn::password_operation::HistoryEvaluation;
 use sid_core::models::{AuditEntry, NewWork, OwnerPurge, Profile, ProfileId, ProfileStatus};
@@ -176,7 +176,7 @@ impl Maintenance {
                         match sid_authn::password_operation::compact_enrollments(
                             storage.as_ref(),
                             evaluation.as_deref(),
-                            Utc::now(),
+                            Timestamp::now(),
                         )
                         .await
                         {
@@ -197,7 +197,7 @@ impl Maintenance {
             FirstRun::AfterInterval,
             with(|s| {
                 Box::pin(async move {
-                    sid_authn::operation::upkeep(s.as_ref(), Utc::now()).await;
+                    sid_authn::operation::upkeep(s.as_ref(), Timestamp::now()).await;
                 })
             }),
         ));
@@ -235,7 +235,7 @@ impl Maintenance {
                 Arc::new(move || {
                     let (storage, source) = (storage.clone(), source.clone());
                     Box::pin(async move {
-                        alert_credential_expiry(storage.as_ref(), &source, Utc::now()).await;
+                        alert_credential_expiry(storage.as_ref(), &source, Timestamp::now()).await;
                     })
                 }),
             ));
@@ -247,7 +247,7 @@ impl Maintenance {
             LOCK_ROLE_EXPIRY,
             with(|s| {
                 Box::pin(async move {
-                    expire_role_assignments(s.as_ref(), Utc::now()).await;
+                    expire_role_assignments(s.as_ref(), Timestamp::now()).await;
                 })
             }),
         ));
@@ -307,9 +307,12 @@ impl Maintenance {
                 Arc::new(move || {
                     let storage = storage.clone();
                     Box::pin(async move {
-                        if let Err(e) =
-                            manage_audit_partitions(storage.as_ref(), audit_retention, Utc::now())
-                                .await
+                        if let Err(e) = manage_audit_partitions(
+                            storage.as_ref(),
+                            audit_retention,
+                            Timestamp::now(),
+                        )
+                        .await
                         {
                             tracing::error!(error = %e, "audit storage maintenance failed");
                         }
@@ -430,10 +433,14 @@ async fn release_job_lock(lock: sid_plugin::storage::JobLock, name: &str) {
 
 /// Whether a profile's migration deadline has expired: it was started at
 /// least `deadline_days` ago.
-pub fn is_migration_expired(profile: &Profile, deadline_days: i64, now: DateTime<Utc>) -> bool {
+pub fn is_migration_expired(profile: &Profile, deadline_days: i64, now: Timestamp) -> bool {
     let started = profile.migration_started_at.unwrap_or(profile.created_at);
-    let deadline = started + chrono::Duration::days(deadline_days);
-    now >= deadline
+    // A deadline past the representable range is never reached.
+    deadline_days
+        .checked_mul(24)
+        .and_then(SignedDuration::try_from_hours)
+        .and_then(|window| started.checked_add(window).ok())
+        .is_some_and(|deadline| now >= deadline)
 }
 
 /// One run of migration deadline enforcement: each profile with
@@ -450,7 +457,7 @@ pub async fn enforce_migration_deadline(storage: &dyn StorageBackend, deadline_d
         }
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut expired_count = 0u64;
 
     for profile in &profiles {
@@ -568,10 +575,10 @@ pub async fn execute_due_closures(
 
 /// Whether a closed profile may be purged: its principals' quarantine
 /// (counted from the end of the grace period, when the closure executes) is over.
-pub fn quarantine_ended(request: &sid_core::models::ClosureRequest, now: DateTime<Utc>) -> bool {
+pub fn quarantine_ended(request: &sid_core::models::ClosureRequest, now: Timestamp) -> bool {
     let closed_from = request.grace_period_end.unwrap_or(request.requested_at);
     now >= closed_from
-        + chrono::Duration::days(i64::from(sid_core::models::IDENTIFIER_QUARANTINE_DAYS))
+        + SignedDuration::from_hours(i64::from(sid_core::models::IDENTIFIER_QUARANTINE_DAYS) * 24)
 }
 
 /// The purge the deletion of `profile` owes the history evaluator, to be
@@ -604,7 +611,7 @@ pub async fn purge_closed_profiles(storage: &dyn StorageBackend) -> u64 {
     };
 
     let mut purged_count = 0u64;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     for profile in &profiles {
         match storage.get_closure_request(profile.id).await {
@@ -727,7 +734,7 @@ fn credential_alert_id(alert: &str) -> String {
 pub async fn alert_credential_expiry(
     storage: &dyn StorageBackend,
     source: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> usize {
     use sid_core::models::event::{Event, event_types};
     let alert_days = sid_core::models::machine_user::CREDENTIAL_ALERT_BEFORE_EXPIRY_DAYS;
@@ -753,12 +760,12 @@ pub async fn alert_credential_expiry(
                 .with_data(serde_json::json!({
                     "kid": cred.kid,
                     "machine_user_id": cred.machine_user_id,
-                    "expired_at": exp.to_rfc3339(),
+                    "expired_at": exp.to_string(),
                 }));
             event.id = credential_alert_id(&format!("expired:{}", cred.kid));
             event
         } else {
-            let days_left = (exp - now).num_days();
+            let days_left = exp.duration_since(now).as_secs() / 86_400;
             info!(
                 kid = %cred.kid,
                 machine_user_id = %cred.machine_user_id,
@@ -770,7 +777,7 @@ pub async fn alert_credential_expiry(
                 .with_data(serde_json::json!({
                     "kid": cred.kid,
                     "machine_user_id": cred.machine_user_id,
-                    "expires_at": exp.to_rfc3339(),
+                    "expires_at": exp.to_string(),
                     "days_left": days_left,
                 }));
             event.id = credential_alert_id(&format!("expiring:{}:{days_left}", cred.kid));
@@ -794,7 +801,7 @@ pub async fn alert_credential_expiry(
 /// One run of role assignment expiry at `now`: each warning threshold is
 /// announced once per assignment, and each removal owes its expired event in
 /// the removal's own transaction.
-pub async fn expire_role_assignments(storage: &dyn StorageBackend, now: DateTime<Utc>) {
+pub async fn expire_role_assignments(storage: &dyn StorageBackend, now: Timestamp) {
     let thresholds = sid_core::models::authz::ROLE_EXPIRY_ALERT_HOURS;
     let max_window = *thresholds.first().unwrap_or(&72);
     match storage.list_expiring_role_assignments(max_window).await {
@@ -803,7 +810,7 @@ pub async fn expire_role_assignments(storage: &dyn StorageBackend, now: DateTime
                 let Some(exp) = a.expires_at.filter(|exp| *exp > now) else {
                     continue;
                 };
-                let hours_left = (exp - now).num_hours();
+                let hours_left = exp.duration_since(now).as_hours();
                 // The thresholds descend: the last one reached is the
                 // tightest warning due now.
                 if let Some(&threshold) = thresholds.iter().rev().find(|&&t| hours_left <= t) {
@@ -839,14 +846,15 @@ pub async fn expire_role_assignments(storage: &dyn StorageBackend, now: DateTime
 pub async fn manage_audit_partitions(
     storage: &dyn StorageBackend,
     retention: AuditRetention,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> sid_core::Result<u64> {
-    use chrono::{Datelike, NaiveDate};
-    let this_month = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
-        .ok_or_else(|| sid_core::Error::Internal(format!("no month start for {now}")))?;
+    let this_month = now
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .first_of_month();
     let next_month = this_month
-        .checked_add_months(chrono::Months::new(1))
-        .ok_or_else(|| sid_core::Error::Internal(format!("no month after {this_month}")))?;
+        .checked_add(jiff::Span::new().months(1))
+        .map_err(|_| sid_core::Error::Internal(format!("no month after {this_month}")))?;
     for month in [this_month, next_month] {
         if storage.ensure_audit_partition(month).await? {
             info!("Audit storage prepared for {month}");
@@ -856,11 +864,11 @@ pub async fn manage_audit_partitions(
     match retention.action {
         RetentionAction::Archive => Ok(0),
         RetentionAction::Delete => {
-            let cut_before = now - chrono::Duration::days(i64::from(retention.days));
+            let cut_before = now - SignedDuration::from_hours(i64::from(retention.days) * 24);
             let removed = storage
                 .drop_expired_audit_records(
                     cut_before,
-                    AuditEntry::system("audit.retention_cut", cut_before.to_rfc3339()).into(),
+                    AuditEntry::system("audit.retention_cut", cut_before.to_string()).into(),
                 )
                 .await?;
             if removed > 0 {

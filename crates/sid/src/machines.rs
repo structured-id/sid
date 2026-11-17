@@ -286,7 +286,7 @@ impl Machines {
                 if req.expires_at.is_some() {
                     mu.expires_at = optional_timestamp(&req.expires_at)?;
                 }
-                mu.updated_at = chrono::Utc::now();
+                mu.updated_at = jiff::Timestamp::now();
 
                 let response = MachineUserResponse {
                     machine_user: Some(machine_user_to_proto(&mu)),
@@ -472,7 +472,7 @@ impl Machines {
                 }
                 let previous = mu.status;
                 mu.status = DomainMachineUserStatus::Active;
-                mu.updated_at = chrono::Utc::now();
+                mu.updated_at = jiff::Timestamp::now();
                 let response = MachineUserResponse {
                     machine_user: Some(machine_user_to_proto(&mu)),
                 };
@@ -693,8 +693,8 @@ impl Machines {
             // The old credential enters its grace period and the new one is
             // stored in one step, only if the old one is still active. The
             // grace ends, at the latest, ROTATION_GRACE_PERIOD_HOURS from now.
-            let grace_until = chrono::Utc::now()
-                + chrono::Duration::hours(i64::from(
+            let grace_until = jiff::Timestamp::now()
+                + jiff::SignedDuration::from_hours(i64::from(
                     sid_core::models::machine_user::ROTATION_GRACE_PERIOD_HOURS,
                 ));
             let mut left = old_cred.clone();
@@ -933,14 +933,12 @@ fn sha256_hex(data: &[u8]) -> String {
 /// The time of an optional field.
 fn optional_timestamp(
     ts: &Option<prost_types::Timestamp>,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, MachineError> {
+) -> Result<Option<jiff::Timestamp>, MachineError> {
     ts.as_ref()
         .map(|t| {
-            chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32).ok_or_else(|| {
-                MachineError::InvalidField {
-                    field: "expires_at",
-                    reason: "not a representable time".into(),
-                }
+            crate::wire::from_timestamp(t).ok_or_else(|| MachineError::InvalidField {
+                field: "expires_at",
+                reason: "not a representable time".into(),
             })
         })
         .transpose()

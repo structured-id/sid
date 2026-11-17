@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use secrecy::{ExposeSecret, SecretString};
 use sid_authn::magic_link::{MagicLinkError, MagicLinkService};
 use sid_authn::otp::{OTP_EMAIL_KIND, OtpError, OtpService};
@@ -103,8 +103,8 @@ pub fn outcome_of(error: DeliveryError) -> WorkOutcome {
 
 /// Whole minutes until `expires_at`, at least one: what a mail tells about
 /// the secret it carries.
-fn minutes_left(expires_at: chrono::DateTime<Utc>) -> i64 {
-    (expires_at - Utc::now()).num_minutes().max(1)
+fn minutes_left(expires_at: Timestamp) -> i64 {
+    (expires_at.duration_since(Timestamp::now()).as_secs() / 60).max(1)
 }
 
 /// Hand `mail` to the host and settle the work by its answer.
@@ -120,14 +120,14 @@ async fn send(delivery: &dyn AuthMailDelivery, mail: OwedMail) -> WorkOutcome {
 /// How long an ended authentication mail keeps its record (its outcome, a
 /// failure to review): the record holds only session and issue ids, and its
 /// session is long gone by then.
-pub const MAIL_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(7);
+pub const MAIL_RECORD_RETENTION: SignedDuration = SignedDuration::from_hours(7 * 24);
 
 /// Drop the authentication mails that ended (sent, failed, expired) more than
 /// [`MAIL_RECORD_RETENTION`] before `now`; open ones are untouched. Returns
 /// how many records were dropped. Idempotent, so replicas may run it at once.
 pub async fn purge_ended_mail(
     store: &dyn sid_plugin::WorkStore,
-    now: chrono::DateTime<Utc>,
+    now: Timestamp,
 ) -> sid_core::Result<u64> {
     let before = now - MAIL_RECORD_RETENTION;
     let mut dropped = 0;
@@ -184,7 +184,7 @@ impl WorkHandler for MagicLinkMail {
         let Ok(id) = uuid::Uuid::from_slice(&work.payload) else {
             return WorkOutcome::Permanent("the work does not name a link session".into());
         };
-        let pending = match self.links.pending_delivery(id, Utc::now()).await {
+        let pending = match self.links.pending_delivery(id, Timestamp::now()).await {
             Ok(Some(pending)) => pending,
             Ok(None) => return WorkOutcome::Done(Some("the link is no longer usable".into())),
             Err(e @ MagicLinkError::Sealed(_)) => return WorkOutcome::Permanent(e.to_string()),
@@ -248,7 +248,7 @@ impl WorkHandler for CodeMail {
         };
         let pending = match self
             .codes
-            .pending_delivery(session, issue, Utc::now())
+            .pending_delivery(session, issue, Timestamp::now())
             .await
         {
             Ok(Some(pending)) => pending,
@@ -313,7 +313,7 @@ impl WorkHandler for ResetMail {
         };
         let pending = match self
             .resets
-            .pending_delivery(ResetSessionId(id), Utc::now())
+            .pending_delivery(ResetSessionId(id), Timestamp::now())
             .await
         {
             Ok(Some(pending)) => pending,
