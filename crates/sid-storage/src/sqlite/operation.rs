@@ -3,7 +3,7 @@
 //! periods they are admitted under.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationCompletion, OperationKey, OperationPeriod,
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
@@ -63,7 +63,7 @@ pub(super) async fn record_in_tx(
             )
             .bind(&operation.namespace)
             .bind(operation.key.as_str())
-            .bind(Utc::now().timestamp_millis())
+            .bind(Timestamp::now().as_millisecond())
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
@@ -75,12 +75,12 @@ pub(super) async fn record_in_tx(
             )));
         }
     }
-    let now = Utc::now();
+    let now = Timestamp::now();
     consume_expired(
         tx,
         &operation.namespace,
         &operation.key,
-        now.timestamp_millis(),
+        now.as_millisecond(),
     )
     .await?;
     let held: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
@@ -111,7 +111,7 @@ pub(super) async fn record_in_tx(
     .bind(&operation.result)
     .bind(fmt_dt(&now))
     .bind(period)
-    .bind(operation.retain_until.map(|t| t.timestamp_millis()))
+    .bind(operation.retain_until.map(|t| t.as_millisecond()))
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
@@ -192,13 +192,13 @@ fn period_of(value: i64) -> SidResult<OperationPeriod> {
 
 /// A stored instant in Unix milliseconds; a malformed one is an error, never
 /// a substitute.
-fn instant(column: &str, ms: i64) -> SidResult<DateTime<Utc>> {
-    DateTime::from_timestamp_millis(ms)
-        .ok_or_else(|| SidError::Storage(format!("column {column}: {ms} is no instant")))
+fn instant(column: &str, ms: i64) -> SidResult<Timestamp> {
+    Timestamp::from_millisecond(ms)
+        .map_err(|_| SidError::Storage(format!("column {column}: {ms} is no instant")))
 }
 
 /// A stored retention end.
-fn retention(ms: Option<i64>) -> SidResult<Option<DateTime<Utc>>> {
+fn retention(ms: Option<i64>) -> SidResult<Option<Timestamp>> {
     ms.map(|ms| instant("retain_until_ms", ms)).transpose()
 }
 
@@ -217,7 +217,7 @@ pub(super) async fn get(
     )
     .bind(namespace)
     .bind(key.as_str())
-    .bind(Utc::now().timestamp_millis())
+    .bind(Timestamp::now().as_millisecond())
     .fetch_optional(pool)
     .await
     .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
@@ -241,9 +241,9 @@ pub(super) async fn get(
 }
 
 /// A stored RFC 3339 time; a malformed one is an error, never a substitute.
-fn time(column: &str, value: &str) -> SidResult<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|t| t.with_timezone(&Utc))
+fn time(column: &str, value: &str) -> SidResult<Timestamp> {
+    value
+        .parse()
         .map_err(|e| SidError::Storage(format!("column {column}: bad timestamp {value}: {e}")))
 }
 
@@ -267,7 +267,7 @@ pub(super) async fn export(pool: &SqlitePool) -> SidResult<Vec<OperationRecord>>
          FROM operation_results WHERE retain_until_ms IS NULL OR retain_until_ms > ?
          ORDER BY completed_at, namespace, op_key",
     )
-    .bind(Utc::now().timestamp_millis())
+    .bind(Timestamp::now().as_millisecond())
     .fetch_all(pool)
     .await
     .map_err(|e| SidError::Storage(format!("operation results: {e}")))?;
@@ -318,7 +318,7 @@ pub(super) async fn import(backend: &SqliteBackend, record: &OperationRecord) ->
     .bind(&c.result)
     .bind(fmt_dt(&record.completed_at))
     .bind(c.period.map(column).transpose()?)
-    .bind(c.retain_until.map(|t| t.timestamp_millis()))
+    .bind(c.retain_until.map(|t| t.as_millisecond()))
     .execute(&mut *tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
@@ -390,10 +390,11 @@ async fn retire(conn: &mut sqlx::SqliteConnection, period: i64) -> SidResult<()>
 }
 
 /// A stored policy duration; a negative or out-of-range one is an error.
-fn seconds(column: &str, value: i64) -> SidResult<Duration> {
-    Duration::try_seconds(value)
-        .filter(|d| *d >= Duration::zero())
-        .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
+fn seconds(column: &str, value: i64) -> SidResult<SignedDuration> {
+    if value < 0 {
+        return Err(SidError::Storage(format!("column {column}: {value}")));
+    }
+    Ok(SignedDuration::from_secs(value))
 }
 
 /// A stored positive bound.
@@ -451,12 +452,12 @@ impl OperationResultStore for SqliteBackend {
 
     async fn current_operation_period(
         &self,
-        now: DateTime<Utc>,
-        acceptance: Duration,
+        now: Timestamp,
+        acceptance: SignedDuration,
     ) -> SidResult<IssuedOperationPeriod> {
-        let until = now.checked_add_signed(acceptance).ok_or_else(|| {
-            SidError::Validation("operation period acceptance out of range".into())
-        })?;
+        let until = now
+            .checked_add(acceptance)
+            .map_err(|_| SidError::Validation("operation period acceptance out of range".into()))?;
         // One write transaction: no other writer issues a period meanwhile.
         let mut tx = self.begin_write().await?;
         let current: Option<PeriodRow> = sqlx::query_as(
@@ -464,7 +465,7 @@ impl OperationResultStore for SqliteBackend {
              WHERE issued_at_ms <= ?1 AND accepted_until_ms > ?1
              ORDER BY period DESC LIMIT 1",
         )
-        .bind(now.timestamp_millis())
+        .bind(now.as_millisecond())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
@@ -488,8 +489,8 @@ impl OperationResultStore for SqliteBackend {
                      RETURNING period, accepted_until_ms",
                 )
                 .bind(next)
-                .bind(now.timestamp_millis())
-                .bind(until.timestamp_millis())
+                .bind(now.as_millisecond())
+                .bind(until.as_millisecond())
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?
@@ -510,12 +511,12 @@ impl OperationResultStore for SqliteBackend {
         admit(&mut conn, column(period)?).await
     }
 
-    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+    async fn retire_operation_periods(&self, before: Timestamp) -> SidResult<u64> {
         // The write transaction serializes this with every admitted commit.
         let mut tx = self.begin_write().await?;
         let ended: Vec<i64> =
             sqlx::query_scalar("SELECT period FROM operation_periods WHERE accepted_until_ms < ?")
-                .bind(before.timestamp_millis())
+                .bind(before.as_millisecond())
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
@@ -584,8 +585,8 @@ impl OperationResultStore for SqliteBackend {
                  VALUES (?, ?, ?)",
             )
             .bind(period)
-            .bind(record.issued_at.timestamp_millis())
-            .bind(record.issued.accepted_until.timestamp_millis())
+            .bind(record.issued_at.as_millisecond())
+            .bind(record.issued.accepted_until.as_millisecond())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("operation period import: {e}")))?;
@@ -618,7 +619,7 @@ impl OperationResultStore for SqliteBackend {
         &self,
         namespace: &str,
         method: &str,
-        before: DateTime<Utc>,
+        before: Timestamp,
     ) -> SidResult<u64> {
         let mut tx = self.begin_write().await?;
         // Compared as instants: stored timestamps do not all sort as text.
@@ -632,8 +633,7 @@ impl OperationResultStore for SqliteBackend {
         .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))?;
         let mut dropped = 0;
         for (key, completed_at) in rows {
-            let completed_at = DateTime::parse_from_rfc3339(&completed_at)
-                .map_err(|e| SidError::Storage(format!("completed_at: {e}")))?;
+            let completed_at = time("completed_at", &completed_at)?;
             if completed_at < before {
                 // The binding of the dropped completion goes with it.
                 for table in ["operation_results", "operation_resources"] {
@@ -655,7 +655,7 @@ impl OperationResultStore for SqliteBackend {
         Ok(dropped)
     }
 
-    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+    async fn purge_expired_operation_results(&self, now: Timestamp) -> SidResult<u64> {
         let mut tx = self.begin_write().await?;
         // The bindings of the dropped completions go with them.
         sqlx::query(
@@ -665,12 +665,12 @@ impl OperationResultStore for SqliteBackend {
                    AND o.op_key = operation_resources.op_key
                    AND o.retain_until_ms <= ?)",
         )
-        .bind(now.timestamp_millis())
+        .bind(now.as_millisecond())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("purge expired operation resources: {e}")))?;
         let dropped = sqlx::query("DELETE FROM operation_results WHERE retain_until_ms <= ?")
-            .bind(now.timestamp_millis())
+            .bind(now.as_millisecond())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))?
@@ -703,7 +703,7 @@ impl OperationResultStore for SqliteBackend {
     ) -> SidResult<Uuid> {
         let reused = || SidError::OperationKeyReused(proposal.key.as_str().into());
         let period = proposal.period.map(column).transpose()?;
-        let now = Utc::now().timestamp_millis();
+        let now = Timestamp::now().as_millisecond();
         // One write transaction: concurrent attempts bind one after another.
         let mut tx = self.begin_write().await?;
         if let Some(period) = period {
@@ -784,7 +784,7 @@ impl OperationResultStore for SqliteBackend {
                    AND o.retain_until_ms <= ?)
              ORDER BY bound_at_ms, namespace, op_key",
         )
-        .bind(Utc::now().timestamp_millis())
+        .bind(Timestamp::now().as_millisecond())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("operation resources: {e}")))?;
@@ -832,7 +832,7 @@ impl OperationResultStore for SqliteBackend {
         .bind(&binding.fingerprint)
         .bind(binding.period.map(column).transpose()?)
         .bind(binding.resource)
-        .bind(Utc::now().timestamp_millis())
+        .bind(Timestamp::now().as_millisecond())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation resource import: {e}")))?

@@ -72,7 +72,7 @@ impl SqliteBackend {
         ip: &str,
         success: bool,
     ) -> SidResult<()> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let (failed, succeeded) = if success { (0, 1) } else { (1, 0) };
         sqlx::query(
             "INSERT INTO ip_reputation (ip, failed_count, success_count, score, first_seen_at, last_failed_at, last_success_at, updated_at) \
@@ -128,7 +128,7 @@ impl SqliteBackend {
         &self,
         older_than: std::time::Duration,
     ) -> SidResult<u64> {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let cutoff = crate::decay_cutoff(older_than)?;
         let mut tx = self.begin_write().await?;
         sqlx::query(
@@ -168,7 +168,7 @@ impl SqliteBackend {
         )
         .bind(cidr)
         .bind(description)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("add_ip_allowlist_entry: {e}")))?;
@@ -209,7 +209,7 @@ impl SqliteBackend {
 
     pub(crate) async fn list_ip_allowlist_entries_impl(
         &self,
-    ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Vec<(String, String, jiff::Timestamp)>> {
         let rows = sqlx::query(
             "SELECT cidr, description, created_at FROM ip_allowlist_entries ORDER BY created_at",
         )
@@ -301,7 +301,7 @@ impl SqliteBackend {
         &self,
         cidr: &str,
         description: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
@@ -346,7 +346,7 @@ fn row_to_reputation(row: &sqlx::sqlite::SqliteRow) -> SidResult<IpReputation> {
 /// The allowlist entries of `rows`.
 fn allowlist_rows(
     rows: &[sqlx::sqlite::SqliteRow],
-) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+) -> SidResult<Vec<(String, String, jiff::Timestamp)>> {
     rows.iter()
         .map(|row| {
             Ok((

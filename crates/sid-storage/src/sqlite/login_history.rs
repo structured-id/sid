@@ -23,16 +23,18 @@ fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> SidResult<LoginLocation> {
 
 /// The instant `window` ago, as stored timestamps are written.
 fn since(window: std::time::Duration) -> SidResult<String> {
-    let window = chrono::Duration::from_std(window)
-        .map_err(|e| SidError::Storage(format!("history window: {e}")))?;
-    Ok(fmt_dt(&(chrono::Utc::now() - window)))
+    let start = jiff::SignedDuration::try_from(window)
+        .ok()
+        .and_then(|w| jiff::Timestamp::now().checked_sub(w).ok())
+        .ok_or_else(|| SidError::Storage(format!("history window {window:?} out of range")))?;
+    Ok(fmt_dt(&start))
 }
 
 impl SqliteBackend {
     pub(crate) async fn get_most_recent_session_ip_impl(
         &self,
         profile_id: ProfileId,
-    ) -> SidResult<Option<(IpAddr, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(IpAddr, jiff::Timestamp)>> {
         // A sign-in still owing its second factor is no history.
         let row = sqlx::query(
             "SELECT ip_address, created_at FROM sessions WHERE profile_id = ? \
@@ -104,7 +106,7 @@ impl SqliteBackend {
         longitude: f64,
         designated_threshold: u32,
     ) -> SidResult<()> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         sqlx::query(
             "INSERT INTO profile_locations (profile_id, country, latitude, longitude, login_count, first_seen, last_seen, designated) \
              VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, 1 >= ?6) \

@@ -108,7 +108,7 @@ impl SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<NativeRotationOutcome> {
         let mut tx = self.begin_write().await?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let now_text = fmt_dt(&now);
         let Some(row) = sqlx::query("SELECT * FROM native_generations WHERE id = ?")
             .bind(rotation.presented)

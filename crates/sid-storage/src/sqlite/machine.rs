@@ -151,7 +151,7 @@ impl SqliteBackend {
         .bind(mu.restrictions.rate_limit_rpm as i32)
         .bind(mu.max_token_lifetime.map(|v| v as i32))
         .bind(fmt_dt_opt(mu.expires_at))
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(mu.id)
         .execute(&mut *tx)
         .await
@@ -177,7 +177,7 @@ impl SqliteBackend {
             "UPDATE machine_users SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
         )
         .bind(to.as_str())
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id)
         .bind(from.as_str())
         .execute(&mut *tx)
@@ -305,7 +305,7 @@ impl SqliteBackend {
         machine_user_id: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: jiff::Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
@@ -404,7 +404,8 @@ impl SqliteBackend {
         &self,
         within_days: u32,
     ) -> SidResult<Vec<MachineUserCredential>> {
-        let cutoff = chrono::Utc::now() + chrono::Duration::days(within_days as i64);
+        let cutoff =
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(i64::from(within_days) * 24);
         let cutoff_str = fmt_dt(&cutoff);
         let rows = sqlx::query(
             "SELECT * FROM machine_user_credentials WHERE status = 'active' AND (expires_at IS NOT NULL AND expires_at <= ?)",

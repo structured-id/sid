@@ -3,7 +3,8 @@
 //! deleted, with each chain's checkpoint recorded first (the delete trigger
 //! allows removing records only below the recorded cut).
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -12,16 +13,19 @@ use super::SqliteBackend;
 impl SqliteBackend {
     pub(crate) async fn drop_expired_audit_records_impl(
         &self,
-        cut_before: DateTime<Utc>,
+        cut_before: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        let boundary = NaiveDate::from_ymd_opt(cut_before.year(), cut_before.month(), 1)
-            .and_then(|d| d.and_hms_opt(0, 0, 0))
-            .map(|t| t.and_utc())
-            .ok_or_else(|| SidError::Validation(format!("no month start for {cut_before}")))?;
+        let boundary = cut_before
+            .to_zoned_datetime(TimeZone::UTC)
+            .date()
+            .first_of_month()
+            .to_zoned_datetime(TimeZone::UTC)
+            .map(|z| z.timestamp())
+            .map_err(|e| SidError::Validation(format!("no month start for {cut_before}: {e}")))?;
         // Audit timestamps are stored as RFC 3339 with milliseconds; the cut
         // uses the same form so the text comparison orders as time.
-        let boundary = boundary.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let boundary = boundary.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO audit_chain_checkpoints (chain_id, sequence, hash, cut_before)

@@ -268,7 +268,7 @@ impl SqliteBackend {
                  updated_at = ?
              WHERE application_id = ? RETURNING id",
         )
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
