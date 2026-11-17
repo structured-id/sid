@@ -4,7 +4,7 @@
 //! usable-credential limit holds under concurrent adds, and a credential is
 //! found by its verifier only.
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::{
@@ -280,7 +280,7 @@ pub async fn test_add_credential(backend: &dyn StorageBackend) {
 pub async fn test_rotate_credential(backend: &dyn StorageBackend) {
     let c = stored(backend, OrgId::generate()).await;
     let old = credential(backend, &c).await;
-    let grace_until = Utc::now() + Duration::hours(1);
+    let grace_until = Timestamp::now() + Duration::from_hours(1);
     let (first, second) = (
         ProvisioningCredential::new(c.id, BEARER, verifier()),
         ProvisioningCredential::new(c.id, BEARER, verifier()),
@@ -299,7 +299,7 @@ pub async fn test_rotate_credential(backend: &dyn StorageBackend) {
     assert_eq!(old_read.status, CredentialStatus::GracePeriod);
     let ends = old_read.expires_at.expect("the grace ends");
     assert!(
-        (ends - grace_until).num_seconds().abs() <= 1,
+        ends.duration_since(grace_until).as_secs().abs() <= 1,
         "{ends} {grace_until}"
     );
     let (winner, loser) = if a {
@@ -614,7 +614,7 @@ pub async fn test_connector_fence_holds_writes_to_current_authority(backend: &dy
     // The credential revoked, or one already expired.
     let expiring = {
         let mut e = ProvisioningCredential::new(c.id, BEARER, verifier());
-        e.expires_at = Some(Utc::now() - Duration::seconds(1));
+        e.expires_at = Some(Timestamp::now() - Duration::from_secs(1));
         assert!(
             backend
                 .add_provisioning_credential(&e, test_audit())
