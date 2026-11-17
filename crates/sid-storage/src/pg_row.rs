@@ -112,11 +112,11 @@ impl ProfileRow {
             visibility: self.visibility.parse().map_err(stored)?,
             manager_id: self.manager_id,
             migration_pending: self.migration_pending,
-            migration_started_at: self.migration_started_at,
-            migration_completed_at: self.migration_completed_at,
+            migration_started_at: self.migration_started_at.jiff(),
+            migration_completed_at: self.migration_completed_at.jiff(),
             revision: u64::try_from(self.revision).map_err(|e| stored(format!("revision: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -157,9 +157,9 @@ impl ProfilePhoneRow {
             can_receive_fax: self.can_receive_fax,
             can_receive_voice: self.can_receive_voice,
             verified: self.verified,
-            verified_at: self.verified_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            verified_at: self.verified_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -192,9 +192,9 @@ impl ProfileEmailRow {
             custom_label: self.custom_label,
             is_primary: self.is_primary,
             verified: self.verified,
-            verified_at: self.verified_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            verified_at: self.verified_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -226,13 +226,13 @@ impl PrincipalEntityRow {
             principal_type: parse_principal_type(&self.principal_type)?,
             value: self.value,
             verified: self.verified,
-            verified_at: self.verified_at,
-            verification_expires: self.verification_expires,
+            verified_at: self.verified_at.jiff(),
+            verification_expires: self.verification_expires.jiff(),
             assigned_profile_id: self.assigned_profile_id,
             assignment_revision: self.assignment_revision,
             email_policy_revision: self.email_policy_revision,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -276,8 +276,8 @@ impl PrincipalRow {
             principal_type: parse_principal_type(&self.principal_type)?,
             value: self.value,
             verified: self.verified,
-            verified_at: self.verified_at,
-            verification_expires: self.verification_expires,
+            verified_at: self.verified_at.jiff(),
+            verification_expires: self.verification_expires.jiff(),
             assigned_profile_id: self.assigned_profile_id,
             assignment_revision: self.assignment_revision,
             email_policy_revision: self.email_policy_revision,
@@ -285,8 +285,8 @@ impl PrincipalRow {
             source_field: self.source_field,
             source_email_id: self.source_email_id.map(ProfileEmailId),
             source_phone_id: self.source_phone_id.map(ProfilePhoneId),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         };
         Ok(principal.as_seen_by_subject())
     }
@@ -315,7 +315,7 @@ impl PrincipalBindingRow {
             source_field: self.source_field,
             source_email_id: self.source_email_id.map(ProfileEmailId),
             source_phone_id: self.source_phone_id.map(ProfilePhoneId),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -364,8 +364,8 @@ impl CredentialRow {
                 .map_err(SidError::Storage)?,
             data: CredentialData::from(self.data),
             label: self.label,
-            created_at: self.created_at,
-            last_used_at: self.last_used_at,
+            created_at: self.created_at.jiff(),
+            last_used_at: self.last_used_at.jiff(),
             policy_evidence: crate::policy_evidence::from_columns(
                 self.zkpp_verified,
                 self.policy_version,
@@ -422,7 +422,7 @@ fn elevation(
     match (level, until) {
         (Some(level), Some(until)) => Ok(Some(sid_core::models::session::Elevation {
             level: auth_level("elevation_level", &level)?,
-            until,
+            until: until.jiff(),
         })),
         (None, None) => Ok(None),
         _ => Err(SidError::Storage(
@@ -444,15 +444,15 @@ impl SessionRow {
             scopes: Session::parse_scopes(&self.scopes),
             assurance_level: auth_level("assurance_level", &self.assurance_level)?,
             elevation,
-            authenticated_at: self.authenticated_at,
+            authenticated_at: self.authenticated_at.jiff(),
             amr: split_ws(&self.amr),
             is_provisional: self.is_provisional,
             passkey_prompt: self.passkey_prompt,
             policy_grace: self.policy_grace,
-            grace_deadline: self.grace_deadline,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            last_activity_at: self.last_activity_at,
+            grace_deadline: self.grace_deadline.jiff(),
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            last_activity_at: self.last_activity_at.jiff(),
             browser_secret_hash: self
                 .browser_secret_hash
                 .as_deref()
@@ -491,8 +491,8 @@ impl ProjectRow {
             description: self.description,
             owner_id: self.owner_id,
             is_system: self.is_system,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -584,8 +584,8 @@ impl OAuth2ClientRow {
                 .map_err(|e| parse("subject_type", e))?,
             sector_identifier_uri: self.sector_identifier_uri,
             contacts: self.contacts,
-            client_id_issued_at: self.client_id_issued_at,
-            client_secret_expires_at: self.client_secret_expires_at,
+            client_id_issued_at: self.client_id_issued_at.jiff(),
+            client_secret_expires_at: self.client_secret_expires_at.jiff(),
             registration_iat: self.registration_iat,
             registration_access_token_hash: self.registration_access_token_hash,
             required_acr: self
@@ -629,7 +629,7 @@ impl OAuth2ClientRow {
             unified_input: self.unified_input,
             org_id: self.org_id,
             revision: u64::try_from(self.revision).map_err(|e| parse("revision", e.to_string()))?,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -665,8 +665,8 @@ impl ApplicationRow {
                 })?,
             revision: u64::try_from(self.revision)
                 .map_err(|e| SidError::Storage(format!("column revision: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -698,8 +698,8 @@ impl ProtectedResourceRow {
             scopes: split_ws(&self.scopes),
             state: self.state.parse().map_err(|e| parse("state", e))?,
             revision: u64::try_from(self.revision).map_err(|e| parse("revision", e.to_string()))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -718,7 +718,7 @@ impl ResourceAccessRow {
             client_id: self.client_id,
             resource_id: self.resource_id,
             scopes: split_ws(&self.scopes),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         }
     }
 }
@@ -755,12 +755,12 @@ impl RefreshTokenRow {
             client_id: self.client_id,
             scopes: split_ws(&self.scopes),
             resource: self.resource_id,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             revoked: self.revoked,
             replaced_by: self.replaced_by,
             family_id: self.family_id,
-            grace_expires_at: self.grace_expires_at,
+            grace_expires_at: self.grace_expires_at.jiff(),
             dpop_jkt: self.dpop_jkt,
         }
     }
@@ -806,13 +806,13 @@ impl AuthCodeRow {
             nonce: self.nonce,
             authentication: sid_core::models::GrantAuthentication {
                 session: self.authorizing_session_id,
-                authenticated_at: self.authenticated_at,
+                authenticated_at: self.authenticated_at.jiff(),
                 amr: split_ws(&self.amr),
                 assurance_level: auth_level("assurance_level", &self.assurance_level)?,
                 elevation: elevation(self.elevation_level, self.elevation_until)?,
             },
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             used: self.used,
             session_id: self.session_id,
             presentation: self.presentation,
@@ -850,8 +850,8 @@ impl RoleRow {
             permissions: Role::parse_permissions(&self.permissions),
             revision: u64::try_from(self.revision)
                 .map_err(|e| sid_core::Error::Storage(format!("role {} revision: {e}", self.id)))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -879,8 +879,8 @@ impl GroupRow {
             name: self.name,
             description: self.description,
             parent_group_id: self.parent_group_id,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -901,7 +901,7 @@ impl GroupMemberRow {
         GroupMember {
             group_id: self.group_id,
             profile_id: self.profile_id,
-            added_at: self.added_at,
+            added_at: self.added_at.jiff(),
         }
     }
 }
@@ -954,8 +954,8 @@ impl RoleAssignmentRow {
             principal,
             role_id: self.role_id,
             scope: self.scope,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             // The envelope lives in its own tables; the store attaches it.
             admin: None,
             policy_admin: None,
@@ -1010,8 +1010,8 @@ impl CedarPolicyRow {
             effect: parsed("effect", &self.effect)?,
             enabled: self.enabled,
             revision: count("revision", self.revision)?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1035,8 +1035,8 @@ impl ProfileMetadataRow {
             profile_id: self.profile_id,
             key: self.key,
             value: self.value,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -1066,9 +1066,9 @@ impl ProfileGrantRow {
             // Written space-separated, like role permissions.
             role_keys: split_ws(&self.role_keys),
             granted_by: self.granted_by,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -1107,8 +1107,8 @@ impl DeviceRow {
             hardware_attested: self.hardware_attested,
             fingerprint_hash: self.fingerprint_hash,
             last_ip_geo: self.last_ip_geo,
-            first_seen_at: self.first_seen_at,
-            last_seen_at: self.last_seen_at,
+            first_seen_at: self.first_seen_at.jiff(),
+            last_seen_at: self.last_seen_at.jiff(),
         })
     }
 }
@@ -1147,9 +1147,9 @@ impl DeviceAttestationRow {
             attestation_object: self.attestation_object,
             attestation_certificate: self.attestation_certificate,
             aaguid: self.aaguid,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            revoked_at: self.revoked_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
+            revoked_at: self.revoked_at.jiff(),
         })
     }
 }
@@ -1188,7 +1188,7 @@ impl DeviceAuthRow {
     fn approval(&self) -> SidResult<Option<sid_core::models::GrantAuthentication>> {
         let (Some(session), Some(authenticated_at), Some(amr), Some(assurance_level)) = (
             self.authorizing_session_id,
-            self.authenticated_at,
+            self.authenticated_at.jiff(),
             self.amr.as_deref(),
             self.assurance_level.as_deref(),
         ) else {
@@ -1218,10 +1218,10 @@ impl DeviceAuthRow {
             authorized_by: self.authorized_by,
             project_id: self.project_id,
             interval: self.interval_secs,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            authorized_at: self.authorized_at,
-            last_polled_at: self.last_polled_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            authorized_at: self.authorized_at.jiff(),
+            last_polled_at: self.last_polled_at.jiff(),
             redeemed_session_id: self.redeemed_session_id,
         })
     }
@@ -1279,8 +1279,8 @@ impl UpstreamProviderRow {
             show_on_login: self.show_on_login,
             display_order: self.display_order,
             logo_url: self.logo_url,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1315,8 +1315,8 @@ impl UpstreamIdentityRow {
             upstream_email: self.upstream_email,
             upstream_name: self.upstream_name,
             upstream_picture: self.upstream_picture,
-            linked_at: self.linked_at,
-            last_login_at: self.last_login_at,
+            linked_at: self.linked_at.jiff(),
+            last_login_at: self.last_login_at.jiff(),
             login_count: count("login_count", self.login_count)?,
         })
     }
@@ -1358,13 +1358,13 @@ impl PatRow {
             scopes: split_ws(&self.scopes),
             ip_allowlist: split_ws(&self.ip_allowlist),
             status: parsed::<PatStatus>("status", &self.status)?,
-            expires_at: self.expires_at,
-            last_used_at: self.last_used_at,
+            expires_at: self.expires_at.jiff(),
+            last_used_at: self.last_used_at.jiff(),
             last_used_ip: self.last_used_ip,
             use_count: count("use_count", self.use_count)?,
-            revoked_at: self.revoked_at,
+            revoked_at: self.revoked_at.jiff(),
             revoked_by: self.revoked_by,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1417,9 +1417,9 @@ impl MachineUserRow {
                 rate_limit_rpm: self.rate_limit_rpm as u32,
             },
             max_token_lifetime: self.max_token_lifetime.map(|v| v as u32),
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1450,8 +1450,8 @@ impl MachineCredentialRow {
             status: self.status.parse().map_err(SidError::Storage)?,
             credential_data: self.credential_data,
             algorithm: self.algorithm,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1477,7 +1477,7 @@ impl ImpersonationGrantRow {
             target_type: self.target_type.parse().map_err(SidError::Storage)?,
             target: self.target,
             allowed_scopes: split_ws(&self.allowed_scopes),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1515,8 +1515,8 @@ impl InitialAccessTokenRow {
             allowed_redirect_patterns: split_ws(&self.allowed_redirect_patterns),
             created_by: self.created_by,
             revoked: self.revoked,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
         }
     }
 }
@@ -1550,8 +1550,8 @@ impl ClosureRequestRow {
             mode: parsed::<ClosureMode>("mode", &self.mode)?,
             closure_reason: self.closure_reason,
             requested_by: self.requested_by,
-            requested_at: self.requested_at,
-            grace_period_end: self.grace_period_end,
+            requested_at: self.requested_at.jiff(),
+            grace_period_end: self.grace_period_end.jiff(),
             export_status: parsed::<ExportStatus>("export_status", &self.export_status)?,
             legal_hold,
             cancel_count: count("cancel_count", i64::from(self.cancel_count))?,
@@ -1584,8 +1584,8 @@ impl MagicLinkRow {
             token_hash: self.token_hash,
             sealed_token: self.sealed_token,
             consumed: self.consumed,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
         }
     }
 }
@@ -1618,9 +1618,9 @@ impl ExportJobRow {
             archive_path: self.archive_path,
             size_bytes: self.size_bytes,
             checksum_sha256: self.checksum_sha256,
-            created_at: self.created_at,
-            ready_at: self.ready_at,
-            expires_at: self.expires_at,
+            created_at: self.created_at.jiff(),
+            ready_at: self.ready_at.jiff(),
+            expires_at: self.expires_at.jiff(),
         })
     }
 }
@@ -1664,8 +1664,8 @@ impl ScimOutboundTargetRow {
             sync_config: serde_json::from_value(self.sync_config)
                 .map_err(|e| field("sync config", e))?,
             enabled: self.enabled,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1694,12 +1694,12 @@ impl ScimOutboundRecordRow {
             sid_entity_id: self.sid_entity_id,
             entity_type: self.entity_type.parse().map_err(SidError::Storage)?,
             downstream_id: self.downstream_id.unwrap_or_default(),
-            last_synced_at: self.last_synced_at,
+            last_synced_at: self.last_synced_at.jiff(),
             last_error: self.last_error,
             failure_count: u32::try_from(self.failure_count)
                 .map_err(|e| SidError::Storage(format!("failure_count: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1734,8 +1734,8 @@ impl ScimOutboundDlqRow {
             error: self.error,
             attempts: u32::try_from(self.attempts)
                 .map_err(|e| SidError::Storage(format!("attempts: {e}")))?,
-            first_attempt: self.first_attempt,
-            last_attempt: self.last_attempt,
+            first_attempt: self.first_attempt.jiff(),
+            last_attempt: self.last_attempt.jiff(),
         })
     }
 }
@@ -1783,9 +1783,9 @@ impl InviteRow {
             metadata,
             max_uses: self.max_uses as u32,
             use_count: self.use_count as u32,
-            expires_at: self.expires_at,
+            expires_at: self.expires_at.jiff(),
             active: self.active,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1823,7 +1823,7 @@ impl RegistrationSourceRow {
                 content: self.utm_content,
             },
             client_id: self.client_id,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1855,10 +1855,10 @@ impl PasswordResetSessionRow {
             token_hash: self.token_hash,
             sealed_token: self.sealed_token,
             status: self.status.parse().map_err(SidError::Storage)?,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            verified_at: self.verified_at,
-            completed_at: self.completed_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            verified_at: self.verified_at.jiff(),
+            completed_at: self.completed_at.jiff(),
         })
     }
 }
