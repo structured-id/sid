@@ -1,11 +1,11 @@
 use super::*;
-use chrono::Duration;
 use core::net::Ipv4Addr;
+use jiff::SignedDuration as Duration;
 
 const LOCAL: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
 
 fn make_session(expires_in: Duration) -> Session {
-    Session::new(ProfileId::generate(), LOCAL, Utc::now() + expires_in)
+    Session::new(ProfileId::generate(), LOCAL, Timestamp::now() + expires_in)
 }
 
 /// A session redeemed from a grant reports the authorizing session's
@@ -13,18 +13,18 @@ fn make_session(expires_in: Duration) -> Session {
 /// to that session.
 #[test]
 fn test_grant_authentication_carries_to_the_redeemed_session() {
-    let mut idp = make_session(Duration::hours(8));
-    idp.authenticated_at = Utc::now() - Duration::minutes(30);
+    let mut idp = make_session(Duration::from_hours(8));
+    idp.authenticated_at = Timestamp::now() - Duration::from_mins(30);
     idp.amr = vec!["pwd".into(), "otp".into(), "mfa".into()];
     idp.assurance_level = AuthLevel::Standard;
     idp.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
-        until: Utc::now() + Duration::minutes(5),
+        until: Timestamp::now() + Duration::from_mins(5),
     });
     let grant = idp.grant_authentication();
     assert_eq!(grant.session, idp.id);
 
-    let app = make_session(Duration::hours(24)).with_grant_authentication(&grant);
+    let app = make_session(Duration::from_hours(24)).with_grant_authentication(&grant);
     assert_eq!(app.authenticated_by, Some(idp.id));
     assert_eq!(app.authenticated_at, idp.authenticated_at);
     assert_eq!(app.amr, idp.amr);
@@ -36,15 +36,15 @@ fn test_grant_authentication_carries_to_the_redeemed_session() {
 /// so every session of the chain ends with that one.
 #[test]
 fn test_grant_from_a_redeemed_session_names_the_idp_session() {
-    let idp = make_session(Duration::hours(8));
-    let app =
-        make_session(Duration::hours(24)).with_grant_authentication(&idp.grant_authentication());
+    let idp = make_session(Duration::from_hours(8));
+    let app = make_session(Duration::from_hours(24))
+        .with_grant_authentication(&idp.grant_authentication());
     assert_eq!(app.grant_authentication().session, idp.id);
 }
 
 #[test]
 fn test_session_new_defaults() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert!(session.client_id.is_none());
     assert!(session.device_id.is_none());
     assert!(session.user_agent.is_none());
@@ -55,19 +55,19 @@ fn test_session_new_defaults() {
 
 #[test]
 fn test_session_not_expired() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert!(!session.is_expired());
 }
 
 #[test]
 fn test_session_expired() {
-    let session = make_session(Duration::seconds(-1));
+    let session = make_session(Duration::from_secs(-1));
     assert!(session.is_expired());
 }
 
 #[test]
 fn test_session_touch() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert!(session.last_activity_at.is_none());
     session.touch();
     assert!(session.last_activity_at.is_some());
@@ -75,14 +75,14 @@ fn test_session_touch() {
 
 #[test]
 fn test_scopes_string() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     session.scopes = vec!["openid".into(), "profile".into(), "email".into()];
     assert_eq!(session.scopes_string(), "openid profile email");
 }
 
 #[test]
 fn test_scopes_string_empty() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert_eq!(session.scopes_string(), "");
 }
 
@@ -113,7 +113,7 @@ fn test_session_id_unique() {
 
 #[test]
 fn test_session_default_assurance_level() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert_eq!(session.assurance_level, AuthLevel::Basic);
 }
 
@@ -156,7 +156,7 @@ fn test_provisional_session() {
 
 #[test]
 fn test_has_scope() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     session.scopes = vec!["openid".into(), "profile".into()];
     assert!(session.has_scope("openid"));
     assert!(session.has_scope("profile"));
@@ -165,7 +165,7 @@ fn test_has_scope() {
 
 #[test]
 fn test_session_elevate() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert_eq!(session.assurance_level, AuthLevel::Basic);
 
     session.elevate(AuthLevel::Standard);
@@ -176,7 +176,7 @@ fn test_session_elevate() {
     assert_eq!(session.assurance_level, AuthLevel::Standard);
 
     session.elevate(AuthLevel::Elevated);
-    assert_eq!(session.assurance_at(Utc::now()), AuthLevel::Elevated);
+    assert_eq!(session.assurance_at(Timestamp::now()), AuthLevel::Elevated);
     assert_eq!(
         session.assurance_level,
         AuthLevel::Standard,
@@ -188,19 +188,19 @@ fn test_session_elevate() {
 /// back to its own level; a lower later step-up does not shorten a higher one.
 #[test]
 fn test_elevation_lapses_after_ttl() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     session.elevate(AuthLevel::Standard);
     session.elevate(AuthLevel::Critical);
     let until = session.elevation.expect("elevated").until;
-    let ttl = Duration::minutes(ELEVATION_TTL_MINUTES);
-    assert!(until <= Utc::now() + ttl);
+    let ttl = Duration::from_mins(ELEVATION_TTL_MINUTES);
+    assert!(until <= Timestamp::now() + ttl);
     assert_eq!(
-        session.assurance_at(until - Duration::seconds(1)),
+        session.assurance_at(until - Duration::from_secs(1)),
         AuthLevel::Critical
     );
     assert_eq!(session.assurance_at(until), AuthLevel::Standard);
     assert_eq!(
-        session.assurance_at(until + Duration::hours(3)),
+        session.assurance_at(until + Duration::from_hours(3)),
         AuthLevel::Standard
     );
 
@@ -275,23 +275,25 @@ fn test_auth_level_acr_roundtrip() {
 
 #[test]
 fn test_session_authenticated_at() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     // authenticated_at should be close to created_at.
-    let diff = (session.authenticated_at - session.created_at)
-        .num_milliseconds()
+    let diff = session
+        .authenticated_at
+        .duration_since(session.created_at)
+        .as_millis()
         .abs();
     assert!(diff < 100);
 }
 
 #[test]
 fn test_session_amr_empty_by_default() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert!(session.amr.is_empty());
 }
 
 #[test]
 fn test_session_add_amr() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     session.add_amr("pwd");
     session.add_amr("otp");
     assert_eq!(session.amr, vec!["pwd", "otp"]);
@@ -309,36 +311,36 @@ fn test_provisional_session_amr() {
 
 #[test]
 fn test_session_decay_level_full() {
-    let session = make_session(Duration::hours(8));
+    let session = make_session(Duration::from_hours(8));
     // Just created → Full trust.
     assert_eq!(session.decay_level(), SessionDecayLevel::Full);
 }
 
 #[test]
 fn test_session_decay_level_high() {
-    let mut session = make_session(Duration::hours(8));
-    session.authenticated_at = Utc::now() - Duration::hours(2);
+    let mut session = make_session(Duration::from_hours(8));
+    session.authenticated_at = Timestamp::now() - Duration::from_hours(2);
     assert_eq!(session.decay_level(), SessionDecayLevel::High);
 }
 
 #[test]
 fn test_session_decay_level_medium() {
-    let mut session = make_session(Duration::hours(24));
-    session.authenticated_at = Utc::now() - Duration::hours(6);
+    let mut session = make_session(Duration::from_hours(24));
+    session.authenticated_at = Timestamp::now() - Duration::from_hours(6);
     assert_eq!(session.decay_level(), SessionDecayLevel::Medium);
 }
 
 #[test]
 fn test_session_decay_level_low() {
-    let mut session = make_session(Duration::hours(24));
-    session.authenticated_at = Utc::now() - Duration::hours(13);
+    let mut session = make_session(Duration::from_hours(24));
+    session.authenticated_at = Timestamp::now() - Duration::from_hours(13);
     assert_eq!(session.decay_level(), SessionDecayLevel::Low);
 }
 
 #[test]
 fn test_session_refresh_authentication() {
-    let mut session = make_session(Duration::hours(24));
-    session.authenticated_at = Utc::now() - Duration::hours(13);
+    let mut session = make_session(Duration::from_hours(24));
+    session.authenticated_at = Timestamp::now() - Duration::from_hours(13);
     assert_eq!(session.decay_level(), SessionDecayLevel::Low);
 
     session.refresh_authentication();
@@ -372,7 +374,7 @@ fn test_decay_constants() {
 
 #[test]
 fn test_session_default_no_grace() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert!(!session.policy_grace);
     assert!(session.grace_deadline.is_none());
     assert!(!session.grace_expired());
@@ -380,8 +382,8 @@ fn test_session_default_no_grace() {
 
 #[test]
 fn test_session_enter_grace() {
-    let mut session = make_session(Duration::hours(1));
-    let deadline = Utc::now() + Duration::days(30);
+    let mut session = make_session(Duration::from_hours(1));
+    let deadline = Timestamp::now() + Duration::from_hours(30 * 24);
     session.enter_grace(deadline);
     assert!(session.policy_grace);
     assert_eq!(session.grace_deadline, Some(deadline));
@@ -390,15 +392,15 @@ fn test_session_enter_grace() {
 
 #[test]
 fn test_session_grace_expired() {
-    let mut session = make_session(Duration::hours(1));
-    session.enter_grace(Utc::now() - Duration::seconds(1));
+    let mut session = make_session(Duration::from_hours(1));
+    session.enter_grace(Timestamp::now() - Duration::from_secs(1));
     assert!(session.grace_expired());
 }
 
 #[test]
 fn test_session_grace_not_expired() {
-    let mut session = make_session(Duration::hours(1));
-    session.enter_grace(Utc::now() + Duration::days(30));
+    let mut session = make_session(Duration::from_hours(1));
+    session.enter_grace(Timestamp::now() + Duration::from_hours(30 * 24));
     assert!(!session.grace_expired());
 }
 
@@ -406,13 +408,13 @@ fn test_session_grace_not_expired() {
 
 #[test]
 fn test_active_gateway_available_for_full_session() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert!(session.as_active().is_some());
 }
 
 #[test]
 fn test_active_gateway_unavailable_for_expired() {
-    let mut session = make_session(Duration::hours(-1));
+    let mut session = make_session(Duration::from_hours(-1));
     assert!(session.as_active().is_none());
 }
 
@@ -424,7 +426,7 @@ fn test_active_gateway_unavailable_for_provisional() {
 
 #[test]
 fn test_active_session_elevate() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert_eq!(session.assurance_level, AuthLevel::Basic);
 
     session.as_active().unwrap().elevate(AuthLevel::Standard);
@@ -433,19 +435,19 @@ fn test_active_session_elevate() {
 
 #[test]
 fn test_active_session_elevate_no_downgrade() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
 
     session.as_active().unwrap().elevate(AuthLevel::Basic);
-    assert_eq!(session.assurance_at(Utc::now()), AuthLevel::Elevated); // unchanged
+    assert_eq!(session.assurance_at(Timestamp::now()), AuthLevel::Elevated); // unchanged
 }
 
 #[test]
 fn test_active_session_enter_grace() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert!(!session.policy_grace);
 
-    let deadline = Utc::now() + Duration::days(30);
+    let deadline = Timestamp::now() + Duration::from_hours(30 * 24);
     session.as_active().unwrap().enter_grace(deadline);
     assert!(session.policy_grace);
     assert!(session.grace_deadline.is_some());
@@ -453,7 +455,7 @@ fn test_active_session_enter_grace() {
 
 #[test]
 fn test_active_session_add_amr() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     assert!(session.amr.is_empty());
 
     let mut active = session.as_active().unwrap();
@@ -464,7 +466,7 @@ fn test_active_session_add_amr() {
 
 #[test]
 fn test_active_session_refresh_authentication() {
-    let mut session = make_session(Duration::hours(1));
+    let mut session = make_session(Duration::from_hours(1));
     let old_auth_at = session.authenticated_at;
     std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -476,42 +478,42 @@ fn test_active_session_refresh_authentication() {
 
 #[test]
 fn test_expired_gateway_available_for_expired() {
-    let session = make_session(Duration::hours(-1));
+    let session = make_session(Duration::from_hours(-1));
     assert!(session.as_expired().is_some());
 }
 
 #[test]
 fn test_expired_gateway_unavailable_for_active() {
-    let session = make_session(Duration::hours(1));
+    let session = make_session(Duration::from_hours(1));
     assert!(session.as_expired().is_none());
 }
 
 #[test]
 fn test_expired_session_inner_readonly() {
-    let session = make_session(Duration::hours(-1));
+    let session = make_session(Duration::from_hours(-1));
     let expired = session.as_expired().unwrap();
     assert_eq!(expired.inner().ip_address, LOCAL);
 }
 
 #[test]
 fn test_expired_session_expired_since() {
-    let session = make_session(Duration::hours(-2));
+    let session = make_session(Duration::from_hours(-2));
     let expired = session.as_expired().unwrap();
     // Should be roughly 2 hours.
-    assert!(expired.expired_since().num_minutes() >= 119);
+    assert!(expired.expired_since().as_mins() >= 119);
 }
 
 // Accepted evidence keeps the issuer's methods and its real authentication
 // time; a level up to Standard is the session's own and grants no step-up.
 #[test]
 fn accepted_evidence_keeps_methods_and_authentication_time() {
-    let at = Utc::now() - Duration::minutes(3);
+    let at = Timestamp::now() - Duration::from_mins(3);
     let evidence = AcceptedEvidence::new(
         Some("urn:sid:acr:standard"),
         vec!["pwd".into(), "otp".into()],
         at,
     );
-    let auth = evidence.authentication(Utc::now()).unwrap();
+    let auth = evidence.authentication(Timestamp::now()).unwrap();
     assert_eq!(auth.assurance_level, AuthLevel::Standard);
     assert_eq!(auth.elevation, None);
     assert_eq!(auth.authenticated_at, at);
@@ -529,9 +531,9 @@ fn an_unknown_or_missing_acr_attests_no_level() {
         Some("urn:sid:acr:platinum"),
         None,
     ] {
-        let evidence = AcceptedEvidence::new(acr, vec!["pwd".into()], Utc::now());
+        let evidence = AcceptedEvidence::new(acr, vec!["pwd".into()], Timestamp::now());
         assert_eq!(evidence.acr, None, "{acr:?}");
-        assert_eq!(evidence.authentication(Utc::now()), None, "{acr:?}");
+        assert_eq!(evidence.authentication(Timestamp::now()), None, "{acr:?}");
     }
 }
 
@@ -540,20 +542,20 @@ fn an_unknown_or_missing_acr_attests_no_level() {
 // shortens what is left, and once the window has passed it grants nothing.
 #[test]
 fn an_elevated_attestation_is_bounded_from_its_authentication_time() {
-    let at = Utc::now() - Duration::minutes(5);
+    let at = Timestamp::now() - Duration::from_mins(5);
     let evidence = AcceptedEvidence::new(Some("urn:sid:acr:elevated"), vec!["hwk".into()], at);
-    let auth = evidence.authentication(Utc::now()).unwrap();
+    let auth = evidence.authentication(Timestamp::now()).unwrap();
     assert_eq!(auth.assurance_level, AuthLevel::Standard);
     let elevation = auth.elevation.expect("within the window");
     assert_eq!(elevation.level, AuthLevel::Elevated);
     assert_eq!(
         elevation.until,
-        at + Duration::minutes(ELEVATION_TTL_MINUTES)
+        at + Duration::from_mins(ELEVATION_TTL_MINUTES)
     );
 
     // A later admission of the same evidence keeps the same end.
     let later = evidence
-        .authentication(Utc::now() + Duration::minutes(2))
+        .authentication(Timestamp::now() + Duration::from_mins(2))
         .unwrap();
     assert_eq!(later.elevation, auth.elevation);
 
@@ -561,9 +563,9 @@ fn an_elevated_attestation_is_bounded_from_its_authentication_time() {
     let old = AcceptedEvidence::new(
         Some("urn:sid:acr:critical"),
         vec!["hwk".into()],
-        Utc::now() - Duration::minutes(ELEVATION_TTL_MINUTES + 1),
+        Timestamp::now() - Duration::from_mins(ELEVATION_TTL_MINUTES + 1),
     );
-    let auth = old.authentication(Utc::now()).unwrap();
+    let auth = old.authentication(Timestamp::now()).unwrap();
     assert_eq!(auth.assurance_level, AuthLevel::Standard);
     assert_eq!(auth.elevation, None);
 }
@@ -584,10 +586,11 @@ fn a_pending_second_factor_context_is_told_from_channel_proof() {
     assert_eq!(pending.scopes, [SECOND_FACTOR_SCOPE]);
     assert_eq!(pending.amr, ["pwd"]);
     assert!(
-        pending.expires_at <= Utc::now() + Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES)
+        pending.expires_at
+            <= Timestamp::now() + Duration::from_mins(PENDING_SECOND_FACTOR_TTL_MINUTES)
     );
 
     let channel = Session::new_provisional(ProfileId::generate(), None);
     assert!(!channel.awaits_second_factor());
-    assert!(!make_session(Duration::hours(1)).awaits_second_factor());
+    assert!(!make_session(Duration::from_hours(1)).awaits_second_factor());
 }

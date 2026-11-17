@@ -22,7 +22,7 @@ fn epoch(owner: ProfileId, status: HistoryEpochUse) -> HistoryEpoch {
         ksf_salt: [9; 32],
         status,
         // An epoch is created at microsecond precision, as every backend stores it.
-        created_at: DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap(),
+        created_at: Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap(),
     }
 }
 
@@ -35,7 +35,7 @@ fn entry(epoch: HistoryEpochId, seq: i64) -> HistoryEntry {
             operation: Uuid::now_v7(),
             policy_version: 1,
         },
-        created_at: DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap(),
+        created_at: Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap(),
     }
 }
 
@@ -45,7 +45,7 @@ fn entry(epoch: HistoryEpochId, seq: i64) -> HistoryEntry {
 /// still verifying its proof is never overtaken by the abort.
 #[test]
 fn an_enrollment_cleanup_waits_for_its_commit_deadline() {
-    let expires_at = DateTime::from_timestamp_micros(1_790_000_000_000_000).unwrap();
+    let expires_at = Timestamp::from_microsecond(1_790_000_000_000_000).unwrap();
     let deadline = commit_deadline(expires_at);
     assert_eq!(deadline, expires_at + ENROLLMENT_FINISH_GRACE);
     let work = EnrollmentAdmission {
@@ -65,7 +65,7 @@ fn an_enrollment_cleanup_waits_for_its_commit_deadline() {
 /// from the due time its admission states.
 #[test]
 fn an_enrollment_cleanup_is_due_at_an_instant_a_store_keeps() {
-    let expires_at = DateTime::from_timestamp_nanos(1_790_000_000_123_456_789);
+    let expires_at = Timestamp::from_nanosecond(1_790_000_000_123_456_789).unwrap();
     let due = EnrollmentAdmission {
         operation: Uuid::now_v7(),
         owner_domain: [1; 32],
@@ -74,7 +74,7 @@ fn an_enrollment_cleanup_is_due_at_an_instant_a_store_keeps() {
     .work()
     .not_before
     .expect("due at a set time");
-    assert_eq!(due.timestamp_subsec_nanos() % 1000, 0, "{due:?}");
+    assert_eq!(due.subsec_nanosecond() % 1000, 0, "{due:?}");
     assert!(due >= commit_deadline(expires_at) + REPLICA_CLOCK_SKEW);
 }
 
@@ -250,13 +250,13 @@ fn commit(depth: u32) -> HistoryCommit {
 /// given number of days ago.
 #[test]
 fn age_retention_is_off_by_default() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut c = commit(1);
     assert_eq!(c.expires_before(now), None);
     c.max_age_days = 183;
     assert_eq!(
         c.expires_before(now),
-        Some(now - chrono::Duration::days(183))
+        Some(now - jiff::SignedDuration::from_hours(183 * 24))
     );
 }
 

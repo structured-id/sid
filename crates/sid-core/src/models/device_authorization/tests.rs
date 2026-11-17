@@ -15,7 +15,7 @@ fn make_device_auth() -> DeviceAuthorizationCode {
 fn approval() -> crate::models::GrantAuthentication {
     crate::models::GrantAuthentication {
         session: crate::models::SessionId::generate(),
-        authenticated_at: Utc::now(),
+        authenticated_at: Timestamp::now(),
         amr: vec!["pwd".into()],
         assurance_level: crate::models::AuthLevel::Basic,
         elevation: None,
@@ -163,7 +163,7 @@ fn test_serde_roundtrip() {
 #[test]
 fn test_is_expired_with_past_expiry() {
     let mut da = make_device_auth();
-    da.expires_at = Utc::now() - chrono::Duration::seconds(10);
+    da.expires_at = Timestamp::now() - jiff::SignedDuration::from_secs(10);
     assert!(da.is_expired());
 }
 
