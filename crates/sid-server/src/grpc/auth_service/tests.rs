@@ -175,7 +175,7 @@ fn test_anomaly_step_up_for_new_device_and_ip() {
         longitude: None,
         prev_latitude: None,
         prev_longitude: None,
-        prev_login_at: Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        prev_login_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24)),
         prev_country: None,
         designated_countries: vec![],
     };

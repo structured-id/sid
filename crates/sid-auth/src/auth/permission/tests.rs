@@ -10,13 +10,13 @@ fn test_dpop_confirmation() {
     let now = jiff::Timestamp::from_second(1_800_000_000).unwrap();
     let proof = sid_authn::dpop::VerifiedProof {
         jti: "proof-1".into(),
-        iat: now.timestamp() - 2,
+        iat: now.as_second() - 2,
     };
     let c = dpop_confirmation(
         "jkt-1",
         "GET",
         "https://orders.example/read/1?page=2#top",
-        now.timestamp() + 3600,
+        now.as_second() + 3600,
         &proof,
         now,
     );
@@ -26,9 +26,9 @@ fn test_dpop_confirmation() {
     assert_eq!(c.uri, "https://orders.example/read/1");
     assert_eq!(c.request_id.len(), 16);
     assert_eq!(c.proof_jti, "proof-1");
-    assert_eq!(c.proof_iat.unwrap().seconds, now.timestamp() - 2);
+    assert_eq!(c.proof_iat.unwrap().seconds, now.as_second() - 2);
     let verified = c.verified_at.unwrap().seconds;
-    assert_eq!(verified, now.timestamp());
+    assert_eq!(verified, now.as_second());
     assert_eq!(c.valid_until.unwrap().seconds, verified + 30);
 
     let expiring = dpop_confirmation(

@@ -377,7 +377,7 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
     let past = history_epoch_cutoff(Ok("2026-10-01T12:00:00Z".into()))
         .unwrap()
         .unwrap();
-    assert_eq!(past.to_rfc3339(), "2026-10-01T12:00:00+00:00");
+    assert_eq!(past.to_string(), "2026-10-01T12:00:00Z");
     let offset = history_epoch_cutoff(Ok("2026-10-01T15:00:00+03:00".into()))
         .unwrap()
         .unwrap();
@@ -388,7 +388,7 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
             "{refused:?}"
         );
     }
-    let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let future = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24)).to_string();
     assert!(history_epoch_cutoff(Ok(future)).is_err());
     assert!(history_epoch_cutoff(Err(NotUnicode("bad".into()))).is_err());
 }
@@ -443,11 +443,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_named() {
             .await
         }
     };
-    let at = |instant: &str| {
-        chrono::DateTime::parse_from_rfc3339(instant)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    };
+    let at = |instant: &str| instant.parse::<jiff::Timestamp>().unwrap();
     // The credential cutoff in force: an earlier raise changes nothing and
     // reports it.
     let credential_cutoff = async || {
@@ -569,11 +565,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
     storage.create_profile(&profile, ctx()).await.unwrap();
     let password = Credential::new(profile.id, CredentialType::Opaque, b"p0".to_vec(), None);
     storage.create_credential(&password, ctx()).await.unwrap();
-    let at = |instant: &str| {
-        chrono::DateTime::parse_from_rfc3339(instant)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    };
+    let at = |instant: &str| instant.parse::<jiff::Timestamp>().unwrap();
     let epoch = |created_at| HistoryEpochDescriptor {
         id: HistoryEpochId::generate(),
         suite: HistorySuite::PallasPoseidonV1,

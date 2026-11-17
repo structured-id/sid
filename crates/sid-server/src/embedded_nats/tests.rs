@@ -107,7 +107,7 @@ async fn in_process_bus_publishes_live_and_refuses_durable_work() {
     assert!(matches!(
         connected
             .bus
-            .replay(chrono::Utc::now(), None, EventFilter::default())
+            .replay(jiff::Timestamp::now(), None, EventFilter::default())
             .await,
         Err(sid_plugin::event_bus::EventBusError::ReplayUnsupported)
     ));
@@ -169,7 +169,7 @@ async fn test_embedded_nats_event_bus_publish_subscribe() {
 #[tokio::test]
 async fn embedded_jetstream_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let since = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let since = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5);
     let event = Event::new("test", "sid.user.created.v1").with_subject("profile/restart");
     let id = event.id.clone();
 

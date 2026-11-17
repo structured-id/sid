@@ -36,7 +36,7 @@ fn create_test_session(profile_id: ProfileId, ip: &str) -> Session {
     Session::new(
         profile_id,
         Some(ip.parse().unwrap()),
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     )
 }
 
@@ -156,7 +156,7 @@ async fn test_new_ip_true_triggers_step_up_with_new_device() {
         longitude: None,
         prev_latitude: None,
         prev_longitude: None,
-        prev_login_at: Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        prev_login_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24)),
         prev_country: None,
         designated_countries: vec![],
     };

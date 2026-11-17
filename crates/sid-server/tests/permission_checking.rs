@@ -277,7 +277,7 @@ async fn asking() -> Asking {
                 client_id: CHECKER.into(),
                 resource_id: api.id,
                 scopes: vec![AUTHZ_CHECK.into()],
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             },
             audit(),
         )
@@ -288,7 +288,7 @@ async fn asking() -> Asking {
         let issuer = svc.issuer.id;
         let path = path.to_owned();
         async move {
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             let app = sid_core::models::Application {
                 id: sid_core::models::ApplicationId::generate(),
                 project_id: ProjectId::SYSTEM,
@@ -441,7 +441,7 @@ impl Asking {
         let session = sid_core::models::Session::new(
             self.profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         self.svc
             .storage
@@ -982,7 +982,7 @@ async fn a_key_bound_token_needs_its_proof() {
 
     let mut confirmed = a.request("orders.read", &a.orders, &bound);
     if let Some(Evaluation::Request(request)) = confirmed.evaluation.as_mut() {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         request.confirmation = Some(RequestConfirmation {
             profile: SenderProofProfile::Dpop.into(),
             method: "GET".into(),
@@ -990,16 +990,16 @@ async fn a_key_bound_token_needs_its_proof() {
             request_id: vec![7; 16],
             jkt: jkt.into(),
             verified_at: Some(prost_types::Timestamp {
-                seconds: now.timestamp(),
+                seconds: now.as_second(),
                 nanos: 0,
             }),
             valid_until: Some(prost_types::Timestamp {
-                seconds: now.timestamp() + 30,
+                seconds: now.as_second() + 30,
                 nanos: 0,
             }),
             proof_jti: "proof-1".into(),
             proof_iat: Some(prost_types::Timestamp {
-                seconds: now.timestamp(),
+                seconds: now.as_second(),
                 nanos: 0,
             }),
         });
@@ -1028,9 +1028,9 @@ fn confirmed(
     question
 }
 
-fn at(time: chrono::DateTime<chrono::Utc>) -> Option<prost_types::Timestamp> {
+fn at(time: jiff::Timestamp) -> Option<prost_types::Timestamp> {
     Some(prost_types::Timestamp {
-        seconds: time.timestamp(),
+        seconds: time.as_second(),
         nanos: 0,
     })
 }
@@ -1038,7 +1038,7 @@ fn at(time: chrono::DateTime<chrono::Utc>) -> Option<prost_types::Timestamp> {
 /// A DPoP confirmation for key `jkt` of a new proof made now, checked now
 /// and usable for 30 s.
 fn dpop_confirmation(jkt: &str) -> RequestConfirmation {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     RequestConfirmation {
         profile: SenderProofProfile::Dpop.into(),
         method: "GET".into(),
@@ -1046,7 +1046,7 @@ fn dpop_confirmation(jkt: &str) -> RequestConfirmation {
         request_id: vec![7; 16],
         jkt: jkt.into(),
         verified_at: at(now),
-        valid_until: at(now + chrono::Duration::seconds(30)),
+        valid_until: at(now + jiff::SignedDuration::from_secs(30)),
         proof_jti: uuid::Uuid::new_v4().to_string(),
         proof_iat: at(now),
     }
@@ -1108,7 +1108,7 @@ async fn a_confirmation_that_does_not_fit_is_refused() {
     let token = a.token().await;
     let (bound, _) = a.profile_token(&a.orders, Some(JKT)).await;
     let (unbound, _) = a.profile_token(&a.orders, None).await;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let cases: Vec<(&str, &str, RequestConfirmation)> = vec![
         (
             "another key",
@@ -1120,8 +1120,8 @@ async fn a_confirmation_that_does_not_fit_is_refused() {
             "expired",
             &bound,
             RequestConfirmation {
-                verified_at: at(now - chrono::Duration::seconds(40)),
-                valid_until: at(now - chrono::Duration::seconds(10)),
+                verified_at: at(now - jiff::SignedDuration::from_secs(40)),
+                valid_until: at(now - jiff::SignedDuration::from_secs(10)),
                 ..dpop_confirmation(JKT)
             },
         ),
@@ -1129,7 +1129,7 @@ async fn a_confirmation_that_does_not_fit_is_refused() {
             "overlong window",
             &bound,
             RequestConfirmation {
-                valid_until: at(now + chrono::Duration::minutes(10)),
+                valid_until: at(now + jiff::SignedDuration::from_mins(10)),
                 ..dpop_confirmation(JKT)
             },
         ),
@@ -1137,8 +1137,10 @@ async fn a_confirmation_that_does_not_fit_is_refused() {
             "checked in the future",
             &bound,
             RequestConfirmation {
-                verified_at: at(now + chrono::Duration::minutes(5)),
-                valid_until: at(now + chrono::Duration::minutes(5) + chrono::Duration::seconds(20)),
+                verified_at: at(now + jiff::SignedDuration::from_mins(5)),
+                valid_until: at(now
+                    + jiff::SignedDuration::from_mins(5)
+                    + jiff::SignedDuration::from_secs(20)),
                 ..dpop_confirmation(JKT)
             },
         ),
@@ -1866,7 +1868,7 @@ fn dpop_proof(htm: &str, htu: &str, token: &str) -> String {
         "jti": uuid::Uuid::now_v7().to_string(),
         "htm": htm,
         "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(

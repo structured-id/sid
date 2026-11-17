@@ -154,7 +154,7 @@ async fn current_token(
     session_id: &str,
     session: BffSession,
 ) -> Result<SecretString, StatusCode> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if session.claims.exp - now > REFRESH_MARGIN_SECS {
         return Ok(session.access_token);
     }

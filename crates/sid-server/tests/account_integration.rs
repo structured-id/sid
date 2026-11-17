@@ -41,7 +41,7 @@ fn key_set() -> ClientKeySet {
 
 /// A proof of `kid` for `audience`, signed with `private_pem`.
 fn proof(private_pem: &str, kid: &str, audience: &str, jti: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = serde_json::json!({
         "iss": kid, "sub": kid, "aud": audience, "iat": now, "exp": now + 60, "jti": jti,
     });
@@ -140,7 +140,7 @@ async fn a_bad_proof_learns_nothing() {
 /// A client assertion (RFC 7523 §3) of `client_id` for `audience`, signed
 /// with `private_pem` under the registered kid.
 fn client_assertion(private_pem: &str, client_id: &str, audience: &str, jti: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = serde_json::json!({
         "iss": client_id, "sub": client_id, "aud": audience,
         "iat": now, "exp": now + 60, "jti": jti,

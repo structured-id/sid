@@ -50,7 +50,7 @@ async fn key_client(jwks: Option<ClientKeySet>) -> TestServices {
     client.grant_types = vec!["client_credentials".into()];
     client.allowed_scopes = vec!["account".into()];
     let svc = TestServices::new(MockStorage::new().with_system_project().with_client(client));
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -98,7 +98,7 @@ async fn key_client(jwks: Option<ClientKeySet>) -> TestServices {
 /// An assertion (RFC 7523 §3) of `key-client` for `audience`, signed by the
 /// test key under `kid`.
 fn assertion(audience: &str, jti: &str, kid: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = serde_json::json!({
         "iss": "key-client", "sub": "key-client", "aud": audience,
         "iat": now, "exp": now + 60, "jti": jti,
@@ -207,7 +207,7 @@ async fn a_misdirected_unknown_or_replayed_assertion_is_refused() {
 #[tokio::test]
 async fn a_premature_assertion_is_invalid_client() {
     let svc = key_client(Some(key_set())).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = serde_json::json!({
         "iss": "key-client", "sub": "key-client", "aud": token_endpoint(&svc),
         "iat": now, "nbf": now + 180, "exp": now + 240, "jti": "jti-early",

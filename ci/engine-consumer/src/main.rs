@@ -821,7 +821,7 @@ impl Served {
 /// The next keyed call's operation context, named `key`.
 async fn operation(storage: &dyn StorageBackend, key: &str) -> Result<OperationContext, Failure> {
     let period = storage
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await?
         .period;
     Ok(OperationContext::new(OperationKey::parse(key)?, period))
@@ -951,7 +951,7 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
 /// Owed (pending or claimed) work of the installation that is due now, by
 /// kind and state; work scheduled for later is not yet owed.
 async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     Ok(storage
         .export_work()
         .await?
@@ -998,7 +998,7 @@ async fn ce_work_settled(
     ),
     Failure,
 > {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let mut completed = std::collections::BTreeSet::new();
     let mut scheduled = std::collections::BTreeSet::new();
     for work in storage.export_work().await? {

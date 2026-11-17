@@ -583,7 +583,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
     let replaced = original.active_epoch().unwrap().id;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let cutoff =
-        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+        jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond()).unwrap();
     svc.storage
         .raise_history_write_cutoff(cutoff, AuditEntry::system("test", "cutoff").into())
         .await
