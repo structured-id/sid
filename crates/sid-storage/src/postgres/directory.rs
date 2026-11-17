@@ -12,6 +12,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
 
 use super::{PostgresBackend, insert_error};
+use crate::pg_time::ToPg;
 
 type Tx<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 
@@ -55,10 +56,10 @@ async fn write_profile(
         .bind(profile.max_assurance.as_str())
         .bind(profile.manager_id)
         .bind(profile.migration_pending)
-        .bind(profile.migration_started_at)
-        .bind(profile.migration_completed_at)
-        .bind(profile.created_at)
-        .bind(profile.updated_at)
+        .bind(profile.migration_started_at.pg())
+        .bind(profile.migration_completed_at.pg())
+        .bind(profile.created_at.pg())
+        .bind(profile.updated_at.pg())
         // As given: a restored profile keeps the revision stale copies of it
         // are checked against.
         .bind(revision)
@@ -113,9 +114,9 @@ pub(super) async fn update_profile(tx: &mut Tx<'_>, profile: &Profile) -> SidRes
     .bind(profile.max_assurance.as_str())
     .bind(profile.manager_id)
     .bind(profile.migration_pending)
-    .bind(profile.migration_started_at)
-    .bind(profile.migration_completed_at)
-    .bind(profile.updated_at)
+    .bind(profile.migration_started_at.pg())
+    .bind(profile.migration_completed_at.pg())
+    .bind(profile.updated_at.pg())
     .bind(reference)
     .execute(&mut **tx)
     .await
@@ -168,7 +169,7 @@ async fn upsert_binding(tx: &mut Tx<'_>, entity_id: Uuid, p: &Principal) -> SidR
     .bind(&p.source_field)
     .bind(p.source_email_id.map(|id| id.0))
     .bind(p.source_phone_id.map(|id| id.0))
-    .bind(p.created_at)
+    .bind(p.created_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(storage("principal binding"))?;
@@ -225,13 +226,13 @@ pub(super) async fn bind_principal(tx: &mut Tx<'_>, p: &Principal) -> SidResult<
     .bind(p.principal_type.as_str())
     .bind(&p.value)
     .bind(p.verified)
-    .bind(p.verified_at)
-    .bind(p.verification_expires)
+    .bind(p.verified_at.pg())
+    .bind(p.verification_expires.pg())
     .bind(assigned)
     .bind(i64::from(assigned.is_some()))
     .bind(p.email_policy_revision)
-    .bind(p.created_at)
-    .bind(p.updated_at)
+    .bind(p.created_at.pg())
+    .bind(p.updated_at.pg())
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| super::principal_write_error("principal", e))?;
@@ -255,13 +256,13 @@ async fn bind_login_principal(tx: &mut Tx<'_>, p: &Principal) -> SidResult<()> {
     .bind(p.principal_type.as_str())
     .bind(&p.value)
     .bind(p.verified)
-    .bind(p.verified_at)
-    .bind(p.verification_expires)
+    .bind(p.verified_at.pg())
+    .bind(p.verification_expires.pg())
     .bind(assigned)
     .bind(i64::from(assigned.is_some()))
     .bind(p.email_policy_revision)
-    .bind(p.created_at)
-    .bind(p.updated_at)
+    .bind(p.created_at.pg())
+    .bind(p.updated_at.pg())
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| super::principal_write_error("login principal", e))?;
@@ -367,9 +368,9 @@ pub(super) async fn upsert_email(tx: &mut Tx<'_>, email: &ProfileEmail) -> SidRe
     .bind(&email.custom_label)
     .bind(email.is_primary)
     .bind(email.verified)
-    .bind(email.verified_at)
-    .bind(email.created_at)
-    .bind(email.updated_at)
+    .bind(email.verified_at.pg())
+    .bind(email.created_at.pg())
+    .bind(email.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("profile email", e))?;
@@ -425,9 +426,9 @@ pub(super) async fn upsert_phone(tx: &mut Tx<'_>, phone: &ProfilePhone) -> SidRe
     .bind(phone.can_receive_fax)
     .bind(phone.can_receive_voice)
     .bind(phone.verified)
-    .bind(phone.verified_at)
-    .bind(phone.created_at)
-    .bind(phone.updated_at)
+    .bind(phone.verified_at.pg())
+    .bind(phone.created_at.pg())
+    .bind(phone.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("profile phone", e))?;
@@ -463,8 +464,8 @@ pub(super) async fn set_metadata(tx: &mut Tx<'_>, metadata: &ProfileMetadata) ->
     .bind(metadata.profile_id)
     .bind(&metadata.key)
     .bind(&metadata.value)
-    .bind(metadata.created_at)
-    .bind(metadata.updated_at)
+    .bind(metadata.created_at.pg())
+    .bind(metadata.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| match &e {
@@ -552,8 +553,8 @@ async fn write_group(tx: &mut Tx<'_>, g: &Group, sql: &'static str) -> Result<u6
         .bind(g.parent_group_id)
         .bind(&g.name)
         .bind(&g.description)
-        .bind(g.created_at)
-        .bind(g.updated_at)
+        .bind(g.created_at.pg())
+        .bind(g.updated_at.pg())
         .execute(&mut **tx)
         .await
         .map(|r| r.rows_affected())
@@ -574,7 +575,7 @@ async fn update_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<bool> {
         .bind(g.id)
         .bind(&g.name)
         .bind(&g.description)
-        .bind(g.updated_at)
+        .bind(g.updated_at.pg())
         .execute(&mut **tx)
         .await
         .map(|r| r.rows_affected() == 1)
@@ -615,7 +616,7 @@ pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResu
     )
     .bind(member.group_id)
     .bind(member.profile_id)
-    .bind(member.added_at)
+    .bind(member.added_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(member_error)?;
