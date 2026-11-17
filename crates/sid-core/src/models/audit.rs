@@ -374,7 +374,9 @@ const RECORD_DIGEST_DOMAIN: &[u8] = b"sid.audit.record.v1";
 /// then chain id, record id, sequence, timestamp, actor, action, outcome and
 /// the previous digest. Each text field is length-prefixed (u32 BE), so no
 /// content of one field can be read as a boundary of the next; the sequence
-/// is a u64 BE and the previous digest its 32 bytes.
+/// is a u64 BE and the previous digest its 32 bytes. The timestamp is RFC 3339
+/// in UTC with a `Z` suffix and only the fractional digits it needs
+/// (`2026-01-01T00:00:00.5Z`), as `jiff::Timestamp` displays it.
 pub fn compute_record_hash(record: &AuditRecord) -> AuditDigest {
     use sha2::{Digest, Sha256};
 
