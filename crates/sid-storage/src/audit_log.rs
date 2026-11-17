@@ -6,7 +6,8 @@
 //! data mutation it records.
 
 use async_trait::async_trait;
-use chrono::{DateTime, SubsecRound, Utc};
+use jiff::Timestamp;
+use jiff_sqlx::{Timestamp as PgTime, ToSqlx};
 use sid_core::models::audit::{
     ActorType, AuditChain, AuditDigest, AuditEntry, AuditError, AuditOutcome, AuditRecord,
     ChainCheckpoint, ChainHead, compute_record_hash,
@@ -38,7 +39,7 @@ impl PostgresAuditLog {
         let outcome_str: String = row.get("outcome");
         Ok(AuditRecord {
             id: row.get("id"),
-            timestamp: row.get("timestamp"),
+            timestamp: row.get::<PgTime, _>("timestamp").to_jiff(),
             chain_id: row.get("chain_id"),
             sequence: row.get::<i64, _>("sequence") as u64,
             actor_id: row.get("actor_id"),
@@ -67,7 +68,7 @@ impl PostgresAuditLog {
         chain_id: &str,
         entry: AuditEntry,
     ) -> Result<AuditRecord, AuditError> {
-        Self::append_at(tx, chain_id, entry, Utc::now()).await
+        Self::append_at(tx, chain_id, entry, Timestamp::now()).await
     }
 
     /// Append a record stamped `at`.
@@ -75,7 +76,7 @@ impl PostgresAuditLog {
         tx: &mut Transaction<'_, Postgres>,
         chain_id: &str,
         entry: AuditEntry,
-        at: DateTime<Utc>,
+        at: Timestamp,
     ) -> Result<AuditRecord, AuditError> {
         let conn: &mut PgConnection = tx;
         // Creates the head at genesis if absent; the no-op update takes the
@@ -102,7 +103,7 @@ impl PostgresAuditLog {
         // record read back for verification no longer has.
         let mut record = AuditRecord {
             id: id.clone(),
-            timestamp: at.trunc_subsecs(6),
+            timestamp: crate::micros(at),
             chain_id: chain_id.to_string(),
             sequence,
             actor_id: entry.actor_id,
@@ -125,7 +126,7 @@ impl PostgresAuditLog {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(&record.id)
-        .bind(record.timestamp)
+        .bind(record.timestamp.to_sqlx())
         .bind(&record.chain_id)
         .bind(record.sequence as i64)
         .bind(&record.actor_id)
@@ -178,8 +179,8 @@ impl AuditLog for PostgresAuditLog {
     async fn query(
         &self,
         chain_id: &str,
-        from: Option<DateTime<Utc>>,
-        to: Option<DateTime<Utc>>,
+        from: Option<Timestamp>,
+        to: Option<Timestamp>,
     ) -> Result<Vec<AuditRecord>, AuditError> {
         let mut query = String::from(
             "SELECT id, timestamp, chain_id, sequence, actor_id, actor_type, \
@@ -289,18 +290,18 @@ impl AuditLog for PostgresAuditLog {
         // Each record into its month's partition, created as retention
         // expects to find it: a row parked in the default partition would
         // keep that month's partition from being created later.
-        let months: std::collections::BTreeSet<(i32, u32)> = chain
+        let months: std::collections::BTreeSet<(i16, i8)> = chain
             .records
             .iter()
             .map(|r| {
-                use chrono::Datelike;
-                (r.timestamp.year(), r.timestamp.month())
+                let day = r.timestamp.to_zoned(jiff::tz::TimeZone::UTC);
+                (day.year(), day.month())
             })
             .collect();
         for (year, month) in months {
             sqlx::query("SELECT create_audit_partition($1, $2)")
-                .bind(year)
-                .bind(i32::try_from(month).map_err(|_| AuditError::Other("month".into()))?)
+                .bind(i32::from(year))
+                .bind(i32::from(month))
                 .execute(&mut *tx)
                 .await
                 .map_err(write)?;
@@ -313,7 +314,7 @@ impl AuditLog for PostgresAuditLog {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
             .bind(&record.id)
-            .bind(record.timestamp)
+            .bind(record.timestamp.to_sqlx())
             .bind(&record.chain_id)
             .bind(sequence(record.sequence)?)
             .bind(&record.actor_id)
@@ -356,7 +357,7 @@ impl AuditLog for PostgresAuditLog {
             .bind(&chain.head.chain_id)
             .bind(sequence(checkpoint.sequence)?)
             .bind(checkpoint.hash.as_bytes().as_slice())
-            .bind(checkpoint.cut_before)
+            .bind(checkpoint.cut_before.to_sqlx())
             .execute(&mut *tx)
             .await
             .map_err(write)?;
@@ -396,7 +397,7 @@ async fn stored_chain(
             Ok(ChainCheckpoint {
                 sequence: row.get::<i64, _>("sequence") as u64,
                 hash: digest(&row, "hash")?,
-                cut_before: row.get("cut_before"),
+                cut_before: row.get::<PgTime, _>("cut_before").to_jiff(),
             })
         })
         .transpose()?;

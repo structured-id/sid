@@ -58,11 +58,22 @@ mod policy_evidence;
 /// back are the same, whatever precision the host clock reports.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::models::BrandingConfig {
-    use chrono::SubsecRound;
     let mut stored = config.clone();
-    stored.created_at = stored.created_at.trunc_subsecs(6);
-    stored.updated_at = stored.updated_at.trunc_subsecs(6);
+    stored.created_at = micros(stored.created_at);
+    stored.updated_at = micros(stored.updated_at);
     stored
+}
+
+/// `at` truncated to the microsecond, the precision SQL timestamp columns
+/// hold.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+pub(crate) fn micros(at: jiff::Timestamp) -> jiff::Timestamp {
+    at.round(
+        jiff::TimestampRound::new()
+            .smallest(jiff::Unit::Microsecond)
+            .mode(jiff::RoundMode::Trunc),
+    )
+    .expect("truncating an instant stays representable")
 }
 
 /// Refusal of a credential for a federated reference: the identity it
@@ -322,15 +333,10 @@ fn transfer_repeat<T: PartialEq>(stored: &T, wanted: &T, what: &str) -> sid_core
     feature = "storage-sqlite",
     feature = "storage-coordinode"
 ))]
-fn decay_cutoff(
-    older_than: std::time::Duration,
-) -> sid_core::Result<chrono::DateTime<chrono::Utc>> {
-    let refused =
-        || sid_core::Error::Validation(format!("decay window {older_than:?} is out of range"));
-    let window = chrono::Duration::from_std(older_than).map_err(|_| refused())?;
-    chrono::Utc::now()
-        .checked_sub_signed(window)
-        .ok_or_else(refused)
+fn decay_cutoff(older_than: std::time::Duration) -> sid_core::Result<jiff::Timestamp> {
+    jiff::Timestamp::now().checked_sub(older_than).map_err(|_| {
+        sid_core::Error::Validation(format!("decay window {older_than:?} is out of range"))
+    })
 }
 
 // SQLite backend (embedded-dev mode)
