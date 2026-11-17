@@ -107,7 +107,7 @@ async fn test_customized_template_reaches_delivery() {
                 push_title: String::new(),
                 push_body: String::new(),
                 push_action_url: String::new(),
-                updated_at: chrono::Utc::now(),
+                updated_at: jiff::Timestamp::now(),
             },
             |_, _| ((), None),
         )
@@ -444,7 +444,7 @@ async fn test_grpc_list_customized_only_after_update() {
                 push_title: String::new(),
                 push_body: String::new(),
                 push_action_url: String::new(),
-                updated_at: chrono::Utc::now(),
+                updated_at: jiff::Timestamp::now(),
             },
             |_, _| ((), None),
         )
@@ -574,7 +574,7 @@ impl Served {
     async fn named<T>(&self, inner: T, token: &str, key: &str) -> tonic::Request<T> {
         let period = self
             .operations
-            .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+            .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
             .await
             .unwrap()
             .period;
@@ -776,7 +776,7 @@ async fn test_a_token_of_another_purpose_is_unauthenticated() {
     let session = sid_core::models::Session::new(
         admin.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let internal = jwt
         .issue_access_token(
@@ -945,7 +945,7 @@ impl NotificationChannel for Counting {
             Ok(sid_plugin::notification::DeliveryReceipt {
                 message_id: "m-1".into(),
                 channel: "email".into(),
-                timestamp: chrono::Utc::now(),
+                timestamp: jiff::Timestamp::now(),
                 provider: "test".into(),
             })
         } else {
@@ -1235,7 +1235,7 @@ async fn test_upkeep_retires_periods_past_their_retention() {
     let pool = crate::test_db::pool().await;
     let operations = crate::test_db::operations(&pool).await;
     let period = operations
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;
@@ -1308,7 +1308,7 @@ async fn test_template_commands_are_named_under_this_services_periods() {
     .period;
     let issued = s
         .operations
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;

@@ -296,12 +296,7 @@ impl sid_proto::sid::v1::operation_service_server::OperationService for Operatio
         let until = issued.accepted_until;
         Ok(tonic::Response::new(sid_proto::sid::v1::OperationPeriod {
             period: issued.period.get(),
-            // A period issued now ends after 1970: its nanoseconds are not
-            // negative, as google.protobuf.Timestamp requires.
-            accepted_until: Some(prost_types::Timestamp {
-                seconds: until.as_second(),
-                nanos: until.subsec_nanosecond(),
-            }),
+            accepted_until: Some(sid_proto::time::to_proto(until)),
         }))
     }
 }

@@ -585,24 +585,7 @@ pub fn descriptor_message(e: &HistoryEpochDescriptor) -> PasswordHistoryEpochDes
     }
 }
 
-/// `at` on the wire.
-fn timestamp(at: jiff::Timestamp) -> prost_types::Timestamp {
-    // The protobuf form counts nanoseconds forward from the second below.
-    let (seconds, nanos) = match at.subsec_nanosecond() {
-        n if n < 0 => (at.as_second() - 1, n + 1_000_000_000),
-        n => (at.as_second(), n),
-    };
-    prost_types::Timestamp { seconds, nanos }
-}
-
-/// The instant a wire timestamp names; nanoseconds outside 0..10⁹ are
-/// malformed (google.protobuf.Timestamp).
-fn instant(t: &prost_types::Timestamp) -> Option<jiff::Timestamp> {
-    if !(0..1_000_000_000).contains(&t.nanos) {
-        return None;
-    }
-    jiff::Timestamp::new(t.seconds, t.nanos).ok()
-}
+use sid_proto::time::{from_proto as instant, to_proto as timestamp};
 
 /// The descriptor a message describes, when every field is well formed.
 fn descriptor_of(m: &PasswordHistoryEpochDescriptor) -> Option<HistoryEpochDescriptor> {

@@ -202,7 +202,7 @@ fn token_for(profile: &Profile) -> String {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     test_jwt()
         .issue_access_token(
@@ -1698,7 +1698,7 @@ async fn signed_in_employee(
     let session = Session::new(
         profile_id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     storage
         .create_session(

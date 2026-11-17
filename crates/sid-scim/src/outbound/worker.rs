@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{
     AuditEntry, GroupId, MutationContext, OperationCompletion, OperationKey, OutboundEntityType,
     ProfileId, ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
@@ -657,7 +657,7 @@ impl ScimOutboundWorker {
         event: &Event,
         error: &ScimClientError,
     ) -> bool {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let sid_entity_id = extract_profile_id(&event.data)
             .map(ProfileId::into_uuid)
             .or_else(|_| extract_uuid_field(&event.data, "group_id"))
@@ -785,7 +785,7 @@ impl ScimOutboundWorker {
         entity_type: OutboundEntityType,
         downstream_id: &str,
     ) -> Result<(), ScimClientError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let record = ScimOutboundRecord {
             target_id,
             sid_entity_id,

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{Mailbox, MultiPart, SinglePart, header::ContentType},
@@ -369,7 +369,7 @@ impl NotificationChannel for SmtpChannel {
         Ok(DeliveryReceipt {
             message_id,
             channel: "email".into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             provider: format!("smtp:{}", self.config.host),
         })
     }
@@ -382,7 +382,7 @@ impl NotificationChannel for SmtpChannel {
                     "SMTP {}:{} reachable",
                     self.config.host, self.config.port
                 )),
-                last_success: Some(Utc::now()),
+                last_success: Some(Timestamp::now()),
             }),
             Ok(false) => Ok(ChannelHealth {
                 healthy: false,

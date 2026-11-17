@@ -318,7 +318,7 @@ fn build_context(event: &Event) -> serde_json::Value {
     let mut ctx = json!({
         "event_type": event.event_type,
         "source": event.source,
-        "time": event.time.to_rfc3339(),
+        "time": event.time.to_string(),
         "id": event.id,
         "data": event.data,
         "data_json": data_json,

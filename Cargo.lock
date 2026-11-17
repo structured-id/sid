@@ -6402,6 +6402,7 @@ dependencies = [
  "hex",
  "hmac",
  "jiff 1.0.0",
+ "jiff-sqlx",
  "jsonwebtoken",
  "lettre",
  "prost",
@@ -6554,6 +6555,7 @@ name = "sid-proto"
 version = "0.2.30"
 dependencies = [
  "glob",
+ "jiff 1.0.0",
  "prost",
  "prost-build",
  "prost-reflect",
@@ -8423,6 +8425,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

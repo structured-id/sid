@@ -39,8 +39,9 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Time
+# Time; PostgreSQL `timestamptz` through jiff-sqlx.
 jiff = { workspace = true }
+jiff-sqlx = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

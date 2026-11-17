@@ -55,7 +55,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true }
 # The session store's write latency histogram.
 opentelemetry = { workspace = true, optional = true }

@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn test_dpop_confirmation() {
     use sid_proto::sid::v1::authn::SenderProofProfile;
-    let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let now = jiff::Timestamp::from_second(1_800_000_000).unwrap();
     let proof = sid_authn::dpop::VerifiedProof {
         jti: "proof-1".into(),
         iat: now.timestamp() - 2,
