@@ -6,7 +6,8 @@
 //!
 //! A token is accepted only when the installation's local issuer signed it
 //! (`at+jwt`, RFC 9068 §4) for the account API resource, naming the client
-//! it was issued to and no source `pid`. Such a token was issued to a client
+//! it was issued to, stating the account API credential kind and carrying no
+//! source `pid`. Such a token was issued to a client
 //! of the installation organization under its local issuer, where the
 //! subject rule is the managed Profile (`subject::SubjectRule::for_hop`), so
 //! its `sub` is the local ProfileId: the typed caller is resolved from that
@@ -18,7 +19,7 @@ use sid_core::models::{OidcIssuer, ProfileId, ResourceIndicator};
 use sid_core::{Error as SidError, Result as SidResult};
 
 use crate::issuer::IssuerRegistry;
-use crate::jwt::AccessTokenClaims;
+use crate::jwt::{AccessTokenClaims, IssuedCredential};
 use crate::resource_token::ResourceTokenVerifier;
 
 /// Verifies access tokens for the account API.
@@ -61,7 +62,16 @@ impl AccountApiVerifier {
         if claims.pid.is_some() {
             return Err(refused("carries a source profile id"));
         }
+        // Only what the issuer stated to be account API access is the user's
+        // own account here: another issuance path's token for this resource,
+        // or one stating no kind, is no such credential.
+        if claims.credential_kind != Some(IssuedCredential::AccountApi) {
+            return Err(refused("not an account API credential"));
+        }
         let profile_id = ProfileId::parse(&claims.sub).map_err(|_| refused("subject"))?;
         Ok(AccountApiToken { claims, profile_id })
     }
 }
+
+#[cfg(test)]
+mod tests;
