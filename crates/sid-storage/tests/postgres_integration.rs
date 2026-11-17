@@ -413,7 +413,7 @@ async fn keyed_commits_under_one_period_do_not_wait_for_each_other() {
     let (store, schema) = host_operation_store().await;
     let pool = schema_pool(&schema).await;
     let period = store
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::minutes(5))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_mins(5))
         .await
         .unwrap()
         .period;
@@ -1365,8 +1365,8 @@ fn native_generation(session: sid_core::models::SessionId) -> sid_core::models::
         session_id: session,
         key_jkt: "jkt-lock-order".into(),
         credential_hashes: vec![uuid::Uuid::new_v4().as_bytes().repeat(2)],
-        expires_at: chrono::Utc::now() + chrono::Duration::days(1),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24),
+        created_at: jiff::Timestamp::now(),
     }
 }
 
@@ -1419,7 +1419,8 @@ async fn test_native_rotation_waits_for_its_sessions_end() {
                             .unwrap(),
                         successor: &successor,
                         sealed: b"sealed",
-                        redeliver_until: chrono::Utc::now() + chrono::Duration::seconds(30),
+                        redeliver_until: jiff::Timestamp::now()
+                            + jiff::SignedDuration::from_secs(30),
                     },
                     common::test_audit(),
                 )
@@ -1486,7 +1487,7 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                                 $14)",
                         )
                         .bind(&r.id)
-                        .bind(r.timestamp)
+                        .bind(jiff_sqlx::ToSqlx::to_sqlx(r.timestamp))
                         .bind(&r.chain_id)
                         .bind(r.sequence as i64)
                         .bind(&r.actor_id)
@@ -1524,12 +1525,10 @@ async fn test_audit_retention_stays_in_its_schema() {
     let outcome = tokio::spawn({
         let (own, other, other_schema) = (own.clone(), other.clone(), other_schema.clone());
         async move {
-            let month = chrono::NaiveDate::from_ymd_opt(2001, 1, 1).unwrap();
+            let month = jiff::civil::date(2001, 1, 1);
             assert!(other.ensure_audit_partition(month).await.unwrap());
 
-            let cut_before = "2002-01-01T00:00:00Z"
-                .parse::<chrono::DateTime<chrono::Utc>>()
-                .unwrap();
+            let cut_before = "2002-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
             own.drop_expired_audit_records(cut_before, common::test_audit())
                 .await
                 .expect("retention of this installation's schema");
@@ -1559,7 +1558,7 @@ async fn test_audit_partition_is_created_in_its_schema() {
     let outcome = tokio::spawn({
         let (own, other, own_schema) = (own.clone(), other.clone(), own_schema.clone());
         async move {
-            let month = chrono::NaiveDate::from_ymd_opt(2001, 1, 1).unwrap();
+            let month = jiff::civil::date(2001, 1, 1);
             assert!(other.ensure_audit_partition(month).await.unwrap());
 
             assert!(
@@ -1594,7 +1593,7 @@ async fn test_audit_partition_ignores_public_on_the_search_path() {
         async move {
             // A month no other scenario uses, so the shared schema's partition
             // is this test's own.
-            let month = chrono::NaiveDate::from_ymd_opt(1999, 7, 1).unwrap();
+            let month = jiff::civil::date(1999, 7, 1);
             shared.ensure_audit_partition(month).await.unwrap();
             let created = own.ensure_audit_partition(month).await.unwrap();
             let in_own: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
@@ -2344,7 +2343,7 @@ async fn test_audit_insert_lands_in_partition() {
 
     // Insert an audit record with a known timestamp (current month).
     let record_id = uuid::Uuid::now_v7().to_string();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
 
     sqlx::query(
         "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, actor_type,
@@ -2352,7 +2351,7 @@ async fn test_audit_insert_lands_in_partition() {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&record_id)
-    .bind(now)
+    .bind(jiff_sqlx::ToSqlx::to_sqlx(now))
     .bind("profile:test_partition")
     .bind(1i64)
     .bind("system")
@@ -2619,8 +2618,8 @@ async fn test_ep6_audit_wiring_produces_records() {
         parent_group_id: None,
         name: format!("ep6-group-{}", uuid::Uuid::now_v7()),
         description: Some("EP6 test group".into()),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     backend.create_group(&group, audit.clone()).await.unwrap();
     let chain_id = format!("group:{}", group.id);
@@ -2851,7 +2850,7 @@ async fn stale_contact(
     profile: sid_core::models::ProfileId,
     address: &str,
 ) -> uuid::Uuid {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let contact = sid_core::models::ProfileEmail {
         id: sid_core::models::ProfileEmailId::new(),
         profile_id: profile,

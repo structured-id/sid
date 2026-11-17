@@ -29,7 +29,7 @@ sid_plugin::storage_conformance!(setup);
 /// the administrative application API, owners are Profiles.
 mod harness {
     use async_trait::async_trait;
-    use chrono::{SubsecRound, Utc};
+    use jiff::{RoundMode, Timestamp, TimestampRound, Unit};
     use sid_core::models::{
         Application, ApplicationId, IssuerId, OAuth2Client, OrgId, Principal,
         PrincipalAssignmentFence, PrincipalType, ProfileId, ProjectId, ProtectedResource,
@@ -254,7 +254,13 @@ mod harness {
     }
 
     fn application(id: ApplicationId, name: &str) -> Application {
-        let now = Utc::now().trunc_subsecs(3);
+        let now = Timestamp::now()
+            .round(
+                TimestampRound::new()
+                    .smallest(Unit::Millisecond)
+                    .mode(RoundMode::Trunc),
+            )
+            .unwrap();
         Application {
             id,
             project_id: ProjectId::SYSTEM,
@@ -610,18 +616,18 @@ mod instance_secret_store {
 /// at commit, so this is the race its snapshot isolation could lose.
 #[tokio::test(flavor = "multi_thread")]
 async fn commits_racing_retirement_are_never_left_behind() {
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration as Duration, Timestamp};
     use sid_core::models::{
         AuditEntry, MutationContext, OperationCompletion, OperationKey, OperationPeriodRefusal,
     };
     use sid_plugin::OperationResultStore;
 
     let store = setup().await;
-    let t0 = Utc::now() - Duration::days(30);
+    let t0 = Timestamp::now() - Duration::from_hours(30 * 24);
     for round in 0..16 {
-        let at = t0 + Duration::hours(2 * round);
+        let at = t0 + Duration::from_hours(2 * round);
         let period = store
-            .current_operation_period(at, Duration::hours(1))
+            .current_operation_period(at, Duration::from_hours(1))
             .await
             .unwrap();
         let ns = format!("race:{round}");
@@ -639,7 +645,7 @@ async fn commits_racing_retirement_are_never_left_behind() {
         };
         let (commits, retired) = tokio::join!(
             futures::future::join_all(keys.iter().map(commit)),
-            store.retire_operation_periods(period.accepted_until + Duration::milliseconds(1)),
+            store.retire_operation_periods(period.accepted_until + Duration::from_millis(1)),
         );
         assert!(retired.unwrap() >= 1);
         for result in commits {
@@ -1039,7 +1045,7 @@ mod audit_retention {
             let id = uuid::Uuid::parse_str(&r.id).expect("record id");
             let params: HashMap<String, Value> = [
                 ("id", Value::Binary(id.as_bytes().to_vec())),
-                ("at", Value::Int(r.timestamp.timestamp_micros())),
+                ("at", Value::Int(r.timestamp.as_microsecond())),
                 ("chain", Value::String(r.chain_id.clone())),
                 ("sequence", Value::Int(i64::try_from(r.sequence).unwrap())),
                 ("actor_id", Value::String(r.actor_id.clone())),
