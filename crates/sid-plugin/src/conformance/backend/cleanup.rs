@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ pub async fn test_delete_outbound_dlq_entry(backend: &dyn StorageBackend) {
     };
 
     backend.ensure_system_project(test_audit()).await.unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let target = ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: format!("dlq-{}", Uuid::now_v7().simple()),
@@ -98,8 +98,8 @@ pub async fn test_cleanup_expired_device_auth_codes(backend: &dyn StorageBackend
         code.expires_at = expires_at;
         code
     };
-    let expired = request(Utc::now() - Duration::minutes(5));
-    let live = request(Utc::now() + Duration::minutes(10));
+    let expired = request(Timestamp::now() - Duration::from_mins(5));
+    let live = request(Timestamp::now() + Duration::from_mins(10));
     for c in [&expired, &live] {
         backend
             .create_device_auth_code(c, test_audit())
@@ -142,12 +142,12 @@ pub async fn test_delete_expired_magic_link_sessions(backend: &dyn StorageBacken
             token_hash: format!("hash_{id}"),
             sealed_token: vec![1],
             consumed: false,
-            created_at: Utc::now() - Duration::hours(2),
+            created_at: Timestamp::now() - Duration::from_hours(2),
             expires_at,
         }
     };
-    let expired = link(Utc::now() - Duration::minutes(5));
-    let live = link(Utc::now() + Duration::minutes(10));
+    let expired = link(Timestamp::now() - Duration::from_mins(5));
+    let live = link(Timestamp::now() + Duration::from_mins(10));
     for l in [&expired, &live] {
         backend
             .create_magic_link_session(l, test_audit())
@@ -195,7 +195,7 @@ pub async fn test_delete_expired_reset_sessions(backend: &dyn StorageBackend) {
         )
     };
     let mut expired = reset("h1");
-    expired.expires_at = Utc::now() - Duration::minutes(5);
+    expired.expires_at = Timestamp::now() - Duration::from_mins(5);
     let live = reset("h2");
     for r in [&expired, &live] {
         backend.create_reset_session(r, test_audit()).await.unwrap();

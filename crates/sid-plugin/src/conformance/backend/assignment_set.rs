@@ -201,7 +201,7 @@ pub async fn test_every_change_moves_the_set(backend: &dyn StorageBackend) {
 
     // Expiry cleanup.
     let expiring = RoleAssignment::new(RoleAssignmentPrincipal::Profile(holder), role.id)
-        .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1));
+        .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
     backend
         .create_role_assignment(&expiring, test_audit())
         .await
@@ -419,7 +419,7 @@ pub async fn test_replacement_keeps_an_administrator(backend: &dyn StorageBacken
     assert!(matches!(removed, Error::InvalidState(_)), "{removed:?}");
     assert_eq!(revision(backend, &set).await, at, "nothing written");
 
-    let renewed = assignment().with_expiry(chrono::Utc::now() + chrono::Duration::days(1));
+    let renewed = assignment().with_expiry(jiff::Timestamp::now() + crate::conformance::days(1));
     backend
         .replace_role_assignments(
             &AssignmentSetChange {

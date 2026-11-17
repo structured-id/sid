@@ -3,7 +3,8 @@
 //! `&dyn StorageBackend`, so whatever backend a harness constructs runs the
 //! same contract.
 
-use chrono::{Duration, Utc};
+use super::days;
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::{
     AuditEntry, LoginStrategy, MutationContext, OAuth2Client, Principal, PrincipalId,
     PrincipalType, Profile, ProfileId, ProjectId, RefreshToken, Session,
@@ -87,7 +88,7 @@ pub fn test_session_end() -> sid_core::models::SessionEnd {
 
 pub fn create_test_profile(username: &str) -> Profile {
     use sid_core::models::{ProfileAssurance, ProfileStatus, ProfileType, ProfileVisibility};
-    let now = Utc::now();
+    let now = Timestamp::now();
     let unique = format!("{}_{}", username, Uuid::now_v7().simple());
     Profile {
         id: ProfileId::generate(),
@@ -116,7 +117,7 @@ pub fn create_test_session(profile_id: ProfileId) -> Session {
     Session::new(
         profile_id,
         Some(std::net::Ipv4Addr::LOCALHOST.into()),
-        Utc::now() + Duration::hours(1),
+        Timestamp::now() + Duration::from_hours(1),
     )
 }
 
@@ -141,7 +142,7 @@ pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
         subject_type: sid_core::models::SubjectType::Pairwise,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -161,7 +162,7 @@ pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
         unified_input: false,
         org_id: None,
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -231,8 +232,8 @@ pub async fn test_profile_get_by_email(backend: &dyn StorageBackend) {
         is_primary: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_email(&pe, test_audit())
@@ -368,9 +369,7 @@ pub async fn test_profile_list(backend: &dyn StorageBackend) {
 /// every page. The profiles here predate any other test's, so profiles other
 /// tests create meanwhile sort after them and do not shift these pages.
 pub async fn test_profile_list_pages_cover_each_profile_once(backend: &dyn StorageBackend) {
-    let created_at = chrono::DateTime::parse_from_rfc3339("1990-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let created_at: Timestamp = "1990-01-01T00:00:00Z".parse().unwrap();
     let tag = uuid::Uuid::now_v7().simple().to_string();
     let mut ids = std::collections::BTreeSet::new();
     for i in 0..7 {
@@ -589,12 +588,12 @@ pub async fn test_project_write_contract(backend: &dyn StorageBackend) {
     let rename = ProjectChange {
         name: Some("renamed".into()),
         description: None,
-        updated_at: chrono::Utc::now(),
+        updated_at: Timestamp::now(),
     };
     let describe = ProjectChange {
         name: None,
         description: Some("described".into()),
-        updated_at: chrono::Utc::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .update_project(project.id, &rename, test_audit())
@@ -891,7 +890,7 @@ fn test_invite(created_by: ProfileId, max_uses: u32) -> sid_core::models::Invite
         use_count: 0,
         expires_at: None,
         active: true,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -903,9 +902,7 @@ fn test_invite(created_by: ProfileId, max_uses: u32) -> sid_core::models::Invite
 pub async fn test_invite_list_pages_cover_each_invite_once(backend: &dyn StorageBackend) {
     let admin = create_test_profile("pager");
     backend.create_profile(&admin, test_audit()).await.unwrap();
-    let created_at = chrono::DateTime::parse_from_rfc3339("2990-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let created_at: Timestamp = "2990-01-01T00:00:00Z".parse().unwrap();
     let mut ids = std::collections::BTreeSet::new();
     for _ in 0..7 {
         let mut invite = test_invite(admin.id, 1);
@@ -982,7 +979,7 @@ pub async fn test_invite_lifecycle(backend: &dyn StorageBackend) {
     );
 
     let mut expired = test_invite(admin.id, 0);
-    expired.expires_at = Some(Utc::now() - Duration::minutes(1));
+    expired.expires_at = Some(Timestamp::now() - Duration::from_mins(1));
     backend
         .create_invites(std::slice::from_ref(&expired), test_audit())
         .await
@@ -1118,7 +1115,7 @@ pub async fn test_invite_search(backend: &dyn StorageBackend) {
 pub async fn test_registration_source_roundtrip(backend: &dyn StorageBackend) {
     use sid_core::models::{NewRegistration, RegistrationSource, RegistrationSourceType};
 
-    let since = Utc::now() - Duration::seconds(1);
+    let since = Timestamp::now() - Duration::from_secs(1);
     let referrer = create_test_profile("referrer");
     backend
         .create_profile(&referrer, test_audit())
@@ -1591,7 +1588,7 @@ pub async fn test_security_signals_persist(backend: &dyn StorageBackend) {
                 description: "failed logins".into(),
                 risk_score: score,
                 reaction: "challenge".into(),
-                timestamp: Utc::now() - Duration::minutes(minutes_ago),
+                timestamp: Timestamp::now() - Duration::from_mins(minutes_ago),
             })
             .await
             .unwrap();
@@ -1663,7 +1660,7 @@ pub async fn test_security_signals_persist(backend: &dyn StorageBackend) {
         .await
         .unwrap()
         .expect("recorded");
-    let recorded: Vec<(String, String, chrono::DateTime<chrono::Utc>)> =
+    let recorded: Vec<(String, String, Timestamp)> =
         serde_json::from_slice(&record.completion.result).unwrap();
     assert!(
         recorded
@@ -1700,7 +1697,7 @@ pub async fn test_login_history_signals(backend: &dyn StorageBackend) {
     let device = Uuid::now_v7();
     let mut earlier = create_test_session(profile.id);
     earlier.ip_address = Some("192.0.2.10".parse().unwrap());
-    earlier.created_at = Utc::now() - Duration::minutes(10);
+    earlier.created_at = Timestamp::now() - Duration::from_mins(10);
     backend
         .create_session(&earlier, test_audit())
         .await
@@ -1909,7 +1906,7 @@ pub async fn test_password_reset_completes_once(backend: &dyn StorageBackend) {
         "r@sid.example.com".into(),
         "hash2".into(),
     );
-    expired.expires_at = Utc::now() - Duration::seconds(1);
+    expired.expires_at = Timestamp::now() - Duration::from_secs(1);
     backend
         .create_reset_session(&expired, test_audit())
         .await
@@ -1933,7 +1930,7 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
         ScimOutboundTargetId,
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let target = ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: "downstream-app".into(),
@@ -2082,8 +2079,8 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
     // keeping the mapping's creation time.
     let mut resynced = record.clone();
     resynced.downstream_id = "ext-43".into();
-    resynced.last_synced_at = now + Duration::seconds(5);
-    resynced.created_at = now + Duration::seconds(5);
+    resynced.last_synced_at = now + Duration::from_secs(5);
+    resynced.created_at = now + Duration::from_secs(5);
     backend
         .record_scim_outbound_sync(&resynced, test_audit())
         .await
@@ -2097,8 +2094,8 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
     assert_eq!(cleared.failure_count, 0);
     assert_eq!(cleared.last_error, None);
     assert_eq!(
-        cleared.created_at.timestamp_millis(),
-        synced.created_at.timestamp_millis()
+        cleared.created_at.as_millisecond(),
+        synced.created_at.as_millisecond()
     );
     assert!(
         backend
@@ -2579,11 +2576,8 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
     };
     backend.ensure_system_project(test_audit()).await.unwrap();
 
-    let at = |days: i64| {
-        chrono::DateTime::from_timestamp_millis(
-            (Utc::now() - Duration::days(days)).timestamp_millis(),
-        )
-        .unwrap()
+    let at = |ago: i64| {
+        Timestamp::from_millisecond((Timestamp::now() - days(ago)).as_millisecond()).unwrap()
     };
     let client = OAuth2Client {
         client_id: format!("test-full-{}", Uuid::now_v7().simple()),
@@ -2710,7 +2704,7 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
 }
 
 pub fn create_test_iat(max_clients: u32) -> sid_core::models::InitialAccessToken {
-    let now = Utc::now();
+    let now = Timestamp::now();
     sid_core::models::InitialAccessToken {
         id: sid_core::models::InitialAccessTokenId::generate(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
@@ -2720,7 +2714,7 @@ pub fn create_test_iat(max_clients: u32) -> sid_core::models::InitialAccessToken
         allowed_scopes: vec!["openid".into()],
         allowed_grant_types: vec!["authorization_code".into()],
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
-        expires_at: now + Duration::hours(1),
+        expires_at: now + Duration::from_hours(1),
         created_at: now,
         created_by: ProfileId::generate(),
         revoked: false,
@@ -2897,7 +2891,7 @@ pub async fn test_register_dynamic_client(backend: &dyn StorageBackend) {
     assert!(matches!(err, sid_core::Error::Revoked(_)), "{err:?}");
 
     let mut expired = create_test_iat(0);
-    expired.expires_at = Utc::now() - Duration::minutes(1);
+    expired.expires_at = Timestamp::now() - Duration::from_mins(1);
     backend
         .create_initial_access_token(&expired, test_audit())
         .await
@@ -3005,7 +2999,7 @@ pub async fn test_closure_request_roundtrip(backend: &dyn StorageBackend) {
         .await
         .unwrap();
     // Whole seconds: SQLite keeps timestamps at millisecond precision.
-    let at = |secs| chrono::DateTime::from_timestamp(secs, 0).unwrap();
+    let at = |secs| Timestamp::from_second(secs).unwrap();
     let hold = LegalHold {
         court_reference: "case-7".into(),
         reason: Some("litigation".into()),
@@ -3107,7 +3101,7 @@ pub async fn test_closure_request_moves_with_profile(backend: &dyn StorageBacken
     let hold = LegalHold {
         court_reference: "case-9".into(),
         reason: None,
-        placed_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+        placed_at: Timestamp::from_second(1_800_000_000).unwrap(),
         expected_end: None,
         placed_by: profile.id,
         reviewing_counsel: None,
@@ -3315,8 +3309,8 @@ pub async fn exchange_records(
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: application::grant_resource(backend).await,
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + days(30),
+        created_at: Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: Uuid::now_v7(),
@@ -3378,8 +3372,8 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
         token_hash: format!("hash_{}", id),
         sealed_token: vec![0xA5, 0x00, 0x5A],
         consumed: false,
-        created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(1),
+        created_at: Timestamp::now(),
+        expires_at: Timestamp::now() + Duration::from_hours(1),
     };
 
     backend
@@ -3480,13 +3474,13 @@ pub async fn test_pat_crud(backend: &dyn StorageBackend) {
         scopes: vec!["read".into()],
         ip_allowlist: vec![],
         status: PatStatus::Active,
-        expires_at: Some(Utc::now() + Duration::days(90)),
+        expires_at: Some(Timestamp::now() + days(90)),
         last_used_at: None,
         last_used_ip: None,
         use_count: 0,
         revoked_at: None,
         revoked_by: None,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     backend.create_pat(&pat, None, test_audit()).await.unwrap();
@@ -3638,7 +3632,7 @@ pub async fn test_record_pat_use_only_when_usable(backend: &dyn StorageBackend) 
     let mut revoked = test_pat(&profile);
     revoked.status = PatStatus::Revoked;
     let mut expired = test_pat(&profile);
-    expired.expires_at = Some(Utc::now() - Duration::minutes(1));
+    expired.expires_at = Some(Timestamp::now() - Duration::from_mins(1));
     for p in [&active, &revoked, &expired] {
         backend.create_pat(p, None, test_audit()).await.unwrap();
     }
@@ -3685,7 +3679,7 @@ pub async fn test_pat_listing_and_profile_revocation(backend: &dyn StorageBacken
     let mut earlier = test_pat(&owner);
     earlier.status = PatStatus::Revoked;
     earlier.revoked_by = Some("first".into());
-    earlier.revoked_at = Some(Utc::now() - Duration::days(1));
+    earlier.revoked_at = Some(Timestamp::now() - days(1));
     let foreign = test_pat(&other);
     for p in [&a, &b, &earlier, &foreign] {
         backend.create_pat(p, None, test_audit()).await.unwrap();
@@ -3749,12 +3743,12 @@ pub async fn test_revoke_unused_pats(backend: &dyn StorageBackend) {
         .await
         .unwrap();
     let mut stale = test_pat(&profile);
-    stale.created_at = Utc::now() - Duration::days(40);
+    stale.created_at = Timestamp::now() - days(40);
     let mut used_long_ago = test_pat(&profile);
-    used_long_ago.created_at = Utc::now() - Duration::days(60);
-    used_long_ago.last_used_at = Some(Utc::now() - Duration::days(40));
+    used_long_ago.created_at = Timestamp::now() - days(60);
+    used_long_ago.last_used_at = Some(Timestamp::now() - days(40));
     let mut old_but_used = test_pat(&profile);
-    old_but_used.created_at = Utc::now() - Duration::days(40);
+    old_but_used.created_at = Timestamp::now() - days(40);
     let fresh = test_pat(&profile);
     for p in [&stale, &used_long_ago, &old_but_used, &fresh] {
         backend.create_pat(p, None, test_audit()).await.unwrap();
@@ -3792,7 +3786,7 @@ fn unique_phone() -> String {
 }
 
 fn create_test_principal(profile_id: ProfileId, pt: PrincipalType, value: &str) -> Principal {
-    let now = Utc::now();
+    let now = Timestamp::now();
     Principal {
         id: PrincipalId(Uuid::now_v7()),
         profile_id,
@@ -3955,7 +3949,7 @@ pub async fn test_principal_source_field_roundtrip(backend: &dyn StorageBackend)
         .unwrap();
 
     // Principal with source_field set (profile-bound)
-    let now = Utc::now();
+    let now = Timestamp::now();
     let with_source = Principal {
         id: PrincipalId(Uuid::now_v7()),
         profile_id: profile.id,
@@ -4028,7 +4022,7 @@ pub async fn test_principal_source_field_roundtrip(backend: &dyn StorageBackend)
     // Update: set source_field on previously None
     let mut updated = without_source.clone();
     updated.source_field = Some("phone".to_string());
-    updated.updated_at = Utc::now();
+    updated.updated_at = Timestamp::now();
     backend
         .save_principal(&updated, test_audit())
         .await
@@ -4063,9 +4057,9 @@ pub async fn test_principal_source_contact_fk_roundtrip(backend: &dyn StorageBac
         custom_label: None,
         is_primary: true,
         verified: true,
-        verified_at: Some(Utc::now()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        verified_at: Some(Timestamp::now()),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_email(&pe, test_audit())
@@ -4086,8 +4080,8 @@ pub async fn test_principal_source_contact_fk_roundtrip(backend: &dyn StorageBac
         can_receive_voice: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_phone(&pp, test_audit())
@@ -4138,7 +4132,7 @@ pub async fn test_principal_source_contact_fk_roundtrip(backend: &dyn StorageBac
     // Update: clear source_email_id
     let mut updated = email_principal.clone();
     updated.source_email_id = None;
-    updated.updated_at = Utc::now();
+    updated.updated_at = Timestamp::now();
     backend
         .save_principal(&updated, test_audit())
         .await
@@ -4153,7 +4147,7 @@ pub async fn test_principal_source_contact_fk_roundtrip(backend: &dyn StorageBac
 
 pub async fn test_principal_quarantine_roundtrip(backend: &dyn StorageBackend) {
     let hash = &format!("sha256:quarantine-{}", Uuid::now_v7().simple());
-    let until = Utc::now() + chrono::Duration::hours(24);
+    let until = Timestamp::now() + Duration::from_hours(24);
 
     // Quarantine a principal hash
     backend
@@ -4366,8 +4360,8 @@ pub async fn test_profile_phone_roundtrip(backend: &dyn StorageBackend) {
         can_receive_voice: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_phone(&phone, test_audit())
@@ -4402,7 +4396,7 @@ pub async fn test_profile_phone_roundtrip(backend: &dyn StorageBackend) {
                 profile.id,
                 phone.id,
                 &settings,
-                Utc::now(),
+                Timestamp::now(),
                 test_audit()
             )
             .await
@@ -4411,7 +4405,13 @@ pub async fn test_profile_phone_roundtrip(backend: &dyn StorageBackend) {
     let stranger = ProfileId::generate();
     assert!(
         !backend
-            .update_profile_phone_settings(stranger, phone.id, &settings, Utc::now(), test_audit())
+            .update_profile_phone_settings(
+                stranger,
+                phone.id,
+                &settings,
+                Timestamp::now(),
+                test_audit()
+            )
             .await
             .unwrap()
     );
@@ -4461,8 +4461,8 @@ pub async fn test_profile_email_roundtrip(backend: &dyn StorageBackend) {
         is_primary: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_email(&email, test_audit())
@@ -4496,7 +4496,7 @@ pub async fn test_profile_email_roundtrip(backend: &dyn StorageBackend) {
                 profile.id,
                 email.id,
                 &settings,
-                Utc::now(),
+                Timestamp::now(),
                 test_audit()
             )
             .await
@@ -4558,8 +4558,8 @@ pub async fn test_get_profile_by_email_via_join(backend: &dyn StorageBackend) {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_email(&pe, test_audit())
@@ -4595,9 +4595,9 @@ pub async fn test_multiple_phones_per_profile(backend: &dyn StorageBackend) {
         can_receive_fax: false,
         can_receive_voice: true,
         verified: true,
-        verified_at: Some(Utc::now()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        verified_at: Some(Timestamp::now()),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_phone(&phone1, test_audit())
@@ -4618,8 +4618,8 @@ pub async fn test_multiple_phones_per_profile(backend: &dyn StorageBackend) {
         can_receive_voice: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_phone(&phone2, test_audit())
@@ -4664,13 +4664,18 @@ pub async fn test_multiple_phones_per_profile(backend: &dyn StorageBackend) {
     // The flag moves back in one write; another profile's phone cannot take it.
     assert!(
         backend
-            .set_primary_profile_phone(profile.id, phone2.id, Utc::now(), test_audit())
+            .set_primary_profile_phone(profile.id, phone2.id, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
     assert!(
         !backend
-            .set_primary_profile_phone(ProfileId::generate(), phone1.id, Utc::now(), test_audit())
+            .set_primary_profile_phone(
+                ProfileId::generate(),
+                phone1.id,
+                Timestamp::now(),
+                test_audit()
+            )
             .await
             .unwrap()
     );
@@ -4706,8 +4711,8 @@ pub async fn test_phone_extension(backend: &dyn StorageBackend) {
         can_receive_voice: true,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     backend
         .create_profile_phone(&phone, test_audit())
@@ -5135,8 +5140,8 @@ pub async fn test_set_primary_profile_email(backend: &dyn StorageBackend) {
         is_primary: primary,
         verified: false,
         verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let first = email(profile.id, true);
     let second = email(profile.id, false);
@@ -5148,7 +5153,7 @@ pub async fn test_set_primary_profile_email(backend: &dyn StorageBackend) {
 
     assert!(
         backend
-            .set_primary_profile_email(profile.id, second.id, Utc::now(), test_audit())
+            .set_primary_profile_email(profile.id, second.id, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
@@ -5160,8 +5165,8 @@ pub async fn test_set_primary_profile_email(backend: &dyn StorageBackend) {
     assert_eq!(primary.id, second.id);
 
     let (a, b) = tokio::join!(
-        backend.set_primary_profile_email(profile.id, first.id, Utc::now(), test_audit()),
-        backend.set_primary_profile_email(profile.id, third.id, Utc::now(), test_audit()),
+        backend.set_primary_profile_email(profile.id, first.id, Timestamp::now(), test_audit()),
+        backend.set_primary_profile_email(profile.id, third.id, Timestamp::now(), test_audit()),
     );
     assert!(a.unwrap() && b.unwrap());
     let primaries = backend
@@ -5178,7 +5183,7 @@ pub async fn test_set_primary_profile_email(backend: &dyn StorageBackend) {
 
     assert!(
         !backend
-            .set_primary_profile_email(profile.id, foreign.id, Utc::now(), test_audit())
+            .set_primary_profile_email(profile.id, foreign.id, Timestamp::now(), test_audit())
             .await
             .unwrap(),
         "another profile's email was made primary"
