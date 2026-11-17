@@ -13,7 +13,7 @@ use sid_core::models::{OidcIssuer, ResourceIndicator};
 use sid_core::{Error as SidError, Result as SidResult};
 
 use crate::issuer::{IssuerRegistry, IssuerVerifier};
-use crate::jwt::AccessTokenClaims;
+use crate::jwt::{AccessTokenClaims, IssuedCredential};
 
 /// Least time between two reloads of the issuer's keys for an unknown `kid`:
 /// a rotation is picked up within it, and tokens naming made-up keys cannot
@@ -126,15 +126,20 @@ impl ResourceTokenVerifier {
     }
 
     /// The claims of `token` when it is a token its holder obtained for
-    /// itself: verified for this resource, not sender-constrained (a service
-    /// call carries no proof, RFC 9449 §7.1) and naming no ProfileId.
+    /// itself: verified for this resource, stated by its issuer to be a
+    /// client credential (RFC 6749 §4.4), not sender-constrained (a service
+    /// call carries no proof, RFC 9449 §7.1) and naming no ProfileId. Whose
+    /// credential it is remains the caller's check against current state.
     pub async fn verify_own(&self, token: &str) -> Result<AccessTokenClaims, OwnTokenError> {
         let claims = match self.verify(token).await {
             Ok(claims) => claims,
             Err(SidError::AuthenticationFailed(_)) => return Err(OwnTokenError::Unauthenticated),
             Err(e) => return Err(OwnTokenError::Storage(e)),
         };
-        if claims.cnf.is_some() || claims.pid.is_some() {
+        if claims.credential_kind != Some(IssuedCredential::Client)
+            || claims.cnf.is_some()
+            || claims.pid.is_some()
+        {
             return Err(OwnTokenError::Unauthenticated);
         }
         Ok(claims)
@@ -152,3 +157,6 @@ pub enum OwnTokenError {
     #[error("storage: {0}")]
     Storage(SidError),
 }
+
+#[cfg(test)]
+mod tests;
