@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Pairwise service bindings: one per (profile, scope), allocated on first use.
 
-use chrono::{DateTime, Utc};
+use jiff_sqlx::{Timestamp as PgTime, ToSqlx};
 use sid_core::models::{BindingId, BindingScope, MutationContext, ProfileId, ServiceBinding};
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::PgPool;
@@ -53,14 +53,7 @@ const IMPORT: &str = "INSERT INTO service_bindings
      VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT DO NOTHING";
 
-type Row = (
-    BindingId,
-    ProfileId,
-    String,
-    i32,
-    DateTime<Utc>,
-    DateTime<Utc>,
-);
+type Row = (BindingId, ProfileId, String, i32, PgTime, PgTime);
 
 fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
     move |e| SidError::Storage(format!("{what}: {e}"))
@@ -76,8 +69,8 @@ fn binding(
             .map_err(|e| SidError::Storage(format!("stored binding scope: {e}")))?,
         binding_index: u32::try_from(index)
             .map_err(|_| SidError::Storage(format!("stored binding index {index}")))?,
-        created_at,
-        last_used_at,
+        created_at: created_at.to_jiff(),
+        last_used_at: last_used_at.to_jiff(),
     })
 }
 
@@ -120,8 +113,8 @@ pub(super) async fn import(
         .bind(imported.profile_id)
         .bind(imported.scope.as_str())
         .bind(index)
-        .bind(imported.created_at)
-        .bind(imported.last_used_at)
+        .bind(imported.created_at.to_sqlx())
+        .bind(imported.last_used_at.to_sqlx())
         .execute(&mut *tx)
         .await
         .map_err(storage("import service binding"))?

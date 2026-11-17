@@ -2,20 +2,32 @@
 //! Monthly audit partitions: created ahead of their month, and removed whole
 //! once their month is past retention, with a chain checkpoint left behind.
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use jiff::Timestamp;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
+use jiff_sqlx::ToSqlx;
 use sid_core::{Error as SidError, Result as SidResult};
 
 type Tx<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 
 /// The month after `(year, month)`.
-fn next_month(year: i32, month: u32) -> SidResult<NaiveDate> {
+fn next_month(year: i32, month: u32) -> SidResult<Date> {
     let (y, m) = if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
     };
-    NaiveDate::from_ymd_opt(y, m, 1)
-        .ok_or_else(|| SidError::Validation(format!("no month after {year}-{month:02}")))
+    let none = || SidError::Validation(format!("no month after {year}-{month:02}"));
+    let y = i16::try_from(y).map_err(|_| none())?;
+    let m = i8::try_from(m).map_err(|_| none())?;
+    Date::new(y, m, 1).map_err(|_| none())
+}
+
+/// The first instant of `day` in UTC.
+fn utc_start(day: Date) -> SidResult<Timestamp> {
+    day.to_zoned(TimeZone::UTC)
+        .map(|z| z.timestamp())
+        .map_err(|e| SidError::Validation(format!("no start of {day}: {e}")))
 }
 
 /// `(year, month)` of a monthly partition name (`audit_records_YYYY_MM`);
@@ -32,27 +44,21 @@ fn partition_month(name: &str) -> Option<(i32, u32)> {
 }
 
 /// The first instant of the month `at` falls in.
-pub(super) fn month_start(at: DateTime<Utc>) -> SidResult<DateTime<Utc>> {
-    NaiveDate::from_ymd_opt(at.year(), at.month(), 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|t| t.and_utc())
-        .ok_or_else(|| SidError::Validation(format!("no month start for {at}")))
+pub(super) fn month_start(at: Timestamp) -> SidResult<Timestamp> {
+    utc_start(at.to_zoned(TimeZone::UTC).date().first_of_month())
 }
 
 /// Create the partition of the month starting at `month_start`; `true` when
 /// it did not exist yet.
-pub(super) async fn ensure_partition(
-    pool: &sqlx::PgPool,
-    month_start: NaiveDate,
-) -> SidResult<bool> {
+pub(super) async fn ensure_partition(pool: &sqlx::PgPool, month_start: Date) -> SidResult<bool> {
     if month_start.day() != 1 {
         return Err(SidError::Validation(format!(
             "{month_start} is not the first day of a month"
         )));
     }
     let outcome: String = sqlx::query_scalar("SELECT create_audit_partition($1, $2)")
-        .bind(month_start.year())
-        .bind(i32::try_from(month_start.month()).map_err(|e| SidError::Validation(e.to_string()))?)
+        .bind(i32::from(month_start.year()))
+        .bind(i32::from(month_start.month()))
         .fetch_one(pool)
         .await
         .map_err(|e| SidError::Storage(format!("create audit partition: {e}")))?;
@@ -63,10 +69,7 @@ pub(super) async fn ensure_partition(
 /// `boundary` (a month start), oldest first, recording each chain's last
 /// dropped record as its checkpoint. Returns the partitions and the records
 /// dropped.
-pub(super) async fn drop_expired(
-    tx: &mut Tx<'_>,
-    boundary: DateTime<Utc>,
-) -> SidResult<(usize, u64)> {
+pub(super) async fn drop_expired(tx: &mut Tx<'_>, boundary: Timestamp) -> SidResult<(usize, u64)> {
     // The parent resolves through this connection's search path: another
     // installation's schema in the same database has its own audit_records.
     let names: Vec<String> = sqlx::query_scalar(
@@ -80,10 +83,7 @@ pub(super) async fn drop_expired(
 
     let mut expired = Vec::new();
     for (year, month) in names.iter().filter_map(|n| partition_month(n)) {
-        let end = next_month(year, month)?
-            .and_hms_opt(0, 0, 0)
-            .map(|t| t.and_utc())
-            .ok_or_else(|| SidError::Validation("month end".into()))?;
+        let end = utc_start(next_month(year, month)?)?;
         if end <= boundary {
             expired.push((year, month));
         }
@@ -109,7 +109,7 @@ pub(super) async fn drop_expired(
                 cut_before = EXCLUDED.cut_before
              WHERE EXCLUDED.sequence > audit_chain_checkpoints.sequence"
         )))
-        .bind(boundary)
+        .bind(boundary.to_sqlx())
         .execute(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("checkpoint {table}: {e}")))?;

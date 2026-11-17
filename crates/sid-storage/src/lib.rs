@@ -27,6 +27,54 @@ pub use postgres::{
 #[cfg(feature = "storage-pg")]
 pub use postgres_blob::PostgresBlobStore;
 
+/// PostgreSQL `timestamptz` values: jiff instants written with `.pg()` and
+/// decoded columns read back with `.jiff()`, both also for `Option`.
+#[cfg(feature = "storage-pg")]
+pub(crate) mod pg_time {
+    pub(crate) use jiff_sqlx::Timestamp as PgTime;
+    use jiff_sqlx::ToSqlx;
+
+    /// An instant as the PostgreSQL codec writes it.
+    pub(crate) trait ToPg {
+        type Out;
+        fn pg(self) -> Self::Out;
+    }
+
+    impl ToPg for jiff::Timestamp {
+        type Out = PgTime;
+        fn pg(self) -> PgTime {
+            self.to_sqlx()
+        }
+    }
+
+    impl ToPg for Option<jiff::Timestamp> {
+        type Out = Option<PgTime>;
+        fn pg(self) -> Option<PgTime> {
+            self.map(ToSqlx::to_sqlx)
+        }
+    }
+
+    /// A decoded column as the domain's instant.
+    pub(crate) trait FromPg {
+        type Out;
+        fn jiff(self) -> Self::Out;
+    }
+
+    impl FromPg for PgTime {
+        type Out = jiff::Timestamp;
+        fn jiff(self) -> jiff::Timestamp {
+            self.to_jiff()
+        }
+    }
+
+    impl FromPg for Option<PgTime> {
+        type Out = Option<jiff::Timestamp>;
+        fn jiff(self) -> Option<jiff::Timestamp> {
+            self.map(PgTime::to_jiff)
+        }
+    }
+}
+
 /// The portable snapshot: over the storage traits, any backend.
 pub mod snapshot;
 

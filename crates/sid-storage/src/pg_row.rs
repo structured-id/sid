@@ -12,7 +12,7 @@
 
 #![allow(dead_code)] // Structs will be used incrementally as methods migrate
 
-use jiff_sqlx::Timestamp as PgTime;
+use crate::pg_time::{FromPg, PgTime};
 use secrecy::SecretBox;
 use uuid::Uuid;
 
@@ -39,26 +39,6 @@ use sid_core::models::{
     invite::InviteId,
     session::AuthLevel,
 };
-
-/// A decoded `timestamptz` column as the domain's instant.
-pub(crate) trait FromPg {
-    type Out;
-    fn jiff(self) -> Self::Out;
-}
-
-impl FromPg for PgTime {
-    type Out = jiff::Timestamp;
-    fn jiff(self) -> jiff::Timestamp {
-        self.to_jiff()
-    }
-}
-
-impl FromPg for Option<PgTime> {
-    type Out = Option<jiff::Timestamp>;
-    fn jiff(self) -> Option<jiff::Timestamp> {
-        self.map(PgTime::to_jiff)
-    }
-}
 
 // ─── Helper: parse whitespace-separated strings ───
 
