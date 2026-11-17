@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use coordinode_core::graph::types::Value;
 use sid_core::models::audit::{
-    AuditChain, AuditEntry, AuditError, AuditRecord, ChainCheckpoint, ChainHead,
+    AuditChain, AuditDigest, AuditEntry, AuditError, AuditRecord, ChainCheckpoint, ChainHead,
     compute_record_hash,
 };
 use sid_core::{Error as SidError, Result as SidResult};
@@ -47,8 +47,8 @@ pub(super) fn append(
         Params::default().with("chain", chain_value()),
     )?;
     let (prev_hash, sequence) = match head.first() {
-        Some(row) => (get_text(row, "last_hash")?, get_int(row, "sequence")?),
-        None => ("genesis".to_owned(), 0),
+        Some(row) => (digest(row, "last_hash")?, get_int(row, "sequence")?),
+        None => (AuditDigest::GENESIS, 0),
     };
     let sequence = sequence
         .checked_add(1)
@@ -69,7 +69,7 @@ pub(super) fn append(
         ip_address: entry.ip_address,
         device_id: entry.device_id,
         prev_hash,
-        hash: String::new(),
+        hash: AuditDigest::GENESIS,
     };
     record.hash = compute_record_hash(&record);
     let id = Uuid::parse_str(&record.id).map_err(|e| SidError::Internal(e.to_string()))?;
@@ -94,8 +94,8 @@ pub(super) fn append(
             )
             .with("ip", record.ip_address.map_or(Value::Null, ip_value))
             .with("device_id", opt_text(record.device_id.as_deref()))
-            .with("prev_hash", Value::String(record.prev_hash.clone()))
-            .with("hash", Value::String(record.hash.clone())),
+            .with("prev_hash", digest_value(record.prev_hash))
+            .with("hash", digest_value(record.hash)),
     )?;
     // The head moves to this record; a chain's first record creates it, and
     // concurrent first appenders meet on its unique chain.
@@ -109,10 +109,21 @@ pub(super) fn append(
         head_query,
         Params::default()
             .with("chain", chain_value())
-            .with("hash", Value::String(record.hash.clone()))
+            .with("hash", digest_value(record.hash))
             .with("sequence", Value::Int(sequence)),
     )?;
     Ok(record)
+}
+
+/// A digest as the node property holds it: its 32 bytes.
+fn digest_value(digest: AuditDigest) -> Value {
+    Value::Binary(digest.as_bytes().to_vec())
+}
+
+/// The digest property `name` of `row`.
+fn digest(row: &Row, name: &str) -> SidResult<AuditDigest> {
+    AuditDigest::from_slice(&get_bytes(row, name)?)
+        .ok_or_else(|| SidError::Storage(format!("stored {name} is not a 32-byte digest")))
 }
 
 /// An address as its octets: 4 for IPv4, 16 for IPv6.
@@ -160,8 +171,8 @@ fn record(row: &Row) -> SidResult<AuditRecord> {
             .map(ip_of)
             .transpose()?,
         device_id: get_opt_text(row, "device_id")?,
-        prev_hash: get_text(row, "prev_hash")?,
-        hash: get_text(row, "hash")?,
+        prev_hash: digest(row, "prev_hash")?,
+        hash: digest(row, "hash")?,
     })
 }
 
@@ -169,17 +180,17 @@ fn audit_error(e: SidError) -> AuditError {
     AuditError::Other(e.to_string())
 }
 
-/// Where `chain` resumes after retention: the sequence and hash of its last
-/// removed record, or the start of the chain.
-fn checkpoint(tx: &Statements<'_>, chain: &str) -> SidResult<(i64, String)> {
+/// Where `chain` resumes after retention: the sequence and digest of its
+/// last removed record, or the start of the chain.
+fn checkpoint(tx: &Statements<'_>, chain: &str) -> SidResult<(i64, AuditDigest)> {
     let rows = tx.run(
         "MATCH (c:SidAuditCheckpoint) WHERE c.chain = $chain
          RETURN c.sequence AS sequence, c.hash AS hash",
         Params::default().with("chain", Value::String(chain.to_owned())),
     )?;
     match rows.first() {
-        Some(row) => Ok((get_int(row, "sequence")?, get_text(row, "hash")?)),
-        None => Ok((0, "genesis".to_owned())),
+        Some(row) => Ok((get_int(row, "sequence")?, digest(row, "hash")?)),
+        None => Ok((0, AuditDigest::GENESIS)),
     }
 }
 
@@ -204,11 +215,11 @@ impl CoordinodeBackend {
             if expired.is_empty() {
                 return Ok(Decision::Abandon(0));
             }
-            let mut last: BTreeMap<String, (i64, String)> = BTreeMap::new();
+            let mut last: BTreeMap<String, (i64, AuditDigest)> = BTreeMap::new();
             for row in &expired {
                 let (chain, sequence) = (get_text(row, "chain")?, get_int(row, "sequence")?);
                 if last.get(&chain).is_none_or(|(kept, _)| sequence > *kept) {
-                    last.insert(chain, (sequence, get_text(row, "hash")?));
+                    last.insert(chain, (sequence, digest(row, "hash")?));
                 }
             }
             for (chain, (sequence, hash)) in last {
@@ -219,7 +230,7 @@ impl CoordinodeBackend {
                 let params = Params::default()
                     .with("chain", Value::String(chain))
                     .with("sequence", Value::Int(sequence))
-                    .with("hash", Value::String(hash))
+                    .with("hash", digest_value(hash))
                     .with("cut_before", time(boundary));
                 let query = if recorded == 0 {
                     "CREATE (c:SidAuditCheckpoint {chain: $chain, sequence: $sequence,
@@ -377,8 +388,8 @@ impl AuditLog for CoordinodeBackend {
                             )
                             .with("ip", record.ip_address.map_or(Value::Null, ip_value))
                             .with("device_id", opt_text(record.device_id.as_deref()))
-                            .with("prev_hash", Value::String(record.prev_hash.clone()))
-                            .with("hash", Value::String(record.hash.clone())),
+                            .with("prev_hash", digest_value(record.prev_hash))
+                            .with("hash", digest_value(record.hash)),
                     )?;
                 }
                 // Concurrent first appenders and importers meet on the
@@ -387,7 +398,7 @@ impl AuditLog for CoordinodeBackend {
                     "CREATE (h:SidAuditHead {chain: $chain, last_hash: $hash, sequence: $sequence})",
                     Params::default()
                         .with("chain", chain_value())
-                        .with("hash", Value::String(given.head.last_hash.clone()))
+                        .with("hash", digest_value(given.head.last_hash))
                         .with("sequence", Value::Int(sequence_value(given.head.sequence)?)),
                 )?;
                 if let Some(c) = &given.checkpoint {
@@ -397,7 +408,7 @@ impl AuditLog for CoordinodeBackend {
                         Params::default()
                             .with("chain", chain_value())
                             .with("sequence", Value::Int(sequence_value(c.sequence)?))
-                            .with("hash", Value::String(c.hash.clone()))
+                            .with("hash", digest_value(c.hash))
                             .with("cut_before", time(c.cut_before)),
                     )?;
                 }
@@ -442,7 +453,7 @@ fn stored_chain(tx: &Statements<'_>, chain: &str) -> SidResult<Option<AuditChain
             Ok::<_, SidError>(ChainCheckpoint {
                 sequence: u64::try_from(get_int(row, "sequence")?)
                     .map_err(|_| SidError::Storage("checkpoint sequence".into()))?,
-                hash: get_text(row, "hash")?,
+                hash: digest(row, "hash")?,
                 cut_before: get_time(row, "cut_before")?,
             })
         })
@@ -463,7 +474,7 @@ fn stored_chain(tx: &Statements<'_>, chain: &str) -> SidResult<Option<AuditChain
             // The head keeps its hash and sequence; the record is the last
             // one the chain still holds.
             last_record_id: records.last().map(|r| r.id.clone()).unwrap_or_default(),
-            last_hash: get_text(head, "last_hash")?,
+            last_hash: digest(head, "last_hash")?,
             sequence: u64::try_from(get_int(head, "sequence")?)
                 .map_err(|_| SidError::Storage("head sequence".into()))?,
         },

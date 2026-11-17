@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use sid_core::models::audit::{
-    ActorType, AuditChain, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainCheckpoint,
-    ChainHead, compute_record_hash,
+    ActorType, AuditChain, AuditDigest, AuditEntry, AuditError, AuditOutcome, AuditRecord,
+    ChainCheckpoint, ChainHead, compute_record_hash,
 };
 use sid_plugin::audit::{AuditLog, VerifyResult};
 use sqlx::postgres::{PgConnection, PgRow};
@@ -33,10 +33,10 @@ impl PostgresAuditLog {
         uuid::Uuid::now_v7().to_string()
     }
 
-    fn row_to_record(row: &PgRow) -> AuditRecord {
+    fn row_to_record(row: &PgRow) -> Result<AuditRecord, AuditError> {
         let actor_type_str: String = row.get("actor_type");
         let outcome_str: String = row.get("outcome");
-        AuditRecord {
+        Ok(AuditRecord {
             id: row.get("id"),
             timestamp: row.get("timestamp"),
             chain_id: row.get("chain_id"),
@@ -51,9 +51,9 @@ impl PostgresAuditLog {
             metadata: row.get("metadata"),
             ip_address: row.get("ip_address"),
             device_id: row.get("device_id"),
-            prev_hash: row.get("prev_hash"),
-            hash: row.get("hash"),
-        }
+            prev_hash: digest(row, "prev_hash")?,
+            hash: digest(row, "hash")?,
+        })
     }
 
     /// Append a record to `chain_id` inside the caller's transaction, shared by
@@ -80,16 +80,18 @@ impl PostgresAuditLog {
         let conn: &mut PgConnection = tx;
         // Creates the head at genesis if absent; the no-op update takes the
         // row lock and returns the head as the lock holder left it.
-        let (prev_hash, head_sequence): (String, i64) = sqlx::query_as(
+        let (prev_hash, head_sequence): (Vec<u8>, i64) = sqlx::query_as(
             "INSERT INTO audit_chain_heads (chain_id, last_record_id, last_hash, sequence) \
-             VALUES ($1, '', 'genesis', 0) \
+             VALUES ($1, '', $2, 0) \
              ON CONFLICT (chain_id) DO UPDATE SET chain_id = EXCLUDED.chain_id \
              RETURNING last_hash, sequence",
         )
         .bind(chain_id)
+        .bind(AuditDigest::GENESIS.as_bytes().as_slice())
         .fetch_one(&mut *conn)
         .await
         .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
+        let prev_hash = AuditDigest::stored(&prev_hash, "last_hash")?;
         let sequence = head_sequence as u64 + 1;
 
         let id = Self::generate_id();
@@ -112,7 +114,7 @@ impl PostgresAuditLog {
             ip_address: entry.ip_address,
             device_id: entry.device_id,
             prev_hash,
-            hash: String::new(),
+            hash: AuditDigest::GENESIS,
         };
         record.hash = compute_record_hash(&record);
 
@@ -134,8 +136,8 @@ impl PostgresAuditLog {
         .bind(&record.metadata)
         .bind(record.ip_address)
         .bind(&record.device_id)
-        .bind(&record.prev_hash)
-        .bind(&record.hash)
+        .bind(record.prev_hash.as_bytes().as_slice())
+        .bind(record.hash.as_bytes().as_slice())
         .execute(&mut *conn)
         .await
         .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
@@ -148,7 +150,7 @@ impl PostgresAuditLog {
         )
         .bind(&record.chain_id)
         .bind(&record.id)
-        .bind(&record.hash)
+        .bind(record.hash.as_bytes().as_slice())
         .bind(record.sequence as i64)
         .execute(&mut *conn)
         .await
@@ -210,21 +212,24 @@ impl AuditLog for PostgresAuditLog {
             .await
             .map_err(|e| AuditError::Other(e.to_string()))?;
 
-        Ok(rows.iter().map(Self::row_to_record).collect())
+        rows.iter().map(Self::row_to_record).collect()
     }
 
     async fn verify_chain(&self, chain_id: &str) -> Result<VerifyResult, AuditError> {
         // Retention may have removed the chain's oldest records; the chain
         // then resumes from the checkpoint the removal left, and records at or
         // below it are outside retention.
-        let checkpoint: Option<(i64, String)> = sqlx::query_as(
+        let checkpoint: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT sequence, hash FROM audit_chain_checkpoints WHERE chain_id = $1",
         )
         .bind(chain_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| AuditError::Other(e.to_string()))?;
-        let (after, genesis) = checkpoint.unwrap_or((0, "genesis".to_string()));
+        let (after, start) = match checkpoint {
+            Some((sequence, hash)) => (sequence, AuditDigest::stored(&hash, "checkpoint hash")?),
+            None => (0, AuditDigest::GENESIS),
+        };
 
         let rows = sqlx::query(
             "SELECT id, timestamp, chain_id, sequence, actor_id, actor_type, \
@@ -237,8 +242,11 @@ impl AuditLog for PostgresAuditLog {
         .await
         .map_err(|e| AuditError::Other(e.to_string()))?;
 
-        let records: Vec<AuditRecord> = rows.iter().map(Self::row_to_record).collect();
-        Ok(sid_plugin::audit::verify_records(&records, genesis))
+        let records = rows
+            .iter()
+            .map(Self::row_to_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sid_plugin::audit::verify_records(&records, start))
     }
 
     async fn list_chain_ids(&self) -> Result<Vec<String>, AuditError> {
@@ -316,8 +324,8 @@ impl AuditLog for PostgresAuditLog {
             .bind(&record.metadata)
             .bind(record.ip_address)
             .bind(&record.device_id)
-            .bind(&record.prev_hash)
-            .bind(&record.hash)
+            .bind(record.prev_hash.as_bytes().as_slice())
+            .bind(record.hash.as_bytes().as_slice())
             .execute(&mut *tx)
             .await
             .map_err(write)?;
@@ -328,7 +336,7 @@ impl AuditLog for PostgresAuditLog {
         )
         .bind(&chain.head.chain_id)
         .bind(&chain.head.last_record_id)
-        .bind(&chain.head.last_hash)
+        .bind(chain.head.last_hash.as_bytes().as_slice())
         .bind(sequence(chain.head.sequence)?)
         .execute(&mut *tx)
         .await
@@ -347,7 +355,7 @@ impl AuditLog for PostgresAuditLog {
             )
             .bind(&chain.head.chain_id)
             .bind(sequence(checkpoint.sequence)?)
-            .bind(&checkpoint.hash)
+            .bind(checkpoint.hash.as_bytes().as_slice())
             .bind(checkpoint.cut_before)
             .execute(&mut *tx)
             .await
@@ -384,11 +392,14 @@ async fn stored_chain(
         .fetch_optional(&mut *conn)
         .await
         .map_err(read)?
-        .map(|row| ChainCheckpoint {
-            sequence: row.get::<i64, _>("sequence") as u64,
-            hash: row.get("hash"),
-            cut_before: row.get("cut_before"),
-        });
+        .map(|row| -> Result<_, AuditError> {
+            Ok(ChainCheckpoint {
+                sequence: row.get::<i64, _>("sequence") as u64,
+                hash: digest(&row, "hash")?,
+                cut_before: row.get("cut_before"),
+            })
+        })
+        .transpose()?;
     let records = sqlx::query(
         "SELECT id, timestamp, chain_id, sequence, actor_id, actor_type, \
          action, resource, outcome, metadata, ip_address, device_id, prev_hash, hash \
@@ -400,17 +411,22 @@ async fn stored_chain(
     .map_err(read)?
     .iter()
     .map(PostgresAuditLog::row_to_record)
-    .collect();
+    .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(AuditChain {
         head: ChainHead {
             chain_id: head.get("chain_id"),
             last_record_id: head.get("last_record_id"),
-            last_hash: head.get("last_hash"),
+            last_hash: digest(&head, "last_hash")?,
             sequence: head.get::<i64, _>("sequence") as u64,
         },
         checkpoint,
         records,
     }))
+}
+
+/// The digest in column `column` of `row`.
+fn digest(row: &PgRow, column: &str) -> Result<AuditDigest, AuditError> {
+    AuditDigest::stored(&row.get::<Vec<u8>, _>(column), column)
 }
 
 #[cfg(test)]

@@ -6,7 +6,9 @@
 use std::future::Future;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use sid_core::models::audit::{ActorType, AuditOutcome, AuditRecord, compute_record_hash};
+use sid_core::models::audit::{
+    ActorType, AuditDigest, AuditOutcome, AuditRecord, compute_record_hash,
+};
 use sid_plugin::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -18,7 +20,7 @@ fn at(s: &str) -> DateTime<Utc> {
 }
 
 /// A record of `chain` at `timestamp`, linked to `prev_hash`.
-fn record(chain: &str, sequence: u64, timestamp: &str, prev_hash: &str) -> AuditRecord {
+fn record(chain: &str, sequence: u64, timestamp: &str, prev_hash: AuditDigest) -> AuditRecord {
     let mut r = AuditRecord {
         id: Uuid::now_v7().to_string(),
         timestamp: at(timestamp),
@@ -32,8 +34,8 @@ fn record(chain: &str, sequence: u64, timestamp: &str, prev_hash: &str) -> Audit
         metadata: serde_json::json!({}),
         ip_address: None,
         device_id: None,
-        prev_hash: prev_hash.to_string(),
-        hash: String::new(),
+        prev_hash,
+        hash: AuditDigest::GENESIS,
     };
     r.hash = compute_record_hash(&r);
     r
@@ -91,9 +93,9 @@ pub async fn test_audit_retention_keeps_chains_verifiable<Ins, Fut>(
     }
 
     let chain = format!("test:retention:{}", Uuid::now_v7());
-    let r1 = record(&chain, 1, "2001-01-10T08:00:00Z", "genesis");
-    let r2 = record(&chain, 2, "2001-01-20T08:00:00Z", &r1.hash);
-    let r3 = record(&chain, 3, "2001-03-05T08:00:00Z", &r2.hash);
+    let r1 = record(&chain, 1, "2001-01-10T08:00:00Z", AuditDigest::GENESIS);
+    let r2 = record(&chain, 2, "2001-01-20T08:00:00Z", r1.hash);
+    let r3 = record(&chain, 3, "2001-03-05T08:00:00Z", r2.hash);
     for r in [r1, r2, r3.clone()] {
         insert(r).await;
     }

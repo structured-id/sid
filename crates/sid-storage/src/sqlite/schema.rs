@@ -1503,8 +1503,8 @@ CREATE TABLE IF NOT EXISTS audit_records (
     metadata    TEXT NOT NULL DEFAULT '{}',
     ip_address  BLOB CHECK (length(ip_address) IN (4, 16)),
     device_id   TEXT,
-    prev_hash   TEXT NOT NULL,
-    hash        TEXT NOT NULL,
+    prev_hash   BLOB NOT NULL CHECK (length(prev_hash) = 32),
+    hash        BLOB NOT NULL CHECK (length(hash) = 32),
     UNIQUE (chain_id, sequence)
 ) STRICT;
 
@@ -1520,7 +1520,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_records(actor_id);
 CREATE TABLE IF NOT EXISTS audit_chain_heads (
     chain_id        TEXT PRIMARY KEY,
     last_record_id  TEXT NOT NULL,
-    last_hash       TEXT NOT NULL,
+    last_hash       BLOB NOT NULL CHECK (length(last_hash) = 32),
     sequence        INTEGER NOT NULL
 ) STRICT;
 
@@ -1528,7 +1528,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_heads (
 CREATE TABLE IF NOT EXISTS audit_chain_checkpoints (
     chain_id    TEXT PRIMARY KEY,
     sequence    INTEGER NOT NULL CHECK (sequence > 0),
-    hash        TEXT NOT NULL,
+    hash        BLOB NOT NULL CHECK (length(hash) = 32),
     cut_before  TEXT NOT NULL
 ) STRICT;
 
