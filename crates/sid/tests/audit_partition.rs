@@ -66,11 +66,17 @@ async fn archive_retention_removes_nothing() {
         "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, actor_type,
          action, resource, outcome, prev_hash, hash)
          VALUES ($1, '2031-06-15'::timestamptz, $2, 1, 'system', 'system', 'test.retention',
-                 'test-resource', 'success', 'genesis', $3)",
+                 'test-resource', 'success', $3, $4)",
     )
     .bind(&record_id)
     .bind(format!("retention:{record_id}"))
-    .bind(format!("hash_{record_id}"))
+    .bind(
+        sid_core::models::audit::AuditDigest::GENESIS
+            .as_bytes()
+            .as_slice(),
+    )
+    // Retention reads no digest; any 32 bytes stand for the record's own.
+    .bind([1u8; 32].as_slice())
     .execute(&pool)
     .await
     .unwrap();

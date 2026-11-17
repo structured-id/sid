@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use sid_core::models::audit::{
-    ActorType, AuditChain, AuditEntry, AuditError, AuditOutcome, AuditRecord, ChainCheckpoint,
-    ChainHead, compute_record_hash,
+    ActorType, AuditChain, AuditDigest, AuditEntry, AuditError, AuditOutcome, AuditRecord,
+    ChainCheckpoint, ChainHead, compute_record_hash,
 };
 use sid_plugin::audit::{AuditLog, VerifyResult};
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -40,11 +40,10 @@ impl SqliteAuditLog {
 
         let (prev_hash, sequence) = match &head_row {
             Some(row) => {
-                let hash: String = row.get("last_hash");
                 let seq: i64 = row.get("sequence");
-                (hash, seq as u64 + 1)
+                (digest(row, "last_hash")?, seq as u64 + 1)
             }
-            None => ("genesis".to_string(), 1),
+            None => (AuditDigest::GENESIS, 1),
         };
 
         let id = uuid::Uuid::now_v7().to_string();
@@ -72,7 +71,7 @@ impl SqliteAuditLog {
             ip_address: entry.ip_address,
             device_id: entry.device_id,
             prev_hash,
-            hash: String::new(),
+            hash: AuditDigest::GENESIS,
         };
         record.hash = compute_record_hash(&record);
 
@@ -98,8 +97,8 @@ impl SqliteAuditLog {
         .bind(&metadata_str)
         .bind(record.ip_address.map(super::ip_to_bytes))
         .bind(&record.device_id)
-        .bind(&record.prev_hash)
-        .bind(&record.hash)
+        .bind(record.prev_hash.as_bytes().as_slice())
+        .bind(record.hash.as_bytes().as_slice())
         .execute(&mut *tx)
         .await
         .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
@@ -114,7 +113,7 @@ impl SqliteAuditLog {
         )
         .bind(&record.chain_id)
         .bind(&record.id)
-        .bind(&record.hash)
+        .bind(record.hash.as_bytes().as_slice())
         .bind(record.sequence as i64)
         .execute(&mut *tx)
         .await
@@ -180,18 +179,21 @@ impl AuditLog for SqliteAuditLog {
         }
         .map_err(|e| AuditError::Other(e.to_string()))?;
 
-        Ok(rows.iter().map(row_to_audit_record).collect())
+        rows.iter().map(row_to_audit_record).collect()
     }
 
     async fn verify_chain(&self, chain_id: &str) -> Result<VerifyResult, AuditError> {
         // After a retention cut the chain resumes from its checkpoint.
-        let checkpoint: Option<(i64, String)> =
+        let checkpoint: Option<(i64, Vec<u8>)> =
             sqlx::query_as("SELECT sequence, hash FROM audit_chain_checkpoints WHERE chain_id = ?")
                 .bind(chain_id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| AuditError::Other(e.to_string()))?;
-        let (after, start) = checkpoint.unwrap_or((0, "genesis".to_string()));
+        let (after, start) = match checkpoint {
+            Some((sequence, hash)) => (sequence, AuditDigest::stored(&hash, "checkpoint hash")?),
+            None => (0, AuditDigest::GENESIS),
+        };
         let records: Vec<AuditRecord> = self
             .query(chain_id, None, None)
             .await?
@@ -264,8 +266,8 @@ impl AuditLog for SqliteAuditLog {
             )
             .bind(record.ip_address.map(super::ip_to_bytes))
             .bind(&record.device_id)
-            .bind(&record.prev_hash)
-            .bind(&record.hash)
+            .bind(record.prev_hash.as_bytes().as_slice())
+            .bind(record.hash.as_bytes().as_slice())
             .execute(&mut *tx)
             .await
             .map_err(write)?;
@@ -276,7 +278,7 @@ impl AuditLog for SqliteAuditLog {
         )
         .bind(&chain.head.chain_id)
         .bind(&chain.head.last_record_id)
-        .bind(&chain.head.last_hash)
+        .bind(chain.head.last_hash.as_bytes().as_slice())
         .bind(sequence_value(chain.head.sequence)?)
         .execute(&mut *tx)
         .await
@@ -288,7 +290,7 @@ impl AuditLog for SqliteAuditLog {
             )
             .bind(&chain.head.chain_id)
             .bind(sequence_value(checkpoint.sequence)?)
-            .bind(&checkpoint.hash)
+            .bind(checkpoint.hash.as_bytes().as_slice())
             .bind(super::fmt_dt(&checkpoint.cut_before))
             .execute(&mut *tx)
             .await
@@ -325,7 +327,7 @@ async fn stored_chain(
         .map(|row| {
             Ok::<_, AuditError>(ChainCheckpoint {
                 sequence: row.get::<i64, _>("sequence") as u64,
-                hash: row.get("hash"),
+                hash: digest(&row, "hash")?,
                 cut_before: chrono::DateTime::parse_from_rfc3339(
                     &row.get::<String, _>("cut_before"),
                 )
@@ -341,12 +343,12 @@ async fn stored_chain(
         .map_err(read)?
         .iter()
         .map(row_to_audit_record)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(AuditChain {
         head: ChainHead {
             chain_id: head.get("chain_id"),
             last_record_id: head.get("last_record_id"),
-            last_hash: head.get("last_hash"),
+            last_hash: digest(&head, "last_hash")?,
             sequence: head.get::<i64, _>("sequence") as u64,
         },
         checkpoint,
@@ -354,7 +356,12 @@ async fn stored_chain(
     }))
 }
 
-fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> AuditRecord {
+/// The digest in column `column` of `row`.
+fn digest(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<AuditDigest, AuditError> {
+    AuditDigest::stored(&row.get::<Vec<u8>, _>(column), column)
+}
+
+fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> Result<AuditRecord, AuditError> {
     let actor_type = match row.get::<String, _>("actor_type").as_str() {
         "admin" => ActorType::Admin,
         "service" => ActorType::Service,
@@ -377,7 +384,7 @@ fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> AuditRecord {
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|_| chrono::Utc::now());
 
-    AuditRecord {
+    Ok(AuditRecord {
         id: row.get("id"),
         timestamp,
         chain_id: row.get("chain_id"),
@@ -392,7 +399,7 @@ fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> AuditRecord {
             .get::<Option<Vec<u8>>, _>("ip_address")
             .map(|ip| super::ip_from_bytes(&ip).expect("the schema admits 4 or 16 bytes")),
         device_id: row.get("device_id"),
-        prev_hash: row.get("prev_hash"),
-        hash: row.get("hash"),
-    }
+        prev_hash: digest(row, "prev_hash")?,
+        hash: digest(row, "hash")?,
+    })
 }

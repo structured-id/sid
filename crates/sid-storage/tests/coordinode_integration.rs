@@ -1053,8 +1053,8 @@ mod audit_retention {
                 ),
                 ("ip", Value::Null),
                 ("device_id", Value::Null),
-                ("prev_hash", Value::String(r.prev_hash.clone())),
-                ("hash", Value::String(r.hash.clone())),
+                ("prev_hash", Value::Binary(r.prev_hash.as_bytes().to_vec())),
+                ("hash", Value::Binary(r.hash.as_bytes().to_vec())),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v))

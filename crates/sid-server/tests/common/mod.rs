@@ -195,8 +195,8 @@ impl AuditLog for RecordingAuditLog {
             metadata: entry.metadata.clone(),
             ip_address: entry.ip_address,
             device_id: entry.device_id.clone(),
-            prev_hash: String::new(),
-            hash: String::new(),
+            prev_hash: sid_core::models::audit::AuditDigest::GENESIS,
+            hash: sid_core::models::audit::AuditDigest::GENESIS,
         };
         self.entries
             .lock()

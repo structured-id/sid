@@ -2,7 +2,7 @@
 //! The audit chain: each record links the one before it, chains are
 //! independent, and a mutation's record commits with the mutation.
 
-use sid_core::models::audit::{AuditEntry, compute_record_hash};
+use sid_core::models::audit::{AuditDigest, AuditEntry, compute_record_hash};
 use sid_plugin::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -22,7 +22,7 @@ pub async fn test_audit_chain_links_records(log: &dyn AuditLog) {
         .await
         .unwrap();
     assert_eq!(first.sequence, 1);
-    assert_eq!(first.prev_hash, "genesis");
+    assert_eq!(first.prev_hash, AuditDigest::GENESIS);
     let second = log
         .log(&chain, AuditEntry::system("profile.updated", &chain))
         .await
@@ -57,19 +57,19 @@ fn rechained(
     id: &str,
 ) -> sid_core::models::audit::AuditChain {
     let mut moved = chain.clone();
-    let mut prev = "genesis".to_owned();
+    let mut prev = AuditDigest::GENESIS;
     for record in &mut moved.records {
         record.id = Uuid::now_v7().to_string();
         record.chain_id = id.to_owned();
-        record.prev_hash = prev.clone();
+        record.prev_hash = prev;
         record.hash = compute_record_hash(record);
-        prev.clone_from(&record.hash);
+        prev = record.hash;
     }
     let last = moved.records.last().expect("a chain with records");
     moved.head = sid_core::models::audit::ChainHead {
         chain_id: id.to_owned(),
         last_record_id: last.id.clone(),
-        last_hash: last.hash.clone(),
+        last_hash: last.hash,
         sequence: last.sequence,
     };
     moved
@@ -134,7 +134,7 @@ pub async fn test_audit_chains_are_independent(log: &dyn AuditLog) {
     let first_b = log.log(&b, AuditEntry::system("b1", &b)).await.unwrap();
     for first in [first_a, first_b] {
         assert_eq!(first.sequence, 1);
-        assert_eq!(first.prev_hash, "genesis");
+        assert_eq!(first.prev_hash, AuditDigest::GENESIS);
     }
 }
 

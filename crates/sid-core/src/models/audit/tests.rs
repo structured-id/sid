@@ -13,7 +13,7 @@ fn make_entry() -> AuditEntry {
     }
 }
 
-fn make_record(chain_id: &str, seq: u64, prev_hash: &str) -> AuditRecord {
+fn make_record(chain_id: &str, seq: u64, prev_hash: AuditDigest) -> AuditRecord {
     let mut record = AuditRecord {
         id: format!("rec_{}", seq),
         timestamp: Utc::now(),
@@ -27,8 +27,8 @@ fn make_record(chain_id: &str, seq: u64, prev_hash: &str) -> AuditRecord {
         metadata: serde_json::Value::Null,
         ip_address: None,
         device_id: None,
-        prev_hash: prev_hash.into(),
-        hash: String::new(),
+        prev_hash,
+        hash: AuditDigest::GENESIS,
     };
     record.hash = compute_record_hash(&record);
     record
@@ -84,7 +84,7 @@ fn test_outcome_display() {
 
 #[test]
 fn test_compute_record_hash_deterministic() {
-    let record = make_record("profile:prof_123", 1, "genesis");
+    let record = make_record("profile:prof_123", 1, AuditDigest::GENESIS);
     let hash1 = compute_record_hash(&record);
     let hash2 = compute_record_hash(&record);
     assert_eq!(hash1, hash2);
@@ -92,7 +92,7 @@ fn test_compute_record_hash_deterministic() {
 
 #[test]
 fn test_compute_record_hash_changes_with_data() {
-    let r1 = make_record("profile:prof_123", 1, "genesis");
+    let r1 = make_record("profile:prof_123", 1, AuditDigest::GENESIS);
     let mut r2 = r1.clone();
     r2.action = "different.action".into();
     r2.hash = compute_record_hash(&r2);
@@ -100,17 +100,58 @@ fn test_compute_record_hash_changes_with_data() {
     assert_ne!(r1.hash, r2.hash);
 }
 
+/// The digest covers the link: the same record linked to another
+/// predecessor has another digest, so a record cannot be moved in a chain.
+#[test]
+fn test_compute_record_hash_covers_the_link() {
+    let record = make_record("chain1", 2, AuditDigest([7; 32]));
+    let mut relinked = record.clone();
+    relinked.prev_hash = AuditDigest([8; 32]);
+    assert_ne!(compute_record_hash(&record), compute_record_hash(&relinked));
+}
+
+/// A field's content cannot be read as the boundary of the next: moving text
+/// from one field into its neighbour changes the digest, as joining the
+/// fields with a separator did not.
+#[test]
+fn test_compute_record_hash_keeps_field_boundaries() {
+    let mut a = make_record("chain1", 1, AuditDigest::GENESIS);
+    a.actor_id = "alice|profile".into();
+    a.action = "deleted".into();
+    let mut b = a.clone();
+    b.actor_id = "alice".into();
+    b.action = "profile|deleted".into();
+    assert_ne!(compute_record_hash(&a), compute_record_hash(&b));
+}
+
 #[test]
 fn test_verify_record_hash_valid() {
-    let record = make_record("chain1", 1, "genesis");
+    let record = make_record("chain1", 1, AuditDigest::GENESIS);
     assert!(verify_record_hash(&record));
 }
 
 #[test]
 fn test_verify_record_hash_tampered() {
-    let mut record = make_record("chain1", 1, "genesis");
+    let mut record = make_record("chain1", 1, AuditDigest::GENESIS);
     record.action = "tampered.action".into(); // Tamper without recomputing hash
     assert!(!verify_record_hash(&record));
+}
+
+/// A stored digest is exactly 32 bytes; any other length is a damaged
+/// record, never read as some other digest.
+#[test]
+fn test_stored_digest_is_32_bytes() {
+    let bytes = [9u8; 32];
+    assert_eq!(
+        AuditDigest::stored(&bytes, "hash").unwrap(),
+        AuditDigest(bytes)
+    );
+    for len in [0, 31, 33, 64] {
+        assert!(
+            AuditDigest::stored(&vec![1u8; len], "hash").is_err(),
+            "{len} bytes"
+        );
+    }
 }
 
 #[test]
@@ -118,14 +159,13 @@ fn test_chain_head_serde() {
     let head = ChainHead {
         chain_id: "profile:prof_123".into(),
         last_record_id: "rec_5".into(),
-        last_hash: "abc123".into(),
+        last_hash: AuditDigest([3; 32]),
         sequence: 5,
     };
 
     let json = serde_json::to_string(&head).unwrap();
     let deserialized: ChainHead = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.chain_id, "profile:prof_123");
-    assert_eq!(deserialized.sequence, 5);
+    assert_eq!(deserialized, head);
 }
 
 #[test]

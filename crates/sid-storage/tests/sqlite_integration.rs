@@ -595,8 +595,8 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                     std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
                 }))
                 .bind(&r.device_id)
-                .bind(&r.prev_hash)
-                .bind(&r.hash)
+                .bind(r.prev_hash.as_bytes().as_slice())
+                .bind(r.hash.as_bytes().as_slice())
                 .execute(&pool)
                 .await
                 .unwrap();
