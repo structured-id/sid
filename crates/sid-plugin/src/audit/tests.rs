@@ -29,8 +29,8 @@ impl AuditLog for InMemoryAuditLog {
 
         let head = heads.get(chain_id);
         let (prev_hash, sequence) = match head {
-            Some(h) => (h.last_hash.clone(), h.sequence + 1),
-            None => ("genesis".to_string(), 1),
+            Some(h) => (h.last_hash, h.sequence + 1),
+            None => (AuditDigest::GENESIS, 1),
         };
 
         let id = format!("audit_{}", records.len() + 1);
@@ -48,7 +48,7 @@ impl AuditLog for InMemoryAuditLog {
             ip_address: entry.ip_address,
             device_id: entry.device_id,
             prev_hash,
-            hash: String::new(),
+            hash: AuditDigest::GENESIS,
         };
         record.hash = compute_record_hash(&record);
 
@@ -57,7 +57,7 @@ impl AuditLog for InMemoryAuditLog {
             ChainHead {
                 chain_id: chain_id.to_string(),
                 last_record_id: id,
-                last_hash: record.hash.clone(),
+                last_hash: record.hash,
                 sequence,
             },
         );
@@ -86,7 +86,7 @@ impl AuditLog for InMemoryAuditLog {
 
     async fn verify_chain(&self, chain_id: &str) -> Result<VerifyResult, AuditError> {
         let records = self.query(chain_id, None, None).await?;
-        Ok(verify_records(&records, "genesis".to_string()))
+        Ok(verify_records(&records, AuditDigest::GENESIS))
     }
 
     async fn list_chain_ids(&self) -> Result<Vec<String>, AuditError> {
@@ -118,8 +118,8 @@ async fn test_log_first_record() {
 
     assert_eq!(record.chain_id, "profile:prof_123");
     assert_eq!(record.sequence, 1);
-    assert_eq!(record.prev_hash, "genesis");
-    assert!(!record.hash.is_empty());
+    assert_eq!(record.prev_hash, AuditDigest::GENESIS);
+    assert_ne!(record.hash, AuditDigest::GENESIS);
 }
 
 #[tokio::test]
@@ -166,8 +166,8 @@ async fn test_parallel_chains_independent() {
     assert_eq!(rb.sequence, 1);
 
     // Both link to genesis
-    assert_eq!(ra.prev_hash, "genesis");
-    assert_eq!(rb.prev_hash, "genesis");
+    assert_eq!(ra.prev_hash, AuditDigest::GENESIS);
+    assert_eq!(rb.prev_hash, AuditDigest::GENESIS);
 }
 
 #[tokio::test]
@@ -235,7 +235,7 @@ async fn three_records() -> Vec<AuditRecord> {
 #[tokio::test]
 async fn verify_records_detects_a_missing_start() {
     let records = three_records().await;
-    let result = verify_records(&records[1..], "genesis".to_string());
+    let result = verify_records(&records[1..], AuditDigest::GENESIS);
     assert!(!result.valid);
     assert_eq!(
         result.first_broken_record.as_deref(),
@@ -248,7 +248,7 @@ async fn verify_records_detects_a_missing_start() {
 #[tokio::test]
 async fn verify_records_resumes_from_a_checkpoint() {
     let records = three_records().await;
-    let result = verify_records(&records[1..], records[0].hash.clone());
+    let result = verify_records(&records[1..], records[0].hash);
     assert!(result.valid);
     assert_eq!(result.records_verified, 2);
 }
@@ -258,7 +258,7 @@ async fn verify_records_resumes_from_a_checkpoint() {
 async fn verify_records_stops_at_a_broken_record() {
     let mut records = three_records().await;
     records[1].outcome = AuditOutcome::Denied;
-    let result = verify_records(&records, "genesis".to_string());
+    let result = verify_records(&records, AuditDigest::GENESIS);
     assert!(!result.valid);
     assert_eq!(result.records_verified, 1);
     assert_eq!(
@@ -267,9 +267,9 @@ async fn verify_records_stops_at_a_broken_record() {
     );
 
     let mut relinked = three_records().await;
-    relinked[2].prev_hash = "other".into();
+    relinked[2].prev_hash = AuditDigest([5; 32]);
     relinked[2].hash = compute_record_hash(&relinked[2]);
-    let result = verify_records(&relinked, "genesis".to_string());
+    let result = verify_records(&relinked, AuditDigest::GENESIS);
     assert!(!result.valid);
     assert_eq!(result.records_verified, 2);
 }

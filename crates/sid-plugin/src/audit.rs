@@ -7,7 +7,7 @@
 //! Implementation: PostgreSQL append-only table with hash chains.
 
 use async_trait::async_trait;
-use sid_core::models::audit::{AuditChain, AuditEntry, AuditError, AuditRecord};
+use sid_core::models::audit::{AuditChain, AuditDigest, AuditEntry, AuditError, AuditRecord};
 
 /// Audit log trait for writing and querying audit records.
 ///
@@ -73,10 +73,11 @@ pub struct VerifyResult {
 }
 
 /// Verify a chain's records in sequence order: the first must link to
-/// `start` (`"genesis"`, or the hash of the last record retention removed),
-/// each to the one before it, and each must hash to its stored hash. A chain
-/// missing its first records therefore fails instead of verifying.
-pub fn verify_records(records: &[AuditRecord], start: String) -> VerifyResult {
+/// `start` ([`AuditDigest::GENESIS`], or the digest of the last record
+/// retention removed), each to the one before it, and each must hash to its
+/// stored digest. A chain missing its first records therefore fails instead
+/// of verifying.
+pub fn verify_records(records: &[AuditRecord], start: AuditDigest) -> VerifyResult {
     let mut expected = start;
     for (verified, record) in records.iter().enumerate() {
         if record.prev_hash != expected || !sid_core::models::audit::verify_record_hash(record) {
@@ -86,7 +87,7 @@ pub fn verify_records(records: &[AuditRecord], start: String) -> VerifyResult {
                 first_broken_record: Some(record.id.clone()),
             };
         }
-        expected.clone_from(&record.hash);
+        expected = record.hash;
     }
     VerifyResult {
         valid: true,

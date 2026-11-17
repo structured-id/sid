@@ -177,17 +177,19 @@ CREATE TABLE anomaly_events (
 CREATE TABLE audit_chain_checkpoints (
     chain_id text NOT NULL,
     sequence bigint NOT NULL,
-    hash text NOT NULL,
+    hash bytea NOT NULL,
     cut_before timestamp with time zone NOT NULL,
     CONSTRAINT audit_chain_checkpoints_sequence_check CHECK ((sequence > 0)),
+    CONSTRAINT audit_chain_checkpoints_hash_check CHECK ((length(hash) = 32)),
     CONSTRAINT audit_chain_checkpoints_pkey PRIMARY KEY (chain_id)
 );
 
 CREATE TABLE audit_chain_heads (
     chain_id text NOT NULL,
     last_record_id text NOT NULL,
-    last_hash text NOT NULL,
+    last_hash bytea NOT NULL,
     sequence bigint NOT NULL,
+    CONSTRAINT audit_chain_heads_last_hash_check CHECK ((length(last_hash) = 32)),
     CONSTRAINT audit_chain_heads_pkey PRIMARY KEY (chain_id)
 );
 
@@ -204,8 +206,9 @@ CREATE TABLE audit_records (
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
     ip_address inet,
     device_id text,
-    prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
-    hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL,
+    prev_hash bytea CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
+    hash bytea CONSTRAINT audit_records_hash_not_null1 NOT NULL,
+    CONSTRAINT audit_records_digest_lengths CHECK (((length(prev_hash) = 32) AND (length(hash) = 32))),
     CONSTRAINT audit_records_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END)),
     CONSTRAINT uq_audit_chain_seq UNIQUE (chain_id, sequence, "timestamp"),
     CONSTRAINT audit_records_pkey1 PRIMARY KEY (id, "timestamp")

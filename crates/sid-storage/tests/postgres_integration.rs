@@ -8,6 +8,7 @@
 
 mod common;
 
+use sid_core::models::audit::AuditDigest;
 use sid_plugin::AuditLog;
 use sid_plugin::InstanceSecretStore;
 use sid_plugin::storage::StorageBackend;
@@ -837,9 +838,12 @@ async fn test_address_columns_hold_one_host() {
     let audit = sqlx::query(
         "INSERT INTO audit_records (id, chain_id, sequence, actor_id, actor_type, action,
              resource, outcome, ip_address, prev_hash, hash)
-         VALUES ($1, 'c', 1, 'a', 'system', 'x', 'r', 'success', '10.0.0.0/8', 'p', 'h')",
+         VALUES ($1, 'c', 1, 'a', 'system', 'x', 'r', 'success', '10.0.0.0/8', $2, $3)",
     )
     .bind(uuid::Uuid::now_v7().to_string())
+    // Well-formed digests, so only the network address can be refused.
+    .bind(AuditDigest::GENESIS.as_bytes().as_slice())
+    .bind([1u8; 32].as_slice())
     .execute(backend.pool())
     .await;
     assert!(audit.is_err(), "a network in audit_records");
@@ -1493,8 +1497,8 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                         .bind(&r.metadata)
                         .bind(r.ip_address)
                         .bind(&r.device_id)
-                        .bind(&r.prev_hash)
-                        .bind(&r.hash)
+                        .bind(r.prev_hash.as_bytes().as_slice())
+                        .bind(r.hash.as_bytes().as_slice())
                         .execute(&pool)
                         .await
                         .unwrap();
@@ -2341,7 +2345,6 @@ async fn test_audit_insert_lands_in_partition() {
     // Insert an audit record with a known timestamp (current month).
     let record_id = uuid::Uuid::now_v7().to_string();
     let now = chrono::Utc::now();
-    let hash = format!("testhash_{}", record_id);
 
     sqlx::query(
         "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, actor_type,
@@ -2357,8 +2360,8 @@ async fn test_audit_insert_lands_in_partition() {
     .bind("test.partition")
     .bind("test-resource")
     .bind("success")
-    .bind("genesis")
-    .bind(&hash)
+    .bind(AuditDigest::GENESIS.as_bytes().as_slice())
+    .bind([1u8; 32].as_slice())
     .execute(pool)
     .await
     .unwrap();
@@ -2470,8 +2473,8 @@ async fn test_audit_create_partition_function() {
     .bind("test.future")
     .bind("test-resource")
     .bind("success")
-    .bind("genesis")
-    .bind(format!("hash_{}", record_id))
+    .bind(AuditDigest::GENESIS.as_bytes().as_slice())
+    .bind([1u8; 32].as_slice())
     .execute(pool)
     .await
     .unwrap();
@@ -2505,8 +2508,8 @@ async fn test_audit_append_only_trigger_on_partitioned() {
     .bind("test.immutable")
     .bind("test-resource")
     .bind("success")
-    .bind("genesis")
-    .bind(format!("hash_{}", record_id))
+    .bind(AuditDigest::GENESIS.as_bytes().as_slice())
+    .bind([1u8; 32].as_slice())
     .execute(pool)
     .await
     .unwrap();
