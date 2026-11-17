@@ -126,7 +126,7 @@ async fn test_new_device_and_ip_triggers_step_up() {
     let detector = AnomalyDetector::ce_default(test_store());
     // A profile that has signed in before, now from a new device and address.
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24));
     ctx.new_device = true;
     ctx.new_ip = true;
 
@@ -738,7 +738,7 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
 async fn test_the_requirements_state_the_new_device_reaction() {
     let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24));
     ctx.new_device = true;
     ctx.new_ip = true;
 
@@ -767,7 +767,7 @@ async fn test_passing_a_new_device_leaves_the_other_rules_in_force() {
     };
     let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24));
     ctx.new_device = true;
     ctx.new_ip = true;
     ctx.is_datacenter_ip = true;

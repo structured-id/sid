@@ -127,7 +127,7 @@ async fn main() {
             RoleAssignmentPrincipal::Profile(access_admin),
             accountant.id,
         )
-        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 1)),
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24)),
         RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), accountant.id),
         RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), accountant.id)
             .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 120)),

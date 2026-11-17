@@ -584,9 +584,9 @@ where
 }
 
 /// The instant in column `name`, or none where it holds null.
-fn time<P: FromPg>(row: &sqlx::postgres::PgRow, name: &str) -> SidResult<P::Out>
+fn time<P>(row: &sqlx::postgres::PgRow, name: &str) -> SidResult<P::Out>
 where
-    P: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    P: FromPg + for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
     col::<P>(row, name).map(FromPg::jiff)
 }
