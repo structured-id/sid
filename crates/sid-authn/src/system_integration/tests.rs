@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, MutationContext, Organization,
 };
@@ -32,7 +32,7 @@ async fn store() -> (SqliteBackend, OidcIssuer) {
         .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),

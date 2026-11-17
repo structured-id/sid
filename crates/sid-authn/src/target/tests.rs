@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     Application, ApplicationId, AuditEntry, IssuerAuthority, IssuerHandle, IssuerSigningKey,
     MutationContext, OAuth2Client, OidcIssuer, Organization, ProjectId, ProtectedResource,
@@ -33,7 +33,7 @@ async fn fixture() -> Fixture {
         .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),
@@ -242,7 +242,7 @@ async fn a_permitted_resource_is_the_target() {
 #[tokio::test]
 async fn the_account_api_is_targeted_under_the_account_grant() {
     let f = fixture().await;
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let account_app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -461,7 +461,7 @@ async fn a_machine_user_names_its_target() {
                 client_id: ci.client_id.clone(),
                 resource_id: f.orders.id,
                 scopes: vec!["write".into()],
-                created_at: Utc::now().trunc_subsecs(3),
+                created_at: Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap(),
             },
             ctx(),
         )

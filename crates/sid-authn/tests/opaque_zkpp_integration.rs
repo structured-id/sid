@@ -301,7 +301,7 @@ fn history(
                     operation: uuid::Uuid::now_v7(),
                     policy_version: 1,
                 },
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             })
             .collect(),
     }

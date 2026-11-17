@@ -148,7 +148,7 @@ async fn enrolled(ops: &Operations, installation: sid_core::models::OrgId) -> En
             .unwrap()
             .into_uuid(),
         owner_domain: owner_domain(installation.as_bytes(), owner),
-        expires_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now(),
     }
 }
 

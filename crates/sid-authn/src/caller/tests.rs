@@ -30,7 +30,7 @@ fn token(jwt: &JwtService, roles: &[&str]) -> (ProfileId, Session, String) {
     let session = Session::new(
         profile,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let roles: Vec<String> = roles.iter().map(|r| (*r).to_owned()).collect();
     let pid = profile.to_string();

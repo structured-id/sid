@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{AuditEntry, MutationContext, Project};
 use sid_plugin::StorageBackend;
 use sid_proto::keyed::projects::project_service::{CreateProject, DeleteProject};
@@ -8,7 +8,7 @@ use sid_storage::sqlite::SqliteBackend;
 
 async fn period(storage: &SqliteBackend) -> OperationPeriod {
     storage
-        .current_operation_period(Utc::now(), Duration::hours(1))
+        .current_operation_period(Timestamp::now(), SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period
@@ -186,7 +186,7 @@ async fn test_upkeep_retires_periods_past_their_retention() {
     let storage = SqliteBackend::new_in_memory().await.unwrap();
     let policy = storage.operation_period_policy().await.unwrap();
     let issued = storage
-        .current_operation_period(Utc::now(), policy.acceptance)
+        .current_operation_period(Timestamp::now(), policy.acceptance)
         .await
         .unwrap();
     let context = OperationContext::new(OperationKey::parse("k-upkeep").unwrap(), issued.period);
@@ -199,7 +199,7 @@ async fn test_upkeep_retires_periods_past_their_retention() {
         Some(&b"done"[..])
     );
 
-    let past = issued.accepted_until + policy.retention + Duration::seconds(1);
+    let past = issued.accepted_until + policy.retention + SignedDuration::from_secs(1);
     assert_eq!(upkeep(&storage, past).await, 1);
     assert!(
         matches!(
@@ -274,10 +274,10 @@ async fn test_resource_id_under_a_retired_period_is_refused() {
     let storage = SqliteBackend::new_in_memory().await.unwrap();
     let policy = storage.operation_period_policy().await.unwrap();
     let issued = storage
-        .current_operation_period(Utc::now(), policy.acceptance)
+        .current_operation_period(Timestamp::now(), policy.acceptance)
         .await
         .unwrap();
-    let past = issued.accepted_until + policy.retention + Duration::seconds(1);
+    let past = issued.accepted_until + policy.retention + SignedDuration::from_secs(1);
     assert_eq!(upkeep(&storage, past).await, 1);
     let context = OperationContext::new(OperationKey::parse("k-late").unwrap(), issued.period);
     let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));

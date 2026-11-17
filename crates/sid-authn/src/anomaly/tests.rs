@@ -44,7 +44,7 @@ async fn test_new_device_ip_needs_a_previous_sign_in() {
     assert_eq!(m.reaction, RuleReaction::Allow, "{}", m.reason);
 
     let later = LoginContext {
-        prev_login_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        prev_login_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1)),
         ..first
     };
     let m = detector.evaluate(&later).await.unwrap();
@@ -126,7 +126,7 @@ async fn test_new_device_and_ip_triggers_step_up() {
     let detector = AnomalyDetector::ce_default(test_store());
     // A profile that has signed in before, now from a new device and address.
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
     ctx.new_device = true;
     ctx.new_ip = true;
 
@@ -709,7 +709,7 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
     ctx.longitude = Some(-74.01);
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(45));
 
     let step_up = Answered {
         step_up: true,
@@ -738,7 +738,7 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
 async fn test_the_requirements_state_the_new_device_reaction() {
     let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
     ctx.new_device = true;
     ctx.new_ip = true;
 
@@ -767,7 +767,7 @@ async fn test_passing_a_new_device_leaves_the_other_rules_in_force() {
     };
     let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 1));
     ctx.new_device = true;
     ctx.new_ip = true;
     ctx.is_datacenter_ip = true;
@@ -803,7 +803,7 @@ async fn test_suppressed_travel_leaves_the_later_rules_in_force() {
     ctx.longitude = Some(-74.01);
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(45));
     ctx.country = Some("US".to_owned());
     ctx.prev_country = Some("DE".to_owned());
     ctx.designated_countries = vec!["US".to_owned(), "DE".to_owned()];
@@ -868,7 +868,7 @@ async fn test_impossible_travel_triggers_step_up() {
     ctx.longitude = Some(-74.01);
     ctx.prev_latitude = Some(52.52); // Berlin (previous)
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(45));
 
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.rule, "impossible_travel");
@@ -889,7 +889,7 @@ async fn test_impossible_travel_allows_slow_travel() {
     ctx.longitude = Some(2.35);
     ctx.prev_latitude = Some(52.52); // Berlin (previous)
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2));
 
     let result = detector.evaluate(&ctx).await.unwrap();
     // 344 km < 500 km min_distance → rule skipped
@@ -905,7 +905,7 @@ async fn test_impossible_travel_allows_long_time() {
     ctx.longitude = Some(-74.01);
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::hours(10));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(10));
 
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
@@ -918,7 +918,7 @@ async fn test_impossible_travel_skipped_when_no_geo() {
     let mut ctx = default_context();
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(30));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(30));
     // latitude/longitude = None (default)
 
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -953,7 +953,7 @@ async fn test_impossible_travel_priority_below_country() {
     ctx.longitude = Some(-74.01);
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(10));
 
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(
@@ -975,7 +975,7 @@ async fn test_impossible_travel_suppressed_when_both_designated() {
     ctx.country = Some("RO".to_string());
     ctx.prev_latitude = Some(50.45); // Kyiv (previous)
     ctx.prev_longitude = Some(30.52);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5));
     ctx.prev_country = Some("UA".to_string());
     ctx.designated_countries = vec!["UA".to_string(), "RO".to_string()];
 
@@ -1012,7 +1012,7 @@ async fn test_impossible_travel_not_suppressed_when_current_not_designated() {
     ctx.country = Some("BR".to_string());
     ctx.prev_latitude = Some(50.45); // Kyiv (previous)
     ctx.prev_longitude = Some(30.52);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5));
     ctx.prev_country = Some("UA".to_string());
     ctx.designated_countries = vec!["UA".to_string(), "RO".to_string()]; // BR not designated
 
@@ -1034,7 +1034,7 @@ async fn test_impossible_travel_not_suppressed_when_no_designated() {
     ctx.country = Some("RO".to_string());
     ctx.prev_latitude = Some(50.45);
     ctx.prev_longitude = Some(30.52);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5));
     ctx.prev_country = Some("UA".to_string());
     ctx.designated_countries = vec![]; // empty
 
@@ -1053,7 +1053,7 @@ async fn test_impossible_travel_not_suppressed_when_no_country() {
     ctx.country = None; // GeoIP country resolution failed
     ctx.prev_latitude = Some(50.45);
     ctx.prev_longitude = Some(30.52);
-    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+    ctx.prev_login_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5));
     ctx.prev_country = Some("UA".to_string());
     ctx.designated_countries = vec!["UA".to_string(), "RO".to_string()];
 

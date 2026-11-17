@@ -35,7 +35,7 @@ fn claims_for(issuer: &OidcIssuer) -> Claims {
         iss: issuer.canonical_url.clone(),
         sub: "subject".into(),
         aud: "client".into(),
-        exp: chrono::Utc::now().timestamp() + 60,
+        exp: jiff::Timestamp::now().as_second() + 60,
     }
 }
 
@@ -430,7 +430,7 @@ const ORDERS: &str = "https://resources.example/orders";
 /// Access-token claims as an issuer puts them in a token that `client-1`
 /// requested for the Orders resource.
 fn access_claims(iss: &str) -> crate::jwt::AccessTokenClaims {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     crate::jwt::AccessTokenClaims {
         sub: "subject".into(),
         pid: None,
@@ -626,7 +626,7 @@ async fn a_logout_token_is_for_its_client_alone() {
             .unwrap();
     assert!(verifier.validate_logout_token(&token, "client-2").is_err());
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = |extra: serde_json::Value| {
         let mut claims = serde_json::json!({
             "iss": issuer.canonical_url,
@@ -676,7 +676,7 @@ async fn a_logout_token_is_for_its_client_alone() {
 async fn a_token_without_the_logout_event_is_refused() {
     let (registry, issuer) = registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = signer
         .sign(
             Some("logout+jwt"),
@@ -726,7 +726,7 @@ async fn id_token_hints_are_this_issuers_id_tokens() {
     let (other_registry, other) = self::registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
     let verifier = registry.verifier(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let live = signer
         .sign(None, &id_claims(&issuer.canonical_url, now + 60))
@@ -768,7 +768,7 @@ async fn an_id_token_is_the_clients_own() {
     let (registry, issuer) = registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
     let verifier = registry.verifier(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let with_nonce = |mut claims: crate::jwt::IdTokenClaims, nonce: Option<&str>| {
         claims.nonce = nonce.map(str::to_owned);
         signer.sign(None, &claims).unwrap()

@@ -340,7 +340,7 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
         AcceptedEvidence {
             acr: Some(AuthLevel::Elevated),
             amr: vec!["hwk".into(), "user".into()],
-            auth_time: Utc.timestamp_opt(auth_time as i64, 0).single().unwrap(),
+            auth_time: Timestamp::from_second(auth_time as i64).unwrap(),
         }
     );
     // The token carried no Binding presentation: none is returned, and the
@@ -593,7 +593,11 @@ async fn only_a_sid_acr_urn_is_a_level() {
         issuer.issue_for(&browser.url, json!({ "acr": acr }));
         let returned = browser.complete(&entry, "c", REDIRECT).await.unwrap();
         assert_eq!(returned.evidence.acr, None, "{acr}");
-        assert_eq!(returned.evidence.authentication(Utc::now()), None, "{acr}");
+        assert_eq!(
+            returned.evidence.authentication(Timestamp::now()),
+            None,
+            "{acr}"
+        );
     }
 }
 
@@ -912,7 +916,7 @@ async fn an_exchange_whose_owner_stopped_is_ambiguous_after_its_lease() {
     };
     let stopped = Progress::Exchanging {
         pending: pending.clone(),
-        owned_until: Utc::now() - chrono::Duration::seconds(1),
+        owned_until: Timestamp::now() - SignedDuration::from_secs(1),
     };
     assert!(
         entry
@@ -938,7 +942,7 @@ async fn an_exchange_whose_owner_stopped_is_ambiguous_after_its_lease() {
 async fn a_return_names_its_operation_and_deadline() {
     let issuer = TestIssuer::start().await;
     let entry = entry(&issuer);
-    let before = Utc::now();
+    let before = Timestamp::now();
     let first = begin(&entry, &EntryRequest::default()).await;
     issuer.issue_for(&first.url, json!({}));
     let returned = first.complete(&entry, "c", REDIRECT).await.unwrap();
@@ -950,8 +954,8 @@ async fn a_return_names_its_operation_and_deadline() {
             .operation,
         returned.operation
     );
-    let ttl = chrono::Duration::from_std(PENDING_TTL).unwrap();
-    assert!(returned.deadline >= before + ttl && returned.deadline <= Utc::now() + ttl);
+    let ttl = SignedDuration::try_from(PENDING_TTL).unwrap();
+    assert!(returned.deadline >= before + ttl && returned.deadline <= Timestamp::now() + ttl);
 
     let second = begin(&entry, &EntryRequest::default()).await;
     issuer.issue_for(&second.url, json!({}));
