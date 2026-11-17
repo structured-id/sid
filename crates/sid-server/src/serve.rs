@@ -150,7 +150,7 @@ impl CeServices {
                 crate::grpc::oidc_provider_service::OidcProviderServiceImpl::new(
                     c.auth_svc.clone(),
                     c.project_svc.clone(),
-                    c.login_url.clone(),
+                    c.sign_in_page.clone(),
                 ),
             ))
             .await
