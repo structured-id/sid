@@ -5,7 +5,7 @@
 //! user or the organization).
 //! The storage layer never decrypts them — only stores and retrieves.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// An encrypted profile blob with optimistic concurrency control.
@@ -25,7 +25,7 @@ pub struct EncryptedBlob {
     pub version: u64,
 
     /// Last update timestamp.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 /// Metadata about a stored blob (without downloading full ciphertext).
@@ -38,7 +38,7 @@ pub struct BlobMeta {
     pub size_bytes: u64,
 
     /// Last update timestamp.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 
     /// Where this blob is currently stored.
     pub storage_status: BlobStorageStatus,
@@ -114,7 +114,7 @@ mod tests {
             ciphertext: vec![1, 2, 3, 4, 5],
             nonce: [42; 12],
             version: 7,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         let json = serde_json::to_string(&blob).unwrap();
         let deserialized: EncryptedBlob = serde_json::from_str(&json).unwrap();
@@ -128,7 +128,7 @@ mod tests {
         let meta = BlobMeta {
             version: 3,
             size_bytes: 1024,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
             storage_status: BlobStorageStatus::SaasVault,
         };
         let json = serde_json::to_string(&meta).unwrap();

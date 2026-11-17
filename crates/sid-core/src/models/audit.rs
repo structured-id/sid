@@ -4,8 +4,8 @@
 //! Append-only audit records with parallel hash chains per entity.
 //! Hash chain provides tamper-evidence without requiring full event sourcing.
 
-use chrono::{DateTime, Utc};
 use core::net::IpAddr;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -137,7 +137,7 @@ pub struct AuditRecord {
     pub id: String,
 
     /// When the event was recorded.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 
     /// Chain this record belongs to (e.g., "profile:prof_01J8K...", "site:site_01J8K...").
     pub chain_id: String,
@@ -266,7 +266,7 @@ pub struct ChainCheckpoint {
     pub sequence: u64,
     pub hash: AuditDigest,
     /// Records before this time were removed.
-    pub cut_before: DateTime<Utc>,
+    pub cut_before: Timestamp,
 }
 
 /// A hash chain as stored, for a move between stores: its head, the
@@ -391,7 +391,7 @@ pub fn compute_record_hash(record: &AuditRecord) -> AuditDigest {
     text(&mut hasher, &record.chain_id);
     text(&mut hasher, &record.id);
     hasher.update(record.sequence.to_be_bytes());
-    text(&mut hasher, &record.timestamp.to_rfc3339());
+    text(&mut hasher, &record.timestamp.to_string());
     text(&mut hasher, &record.actor_id);
     text(&mut hasher, &record.action);
     text(&mut hasher, &record.outcome.to_string());

@@ -3,7 +3,7 @@
 //!
 //! Represents authentication factors (OPAQUE, WebAuthn, TOTP, etc.)
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -223,7 +223,7 @@ pub struct StoredUserHandle {
     pub profile_id: ProfileId,
     pub rp_id: String,
     pub handle: WebAuthnUserHandle,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Credential lifecycle status.
@@ -326,8 +326,8 @@ pub struct Credential<O = ProfileId> {
     /// Optional user-provided label (e.g., "iPhone 15 Pro", "Backup codes")
     pub label: Option<String>,
 
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
 
     // ─── OPAQUE-ZKPP fields (only for credential_type = Opaque) ───
     /// What the registration that installed this password proved about it.
@@ -361,7 +361,7 @@ impl<O> Credential<O> {
         data: impl Into<CredentialData>,
         label: Option<String>,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: CredentialId::new(),
             profile_id,
@@ -380,7 +380,7 @@ impl<O> Credential<O> {
 
     /// Update last used timestamp
     pub fn mark_used(&mut self) {
-        self.last_used_at = Some(Utc::now());
+        self.last_used_at = Some(Timestamp::now());
     }
 
     /// Gateway: obtain a typed wrapper if credential is active.

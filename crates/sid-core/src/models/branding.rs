@@ -43,8 +43,8 @@ pub struct BrandingConfig {
     #[serde(default)]
     pub revision: u64,
 
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 /// Branding lifecycle status.
@@ -374,8 +374,8 @@ mod tests {
                 login_title: Some("Sign in to Acme".into()),
                 ..Default::default()
             },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
