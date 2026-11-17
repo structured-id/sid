@@ -2,7 +2,7 @@
 //! Storage backend plugin traits.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::Result;
 use sid_core::models::anomaly_event::AnomalyEventRecord;
 use sid_core::models::consent::{ConsentId, ConsentRecord};
@@ -177,7 +177,7 @@ pub trait StorageBackend:
         profile_id: ProfileId,
         id: ProfilePhoneId,
         settings: &PhoneSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -188,7 +188,7 @@ pub trait StorageBackend:
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -221,7 +221,7 @@ pub trait StorageBackend:
         profile_id: ProfileId,
         id: ProfileEmailId,
         settings: &EmailSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -232,7 +232,7 @@ pub trait StorageBackend:
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -513,9 +513,7 @@ pub trait StorageBackend:
     async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> Result<()>;
 
     /// List all IP allowlist entries.
-    async fn list_ip_allowlist_entries(
-        &self,
-    ) -> Result<Vec<(String, String, chrono::DateTime<chrono::Utc>)>>;
+    async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, jiff::Timestamp)>>;
 
     /// Store an exported allowlist entry with the time it was added. The
     /// same entry stored before is `false` with nothing written; another for
@@ -524,7 +522,7 @@ pub trait StorageBackend:
         &self,
         cidr: &str,
         description: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -1711,7 +1709,7 @@ pub trait StorageBackend:
         machine_user_id: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -1828,7 +1826,7 @@ pub trait StorageBackend:
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -1896,7 +1894,7 @@ pub trait StorageBackend:
         &self,
         principal_hash: &str,
         principal_type: &str,
-        quarantine_until: DateTime<Utc>,
+        quarantine_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<()>;
 
@@ -1965,7 +1963,7 @@ pub trait StorageBackend:
     async fn acknowledge_export_job(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -1974,7 +1972,7 @@ pub trait StorageBackend:
     async fn expire_export_job(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -2194,7 +2192,7 @@ pub trait StorageBackend:
         &self,
         id: sid_core::models::BrandingConfigId,
         project_id: sid_core::models::ProjectId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -2303,15 +2301,11 @@ pub trait StorageBackend:
     /// Count registrations by source type in a time range.
     async fn count_registrations_by_source(
         &self,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> Result<Vec<(RegistrationSourceType, u64)>>;
 
     /// Get top referrers in a time range.
-    async fn top_referrers(
-        &self,
-        since: DateTime<Utc>,
-        limit: u64,
-    ) -> Result<Vec<(ProfileId, u64)>>;
+    async fn top_referrers(&self, since: Timestamp, limit: u64) -> Result<Vec<(ProfileId, u64)>>;
 
     // === DISTRIBUTED LOCKING ===
 
@@ -2324,7 +2318,7 @@ pub trait StorageBackend:
     /// (the first day of a month), so that month's records have a place
     /// before it begins; `true` when something was created. A backend that
     /// keeps audit records in one store has nothing to prepare.
-    async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> Result<bool>;
+    async fn ensure_audit_partition(&self, month_start: jiff::civil::Date) -> Result<bool>;
 
     /// Remove the audit records of every calendar month that ended at or
     /// before `cut_before`, never a record of a month still running on it,
@@ -2333,7 +2327,7 @@ pub trait StorageBackend:
     /// there. Returns the number of records removed.
     async fn drop_expired_audit_records(
         &self,
-        cut_before: DateTime<Utc>,
+        cut_before: Timestamp,
         ctx: MutationContext,
     ) -> Result<u64>;
 
