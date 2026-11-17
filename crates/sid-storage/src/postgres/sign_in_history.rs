@@ -7,6 +7,8 @@ use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{LoginLocation, SignInHistoryStore};
 
 use super::PostgresBackend;
+use crate::pg_time::{FromPg, PgTime, ToPg};
+use jiff::{SignedDuration, Timestamp};
 
 #[async_trait]
 impl SignInHistoryStore for PostgresBackend {
@@ -15,9 +17,9 @@ impl SignInHistoryStore for PostgresBackend {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: ProfileId,
-    ) -> SidResult<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(std::net::IpAddr, Timestamp)>> {
         // A sign-in still owing its second factor is no history.
-        let row: Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let row: Option<(std::net::IpAddr, PgTime)> = sqlx::query_as(
             "SELECT ip_address, created_at FROM sessions WHERE profile_id = $1 \
              AND ip_address IS NOT NULL AND NOT (is_provisional AND scopes = $2) \
              ORDER BY created_at DESC LIMIT 1",
@@ -27,7 +29,7 @@ impl SignInHistoryStore for PostgresBackend {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        Ok(row)
+        Ok(row.map(|(ip, at)| (ip, at.jiff())))
     }
 
     async fn has_recent_session_from_ip(
@@ -36,13 +38,13 @@ impl SignInHistoryStore for PostgresBackend {
         ip: std::net::IpAddr,
         window: std::time::Duration,
     ) -> SidResult<bool> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let cutoff = window_start(window)?;
         let row: (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND ip_address = $2 AND created_at > $3 \
              AND NOT (is_provisional AND scopes = $4))",
         ).bind(profile_id)
         .bind(ip)
-        .bind(cutoff)
+        .bind(cutoff.pg())
         .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
@@ -56,13 +58,13 @@ impl SignInHistoryStore for PostgresBackend {
         device_id: uuid::Uuid,
         window: std::time::Duration,
     ) -> SidResult<bool> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let cutoff = window_start(window)?;
         let row: (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND device_id = $2 AND created_at > $3 \
              AND NOT (is_provisional AND scopes = $4))",
         ).bind(profile_id)
         .bind(device_id)
-        .bind(cutoff)
+        .bind(cutoff.pg())
         .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
@@ -164,8 +166,8 @@ impl SignInHistoryStore for PostgresBackend {
         .bind(location.latitude)
         .bind(location.longitude)
         .bind(count)
-        .bind(location.first_seen)
-        .bind(location.last_seen)
+        .bind(location.first_seen.pg())
+        .bind(location.last_seen.pg())
         .bind(location.designated)
         .execute(&mut *tx)
         .await
@@ -176,7 +178,7 @@ impl SignInHistoryStore for PostgresBackend {
     }
 }
 
-type Time = chrono::DateTime<chrono::Utc>;
+type Time = PgTime;
 
 /// country, latitude, longitude, login_count, first_seen, last_seen, designated
 type LocationRow = (String, f64, f64, i32, Time, Time, bool);
@@ -188,8 +190,16 @@ fn location_of(row: LocationRow) -> LoginLocation {
         latitude,
         longitude,
         login_count: i64::from(login_count),
-        first_seen,
-        last_seen,
+        first_seen: first_seen.jiff(),
+        last_seen: last_seen.jiff(),
         designated,
     }
+}
+
+/// The start of the look-back `window` ending now.
+fn window_start(window: std::time::Duration) -> SidResult<Timestamp> {
+    SignedDuration::try_from(window)
+        .ok()
+        .and_then(|w| Timestamp::now().checked_sub(w).ok())
+        .ok_or_else(|| SidError::Validation(format!("look-back window {window:?} out of range")))
 }

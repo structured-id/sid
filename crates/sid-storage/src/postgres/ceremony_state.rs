@@ -16,6 +16,7 @@ use sid_plugin::{
 };
 
 use super::PostgresBackend;
+use crate::pg_time::{FromPg, PgTime, ToPg};
 
 fn failure(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
     move |e| SidError::Storage(format!("{what}: {e}"))
@@ -380,7 +381,7 @@ impl CeremonyStateStore for PostgresBackend {
             .execute(&mut *tx)
             .await
             .map_err(failure("export ceremony state"))?;
-        let states: Vec<(String, String, Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let states: Vec<(String, String, Vec<u8>, PgTime)> = sqlx::query_as(
             // Milliseconds: the precision every store keeps a deadline at.
             "SELECT namespace, state_key, value, date_trunc('milliseconds', expires_at)
              FROM ceremony_states
@@ -389,7 +390,7 @@ impl CeremonyStateStore for PostgresBackend {
         .fetch_all(&mut *tx)
         .await
         .map_err(failure("export ceremony state"))?;
-        let counts: Vec<(String, String, i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let counts: Vec<(String, String, i64, PgTime)> = sqlx::query_as(
             "SELECT namespace, count_key, count, date_trunc('milliseconds', window_ends)
              FROM ceremony_counts
              WHERE window_ends > clock_timestamp() ORDER BY namespace, count_key",
@@ -407,7 +408,7 @@ impl CeremonyStateStore for PostgresBackend {
                     namespace,
                     key,
                     value,
-                    expires_at,
+                    expires_at: expires_at.jiff(),
                 })
                 .collect(),
             counts: counts
@@ -418,7 +419,7 @@ impl CeremonyStateStore for PostgresBackend {
                         count: u64::try_from(count)
                             .map_err(|_| SidError::Storage(format!("count of {key} is {count}")))?,
                         key,
-                        window_ends,
+                        window_ends: window_ends.jiff(),
                     })
                 })
                 .collect::<SidResult<_>>()?,
@@ -434,7 +435,7 @@ impl CeremonyStateStore for PostgresBackend {
         let mut stored = 0;
         for entry in &records.states {
             // The row lock orders this with a concurrent writer of the key.
-            let held: Option<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            let held: Option<(Vec<u8>, PgTime)> = sqlx::query_as(
                 "SELECT value, date_trunc('milliseconds', expires_at) FROM ceremony_states
                  WHERE namespace = $1 AND state_key = $2 AND expires_at > clock_timestamp()
                  FOR UPDATE",
@@ -444,9 +445,9 @@ impl CeremonyStateStore for PostgresBackend {
             .fetch_optional(&mut *tx)
             .await
             .map_err(failure("import ceremony state"))?;
-            if let Some(held) = held {
+            if let Some((value, expires_at)) = held {
                 crate::transfer_repeat(
-                    &held,
+                    &(value, expires_at.jiff()),
                     &(entry.value.clone(), entry.expires_at),
                     "ceremony state",
                 )?;
@@ -461,7 +462,7 @@ impl CeremonyStateStore for PostgresBackend {
             .bind(&entry.namespace)
             .bind(&entry.key)
             .bind(&entry.value)
-            .bind(entry.expires_at)
+            .bind(entry.expires_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(failure("import ceremony state"))?;
@@ -471,7 +472,7 @@ impl CeremonyStateStore for PostgresBackend {
             let value = i64::try_from(count.count).map_err(|_| {
                 SidError::Validation(format!("count of {} is too large", count.key))
             })?;
-            let held: Option<(i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            let held: Option<(i64, PgTime)> = sqlx::query_as(
                 "SELECT count, date_trunc('milliseconds', window_ends) FROM ceremony_counts
                  WHERE namespace = $1 AND count_key = $2 AND window_ends > clock_timestamp()
                  FOR UPDATE",
@@ -481,8 +482,12 @@ impl CeremonyStateStore for PostgresBackend {
             .fetch_optional(&mut *tx)
             .await
             .map_err(failure("import ceremony count"))?;
-            if let Some(held) = held {
-                crate::transfer_repeat(&held, &(value, count.window_ends), "ceremony count")?;
+            if let Some((held_count, window_ends)) = held {
+                crate::transfer_repeat(
+                    &(held_count, window_ends.jiff()),
+                    &(value, count.window_ends),
+                    "ceremony count",
+                )?;
                 continue;
             }
             sqlx::query(
@@ -494,7 +499,7 @@ impl CeremonyStateStore for PostgresBackend {
             .bind(&count.namespace)
             .bind(&count.key)
             .bind(value)
-            .bind(count.window_ends)
+            .bind(count.window_ends.pg())
             .execute(&mut *tx)
             .await
             .map_err(failure("import ceremony count"))?;

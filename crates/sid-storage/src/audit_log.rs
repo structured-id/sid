@@ -202,10 +202,10 @@ impl AuditLog for PostgresAuditLog {
         // is a placeholder number, and every value arrives through `bind`.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(query)).bind(chain_id);
         if let Some(from) = from {
-            q = q.bind(from);
+            q = q.bind(from.to_sqlx());
         }
         if let Some(to) = to {
-            q = q.bind(to);
+            q = q.bind(to.to_sqlx());
         }
 
         let rows = q
@@ -294,7 +294,7 @@ impl AuditLog for PostgresAuditLog {
             .records
             .iter()
             .map(|r| {
-                let day = r.timestamp.to_zoned(jiff::tz::TimeZone::UTC);
+                let day = r.timestamp.to_zoned_datetime(jiff::tz::TimeZone::UTC);
                 (day.year(), day.month())
             })
             .collect();

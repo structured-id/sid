@@ -25,7 +25,7 @@ fn next_month(year: i32, month: u32) -> SidResult<Date> {
 
 /// The first instant of `day` in UTC.
 fn utc_start(day: Date) -> SidResult<Timestamp> {
-    day.to_zoned(TimeZone::UTC)
+    day.to_zoned_datetime(TimeZone::UTC)
         .map(|z| z.timestamp())
         .map_err(|e| SidError::Validation(format!("no start of {day}: {e}")))
 }
@@ -45,7 +45,7 @@ fn partition_month(name: &str) -> Option<(i32, u32)> {
 
 /// The first instant of the month `at` falls in.
 pub(super) fn month_start(at: Timestamp) -> SidResult<Timestamp> {
-    utc_start(at.to_zoned(TimeZone::UTC).date().first_of_month())
+    utc_start(at.to_zoned_datetime(TimeZone::UTC).date().first_of_month())
 }
 
 /// Create the partition of the month starting at `month_start`; `true` when

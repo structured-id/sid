@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Export an installation's database into a snapshot.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_plugin::SnapshotRules;
 use tracing::info;
 
@@ -403,7 +403,7 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
 
     super::import::validate(&snapshot, rules)?;
     snapshot.metadata.total_entities = snapshot.count_entities();
-    snapshot.metadata.created_at = Utc::now();
+    snapshot.metadata.created_at = Timestamp::now();
     info!(total = snapshot.metadata.total_entities, "export complete");
     Ok(snapshot)
 }

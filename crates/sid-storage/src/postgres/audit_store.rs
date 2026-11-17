@@ -103,7 +103,7 @@ impl PgAuditStore {
     /// on every replica.
     pub async fn prepare_partitions(&self, now: Timestamp) -> SidResult<()> {
         let this = now
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date()
             .first_of_month();
         let next = this

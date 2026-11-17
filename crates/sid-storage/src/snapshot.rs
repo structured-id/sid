@@ -11,7 +11,7 @@
 //! into the same target, and starts nothing: serving, issuance and restored
 //! work begin only when the host activates the restored installation.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sid_core::models::consent::ConsentRecord;
 use sid_core::models::notification::NotificationPreferences;
@@ -184,11 +184,11 @@ pub struct Snapshot {
 
     /// The credential service's history write cutoff, when one was raised:
     /// no history entry is written under an epoch created before it.
-    pub history_write_cutoff: Option<DateTime<Utc>>,
+    pub history_write_cutoff: Option<Timestamp>,
 
     /// The evaluator's history key write cutoff, when one was raised: no
     /// epoch created before it is selected or evaluated.
-    pub history_key_write_cutoff: Option<DateTime<Utc>>,
+    pub history_key_write_cutoff: Option<Timestamp>,
 
     /// The evaluator's fences of aborted first enrollments and purged owners,
     /// and its own audit trail where it keeps one apart from the audit chains.
@@ -359,7 +359,7 @@ pub struct Snapshot {
     pub platform_cas: sid_plugin::platform_ca::PlatformCaArchive,
 
     /// The IP allowlist, with when each entry was added.
-    pub ip_allowlist: Vec<(String, String, DateTime<Utc>)>,
+    pub ip_allowlist: Vec<(String, String, Timestamp)>,
 
     /// Learned IP reputation and the anomaly events the sign-in rules fired.
     pub ip_reputation: Vec<IpReputation>,
@@ -398,7 +398,7 @@ pub struct SnapshotMetadata {
     pub installation_org: Option<sid_core::models::OrgId>,
 
     /// When the snapshot was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     /// Source backend type (its `StorageBackend::name`).
     pub source_backend: String,
@@ -467,7 +467,7 @@ impl Snapshot {
                 version: FORMAT_VERSION,
                 snapshot_id: uuid::Uuid::now_v7(),
                 installation_org: None,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 source_backend: source_backend.to_string(),
                 total_entities: 0,
             },

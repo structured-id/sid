@@ -12,6 +12,7 @@ use sid_plugin::CredentialStore;
 use uuid::Uuid;
 
 use super::{PostgresBackend, insert_error, password_history};
+use crate::pg_time::{FromPg, PgTime, ToPg};
 
 /// Spend `spend` inside a mutation's transaction: the credential must still
 /// be active and hold the data as read, else the mutation commits nothing.
@@ -188,18 +189,20 @@ impl CredentialStore for PostgresBackend {
         password_history::get(&self.pool, owner).await
     }
 
-    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
-        sqlx::query_scalar("SELECT not_before FROM password_history_write_cutoff")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(format!("write cutoff: {e}")))
+    async fn history_write_cutoff(&self) -> SidResult<Option<jiff::Timestamp>> {
+        let cutoff: Option<PgTime> =
+            sqlx::query_scalar("SELECT not_before FROM password_history_write_cutoff")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(format!("write cutoff: {e}")))?;
+        Ok(cutoff.jiff())
     }
 
     async fn raise_history_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         audit: MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<jiff::Timestamp> {
         let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut tx = self
             .pool
@@ -208,18 +211,18 @@ impl CredentialStore for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // The row lock serializes the raise with every history commit, which
         // reads this row shared in its own transaction.
-        let current: Option<chrono::DateTime<chrono::Utc>> =
+        let current: Option<PgTime> =
             sqlx::query_scalar("SELECT not_before FROM password_history_write_cutoff FOR UPDATE")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("write cutoff: {e}")))?;
-        if let Some(current) = current
+        if let Some(current) = current.jiff()
             && current >= not_before
         {
             return Ok(current);
         }
         sqlx::query("UPDATE password_history_write_cutoff SET not_before = $1")
-            .bind(not_before)
+            .bind(not_before.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("write cutoff raise: {e}")))?;
