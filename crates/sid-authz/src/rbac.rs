@@ -90,7 +90,7 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
     }
 
     /// The stored roles among `ids`, by id.
-    async fn roles_by_id(&self, ids: &[RoleId]) -> Result<HashMap<RoleId, Role>> {
+    pub(crate) async fn roles_by_id(&self, ids: &[RoleId]) -> Result<HashMap<RoleId, Role>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -103,92 +103,11 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
             .collect())
     }
 
-    /// Keys of the roles granting `permission` to `principal` through the
-    /// unexpired assignments `counts` admits whose role `in_scope` admits, and
-    /// the installation administrator's, in assignment order, each role once.
-    async fn granting_roles(
-        &self,
-        principal: &AuthzPrincipal,
-        permission: &str,
-        counts: impl Fn(&RoleAssignment) -> bool,
-        in_scope: impl Fn(&Role) -> bool,
-    ) -> Result<Vec<String>> {
-        let assignments = self.assignments_of(principal).await?;
-        let mut seen = HashSet::new();
-        // `None` is the installation administrator's assignment.
-        let mut picked = Vec::new();
-        for assignment in &assignments {
-            if assignment.administers_installation() {
-                if seen.insert(assignment.role_id) {
-                    picked.push(None);
-                }
-                continue;
-            }
-            if assignment.is_expired() || !counts(assignment) || !seen.insert(assignment.role_id) {
-                continue;
-            }
-            picked.push(Some(assignment.role_id));
-        }
-        let ids: Vec<RoleId> = picked.iter().flatten().copied().collect();
-        let mut roles = self.roles_by_id(&ids).await?;
-        let mut granting = Vec::new();
-        for pick in picked {
-            match pick {
-                None => granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned()),
-                Some(id) => {
-                    if let Some(role) = roles.remove(&id)
-                        && in_scope(&role)
-                        && role.has_permission(permission)
-                    {
-                        granting.push(role.key);
-                    }
-                }
-            }
-        }
-        Ok(granting)
-    }
-
-    /// Keys of the roles granting `permission` to `principal` on the protected
-    /// resource `resource`: unexpired assignments scoped to exactly that
-    /// resource (a profile's groups included), and the installation
-    /// administrator's. Other project-wide and unscoped assignments grant
-    /// nothing on a resource.
-    pub async fn resource_granting_roles(
-        &self,
-        principal: &AuthzPrincipal,
-        resource: ResourceId,
-        permission: &str,
-    ) -> Result<Vec<String>> {
-        self.granting_roles(
-            principal,
-            permission,
-            |assignment| assignment.resource_scope() == Some(resource),
-            |_| true,
-        )
-        .await
-    }
-
-    /// Keys of the roles of `project` granting `permission` to `principal`:
-    /// its unexpired assignments (a profile's groups included), except those
-    /// scoped to one protected resource, which count only there, and the
-    /// installation administrator's on every project.
-    pub async fn project_granting_roles(
-        &self,
-        principal: &AuthzPrincipal,
-        project: ProjectId,
-        permission: &str,
-    ) -> Result<Vec<String>> {
-        self.granting_roles(
-            principal,
-            permission,
-            |assignment| assignment.resource_scope().is_none(),
-            |role| role.project_id == project,
-        )
-        .await
-    }
-
     /// Every stored assignment of `principal`, a profile's groups included.
-    async fn assignments_of(&self, principal: &AuthzPrincipal) -> Result<Vec<RoleAssignment>> {
+    pub(crate) async fn assignments_of(
+        &self,
+        principal: &AuthzPrincipal,
+    ) -> Result<Vec<RoleAssignment>> {
         Ok(match principal {
             AuthzPrincipal::Profile(profile_id) => {
                 self.storage
@@ -258,6 +177,81 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
             })
         }
     }
+}
+
+/// What a decision is on, and so which assignments and roles count toward it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum GrantTarget {
+    /// One protected resource: only assignments scoped to exactly it count,
+    /// with roles of any project.
+    Resource(ResourceId),
+    /// A project: assignments not scoped to one resource, with roles of the
+    /// project.
+    Project(ProjectId),
+}
+
+impl GrantTarget {
+    fn counts(self, assignment: &RoleAssignment) -> bool {
+        match self {
+            Self::Resource(resource) => assignment.resource_scope() == Some(resource),
+            Self::Project(_) => assignment.resource_scope().is_none(),
+        }
+    }
+
+    fn in_scope(self, role: &Role) -> bool {
+        match self {
+            Self::Resource(_) => true,
+            Self::Project(project) => role.project_id == project,
+        }
+    }
+}
+
+/// The roles `assignments` bring to a decision on `target`, in assignment
+/// order, each role once: the unexpired assignments that count there, and
+/// the installation administrator's (`None`), which counts everywhere.
+pub(crate) fn picks(assignments: &[RoleAssignment], target: GrantTarget) -> Vec<Option<RoleId>> {
+    let mut seen = HashSet::new();
+    let mut picked = Vec::new();
+    for assignment in assignments {
+        if assignment.administers_installation() {
+            if seen.insert(assignment.role_id) {
+                picked.push(None);
+            }
+            continue;
+        }
+        if assignment.is_expired() || !target.counts(assignment) || !seen.insert(assignment.role_id)
+        {
+            continue;
+        }
+        picked.push(Some(assignment.role_id));
+    }
+    picked
+}
+
+/// Keys of the `picked` roles, read into `roles`, that grant `permission` on
+/// `target`, in pick order. A picked role missing from `roles` grants
+/// nothing.
+pub(crate) fn granting(
+    picked: &[Option<RoleId>],
+    roles: &HashMap<RoleId, Role>,
+    permission: &str,
+    target: GrantTarget,
+) -> Vec<String> {
+    let mut granting = Vec::new();
+    for pick in picked {
+        match pick {
+            None => granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned()),
+            Some(id) => {
+                if let Some(role) = roles.get(id)
+                    && target.in_scope(role)
+                    && role.has_permission(permission)
+                {
+                    granting.push(role.key.clone());
+                }
+            }
+        }
+    }
+    granting
 }
 
 /// Result of a permission check with context.

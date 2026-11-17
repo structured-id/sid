@@ -4,18 +4,21 @@
 //! Pipeline: RBAC role check → Cedar policy evaluation. No graph
 //! traversal, no ReBAC: all checks are flat queries.
 
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sid_core::models::{
     AUTHZ_CHECK, AuthzPrincipal, MachineUserId, PolicyScope, ProfileId, ProjectId,
-    ProvisioningConnectorId, ResourceId, SCIM_ACTION_PREFIX, TOKEN_INTROSPECT,
+    ProvisioningConnectorId, ResourceId, RoleAssignment, RoleId, SCIM_ACTION_PREFIX,
+    TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
 
 use crate::cedar::CedarService;
 use crate::compiled::PolicySets;
 use crate::decision::{AuthzCheckRequest, AuthzCheckResponse, AuthzError};
-use crate::rbac::RbacService;
+use crate::rbac::{self, GrantTarget, RbacService};
 
 /// Resource prefix naming one registered protected resource.
 const OAUTH_RESOURCE: &str = "oauth_resource:";
@@ -103,44 +106,54 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
             .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}")))
     }
 
-    /// The decision on one protected resource: the assignments scoped to it,
-    /// and the installation's, its parent project's and its own policies.
-    /// Token inspection and permission checking need their assignment on
-    /// the resource whatever a policy permits.
-    async fn check_protected_resource(
+    /// The roles `principal` holds that grant `action` on `target`, read
+    /// into `reads` when they are not there yet.
+    async fn granting(
         &self,
         principal: &AuthzPrincipal,
-        resource: ResourceId,
-        request: &AuthzCheckRequest,
-        policies: Option<&[(String, String)]>,
-    ) -> Result<AuthzCheckResponse, AuthzError> {
-        let action = request.action.as_str();
-        let granting = self
-            .rbac
-            .resource_granting_roles(principal, resource, action)
-            .await
-            .map_err(|e| AuthzError::Storage(e.to_string()))?;
-        if granting.is_empty() && (action == TOKEN_INTROSPECT || action == AUTHZ_CHECK) {
-            return Ok(AuthzCheckResponse::Deny {
-                reason: format!("no role on resource {resource} grants '{action}'"),
-            });
-        }
-        let stored;
-        let applicable = match policies {
-            Some(policies) => policies,
+        target: GrantTarget,
+        action: &str,
+        reads: &mut Reads,
+    ) -> Result<Vec<String>, AuthzError> {
+        let storage = |e: sid_core::Error| AuthzError::Storage(e.to_string());
+        let picked = match reads.assignments.get(principal) {
+            Some(assignments) => rbac::picks(assignments, target),
             None => {
-                let scopes = self.resource_scopes(resource).await?;
-                stored = self.enabled_policies(&scopes).await?;
-                &stored
+                let assignments = self.rbac.assignments_of(principal).await.map_err(storage)?;
+                let picked = rbac::picks(&assignments, target);
+                reads.assignments.insert(principal.clone(), assignments);
+                picked
             }
         };
-        Ok(self.combine(
-            principal,
-            request,
-            &resource.to_string(),
-            &granting,
-            applicable,
-        ))
+        let unread: Vec<RoleId> = picked
+            .iter()
+            .flatten()
+            .filter(|id| !reads.roles_read.contains(id))
+            .copied()
+            .collect();
+        if !unread.is_empty() {
+            reads
+                .roles
+                .extend(self.rbac.roles_by_id(&unread).await.map_err(storage)?);
+            reads.roles_read.extend(unread);
+        }
+        Ok(rbac::granting(&picked, &reads.roles, action, target))
+    }
+
+    /// The enabled policies that apply to a decision on `target`, read into
+    /// `reads` when they are not there yet.
+    async fn applicable<'r>(
+        &self,
+        target: GrantTarget,
+        reads: &'r mut Reads,
+    ) -> Result<&'r [(String, String)], AuthzError> {
+        match reads.policies.entry(target) {
+            Entry::Occupied(read) => Ok(read.into_mut()),
+            Entry::Vacant(unread) => {
+                let scopes = self.scopes_for(target).await?;
+                Ok(unread.insert(self.enabled_policies(&scopes).await?))
+            }
+        }
     }
 
     /// The project of the application `resource` belongs to; none for a
@@ -184,18 +197,24 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         Ok(scopes)
     }
 
-    /// The scopes whose policies apply to a decision on `resource` (a
-    /// protected resource `oauth_resource:<id>`, or a project).
-    async fn scopes_of(&self, resource: &str) -> Result<Vec<PolicyScope>, AuthzError> {
+    /// What `resource` names: a protected resource `oauth_resource:<id>`, or
+    /// else a project.
+    fn target_of(resource: &str) -> Result<GrantTarget, AuthzError> {
         match resource.strip_prefix(OAUTH_RESOURCE) {
-            Some(id) => {
-                let id = ResourceId::parse(id)
-                    .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}")))?;
-                self.resource_scopes(id).await
-            }
-            None => Ok(vec![
+            Some(id) => ResourceId::parse(id)
+                .map(GrantTarget::Resource)
+                .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}"))),
+            None => Self::parse_project(resource).map(GrantTarget::Project),
+        }
+    }
+
+    /// The scopes whose policies apply to a decision on `target`.
+    async fn scopes_for(&self, target: GrantTarget) -> Result<Vec<PolicyScope>, AuthzError> {
+        match target {
+            GrantTarget::Resource(id) => self.resource_scopes(id).await,
+            GrantTarget::Project(project) => Ok(vec![
                 PolicyScope::Installation,
-                PolicyScope::Project(Self::parse_project(resource)?),
+                PolicyScope::Project(project),
             ]),
         }
     }
@@ -207,7 +226,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         &self,
         resource: &str,
     ) -> Result<ApplicablePolicies, AuthzError> {
-        let scopes = self.scopes_of(resource).await?;
+        let scopes = self.scopes_for(Self::target_of(resource)?).await?;
         let mut policies = Vec::new();
         for scope in &scopes {
             policies.extend(
@@ -342,7 +361,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         &self,
         request: &AuthzCheckRequest,
     ) -> Result<AuthzCheckResponse, AuthzError> {
-        self.decide(request, None).await
+        self.decide(request, None, &mut Reads::default()).await
     }
 
     /// The decision [`Self::check`] would make if the project's enabled
@@ -353,13 +372,17 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         request: &AuthzCheckRequest,
         policies: &[(String, String)],
     ) -> Result<AuthzCheckResponse, AuthzError> {
-        self.decide(request, Some(policies)).await
+        self.decide(request, Some(policies), &mut Reads::default())
+            .await
     }
 
+    /// The decision on `request`, under `policies` instead of the stored
+    /// ones when given, reading what it needs into `reads`.
     async fn decide(
         &self,
         request: &AuthzCheckRequest,
         policies: Option<&[(String, String)]>,
+        reads: &mut Reads,
     ) -> Result<AuthzCheckResponse, AuthzError> {
         let principal = Self::parse_subject(&request.subject)?;
         let protected = request.resource.strip_prefix(OAUTH_RESOURCE);
@@ -404,57 +427,61 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
                 ),
             });
         }
-        if let Some(id) = protected {
-            let resource = ResourceId::parse(id)
-                .map_err(|e| AuthzError::InvalidResource(format!("{}: {e}", request.resource)))?;
-            return self
-                .check_protected_resource(&principal, resource, request, policies)
-                .await;
+        let target = Self::target_of(&request.resource)?;
+        let action = request.action.as_str();
+        // The principal's roles that grant the action on the target, whatever
+        // kind of principal it is.
+        let granting = self.granting(&principal, target, action, reads).await?;
+        // Token inspection and permission checking need their assignment on
+        // the resource whatever a policy permits.
+        if let GrantTarget::Resource(resource) = target
+            && granting.is_empty()
+            && (action == TOKEN_INTROSPECT || action == AUTHZ_CHECK)
+        {
+            return Ok(AuthzCheckResponse::Deny {
+                reason: format!("no role on resource {resource} grants '{action}'"),
+            });
         }
-        let project_id = Self::parse_project(&request.resource)?;
-
-        // The principal's project roles that grant the action, whatever kind
-        // of principal it is.
-        let granting_roles = self
-            .rbac
-            .project_granting_roles(&principal, project_id, &request.action)
-            .await
-            .map_err(|e| AuthzError::Storage(e.to_string()))?;
-
-        // The installation's and the project's policies apply to every
-        // decision on the project: a `forbid` prohibits whatever role
+        // The installation's, the project's and the resource's policies apply
+        // to every decision on the target: a `forbid` prohibits whatever role
         // grants, a `permit` allows without one.
-        let stored;
         let applicable = match policies {
             Some(policies) => policies,
-            None => {
-                stored = self
-                    .enabled_policies(&self.scopes_of(&request.resource).await?)
-                    .await?;
-                &stored
-            }
+            None => self.applicable(target, reads).await?,
         };
-        Ok(self.combine(
-            &principal,
-            request,
-            &project_id.to_string(),
-            &granting_roles,
-            applicable,
-        ))
+        let named = match target {
+            GrantTarget::Resource(resource) => resource.to_string(),
+            GrantTarget::Project(project) => project.to_string(),
+        };
+        Ok(self.combine(&principal, request, &named, &granting, applicable))
     }
 
     /// One decision per request, in order; the first check that cannot be
-    /// decided fails the batch.
+    /// decided fails the batch. Each subject's assignments and roles and each
+    /// target's policies are read once for the whole batch.
     pub async fn batch_check(
         &self,
         requests: &[AuthzCheckRequest],
     ) -> Result<Vec<AuthzCheckResponse>, AuthzError> {
+        let mut reads = Reads::default();
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
-            results.push(self.check(request).await?);
+            results.push(self.decide(request, None, &mut reads).await?);
         }
         Ok(results)
     }
+}
+
+/// What the decisions of one call have read: each subject's assignments, the
+/// roles they name and each target's enabled policies.
+#[derive(Default)]
+struct Reads {
+    assignments: HashMap<AuthzPrincipal, Vec<RoleAssignment>>,
+    roles: HashMap<RoleId, sid_core::models::Role>,
+    /// The roles read, found or not: a role deleted since its assignment is
+    /// not asked for again.
+    roles_read: HashSet<RoleId>,
+    policies: HashMap<GrantTarget, Vec<(String, String)>>,
 }
 
 #[cfg(test)]

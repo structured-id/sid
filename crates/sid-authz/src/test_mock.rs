@@ -19,6 +19,8 @@ pub struct MockStorage {
     /// While set, the reads a permission check makes fail as an
     /// unreachable store would.
     pub unavailable: std::sync::atomic::AtomicBool,
+    /// How many reads a permission check has made.
+    pub reads: std::sync::atomic::AtomicUsize,
 }
 
 impl MockStorage {
@@ -32,6 +34,7 @@ impl MockStorage {
             applications: Mutex::new(Vec::new()),
             resources: Mutex::new(Vec::new()),
             unavailable: std::sync::atomic::AtomicBool::new(false),
+            reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -78,6 +81,7 @@ impl MockStorage {
     }
 
     fn reachable(&self) -> Result<()> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(sid_core::Error::Storage("store unavailable".into()));
         }

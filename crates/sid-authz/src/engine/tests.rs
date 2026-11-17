@@ -1293,6 +1293,46 @@ async fn a_resource_forbid_on_one_object_denies_only_that_object() {
     assert!(g.cancels("order:own").await, "another object");
 }
 
+/// A batch about one subject on one target reads the subject's assignments,
+/// the target's registration and its policies once, as a single check does,
+/// and still answers every question by its own object, in order.
+#[tokio::test]
+async fn a_batch_reads_each_subject_and_target_once() {
+    let g = granted_on_resource().await;
+    g.policy(
+        PolicyScope::Resource(g.resource),
+        PolicyEffect::Forbid,
+        r#"forbid(principal, action, resource) when { context has object && context.object == "order:foreign" };"#,
+    )
+    .await;
+    let ask = |object: &str| AuthzCheckRequest {
+        subject: format!("user:{}", g.user),
+        action: "orders.cancel".into(),
+        resource: format!("oauth_resource:{}", g.resource),
+        context: [("object".to_owned(), object.to_owned())].into(),
+    };
+    let reads = || g.storage.reads.load(std::sync::atomic::Ordering::SeqCst);
+
+    let before = reads();
+    assert!(g.engine.check(&ask("order:1")).await.unwrap().is_allowed());
+    let single = reads() - before;
+
+    let before = reads();
+    let answers = g
+        .engine
+        .batch_check(&[ask("order:1"), ask("order:foreign"), ask("order:2")])
+        .await
+        .unwrap();
+    let batch = reads() - before;
+
+    let allowed: Vec<bool> = answers.iter().map(|a| a.is_allowed()).collect();
+    assert_eq!(allowed, [true, false, true]);
+    assert_eq!(
+        batch, single,
+        "a batch of three read {batch}, one check {single}"
+    );
+}
+
 /// A permit cannot override a prohibition inherited from a wider scope.
 #[tokio::test]
 async fn a_local_permit_does_not_override_an_inherited_forbid() {
