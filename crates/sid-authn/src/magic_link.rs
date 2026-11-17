@@ -81,7 +81,7 @@ pub struct PendingLink {
     pub session_id: uuid::Uuid,
     pub destination: String,
     pub token: secrecy::SecretString,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
 }
 
 /// Magic link session service.
@@ -241,7 +241,7 @@ impl MagicLinkService {
     pub async fn pending_delivery(
         &self,
         id: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
+        now: jiff::Timestamp,
     ) -> Result<Option<PendingLink>, MagicLinkError> {
         let Some(session) = self
             .storage

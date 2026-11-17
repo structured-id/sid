@@ -454,7 +454,7 @@ async fn judge<H: SignInSecurityHost>(
 
     // The login requirements, checked on a probe of the session the sign-in
     // would create: the real one does not exist yet.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let probe = match attempt.authentication {
         AttemptAuthentication::Local { assurance, amr, .. } => {
             crate::login_policy::local_authentication(owner.clone(), assurance, amr, now)

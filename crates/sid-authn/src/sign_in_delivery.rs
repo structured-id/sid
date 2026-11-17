@@ -3,7 +3,7 @@
 //! the configured browser sign-in page gets the HttpOnly session cookie, a
 //! native client the access token in a response header, never the message.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use prost::Message;
 use secrecy::ExposeSecret;
 use sid_core::models::Session;
@@ -119,7 +119,10 @@ impl BrowserCredential {
     /// lives for what remains of the session now, after storing it took
     /// its time, so it never outlives the session it names.
     pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> SignedIn {
-        let expires_in = (session.expires_at - Utc::now()).num_seconds();
+        let expires_in = session
+            .expires_at
+            .duration_since(Timestamp::now())
+            .as_secs();
         SignedIn {
             session_id: session.id,
             expires_in,
@@ -135,7 +138,7 @@ impl BrowserCredential {
         keys: &dyn sid_keys::KeyManager,
         context: &str,
         session: &Session<O>,
-        deadline: DateTime<Utc>,
+        deadline: Timestamp,
     ) -> Result<Vec<u8>, SealedSecretError> {
         seal_retained(
             keys,
@@ -157,7 +160,7 @@ impl BrowserCredential {
 /// client proved its key.
 pub struct BearerCredential<'a> {
     pub token: &'a secrecy::SecretString,
-    pub token_expires_at: DateTime<Utc>,
+    pub token_expires_at: Timestamp,
     pub refresh: Option<&'a NativeCredentialSet>,
 }
 
@@ -169,7 +172,7 @@ pub async fn retain_bearer<O>(
     context: &str,
     session: &Session<O>,
     credential: BearerCredential<'_>,
-    deadline: DateTime<Utc>,
+    deadline: Timestamp,
 ) -> Result<Vec<u8>, SealedSecretError> {
     seal_retained(
         keys,
@@ -202,7 +205,7 @@ async fn seal_retained(
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Retained {
     session: sid_ids::SessionId,
-    deadline: DateTime<Utc>,
+    deadline: Timestamp,
     credential: RetainedCredential,
 }
 
@@ -215,7 +218,7 @@ enum RetainedCredential {
     /// generation.
     Bearer {
         token: String,
-        token_expires_at: DateTime<Utc>,
+        token_expires_at: Timestamp,
         refresh: Option<Vec<u8>>,
     },
 }
@@ -225,7 +228,7 @@ enum Opened {
     Browser(BrowserCredential),
     Bearer {
         token: secrecy::SecretString,
-        token_expires_at: DateTime<Utc>,
+        token_expires_at: Timestamp,
         refresh: Option<NativeCredentialSet>,
     },
 }
@@ -234,7 +237,7 @@ enum Opened {
 /// may be redelivered, and its credential.
 pub struct RetainedDelivery {
     pub session_id: sid_ids::SessionId,
-    pub deadline: DateTime<Utc>,
+    pub deadline: Timestamp,
     credential: Opened,
 }
 
@@ -320,7 +323,10 @@ impl RetainedDelivery {
                 refresh,
             } => Some(SignedIn {
                 session_id: session.id,
-                expires_in: (token_expires_at.min(session.expires_at) - Utc::now()).num_seconds(),
+                expires_in: token_expires_at
+                    .min(session.expires_at)
+                    .duration_since(Timestamp::now())
+                    .as_secs(),
                 delivery: Delivery::Bearer { token, refresh },
             }),
         }

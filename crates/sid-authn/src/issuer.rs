@@ -82,7 +82,7 @@ pub async fn ensure_local_issuer(
         handle,
         authority: IssuerAuthority::Local,
         recipient_org: org,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let first_key = new_signing_key(keys, &issuer, 1).await?;
     // Replicas starting together race here: the first insert is kept and
@@ -237,7 +237,7 @@ pub async fn ensure_issuer_resource(
     {
         return with_actions(storage, issuer, &indicator, stored, scopes, name).await;
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -313,7 +313,7 @@ async fn with_actions(
         }
         let mut updated = stored.clone();
         updated.scopes.extend(missing);
-        updated.updated_at = chrono::Utc::now();
+        updated.updated_at = jiff::Timestamp::now();
         let audit = AuditEntry::system("issuer_resource.actions_added", issuer.id.to_string());
         storage
             .update_protected_resource(&updated, audit.into())
@@ -353,7 +353,7 @@ async fn new_signing_key(
         key_id: key_id(&public_key),
         public_key,
         sealed_private_key,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     })
 }
 

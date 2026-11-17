@@ -202,7 +202,7 @@ pub struct PendingOperation<O, P> {
     pub current_password: CurrentPassword,
     /// When the operation ends, fixed when it is prepared: every step stores
     /// it until then, and a first enrollment's cleanup is due then.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
 }
 
 /// What execute's KE3 established.
@@ -292,7 +292,7 @@ pub struct Prepared {
     pub registration_response: Option<Vec<u8>>,
     /// When the operation ends: whatever the host hands the client for it
     /// (a ceremony context's cookie) must not outlive it.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
 }
 
 /// What a finished operation hands its purpose to commit.
@@ -413,7 +413,7 @@ pub struct HistoryAdmission {
     pub id: PasswordOperationId,
     pub owner_domain: [u8; 32],
     pub kind: OwnerKind,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
     pub charge_key: String,
     pub live: LiveDomains,
     /// The domains holding an entry of the operation's comparison window,
@@ -496,7 +496,7 @@ impl HistoryAdmission {
         let expires_at = req
             .expires_at
             .as_ref()
-            .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?))
+            .and_then(instant)
             .ok_or_else(|| invalid_field("expires_at", "a valid instant"))?;
         Ok(Self {
             id: operation_id(req.operation_id.as_ref())?,
@@ -586,12 +586,22 @@ pub fn descriptor_message(e: &HistoryEpochDescriptor) -> PasswordHistoryEpochDes
 }
 
 /// `at` on the wire.
-fn timestamp(at: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: at.timestamp(),
-        // Sub-second nanoseconds are below 2·10⁹ (a leap second), within i32.
-        nanos: at.timestamp_subsec_nanos() as i32,
+fn timestamp(at: jiff::Timestamp) -> prost_types::Timestamp {
+    // The protobuf form counts nanoseconds forward from the second below.
+    let (seconds, nanos) = match at.subsec_nanosecond() {
+        n if n < 0 => (at.as_second() - 1, n + 1_000_000_000),
+        n => (at.as_second(), n),
+    };
+    prost_types::Timestamp { seconds, nanos }
+}
+
+/// The instant a wire timestamp names; nanoseconds outside 0..10⁹ are
+/// malformed (google.protobuf.Timestamp).
+fn instant(t: &prost_types::Timestamp) -> Option<jiff::Timestamp> {
+    if !(0..1_000_000_000).contains(&t.nanos) {
+        return None;
     }
+    jiff::Timestamp::new(t.seconds, t.nanos).ok()
 }
 
 /// The descriptor a message describes, when every field is well formed.
@@ -607,9 +617,7 @@ fn descriptor_of(m: &PasswordHistoryEpochDescriptor) -> Option<HistoryEpochDescr
             lanes: ksf.lanes,
         },
         ksf_salt: m.ksf_salt.as_slice().try_into().ok()?,
-        created_at: m.created_at.as_ref().and_then(|t| {
-            chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?)
-        })?,
+        created_at: m.created_at.as_ref().and_then(instant)?,
     })
 }
 
@@ -842,11 +850,9 @@ pub enum HistoryCutoffError {
 /// store that keeps history keys or commits history.
 pub fn parse_history_write_cutoff(
     value: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<chrono::DateTime<chrono::Utc>, HistoryCutoffError> {
-    let cutoff = chrono::DateTime::parse_from_rfc3339(value)
-        .map_err(|_| HistoryCutoffError::Malformed)?
-        .with_timezone(&chrono::Utc);
+    now: jiff::Timestamp,
+) -> Result<jiff::Timestamp, HistoryCutoffError> {
+    let cutoff: jiff::Timestamp = value.parse().map_err(|_| HistoryCutoffError::Malformed)?;
     if cutoff > now {
         return Err(HistoryCutoffError::Future);
     }
@@ -885,7 +891,7 @@ impl PasswordHistoryAuthority {
         store: Arc<dyn HistoryKeyStore>,
         master_key: &std::path::Path,
         crypto: Arc<dyn sid_crypto::CryptoPrimitives>,
-        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+        cutoff: Option<jiff::Timestamp>,
     ) -> Result<Self, HistoryAuthorityError> {
         if let Some(cutoff) = cutoff {
             store
@@ -1074,8 +1080,8 @@ where
         };
         // One deadline for every record of the operation: its pending state,
         // the evaluator's record and a first enrollment's cleanup.
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::from_std(OPERATION_TTL)
+        let expires_at = jiff::Timestamp::now()
+            + jiff::SignedDuration::try_from(OPERATION_TTL)
                 .expect("the operation lifetime fits a duration");
         let mut op = PendingOperation {
             id,
@@ -1352,7 +1358,7 @@ where
             .verify_finish(zkpp, id, method, record, proof, authorized)
             .await?;
         if let Finish::Ready(done) = &finished
-            && chrono::Utc::now() >= commit_deadline(done.operation.expires_at)
+            && jiff::Timestamp::now() >= commit_deadline(done.operation.expires_at)
         {
             return Err(expired().into());
         }
@@ -1644,7 +1650,7 @@ fn selection_is_complete<O>(
 struct EvaluatorOperation {
     owner_domain: [u8; 32],
     kind: OwnerKind,
-    expires_at: chrono::DateTime<chrono::Utc>,
+    expires_at: jiff::Timestamp,
     charge_key: String,
     /// The selected epochs, active first.
     epochs: Vec<HistoryEpochDescriptor>,
@@ -1735,12 +1741,12 @@ impl HistoryEvaluation {
         &self,
         admission: &HistoryAdmission,
     ) -> Result<Vec<HistoryEpochDescriptor>, PasswordOperationError> {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         // The expiry comes from the credential service's clock; an ordinary
         // skew between the two hosts is tolerated, as at JWT expiry
         // (RFC 7519 §4.1.4).
         let latest = now
-            + chrono::Duration::from_std(OPERATION_TTL + ADMISSION_CLOCK_SKEW)
+            + jiff::SignedDuration::try_from(OPERATION_TTL + ADMISSION_CLOCK_SKEW)
                 .expect("the operation lifetime fits a duration");
         if admission.expires_at <= now || admission.expires_at > latest {
             return Err(invalid_field(
@@ -1786,7 +1792,7 @@ impl HistoryEvaluation {
         record: &mut EvaluatorOperation,
         admission: &HistoryAdmission,
         policy: &EpochPolicy,
-        now: chrono::DateTime<chrono::Utc>,
+        now: jiff::Timestamp,
     ) -> Result<(), PasswordOperationError> {
         let owner_domain = admission.owner_domain;
         match admission.kind {
@@ -1956,10 +1962,7 @@ impl HistoryEvaluation {
 
     /// Drop the fences of first enrollments abandoned before `before`, when
     /// no delayed preparation of them can still be within its expiry.
-    pub async fn compact_abandoned(
-        &self,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> sid_core::Result<u64> {
+    pub async fn compact_abandoned(&self, before: jiff::Timestamp) -> sid_core::Result<u64> {
         self.keys
             .compact_abandoned(before, audit("password_history.fences_compacted"))
             .await
@@ -1976,7 +1979,7 @@ impl HistoryEvaluation {
     ) -> Result<Vec<PasswordHistoryEvaluation>, PasswordOperationError> {
         let blinded = array32(blinded, "blinded_input")?;
         let mut record = self.ops.take(&id.to_string()).await?.ok_or_else(expired)?;
-        if record.expires_at <= chrono::Utc::now() {
+        if record.expires_at <= jiff::Timestamp::now() {
             return Err(expired());
         }
         // Checked before a recorded answer is returned too: no evaluation,

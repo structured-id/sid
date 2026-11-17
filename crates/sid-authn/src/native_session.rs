@@ -73,7 +73,7 @@ fn new_generation(
     key_jkt: &str,
     policy: NativePolicy,
 ) -> NewGeneration {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let credentials: Vec<String> = (0..policy.generation_size)
         .map(|_| {
             let mut bytes = Zeroizing::new([0u8; CREDENTIAL_BYTES]);
@@ -95,7 +95,7 @@ fn new_generation(
     };
     let set = NativeCredentialSet {
         refresh_credentials: credentials,
-        expires_in: (session.expires_at - now).num_seconds().max(0),
+        expires_in: session.expires_at.duration_since(now).as_secs().max(0),
         redelivery_window: i64::try_from(policy.redelivery_window.as_secs())
             .expect("a policy window in seconds fits i64"),
     };
@@ -202,7 +202,7 @@ where
     if proved.jkt != presented.key_jkt {
         return Err(NativeError::KeyMismatch);
     }
-    if presented.expires_at <= chrono::Utc::now() {
+    if presented.expires_at <= jiff::Timestamp::now() {
         return Err(NativeError::Expired);
     }
     let session = store
@@ -216,7 +216,7 @@ where
     let sealed = crate::sealed_secret::seal(keys, &context, &successor.set.encode_to_vec())
         .await
         .map_err(|e| NativeError::Sealing(e.to_string()))?;
-    let window = chrono::Duration::from_std(policy.redelivery_window)
+    let window = jiff::SignedDuration::try_from(policy.redelivery_window)
         .map_err(|e| NativeError::Sealing(format!("redelivery window: {e}")))?;
     let outcome = store
         .rotate_native_generation(
@@ -225,7 +225,7 @@ where
                 exchange: request.exchange,
                 successor: &successor.generation,
                 sealed: &sealed,
-                redeliver_until: chrono::Utc::now() + window,
+                redeliver_until: jiff::Timestamp::now() + window,
             },
             AuditEntry::user(
                 session.profile_id.to_string(),

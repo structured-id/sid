@@ -537,18 +537,15 @@ fn decode_recorded<T: serde::de::DeserializeOwned>(result: &[u8]) -> Result<T, O
 /// completions. Both are idempotent and serialized in the store, so every
 /// replica of a host runs this, about once a minute, under no job lock.
 /// Returns how many periods were retired.
-pub async fn upkeep(
-    store: &(impl OperationResultStore + ?Sized),
-    now: chrono::DateTime<chrono::Utc>,
-) -> u64 {
+pub async fn upkeep(store: &(impl OperationResultStore + ?Sized), now: jiff::Timestamp) -> u64 {
     if let Err(e) = store.purge_expired_operation_results(now).await {
         tracing::warn!(error = %e, "operation result expiry failed");
     }
     let retired = async {
         let policy = store.operation_period_policy().await?;
         let before = now
-            .checked_sub_signed(policy.retention)
-            .ok_or_else(|| sid_core::Error::Internal("operation period retention".into()))?;
+            .checked_sub(policy.retention)
+            .map_err(|_| sid_core::Error::Internal("operation period retention".into()))?;
         store.retire_operation_periods(before).await
     };
     match retired.await {

@@ -12,7 +12,7 @@
 //! Every refusal is the same `unauthenticated`, so a caller learns nothing
 //! about which check failed.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{MachineUser, MachineUserCredential};
 use sid_plugin::StorageBackend;
 
@@ -86,7 +86,7 @@ pub async fn machine_token_state(
     };
     let usable = credential.machine_user_id == machine.id
         && credential.status.is_usable()
-        && credential.expires_at.is_none_or(|at| at > Utc::now());
+        && credential.expires_at.is_none_or(|at| at > Timestamp::now());
     if !usable {
         return Ok(MachineTokenState::Unusable);
     }
