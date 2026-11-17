@@ -97,9 +97,6 @@ idna = { workspace = true }
 # Email login handles: mailbox grammar, IDNA and PSL; SID equality on top.
 structured-email-address = { workspace = true }
 
-# Phone number validation (E.164)
-phonenumber = { workspace = true }
-
 # The password operation's wire messages (optional)
 sid-proto = { workspace = true, optional = true }
 # The typed ids of password operations and sign-ins; their wire form
