@@ -2,7 +2,7 @@
 //! Sessions: a create never replaces one, and recording an authentication
 //! never brings back an ended session or undoes a concurrent authentication.
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::Session;
 use sid_core::models::session::{AuthLevel, Elevation};
@@ -113,7 +113,7 @@ pub async fn test_record_authentication_refuses_expired_session(backend: &dyn St
         .await
         .unwrap();
     let mut session = create_test_session(profile.id);
-    session.expires_at = Utc::now() - Duration::minutes(1);
+    session.expires_at = Timestamp::now() - Duration::from_mins(1);
     backend
         .create_session(&session, test_audit())
         .await
@@ -123,7 +123,7 @@ pub async fn test_record_authentication_refuses_expired_session(backend: &dyn St
     let mut new = stored.authentication();
     new.elevation = Some(Elevation {
         level: AuthLevel::Critical,
-        until: Utc::now() + Duration::minutes(15),
+        until: Timestamp::now() + Duration::from_mins(15),
     });
     assert!(
         !backend

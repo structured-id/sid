@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::audit::{ActorType, AuditOutcome, ChainHead, compute_record_hash};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -36,7 +36,7 @@ impl AuditLog for InMemoryAuditLog {
         let id = format!("audit_{}", records.len() + 1);
         let mut record = AuditRecord {
             id: id.clone(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             chain_id: chain_id.to_string(),
             sequence,
             actor_id: entry.actor_id,
@@ -69,8 +69,8 @@ impl AuditLog for InMemoryAuditLog {
     async fn query(
         &self,
         chain_id: &str,
-        from: Option<chrono::DateTime<chrono::Utc>>,
-        to: Option<chrono::DateTime<chrono::Utc>>,
+        from: Option<Timestamp>,
+        to: Option<Timestamp>,
     ) -> Result<Vec<AuditRecord>, AuditError> {
         let records = self.records.lock().unwrap();
         Ok(records
