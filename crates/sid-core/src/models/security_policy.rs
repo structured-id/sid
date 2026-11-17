@@ -6,7 +6,7 @@
 //!
 //! The policy is hardcoded via constants.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -658,8 +658,8 @@ pub struct SecurityPolicy {
     /// Network access restrictions (country, Tor, datacenter IPs).
     pub network: NetworkPolicy,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl SecurityPolicy {
@@ -674,7 +674,7 @@ impl SecurityPolicy {
     /// In CE, this is the only policy — not configurable via UI or API.
     /// Equivalent to NIST SP 800-63B AAL1 baseline.
     pub fn ce_default() -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: SecurityPolicyId(Uuid::nil()),
             name: "CE Default".to_string(),

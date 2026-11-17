@@ -4,7 +4,7 @@
 //! Enrollment, challenge/response lifecycle, and recovery codes.
 //! MFA methods are extensible via `MfaProvider` trait (in sid-plugin).
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -258,8 +258,8 @@ pub struct MfaEnrollment {
 
     pub status: EnrollmentStatus,
 
-    pub enrolled_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub enrolled_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
 }
 
 impl MfaEnrollment {
@@ -270,7 +270,7 @@ impl MfaEnrollment {
             method,
             credential_id,
             status: EnrollmentStatus::Pending,
-            enrolled_at: Utc::now(),
+            enrolled_at: Timestamp::now(),
             last_used_at: None,
         }
     }
@@ -294,7 +294,7 @@ impl MfaEnrollment {
     }
 
     pub fn record_use(&mut self) {
-        self.last_used_at = Some(Utc::now());
+        self.last_used_at = Some(Timestamp::now());
     }
 
     pub fn is_active(&self) -> bool {
@@ -388,9 +388,9 @@ pub struct MfaChallenge {
     /// Auth level that will be granted on success.
     pub target_level: AuthLevel,
 
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub verified_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub verified_at: Option<Timestamp>,
 }
 
 /// CE hardcoded MFA policy constants.
@@ -405,7 +405,7 @@ impl MfaChallenge {
         challenge_data: Vec<u8>,
         target_level: AuthLevel,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: Uuid::now_v7(),
             profile_id,
@@ -415,14 +415,14 @@ impl MfaChallenge {
             attempt_count: 0,
             target_level,
             created_at: now,
-            expires_at: now + chrono::Duration::seconds(MFA_CHALLENGE_TTL_SECONDS as i64),
+            expires_at: now + SignedDuration::from_secs(MFA_CHALLENGE_TTL_SECONDS as i64),
             verified_at: None,
         }
     }
 
     /// Whether this challenge has expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        Timestamp::now() >= self.expires_at
     }
 
     /// Whether more attempts are allowed.
@@ -473,7 +473,7 @@ impl<'a> PendingChallenge<'a> {
     /// Mark as successfully verified. Consumes wrapper.
     pub fn verify(self) {
         self.0.status = ChallengeStatus::Verified;
-        self.0.verified_at = Some(Utc::now());
+        self.0.verified_at = Some(Timestamp::now());
     }
 
     /// Mark as expired (TTL exceeded). Consumes wrapper.
@@ -497,7 +497,7 @@ pub struct RecoveryCode {
     pub used: bool,
 
     /// When this code was used (if used).
-    pub used_at: Option<DateTime<Utc>>,
+    pub used_at: Option<Timestamp>,
 }
 
 impl RecoveryCode {
@@ -515,7 +515,7 @@ impl RecoveryCode {
             return false;
         }
         self.used = true;
-        self.used_at = Some(Utc::now());
+        self.used_at = Some(Timestamp::now());
         true
     }
 }
@@ -525,7 +525,7 @@ impl RecoveryCode {
 pub struct RecoveryCodeSet {
     pub profile_id: ProfileId,
     pub codes: Vec<RecoveryCode>,
-    pub generated_at: DateTime<Utc>,
+    pub generated_at: Timestamp,
 }
 
 impl RecoveryCodeSet {
@@ -533,7 +533,7 @@ impl RecoveryCodeSet {
         Self {
             profile_id,
             codes: code_hashes.into_iter().map(RecoveryCode::new).collect(),
-            generated_at: Utc::now(),
+            generated_at: Timestamp::now(),
         }
     }
 
@@ -830,7 +830,7 @@ mod tests {
             vec![],
             AuthLevel::Standard,
         );
-        c.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        c.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
         assert!(c.is_expired());
         assert!(!c.is_actionable());
     }
