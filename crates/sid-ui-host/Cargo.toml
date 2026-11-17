@@ -65,3 +65,6 @@ tempfile = "3"
 jsonwebtoken = { workspace = true }
 # The codec of the stand-in issuer the refresh tests talk to.
 tonic-prost = "0.14"
+# A real issuer over gRPC, for the adapter's sign-in, refresh and sign-out
+# against it.
+sid-test-issuer = { path = "../sid-test-issuer" }

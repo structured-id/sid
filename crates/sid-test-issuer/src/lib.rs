@@ -686,6 +686,118 @@ impl TestIssuer {
             .expect("end session");
     }
 
+    /// A confidential web client `client_id`, an application of its own
+    /// allowed to sign users in to the resource `indicator`: it authenticates
+    /// at the token endpoint with a JWT signed by a key of `jwks`
+    /// (RFC 7523 §2.2) and returns users to `redirect_uri`, as an
+    /// application's browser adapter is registered.
+    pub async fn web_client(
+        &self,
+        client_id: &str,
+        indicator: &str,
+        redirect_uri: &str,
+        jwks: serde_json::Value,
+    ) -> sid_core::models::OAuth2Client {
+        let resource = self.resource(indicator);
+        let now = chrono::Utc::now();
+        let app = sid_core::models::Application {
+            id: sid_core::models::ApplicationId::generate(),
+            project_id: ProjectId::SYSTEM,
+            name: client_id.to_owned(),
+            system: None,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut client = sign_in_client(
+            client_id.to_owned(),
+            resource,
+            redirect_uri.to_owned(),
+            self.issuer.recipient_org,
+        );
+        client.application_id = app.id;
+        client.application_type = sid_core::models::ApplicationType::Web;
+        client.token_endpoint_auth_method =
+            sid_core::models::TokenEndpointAuthMethod::PrivateKeyJwt;
+        client.jwks =
+            Some(sid_core::models::ClientKeySet::try_from(jwks).expect("the client's public keys"));
+        self.storage
+            .create_application(&app, Some(&client), None, audit("application.create"))
+            .await
+            .expect("web client");
+        self.storage
+            .set_resource_access(
+                &ResourceAccess {
+                    client_id: client_id.into(),
+                    resource_id: resource.id,
+                    scopes: vec![],
+                    created_at: now,
+                },
+                audit("resource_access.set"),
+            )
+            .await
+            .expect("resource access");
+        client
+    }
+
+    /// `profile` signed in at this issuer now, as its sign-in page leaves a
+    /// browser: the stored session and the bearer token its pages present.
+    pub async fn sign_in(&self, profile: &Profile) -> (Session, String) {
+        let session = Session::new(
+            profile.id,
+            None,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        );
+        self.storage
+            .create_session(&session, audit("session.create"))
+            .await
+            .expect("session");
+        let id = profile.id.to_string();
+        let token = self
+            .jwt
+            .issue_access_token(
+                &id,
+                Some(&id),
+                &profile.roles,
+                &session,
+                &["openid".to_owned()],
+                None,
+                None,
+            )
+            .expect("session token");
+        (session, token)
+    }
+
+    /// The authorization code this issuer's authorization endpoint returns
+    /// for `request` to the browser signed in with `bearer`
+    /// (RFC 6749 §4.1.2). The request names this issuer; a refusal fails the
+    /// test.
+    pub async fn authorize(
+        &self,
+        bearer: &str,
+        mut request: sid_proto::sid::v1::OAuth2AuthorizeRequest,
+    ) -> String {
+        use sid_proto::sid::v1::auth_service_server::AuthService;
+        use sid_proto::sid::v1::o_auth2_authorize_response::Result as Authorized;
+        request.issuer_handle = self.issuer.handle.to_string();
+        let mut call = tonic::Request::new(request);
+        call.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {bearer}").parse().expect("a header value"),
+        );
+        match self
+            .auth
+            .o_auth2_authorize(call)
+            .await
+            .expect("authorization")
+            .into_inner()
+            .result
+        {
+            Some(Authorized::AuthorizationCode(code)) => code,
+            other => panic!("expected an authorization code, got {other:?}"),
+        }
+    }
+
     /// Register `principal` (an email address) with `password` through the
     /// issuer's password registration; returns the Profile it created. On an
     /// installation not claimed yet the account registers with the open
@@ -862,10 +974,6 @@ async fn register(
     org: sid_core::models::OrgId,
     indicator: &str,
 ) -> ProtectedResource {
-    use sid_core::models::{
-        ApplicationType, EnforcementMode, LoginStrategy, OAuth2Client, SubjectType,
-        TokenEndpointAuthMethod,
-    };
     let now = chrono::Utc::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
@@ -887,19 +995,52 @@ async fn register(
         created_at: now,
         updated_at: now,
     };
-    let client = OAuth2Client {
-        client_id: console(&resource),
+    let client = sign_in_client(
+        console(&resource),
+        &resource,
+        format!("{}/callback", indicator.trim_end_matches('/')),
+        org,
+    );
+    storage
+        .create_application(
+            &app,
+            Some(&client),
+            Some(&resource),
+            audit("application.create"),
+        )
+        .await
+        .expect("resource");
+    resource
+}
+
+/// A public code-flow client `client_id` of `resource`'s application in
+/// organization `org`, signing users in to that resource and returning them
+/// to `redirect_uri`.
+fn sign_in_client(
+    client_id: String,
+    resource: &ProtectedResource,
+    redirect_uri: String,
+    org: sid_core::models::OrgId,
+) -> sid_core::models::OAuth2Client {
+    use sid_core::models::{
+        ApplicationType, EnforcementMode, LoginStrategy, OAuth2Client, SubjectType,
+        TokenEndpointAuthMethod,
+    };
+    OAuth2Client {
+        client_id,
         project_id: ProjectId::SYSTEM,
-        application_id: app.id,
+        application_id: resource
+            .application_id
+            .expect("a resource registered with its application"),
         default_resource: Some(resource.id),
         application_type: ApplicationType::Spa,
         client_secret_hash: None,
         jwks: None,
         participant_admission: None,
-        redirect_uris: vec![format!("{}/callback", indicator.trim_end_matches('/'))],
+        redirect_uris: vec![redirect_uri],
         allowed_scopes: vec!["openid".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],
-        client_name: indicator.to_owned(),
+        client_name: resource.indicator.as_str().to_owned(),
         logo_uri: None,
         active: true,
         token_endpoint_auth_method: TokenEndpointAuthMethod::None,
@@ -907,7 +1048,7 @@ async fn register(
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: now,
+        client_id_issued_at: resource.created_at,
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -927,18 +1068,8 @@ async fn register(
         unified_input: false,
         org_id: Some(org),
         revision: 0,
-        created_at: now,
-    };
-    storage
-        .create_application(
-            &app,
-            Some(&client),
-            Some(&resource),
-            audit("application.create"),
-        )
-        .await
-        .expect("resource");
-    resource
+        created_at: resource.created_at,
+    }
 }
 
 /// The authentication service, as a server start builds it; only its token
