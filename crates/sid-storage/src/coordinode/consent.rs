@@ -9,8 +9,8 @@
 //! per Profile and project, one identity per Profile and provider and per
 //! provider subject: the store keeps each unique.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::consent::{
     ClaimDecision, ClaimGrant, ClaimGrantChange, ClaimGrantId, ConsentId, ConsentRecord,
 };
@@ -356,7 +356,7 @@ impl CoordinodeBackend {
             if !active {
                 return Ok(Decision::Abandon(ClaimGrantChange::ConsentNotActive));
             }
-            let now = Utc::now();
+            let now = Timestamp::now();
             let pair = claim_pair(id, &claim_name)?;
             let stored = tx
                 .run(
@@ -473,7 +473,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<u64> {
         self.transaction(move |tx| {
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let consents = consents_where(
                 tx,
                 "c.profile_id = $id",

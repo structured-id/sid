@@ -6,8 +6,8 @@
 //! project apply one after the other and the later archives the earlier: a
 //! project never has two published configs.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     BrandingConfig, BrandingConfigId, BrandingStatus, MutationContext, ProjectId,
 };
@@ -137,7 +137,7 @@ impl CoordinodeBackend {
         &self,
         id: BrandingConfigId,
         project: ProjectId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let chain = format!("branding:{}", id);

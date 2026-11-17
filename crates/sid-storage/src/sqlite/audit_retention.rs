@@ -4,7 +4,6 @@
 //! allows removing records only below the recorded cut).
 
 use jiff::Timestamp;
-use jiff::tz::TimeZone;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -16,13 +15,7 @@ impl SqliteBackend {
         cut_before: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        let boundary = cut_before
-            .to_zoned_datetime(TimeZone::UTC)
-            .date()
-            .first_of_month()
-            .to_zoned_datetime(TimeZone::UTC)
-            .map(|z| z.timestamp())
-            .map_err(|e| SidError::Validation(format!("no month start for {cut_before}: {e}")))?;
+        let boundary = crate::month_start(cut_before)?;
         // Audit timestamps are stored as RFC 3339 with milliseconds; the cut
         // uses the same form so the text comparison orders as time.
         let boundary = boundary.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

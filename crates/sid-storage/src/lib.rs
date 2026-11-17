@@ -114,7 +114,11 @@ fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::model
 
 /// `at` truncated to the microsecond, the precision SQL timestamp columns
 /// hold.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 pub(crate) fn micros(at: jiff::Timestamp) -> jiff::Timestamp {
     at.round(
         jiff::TimestampRound::new()
@@ -122,6 +126,51 @@ pub(crate) fn micros(at: jiff::Timestamp) -> jiff::Timestamp {
             .mode(jiff::RoundMode::Trunc),
     )
     .expect("truncating an instant stays representable")
+}
+
+/// The first instant (UTC) of the month `at` falls in: audit retention
+/// removes whole months before it.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn month_start(at: jiff::Timestamp) -> sid_core::Result<jiff::Timestamp> {
+    let utc = jiff::tz::TimeZone::UTC;
+    at.to_zoned_datetime(utc.clone())
+        .date()
+        .first_of_month()
+        .to_zoned_datetime(utc)
+        .map(|z| z.timestamp())
+        .map_err(|e| sid_core::Error::Validation(format!("no month start for {at}: {e}")))
+}
+
+/// A stored policy duration in whole seconds; a negative one is an error.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn stored_seconds(column: &str, value: i64) -> sid_core::Result<jiff::SignedDuration> {
+    if value < 0 {
+        return Err(sid_core::Error::Storage(format!(
+            "column {column}: {value}"
+        )));
+    }
+    Ok(jiff::SignedDuration::from_secs(value))
+}
+
+/// The instant `hours` from now; a window past the representable range is a
+/// caller error.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn hours_from_now(hours: i64) -> sid_core::Result<jiff::Timestamp> {
+    jiff::SignedDuration::try_from_hours(hours)
+        .and_then(|window| jiff::Timestamp::now().checked_add(window).ok())
+        .ok_or_else(|| sid_core::Error::Validation(format!("window {hours}h out of range")))
 }
 
 /// Refusal of a credential for a federated reference: the identity it

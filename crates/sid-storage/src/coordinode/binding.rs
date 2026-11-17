@@ -6,8 +6,8 @@
 //! first uses of one profile apply one after the other: a scope gets one
 //! binding and an index never belongs to two bindings of a profile.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{BindingId, BindingScope, MutationContext, ProfileId, ServiceBinding};
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -121,7 +121,7 @@ impl CoordinodeBackend {
         let scope = scope.clone();
         self.transaction(move |tx| {
             // Answered as stored: a concurrent caller reads the same instant.
-            let now = super::stored_time(Utc::now());
+            let now = super::stored_time(Timestamp::now());
             if let Some(mut existing) = find(tx, profile, &scope)? {
                 // Recording the use is not a change of the binding: no audit.
                 tx.run(

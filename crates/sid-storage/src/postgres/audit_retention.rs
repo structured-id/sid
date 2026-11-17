@@ -43,10 +43,7 @@ fn partition_month(name: &str) -> Option<(i32, u32)> {
     (1..=12).contains(&month).then_some((year, month))
 }
 
-/// The first instant of the month `at` falls in.
-pub(super) fn month_start(at: Timestamp) -> SidResult<Timestamp> {
-    utc_start(at.to_zoned_datetime(TimeZone::UTC).date().first_of_month())
-}
+pub(super) use crate::month_start;
 
 /// Create the partition of the month starting at `month_start`; `true` when
 /// it did not exist yet.

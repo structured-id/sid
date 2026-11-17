@@ -29,7 +29,7 @@ fn values(enrollment: &SiteEnrollment) -> Params {
         .with("certificate", Value::Binary(enrollment.certificate.clone()))
         // Each certificate behind its four-byte length, in order.
         .with("chain", Value::Binary(enrollment.chain_bytes()))
-        .with("now", super::time(chrono::Utc::now()))
+        .with("now", super::time(jiff::Timestamp::now()))
 }
 
 impl CoordinodeBackend {

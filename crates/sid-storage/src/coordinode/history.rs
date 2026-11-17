@@ -5,8 +5,8 @@
 
 use std::net::IpAddr;
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{MutationContext, ProfileId, Session};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::LoginLocation;
@@ -14,12 +14,12 @@ use sid_plugin::LoginLocation;
 use super::{CoordinodeBackend, Decision, Params, Statements, get_int, get_text, key, time};
 
 /// The instant `window` ago.
-fn since(window: std::time::Duration) -> SidResult<DateTime<Utc>> {
-    let window = chrono::Duration::from_std(window)
+fn since(window: std::time::Duration) -> SidResult<Timestamp> {
+    let window = SignedDuration::try_from(window)
         .map_err(|e| SidError::Storage(format!("history window: {e}")))?;
-    Utc::now()
-        .checked_sub_signed(window)
-        .ok_or_else(|| SidError::Validation("history window out of range".into()))
+    Timestamp::now()
+        .checked_sub(window)
+        .map_err(|_| SidError::Validation("history window out of range".into()))
 }
 
 /// `profile`'s sessions that count as sign-ins, newest first.
@@ -47,7 +47,7 @@ impl CoordinodeBackend {
     pub(super) async fn get_most_recent_session_ip(
         &self,
         profile: ProfileId,
-    ) -> SidResult<Option<(IpAddr, DateTime<Utc>)>> {
+    ) -> SidResult<Option<(IpAddr, Timestamp)>> {
         self.read(move |tx| {
             Ok(sign_ins(tx, profile)?
                 .into_iter()
@@ -97,7 +97,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let country = country.to_owned();
         self.transaction(move |tx| {
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let pair = country_key(profile, &country)?;
             let stored = tx.run(
                 "MATCH (l:SidLoginLocation) WHERE l.pair = $pair RETURN l.login_count AS n",

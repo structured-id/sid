@@ -5211,7 +5211,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         within_hours: i64,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let deadline = Timestamp::now() + jiff::SignedDuration::from_hours(within_hours);
+        let deadline = crate::hours_from_now(within_hours)?;
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= $1",
         )

@@ -12,8 +12,8 @@
 //! and organization. A dynamic registration counts its use on its token's
 //! node, so concurrent registrations under one token count exactly.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     Application, ApplicationId, InitialAccessToken, InitialAccessTokenId, IssuerAuthority,
     IssuerHandle, IssuerId, IssuerSigningKey, MutationContext, OAuth2Client, OidcIssuer, OrgId,
@@ -1199,7 +1199,7 @@ impl CoordinodeBackend {
             }
             // The resource role is retired, never deleted: its indicator
             // stays reserved.
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let retired = tx.run(
                 "MATCH (r:SidResource) WHERE r.application_id = $id
                  SET r.state = 'retired', r.application_id = null,
@@ -1788,7 +1788,7 @@ impl CoordinodeBackend {
                 if token.revoked {
                     return Err(SidError::Revoked(format!("initial access token {iat_id}")));
                 }
-                if token.expires_at <= Utc::now() {
+                if token.expires_at <= Timestamp::now() {
                     return Err(SidError::Expired(format!("initial access token {iat_id}")));
                 }
                 if token.max_clients > 0 && token.clients_registered >= token.max_clients {

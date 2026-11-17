@@ -11,8 +11,8 @@
 //! conflicts with a concurrent change of it. What a fence names that still
 //! exists (its basis assignment, a membership) is held for the commit.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     AccessRequest, AccessRequestId, AccessRequestStatus, AdminEnvelope, AdminOperation,
     AssignmentFence, AssignmentProvenance, AssignmentSet, AssignmentSetChange, AuthorityBasis,
@@ -918,7 +918,7 @@ fn administrator_assignments(
     tx: &Statements<'_>,
     profile: Option<ProfileId>,
 ) -> SidResult<Vec<RoleAssignment>> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     Ok(assignments_where(
         tx,
         "a.role_id = $value",
@@ -1029,7 +1029,7 @@ pub(super) fn check_authority(tx: &Statements<'_>, basis: &AuthorityBasis) -> Si
     )?;
     let current = match rows.first() {
         Some(row) => {
-            let live = get_opt_time(row, "expires_at")?.is_none_or(|t| t > Utc::now());
+            let live = get_opt_time(row, "expires_at")?.is_none_or(|t| t > Timestamp::now());
             live && revision_of(row)? == basis.revision && hold_first(tx, &rows)?
         }
         None => false,
@@ -1388,7 +1388,7 @@ impl CoordinodeBackend {
                 Params::default()
                     .with("id", bin(group_id.as_bytes()))
                     .with("description", opt_text(description.as_deref()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             let Some(row) = rows.first() else {
                 return Ok(Decision::Abandon(false));
@@ -1717,9 +1717,7 @@ impl CoordinodeBackend {
         &self,
         within_hours: i64,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let cutoff = Utc::now()
-            .checked_add_signed(chrono::Duration::hours(within_hours))
-            .ok_or_else(|| SidError::Validation(format!("window {within_hours}h out of range")))?;
+        let cutoff = crate::hours_from_now(within_hours)?;
         self.list_assignments(
             "a.expires_at IS NOT NULL AND a.expires_at <= $value",
             time(cutoff),
@@ -1735,7 +1733,7 @@ impl CoordinodeBackend {
             let expired = assignments_where(
                 tx,
                 "a.expires_at IS NOT NULL AND a.expires_at < $value",
-                time(Utc::now()),
+                time(Timestamp::now()),
             )?;
             for a in &expired {
                 delete_assignment(tx, a.id)?;
@@ -2000,7 +1998,7 @@ impl CoordinodeBackend {
             )?;
             // The expiry is applied here: CoordiNode drops a row whose OR
             // branch compares a missing property (coordinode#83).
-            let now = Utc::now();
+            let now = Timestamp::now();
             let pending = rows
                 .iter()
                 .map(request)

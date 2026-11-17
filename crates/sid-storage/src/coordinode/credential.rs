@@ -11,8 +11,8 @@
 //! commit moves its owner's revision on the history node and holds the
 //! write cutoff, so a raise of the cutoff committed meanwhile refuses it.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::credential::CredentialStatus;
 use sid_core::models::{
     Credential, CredentialData, CredentialId, CredentialRevocation, CredentialType, HistoryArchive,
@@ -383,7 +383,7 @@ fn record_descriptor(
 
 /// The history write cutoff, held for the open transaction: a raise
 /// committed meanwhile refuses it.
-fn held_cutoff(tx: &Statements<'_>) -> SidResult<Option<DateTime<Utc>>> {
+fn held_cutoff(tx: &Statements<'_>) -> SidResult<Option<Timestamp>> {
     let rows = tx.run(
         "MATCH (c:SidHistoryCutoff) WHERE c.id = $id RETURN id(c) AS node, c.not_before AS not_before",
         Params::default().with("id", Cutoff::Credential.slot()),
@@ -441,7 +441,7 @@ pub(super) fn init_cutoff(tx: &Statements<'_>) -> SidResult<Decision<()>> {
 }
 
 /// The write cutoff `which` records, read in `tx`; `None` when none was set.
-pub(super) fn read_cutoff(tx: &Statements<'_>, which: Cutoff) -> SidResult<Option<DateTime<Utc>>> {
+pub(super) fn read_cutoff(tx: &Statements<'_>, which: Cutoff) -> SidResult<Option<Timestamp>> {
     let rows = tx.run(
         "MATCH (c:SidHistoryCutoff) WHERE c.id = $id RETURN c.not_before AS not_before",
         Params::default().with("id", which.slot()),
@@ -458,8 +458,8 @@ pub(super) fn read_cutoff(tx: &Statements<'_>, which: Cutoff) -> SidResult<Optio
 pub(super) fn raise_cutoff(
     tx: &Statements<'_>,
     which: Cutoff,
-    not_before: DateTime<Utc>,
-) -> SidResult<(DateTime<Utc>, bool)> {
+    not_before: Timestamp,
+) -> SidResult<(Timestamp, bool)> {
     let not_before = sid_core::models::password_history::stored_instant(not_before);
     if let Some(current) = read_cutoff(tx, which)?
         && current >= not_before
@@ -514,7 +514,7 @@ pub(super) fn apply_history(tx: &Statements<'_>, commit: &HistoryCommit) -> SidR
     for d in &commit.epochs {
         record_descriptor(tx, owner, d)?;
     }
-    let accepted_at = Utc::now();
+    let accepted_at = Timestamp::now();
     let active = commit.epochs[0].id;
     tx.run(
         "MATCH (e:SidHistoryEpoch) WHERE e.owner_id = $owner AND e.status = 'active'
@@ -620,7 +620,7 @@ pub(super) fn spend(
         Params::default()
             .with("id", uuid(&spend.credential.0))
             .with("data", Value::Binary(spend.left.clone()))
-            .with("now", time(Utc::now())),
+            .with("now", time(Timestamp::now())),
     )?;
     Ok(())
 }
@@ -798,7 +798,7 @@ impl CoordinodeBackend {
                         .map_or(Value::Null, |id| Value::Binary(id.to_vec())),
                 )
                 .with("artifact", artifact.map_or(Value::Null, Value::Binary))
-                .with("now", time(Utc::now())),
+                .with("now", time(Timestamp::now())),
         };
         self.update_credential(id, update, history.cloned(), ctx)
             .await
@@ -828,7 +828,7 @@ impl CoordinodeBackend {
         let update = Update {
             when: When::Active,
             set: "c.last_used_at = $now",
-            params: Params::default().with("now", time(Utc::now())),
+            params: Params::default().with("now", time(Timestamp::now())),
         };
         self.update_credential(id, update, None, ctx).await
     }
@@ -845,7 +845,7 @@ impl CoordinodeBackend {
             set: "c.data = $data, c.last_used_at = $now",
             params: Params::default()
                 .with("data", Value::Binary(data.to_vec()))
-                .with("now", time(Utc::now())),
+                .with("now", time(Timestamp::now())),
         };
         self.update_credential(id, update, None, ctx).await
     }
@@ -1006,7 +1006,7 @@ impl CoordinodeBackend {
                     .with("profile", profile_value(owner))
                     .with("rp_id", Value::String(rp_id.clone()))
                     .with("handle", Value::Binary(candidate.0.to_vec()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             finalize(tx, &format!("profile:{owner}"), ctx.clone())?;
             Ok(Decision::Commit(candidate))
@@ -1134,15 +1134,15 @@ impl CoordinodeBackend {
         .await
     }
 
-    pub(super) async fn history_write_cutoff(&self) -> SidResult<Option<DateTime<Utc>>> {
+    pub(super) async fn history_write_cutoff(&self) -> SidResult<Option<Timestamp>> {
         self.read(|tx| read_cutoff(tx, Cutoff::Credential)).await
     }
 
     pub(super) async fn raise_history_write_cutoff(
         &self,
-        not_before: DateTime<Utc>,
+        not_before: Timestamp,
         ctx: MutationContext,
-    ) -> SidResult<DateTime<Utc>> {
+    ) -> SidResult<Timestamp> {
         self.transaction(move |tx| {
             let (cutoff, moved) = raise_cutoff(tx, Cutoff::Credential, not_before)?;
             if !moved {

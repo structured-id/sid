@@ -1210,8 +1210,7 @@ impl SqliteBackend {
         &self,
         within_hours: i64,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let cutoff =
-            fmt_dt(&(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(within_hours)));
+        let cutoff = fmt_dt(&crate::hours_from_now(within_hours)?);
         let rows = sqlx::query(
             "SELECT * FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= ?",
         )

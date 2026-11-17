@@ -389,13 +389,7 @@ async fn retire(conn: &mut sqlx::SqliteConnection, period: i64) -> SidResult<()>
     Ok(())
 }
 
-/// A stored policy duration; a negative or out-of-range one is an error.
-fn seconds(column: &str, value: i64) -> SidResult<SignedDuration> {
-    if value < 0 {
-        return Err(SidError::Storage(format!("column {column}: {value}")));
-    }
-    Ok(SignedDuration::from_secs(value))
-}
+use crate::stored_seconds as seconds;
 
 /// A stored positive bound.
 fn bound(column: &str, value: i64) -> SidResult<u64> {
