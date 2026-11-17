@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.30](https://github.com/structured-id/sid/compare/v0.2.29...v0.2.30) - 2026-11-17
+
+### Added
+
+- enforce each method's declared access rule ([#670](https://github.com/structured-id/sid/pull/670))
+- *(fed)* carry the coordinating route's return address on its entry connection ([#662](https://github.com/structured-id/sid/pull/662))
+- *(federation)* return an entry to a host page ([#654](https://github.com/structured-id/sid/pull/654))
+- *(federation)* deliver the site's admission to the platform ([#650](https://github.com/structured-id/sid/pull/650))
+- *(fed)* register another organization's site and read CA status apart ([#645](https://github.com/structured-id/sid/pull/645))
+- *(federation)* receiving side of federated sign-in ([#643](https://github.com/structured-id/sid/pull/643))
+- *(oauth)* keep a kept request's origin through redemption ([#641](https://github.com/structured-id/sid/pull/641))
+- *(authn)* carry the Binding presentation in the ID token ([#639](https://github.com/structured-id/sid/pull/639))
+- *(admin)* store and serve incoming Profile admission ([#629](https://github.com/structured-id/sid/pull/629))
+
+### Fixed
+
+- *(work)* end an abandoned last attempt with its alert ([#664](https://github.com/structured-id/sid/pull/664))
+
+### Other
+
+- *(audit)* keep audit chain digests as binary end to end ([#681](https://github.com/structured-id/sid/pull/681))
+- *(ui-host)* qualify the browser adapter against a real issuer ([#679](https://github.com/structured-id/sid/pull/679))
+- *(machine)* a lost rotation is replaced only by a new command ([#668](https://github.com/structured-id/sid/pull/668))
+- *(oauth)* check a Profile's standing session; drop code redemption tracking ([#652](https://github.com/structured-id/sid/pull/652))
+- durable delivery tails and sign-in codes through the server's work ([#647](https://github.com/structured-id/sid/pull/647))
+
 ## [0.2.29](https://github.com/structured-id/sid/compare/v0.2.28...v0.2.29) - 2026-11-13
 
 ### Fixed
