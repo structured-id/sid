@@ -104,7 +104,7 @@ type IssuerRow = (
     String,
     String,
     sid_core::models::OrgId,
-    Timestamp,
+    PgTime,
 );
 
 fn issuer_from_row(
@@ -117,7 +117,7 @@ fn issuer_from_row(
         canonical_url,
         authority: authority.parse().map_err(stored)?,
         recipient_org,
-        created_at,
+        created_at: created_at.jiff(),
     })
 }
 
@@ -1974,7 +1974,7 @@ impl IssuerStore for PostgresBackend {
             String,
             Vec<u8>,
             Vec<u8>,
-            Timestamp,
+            PgTime,
         )> = sqlx::query_as(
             "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
                  FROM oidc_issuer_signing_keys WHERE issuer_id = $1 ORDER BY generation",
@@ -1998,7 +1998,7 @@ impl IssuerStore for PostgresBackend {
                             .try_into()
                             .map_err(|_| stored("public key is not 32 bytes"))?,
                         sealed_private_key,
-                        created_at,
+                        created_at: created_at.jiff(),
                     })
                 },
             )
@@ -4016,7 +4016,7 @@ impl StorageBackend for PostgresBackend {
         .ok_or_else(|| SidError::NotFound(format!("initial access token {iat}")))?;
         use sqlx::Row;
         let revoked: bool = row.get("revoked");
-        let expires_at: Timestamp = row.get("expires_at");
+        let expires_at = row.get::<PgTime, _>("expires_at").jiff();
         let max_clients: i32 = row.get("max_clients");
         let registered: i32 = row.get("clients_registered");
         if revoked {
@@ -4116,7 +4116,7 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
     async fn instance_organization(&self) -> SidResult<Option<sid_core::models::Organization>> {
-        let row: Option<(sid_core::models::OrgId, String, String, String, Timestamp)> =
+        let row: Option<(sid_core::models::OrgId, String, String, String, PgTime)> =
             sqlx::query_as(
                 "SELECT id, org_type, status, canonical_domain, created_at
                  FROM organizations WHERE is_instance",
@@ -4131,7 +4131,7 @@ impl StorageBackend for PostgresBackend {
                 org_type: org_type.parse().map_err(stored)?,
                 status: status.parse().map_err(stored)?,
                 canonical_domain,
-                created_at,
+                created_at: created_at.jiff(),
             })
         })
         .transpose()
@@ -4218,7 +4218,7 @@ impl StorageBackend for PostgresBackend {
     async fn organization_references(
         &self,
     ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
-        let rows: Vec<(sid_core::models::OrgId, Timestamp)> = sqlx::query_as(
+        let rows: Vec<(sid_core::models::OrgId, PgTime)> = sqlx::query_as(
             "SELECT id, created_at FROM organizations WHERE NOT is_instance ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -4226,7 +4226,10 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| SidError::Storage(format!("organization references: {e}")))?;
         Ok(rows
             .into_iter()
-            .map(|(id, created_at)| sid_core::models::OrganizationReference { id, created_at })
+            .map(|(id, created_at)| sid_core::models::OrganizationReference {
+                id,
+                created_at: created_at.jiff(),
+            })
             .collect())
     }
 
@@ -7326,7 +7329,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&event.description)
         .bind(event.risk_score)
         .bind(&event.reaction)
-        .bind(event.timestamp)
+        .bind(event.timestamp.pg())
         .execute(&self.pool)
         .await
         .map_err(|e| sid_core::Error::Storage(format!("save_anomaly_event: {e}")))?;
@@ -7398,7 +7401,7 @@ impl StorageBackend for PostgresBackend {
         .bind(&event.description)
         .bind(event.risk_score)
         .bind(&event.reaction)
-        .bind(event.timestamp)
+        .bind(event.timestamp.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("anomaly event", e))?;
@@ -7606,13 +7609,16 @@ impl StorageBackend for PostgresBackend {
     }
 
     async fn list_ip_allowlist_entries(&self) -> SidResult<Vec<(String, String, Timestamp)>> {
-        let rows: Vec<(String, String, Timestamp)> = sqlx::query_as(
+        let rows: Vec<(String, String, PgTime)> = sqlx::query_as(
             "SELECT cidr, description, created_at FROM ip_allowlist_entries ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| sid_core::Error::Storage(format!("list_ip_allowlist_entries: {e}")))?;
-        Ok(rows)
+        Ok(rows
+            .into_iter()
+            .map(|(cidr, description, at)| (cidr, description, at.jiff()))
+            .collect())
     }
 
     async fn import_ip_allowlist_entry(
@@ -7624,13 +7630,14 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("import_ip_allowlist_entry: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let held: Option<(String, String, Timestamp)> = sqlx::query_as(
+        let held: Option<(String, String, PgTime)> = sqlx::query_as(
             "SELECT cidr, description, created_at FROM ip_allowlist_entries WHERE cidr = $1",
         )
         .bind(cidr)
         .fetch_optional(&mut *tx)
         .await
         .map_err(storage)?;
+        let held = held.map(|(cidr, description, at)| (cidr, description, at.jiff()));
         let wanted = (cidr.to_owned(), description.to_owned(), created_at);
         if let Some(held) = held {
             return crate::transfer_repeat(&held, &wanted, "IP allowlist entry");
@@ -9081,7 +9088,7 @@ impl StorageBackend for PostgresBackend {
         offset: u64,
         limit: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
-        let rows: Vec<(ProfileId, Option<Uuid>, Timestamp)> = sqlx::query_as(
+        let rows: Vec<(ProfileId, Option<Uuid>, PgTime)> = sqlx::query_as(
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
              WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
         )
@@ -9097,7 +9104,7 @@ impl StorageBackend for PostgresBackend {
                 |(profile_id, credential_id, redeemed_at)| sid_core::models::InviteRedemption {
                     profile_id,
                     credential_id: credential_id.map(sid_core::models::CredentialId),
-                    redeemed_at,
+                    redeemed_at: redeemed_at.jiff(),
                 },
             )
             .collect())
@@ -9111,7 +9118,7 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("import invite redemption: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let held: Option<(ProfileId, Option<Uuid>, Timestamp)> = sqlx::query_as(
+        let held: Option<(ProfileId, Option<Uuid>, PgTime)> = sqlx::query_as(
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
                  WHERE invite_id = $1 AND profile_id = $2",
         )
@@ -9124,7 +9131,7 @@ impl StorageBackend for PostgresBackend {
             let stored = sid_core::models::InviteRedemption {
                 profile_id,
                 credential_id: credential_id.map(sid_core::models::CredentialId),
-                redeemed_at,
+                redeemed_at: redeemed_at.jiff(),
             };
             return crate::transfer_repeat(&stored, redemption, "invite redemption");
         }
@@ -9326,7 +9333,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Option<sid_core::models::notification::NotificationPreferences>> {
-        let row: Option<(serde_json::Value, Timestamp)> = sqlx::query_as(
+        let row: Option<(serde_json::Value, PgTime)> = sqlx::query_as(
             "SELECT preferences, updated_at FROM notification_preferences WHERE profile_id = $1",
         )
         .bind(profile_id)
@@ -9347,7 +9354,7 @@ impl StorageBackend for PostgresBackend {
                     sid_core::models::notification::NotificationPreferences {
                         profile_id,
                         categories,
-                        updated_at,
+                        updated_at: updated_at.jiff(),
                     },
                 ))
             }
@@ -9860,9 +9867,9 @@ struct AccessRequestRow {
     status: String,
     reviewed_by: Option<ProfileId>,
     review_comment: Option<String>,
-    created_at: Timestamp,
-    reviewed_at: Option<Timestamp>,
-    expires_at: Option<Timestamp>,
+    created_at: PgTime,
+    reviewed_at: Option<PgTime>,
+    expires_at: Option<PgTime>,
 }
 
 impl AccessRequestRow {
@@ -9883,9 +9890,9 @@ impl AccessRequestRow {
             })?,
             reviewed_by: self.reviewed_by,
             review_comment: self.review_comment,
-            created_at: self.created_at,
-            reviewed_at: self.reviewed_at,
-            expires_at: self.expires_at,
+            created_at: self.created_at.jiff(),
+            reviewed_at: self.reviewed_at.jiff(),
+            expires_at: self.expires_at.jiff(),
         })
     }
 }
