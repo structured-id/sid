@@ -110,7 +110,7 @@ async fn main() {
         .assign(
             &holder,
             RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), accountant.id)
-                .with_expiry(chrono::Utc::now() + chrono::Duration::days(30)),
+                .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 30)),
             audit(),
         )
         .await
@@ -127,10 +127,10 @@ async fn main() {
             RoleAssignmentPrincipal::Profile(access_admin),
             accountant.id,
         )
-        .with_expiry(chrono::Utc::now() + chrono::Duration::days(1)),
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 1)),
         RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), accountant.id),
         RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), accountant.id)
-            .with_expiry(chrono::Utc::now() + chrono::Duration::days(120)),
+            .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 120)),
     ] {
         let err = core.assign(&holder, refused, audit()).await.unwrap_err();
         assert!(

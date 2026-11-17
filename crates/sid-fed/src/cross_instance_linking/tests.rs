@@ -14,7 +14,7 @@ fn proof(nonce: &str) -> CrossInstanceLinkingProof {
         a,
         b,
         org,
-        Utc::now(),
+        Timestamp::now(),
         true,
         nonce.to_owned(),
         vec![1, 2, 3],
@@ -27,7 +27,7 @@ fn proof(nonce: &str) -> CrossInstanceLinkingProof {
 #[test]
 fn the_statement_covers_every_field() {
     let (a, b, org) = ids();
-    let at = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
+    let at = Timestamp::new(1_700_000_000, 123_000_000).unwrap();
     assert_eq!(
         build_linking_statement(&a, &b, &org, &at, false, "n:1"),
         format!("sid:cross-link:v1\n{a}\n{b}\n{org}\n2023-11-14T22:13:20.123Z\n0\n3:n:1")
@@ -39,7 +39,7 @@ fn the_statement_covers_every_field() {
 #[test]
 fn free_text_is_unambiguous() {
     let (a, b, org) = ids();
-    let at = Utc::now();
+    let at = Timestamp::now();
     assert_ne!(
         build_linking_statement(&a, &b, &org, &at, true, "x\n1"),
         build_linking_statement(&a, &b, &org, &at, true, "x")
@@ -70,7 +70,7 @@ fn a_changed_field_breaks_the_statement() {
     assert!(!verify_proof_statement(&changed));
 
     let mut changed = original.clone();
-    changed.created_at += chrono::Duration::nanoseconds(1);
+    changed.created_at += jiff::SignedDuration::from_nanos(1);
     assert!(!verify_proof_statement(&changed));
 
     let mut changed = original;
@@ -90,14 +90,14 @@ fn a_proof_is_for_its_recipient_only() {
 #[test]
 fn only_a_party_revokes() {
     let (a, b, org) = ids();
-    let at = Utc::now();
+    let at = Timestamp::now();
     let revocation =
         create_link_revocation(a, b, org, b, "user_requested".into(), at, vec![7]).unwrap();
     assert_eq!(
         revocation_statement(&revocation),
         format!(
             "sid:cross-unlink:v1\n{a}\n{b}\n{org}\n{b}\n{}\n14:user_requested",
-            at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+            at
         )
     );
     assert_eq!(

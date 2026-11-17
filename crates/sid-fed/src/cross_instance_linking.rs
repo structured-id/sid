@@ -14,7 +14,7 @@
 //! - **Replay-resistant**: Nonce + creation time prevent reuse.
 //! - **Revocable**: Single-signature revocation (either key can unlink).
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sid_core::models::{BindingId, OrgId};
 
@@ -52,7 +52,7 @@ pub struct CrossInstanceLinkingProof {
     /// Whether either Binding alone can revoke the link later.
     pub revocable: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Status of a cross-instance link.
@@ -83,7 +83,7 @@ pub struct CrossInstanceLinkRevocation {
     /// Which of the two Bindings signed.
     pub signing_binding: BindingId,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Why a link record was not built.
@@ -111,8 +111,8 @@ fn statement(prefix: &str, fields: &[String], text: &str) -> String {
 
 /// The exact text form of a time, every fractional digit included, so two
 /// distinct times never share it.
-fn time(at: &DateTime<Utc>) -> String {
-    at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+fn time(at: &Timestamp) -> String {
+    at.to_string()
 }
 
 /// Build the canonical linking statement both Bindings sign: both Bindings,
@@ -121,7 +121,7 @@ pub fn build_linking_statement(
     binding_a: &BindingId,
     binding_b: &BindingId,
     recipient_org: &OrgId,
-    created_at: &DateTime<Utc>,
+    created_at: &Timestamp,
     revocable: bool,
     nonce: &str,
 ) -> String {
@@ -145,7 +145,7 @@ pub fn create_linking_proof(
     binding_a: BindingId,
     binding_b: BindingId,
     recipient_org: OrgId,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     revocable: bool,
     nonce: String,
     signature_a: Vec<u8>,
@@ -216,7 +216,7 @@ pub fn create_link_revocation(
     recipient_org: OrgId,
     signing_binding: BindingId,
     reason: String,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     signature: Vec<u8>,
 ) -> Result<CrossInstanceLinkRevocation, LinkingError> {
     if signing_binding != binding_a && signing_binding != binding_b {
