@@ -25,7 +25,7 @@ sid-proto = { workspace = true, features = ["grpc"] }
 sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }
 sid-auth = { path = "../sid-auth", default-features = false }
 arc-swap = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 secrecy = { workspace = true }
 # A web client's registered public keys (RFC 7517 §5).
 serde_json = { workspace = true }

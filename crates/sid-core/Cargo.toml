@@ -14,7 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -22,7 +22,6 @@ zeroize = { workspace = true }
 secrecy = { workspace = true }
 rand = { workspace = true }
 url = { workspace = true }
-cloudevents-sdk = "0.9"
 # A history epoch's public key is a compressed Pallas point
 pasta_curves = { workspace = true }
 group = { workspace = true }

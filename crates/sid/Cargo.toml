@@ -43,7 +43,7 @@ prost-types = { workspace = true }
 async-trait = { workspace = true }
 # Hashes of issued client secrets.
 argon2 = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
 # The kept state of a sign-in between its steps.
