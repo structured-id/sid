@@ -37,7 +37,7 @@ pub enum PasswordResetError {
 pub struct PendingReset {
     pub destination: String,
     pub token: secrecy::SecretString,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
 }
 
 /// The SHA-256 a reset session keeps of its link's token, hex-encoded.
@@ -124,7 +124,7 @@ impl PasswordResetService {
     pub async fn pending_delivery(
         &self,
         id: ResetSessionId,
-        now: chrono::DateTime<chrono::Utc>,
+        now: jiff::Timestamp,
     ) -> Result<Option<PendingReset>, PasswordResetError> {
         let Some(session) = self
             .storage

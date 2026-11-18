@@ -58,7 +58,7 @@ pub trait BlobStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use sid_core::models::BlobStorageStatus;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -136,7 +136,7 @@ mod tests {
             ciphertext: data.to_vec(),
             nonce: [0; 12],
             version,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         }
     }
 

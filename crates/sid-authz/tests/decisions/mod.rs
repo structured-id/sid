@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_authz::{AuthzCheckRequest, AuthzError, CeAuthzEngine};
 use sid_core::models::{
     AuditEntry, CedarPolicy, Group, GroupMember, MutationContext, PolicyEffect, PolicyScope,
@@ -248,7 +248,7 @@ pub async fn a_revoked_or_expired_assignment_grants_nothing(storage: Store) {
 
     let mut expired = RoleAssignment::new(RoleAssignmentPrincipal::Profile(w.user), w.role.id)
         .on_resource(w.resource);
-    expired.expires_at = Some(Utc::now() - Duration::minutes(1));
+    expired.expires_at = Some(Timestamp::now() - SignedDuration::from_mins(1));
     w.storage
         .create_role_assignment(&expired, audit())
         .await

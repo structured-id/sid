@@ -4,6 +4,7 @@
 //! the claim generation.
 
 use super::PostgresBackend;
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use async_trait::async_trait;
 use sid_core::models::{
     ClaimedWork, NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
@@ -60,8 +61,8 @@ struct WorkRows<'a> {
     kinds: Vec<&'a str>,
     payloads: Vec<&'a [u8]>,
     max_attempts: Vec<i32>,
-    not_before: Vec<Option<chrono::DateTime<chrono::Utc>>>,
-    expires_at: Vec<Option<chrono::DateTime<chrono::Utc>>>,
+    not_before: Vec<Option<PgTime>>,
+    expires_at: Vec<Option<PgTime>>,
 }
 
 impl<'a> WorkRows<'a> {
@@ -86,8 +87,8 @@ impl<'a> WorkRows<'a> {
                     .filter(|n| *n > 0)
                     .ok_or_else(|| SidError::Validation("max_attempts out of range".into()))?,
             );
-            rows.not_before.push(work.not_before);
-            rows.expires_at.push(work.expires_at);
+            rows.not_before.push(work.not_before.pg());
+            rows.expires_at.push(work.expires_at.pg());
         }
         Ok(rows)
     }
@@ -233,9 +234,9 @@ async fn claim(
                 attempt: count(col(row, "attempts")?)?,
                 max_attempts: count(col(row, "max_attempts")?)?,
                 generation: col(row, "generation")?,
-                expires_at: col(row, "expires_at")?,
-                created_at: col(row, "created_at")?,
-                due_at: col(row, "not_before")?,
+                expires_at: time::<Option<PgTime>>(row, "expires_at")?,
+                created_at: time::<PgTime>(row, "created_at")?,
+                due_at: time::<PgTime>(row, "not_before")?,
             })
         })
         .collect()
@@ -384,7 +385,7 @@ async fn fail(
         .bind(id.0)
         .bind(generation)
         .bind(&failure.error)
-        .bind(failure.retry_at)
+        .bind(failure.retry_at.pg())
         .bind(failure.ambiguous)
         .fetch_one(pool)
         .await
@@ -417,10 +418,10 @@ fn record(row: &sqlx::postgres::PgRow) -> SidResult<WorkRecord> {
         last_error: col(row, "last_error")?,
         ambiguous: col(row, "ambiguous")?,
         result: col(row, "result")?,
-        not_before: col(row, "not_before")?,
-        expires_at: col(row, "expires_at")?,
-        created_at: col(row, "created_at")?,
-        updated_at: col(row, "updated_at")?,
+        not_before: time::<PgTime>(row, "not_before")?,
+        expires_at: time::<Option<PgTime>>(row, "expires_at")?,
+        created_at: time::<PgTime>(row, "created_at")?,
+        updated_at: time::<PgTime>(row, "updated_at")?,
     })
 }
 
@@ -468,10 +469,10 @@ async fn import(pool: &PgPool, work: &WorkSnapshot) -> SidResult<bool> {
     .bind(&record.last_error)
     .bind(record.ambiguous)
     .bind(&record.result)
-    .bind(record.not_before)
-    .bind(record.expires_at)
-    .bind(record.created_at)
-    .bind(record.updated_at)
+    .bind(record.not_before.pg())
+    .bind(record.expires_at.pg())
+    .bind(record.created_at.pg())
+    .bind(record.updated_at.pg())
     .execute(pool)
     .await
     .map_err(|e| SidError::Storage(format!("import work: {e}")))?
@@ -553,14 +554,14 @@ macro_rules! work_store_over_pool {
             async fn purge_ended_work(
                 &self,
                 kind: &WorkKind,
-                before: chrono::DateTime<chrono::Utc>,
+                before: jiff::Timestamp,
             ) -> SidResult<u64> {
                 sqlx::query(
                     "DELETE FROM durable_work
                      WHERE kind = $1 AND state NOT IN ('pending', 'claimed') AND updated_at < $2",
                 )
                 .bind(kind.as_str())
-                .bind(before)
+                .bind(before.pg())
                 .execute(&self.pool)
                 .await
                 .map(|done| done.rows_affected())
@@ -580,6 +581,14 @@ where
 {
     row.try_get(name)
         .map_err(|e| SidError::Storage(format!("work column {name}: {e}")))
+}
+
+/// The instant in column `name`, or none where it holds null.
+fn time<P>(row: &sqlx::postgres::PgRow, name: &str) -> SidResult<P::Out>
+where
+    P: FromPg + for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    col::<P>(row, name).map(FromPg::jiff)
 }
 
 /// A stored non-negative count.

@@ -291,7 +291,7 @@ pub(super) async fn unbind_principal(
     )
     .bind(principal_id.0)
     .bind(profile_id)
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .execute(&mut **tx)
     .await
     .map_err(storage("release principal"))?;
@@ -461,7 +461,7 @@ pub(super) async fn revoke_pats(
     sqlx::query(
         "UPDATE personal_access_tokens SET status = 'revoked', revoked_at = ?, revoked_by = ? WHERE profile_id = ? AND status = 'active'",
     )
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .bind(revoked_by)
     .bind(profile_id)
     .execute(&mut **tx)

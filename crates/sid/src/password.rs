@@ -483,8 +483,7 @@ impl<'a> Passwords<'a> {
         )
         .await?;
         // Never negative: the requirement clamps at zero.
-        let left = left
-            .to_std()
+        let left = std::time::Duration::try_from(left)
             .map_err(|e| internal("password change requirement", e))?;
         prost_types::Duration::try_from(left)
             .map_err(|e| internal("password change requirement", e))
@@ -897,7 +896,7 @@ impl<'a> PasswordResets<'a> {
                 return None;
             }
         };
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let probe = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
         match requirements.decide(&probe, now) {
             LoginDecision::Allow { .. } => Some(requirements.fence),
@@ -1110,7 +1109,7 @@ impl ImportedPasswordUpgrades {
             .ok_or(PasswordError::AuthenticationFailed)?;
         if profile.migration_pending {
             profile.migration_pending = false;
-            profile.migration_completed_at = Some(chrono::Utc::now());
+            profile.migration_completed_at = Some(jiff::Timestamp::now());
             // A profile changed meanwhile keeps the flag; the next sign-in
             // clears it. The migrated credential is already stored.
             match storage

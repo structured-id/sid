@@ -148,7 +148,7 @@ async fn only_this_sites_own_enrollment_is_held() {
     assert!(matches!(garbage, Err(FederationSiteError::Refused(_))));
     assert_eq!(i.storage.site_enrollment().await.unwrap(), None);
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let user = Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
         sub: i.admin.profile_id.to_string(),
         pid: Some(i.admin.profile_id.to_string()),

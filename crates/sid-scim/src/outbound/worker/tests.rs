@@ -154,8 +154,8 @@ fn target(name: &str, enabled: bool, endpoint: &str) -> ScimOutboundTarget {
             retry_backoff_base_secs: 1,
         },
         enabled,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 

@@ -121,7 +121,7 @@ pub async fn test_concurrent_scopes_get_distinct_indexes(backend: &dyn StorageBa
 /// the export lists them in index order and a new scope continues after them.
 pub async fn test_binding_import_keeps_identity(backend: &dyn StorageBackend) {
     let holder = profile(backend).await;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let exported: Vec<_> = [3u32, 7]
         .into_iter()
         .map(|binding_index| sid_core::models::ServiceBinding {

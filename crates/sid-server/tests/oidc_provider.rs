@@ -412,7 +412,7 @@ async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     session.browser_secret_hash = Some(secret.hash());
@@ -422,7 +422,7 @@ async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie
             .with_session(session.clone()),
         cookie.clone(),
     );
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     svc.storage
         .create_profile_email(
             &sid_core::models::ProfileEmail {
@@ -524,7 +524,7 @@ fn dpop_proof(htm: &str, htu: &str, token: &str) -> String {
         "jti": uuid::Uuid::now_v7().to_string(),
         "htm": htm,
         "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(
@@ -1310,8 +1310,8 @@ async fn registration_endpoints() -> (TestServices, String) {
         allowed_scopes: vec!["openid".into(), "profile".into()],
         allowed_grant_types: vec!["authorization_code".into(), "refresh_token".into()],
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+        created_at: jiff::Timestamp::now(),
         created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     };
@@ -1792,7 +1792,7 @@ async fn sign_in_again(browser: &mut Browser) -> sid_core::models::Session {
     let mut session = sid_core::models::Session::new(
         browser.user.profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     browser
@@ -2316,7 +2316,7 @@ async fn authorize_needs_a_live_full_session() {
 
     for limited in [
         |s: &mut sid_core::models::Session| {
-            s.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1)
+            s.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)
         },
         |s: &mut sid_core::models::Session| s.is_provisional = true,
     ] {
@@ -2399,7 +2399,7 @@ async fn authorize_records_activity_only_on_accepted_use() {
     redirect_query(&browser.get(&refused).await, REDIRECT_URI);
     assert_eq!(last().await, None);
 
-    let before = chrono::Utc::now();
+    let before = jiff::Timestamp::now();
     let accepted = with_query(&browser.authorize, &authorize_query(REDIRECT_URI));
     assert!(redirect_query(&browser.get(&accepted).await, REDIRECT_URI).contains_key("code"));
     assert!(last().await.is_some_and(|at| at >= before));
@@ -2427,7 +2427,7 @@ async fn authorize_continues_on_another_replica() {
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     a.storage
@@ -2478,7 +2478,7 @@ impl Browser {
         let mut session = sid_core::models::Session::new(
             self.user.profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         )
         .with_grant_authentication(&self.user.session.grant_authentication());
         session.client_id = Some("test-client".into());
@@ -2971,7 +2971,7 @@ fn signed_in_over(
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     let svc = TestServices::with_cache(

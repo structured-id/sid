@@ -121,8 +121,8 @@ fn claimed(delivery: &LogoutDelivery) -> ClaimedWork {
         max_attempts: work.max_attempts,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     }
 }
 
@@ -307,13 +307,13 @@ async fn test_revoked_session_logout_is_owed_and_delivered() {
     let mut session = Session::new(
         profile_id(),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.client_id = Some("client-456".into());
     let first_party = Session::new(
         profile_id(),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     for s in [&session, &first_party] {
         storage
@@ -514,7 +514,7 @@ async fn test_owed_logout_survives_an_unavailable_rp_and_a_worker_restart() {
     let mut session = Session::new(
         profile_id(),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.client_id = Some("client-456".into());
     storage

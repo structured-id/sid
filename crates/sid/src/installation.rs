@@ -149,10 +149,7 @@ impl Installation {
                 .map_err(InstallationError::Opaque)?,
         );
         let revocation_cache = Arc::new(RevocationCache::recorded_in(
-            settings
-                .access_token_ttl
-                .duration()
-                .to_std()
+            std::time::Duration::try_from(settings.access_token_ttl.duration())
                 .expect("access token lifetime is positive"),
             settings.cache,
             storage.clone(),

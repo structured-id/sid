@@ -32,7 +32,7 @@ fn fixture() -> Fixture {
     let session = Session::new(
         owner.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let storage = MockStorage::new()
         .with_profile(owner.clone())
@@ -113,7 +113,7 @@ async fn test_validate_session_names_no_owner_of_an_expired_session() {
     let session = Session::new(
         owner.id,
         None,
-        chrono::Utc::now() - chrono::Duration::minutes(1),
+        jiff::Timestamp::now() - jiff::SignedDuration::from_mins(1),
     );
     let svc = TestServices::new(
         MockStorage::new()

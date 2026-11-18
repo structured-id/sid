@@ -24,7 +24,7 @@ fn content(subject: &str) -> StoredContent {
         push_title: String::new(),
         push_body: String::new(),
         push_action_url: String::new(),
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -374,7 +374,7 @@ async fn test_render_preview_email() {
         push_title: String::new(),
         push_body: String::new(),
         push_action_url: String::new(),
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
     let mut vars = HashMap::new();
     vars.insert("event_type".into(), "sid.security.brute_force.v1".into());
@@ -396,7 +396,7 @@ async fn test_render_preview_sms() {
         push_title: String::new(),
         push_body: String::new(),
         push_action_url: String::new(),
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
     let mut vars = HashMap::new();
     vars.insert("code".into(), "123456".into());

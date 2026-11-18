@@ -59,7 +59,7 @@ async fn session(h: &Harness, jkt: &str) -> (Session, NativeCredentialSet) {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (first, set) = first_generation(&session, jkt, h.policy);
     h.store
@@ -93,7 +93,7 @@ fn proof(credential: &str, exchange: &NativeExchange) -> String {
         "jti": uuid::Uuid::new_v4().to_string(),
         "htm": "POST",
         "htu": URL,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "sid_rt": crate::dpop::native_digest(credential.as_bytes()),
         "sid_ex": URL_SAFE_NO_PAD.encode(exchange.as_bytes()),
     });

@@ -120,10 +120,7 @@ fn too_many_streams(quota: &'static str, limit: usize) -> Status {
 
 /// Convert domain Event → proto CloudEvent for gRPC streaming.
 fn event_to_proto(event: &Event) -> Result<CloudEvent, serde_json::Error> {
-    let time = prost_types::Timestamp {
-        seconds: event.time.timestamp(),
-        nanos: event.time.timestamp_subsec_nanos() as i32,
-    };
+    let time = sid_proto::time::to_proto(event.time);
 
     let data = if event.data.is_null() {
         Vec::new()
@@ -195,14 +192,8 @@ fn forward(
 
 /// A request timestamp as a UTC time, or `InvalidArgument` naming the field.
 #[allow(clippy::result_large_err)]
-fn timestamp(
-    field: &'static str,
-    ts: prost_types::Timestamp,
-) -> Result<chrono::DateTime<chrono::Utc>, Status> {
-    u32::try_from(ts.nanos)
-        .ok()
-        .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-        .ok_or_else(|| invalid_field(field, "not a valid timestamp"))
+fn timestamp(field: &'static str, ts: prost_types::Timestamp) -> Result<jiff::Timestamp, Status> {
+    sid_proto::time::from_proto(&ts).ok_or_else(|| invalid_field(field, "not a valid timestamp"))
 }
 
 #[tonic::async_trait]

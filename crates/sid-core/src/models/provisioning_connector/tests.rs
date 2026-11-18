@@ -87,7 +87,7 @@ fn credential_kinds_have_their_own_prefixes() {
 /// never once revoked or expired, nor at the exact end of its validity.
 #[test]
 fn credential_usability() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut c = ProvisioningCredential::new(
         ProvisioningConnectorId::generate(),
         ConnectorCredentialKind::ScimBearer,
@@ -96,9 +96,9 @@ fn credential_usability() {
     assert!(c.is_usable_at(now));
 
     c.status = CredentialStatus::GracePeriod;
-    c.expires_at = Some(now + Duration::hours(1));
+    c.expires_at = Some(now + SignedDuration::from_hours(1));
     assert!(c.is_usable_at(now));
-    assert!(!c.is_usable_at(now + Duration::hours(1)));
+    assert!(!c.is_usable_at(now + SignedDuration::from_hours(1)));
 
     c.status = CredentialStatus::Revoked;
     c.expires_at = None;

@@ -59,7 +59,7 @@ fn profile() -> Profile {
 #[test]
 fn test_granted_claims_follow_the_scopes() {
     let profile = profile();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let email = ProfileEmail {
         id: sid_core::models::ProfileEmailId::new(),
         profile_id: profile.id,

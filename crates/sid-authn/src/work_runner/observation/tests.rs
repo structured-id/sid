@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
-use chrono::Utc;
+use jiff::SignedDuration;
 
 /// A wait is measured from the store's due time; a store clock ahead of this
 /// process gives zero, not a negative or panicking duration.
 #[test]
 fn elapsed_is_zero_when_the_store_clock_is_ahead() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     assert_eq!(
-        elapsed(now + chrono::Duration::seconds(5), now),
+        elapsed(now + SignedDuration::from_secs(5), now),
         Duration::ZERO
     );
     assert_eq!(
-        elapsed(now - chrono::Duration::milliseconds(1500), now),
+        elapsed(now - SignedDuration::from_millis(1500), now),
         Duration::from_millis(1500)
     );
 }

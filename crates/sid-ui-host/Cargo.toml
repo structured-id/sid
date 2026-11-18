@@ -41,7 +41,7 @@ sid-plugin = { workspace = true }
 sid-infra = { workspace = true, features = ["issuer-client", "redis", "http", "oauth-http"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt"] }
-chrono = { workspace = true }
+jiff = { workspace = true }
 # The listener: the adapter's annotated RPCs, gRPC and gRPC-Web to the hosted
 # API and the bundle's routes, through the embedded transcoder.
 structured-proxy = { version = "8.1.4", default-features = false }

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::{
     CeremonyCount, CeremonyEntry, CeremonyRecords, CeremonyStateStore, SingleUseAdmissions,
@@ -20,7 +20,7 @@ fn failure(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
 }
 
 fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    Timestamp::now().as_millisecond()
 }
 
 /// The deadline `ttl` from `now`; a lifetime past the millisecond range is
@@ -425,7 +425,7 @@ impl CeremonyStateStore for SqliteBackend {
             .fetch_optional(&mut *tx)
             .await
             .map_err(failure("import ceremony state"))?;
-            let wanted = (entry.value.clone(), entry.expires_at.timestamp_millis());
+            let wanted = (entry.value.clone(), entry.expires_at.as_millisecond());
             if let Some(held) = held {
                 crate::transfer_repeat(&held, &wanted, "ceremony state")?;
                 continue;
@@ -459,7 +459,7 @@ impl CeremonyStateStore for SqliteBackend {
             let value = i64::try_from(count.count).map_err(|_| {
                 SidError::Validation(format!("count of {} is too large", count.key))
             })?;
-            let wanted = (value, count.window_ends.timestamp_millis());
+            let wanted = (value, count.window_ends.as_millisecond());
             if let Some(held) = held {
                 crate::transfer_repeat(&held, &wanted, "ceremony count")?;
                 continue;
@@ -487,7 +487,7 @@ impl CeremonyStateStore for SqliteBackend {
 }
 
 /// The instant of a stored millisecond deadline.
-fn instant(ms: i64) -> SidResult<chrono::DateTime<Utc>> {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .ok_or_else(|| SidError::Storage(format!("ceremony deadline {ms} is out of range")))
+fn instant(ms: i64) -> SidResult<Timestamp> {
+    Timestamp::from_millisecond(ms)
+        .map_err(|_| SidError::Storage(format!("ceremony deadline {ms} is out of range")))
 }

@@ -341,7 +341,7 @@ impl UpstreamService for UpstreamServiceImpl {
                 email: claims.email.clone(),
                 name: claims.name.clone(),
                 picture: claims.picture.clone(),
-                at: chrono::Utc::now(),
+                at: jiff::Timestamp::now(),
             };
             let recorded = self
                 .storage

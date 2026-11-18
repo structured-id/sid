@@ -439,8 +439,8 @@ impl EventBus for NatsEventBus {
 
     async fn replay(
         &self,
-        from: chrono::DateTime<chrono::Utc>,
-        to: Option<chrono::DateTime<chrono::Utc>>,
+        from: jiff::Timestamp,
+        to: Option<jiff::Timestamp>,
         filter: EventFilter,
     ) -> EventBusResult<mpsc::Receiver<Event>> {
         let subjects = self
@@ -449,10 +449,7 @@ impl EventBus for NatsEventBus {
             .map_err(EventBusError::SubscribeFailed)?;
 
         // On the history only: replay reads facts and never hands anyone work.
-        let nanos = from
-            .timestamp_nanos_opt()
-            .ok_or_else(|| EventBusError::InvalidReplayWindow(format!("start {from}")))?;
-        let start_time = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
+        let start_time = time::OffsetDateTime::from_unix_timestamp_nanos(from.as_nanosecond())
             .map_err(|e| EventBusError::InvalidReplayWindow(format!("start {from}: {e}")))?;
         let messages = self
             .read_history(
@@ -482,7 +479,7 @@ impl EventBus for NatsEventBus {
 async fn forward_history(
     mut messages: jetstream::consumer::pull::Ordered,
     tx: mpsc::Sender<Event>,
-    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    cutoff: Option<jiff::Timestamp>,
 ) {
     use futures::StreamExt;
     while let Some(read) = messages.next().await {

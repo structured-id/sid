@@ -89,7 +89,7 @@ async fn test_create_retry_answers_with_its_token_without_the_value() {
     let (svc, jwt) = service(storage.clone()).await;
     let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
     // One command: the retry repeats the same inputs.
-    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let expires = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24)).as_second();
     let create = || {
         keyed(
             sid_proto::sid::v1::CreatePatRequest {
@@ -140,7 +140,7 @@ async fn test_concurrent_attempts_at_the_limit_answer_with_one_token() {
     }
     let (svc, jwt) = service(storage.clone()).await;
     let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
-    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let expires = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24)).as_second();
     let create = || {
         keyed(
             sid_proto::sid::v1::CreatePatRequest {
@@ -292,7 +292,8 @@ async fn test_create_beyond_the_token_limit_is_quota_exceeded() {
                 name: "one more".into(),
                 scopes: vec!["repos:read".into()],
                 expires_at: Some(prost_types::Timestamp {
-                    seconds: (chrono::Utc::now() + chrono::Duration::days(1)).timestamp(),
+                    seconds: (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24))
+                        .as_second(),
                     nanos: 0,
                 }),
                 ..Default::default()
@@ -325,7 +326,8 @@ async fn test_exchange_of_an_unbound_token_issues_nothing() {
                 name: "ci".into(),
                 scopes: vec!["repos:read".into()],
                 expires_at: Some(prost_types::Timestamp {
-                    seconds: (chrono::Utc::now() + chrono::Duration::days(1)).timestamp(),
+                    seconds: (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24))
+                        .as_second(),
                     nanos: 0,
                 }),
                 ..Default::default()

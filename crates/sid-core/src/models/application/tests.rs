@@ -101,8 +101,8 @@ fn resource(state: ResourceState) -> ProtectedResource {
         scopes: vec!["orders.read".into(), "orders.write".into()],
         state,
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -147,7 +147,7 @@ fn access_grants_only_scopes_both_allowed_and_supported() {
         client_id: "orders-web".into(),
         resource_id: target.id,
         scopes: vec!["orders.read".into(), "admin".into()],
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let requested = vec!["orders.read".into(), "orders.write".into(), "admin".into()];
     assert_eq!(

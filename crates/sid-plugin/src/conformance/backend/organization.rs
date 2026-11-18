@@ -90,7 +90,7 @@ pub async fn test_instance_organization_and_clients(backend: &dyn StorageBackend
     let reference = sid_core::models::OrganizationReference {
         id: sid_core::models::OrgId::generate(),
         // Stores keep times to the microsecond.
-        created_at: chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 6),
+        created_at: crate::conformance::trunc(jiff::Timestamp::now(), jiff::Unit::Microsecond),
     };
     let recipient = reference.id;
     let (ra, rb) = tokio::join!(

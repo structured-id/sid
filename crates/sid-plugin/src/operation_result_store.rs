@@ -3,7 +3,7 @@
 //! commands, so a retried command resolves to its original outcome.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::Result;
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationKey, OperationPeriod, OperationPeriodPolicy,
@@ -26,8 +26,8 @@ pub trait OperationResultStore: Send + Sync {
     /// state.
     async fn current_operation_period(
         &self,
-        now: DateTime<Utc>,
-        acceptance: Duration,
+        now: Timestamp,
+        acceptance: SignedDuration,
     ) -> Result<IssuedOperationPeriod>;
 
     /// Whether the store admits a command named with `period`, asked before
@@ -41,7 +41,7 @@ pub trait OperationResultStore: Send + Sync {
     /// command of that period is refused, never executed as new. A commit
     /// admitted under the period either finishes before the retirement or is
     /// refused. Returns how many periods were retired.
-    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> Result<u64>;
+    async fn retire_operation_periods(&self, before: Timestamp) -> Result<u64>;
 
     /// The last period issued and the periods still admitted, to carry to
     /// another store with the completions named with them.
@@ -67,14 +67,14 @@ pub trait OperationResultStore: Send + Sync {
         &self,
         namespace: &str,
         method: &str,
-        before: DateTime<Utc>,
+        before: Timestamp,
     ) -> Result<u64>;
 
     /// Drop every completion whose retention ended by `now`
     /// ([`OperationCompletion::retain_until`]). Returns how many were dropped.
     ///
     /// [`OperationCompletion::retain_until`]: sid_core::models::OperationCompletion::retain_until
-    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> Result<u64>;
+    async fn purge_expired_operation_results(&self, now: Timestamp) -> Result<u64>;
 
     /// The committed completion of the keyed command `key` in `namespace`
     /// (recorded through [`MutationContext::operation`]), if any; one past

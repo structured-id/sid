@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationCompletion, OperationKey, OperationPeriod,
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
@@ -116,7 +116,7 @@ struct Entry {
     stored: bool,
     completion: Option<OperationRecord>,
     /// The bound identifier and when it was bound.
-    binding: Option<(OperationResourceBinding, DateTime<Utc>)>,
+    binding: Option<(OperationResourceBinding, Timestamp)>,
 }
 
 impl Entry {
@@ -293,7 +293,7 @@ impl Admitted {
 fn settle(
     tx: &Statements<'_>,
     entry: &mut Entry,
-    now: DateTime<Utc>,
+    now: Timestamp,
     admitted: &mut Admitted,
 ) -> SidResult<()> {
     let Some(record) = &entry.completion else {
@@ -457,7 +457,7 @@ pub(super) fn record(tx: &Statements<'_>, operation: &OperationCompletion) -> Si
         // A completed key answers as completed, full period or not.
         if matches!(e, SidError::ResourceExhausted(_)) {
             let mut entry = load(tx, &operation.namespace, &operation.key)?;
-            settle(tx, &mut entry, Utc::now(), &mut Admitted::default())?;
+            settle(tx, &mut entry, Timestamp::now(), &mut Admitted::default())?;
             if entry.completion.is_some() {
                 return Err(SidError::OperationCompleted(operation.key.as_str().into()));
             }
@@ -469,7 +469,7 @@ pub(super) fn record(tx: &Statements<'_>, operation: &OperationCompletion) -> Si
             "operation result larger than {limit} bytes"
         )));
     }
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut entry = load(tx, &operation.namespace, &operation.key)?;
     settle(tx, &mut entry, now, &mut Admitted::default())?;
     if let Some((bound, _)) = &entry.binding
@@ -545,12 +545,7 @@ fn drop_retired(tx: &Statements<'_>, period: i64) -> SidResult<()> {
     Ok(())
 }
 
-/// A stored policy duration; a negative one is an error.
-fn seconds(name: &str, value: i64) -> SidResult<Duration> {
-    Duration::try_seconds(value)
-        .filter(|d| *d >= Duration::zero())
-        .ok_or_else(|| SidError::Storage(format!("{name}: {value}")))
-}
+use crate::stored_seconds as seconds;
 
 /// A stored positive bound.
 fn bound(name: &str, value: i64) -> SidResult<u64> {
@@ -646,11 +641,12 @@ impl OperationResultStore for CoordinodeBackend {
 
     async fn current_operation_period(
         &self,
-        now: DateTime<Utc>,
-        acceptance: Duration,
+        now: Timestamp,
+        acceptance: SignedDuration,
     ) -> SidResult<IssuedOperationPeriod> {
         let until = now
-            .checked_add_signed(acceptance)
+            .checked_add(acceptance)
+            .ok()
             .map(super::stored_time)
             .ok_or_else(|| {
                 SidError::Validation("operation period acceptance out of range".into())
@@ -698,7 +694,7 @@ impl OperationResultStore for CoordinodeBackend {
             .await
     }
 
-    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+    async fn retire_operation_periods(&self, before: Timestamp) -> SidResult<u64> {
         let marked = self
             .transaction(move |tx| {
                 let rows = tx.run(
@@ -809,7 +805,7 @@ impl OperationResultStore for CoordinodeBackend {
         &self,
         namespace: &str,
         method: &str,
-        before: DateTime<Utc>,
+        before: Timestamp,
     ) -> SidResult<u64> {
         let (namespace, method) = (namespace.to_owned(), method.to_owned());
         self.transaction(move |tx| {
@@ -828,7 +824,7 @@ impl OperationResultStore for CoordinodeBackend {
         .await
     }
 
-    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+    async fn purge_expired_operation_results(&self, now: Timestamp) -> SidResult<u64> {
         self.transaction(move |tx| {
             // The bindings of the dropped completions go with them.
             let rows = tx.run(
@@ -850,7 +846,7 @@ impl OperationResultStore for CoordinodeBackend {
         let (namespace, key) = (namespace.to_owned(), key.clone());
         self.transaction(move |tx| {
             let mut entry = load(tx, &namespace, &key)?;
-            settle(tx, &mut entry, Utc::now(), &mut Admitted::default())?;
+            settle(tx, &mut entry, Timestamp::now(), &mut Admitted::default())?;
             Ok(Decision::Abandon(entry.completion))
         })
         .await
@@ -862,7 +858,7 @@ impl OperationResultStore for CoordinodeBackend {
                 &format!("MATCH (o:SidOperation) WHERE o.completed = true RETURN {FIELDS}"),
                 Params::default(),
             )?;
-            let (now, mut admitted) = (Utc::now(), Admitted::default());
+            let (now, mut admitted) = (Timestamp::now(), Admitted::default());
             let mut records = Vec::with_capacity(rows.len());
             for row in &rows {
                 let mut entry = entry(row)?;
@@ -930,7 +926,7 @@ impl OperationResultStore for CoordinodeBackend {
             if let Some(period) = proposal.period {
                 admit(tx, period)?;
             }
-            let now = Utc::now();
+            let now = Timestamp::now();
             let mut entry = load(tx, &proposal.namespace, &proposal.key)?;
             // A key whose completion's retention ended is free again; one
             // completed for another command binds nothing.
@@ -969,7 +965,7 @@ impl OperationResultStore for CoordinodeBackend {
             )?;
             // A binding whose completion expired holds a key already
             // released: it is not carried elsewhere.
-            let (now, mut admitted) = (Utc::now(), Admitted::default());
+            let (now, mut admitted) = (Timestamp::now(), Admitted::default());
             let mut bindings = Vec::with_capacity(rows.len());
             for row in &rows {
                 let mut entry = entry(row)?;
@@ -1010,7 +1006,7 @@ impl OperationResultStore for CoordinodeBackend {
             if entry.binding.is_some() {
                 return Ok(Decision::Abandon(false));
             }
-            entry.binding = Some((binding.clone(), Utc::now()));
+            entry.binding = Some((binding.clone(), Timestamp::now()));
             save(tx, &entry)?;
             Ok(Decision::Commit(true))
         })

@@ -434,7 +434,7 @@ async fn test_a_rotated_credential_has_a_grace_end() {
         .unwrap()
         .into_inner();
     let kid = added.credential.unwrap().kid;
-    let before = chrono::Utc::now();
+    let before = jiff::Timestamp::now();
     let rotated = svc
         .machine_user
         .rotate_machine_credential(req(
@@ -451,16 +451,19 @@ async fn test_a_rotated_credential_has_a_grace_end() {
     let old = rotated.old_credential.unwrap();
     assert_eq!(old.status, MachineCredentialStatus::GracePeriod as i32);
     let end = old.expires_at.expect("a grace end").seconds;
-    let grace = chrono::Duration::hours(72);
-    assert!(end >= (before + grace).timestamp() - 1, "{end}");
-    assert!(end <= (chrono::Utc::now() + grace).timestamp() + 1, "{end}");
+    let grace = jiff::SignedDuration::from_hours(72);
+    assert!(end >= (before + grace).as_second() - 1, "{end}");
+    assert!(
+        end <= (jiff::Timestamp::now() + grace).as_second() + 1,
+        "{end}"
+    );
     let stored = svc
         .storage
         .get_machine_credential_by_kid(&kid)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.expires_at.unwrap().timestamp(), end);
+    assert_eq!(stored.expires_at.unwrap().as_second(), end);
 }
 
 /// Revoking a credential, suspending the machine user or deleting it stops

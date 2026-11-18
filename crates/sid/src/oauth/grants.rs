@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use secrecy::ExposeSecret;
 use sid_authn::client_auth::ClientAuthentication;
 use sid_authn::device_auth;
@@ -250,7 +250,7 @@ impl OAuth {
             .with_client(client, None)
             .for_account(self.storage.as_ref(), session.profile_id)
             .await?;
-        match requirements.decide(session, Utc::now()) {
+        match requirements.decide(session, Timestamp::now()) {
             sid_authn::login_policy::LoginDecision::Allow { .. } => Ok(requirements.fence),
             sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
                 info!(client = %client.client_id, ?unmet, "Grant no longer admitted by the login requirements");
@@ -376,7 +376,7 @@ impl OAuth {
         let lifetime = self.jwt.access_token_ttl_secs();
         let expires_in = actor
             .max_lifetime
-            .map_or(lifetime, |cap| cap.num_seconds().min(lifetime));
+            .map_or(lifetime, |cap| cap.as_secs().min(lifetime));
         Ok(OAuth2TokenResponse {
             access_token,
             token_type: token_type.to_string(),
@@ -425,7 +425,7 @@ impl OAuth {
                 credential: &kid,
                 max_lifetime: mu
                     .max_token_lifetime
-                    .map(|seconds| Duration::seconds(i64::from(seconds))),
+                    .map(|seconds| Duration::from_secs(i64::from(seconds))),
             };
             return self
                 .client_token(&issuer, actor, &target, scopes, req, proof_target)
@@ -703,9 +703,12 @@ impl OAuth {
             .authorized_with
             .as_ref()
             .ok_or_else(|| internal("storage", "an approved device code has no authentication"))?;
-        let mut session =
-            sid_core::models::Session::new(profile.id, None, Utc::now() + Duration::hours(24))
-                .with_grant_authentication(approved);
+        let mut session = sid_core::models::Session::new(
+            profile.id,
+            None,
+            Timestamp::now() + Duration::from_hours(24),
+        )
+        .with_grant_authentication(approved);
         session.client_id = Some(client.client_id.clone());
         session.scopes = code
             .scope
@@ -922,9 +925,9 @@ impl OAuth {
         // The impersonation is a session of the target: it shows in the
         // target's sessions, and revoking it or the target's access ends the
         // token. It is recorded together with its audit entry.
-        let lifetime = Duration::seconds(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
+        let lifetime = Duration::from_secs(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
         let mut session =
-            sid_core::models::Session::new(profile_id, client_ip, Utc::now() + lifetime);
+            sid_core::models::Session::new(profile_id, client_ip, Timestamp::now() + lifetime);
         session.client_id = Some(mu.client_id.clone());
         session.scopes = scopes.clone();
         session.amr = vec!["token_exchange".to_string()];
@@ -949,7 +952,7 @@ impl OAuth {
         Ok(OAuth2TokenResponse {
             access_token,
             token_type: "Bearer".to_string(),
-            expires_in: lifetime.num_seconds(),
+            expires_in: lifetime.as_secs(),
             refresh_token: None,
             id_token: None,
             scope: Some(scopes.join(" ")),
@@ -1105,7 +1108,7 @@ impl OAuth {
             if claims.client_id.as_deref() != Some(client.client_id.as_str()) {
                 return Err(not_its_own());
             }
-            let remaining = claims.exp - Utc::now().timestamp();
+            let remaining = claims.exp - Timestamp::now().as_second();
             if remaining > 0 {
                 self.revocation
                     .revoke_jti(

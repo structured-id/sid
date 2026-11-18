@@ -103,7 +103,7 @@ async fn orders_api(svc: &TestServices, scopes: Option<&[&str]>) {
         Application, ApplicationId, AuditEntry, ProjectId, ProtectedResource, ResourceAccess,
         ResourceId, ResourceIndicator, ResourceState,
     };
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -236,7 +236,7 @@ async fn introspection_reflects_the_requesting_clients_state() {
                 client_id: WORKER.into(),
                 resource_id: resource.id,
                 scopes: vec!["orders.read".into()],
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             },
             audit(),
         )
@@ -382,7 +382,7 @@ async fn introspection_reflects_the_machines_current_state() {
     assert!(active().await, "restored machine");
 
     let mut expired = machine.clone();
-    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    expired.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(1));
     assert!(
         svc.storage
             .update_machine_user(&expired, audit())
@@ -673,7 +673,7 @@ async fn test_revoked_subject_token_is_refused() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (subject_token, session) =
         issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -832,7 +832,7 @@ async fn test_impersonation_is_a_recorded_and_audited_session() {
         .expect("impersonation session stored");
     assert_eq!(session.profile_id, profile.id);
     assert_eq!(session.client_id.as_deref(), Some("mu_test_exchange"));
-    assert_eq!(session.expires_at.timestamp(), claims.exp);
+    assert_eq!(session.expires_at.as_second(), claims.exp);
     let audits = svc.mock_storage.session_audits();
     let audit = audits
         .iter()

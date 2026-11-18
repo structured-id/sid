@@ -636,7 +636,7 @@ async fn test_replay_reads_history_only() {
     let t = topology();
     let bus = owner(&t).await;
     let receiver = recipient("r");
-    let start = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let start = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5);
     let fact = Event::new("sid-test", event_types::USER_CREATED);
     bus.publish(fact.clone()).await.unwrap();
     let work = Event::new("sid-test", event_types::PASSWORD_HISTORY_OWNER_PURGED);
@@ -671,7 +671,7 @@ async fn test_replay_waits_for_a_slow_reader() {
     use futures::future::join_all;
     let t = topology();
     let bus = owner(&t).await;
-    let start = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let start = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5);
     const EVENTS: usize = 3_000;
     for chunk in (0..EVENTS).collect::<Vec<_>>().chunks(200) {
         join_all(
@@ -721,7 +721,7 @@ async fn test_a_stalled_replay_reader_gets_each_event_once() {
     use std::collections::HashSet;
     let t = topology();
     let bus = owner(&t).await;
-    let start = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let start = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5);
     const EVENTS: usize = 3_000;
     for chunk in (0..EVENTS).collect::<Vec<_>>().chunks(200) {
         join_all(

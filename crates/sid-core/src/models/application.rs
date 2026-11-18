@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 pub use sid_ids::{ApplicationId, ResourceId};
@@ -30,8 +30,8 @@ pub struct Application {
     pub system: Option<SystemIntegration>,
     /// Stored revision: 0 for a new application, moved on by every update.
     pub revision: u64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// An integration of the installation with itself, provisioned by SID rather
@@ -174,8 +174,8 @@ pub struct ProtectedResource {
     pub state: ResourceState,
     /// Stored revision: 0 for a new resource, moved on by every update.
     pub revision: u64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ProtectedResource {
@@ -212,7 +212,7 @@ pub struct ResourceAccess {
     pub client_id: String,
     pub resource_id: ResourceId,
     pub scopes: Vec<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl ResourceAccess {

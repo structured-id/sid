@@ -52,7 +52,7 @@ async fn concurrent_takes_have_one_winner() {
 async fn a_replacement_applies_only_to_what_was_read() {
     let (a, b) = replicas(Duration::from_secs(60));
     a.insert("k1", &"one".to_string()).await.unwrap();
-    let deadline = chrono::Utc::now() + chrono::Duration::seconds(60);
+    let deadline = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(60);
     let read_a = a.read_versioned("k1").await.unwrap().unwrap();
     let read_b = b.read_versioned("k1").await.unwrap().unwrap();
     assert_eq!(read_a.value, "one");
@@ -88,7 +88,7 @@ async fn a_replacement_applies_only_to_what_was_read() {
     );
 
     let read = a.read_versioned("k1").await.unwrap().unwrap();
-    let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let past = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1);
     assert!(
         a.replace("k1", &read, &"late".to_string(), past)
             .await
@@ -127,7 +127,7 @@ async fn expired_state_is_not_taken() {
 #[tokio::test]
 async fn state_stored_until_a_deadline_ends_with_it() {
     let (a, b) = replicas(Duration::from_secs(60));
-    let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(40);
+    let deadline = jiff::Timestamp::now() + jiff::SignedDuration::from_millis(40);
     assert!(
         a.insert_until("k1", &"state".to_string(), deadline)
             .await
@@ -136,7 +136,7 @@ async fn state_stored_until_a_deadline_ends_with_it() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert_eq!(b.take("k1").await.unwrap(), None);
 
-    let passed = chrono::Utc::now() - chrono::Duration::milliseconds(1);
+    let passed = jiff::Timestamp::now() - jiff::SignedDuration::from_millis(1);
     assert!(
         !a.insert_until("k2", &"state".to_string(), passed)
             .await

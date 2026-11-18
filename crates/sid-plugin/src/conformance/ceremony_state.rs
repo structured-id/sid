@@ -395,8 +395,7 @@ pub async fn records_move_with_their_deadlines(store: &dyn CeremonyStateStore) {
     assert_eq!(ours.counts[0].count, 2);
     // Deadlines move at the precision every store keeps, milliseconds, so a
     // record moved between engines compares equal on both sides.
-    let whole_ms =
-        |t: &chrono::DateTime<chrono::Utc>| t.timestamp_subsec_nanos().is_multiple_of(1_000_000);
+    let whole_ms = |t: &jiff::Timestamp| t.subsec_nanosecond() % 1_000_000 == 0;
     assert!(
         ours.states.iter().all(|s| whole_ms(&s.expires_at)),
         "{ours:?}"

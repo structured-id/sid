@@ -582,9 +582,9 @@ impl EntryConnections {
 
 /// Now, at the microsecond precision every backend stores a time in: the
 /// connection a command answers with is the one a later read returns.
-fn stored_now() -> chrono::DateTime<chrono::Utc> {
-    use chrono::SubsecRound as _;
-    chrono::Utc::now().trunc_subsecs(6)
+fn stored_now() -> jiff::Timestamp {
+    jiff::Timestamp::from_microsecond(jiff::Timestamp::now().as_microsecond())
+        .expect("now is representable")
 }
 
 /// The key of the record that installation issuer `issuer` has its

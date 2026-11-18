@@ -81,7 +81,7 @@ async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,

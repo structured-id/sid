@@ -3,8 +3,9 @@
 //! (`history_key_*`), its own migrations and its own pool, so the evaluator can
 //! run against a database and role that reach nothing else.
 
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     AbandonedEnrollment, AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryEpochUse,
     HistoryKsf, HistoryPreparation, HistorySuite, KeyArchive, KeyAuditRecord, KeyEpoch, KeyEpochs,
@@ -28,7 +29,7 @@ type KeyEpochRow = (
     i32,
     Vec<u8>,
     String,
-    DateTime<Utc>,
+    PgTime,
 );
 
 macro_rules! key_epoch_columns {
@@ -53,7 +54,7 @@ fn key_epoch_from_row(row: KeyEpochRow) -> SidResult<KeyEpoch> {
         },
         ksf_salt: fixed32(salt, "ksf_salt")?,
         status: HistoryEpochUse::parse(&status)?,
-        created_at,
+        created_at: created_at.jiff(),
     })
 }
 
@@ -132,7 +133,7 @@ async fn insert_key_epoch(
     .bind(signed(e.ksf.lanes, "KSF lanes")?)
     .bind(e.ksf_salt.as_slice())
     .bind(e.status.as_str())
-    .bind(e.created_at)
+    .bind(e.created_at.pg())
     .bind(created_by)
     .execute(&mut **tx)
     .await
@@ -248,7 +249,7 @@ async fn read_key_archive(
     .fetch_all(&mut *conn)
     .await
     .map_err(storage("archive creators"))?;
-    let uses: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
+    let uses: Vec<(Uuid, Uuid, PgTime)> = sqlx::query_as(
         "SELECT operation_id, epoch_id, expires_at FROM history_key_uses
          WHERE owner_domain = $1 ORDER BY operation_id, epoch_id",
     )
@@ -301,7 +302,7 @@ async fn read_key_archive(
             .map(|(operation, epoch, expires_at)| KeyUse {
                 operation,
                 epoch: HistoryEpochId(epoch),
-                expires_at,
+                expires_at: expires_at.jiff(),
             })
             .collect(),
     };
@@ -310,14 +311,14 @@ async fn read_key_archive(
 }
 
 async fn read_key_records(conn: &mut sqlx::PgConnection) -> SidResult<KeyStoreRecords> {
-    let abandoned: Vec<(Uuid, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
+    let abandoned: Vec<(Uuid, Vec<u8>, PgTime)> = sqlx::query_as(
         "SELECT operation_id, owner_domain, abandoned_at FROM history_key_abandoned
          ORDER BY operation_id",
     )
     .fetch_all(&mut *conn)
     .await
     .map_err(storage("abandoned enrollments"))?;
-    let purged: Vec<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
+    let purged: Vec<(Vec<u8>, PgTime)> = sqlx::query_as(
         "SELECT owner_domain, purged_at FROM history_key_purged ORDER BY owner_domain",
     )
     .fetch_all(&mut *conn)
@@ -325,7 +326,7 @@ async fn read_key_records(conn: &mut sqlx::PgConnection) -> SidResult<KeyStoreRe
     .map_err(storage("purged owners"))?;
     type AuditRow = (
         i64,
-        DateTime<Utc>,
+        PgTime,
         String,
         String,
         String,
@@ -347,7 +348,7 @@ async fn read_key_records(conn: &mut sqlx::PgConnection) -> SidResult<KeyStoreRe
                 Ok(AbandonedEnrollment {
                     operation,
                     owner_domain: fixed32(domain, "owner_domain")?,
-                    at,
+                    at: at.jiff(),
                 })
             })
             .collect::<SidResult<_>>()?,
@@ -356,7 +357,7 @@ async fn read_key_records(conn: &mut sqlx::PgConnection) -> SidResult<KeyStoreRe
             .map(|(domain, at)| {
                 Ok(PurgedOwner {
                     owner_domain: fixed32(domain, "owner_domain")?,
-                    at,
+                    at: at.jiff(),
                 })
             })
             .collect::<SidResult<_>>()?,
@@ -375,7 +376,7 @@ async fn read_key_records(conn: &mut sqlx::PgConnection) -> SidResult<KeyStoreRe
                 )| {
                     KeyAuditRecord {
                         sequence,
-                        occurred_at,
+                        occurred_at: occurred_at.jiff(),
                         actor_id,
                         actor_type,
                         action,
@@ -587,7 +588,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         )
         .bind(owner_domain)
         .bind(&prep.live.settled)
-        .bind(prep.now)
+        .bind(prep.now.pg())
         .execute(&mut *tx)
         .await
         .map_err(storage("use release"))?;
@@ -630,7 +631,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
             )
             .bind(prep.operation).bind(epoch.id.0)
             .bind(owner_domain)
-            .bind(prep.expires_at)
+            .bind(prep.expires_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("use record"))?;
@@ -758,16 +759,16 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         Ok(destroyed)
     }
 
-    async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> SidResult<u64> {
+    async fn compact_abandoned(&self, before: Timestamp, audit: AuditEntry) -> SidResult<u64> {
         let mut tx = self.begin().await?;
         let mut dropped = sqlx::query("DELETE FROM history_key_abandoned WHERE abandoned_at < $1")
-            .bind(before)
+            .bind(before.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("fence compaction"))?
             .rows_affected();
         dropped += sqlx::query("DELETE FROM history_key_purged WHERE purged_at < $1")
-            .bind(before)
+            .bind(before.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("fence compaction"))?
@@ -789,32 +790,34 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         Ok(key.map(WrappedHistoryKey))
     }
 
-    async fn write_cutoff(&self) -> SidResult<Option<DateTime<Utc>>> {
-        sqlx::query_scalar("SELECT not_before FROM history_key_write_cutoff")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(storage("write cutoff"))
+    async fn write_cutoff(&self) -> SidResult<Option<Timestamp>> {
+        let cutoff: Option<PgTime> =
+            sqlx::query_scalar("SELECT not_before FROM history_key_write_cutoff")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(storage("write cutoff"))?;
+        Ok(cutoff.jiff())
     }
 
     async fn raise_write_cutoff(
         &self,
-        not_before: DateTime<Utc>,
+        not_before: Timestamp,
         audit: AuditEntry,
-    ) -> SidResult<DateTime<Utc>> {
+    ) -> SidResult<Timestamp> {
         let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut tx = self.begin().await?;
-        let current: Option<DateTime<Utc>> =
+        let current: Option<PgTime> =
             sqlx::query_scalar("SELECT not_before FROM history_key_write_cutoff FOR UPDATE")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(storage("write cutoff"))?;
-        if let Some(current) = current
+        if let Some(current) = current.jiff()
             && current >= not_before
         {
             return Ok(current);
         }
         sqlx::query("UPDATE history_key_write_cutoff SET not_before = $1")
-            .bind(not_before)
+            .bind(not_before.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("write cutoff raise"))?;
@@ -921,7 +924,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
             .bind(u.operation)
             .bind(u.epoch.0)
             .bind(domain)
-            .bind(u.expires_at)
+            .bind(u.expires_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("archive use"))?;
@@ -991,7 +994,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
             )
             .bind(a.operation)
             .bind(a.owner_domain.as_slice())
-            .bind(a.at)
+            .bind(a.at.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage("abandoned import"))?;
@@ -999,7 +1002,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         for p in &records.purged {
             sqlx::query("INSERT INTO history_key_purged (owner_domain, purged_at) VALUES ($1, $2)")
                 .bind(p.owner_domain.as_slice())
-                .bind(p.at)
+                .bind(p.at.pg())
                 .execute(&mut *tx)
                 .await
                 .map_err(storage("purged import"))?;
@@ -1011,7 +1014,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(r.sequence)
-            .bind(r.occurred_at)
+            .bind(r.occurred_at.pg())
             .bind(&r.actor_id)
             .bind(&r.actor_type)
             .bind(&r.action)

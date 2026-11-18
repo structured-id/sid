@@ -22,13 +22,17 @@ fn create_test_email() -> ProfileEmail {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
 fn create_test_session(profile: &Profile) -> Session {
-    Session::new(profile.id, None, Utc::now() + Duration::hours(1))
+    Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    )
 }
 
 /// Helper: issue_id_token with default primary email, no phone
@@ -121,7 +125,7 @@ fn test_jwt_roundtrip() {
     assert_eq!(claims.iss, "https://sid.example.com");
     assert_eq!(claims.scope, "openid profile");
     assert_eq!(claims.sid, session.id.to_string());
-    assert_eq!(claims.auth_time, session.authenticated_at.timestamp());
+    assert_eq!(claims.auth_time, session.authenticated_at.as_second());
 }
 
 /// An application token is typed `at+jwt`, names the protected resource it
@@ -321,7 +325,7 @@ fn test_client_access_token() {
 
     // A shorter cap of the client wins; a longer one does not extend.
     let capped = payload(
-        &jwt.client_access_token_signed_by(&jwt, &grant(Some(Duration::seconds(60))))
+        &jwt.client_access_token_signed_by(&jwt, &grant(Some(SignedDuration::from_secs(60))))
             .unwrap(),
     );
     assert_eq!(
@@ -329,7 +333,7 @@ fn test_client_access_token() {
         60
     );
     let longer = payload(
-        &jwt.client_access_token_signed_by(&jwt, &grant(Some(Duration::days(1))))
+        &jwt.client_access_token_signed_by(&jwt, &grant(Some(SignedDuration::from_hours(24))))
             .unwrap(),
     );
     assert_eq!(
@@ -371,7 +375,7 @@ fn test_id_token() {
     assert_eq!(token_data.claims.email_verified, Some(true));
     assert_eq!(
         token_data.claims.auth_time,
-        session.authenticated_at.timestamp()
+        session.authenticated_at.as_second()
     );
 }
 
@@ -386,7 +390,7 @@ fn test_expired_token_rejected() {
     .expect("JwtService creation failed");
 
     // Set TTL to negative to create an expired token (must exceed jsonwebtoken's 60s leeway)
-    jwt.access_token_ttl = Duration::seconds(-120);
+    jwt.access_token_ttl = SignedDuration::from_secs(-120);
 
     let profile = create_test_profile();
     let session = create_test_session(&profile);
@@ -591,8 +595,8 @@ fn test_auth_time_is_last_authentication() {
 
     let profile = create_test_profile();
     let mut session = create_test_session(&profile);
-    session.created_at -= Duration::hours(2);
-    session.authenticated_at -= Duration::minutes(10);
+    session.created_at -= SignedDuration::from_hours(2);
+    session.authenticated_at -= SignedDuration::from_mins(10);
 
     let token = jwt
         .issue_access_token(
@@ -607,7 +611,7 @@ fn test_auth_time_is_last_authentication() {
         .unwrap();
     let claims = jwt.validate_access_token(&token).unwrap();
 
-    assert_eq!(claims.auth_time, session.authenticated_at.timestamp());
+    assert_eq!(claims.auth_time, session.authenticated_at.as_second());
     assert!(claims.auth_time <= claims.iat);
 }
 
@@ -718,7 +722,7 @@ fn test_impersonation_token_roundtrip() {
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
         None,
-        Utc::now() + Duration::seconds(300),
+        Timestamp::now() + SignedDuration::from_secs(300),
     );
     let token = jwt
         .issue_impersonation_token(
@@ -753,7 +757,7 @@ fn test_impersonation_token_ends_with_its_session() {
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
         None,
-        Utc::now() + Duration::seconds(60),
+        Timestamp::now() + SignedDuration::from_secs(60),
     );
 
     let token = jwt
@@ -761,7 +765,7 @@ fn test_impersonation_token_ends_with_its_session() {
         .unwrap();
 
     let claims = jwt.validate_access_token(&token).unwrap();
-    assert_eq!(claims.exp, session.expires_at.timestamp());
+    assert_eq!(claims.exp, session.expires_at.as_second());
 }
 
 #[test]
@@ -777,7 +781,7 @@ fn test_impersonation_token_ttl_capped_at_300s() {
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
         None,
-        Utc::now() + Duration::hours(1),
+        Timestamp::now() + SignedDuration::from_hours(1),
     );
     let token = jwt
         .issue_impersonation_token("target", &session, "actor", &["read".into()])
@@ -888,7 +892,7 @@ fn test_elevated_token_ends_with_its_elevation() {
     let profile = create_test_profile();
     let mut session = create_test_session(&profile);
     session.as_active().unwrap().elevate(AuthLevel::Standard);
-    let until = Utc::now() + Duration::seconds(90);
+    let until = Timestamp::now() + SignedDuration::from_secs(90);
     session.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
         until,
@@ -911,15 +915,15 @@ fn test_elevated_token_ends_with_its_elevation() {
 
     let elevated = issue(&session);
     assert_eq!(elevated.acr, "urn:sid:acr:elevated");
-    assert_eq!(elevated.exp, until.timestamp(), "outlives its step-up");
+    assert_eq!(elevated.exp, until.as_second(), "outlives its step-up");
 
     session.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
-        until: Utc::now() - Duration::seconds(1),
+        until: Timestamp::now() - SignedDuration::from_secs(1),
     });
     let lapsed = issue(&session);
     assert_eq!(lapsed.acr, "urn:sid:acr:standard");
-    assert!(lapsed.exp > until.timestamp());
+    assert!(lapsed.exp > until.as_second());
 }
 
 // ── OIDC §5.1 Standard Claims tests ──
@@ -1074,8 +1078,8 @@ fn test_id_token_phone_claims_present_when_verified() {
         can_receive_voice: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let token = jwt
@@ -1131,8 +1135,8 @@ fn test_id_token_phone_claims_present_unverified() {
         can_receive_voice: true,
         verified: false,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let token = jwt
@@ -1173,7 +1177,7 @@ fn test_id_token_updated_at_claim() {
     .unwrap();
 
     let profile = create_test_profile();
-    let expected_updated_at = profile.updated_at.timestamp();
+    let expected_updated_at = profile.updated_at.as_second();
     let session = create_test_session(&profile);
 
     let token = issue_test_id_token(&jwt, &profile, &session, None);

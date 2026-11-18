@@ -3,8 +3,8 @@
 //! emailed link, completed once by installing the new password. Each step
 //! writes the session's node, so of concurrent steps one commits.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     Credential, CredentialType, HistoryCommit, MutationContext, PasswordResetSession, ProfileId,
     ResetSessionId, Session, SessionEnd,
@@ -126,7 +126,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transaction(move |tx| {
-            let now = Utc::now();
+            let now = Timestamp::now();
             // Not pending or expired: nothing written, nothing audited.
             let pending = get_reset(tx, id)?
                 .is_some_and(|s| s.status.as_str() == "pending" && s.expires_at > now);
@@ -167,7 +167,7 @@ impl CoordinodeBackend {
         }
         let (credential, history, end) = (credential.clone(), history.cloned(), end.clone());
         self.transaction(move |tx| {
-            let now = Utc::now();
+            let now = Timestamp::now();
             // Not verified or expired: nothing written.
             let Some(verified) = get_reset(tx, id)?
                 .filter(|s| s.status.as_str() == "verified" && s.expires_at > now)
@@ -207,7 +207,7 @@ impl CoordinodeBackend {
                 &format!("MATCH (r:SidResetSession) WHERE r.profile_id = $id RETURN {RESET}"),
                 Params::default().with("id", Value::Binary(profile.as_bytes().to_vec())),
             )?;
-            let now = Utc::now();
+            let now = Timestamp::now();
             let active = rows
                 .iter()
                 .map(reset)
@@ -230,7 +230,7 @@ impl CoordinodeBackend {
             let rows = tx.run(
                 "MATCH (r:SidResetSession) WHERE r.expires_at < $now AND r.status = 'pending'
                  DETACH DELETE r RETURN count(*) AS n",
-                Params::default().with("now", time(Utc::now())),
+                Params::default().with("now", time(Timestamp::now())),
             )?;
             let removed = super::get_count(&rows)?;
             if removed == 0 && ctx.work.is_empty() && ctx.operation.is_none() {

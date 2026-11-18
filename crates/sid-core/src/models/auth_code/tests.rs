@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Duration;
+use jiff::SignedDuration as Duration;
 
 use crate::models::{AuthLevel, SessionId};
 
@@ -7,7 +7,7 @@ use crate::models::{AuthLevel, SessionId};
 fn authentication() -> GrantAuthentication {
     GrantAuthentication {
         session: SessionId::generate(),
-        authenticated_at: Utc::now() - Duration::hours(1),
+        authenticated_at: Timestamp::now() - Duration::from_hours(1),
         amr: vec!["pwd".into()],
         assurance_level: AuthLevel::Basic,
         elevation: None,
@@ -25,8 +25,8 @@ fn make_code(expires_in: Duration, used: bool) -> AuthorizationCode {
         code_challenge: Some("challenge-value".to_string()),
         nonce: None,
         authentication: authentication(),
-        expires_at: Utc::now() + expires_in,
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + expires_in,
+        created_at: Timestamp::now(),
         used,
         session_id: None,
         presentation: None,
@@ -35,40 +35,40 @@ fn make_code(expires_in: Duration, used: bool) -> AuthorizationCode {
 
 #[test]
 fn test_valid_code() {
-    let code = make_code(Duration::minutes(5), false);
+    let code = make_code(Duration::from_mins(5), false);
     assert!(!code.is_expired());
     assert!(code.is_valid());
 }
 
 #[test]
 fn test_expired_code() {
-    let code = make_code(Duration::seconds(-1), false);
+    let code = make_code(Duration::from_secs(-1), false);
     assert!(code.is_expired());
     assert!(!code.is_valid());
 }
 
 #[test]
 fn test_used_code() {
-    let code = make_code(Duration::minutes(5), true);
+    let code = make_code(Duration::from_mins(5), true);
     assert!(!code.is_expired());
     assert!(!code.is_valid());
 }
 
 #[test]
 fn test_used_and_expired() {
-    let code = make_code(Duration::seconds(-1), true);
+    let code = make_code(Duration::from_secs(-1), true);
     assert!(!code.is_valid());
 }
 
 #[test]
 fn test_scopes_string() {
-    let code = make_code(Duration::minutes(5), false);
+    let code = make_code(Duration::from_mins(5), false);
     assert_eq!(code.scopes_string(), "openid email");
 }
 
 #[test]
 fn test_code_without_pkce() {
-    let mut code = make_code(Duration::minutes(5), false);
+    let mut code = make_code(Duration::from_mins(5), false);
     code.code_challenge = None;
     assert!(code.code_challenge.is_none());
     assert!(code.is_valid());
@@ -91,8 +91,8 @@ fn test_exchange_valid_code_consumes_self() {
         code_challenge: Some("challenge-value".to_string()),
         nonce: Some("n-0S6_WzA2Mj".to_string()),
         authentication: authentication.clone(),
-        expires_at: Utc::now() + Duration::minutes(5),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_mins(5),
+        created_at: Timestamp::now(),
         used: false,
         session_id: None,
         presentation: None,
@@ -131,8 +131,8 @@ fn test_exchanged_code_reads_without_a_copy_profile_id() {
         code_challenge: None,
         nonce: None,
         authentication: authentication(),
-        expires_at: Utc::now() + Duration::minutes(5),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_mins(5),
+        created_at: Timestamp::now(),
         used: false,
         session_id: None,
         presentation: None,
@@ -144,14 +144,14 @@ fn test_exchanged_code_reads_without_a_copy_profile_id() {
 
 #[test]
 fn test_exchange_already_used_returns_error() {
-    let code = make_code(Duration::minutes(5), true);
+    let code = make_code(Duration::from_mins(5), true);
     let err = code.exchange().unwrap_err();
     assert_eq!(err, AuthCodeError::AlreadyUsed);
 }
 
 #[test]
 fn test_exchange_expired_returns_error() {
-    let code = make_code(Duration::seconds(-1), false);
+    let code = make_code(Duration::from_secs(-1), false);
     let err = code.exchange().unwrap_err();
     assert_eq!(err, AuthCodeError::Expired);
 }
@@ -159,7 +159,7 @@ fn test_exchange_expired_returns_error() {
 #[test]
 fn test_exchange_used_and_expired_returns_already_used() {
     // AlreadyUsed is checked first (more specific: indicates replay attack)
-    let code = make_code(Duration::seconds(-1), true);
+    let code = make_code(Duration::from_secs(-1), true);
     let err = code.exchange().unwrap_err();
     assert_eq!(err, AuthCodeError::AlreadyUsed);
 }

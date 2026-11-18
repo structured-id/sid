@@ -27,7 +27,7 @@ async fn signed_in(svc: &TestServices, profile: &Profile) -> String {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         issue_token_with_session(&svc.jwt, profile, &["openid".to_string()], session);

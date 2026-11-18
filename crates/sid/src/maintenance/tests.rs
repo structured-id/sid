@@ -1,8 +1,12 @@
 use super::*;
-use chrono::Duration as Days;
+
+/// `n` whole days.
+fn days(n: i64) -> SignedDuration {
+    SignedDuration::from_hours(n * 24)
+}
 
 fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profile {
-    let now = Utc::now();
+    let now = Timestamp::now();
     Profile {
         id: ProfileId::generate(),
         profile_type: sid_core::models::ProfileType::Personal,
@@ -18,10 +22,10 @@ fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profi
         max_assurance: sid_core::models::ProfileAssurance::Anonymous,
         manager_id: None,
         migration_pending,
-        migration_started_at: started_days_ago.map(|d| now - Days::days(d)),
+        migration_started_at: started_days_ago.map(|d| now - days(d)),
         migration_completed_at: None,
         revision: 0,
-        created_at: now - Days::days(started_days_ago.unwrap_or(0)),
+        created_at: now - days(started_days_ago.unwrap_or(0)),
         updated_at: now,
     }
 }
@@ -29,19 +33,19 @@ fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profi
 #[test]
 fn test_is_migration_expired_within_deadline() {
     let profile = make_profile(true, Some(30));
-    assert!(!is_migration_expired(&profile, 180, Utc::now()));
+    assert!(!is_migration_expired(&profile, 180, Timestamp::now()));
 }
 
 #[test]
 fn test_is_migration_expired_past_deadline() {
     let profile = make_profile(true, Some(200));
-    assert!(is_migration_expired(&profile, 180, Utc::now()));
+    assert!(is_migration_expired(&profile, 180, Timestamp::now()));
 }
 
 #[test]
 fn test_is_migration_expired_exactly_at_deadline() {
     let profile = make_profile(true, Some(180));
-    assert!(is_migration_expired(&profile, 180, Utc::now()));
+    assert!(is_migration_expired(&profile, 180, Timestamp::now()));
 }
 
 #[test]
@@ -49,16 +53,16 @@ fn test_is_migration_expired_uses_created_at_fallback() {
     // No migration_started_at: counted from created_at.
     let mut profile = make_profile(true, None);
     profile.migration_started_at = None;
-    profile.created_at = Utc::now() - Days::days(200);
-    assert!(is_migration_expired(&profile, 180, Utc::now()));
+    profile.created_at = Timestamp::now() - days(200);
+    assert!(is_migration_expired(&profile, 180, Timestamp::now()));
 }
 
 #[test]
 fn test_is_migration_expired_created_recently() {
     let mut profile = make_profile(true, None);
     profile.migration_started_at = None;
-    profile.created_at = Utc::now() - Days::days(10);
-    assert!(!is_migration_expired(&profile, 180, Utc::now()));
+    profile.created_at = Timestamp::now() - days(10);
+    assert!(!is_migration_expired(&profile, 180, Timestamp::now()));
 }
 
 #[test]

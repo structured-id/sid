@@ -148,7 +148,7 @@ pub fn granted_claims(
         info.preferred_username = profile.username.clone();
         // Seconds since the epoch fit 32 bits until 2106; a time outside
         // that range is left out rather than wrapped.
-        info.updated_at = u32::try_from(profile.updated_at.timestamp()).ok();
+        info.updated_at = u32::try_from(profile.updated_at.as_second()).ok();
     }
     if granted("email")
         && let Some(email) = email

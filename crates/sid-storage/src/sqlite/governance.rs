@@ -116,7 +116,7 @@ impl SqliteBackend {
             " FROM access_requests WHERE status = 'pending' \
               AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at ASC"
         ))
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;

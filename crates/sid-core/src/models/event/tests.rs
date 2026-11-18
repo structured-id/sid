@@ -337,68 +337,44 @@ fn test_try_from_json_not_an_object() {
     assert!(matches!(err, EventValidationError::InvalidStructure(_)));
 }
 
-// ── cloudevents-sdk interop tests ──
+// ── CloudEvents JSON envelope ──
 
+/// The envelope is written with the CloudEvents 1.0 JSON attribute names,
+/// `time` as an RFC 3339 instant in UTC (CloudEvents 1.0 §3.1.1) and the
+/// `sequence` extension, and an envelope from another producer reads back
+/// into the same event.
 #[test]
-fn test_to_cloudevents_sdk() {
-    let sid_event = Event::new("sid-identity.test", event_types::USER_CREATED)
-        .with_subject("profile/prof_123")
-        .with_data(serde_json::json!({"name": "Alice"}))
-        .with_sequence(42);
-
-    let ce: cloudevents::Event = (&sid_event).into();
-
-    use cloudevents::event::AttributesReader;
-    assert_eq!(ce.id(), sid_event.id);
-    assert_eq!(ce.source().to_string(), "sid-identity.test");
-    assert_eq!(ce.ty(), "sid.user.created.v1");
-    assert_eq!(ce.subject().unwrap(), "profile/prof_123");
-    assert_eq!(ce.specversion(), cloudevents::event::SpecVersion::V10);
-
-    // Check sequence extension
-    let seq = ce.extension(EXT_SEQUENCE).unwrap();
-    assert_eq!(*seq, cloudevents::event::ExtensionValue::Integer(42));
-}
-
-#[test]
-fn test_from_cloudevents_sdk() {
-    let ce = cloudevents::EventBuilderV10::new()
-        .id("ce-id-001")
-        .source("external-system.example.com")
-        .ty("external.event.v1")
-        .subject("resource/123")
-        .time(Utc::now())
-        .data("application/json", serde_json::json!({"key": "value"}))
-        .extension(EXT_SEQUENCE, 99i64)
-        .build()
-        .unwrap();
-
-    let sid_event = Event::try_from(ce).unwrap();
-    assert_eq!(sid_event.id, "ce-id-001");
-    assert_eq!(sid_event.source, "external-system.example.com");
-    assert_eq!(sid_event.event_type, "external.event.v1");
-    assert_eq!(sid_event.subject.as_deref(), Some("resource/123"));
-    assert_eq!(sid_event.specversion, "1.0");
-    assert_eq!(sid_event.sequence, 99);
-    assert_eq!(sid_event.data["key"], "value");
-}
-
-#[test]
-fn test_roundtrip_sid_to_ce_to_sid() {
+fn test_cloudevents_json_envelope() {
     let original = Event::new("sid-identity.test", event_types::SESSION_CREATED)
         .with_subject("session/sess_abc")
         .with_data(serde_json::json!({"ip": "10.0.0.1"}))
         .with_sequence(7);
+    let json = serde_json::to_value(&original).unwrap();
+    assert_eq!(json["specversion"], "1.0");
+    assert_eq!(json["type"], event_types::SESSION_CREATED);
+    assert_eq!(json["sequence"], 7);
+    let time = json["time"].as_str().unwrap();
+    assert!(time.ends_with('Z'), "{time}");
+    assert_eq!(time.parse::<jiff::Timestamp>().unwrap(), original.time);
 
-    let ce: cloudevents::Event = (&original).into();
-    let roundtripped = Event::try_from(ce).unwrap();
-
-    assert_eq!(roundtripped.id, original.id);
-    assert_eq!(roundtripped.source, original.source);
-    assert_eq!(roundtripped.event_type, original.event_type);
-    assert_eq!(roundtripped.subject, original.subject);
-    assert_eq!(roundtripped.sequence, original.sequence);
-    assert_eq!(roundtripped.data["ip"], "10.0.0.1");
+    let foreign = serde_json::json!({
+        "specversion": "1.0",
+        "id": "ce-id-001",
+        "source": "external-system.example.com",
+        "type": "external.event.v1",
+        "subject": "resource/123",
+        "time": "2026-11-17T12:00:00.5+02:00",
+        "data": {"key": "value"},
+        "sequence": 99,
+    });
+    let read = Event::try_from(foreign).unwrap();
+    assert_eq!(read.event_type, "external.event.v1");
+    assert_eq!(
+        read.time,
+        "2026-11-17T10:00:00.5Z".parse::<jiff::Timestamp>().unwrap()
+    );
+    assert_eq!(read.sequence, 99);
+    assert_eq!(read.data["key"], "value");
 }
 
 // ── Filter tests (unchanged) ──

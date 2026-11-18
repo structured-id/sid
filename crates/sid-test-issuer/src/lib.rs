@@ -245,7 +245,7 @@ impl TestIssuer {
                         client_id: checker.client_id.clone(),
                         resource_id: api.id,
                         scopes: vec![AUTHZ_CHECK.into()],
-                        created_at: chrono::Utc::now(),
+                        created_at: jiff::Timestamp::now(),
                     },
                     audit("resource_access.set"),
                 )
@@ -494,7 +494,7 @@ impl TestIssuer {
                     client_id: client_id.into(),
                     resource_id: resource.id,
                     scopes,
-                    created_at: chrono::Utc::now(),
+                    created_at: jiff::Timestamp::now(),
                 },
                 audit("resource_access.set"),
             )
@@ -636,7 +636,7 @@ impl TestIssuer {
         let session = Session::new(
             profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         self.storage
             .create_session(&session, audit("session.create"))
@@ -699,7 +699,7 @@ impl TestIssuer {
         jwks: serde_json::Value,
     ) -> sid_core::models::OAuth2Client {
         let resource = self.resource(indicator);
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let app = sid_core::models::Application {
             id: sid_core::models::ApplicationId::generate(),
             project_id: ProjectId::SYSTEM,
@@ -746,7 +746,7 @@ impl TestIssuer {
         let session = Session::new(
             profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         self.storage
             .create_session(&session, audit("session.create"))
@@ -974,7 +974,7 @@ async fn register(
     org: sid_core::models::OrgId,
     indicator: &str,
 ) -> ProtectedResource {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,

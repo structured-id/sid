@@ -2,7 +2,7 @@
 //! Directory (SCIM) writes: one request's changes to a user or a group are
 //! applied in one transaction with its audit entry and owed work.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::Error;
 use sid_core::models::{
     DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode, EmailLabel, Event, Group,
@@ -20,7 +20,7 @@ fn tag() -> String {
 }
 
 fn email(profile_id: ProfileId, address: &str) -> ProfileEmail {
-    let now = Utc::now();
+    let now = Timestamp::now();
     ProfileEmail {
         id: ProfileEmailId::new(),
         profile_id,
@@ -36,7 +36,7 @@ fn email(profile_id: ProfileId, address: &str) -> ProfileEmail {
 }
 
 fn phone(profile_id: ProfileId) -> ProfilePhone {
-    let now = Utc::now();
+    let now = Timestamp::now();
     ProfilePhone {
         id: ProfilePhoneId::new(),
         profile_id,

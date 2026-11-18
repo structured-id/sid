@@ -77,8 +77,8 @@ fn test_domain_to_proto_status() {
         assets: BrandingAssets::default(),
         dark_mode: DarkModeConfig::default(),
         text: BrandingText::default(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     assert_eq!(
         domain_to_proto(&config).status,

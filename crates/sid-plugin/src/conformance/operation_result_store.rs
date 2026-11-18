@@ -132,7 +132,7 @@ pub async fn results_travel_between_stores(store: &dyn OperationResultStore) {
 
     let mut moved = mine.clone();
     moved.completion.namespace = namespace();
-    moved.completed_at -= chrono::Duration::days(1);
+    moved.completed_at -= crate::conformance::days(1);
     assert!(store.import_operation_result(&moved).await.unwrap());
     let restored = store
         .get_operation_result(&moved.completion.namespace, &key)
@@ -141,8 +141,8 @@ pub async fn results_travel_between_stores(store: &dyn OperationResultStore) {
         .expect("imported");
     assert_eq!(restored.completion, moved.completion);
     assert_eq!(
-        restored.completed_at.timestamp_millis(),
-        moved.completed_at.timestamp_millis()
+        restored.completed_at.as_millisecond(),
+        moved.completed_at.as_millisecond()
     );
     let err = store
         .record_outcome(outcome(&moved.completion.namespace, &key, "abort", b""))
@@ -157,8 +157,8 @@ pub async fn results_travel_between_stores(store: &dyn OperationResultStore) {
 pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn OperationResultStore) {
     let ns = namespace();
     let (expired, kept, unbounded) = (key(), key(), key());
-    let now = chrono::Utc::now();
-    let retained = |key: &OperationKey, until: chrono::DateTime<chrono::Utc>, result: &[u8]| {
+    let now = jiff::Timestamp::now();
+    let retained = |key: &OperationKey, until: jiff::Timestamp, result: &[u8]| {
         MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
             OperationCompletion::new(&ns, key.clone(), "deliver", b"inputs", result.to_vec())
                 .retained_until(until),
@@ -167,13 +167,17 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
     store
         .record_outcome(retained(
             &expired,
-            now - chrono::Duration::seconds(1),
+            now - jiff::SignedDuration::from_secs(1),
             b"old",
         ))
         .await
         .unwrap();
     store
-        .record_outcome(retained(&kept, now + chrono::Duration::hours(1), b"kept"))
+        .record_outcome(retained(
+            &kept,
+            now + jiff::SignedDuration::from_hours(1),
+            b"kept",
+        ))
         .await
         .unwrap();
     store
@@ -195,8 +199,8 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
         .unwrap()
         .expect("within its retention");
     assert_eq!(
-        record.completion.retain_until.map(|t| t.timestamp_millis()),
-        Some((now + chrono::Duration::hours(1)).timestamp_millis())
+        record.completion.retain_until.map(|t| t.as_millisecond()),
+        Some((now + jiff::SignedDuration::from_hours(1)).as_millisecond())
     );
     assert!(
         store
@@ -208,7 +212,11 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
 
     // The expired key is free again: its new outcome is recorded.
     store
-        .record_outcome(retained(&expired, now + chrono::Duration::hours(1), b"new"))
+        .record_outcome(retained(
+            &expired,
+            now + jiff::SignedDuration::from_hours(1),
+            b"new",
+        ))
         .await
         .unwrap();
     let renewed = store
@@ -220,12 +228,16 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
 
     let dropped = key();
     store
-        .record_outcome(retained(&dropped, now - chrono::Duration::seconds(1), b""))
+        .record_outcome(retained(
+            &dropped,
+            now - jiff::SignedDuration::from_secs(1),
+            b"",
+        ))
         .await
         .unwrap();
     assert!(
         store
-            .purge_expired_operation_results(chrono::Utc::now())
+            .purge_expired_operation_results(jiff::Timestamp::now())
             .await
             .unwrap()
             >= 1
@@ -247,7 +259,7 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
 /// period.
 pub async fn concurrent_imports_under_one_period_all_land(store: &dyn OperationResultStore) {
     let period = store
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;
@@ -256,7 +268,7 @@ pub async fn concurrent_imports_under_one_period_all_land(store: &dyn OperationR
         .map(|_| sid_core::models::OperationRecord {
             completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
                 .in_period(period),
-            completed_at: chrono::Utc::now(),
+            completed_at: jiff::Timestamp::now(),
         })
         .collect();
     let imported =
@@ -282,7 +294,7 @@ pub async fn an_oversized_result_is_refused(store: &dyn OperationResultStore) {
     let limit = usize::try_from(store.operation_period_policy().await.unwrap().result_bytes)
         .expect("a result limit within memory");
     let period = store
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;
@@ -338,13 +350,13 @@ pub async fn an_oversized_result_is_refused(store: &dyn OperationResultStore) {
 /// capacity is still used when many keys arrive. Needs a store of its own
 /// whose harness set a capacity of at most 8.
 pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultStore) {
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration as Duration, Timestamp};
 
     let capacity = store.operation_period_policy().await.unwrap().capacity;
     assert!(capacity <= 8, "the harness sets a small capacity");
-    let now = Utc::now();
+    let now = Timestamp::now();
     let period = store
-        .current_operation_period(now, Duration::minutes(1))
+        .current_operation_period(now, Duration::from_mins(1))
         .await
         .unwrap()
         .period;
@@ -404,7 +416,7 @@ pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultSt
     );
 
     let fresh = store
-        .current_operation_period(now + Duration::minutes(2), Duration::minutes(1))
+        .current_operation_period(now + Duration::from_mins(2), Duration::from_mins(1))
         .await
         .unwrap()
         .period;
@@ -429,12 +441,12 @@ pub async fn a_full_period_refuses_new_completions(store: &dyn OperationResultSt
 /// it has. Needs a store of its own whose harness set a capacity of at most
 /// 8.
 pub async fn imported_completions_keep_the_period_bound(store: &dyn OperationResultStore) {
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration as Duration, Timestamp};
 
     let capacity = store.operation_period_policy().await.unwrap().capacity;
     assert!(capacity <= 8, "the harness sets a small capacity");
     let period = store
-        .current_operation_period(Utc::now(), Duration::minutes(5))
+        .current_operation_period(Timestamp::now(), Duration::from_mins(5))
         .await
         .unwrap()
         .period;
@@ -444,7 +456,7 @@ pub async fn imported_completions_keep_the_period_bound(store: &dyn OperationRes
         let carried = OperationRecord {
             completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
                 .in_period(period),
-            completed_at: Utc::now(),
+            completed_at: Timestamp::now(),
         };
         assert!(store.import_operation_result(&carried).await.unwrap());
     }
@@ -485,18 +497,18 @@ pub async fn imported_completions_keep_the_period_bound(store: &dyn OperationRes
 /// - Periods leave in the export; an import never un-retires a period, and
 ///   a period its source retired is retired here with its completions.
 pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore) {
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration as Duration, Timestamp};
     use sid_core::models::{
         IssuedOperationPeriod, OperationPeriod, OperationPeriodRecord, OperationPeriodRefusal,
         OperationPeriodState,
     };
 
     let policy = store.operation_period_policy().await.unwrap();
-    assert!(policy.acceptance > Duration::zero() && policy.retention >= Duration::zero());
-    let acceptance = Duration::hours(1);
+    assert!(policy.acceptance > Duration::ZERO && policy.retention >= Duration::ZERO);
+    let acceptance = Duration::from_hours(1);
     // After every period an earlier run of this scenario left, and well
     // before any period a caller with a real clock is issued.
-    let horizon = Utc::now() - Duration::days(2);
+    let horizon = Timestamp::now() - crate::conformance::days(2);
     let t0 = store
         .export_operation_periods()
         .await
@@ -506,13 +518,16 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         .map(|p| p.issued.accepted_until)
         .filter(|until| *until < horizon)
         .max()
-        .map_or(horizon - Duration::days(28), |until| {
-            until + Duration::hours(1)
+        .map_or(horizon - crate::conformance::days(28), |until| {
+            until + Duration::from_hours(1)
         })
         // A caller's clock may be finer than the store keeps instants: the
         // period issued and the one read back are still the same.
-        + Duration::nanoseconds(463);
-    assert!(t0 + Duration::hours(4) < horizon, "the scenario's window");
+        + Duration::from_nanos(463);
+    assert!(
+        t0 + Duration::from_hours(4) < horizon,
+        "the scenario's window"
+    );
     let (a, b) = tokio::join!(
         store.current_operation_period(t0, acceptance),
         store.current_operation_period(t0, acceptance),
@@ -520,16 +535,16 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     let first = a.unwrap();
     assert_eq!(first, b.unwrap(), "concurrent callers share one period");
     assert_eq!(
-        first.accepted_until.timestamp_millis(),
-        (t0 + acceptance).timestamp_millis()
+        first.accepted_until.as_millisecond(),
+        (t0 + acceptance).as_millisecond()
     );
     let still = store
-        .current_operation_period(t0 + Duration::minutes(30), acceptance)
+        .current_operation_period(t0 + Duration::from_mins(30), acceptance)
         .await
         .unwrap();
     assert_eq!(still.period, first.period, "current while accepting");
     let next = store
-        .current_operation_period(t0 + Duration::hours(2), acceptance)
+        .current_operation_period(t0 + Duration::from_hours(2), acceptance)
         .await
         .unwrap();
     assert!(next.period > first.period);
@@ -617,7 +632,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     let racing = key();
     let (committed, retired) = tokio::join!(
         store.record_outcome(keyed(&racing, first.period)),
-        store.retire_operation_periods(first.accepted_until + Duration::milliseconds(1)),
+        store.retire_operation_periods(first.accepted_until + Duration::from_millis(1)),
     );
     assert!(retired.unwrap() >= 1);
     if let Err(e) = committed {
@@ -686,7 +701,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     let carried = sid_core::models::OperationRecord {
         completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
             .in_period(first.period),
-        completed_at: Utc::now(),
+        completed_at: Timestamp::now(),
     };
     assert!(!store.import_operation_result(&carried).await.unwrap());
     // Asked before a command's first effect, the store answers the same.
@@ -700,7 +715,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         OperationPeriodRefusal::NotIssued
     );
     let reissued = store
-        .current_operation_period(t0 + Duration::minutes(30), acceptance)
+        .current_operation_period(t0 + Duration::from_mins(30), acceptance)
         .await
         .unwrap();
     assert!(
@@ -726,14 +741,13 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         .record_outcome(keyed(&pending, next.period))
         .await
         .unwrap();
-    let source_record =
-        |period: OperationPeriod, until: chrono::DateTime<Utc>| OperationPeriodRecord {
-            issued: IssuedOperationPeriod {
-                period,
-                accepted_until: until,
-            },
-            issued_at: t0,
-        };
+    let source_record = |period: OperationPeriod, until: jiff::Timestamp| OperationPeriodRecord {
+        issued: IssuedOperationPeriod {
+            period,
+            accepted_until: until,
+        },
+        issued_at: t0,
+    };
     // The number right after the last issued: a caller that takes it here
     // meanwhile keeps it, as the import names it admitted.
     let foreign = OperationPeriod::new(exported.issued_through.get() + 1);
@@ -744,7 +758,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         .copied()
         .collect();
     active.push(source_record(first.period, first.accepted_until));
-    active.push(source_record(foreign, t0 + Duration::minutes(10)));
+    active.push(source_record(foreign, t0 + Duration::from_mins(10)));
     store
         .import_operation_periods(&OperationPeriodState {
             issued_through: foreign,
@@ -912,13 +926,13 @@ pub async fn a_binding_lives_with_its_completion(store: &dyn OperationResultStor
     let expired = key();
     let old = proposal(&ns, &expired, "deliver");
     store.bind_operation_resource(&old).await.unwrap();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     store
         .record_outcome(
             MutationContext::from(AuditEntry::system("conformance", "operation_result"))
                 .with_operation(
                     OperationCompletion::new(&ns, expired.clone(), "deliver", b"inputs", vec![])
-                        .retained_until(now - chrono::Duration::seconds(1)),
+                        .retained_until(now - jiff::SignedDuration::from_secs(1)),
                 ),
         )
         .await
@@ -959,7 +973,7 @@ pub async fn a_binding_lives_with_its_completion(store: &dyn OperationResultStor
         .await
         .unwrap();
     store
-        .purge_operation_results(&ns, "commit", now + chrono::Duration::seconds(5))
+        .purge_operation_results(&ns, "commit", now + jiff::SignedDuration::from_secs(5))
         .await
         .unwrap();
     assert!(
@@ -1025,7 +1039,7 @@ pub async fn results_are_purged_by_method(store: &dyn OperationResultStore) {
         .await
         .unwrap();
 
-    let earlier = chrono::Utc::now() - chrono::Duration::hours(1);
+    let earlier = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
     assert_eq!(
         store
             .purge_operation_results(&ns, "abort", earlier)
@@ -1033,7 +1047,7 @@ pub async fn results_are_purged_by_method(store: &dyn OperationResultStore) {
             .unwrap(),
         0
     );
-    let later = chrono::Utc::now() + chrono::Duration::seconds(5);
+    let later = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(5);
     assert_eq!(
         store
             .purge_operation_results(&ns, "abort", later)

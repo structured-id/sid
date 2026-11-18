@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rand::TryRng;
 use serde::{Deserialize, Serialize};
 
@@ -110,7 +110,7 @@ pub struct OidcIssuer {
     pub authority: IssuerAuthority,
     /// The organization whose applications this issuer serves.
     pub recipient_org: OrgId,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl OidcIssuer {
@@ -173,7 +173,7 @@ pub struct IssuerSigningKey {
     pub key_id: String,
     pub public_key: [u8; 32],
     pub sealed_private_key: Vec<u8>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl IssuerSigningKey {

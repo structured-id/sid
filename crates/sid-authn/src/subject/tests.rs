@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::oauth2_client::{
     ApplicationType, LoginStrategy, SubjectType, TokenEndpointAuthMethod,
 };
@@ -25,7 +25,7 @@ fn local_issuer(org: OrgId) -> OidcIssuer {
         handle,
         authority: IssuerAuthority::Local,
         recipient_org: org,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -60,7 +60,7 @@ fn make_client(subject_type: SubjectType) -> OAuth2Client {
         subject_type,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -80,7 +80,7 @@ fn make_client(subject_type: SubjectType) -> OAuth2Client {
         unified_input: false,
         org_id: Some(org_a()),
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 

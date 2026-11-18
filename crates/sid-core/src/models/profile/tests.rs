@@ -423,7 +423,7 @@ fn test_closure_request_with_grace_period() {
 fn test_closure_request_grace_period_elapsed() {
     let pid = ProfileId::generate();
     let mut req = ClosureRequest::new(pid, ClosureMode::GdprErasure, pid);
-    req.grace_period_end = Some(Utc::now() - chrono::Duration::seconds(1));
+    req.grace_period_end = Some(Timestamp::now() - jiff::SignedDuration::from_secs(1));
     assert!(req.grace_period_elapsed());
 }
 

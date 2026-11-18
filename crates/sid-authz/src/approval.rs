@@ -6,7 +6,7 @@
 //! - Threshold: m-of-n approvers must approve.
 //! - Unanimous: all approvers must approve.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -106,7 +106,7 @@ pub struct ApprovalVote {
     /// Optional comment.
     pub comment: Option<String>,
     /// When the vote was cast.
-    pub voted_at: DateTime<Utc>,
+    pub voted_at: Timestamp,
 }
 
 /// Individual vote decision.
@@ -134,9 +134,9 @@ pub struct ApprovalRequest {
     /// Current status (computed from votes + strategy).
     pub status: ApprovalStatus,
     /// Created timestamp.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Request timeout.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl ApprovalRequest {
@@ -155,7 +155,7 @@ impl ApprovalRequest {
             requester_id,
             votes: Vec::new(),
             status: ApprovalStatus::Pending,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             expires_at: None,
         }
     }
@@ -188,7 +188,7 @@ impl ApprovalRequest {
             approver_id,
             decision,
             comment,
-            voted_at: Utc::now(),
+            voted_at: Timestamp::now(),
         });
 
         self.evaluate();
@@ -225,7 +225,7 @@ impl ApprovalRequest {
     pub fn check_expired(&mut self) -> bool {
         if self.status == ApprovalStatus::Pending
             && let Some(exp) = self.expires_at
-            && Utc::now() > exp
+            && Timestamp::now() > exp
         {
             self.status = ApprovalStatus::Expired;
             return true;
@@ -503,7 +503,7 @@ mod tests {
         )
         .unwrap();
 
-        req.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        req.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_secs(1));
         assert!(req.check_expired());
         assert_eq!(req.status, ApprovalStatus::Expired);
     }
@@ -519,7 +519,7 @@ mod tests {
         )
         .unwrap();
 
-        req.expires_at = Some(Utc::now() + chrono::Duration::hours(24));
+        req.expires_at = Some(Timestamp::now() + jiff::SignedDuration::from_hours(24));
         assert!(!req.check_expired());
         assert_eq!(req.status, ApprovalStatus::Pending);
     }

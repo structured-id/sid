@@ -7,8 +7,8 @@
 //! administrator role and every other administrator, so the last usable
 //! one is never lost to concurrent closures or revocations.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::magic_link::MagicLinkSession;
 use sid_core::models::profile::{ClosureRequest, ExportJob, LegalHold};
 use sid_core::models::{MutationContext, Profile, ProfileId};
@@ -343,7 +343,7 @@ impl CoordinodeBackend {
     async fn finish_export_job(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         live: bool,
         to: &'static str,
         ctx: MutationContext,
@@ -374,7 +374,7 @@ impl CoordinodeBackend {
     pub(super) async fn acknowledge_export_job(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.finish_export_job(id, at, true, "downloaded", ctx)
@@ -384,7 +384,7 @@ impl CoordinodeBackend {
     pub(super) async fn expire_export_job(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.finish_export_job(id, at, false, "expired", ctx).await
@@ -475,7 +475,8 @@ impl CoordinodeBackend {
         self.transaction(move |tx| {
             // The consumption writes the link: of concurrent consumers one
             // commits, the others run again and find it consumed.
-            let Some(open) = get_link(tx, id)?.filter(|l| !l.consumed && l.expires_at > Utc::now())
+            let Some(open) =
+                get_link(tx, id)?.filter(|l| !l.consumed && l.expires_at > Timestamp::now())
             else {
                 return Ok(Decision::Abandon(None));
             };
@@ -499,7 +500,7 @@ impl CoordinodeBackend {
             let rows = tx.run(
                 "MATCH (l:SidMagicLink) WHERE l.expires_at < $now DETACH DELETE l
                  RETURN count(*) AS n",
-                Params::default().with("now", time(Utc::now())),
+                Params::default().with("now", time(Timestamp::now())),
             )?;
             let removed = super::get_count(&rows)?;
             if removed == 0 && ctx.work.is_empty() && ctx.operation.is_none() {
@@ -520,7 +521,7 @@ impl CoordinodeBackend {
                  RETURN count(l) AS n",
                 Params::default()
                     .with("email", Value::String(email.clone()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             u32::try_from(super::get_count(&rows)?)
                 .map_err(|_| SidError::Storage("magic link count".into()))

@@ -34,18 +34,18 @@ in_process!(
 #[test]
 fn records_are_kept_while_live_at_the_cutoff() {
     use super::{CeremonyCount, CeremonyEntry, CeremonyRecords};
-    let at = chrono::Utc::now();
+    let at = jiff::Timestamp::now();
     let state = |name: &str, offset: i64| CeremonyEntry {
         namespace: "ns".into(),
         key: name.into(),
         value: Vec::new(),
-        expires_at: at + chrono::Duration::seconds(offset),
+        expires_at: at + jiff::SignedDuration::from_secs(offset),
     };
     let count = |name: &str, offset: i64| CeremonyCount {
         namespace: "ns".into(),
         key: name.into(),
         count: 1,
-        window_ends: at + chrono::Duration::seconds(offset),
+        window_ends: at + jiff::SignedDuration::from_secs(offset),
     };
     let mut records = CeremonyRecords {
         states: vec![state("live", 1), state("ending", 0), state("ended", -1)],

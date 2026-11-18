@@ -75,15 +75,12 @@ pub enum Refusal {
 
 /// When an invite created at `now` expires under a default of `hours`
 /// (0: never); `None` when that time cannot be represented.
-pub fn default_expiry(
-    now: chrono::DateTime<chrono::Utc>,
-    hours: u32,
-) -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+pub fn default_expiry(now: jiff::Timestamp, hours: u32) -> Option<Option<jiff::Timestamp>> {
     if hours == 0 {
         return Some(None);
     }
-    chrono::TimeDelta::try_hours(i64::from(hours))
-        .and_then(|delta| now.checked_add_signed(delta))
+    jiff::SignedDuration::try_from_hours(i64::from(hours))
+        .and_then(|delta| now.checked_add(delta).ok())
         .map(Some)
 }
 
@@ -107,7 +104,7 @@ pub fn validated(
     if policy.invite.default_max_uses > MAX_INVITE_USES {
         return Err(Refusal::TooManyUses);
     }
-    if default_expiry(chrono::Utc::now(), policy.invite.default_expiry_hours).is_none() {
+    if default_expiry(jiff::Timestamp::now(), policy.invite.default_expiry_hours).is_none() {
         return Err(Refusal::ExpiryTooFar);
     }
     let mut domains = Vec::with_capacity(policy.allowed_domains.len());
@@ -253,12 +250,10 @@ impl Inviter {
 /// another value.
 fn invite_expiry(
     ts: Option<prost_types::Timestamp>,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, EnrollmentError> {
+) -> Result<Option<jiff::Timestamp>, EnrollmentError> {
     ts.map(|ts| {
-        u32::try_from(ts.nanos)
-            .ok()
-            .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-            .filter(|at| *at > chrono::Utc::now())
+        crate::wire::from_timestamp(&ts)
+            .filter(|at| *at > jiff::Timestamp::now())
             .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))
     })
     .transpose()
@@ -437,7 +432,7 @@ impl Enrollment {
         unlimited_uses: bool,
         expires_at: Option<prost_types::Timestamp>,
         never_expires: bool,
-    ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), EnrollmentError> {
+    ) -> Result<(u32, Option<jiff::Timestamp>), EnrollmentError> {
         if unlimited_uses && max_uses != 0 {
             return Err(invalid_field(
                 "unlimited_uses",
@@ -469,9 +464,10 @@ impl Enrollment {
             None if never_expires => None,
             // Stored defaults are checked when stored; one that is not
             // representable now is an inconsistency, not a client error.
-            None => default_expiry(chrono::Utc::now(), defaults.default_expiry_hours).ok_or_else(
-                || internal("invite expiry", "the default expiry is not representable"),
-            )?,
+            None => default_expiry(jiff::Timestamp::now(), defaults.default_expiry_hours)
+                .ok_or_else(|| {
+                    internal("invite expiry", "the default expiry is not representable")
+                })?,
         };
         Ok((max_uses, expires_at))
     }
@@ -542,7 +538,7 @@ impl Enrollment {
                     use_count: 0,
                     expires_at,
                     active: true,
-                    created_at: chrono::Utc::now(),
+                    created_at: jiff::Timestamp::now(),
                 };
                 let response = invite_to_proto(&invite);
                 let ctx =
@@ -662,7 +658,7 @@ impl Enrollment {
                     )
                     .await?;
                 let created_by_name = self.inviter_name(inviter).await?;
-                let now = chrono::Utc::now();
+                let now = jiff::Timestamp::now();
                 let invites: Vec<Invite> = (0..count)
                     .map(|_| Invite {
                         id: InviteId::generate(),
@@ -707,8 +703,8 @@ impl Enrollment {
         };
         // A period reaching before the representable time is refused rather
         // than overflowing.
-        let since = chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::days(i64::from(period_days)))
+        let since = jiff::SignedDuration::try_from_hours(i64::from(period_days) * 24)
+            .and_then(|period| jiff::Timestamp::now().checked_sub(period).ok())
             .ok_or_else(|| invalid_field("period_days", "too long"))?;
         let by_source = self.storage.count_registrations_by_source(since).await?;
         let total: u64 = by_source.iter().map(|(_, c)| c).sum();

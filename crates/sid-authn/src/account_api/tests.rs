@@ -15,7 +15,7 @@ async fn token(
     issuer: &OidcIssuer,
     kind: Option<IssuedCredential>,
 ) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = AccessTokenClaims {
         sub: ProfileId::generate().to_string(),
         pid: None,

@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Duration as ChronoDuration;
+use jiff::SignedDuration;
 use sid_core::models::ProfileId;
 use sid_core::models::session::Elevation;
 
@@ -22,24 +22,24 @@ fn requirements(min_acr: AuthLevel, enforcement: EnforcementMode) -> LoginRequir
 // method required; optional MFA does not.
 #[test]
 fn required_mfa_needs_standard_whatever_the_minimum() {
-    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let password = session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO);
     let mut r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
     r.mfa = MfaEnforcement::Required;
     assert_eq!(
-        r.decide(&password, Utc::now()),
+        r.decide(&password, Timestamp::now()),
         LoginDecision::StepUp(Unmet {
             acr: Some(AuthLevel::Standard),
             ..Unmet::default()
         })
     );
-    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], ChronoDuration::zero());
+    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], SignedDuration::ZERO);
     assert!(matches!(
-        r.decide(&with_otp, Utc::now()),
+        r.decide(&with_otp, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
     r.mfa = MfaEnforcement::Optional;
     assert!(matches!(
-        r.decide(&password, Utc::now()),
+        r.decide(&password, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
 }
@@ -49,17 +49,17 @@ fn required_mfa_needs_standard_whatever_the_minimum() {
 // (a higher level, another method): that part is audited, not required.
 #[test]
 fn a_factor_meeting_the_protection_completes_an_audited_sign_in() {
-    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let password = session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO);
     let mut r = requirements(AuthLevel::Elevated, EnforcementMode::Audit);
     r.required_amr.insert("hwk".into());
     r.account_protection = AuthLevel::Standard;
     assert!(matches!(
-        r.decide(&password, Utc::now()),
+        r.decide(&password, Timestamp::now()),
         LoginDecision::StepUp(_)
     ));
-    assert!(r.met_with(&password, AuthLevel::Standard, "otp", Utc::now()));
+    assert!(r.met_with(&password, AuthLevel::Standard, "otp", Timestamp::now()));
     r.enforcement = EnforcementMode::Hard;
-    assert!(!r.met_with(&password, AuthLevel::Standard, "otp", Utc::now()));
+    assert!(!r.met_with(&password, AuthLevel::Standard, "otp", Timestamp::now()));
 }
 
 // Regression: an account's enabled protection is required of its sign-in
@@ -67,39 +67,39 @@ fn a_factor_meeting_the_protection_completes_an_audited_sign_in() {
 // waives the policy's own unmet requirements.
 #[test]
 fn enabled_account_protection_is_not_waived() {
-    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let password = session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO);
     let mut r = requirements(AuthLevel::Basic, EnforcementMode::Audit);
     r.account_protection = AuthLevel::Standard;
     assert_eq!(
-        r.decide(&password, Utc::now()),
+        r.decide(&password, Timestamp::now()),
         LoginDecision::StepUp(Unmet {
             acr: Some(AuthLevel::Standard),
             ..Unmet::default()
         })
     );
-    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], ChronoDuration::zero());
+    let with_otp = session(AuthLevel::Standard, &["pwd", "otp"], SignedDuration::ZERO);
     assert!(matches!(
-        r.decide(&with_otp, Utc::now()),
+        r.decide(&with_otp, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
     let mut policy_only = requirements(AuthLevel::Standard, EnforcementMode::Audit);
     policy_only.account_protection = AuthLevel::Basic;
     assert!(matches!(
-        policy_only.decide(&password, Utc::now()),
+        policy_only.decide(&password, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
 }
 
 /// A session authenticated `ago` before now at `level` with `amr`.
-fn session(level: AuthLevel, amr: &[&str], ago: ChronoDuration) -> Session {
+fn session(level: AuthLevel, amr: &[&str], ago: SignedDuration) -> Session {
     let mut session = Session::new(
         ProfileId::generate(),
         None,
-        Utc::now() + ChronoDuration::hours(24),
+        Timestamp::now() + SignedDuration::from_hours(24),
     );
     session.assurance_level = level;
     session.amr = amr.iter().map(|m| (*m).to_string()).collect();
-    session.authenticated_at = Utc::now() - ago;
+    session.authenticated_at = Timestamp::now() - ago;
     session
 }
 
@@ -108,7 +108,7 @@ fn client(
     required_amr: &[&str],
     mode: EnforcementMode,
 ) -> OAuth2Client {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
         project_id: sid_core::models::ProjectId::SYSTEM,
@@ -131,8 +131,8 @@ fn client(
 fn a_met_requirement_allows() {
     let r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
     let decision = r.decide(
-        &session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero()),
-        Utc::now(),
+        &session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO),
+        Timestamp::now(),
     );
     assert_eq!(
         decision,
@@ -146,20 +146,20 @@ fn a_met_requirement_allows() {
 // audit allows and reports what was unmet.
 #[test]
 fn a_lower_level_steps_up_unless_audited() {
-    let s = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let s = session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO);
     let unmet = Unmet {
         acr: Some(AuthLevel::Standard),
         ..Unmet::default()
     };
     for mode in [EnforcementMode::Soft, EnforcementMode::Hard] {
         assert_eq!(
-            requirements(AuthLevel::Standard, mode).decide(&s, Utc::now()),
+            requirements(AuthLevel::Standard, mode).decide(&s, Timestamp::now()),
             LoginDecision::StepUp(unmet.clone()),
             "{mode:?}"
         );
     }
     assert_eq!(
-        requirements(AuthLevel::Standard, EnforcementMode::Audit).decide(&s, Utc::now()),
+        requirements(AuthLevel::Standard, EnforcementMode::Audit).decide(&s, Timestamp::now()),
         LoginDecision::Allow { audited: unmet }
     );
 }
@@ -172,8 +172,8 @@ fn a_missing_method_is_named() {
     let mut r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
     r.required_amr.insert("hwk".into());
     let decision = r.decide(
-        &session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero()),
-        Utc::now(),
+        &session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO),
+        Timestamp::now(),
     );
     assert_eq!(
         decision,
@@ -182,9 +182,9 @@ fn a_missing_method_is_named() {
             ..Unmet::default()
         })
     );
-    let with_it = session(AuthLevel::Basic, &["pwd", "hwk"], ChronoDuration::zero());
+    let with_it = session(AuthLevel::Basic, &["pwd", "hwk"], SignedDuration::ZERO);
     assert!(matches!(
-        r.decide(&with_it, Utc::now()),
+        r.decide(&with_it, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
 }
@@ -196,17 +196,17 @@ fn a_missing_method_is_named() {
 fn an_old_authentication_is_named() {
     let mut r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
     r.max_authentication_age = Some(Duration::from_secs(300));
-    let old = session(AuthLevel::Basic, &["pwd"], ChronoDuration::seconds(600));
+    let old = session(AuthLevel::Basic, &["pwd"], SignedDuration::from_secs(600));
     assert_eq!(
-        r.decide(&old, Utc::now()),
+        r.decide(&old, Timestamp::now()),
         LoginDecision::StepUp(Unmet {
             max_authentication_age: Some(Duration::from_secs(300)),
             ..Unmet::default()
         })
     );
-    let recent = session(AuthLevel::Basic, &["pwd"], ChronoDuration::seconds(60));
+    let recent = session(AuthLevel::Basic, &["pwd"], SignedDuration::from_secs(60));
     assert!(matches!(
-        r.decide(&recent, Utc::now()),
+        r.decide(&recent, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
 }
@@ -217,9 +217,9 @@ fn an_old_authentication_is_named() {
 fn a_future_authentication_time_fails_an_age_bound() {
     let mut r = requirements(AuthLevel::Basic, EnforcementMode::Hard);
     r.max_authentication_age = Some(Duration::from_secs(300));
-    let future = session(AuthLevel::Basic, &["pwd"], ChronoDuration::seconds(-120));
+    let future = session(AuthLevel::Basic, &["pwd"], SignedDuration::from_secs(-120));
     assert!(matches!(
-        r.decide(&future, Utc::now()),
+        r.decide(&future, Timestamp::now()),
         LoginDecision::StepUp(_)
     ));
 }
@@ -229,20 +229,23 @@ fn a_future_authentication_time_fails_an_age_bound() {
 #[test]
 fn a_lapsed_step_up_no_longer_counts() {
     let r = requirements(AuthLevel::Elevated, EnforcementMode::Hard);
-    let mut s = session(AuthLevel::Standard, &["pwd", "otp"], ChronoDuration::zero());
+    let mut s = session(AuthLevel::Standard, &["pwd", "otp"], SignedDuration::ZERO);
     s.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
-        until: Utc::now() + ChronoDuration::minutes(5),
+        until: Timestamp::now() + SignedDuration::from_mins(5),
     });
     assert!(matches!(
-        r.decide(&s, Utc::now()),
+        r.decide(&s, Timestamp::now()),
         LoginDecision::Allow { .. }
     ));
     s.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
-        until: Utc::now() - ChronoDuration::seconds(1),
+        until: Timestamp::now() - SignedDuration::from_secs(1),
     });
-    assert!(matches!(r.decide(&s, Utc::now()), LoginDecision::StepUp(_)));
+    assert!(matches!(
+        r.decide(&s, Timestamp::now()),
+        LoginDecision::StepUp(_)
+    ));
 }
 
 // The client and the request only strengthen: a higher level, more methods,
@@ -275,7 +278,7 @@ fn a_local_authentication_completing_now_meets_an_age_bound() {
         max_authentication_age: Some(Duration::from_secs(1)),
         ..requirements(AuthLevel::Basic, EnforcementMode::Hard)
     };
-    let now = Utc::now();
+    let now = Timestamp::now();
     let probe = local_authentication(
         ProfileId::generate(),
         AuthLevel::Basic,
@@ -321,8 +324,8 @@ async fn the_fixed_source_states_its_policy() {
 // complete with it.
 #[test]
 fn a_further_factor_meets_only_what_it_provides() {
-    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
-    let now = Utc::now();
+    let password = session(AuthLevel::Basic, &["pwd"], SignedDuration::ZERO);
+    let now = Timestamp::now();
 
     let mut otp = requirements(AuthLevel::Standard, EnforcementMode::Hard);
     otp.required_amr.insert("otp".into());
@@ -338,6 +341,6 @@ fn a_further_factor_meets_only_what_it_provides() {
     // An authentication too old stays too old after another factor.
     let mut fresh = otp.clone();
     fresh.max_authentication_age = Some(std::time::Duration::from_secs(60));
-    let old = session(AuthLevel::Basic, &["pwd"], ChronoDuration::minutes(5));
+    let old = session(AuthLevel::Basic, &["pwd"], SignedDuration::from_mins(5));
     assert!(!fresh.met_with(&old, AuthLevel::Standard, "otp", now));
 }

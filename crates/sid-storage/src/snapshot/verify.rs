@@ -216,7 +216,7 @@ pub async fn verify(
     // Each export drops the ceremony records expired at its own moment: both
     // sides are compared at one later cutoff, so a deadline passing between
     // the two exports is no difference.
-    let cutoff = chrono::Utc::now();
+    let cutoff = jiff::Timestamp::now();
     moved.ceremony.retain_live_at(cutoff);
     held.ceremony.retain_live_at(cutoff);
     // A claim belongs to a worker of the store it was made in: every import

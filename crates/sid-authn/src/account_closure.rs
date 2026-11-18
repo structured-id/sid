@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sha2::{Digest, Sha256};
 
 use sid_core::models::{
@@ -302,7 +302,8 @@ impl AccountClosureService {
         // 2. Quarantine principals.
         let principals = self.storage.get_principals_by_profile(profile_id).await?;
 
-        let quarantine_until = Utc::now() + Duration::days(i64::from(IDENTIFIER_QUARANTINE_DAYS));
+        let quarantine_until = Timestamp::now()
+            + SignedDuration::from_hours(i64::from(IDENTIFIER_QUARANTINE_DAYS) * 24);
 
         for principal in &principals {
             let principal_hash =
