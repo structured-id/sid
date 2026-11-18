@@ -469,6 +469,29 @@ async fn an_issued_id_token_must_match_client_and_nonce() {
     }
 }
 
+/// A sign-in started at one issuer completes only with that issuer's ID
+/// token: another issuer of the same installation, valid in itself and for
+/// the same client and nonce, is refused (OpenID Connect Core 1.0 §3.1.3.7).
+#[tokio::test]
+async fn a_started_sign_in_refuses_another_issuers_id_token() {
+    let (directory, _, other) = two_issuers();
+    let expected = issuer_url(HANDLE);
+    let now = jiff::Timestamp::now().as_second();
+    let id: IdTokenClaims = serde_json::from_value(serde_json::json!({
+        "iss": issuer_url(OTHER_HANDLE), "sub": "subject", "aud": "ops-web",
+        "exp": now + 60, "iat": now, "auth_time": now,
+        "acr": "urn:sid:acr:basic", "nonce": "n-1",
+    }))
+    .unwrap();
+    let token = signed(&other, "JWT", &id);
+    assert!(matches!(
+        directory
+            .issued_id_token(&expected, "ops-web", "n-1", &token)
+            .await,
+        Err(IssuedTokenRefusal::Invalid(_))
+    ));
+}
+
 /// A registry that cannot answer leaves the token undecided: unavailable,
 /// not invalid, so a caller does not sign a user out over an outage.
 #[tokio::test]

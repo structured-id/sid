@@ -555,32 +555,56 @@ async fn the_empty_handle_names_only_a_root_base_issuer() {
     assert_eq!(registry.by_handle("").await.unwrap(), None);
 }
 
-/// An issuer URL of the installation at `base` maps to the handle its
-/// registry names it by: empty for the root origin, the handle for
-/// `{base}/i/{handle}`; any other URL, a malformed handle, a longer path or
-/// another host maps to none.
+/// An issuer URL is read as written: its root selects the base issuer at
+/// that location, `…/i/{handle}` the scoped issuer of that organization
+/// segment. A malformed segment, a longer path, a query or what is not a URL
+/// selects nothing; it never falls back to the base issuer.
 #[test]
-fn installation_issuer_urls_map_to_handles() {
+fn issuer_urls_are_read_into_location_and_selector() {
     let handle = IssuerHandle::generate();
-    let base = "https://id.sid.example.com/";
-    assert_eq!(
-        installation_issuer_handle(base, "https://id.sid.example.com"),
-        Some("")
-    );
-    let scoped = format!("https://id.sid.example.com/i/{handle}");
-    assert_eq!(
-        installation_issuer_handle(base, &scoped),
-        Some(handle.as_str())
-    );
-    for other in [
-        "https://id.sid.example.com/".to_owned(),
+    let root = read_issuer("https://id.sid.example.com").unwrap();
+    assert_eq!(root.location, "https://id.sid.example.com");
+    assert_eq!(root.selector, IssuerSelector::Root);
+    let scoped_url = format!("https://id.sid.example.com/i/{handle}");
+    let scoped = read_issuer(&scoped_url).unwrap();
+    assert_eq!(scoped.location, "https://id.sid.example.com");
+    assert_eq!(scoped.selector, IssuerSelector::Scoped(handle.clone()));
+    assert_eq!(scoped.selector.wire(), handle.as_str());
+    assert_eq!(root.selector.wire(), "");
+    for malformed in [
         "https://id.sid.example.com/i/not-a-handle".to_owned(),
         format!("https://id.sid.example.com/i/{handle}/jwks"),
-        format!("https://id.sid.example.com.evil.example/i/{handle}"),
-        "https://other.sid.example.com".to_owned(),
-        "https://id.sid.example.comx".to_owned(),
+        format!("https://id.sid.example.com/i/{handle}?x=1"),
+        "not a url".to_owned(),
     ] {
-        assert_eq!(installation_issuer_handle(base, &other), None, "{other}");
+        assert!(read_issuer(&malformed).is_none(), "{malformed}");
+    }
+}
+
+/// Membership is the receiver's condition, not the segment: the same valid
+/// organization segment is an issuer of the configured installation at its
+/// location only; at another host it is not, whatever the segment.
+#[test]
+fn an_installation_admits_issuers_at_its_own_location_only() {
+    let handle = IssuerHandle::generate();
+    let installation = InstallationIssuers::new("https://id.sid.example.com/");
+    let own = format!("https://id.sid.example.com/i/{handle}");
+    assert_eq!(
+        installation.select(&own),
+        Some(IssuerSelector::Scoped(handle.clone()))
+    );
+    assert_eq!(
+        installation.select("https://id.sid.example.com"),
+        Some(IssuerSelector::Root)
+    );
+    for other in [
+        format!("https://other.sid.example.com/i/{handle}"),
+        format!("https://id.sid.example.com.evil.example/i/{handle}"),
+        "https://id.sid.example.comx".to_owned(),
+        "https://id.sid.example.com/".to_owned(),
+        "https://id.sid.example.com/i/not-a-handle".to_owned(),
+    ] {
+        assert_eq!(installation.select(&other), None, "{other}");
     }
 }
 
