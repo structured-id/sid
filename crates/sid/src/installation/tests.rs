@@ -84,8 +84,10 @@ async fn store_administrator(storage: &dyn StorageBackend) {
 }
 
 /// The first open creates the organization named by the issuer's host and
-/// its issuer; a later open, as a restart or another replica does, finds the
-/// same organization, issuer, resources and keys.
+/// its base issuer at the configured root origin, not `/i/<handle>`
+/// (auth/oidc-issuer-model.md, stable issuer identity); a later open, as a
+/// restart or another replica does, finds the same organization, issuer,
+/// resources and keys.
 #[tokio::test]
 async fn an_installation_reopens_as_it_was_created() {
     let (storage, master) = (sqlite().await, MasterKey::new());
@@ -94,6 +96,7 @@ async fn an_installation_reopens_as_it_was_created() {
         .unwrap();
     assert_eq!(first.organization.canonical_domain, "id.sid.example.com");
     assert_eq!(first.issuer.recipient_org, first.organization.id);
+    assert_eq!(first.issuer.canonical_url, "https://id.sid.example.com");
 
     let again = Installation::open(storage, settings(&master, None))
         .await

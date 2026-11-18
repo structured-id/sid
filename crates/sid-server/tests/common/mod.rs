@@ -1767,8 +1767,10 @@ impl TestServices {
             login_policy,
         } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
-        // Provisioned as a server start provisions it; a replica over the same
-        // store reads the stored one back.
+        // A scoped (`/i/<handle>`) issuer of the installation, the form of a
+        // hosted organization's or recipient's issuer; a store that already
+        // holds one, such as a root-addressed base issuer a test provisioned,
+        // or a replica over the same store, reads the stored one back.
         let issuer = futures::executor::block_on(sid_authn::issuer::ensure_local_issuer(
             storage.as_ref(),
             test_key_manager().as_ref(),
@@ -1800,10 +1802,11 @@ impl TestServices {
             storage.as_ref(),
         ))
         .expect("invite issuer role");
-        let issuers = Arc::new(sid_authn::issuer::IssuerRegistry::new(
-            storage.clone(),
-            test_key_manager(),
-        ));
+        // Told its base issuer, as the installation's open tells it.
+        let issuers = Arc::new(
+            sid_authn::issuer::IssuerRegistry::new(storage.clone(), test_key_manager())
+                .with_base_issuer(&issuer),
+        );
         // The services accept the account API's tokens, as a server does.
         let account_api =
             futures::executor::block_on(sid_authn::account_api::AccountApiVerifier::new(

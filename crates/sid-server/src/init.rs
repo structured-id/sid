@@ -922,6 +922,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let entry_connections = Arc::new(sid::entry_connections::EntryConnections::new(
         storage.clone(),
         key_manager.clone(),
+        issuers.clone(),
     ));
 
     let project_svc = Arc::new(ProjectServiceImpl::new(

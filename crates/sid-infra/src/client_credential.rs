@@ -247,11 +247,7 @@ impl ClientCredential {
         scope: Option<&'static str>,
     ) -> Result<Self, CredentialError> {
         let invalid = |why: String| CredentialError::Config(why);
-        let prefix = format!("{}/i/", base.trim_end_matches('/'));
-        let handle = config
-            .issuer
-            .strip_prefix(&prefix)
-            .filter(|handle| sid_core::models::IssuerHandle::parse(handle).is_ok())
+        let handle = sid_authn::issuer::installation_issuer_handle(base, &config.issuer)
             .ok_or_else(|| invalid("the issuer is not one of this installation".into()))?
             .to_owned();
         if config.client_id.is_empty() {

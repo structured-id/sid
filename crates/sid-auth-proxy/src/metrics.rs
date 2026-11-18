@@ -53,10 +53,14 @@ fn path_class(path: &str) -> &'static str {
             "oauth2"
         };
     }
+    // The root-addressed base issuer's endpoints, classified as a scoped
+    // issuer's are.
     if path.starts_with("/health") {
         "health"
-    } else if path.starts_with("/.well-known") {
+    } else if path.starts_with("/.well-known") || path == "/jwks" {
         "discovery"
+    } else if path == "/userinfo" {
+        "userinfo"
     } else if path == "/metrics" {
         "metrics"
     } else if path.starts_with("/v1/auth/magic-link") {

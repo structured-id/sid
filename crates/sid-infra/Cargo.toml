@@ -103,6 +103,9 @@ password-operation = [
     "sid-authn/password-operation",
     "dep:sid-ids-proto",
 ]
+# The root routes of a root-addressed base issuer, read from the
+# `google.api.http` rules of the issuer's methods.
+issuer-routes = ["dep:sid-proto", "dep:prost-reflect"]
 # The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
 oauth-http = ["authn-grpc"]
 http = [
@@ -142,6 +145,7 @@ sid-infra = { path = ".", features = [
     "password-operation",
     "oauth-http",
     "platform-ca-dns",
+    "issuer-routes",
 ] }
 # The shared adapters' tests run the cores over an in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }

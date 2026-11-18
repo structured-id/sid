@@ -12,6 +12,9 @@ fn test_path_class() {
     assert_eq!(path_class("/v1/auth/opaque/register/start"), "register");
     assert_eq!(path_class("/v1/auth/opaque/login/start"), "auth");
     assert_eq!(path_class("/oauth2/token"), "oauth2");
+    // The root-addressed base issuer's endpoints.
+    assert_eq!(path_class("/jwks"), "discovery");
+    assert_eq!(path_class("/userinfo"), "userinfo");
     let issuer = "/i/0123456789abcdef0123456789abcdef";
     assert_eq!(path_class(&format!("{issuer}/oauth2/token")), "oauth2");
     assert_eq!(path_class(&format!("{issuer}/jwks")), "discovery");

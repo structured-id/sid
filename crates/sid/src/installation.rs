@@ -177,9 +177,10 @@ impl Installation {
             tracing::info!(assigned, org = %organization.id, "applications assigned to the installation organization");
         }
 
-        // The issuer's key must open under this installation's master key, or
-        // the open fails rather than signing with a key its published set lacks.
-        let issuer = sid_authn::issuer::ensure_local_issuer(
+        // The installation's base issuer, at its configured root origin. Its
+        // key must open under this installation's master key, or the open
+        // fails rather than signing with a key its published set lacks.
+        let issuer = sid_authn::issuer::ensure_base_issuer(
             storage.as_ref(),
             key_manager.as_ref(),
             &settings.issuer,
@@ -211,7 +212,9 @@ impl Installation {
         sid_authz::builtin::ensure_invite_issuer_role(storage.as_ref())
             .await
             .map_err(store("invite issuer role"))?;
-        let issuers = Arc::new(IssuerRegistry::new(storage.clone(), key_manager.clone()));
+        let issuers = Arc::new(
+            IssuerRegistry::new(storage.clone(), key_manager.clone()).with_base_issuer(&issuer),
+        );
         issuers
             .signer(&issuer)
             .await
