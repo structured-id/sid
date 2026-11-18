@@ -890,6 +890,58 @@ async fn a_call_must_come_from_the_page_with_the_csrf_token() {
     replica.bearer(&safe).await.unwrap();
 }
 
+/// A session read, an API call and a sign-out each verify the exact Origin
+/// before touching the session: a foreign, absent, `null` (Fetch §3.2.5) or
+/// duplicated Origin is refused, and the session stays as it was. Only the
+/// page's own origin, sent once, passes.
+#[tokio::test]
+async fn every_session_request_verifies_the_exact_origin() {
+    let world = World::new();
+    let replica = world.replica();
+    let id = sign_in(&world, &replica).await;
+    let csrf = world
+        .store()
+        .get_session(&id)
+        .await
+        .unwrap()
+        .unwrap()
+        .csrf_token;
+    let refused: [Vec<&[u8]>; 4] = [
+        vec![b"https://evil.example.com"],
+        vec![],
+        vec![b"null"],
+        vec![ORIGIN.as_bytes(), ORIGIN.as_bytes()],
+    ];
+    for origins in refused {
+        let request = BrowserRequest {
+            origins: origins.clone(),
+            ..page_call(&id, &csrf)
+        };
+        assert!(
+            matches!(
+                replica.read(&request).await,
+                Err(SessionFailure::NotThePage)
+            ),
+            "read {origins:?}"
+        );
+        assert!(
+            matches!(
+                replica.bearer(&request).await,
+                Err(SessionFailure::NotThePage)
+            ),
+            "bearer {origins:?}"
+        );
+        assert!(
+            matches!(replica.end(&request).await, Err(SessionFailure::NotThePage)),
+            "end {origins:?}"
+        );
+    }
+    assert!(world.store().get_session(&id).await.unwrap().is_some());
+    replica.read(&page_call(&id, &csrf)).await.unwrap();
+    replica.bearer(&page_call(&id, &csrf)).await.unwrap();
+    replica.end(&page_call(&id, &csrf)).await.unwrap();
+}
+
 /// A session of another connection is not this one's.
 #[tokio::test]
 async fn a_session_of_another_connection_is_not_used() {
