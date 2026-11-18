@@ -606,7 +606,7 @@ async fn http_registry_down_is_503() {
 #[tokio::test]
 async fn http_revoked_session_is_refused() {
     let h = harness().await;
-    sid_auth::revocation_view(h.cache.clone())
+    sid_authn::revocation_cache::RevocationCache::receiver_view(h.cache.clone())
         .revoke_session("sess_01".into())
         .await
         .unwrap();

@@ -103,7 +103,7 @@ pub(crate) fn test_state() -> ProxyState {
         issuer_url: "https://sid.example.com".into(),
         issuers: test_issuers(),
         grpc_channel: test_channel(),
-        revocation: sid_auth::revocation_view(cache.clone()),
+        revocation: sid_authn::revocation_cache::RevocationCache::receiver_view(cache.clone()),
         bff_enabled: true,
         account: None,
         api_upstream: None,

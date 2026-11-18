@@ -6032,7 +6032,6 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2 0.11.1",
- "sid-auth",
  "sid-authn",
  "sid-core",
  "sid-crypto",

@@ -16,13 +16,12 @@ name = "sid_auth_proxy"
 path = "src/lib.rs"
 
 [dependencies]
-# Token claims and revocation view shared with the decision service.
-sid-auth = { path = "../sid-auth", default-features = false }
-# The installation's issuer directory and the verification of the tokens its
-# issuer returns to the BFF.
+# The installation's issuer directory, the verification of the tokens its
+# issuer returns to the BFF and the revocations every SID process records.
 sid-authn = { workspace = true }
-# The issuer registry and the BFF's client at its issuer, over gRPC.
-sid-infra = { workspace = true, features = ["issuer-client"] }
+# The issuer registry and the BFF's client at its issuer, over gRPC; the
+# cache its replicas share.
+sid-infra = { workspace = true, features = ["issuer-client", "redis"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-core = { workspace = true }

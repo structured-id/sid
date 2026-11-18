@@ -171,6 +171,18 @@ impl RevocationCache {
         Self::with_record(max_token_lifetime, shared, Record::SharedCache)
     }
 
+    /// A receiver's view of the revocations delivered over `shared` (see
+    /// [`Self::new`]) when it does not know the issuer's access-token
+    /// lifetime: it keeps each revocation for the longest lifetime an issuer
+    /// may give a token.
+    pub fn receiver_view(shared: Arc<dyn CacheBackend>) -> Arc<Self> {
+        let lifetime = crate::jwt::AccessTokenTtl::MAX
+            .duration()
+            .to_std()
+            .expect("the longest access-token lifetime is positive");
+        Arc::new(Self::new(lifetime, shared))
+    }
+
     /// The issuer's revocation cache: each revocation is committed in
     /// `store` and propagated over `shared`; cold misses are confirmed in
     /// `store`, so the shared cache is never needed for a correct answer.

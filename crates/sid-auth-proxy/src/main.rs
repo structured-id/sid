@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
 
     // One cache for both things replicas must agree on: the sessions below
     // and the rate-limit counters inside Shield.
-    let cache = sid_auth::shared_cache(config.cache_url()).await?;
+    let cache = sid_infra::shared_cache(config.cache_url()).await?;
     // Revocations made anywhere reach this process before it answers.
-    let revocation = sid_auth::revocation_view(cache.clone());
+    let revocation = sid_authn::revocation_cache::RevocationCache::receiver_view(cache.clone());
     let _revocation_listener = revocation.listen().await;
 
     // Issuer calls end within a bound, their whole answer included.
