@@ -79,3 +79,5 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 # Replica tests run against the real shared cache.
 sid-infra = { workspace = true, features = ["redis"] }
+# A real issuer over gRPC, for the BFF's sign-in and sign-out against it.
+sid-test-issuer = { path = "../sid-test-issuer" }

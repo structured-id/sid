@@ -6070,6 +6070,7 @@ dependencies = [
  "sid-plugin",
  "sid-proto",
  "sid-storage",
+ "sid-test-issuer",
  "subtle",
  "thiserror 2.0.21",
  "tokio",
