@@ -46,7 +46,7 @@ pub(crate) async fn insert_work_in_tx(
     if work.max_attempts == 0 {
         return Err(SidError::Validation("max_attempts out of range".into()));
     }
-    let now = fmt_dt(&chrono::Utc::now());
+    let now = fmt_dt(&jiff::Timestamp::now());
     let inserted = sqlx::query(
         "INSERT INTO durable_work (id, kind, payload, max_attempts, not_before, expires_at,
             created_at, updated_at)
@@ -56,7 +56,9 @@ pub(crate) async fn insert_work_in_tx(
     .bind(work.kind.as_str())
     .bind(&work.payload)
     .bind(i64::from(work.max_attempts))
-    .bind(fmt_dt(&work.not_before.unwrap_or_else(chrono::Utc::now)))
+    .bind(fmt_dt(
+        &work.not_before.unwrap_or_else(jiff::Timestamp::now),
+    ))
     .bind(work.expires_at.as_ref().map(fmt_dt))
     .bind(&now)
     .bind(&now)
@@ -120,12 +122,13 @@ impl WorkStore for SqliteBackend {
         if kinds.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let now_s = fmt_dt(&now);
         let lease_until = fmt_dt(
-            &(now
-                + chrono::Duration::from_std(lease)
-                    .map_err(|_| SidError::Validation("lease out of range".into()))?),
+            &jiff::SignedDuration::try_from(lease)
+                .ok()
+                .and_then(|lease| now.checked_add(lease).ok())
+                .ok_or_else(|| SidError::Validation("lease out of range".into()))?,
         );
         // The kinds travel as one JSON array bound to a fixed statement.
         let kinds_json =
@@ -212,7 +215,7 @@ impl WorkStore for SqliteBackend {
     ) -> SidResult<bool> {
         // One statement, atomic on its own: no transaction.
         let mut conn = self.writer.acquire().await.map_err(storage)?;
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         complete_claimed(&mut conn, id, generation, result, &[], &now).await
     }
 
@@ -227,7 +230,7 @@ impl WorkStore for SqliteBackend {
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         if !complete_claimed(&mut tx, id, generation, result, owed, &now).await? {
             return Ok(false);
         }
@@ -243,7 +246,7 @@ impl WorkStore for SqliteBackend {
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut done = Vec::with_capacity(works.len());
         for work in works {
             done.push(
@@ -286,7 +289,7 @@ impl WorkStore for SqliteBackend {
         .bind(&retry_at)
         .bind(&failure.error)
         .bind(failure.ambiguous)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id.0)
         .bind(generation)
         .fetch_optional(&mut *tx)
@@ -380,11 +383,7 @@ impl WorkStore for SqliteBackend {
             .map_err(storage)
     }
 
-    async fn purge_ended_work(
-        &self,
-        kind: &WorkKind,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
+    async fn purge_ended_work(&self, kind: &WorkKind, before: jiff::Timestamp) -> SidResult<u64> {
         let mut conn = self.writer.acquire().await.map_err(storage)?;
         let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
             .await
@@ -400,8 +399,7 @@ impl WorkStore for SqliteBackend {
         .map_err(storage)?;
         let mut dropped = 0;
         for (id, updated_at) in ended {
-            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)
-                .map_err(|e| SidError::Storage(format!("work updated_at: {e}")))?;
+            let updated_at = time(&updated_at)?;
             if updated_at < before {
                 sqlx::query("DELETE FROM durable_work WHERE id = ?")
                     .bind(id)
@@ -440,13 +438,13 @@ fn record(row: &sqlx::sqlite::SqliteRow) -> SidResult<WorkRecord> {
 
 /// A stored timestamp. A malformed one is an error: expiry and retry times
 /// decide whether work runs, so no substitute value is acceptable.
-fn time(value: &str) -> SidResult<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|t| t.with_timezone(&chrono::Utc))
+fn time(value: &str) -> SidResult<jiff::Timestamp> {
+    value
+        .parse()
         .map_err(|e| SidError::Storage(format!("bad work timestamp {value}: {e}")))
 }
 
-fn time_opt(value: Option<String>) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+fn time_opt(value: Option<String>) -> SidResult<Option<jiff::Timestamp>> {
     value.as_deref().map(time).transpose()
 }
 

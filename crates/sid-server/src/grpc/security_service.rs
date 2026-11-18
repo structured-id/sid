@@ -393,9 +393,14 @@ impl SecurityService for SecurityServiceImpl {
                 auto_repair: false,
             })
             .await;
-        let duration_ms = (report.completed_at - report.started_at)
-            .num_milliseconds()
-            .max(0);
+        let duration_ms = i64::try_from(
+            report
+                .completed_at
+                .duration_since(report.started_at)
+                .as_millis()
+                .max(0),
+        )
+        .expect("an integrity check ends within i64 milliseconds of its start");
 
         Ok(Response::new(pb::IntegrityCheckResponse {
             passed: report.passed,

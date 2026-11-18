@@ -76,7 +76,7 @@ impl OAuth {
                 tracing::error!(error = %e, "read session id of a verified token");
                 DeviceApprovalError::Internal
             })?;
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             let session = self
                 .storage
                 .get_session(session_id)

@@ -45,7 +45,7 @@ fn create_test_client() -> OAuth2Client {
         subject_type: sid_core::models::SubjectType::Pairwise,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -65,7 +65,7 @@ fn create_test_client() -> OAuth2Client {
         unified_input: false,
         org_id: None,
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -82,14 +82,14 @@ fn orders_target(client: &OAuth2Client) -> crate::target::Target {
         scopes: vec!["openid".into(), "orders.read".into()],
         state: ResourceState::Active,
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let access = ResourceAccess {
         client_id: client.client_id.clone(),
         resource_id: resource.id,
         scopes: vec!["openid".into(), "orders.read".into()],
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     crate::target::Target::from_parts(resource, access, crate::jwt::UserGrant::Delegated)
 }
@@ -100,7 +100,7 @@ const ORDERS: &str = "https://resources.example/orders";
 fn test_authentication() -> sid_core::models::GrantAuthentication {
     sid_core::models::GrantAuthentication {
         session: sid_core::models::SessionId::generate(),
-        authenticated_at: Utc::now() - chrono::Duration::minutes(10),
+        authenticated_at: Timestamp::now() - SignedDuration::from_mins(10),
         amr: vec!["pwd".into()],
         assurance_level: sid_core::models::AuthLevel::Basic,
         elevation: None,
@@ -112,7 +112,11 @@ fn create_test_profile() -> Profile {
 }
 
 fn create_test_session(profile: &Profile) -> Session {
-    Session::new(profile.id, None, Utc::now() + Duration::hours(1))
+    Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    )
 }
 
 /// A complete, valid OIDC authorization request.
@@ -543,7 +547,7 @@ async fn test_issue_tokens_for_another_user_representation() {
     let session = Session::new(
         OtherAccount(7),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        Timestamp::now() + SignedDuration::from_hours(1),
     );
     let client = create_test_client();
     let target = orders_target(&client);
@@ -586,7 +590,7 @@ async fn test_issue_tokens_for_a_user_representation_that_is_not_copy() {
     let session = Session::new(
         "account-7".to_string(),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        Timestamp::now() + SignedDuration::from_hours(1),
     );
     let client = create_test_client();
     let target = orders_target(&client);

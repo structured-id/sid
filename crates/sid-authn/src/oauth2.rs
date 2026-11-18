@@ -9,7 +9,7 @@
 //! - Token Revocation (RFC 7009)
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,8 +33,8 @@ use crate::jwt::JwtService;
 /// OAuth2 server handling authorization, token exchange, and token management.
 pub struct OAuth2Server {
     jwt: Arc<JwtService>,
-    auth_code_ttl: Duration,
-    refresh_token_ttl: Duration,
+    auth_code_ttl: SignedDuration,
+    refresh_token_ttl: SignedDuration,
 }
 
 /// Authorization request (pre-validation).
@@ -302,13 +302,13 @@ impl OAuth2Server {
     pub fn new(jwt: Arc<JwtService>) -> Self {
         Self {
             jwt,
-            auth_code_ttl: Duration::minutes(5),
-            refresh_token_ttl: Duration::days(30),
+            auth_code_ttl: SignedDuration::from_mins(5),
+            refresh_token_ttl: SignedDuration::from_hours(30 * 24),
         }
     }
 
     /// Set refresh token TTL (default: 30 days, range: 7-30 days per architecture spec).
-    pub fn with_refresh_token_ttl(mut self, ttl: Duration) -> Self {
+    pub fn with_refresh_token_ttl(mut self, ttl: SignedDuration) -> Self {
         self.refresh_token_ttl = ttl;
         self
     }
@@ -386,7 +386,7 @@ impl OAuth2Server {
     ) -> SidResult<(String, AuthorizationCode<O>)> {
         let raw_code = generate_random_token(32);
         let code_hash = sha256_hash(raw_code.as_bytes());
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let code = AuthorizationCode {
             code_hash,
@@ -533,7 +533,7 @@ impl OAuth2Server {
         // Generate refresh token
         let raw_refresh = generate_random_token(48);
         let refresh_hash = sha256_hash(raw_refresh.as_bytes());
-        let now = Utc::now();
+        let now = Timestamp::now();
         let token_id = Uuid::now_v7();
 
         let refresh_model = RefreshToken {

@@ -229,10 +229,10 @@ impl SqliteBackend {
         &self,
         old_id: Uuid,
         new: &RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        grace_expires_at: jiff::Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let rotated = sqlx::query(
             "UPDATE refresh_tokens SET revoked = 1, replaced_by = ?,

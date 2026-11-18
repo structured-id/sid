@@ -713,9 +713,7 @@ fn put(object: &mut Map<String, Value>, name: &str, value: &str) {
 
 /// A Timestamp as an RFC 7643 §2.3.5 dateTime.
 fn date_time(at: &prost_types::Timestamp) -> Option<String> {
-    let nanos = u32::try_from(at.nanos).ok()?;
-    chrono::DateTime::from_timestamp(at.seconds, nanos)
-        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    sid_proto::time::from_proto(at).map(|at| at.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
 /// A resource's `meta` (RFC 7643 §3.1).

@@ -2,7 +2,7 @@
 //! Flow actions: created once, listed per hook point in execution order, and
 //! updated only over the revision they were read at.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{
     ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowType,
     Project, ProjectId,
@@ -22,7 +22,7 @@ async fn project(backend: &dyn StorageBackend) -> ProjectId {
 }
 
 fn action(project_id: ProjectId, point: ActionPoint, order: i32) -> FlowAction {
-    let now = Utc::now();
+    let now = Timestamp::now();
     FlowAction {
         id: FlowActionId::generate(),
         project_id,

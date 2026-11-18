@@ -1,4 +1,4 @@
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerId, OrgId,
 };
@@ -8,7 +8,7 @@ use super::*;
 
 /// A connection to `issuer` bringing identities of `source`.
 fn connection(issuer: &str, source: Option<OrgId>) -> EntryConnection {
-    let now = Utc::now().trunc_subsecs(6);
+    let now = Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap();
     EntryConnection {
         handle: EntryHandle::generate(),
         owner: ConnectionOwner::Administration,

@@ -4,7 +4,7 @@
 //! Stores device authorization requests: device_code + user_code pairs
 //! with status tracking for the polling flow.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -158,12 +158,12 @@ pub struct DeviceAuthorizationCode {
     /// Minimum polling interval in seconds (RFC 8628 §3.2).
     pub interval: i32,
 
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub authorized_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub authorized_at: Option<Timestamp>,
 
     /// Last time the device polled for this code (for slow_down enforcement).
-    pub last_polled_at: Option<DateTime<Utc>>,
+    pub last_polled_at: Option<Timestamp>,
 
     /// Session created when the code was redeemed.
     pub redeemed_session_id: Option<super::SessionId>,
@@ -184,7 +184,7 @@ impl DeviceAuthorizationCode {
         resource: super::ResourceId,
         project_id: ProjectId,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: DeviceAuthCodeId::new(),
             client_id,
@@ -198,7 +198,7 @@ impl DeviceAuthorizationCode {
             project_id,
             interval: DEVICE_CODE_POLL_INTERVAL_SECS,
             created_at: now,
-            expires_at: now + chrono::Duration::seconds(DEVICE_CODE_LIFETIME_SECS),
+            expires_at: now + SignedDuration::from_secs(DEVICE_CODE_LIFETIME_SECS),
             authorized_at: None,
             last_polled_at: None,
             redeemed_session_id: None,
@@ -207,7 +207,7 @@ impl DeviceAuthorizationCode {
 
     /// Check if this authorization request has expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        Timestamp::now() >= self.expires_at
     }
 
     /// Gateway: obtain typed wrapper if code is in Pending state.
@@ -250,7 +250,7 @@ impl<'a> PendingDeviceAuth<'a> {
         self.0.status = DeviceAuthStatus::Authorized;
         self.0.authorized_by = Some(profile_id);
         self.0.authorized_with = Some(authentication);
-        self.0.authorized_at = Some(Utc::now());
+        self.0.authorized_at = Some(Timestamp::now());
     }
 
     /// User denies authorization. Consumes the wrapper.

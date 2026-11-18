@@ -174,8 +174,8 @@ async fn test_magic_link_expired() {
         token_hash: "$argon2id$v=19$m=19456,t=2,p=1$fake$fakehash".to_string(),
         sealed_token: Vec::new(),
         consumed: false,
-        created_at: chrono::Utc::now() - chrono::Duration::hours(1),
-        expires_at: chrono::Utc::now() - chrono::Duration::minutes(1), // expired 1 min ago
+        created_at: jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1),
+        expires_at: jiff::Timestamp::now() - jiff::SignedDuration::from_mins(1), // expired 1 min ago
     };
 
     storage
@@ -270,8 +270,8 @@ async fn cleanup_removes_expired(storage: Arc<dyn StorageBackend>) {
         token_hash: "hash".to_string(),
         sealed_token: Vec::new(),
         consumed: false,
-        created_at: chrono::Utc::now() - chrono::Duration::hours(2),
-        expires_at: chrono::Utc::now() - chrono::Duration::hours(1),
+        created_at: jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2),
+        expires_at: jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1),
     };
     storage
         .create_magic_link_session(&expired, AuditEntry::system("test", "test").into())
@@ -356,7 +356,7 @@ impl NotificationChannel for Recorded {
         Ok(DeliveryReceipt {
             message_id: uuid::Uuid::now_v7().to_string(),
             channel: "email".into(),
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             provider: "recorded".into(),
         })
     }
@@ -388,8 +388,8 @@ fn delivery_of(id: uuid::Uuid) -> ClaimedWork {
         max_attempts: 8,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     }
 }
 
@@ -534,7 +534,7 @@ async fn test_link_mail_sends_nothing_once_expired() {
     let keys = common::test_key_manager();
     let email = unique_email("kate-ml-expired");
     let mut expired = MagicLinkSession::new(email.clone(), email, "hash".into());
-    expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    expired.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1);
     expired.sealed_token = sid_authn::sealed_secret::seal(
         keys.as_ref(),
         &sid_core::models::magic_link_sealing_context(expired.id),
@@ -576,7 +576,7 @@ async fn test_link_mail_waits_for_a_provider() {
     assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
     assert!(
         service
-            .pending_delivery(result.session_id, chrono::Utc::now())
+            .pending_delivery(result.session_id, jiff::Timestamp::now())
             .await
             .unwrap()
             .is_some()

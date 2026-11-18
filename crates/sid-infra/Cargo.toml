@@ -12,7 +12,7 @@ sid-plugin = { workspace = true }
 sid-core = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
 fred = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -58,7 +58,7 @@ hickory-resolver = { workspace = true, optional = true }
 [features]
 # Each backend is its own capability: a consumer of one never builds or
 # connects the others.
-nats = ["dep:async-nats", "dep:futures", "dep:chrono"]
+nats = ["dep:async-nats", "dep:futures", "dep:jiff"]
 redis = ["dep:fred"]
 issuer-client = [
     "dep:sid-authn",
@@ -93,7 +93,7 @@ authn-grpc = [
     "dep:futures",
     "dep:prost-reflect",
     "dep:secrecy",
-    "dep:chrono",
+    "dep:jiff",
     "dep:url",
     "dep:sid-ids",
     "dep:uuid",
@@ -105,6 +105,9 @@ password-operation = [
     "sid-authn/password-operation",
     "dep:sid-ids-proto",
 ]
+# The root routes of a root-addressed base issuer, read from the
+# `google.api.http` rules of the issuer's methods.
+issuer-routes = ["dep:sid-proto", "dep:prost-reflect"]
 # The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
 oauth-http = ["authn-grpc"]
 http = [
@@ -144,6 +147,7 @@ sid-infra = { path = ".", features = [
     "password-operation",
     "oauth-http",
     "platform-ca-dns",
+    "issuer-routes",
 ] }
 # The shared adapters' tests run the cores over an in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
@@ -151,7 +155,7 @@ sid-keys = { workspace = true }
 sid-crypto = { workspace = true, features = ["primitives", "jwt", "tls-aws-lc"] }
 sid-proto = { workspace = true }
 secrecy = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 # Client assertions are decoded and credential files written by the tests.
 jsonwebtoken = { workspace = true }
 tempfile = "3"

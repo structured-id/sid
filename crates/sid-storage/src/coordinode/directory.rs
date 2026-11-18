@@ -7,8 +7,8 @@
 //! text. Creating a token takes its owner's turn, so the count of active
 //! tokens it is checked against conflicts with a concurrent creation.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::directory_query::metadata_keys;
 use sid_core::models::pat::{PatId, PatStatus, PersonalAccessToken};
 use sid_core::models::{
@@ -139,7 +139,7 @@ fn pats_where(
 
 /// Revoke `ids` by `revoked_by` in `tx`.
 fn revoke(tx: &Statements<'_>, ids: &[PatId], revoked_by: Option<&str>) -> SidResult<()> {
-    let now = time(Utc::now());
+    let now = time(Timestamp::now());
     for id in ids {
         tx.run(
             "MATCH (t:SidPat) WHERE t.id = $id
@@ -665,7 +665,7 @@ impl CoordinodeBackend {
     ) -> SidResult<bool> {
         let ip = ip.map(str::to_owned);
         self.transaction(move |tx| {
-            let now = Utc::now();
+            let now = Timestamp::now();
             let usable = pats_where(tx, "t.id = $value", uuid(id.as_uuid()))?
                 .pop()
                 .is_some_and(|t| {
@@ -761,7 +761,7 @@ impl CoordinodeBackend {
         days: u32,
         ctx: MutationContext,
     ) -> SidResult<u64> {
-        let cutoff = Utc::now() - chrono::Duration::days(i64::from(days));
+        let cutoff = Timestamp::now() - jiff::SignedDuration::from_hours(i64::from(days) * 24);
         self.transaction(move |tx| {
             // Unused since the cutoff: the last use, or the creation of one
             // never used, came before it.

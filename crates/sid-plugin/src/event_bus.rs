@@ -208,8 +208,8 @@ pub trait EventBus: Send + Sync {
     /// rather than answering an empty history.
     async fn replay(
         &self,
-        from: chrono::DateTime<chrono::Utc>,
-        to: Option<chrono::DateTime<chrono::Utc>>,
+        from: jiff::Timestamp,
+        to: Option<jiff::Timestamp>,
         filter: EventFilter,
     ) -> EventBusResult<mpsc::Receiver<Event>> {
         let _ = (from, to, filter);

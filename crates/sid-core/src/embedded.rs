@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -161,31 +161,31 @@ pub struct UpstreamCacheEntry {
     /// Cached value (JSON-encoded).
     pub value: String,
     /// When this entry was fetched from upstream.
-    pub fetched_at: DateTime<Utc>,
+    pub fetched_at: Timestamp,
     /// When this entry expires.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 impl UpstreamCacheEntry {
     pub fn new(key: impl Into<String>, value: impl Into<String>, ttl_secs: u64) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             key: key.into(),
             value: value.into(),
             fetched_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_secs as i64),
+            expires_at: now + SignedDuration::from_secs(ttl_secs as i64),
         }
     }
 
     /// Whether this cache entry has expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Timestamp::now() > self.expires_at
     }
 
     /// Whether this entry is within the grace period.
     pub fn is_within_grace(&self, grace_secs: u64) -> bool {
-        let grace_deadline = self.expires_at + chrono::Duration::seconds(grace_secs as i64);
-        Utc::now() <= grace_deadline
+        let grace_deadline = self.expires_at + SignedDuration::from_secs(grace_secs as i64);
+        Timestamp::now() <= grace_deadline
     }
 }
 
@@ -209,7 +209,7 @@ pub struct HubSyncState {
     /// Current offline status.
     pub status: OfflineStatus,
     /// Last successful sync time.
-    pub last_sync: Option<DateTime<Utc>>,
+    pub last_sync: Option<Timestamp>,
     /// Number of consecutive sync failures.
     pub consecutive_failures: u32,
     /// Pending changes to push to upstream.
@@ -230,7 +230,7 @@ impl HubSyncState {
     /// Record a successful sync.
     pub fn record_sync_success(&mut self) {
         self.status = OfflineStatus::Online;
-        self.last_sync = Some(Utc::now());
+        self.last_sync = Some(Timestamp::now());
         self.consecutive_failures = 0;
     }
 
@@ -239,7 +239,7 @@ impl HubSyncState {
         self.consecutive_failures += 1;
         self.status = match self.last_sync {
             Some(last) => {
-                let elapsed = (Utc::now() - last).num_seconds() as u64;
+                let elapsed = Timestamp::now().duration_since(last).as_secs() as u64;
                 if elapsed <= grace_period_secs {
                     OfflineStatus::OfflineGrace
                 } else {
@@ -270,7 +270,7 @@ pub struct LocalAuditEntry {
     /// Sequential ID.
     pub id: u64,
     /// When the event occurred.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     /// Actor who performed the action.
     pub actor_id: String,
     /// Action performed.
@@ -285,7 +285,7 @@ impl LocalAuditEntry {
     pub fn new(id: u64, actor_id: impl Into<String>, action: impl Into<String>) -> Self {
         Self {
             id,
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             actor_id: actor_id.into(),
             action: action.into(),
             target: None,
@@ -320,9 +320,9 @@ pub struct DeviceRegistration {
     /// Credential type used.
     pub credential_type: EmbeddedCredentialType,
     /// When the device was enrolled.
-    pub enrolled_at: DateTime<Utc>,
+    pub enrolled_at: Timestamp,
     /// When the credential expires.
-    pub credential_expires_at: Option<DateTime<Utc>>,
+    pub credential_expires_at: Option<Timestamp>,
     /// Whether the device is active.
     pub active: bool,
 }
@@ -338,7 +338,7 @@ impl DeviceRegistration {
             name: name.into(),
             profile_type,
             credential_type,
-            enrolled_at: Utc::now(),
+            enrolled_at: Timestamp::now(),
             credential_expires_at: None,
             active: true,
         }
@@ -347,15 +347,15 @@ impl DeviceRegistration {
     /// Whether the credential has expired.
     pub fn is_credential_expired(&self) -> bool {
         self.credential_expires_at
-            .is_some_and(|exp| Utc::now() > exp)
+            .is_some_and(|exp| Timestamp::now() > exp)
     }
 
     /// Whether this device needs credential rotation.
     pub fn needs_rotation(&self, rotation_window_secs: u64) -> bool {
         match self.credential_expires_at {
             Some(exp) => {
-                let rotate_at = exp - chrono::Duration::seconds(rotation_window_secs as i64);
-                Utc::now() >= rotate_at
+                let rotate_at = exp - SignedDuration::from_secs(rotation_window_secs as i64);
+                Timestamp::now() >= rotate_at
             }
             None => false,
         }
@@ -404,7 +404,7 @@ mod tests {
     fn test_upstream_cache_expired() {
         let mut entry = UpstreamCacheEntry::new("crl", "{}", 3600);
         // Simulate expiry
-        entry.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        entry.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
         assert!(entry.is_expired());
         // But within grace
         assert!(entry.is_within_grace(3600));
@@ -465,7 +465,7 @@ mod tests {
             HubProfileType::Device,
             EmbeddedCredentialType::Token,
         );
-        device.credential_expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+        device.credential_expires_at = Some(Timestamp::now() - SignedDuration::from_hours(1));
         assert!(device.is_credential_expired());
     }
 
@@ -477,7 +477,7 @@ mod tests {
             EmbeddedCredentialType::ClientCert,
         );
         // Expires in 3 days, rotation window is 7 days → needs rotation
-        device.credential_expires_at = Some(Utc::now() + chrono::Duration::days(3));
+        device.credential_expires_at = Some(Timestamp::now() + SignedDuration::from_hours(72));
         assert!(device.needs_rotation(7 * 86400));
     }
 

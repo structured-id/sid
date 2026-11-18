@@ -9,8 +9,8 @@
 //! node, so of concurrent consumers one commits. Spending an invite moves
 //! its use count, so concurrent registrations spend it exactly.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::enrollment::EnrollmentDenialReason;
 use sid_core::models::{
     AuditEntry, BootstrapPolicy, CentralAdoption, CredentialId, EnrollmentGate, EnrollmentPolicy,
@@ -274,7 +274,7 @@ fn admit(
         tx,
         &format!("invite:{}", spent.id),
         crate::invite_use_entry(registration, spent.id),
-        Utc::now(),
+        Timestamp::now(),
     )?;
     Ok((admission.source(), Some(spent.id)))
 }
@@ -349,7 +349,7 @@ pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) ->
 }
 
 /// The sources recorded since `since`.
-fn sources_since(tx: &Statements<'_>, since: DateTime<Utc>) -> SidResult<Vec<RegistrationSource>> {
+fn sources_since(tx: &Statements<'_>, since: Timestamp) -> SidResult<Vec<RegistrationSource>> {
     let rows = tx.run(
         &format!("MATCH (s:SidRegistrationSource) WHERE s.created_at >= $since RETURN {SOURCE}"),
         Params::default().with("since", time(since)),
@@ -440,7 +440,7 @@ fn register(
                     "credential",
                     credential.as_ref().map_or(Value::Null, |c| uuid(&c.id.0)),
                 )
-                .with("now", time(Utc::now())),
+                .with("now", time(Timestamp::now())),
         )?;
     }
     // A new owner has no history: nothing can have moved it, so a refusal
@@ -506,7 +506,7 @@ impl CoordinodeBackend {
                  SET p.central = true, p.adopted_at = $now",
                 Params::default()
                     .with("scope", scope())
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             finalize(tx, "installation:bootstrap_policy", ctx.clone())?;
             Ok(Decision::Commit(CentralAdoption::Adopted))
@@ -566,7 +566,7 @@ impl CoordinodeBackend {
                             "expiry_hours",
                             Value::Int(i64::from(policy.invite.default_expiry_hours)),
                         )
-                        .with("now", time(Utc::now())),
+                        .with("now", time(Timestamp::now())),
                 )?;
                 Ok(())
             },
@@ -898,7 +898,7 @@ impl CoordinodeBackend {
 
     pub(super) async fn count_registrations_by_source(
         &self,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> SidResult<Vec<(RegistrationSourceType, u64)>> {
         let sources = self.read(move |tx| sources_since(tx, since)).await?;
         let mut counts =
@@ -914,7 +914,7 @@ impl CoordinodeBackend {
 
     pub(super) async fn top_referrers(
         &self,
-        since: DateTime<Utc>,
+        since: Timestamp,
         limit: u64,
     ) -> SidResult<Vec<(ProfileId, u64)>> {
         let sources = self.read(move |tx| sources_since(tx, since)).await?;

@@ -98,11 +98,7 @@ pub trait WorkStore: Send + Sync {
     /// cancelled) before `before`; open work is never touched. Its kind's
     /// owner decides when an ended item is no longer needed. Returns how
     /// many were dropped.
-    async fn purge_ended_work(
-        &self,
-        kind: &WorkKind,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64>;
+    async fn purge_ended_work(&self, kind: &WorkKind, before: jiff::Timestamp) -> Result<u64>;
 
     /// Whether any work of `kind` is stored, in any state, until it is purged.
     /// The default reads every item; a backend that can ask for one answers

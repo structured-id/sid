@@ -127,6 +127,6 @@ fn test_cascade_entries_have_timestamps() {
 
     let entry = &req.cascade_entries[0];
     // Timestamp should be recent (within last second).
-    let elapsed = chrono::Utc::now() - entry.revoked_at;
-    assert!(elapsed.num_seconds() < 2);
+    let elapsed = jiff::Timestamp::now().duration_since(entry.revoked_at);
+    assert!(elapsed.as_secs() < 2);
 }

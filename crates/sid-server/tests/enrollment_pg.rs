@@ -499,7 +499,7 @@ async fn test_pg_enrollment_refuses_values_it_would_replace() {
         .total_count;
 
     let past = prost_types::Timestamp {
-        seconds: chrono::Utc::now().timestamp() - 60,
+        seconds: jiff::Timestamp::now().as_second() - 60,
         nanos: 0,
     };
     let unreadable = prost_types::Timestamp {

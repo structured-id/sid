@@ -29,9 +29,9 @@ const UNKNOWN_KEY_REFRESH: Duration = Duration::from_secs(30);
 /// within this interval.
 const RESOURCE_TTL: Duration = Duration::from_secs(30);
 
-/// The endpoint path of an issuer-scoped request: what follows
+/// The endpoint path of a request to a scoped issuer: what follows
 /// `/i/{handle}` (`/oauth2/token`, `/jwks`, `/.well-known/...`), or `None`
-/// for a path outside every issuer.
+/// for a path outside every scoped issuer.
 pub fn issuer_endpoint(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/i/")?;
     rest.find('/').map(|slash| &rest[slash..])
@@ -134,8 +134,9 @@ struct CachedResource {
 /// The cache holds public data read from the registry; every replica reads
 /// the same, so it holds no state a replica must agree on.
 pub struct IssuerDirectory {
-    /// `{base}/i/`: the prefix of every issuer URL of this installation.
-    prefix: String,
+    /// The installation's public URL: its root-addressed base issuer, and
+    /// the base of `{base}/i/{handle}` of its scoped issuers.
+    base: String,
     source: Arc<dyn IssuerSource>,
     cache: DashMap<String, Cached>,
     /// Registered resources by (issuer handle, indicator). Only resources the
@@ -146,7 +147,7 @@ pub struct IssuerDirectory {
 impl std::fmt::Debug for IssuerDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IssuerDirectory")
-            .field("prefix", &self.prefix)
+            .field("base", &self.base)
             .finish_non_exhaustive()
     }
 }
@@ -155,11 +156,17 @@ impl IssuerDirectory {
     /// The issuers under `base`, the installation's public URL.
     pub fn new(base: &str, source: Arc<dyn IssuerSource>) -> Self {
         Self {
-            prefix: format!("{}/i/", base.trim_end_matches('/')),
+            base: base.trim_end_matches('/').to_owned(),
             source,
             cache: DashMap::new(),
             resources: DashMap::new(),
         }
+    }
+
+    /// The registry handle of `issuer` when it is one of this installation's
+    /// ([`crate::issuer::installation_issuer_handle`]).
+    fn handle_of<'a>(&self, issuer: &'a str) -> Option<&'a str> {
+        crate::issuer::installation_issuer_handle(&self.base, issuer)
     }
 
     /// The resource `resource` registered under the issuer `issuer` (its
@@ -171,12 +178,9 @@ impl IssuerDirectory {
         issuer: &str,
         resource: &str,
     ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
-        let Some(handle) = issuer.strip_prefix(&self.prefix) else {
+        let Some(handle) = self.handle_of(issuer) else {
             return Ok(None);
         };
-        if sid_core::models::IssuerHandle::parse(handle).is_err() {
-            return Ok(None);
-        }
         let key = (handle.to_owned(), resource.to_owned());
         if let Some(cached) = self.resources.get(&key)
             && cached.fetched.elapsed() < RESOURCE_TTL
@@ -205,15 +209,15 @@ impl IssuerDirectory {
         Ok(record)
     }
 
-    /// The issuer a request path names by `handle`. The answer must name an
-    /// issuer under this installation's base and end in this handle, or the
-    /// handle names no issuer here.
+    /// The issuer a request path names by `handle`, the empty handle naming
+    /// the root-addressed base issuer. The answer must be exactly the URL
+    /// this installation gives that handle, or it names no issuer here.
     pub async fn by_handle(
         &self,
         handle: &str,
     ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
         // Text that cannot be a handle is not asked about.
-        if sid_core::models::IssuerHandle::parse(handle).is_err() {
+        if !handle.is_empty() && sid_core::models::IssuerHandle::parse(handle).is_err() {
             return Ok(None);
         }
         if let Some(cached) = self.cache.get(handle)
@@ -232,7 +236,7 @@ impl IssuerDirectory {
         iss: &str,
         kid: &str,
     ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
-        let Some(handle) = iss.strip_prefix(&self.prefix) else {
+        let Some(handle) = self.handle_of(iss) else {
             return Ok(None);
         };
         let Some(issuer) = self.by_handle(handle).await? else {
@@ -330,7 +334,7 @@ impl IssuerDirectory {
             .source
             .issuer(handle)
             .await?
-            .filter(|record| record.issuer.strip_prefix(&self.prefix) == Some(handle))
+            .filter(|record| self.handle_of(&record.issuer) == Some(handle))
             .map(|record| Arc::new(KnownIssuer::from_record(record)));
         match &issuer {
             Some(known) => {

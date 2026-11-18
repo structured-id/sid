@@ -27,6 +27,54 @@ pub use postgres::{
 #[cfg(feature = "storage-pg")]
 pub use postgres_blob::PostgresBlobStore;
 
+/// PostgreSQL `timestamptz` values: jiff instants written with `.pg()` and
+/// decoded columns read back with `.jiff()`, both also for `Option`.
+#[cfg(feature = "storage-pg")]
+pub(crate) mod pg_time {
+    pub(crate) use jiff_sqlx::Timestamp as PgTime;
+    use jiff_sqlx::ToSqlx;
+
+    /// An instant as the PostgreSQL codec writes it.
+    pub(crate) trait ToPg {
+        type Out;
+        fn pg(self) -> Self::Out;
+    }
+
+    impl ToPg for jiff::Timestamp {
+        type Out = PgTime;
+        fn pg(self) -> PgTime {
+            self.to_sqlx()
+        }
+    }
+
+    impl ToPg for Option<jiff::Timestamp> {
+        type Out = Option<PgTime>;
+        fn pg(self) -> Option<PgTime> {
+            self.map(ToSqlx::to_sqlx)
+        }
+    }
+
+    /// A decoded column as the domain's instant.
+    pub(crate) trait FromPg {
+        type Out;
+        fn jiff(self) -> Self::Out;
+    }
+
+    impl FromPg for PgTime {
+        type Out = jiff::Timestamp;
+        fn jiff(self) -> jiff::Timestamp {
+            self.to_jiff()
+        }
+    }
+
+    impl FromPg for Option<PgTime> {
+        type Out = Option<jiff::Timestamp>;
+        fn jiff(self) -> Option<jiff::Timestamp> {
+            self.map(PgTime::to_jiff)
+        }
+    }
+}
+
 /// The portable snapshot: over the storage traits, any backend.
 pub mod snapshot;
 
@@ -58,11 +106,71 @@ mod policy_evidence;
 /// back are the same, whatever precision the host clock reports.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 fn stored_branding(config: &sid_core::models::BrandingConfig) -> sid_core::models::BrandingConfig {
-    use chrono::SubsecRound;
     let mut stored = config.clone();
-    stored.created_at = stored.created_at.trunc_subsecs(6);
-    stored.updated_at = stored.updated_at.trunc_subsecs(6);
+    stored.created_at = micros(stored.created_at);
+    stored.updated_at = micros(stored.updated_at);
     stored
+}
+
+/// `at` truncated to the microsecond, the precision SQL timestamp columns
+/// hold.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn micros(at: jiff::Timestamp) -> jiff::Timestamp {
+    at.round(
+        jiff::TimestampRound::new()
+            .smallest(jiff::Unit::Microsecond)
+            .mode(jiff::RoundMode::Trunc),
+    )
+    .expect("truncating an instant stays representable")
+}
+
+/// The first instant (UTC) of the month `at` falls in: audit retention
+/// removes whole months before it.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn month_start(at: jiff::Timestamp) -> sid_core::Result<jiff::Timestamp> {
+    let utc = jiff::tz::TimeZone::UTC;
+    at.to_zoned_datetime(utc.clone())
+        .date()
+        .first_of_month()
+        .to_zoned_datetime(utc)
+        .map(|z| z.timestamp())
+        .map_err(|e| sid_core::Error::Validation(format!("no month start for {at}: {e}")))
+}
+
+/// A stored policy duration in whole seconds; a negative one is an error.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn stored_seconds(column: &str, value: i64) -> sid_core::Result<jiff::SignedDuration> {
+    if value < 0 {
+        return Err(sid_core::Error::Storage(format!(
+            "column {column}: {value}"
+        )));
+    }
+    Ok(jiff::SignedDuration::from_secs(value))
+}
+
+/// The instant `hours` from now; a window past the representable range is a
+/// caller error.
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
+pub(crate) fn hours_from_now(hours: i64) -> sid_core::Result<jiff::Timestamp> {
+    jiff::SignedDuration::try_from_hours(hours)
+        .and_then(|window| jiff::Timestamp::now().checked_add(window).ok())
+        .ok_or_else(|| sid_core::Error::Validation(format!("window {hours}h out of range")))
 }
 
 /// Refusal of a credential for a federated reference: the identity it
@@ -322,15 +430,10 @@ fn transfer_repeat<T: PartialEq>(stored: &T, wanted: &T, what: &str) -> sid_core
     feature = "storage-sqlite",
     feature = "storage-coordinode"
 ))]
-fn decay_cutoff(
-    older_than: std::time::Duration,
-) -> sid_core::Result<chrono::DateTime<chrono::Utc>> {
-    let refused =
-        || sid_core::Error::Validation(format!("decay window {older_than:?} is out of range"));
-    let window = chrono::Duration::from_std(older_than).map_err(|_| refused())?;
-    chrono::Utc::now()
-        .checked_sub_signed(window)
-        .ok_or_else(refused)
+fn decay_cutoff(older_than: std::time::Duration) -> sid_core::Result<jiff::Timestamp> {
+    jiff::Timestamp::now().checked_sub(older_than).map_err(|_| {
+        sid_core::Error::Validation(format!("decay window {older_than:?} is out of range"))
+    })
 }
 
 // SQLite backend (embedded-dev mode)

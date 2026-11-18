@@ -6,7 +6,7 @@
 //! OIDC discovery URL or manual endpoint configuration, and a trust category that
 //! maps to the existing `AssuranceLevel` system.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::principal_verification::AssuranceLevel;
@@ -155,8 +155,8 @@ pub struct UpstreamProvider {
     pub revision: u64,
 
     // === Timestamps ===
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl UpstreamProvider {
@@ -167,7 +167,7 @@ impl UpstreamProvider {
         client_id: impl Into<String>,
         client_secret: EncryptedField,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: UpstreamProviderId::generate(),
             name: name.into(),

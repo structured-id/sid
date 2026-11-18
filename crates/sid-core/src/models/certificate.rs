@@ -3,7 +3,7 @@
 //!
 //! Certificate hierarchy: RootCA → InstanceCA → BindingCertificate / ScopedCA / SiteCertificate.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -94,10 +94,10 @@ pub struct Certificate {
     pub der: Vec<u8>,
 
     /// Validity: not before.
-    pub not_before: DateTime<Utc>,
+    pub not_before: Timestamp,
 
     /// Validity: not after.
-    pub not_after: DateTime<Utc>,
+    pub not_after: Timestamp,
 
     /// For InstanceCA: instance identifier.
     pub instance_id: Option<String>,
@@ -112,18 +112,18 @@ pub struct Certificate {
     pub binding_id: Option<String>,
 
     /// Revocation timestamp.
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
 
     /// Revocation reason.
     pub revocation_reason: Option<RevocationReason>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl Certificate {
     /// Whether this certificate is currently valid (not expired, not revoked).
     pub fn is_valid(&self) -> bool {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.revoked_at.is_none() && now >= self.not_before && now <= self.not_after
     }
 
@@ -134,12 +134,12 @@ impl Certificate {
 
     /// Whether this certificate has expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.not_after
+        Timestamp::now() > self.not_after
     }
 
     /// Days until expiry (negative if expired).
     pub fn days_until_expiry(&self) -> i64 {
-        (self.not_after - Utc::now()).num_days()
+        self.not_after.duration_since(Timestamp::now()).as_secs() / 86_400
     }
 }
 
@@ -148,7 +148,7 @@ mod tests {
     use super::*;
 
     fn make_cert(cert_type: CertificateType) -> Certificate {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Certificate {
             id: CertificateId::new(),
             cert_type,
@@ -157,8 +157,8 @@ mod tests {
             issuer_dn: "CN=Test".to_string(),
             parent_id: None,
             der: vec![],
-            not_before: now - chrono::Duration::hours(1),
-            not_after: now + chrono::Duration::days(365),
+            not_before: now - jiff::SignedDuration::from_hours(1),
+            not_after: now + jiff::SignedDuration::from_hours(365 * 24),
             instance_id: None,
             org_id: None,
             site_domain: None,
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn test_certificate_expired() {
         let mut cert = make_cert(CertificateType::InstanceCa);
-        cert.not_after = Utc::now() - chrono::Duration::hours(1);
+        cert.not_after = Timestamp::now() - jiff::SignedDuration::from_hours(1);
         assert!(!cert.is_valid());
         assert!(cert.is_expired());
     }
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_certificate_revoked() {
         let mut cert = make_cert(CertificateType::BindingCertificate);
-        cert.revoked_at = Some(Utc::now());
+        cert.revoked_at = Some(Timestamp::now());
         cert.revocation_reason = Some(RevocationReason::Emergency);
         assert!(!cert.is_valid());
         assert!(cert.is_revoked());
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_certificate_not_yet_valid() {
         let mut cert = make_cert(CertificateType::SiteCertificate);
-        cert.not_before = Utc::now() + chrono::Duration::hours(1);
+        cert.not_before = Timestamp::now() + jiff::SignedDuration::from_hours(1);
         assert!(!cert.is_valid());
     }
 

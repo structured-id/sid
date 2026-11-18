@@ -241,7 +241,7 @@ impl NotificationChannel for Immediate {
         Ok(DeliveryReceipt {
             message_id: "m".into(),
             channel: self.id.into(),
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             provider: "bench".into(),
         })
     }
@@ -414,7 +414,7 @@ impl WorkStore for Timed {
     async fn purge_ended_work(
         &self,
         kind: &sid_core::models::WorkKind,
-        before: chrono::DateTime<chrono::Utc>,
+        before: jiff::Timestamp,
     ) -> sid_core::Result<u64> {
         self.inner.purge_ended_work(kind, before).await
     }
@@ -1157,7 +1157,7 @@ impl NotificationChannel for Piped {
         Ok(DeliveryReceipt {
             message_id: "m".into(),
             channel: self.id.into(),
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             provider: "bench".into(),
         })
     }

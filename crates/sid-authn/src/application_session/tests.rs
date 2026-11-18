@@ -158,7 +158,7 @@ impl Client {
     }
 
     fn access_token(&self, audience: &str, lifetime: i64) -> String {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         self.registry.sign(
             "at+jwt",
             &AccessTokenClaims {
@@ -214,7 +214,7 @@ impl ApplicationClient for Client {
             .unwrap()
             .remove(&code)
             .ok_or_else(|| GrantFailure::Refused("invalid_grant".into()))?;
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let id_token = self.registry.sign(
             "JWT",
             &serde_json::json!({
@@ -359,7 +359,7 @@ async fn expiring(world: &World, id: &str) -> BffSession {
     let store = world.store();
     let mut session = store.get_session(id).await.unwrap().unwrap();
     let mut claims = session.claims.clone();
-    claims.exp = chrono::Utc::now().timestamp() + 5;
+    claims.exp = jiff::Timestamp::now().as_second() + 5;
     let refresh = session.refresh_token.clone().unwrap();
     store
         .replace_tokens(
@@ -785,7 +785,7 @@ async fn a_stale_snapshot_presents_the_current_refresh_token() {
     // Another replica rotated `refresh-1` to a token near its end too.
     let store = world.store();
     let mut claims = stale.claims.clone();
-    claims.exp = chrono::Utc::now().timestamp() + 5;
+    claims.exp = jiff::Timestamp::now().as_second() + 5;
     store
         .replace_tokens(
             &id,
@@ -809,7 +809,7 @@ async fn a_usable_token_found_after_a_stale_read_is_not_refreshed() {
     let id = sign_in(&world, &replica).await;
     let stale = expiring(&world, &id).await;
     let mut claims = stale.claims.clone();
-    claims.exp = chrono::Utc::now().timestamp() + 600;
+    claims.exp = jiff::Timestamp::now().as_second() + 600;
     world
         .store()
         .replace_tokens(

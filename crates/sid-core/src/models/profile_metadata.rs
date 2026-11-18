@@ -4,7 +4,7 @@
 //! CE: free-form key-value pairs. No schema validation.
 //! Keys are arbitrary strings, values are JSON.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::ProfileId;
@@ -15,14 +15,14 @@ pub struct ProfileMetadata {
     pub profile_id: ProfileId,
     pub key: String,
     pub value: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ProfileMetadata {
     /// Create a new metadata entry.
     pub fn new(profile_id: ProfileId, key: impl Into<String>, value: serde_json::Value) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             profile_id,
             key: key.into(),

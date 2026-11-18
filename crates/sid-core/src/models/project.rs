@@ -4,7 +4,7 @@
 //! Project = container for related applications (OAuth2 clients)
 //! that share authorization scope (roles, policies, grants).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::ProfileId;
@@ -19,7 +19,7 @@ pub use sid_ids::ProjectId;
 pub struct ProjectChange {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 /// Project represents a container for OAuth2/OIDC applications.
@@ -35,14 +35,14 @@ pub struct Project {
     pub owner_id: Option<ProfileId>,
     /// System projects cannot be deleted.
     pub is_system: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Project {
     /// Create the default system project ("SID").
     pub fn system() -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ProjectId::SYSTEM,
             name: "SID".to_string(),
@@ -56,7 +56,7 @@ impl Project {
 
     /// Create a new user project.
     pub fn new(name: impl Into<String>, owner_id: Option<ProfileId>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ProjectId::generate(),
             name: name.into(),

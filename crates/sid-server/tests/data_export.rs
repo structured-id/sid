@@ -86,7 +86,7 @@ async fn acknowledge_export_answers_by_outcome() {
 
     let mut lapsed = ExportJob::new(owner.id, ExportFormat::Json);
     lapsed.mark_ready("exports/a.json".into(), 1, "ab".repeat(32));
-    lapsed.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+    lapsed.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1));
     svc.storage
         .create_export_job(&lapsed, AuditEntry::system("test", "export").into())
         .await
@@ -103,7 +103,7 @@ async fn acknowledge_export_answers_by_outcome() {
     assert_eq!(violation.subject, owner.id.to_string());
 
     let mut ready = ExportJob::new(owner.id, ExportFormat::Json);
-    ready.created_at = lapsed.created_at + chrono::Duration::seconds(1);
+    ready.created_at = lapsed.created_at + jiff::SignedDuration::from_secs(1);
     ready.mark_ready("exports/b.json".into(), 1, "cd".repeat(32));
     svc.storage
         .create_export_job(&ready, AuditEntry::system("test", "export").into())

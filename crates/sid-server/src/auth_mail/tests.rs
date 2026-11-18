@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use secrecy::SecretString;
 use sid_plugin::notification::{ChannelHealth, DeliveryError, DeliveryReceipt, RenderedMessage};
 
@@ -32,7 +32,7 @@ impl NotificationChannel for Recorded {
         Ok(DeliveryReceipt {
             message_id: uuid::Uuid::now_v7().to_string(),
             channel: "email".into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             provider: "recorded".into(),
         })
     }

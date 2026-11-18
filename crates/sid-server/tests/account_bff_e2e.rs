@@ -543,8 +543,8 @@ async fn the_issuers_back_channel_logout_signs_the_browser_out() {
             max_attempts: work.max_attempts,
             generation: 1,
             expires_at: None,
-            created_at: chrono::Utc::now(),
-            due_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            due_at: jiff::Timestamp::now(),
         })
         .await;
     assert!(
@@ -569,7 +569,7 @@ async fn holding_a_token_the_api_refuses(deployment: &Deployment, browser: &Brow
         .refresh_token
         .clone()
         .expect("the sign-in granted a refresh token");
-    assert!(before.claims.exp > chrono::Utc::now().timestamp());
+    assert!(before.claims.exp > jiff::Timestamp::now().as_second());
     assert!(matches!(
         store
             .replace_tokens(
@@ -815,7 +815,7 @@ async fn an_expired_token_is_refreshed_before_the_call() {
     let after = store.get_session(&id).await.unwrap().unwrap();
     assert_ne!(after.bearer(), before.bearer());
     assert!(!after.holds_refresh_token(&held));
-    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+    assert!(after.claims.exp > jiff::Timestamp::now().as_second());
 }
 
 /// A refresh the issuer committed but whose answer never came back: the
@@ -892,7 +892,7 @@ async fn a_lost_refresh_answer_is_recovered_within_the_grace_window() {
         .unwrap()
         .unwrap();
     assert!(!after.holds_refresh_token(&held));
-    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+    assert!(after.claims.exp > jiff::Timestamp::now().as_second());
 }
 
 /// After the grace window the replaced token reads as theft: the issuer ends
@@ -1005,7 +1005,7 @@ async fn two_replicas_refresh_one_session_at_once() {
     }
     let after = store.get_session(id).await.unwrap().unwrap();
     assert!(!after.holds_refresh_token(&held));
-    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+    assert!(after.claims.exp > jiff::Timestamp::now().as_second());
     assert_eq!(current_profile(&second, &browser, true).await.1, "0");
 }
 

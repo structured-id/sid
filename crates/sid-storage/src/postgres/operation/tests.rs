@@ -64,7 +64,7 @@ fn completion_in(place: i16, period: OperationPeriod) -> OperationCompletion {
 async fn a_full_first_place_is_released_before_every_place_is_taken() {
     let (store, pool, schema) = store().await;
     let period = store
-        .current_operation_period(Utc::now(), Duration::minutes(5))
+        .current_operation_period(Timestamp::now(), SignedDuration::from_mins(5))
         .await
         .unwrap()
         .period;

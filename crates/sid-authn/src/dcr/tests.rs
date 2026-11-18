@@ -27,8 +27,8 @@ fn valid_iat() -> InitialAccessToken {
         allowed_scopes: vec!["openid".into(), "profile".into(), "email".into()],
         allowed_grant_types: vec!["authorization_code".into(), "refresh_token".into()],
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
-        expires_at: Utc::now() + chrono::Duration::hours(24),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + jiff::SignedDuration::from_hours(24),
+        created_at: Timestamp::now(),
         created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     }
@@ -255,7 +255,7 @@ fn test_valid_iat_passes() {
 #[test]
 fn test_iat_expired() {
     let mut iat = valid_iat();
-    iat.expires_at = Utc::now() - chrono::Duration::hours(1);
+    iat.expires_at = Timestamp::now() - jiff::SignedDuration::from_hours(1);
     assert!(matches!(
         validate_iat_constraints(&iat, &valid_request()),
         Err(DcrError::IatExpired)

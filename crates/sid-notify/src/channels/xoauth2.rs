@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
@@ -224,7 +224,7 @@ impl XOAuth2TokenProvider for GoogleTokenProvider {
             .as_deref()
             .unwrap_or("https://oauth2.googleapis.com/token");
 
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         let claims = GoogleJwtClaims {
             iss: key.client_email.clone(),
             scope: "https://mail.google.com/".into(),
@@ -515,7 +515,7 @@ impl NotificationChannel for XOAuth2SmtpChannel {
         Ok(DeliveryReceipt {
             message_id,
             channel: "email".into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             provider: format!("smtp-xoauth2:{}", self.config.host),
         })
     }
@@ -534,7 +534,7 @@ impl NotificationChannel for XOAuth2SmtpChannel {
                         "SMTP {}:{} reachable (XOAUTH2)",
                         self.config.host, self.config.port
                     )),
-                    last_success: Some(Utc::now()),
+                    last_success: Some(Timestamp::now()),
                 }),
                 Ok(false) => Ok(ChannelHealth {
                     healthy: false,

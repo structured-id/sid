@@ -3,8 +3,8 @@
 //! reputation, the IP allowlist, notification preferences, and the
 //! integrity counts of records whose owner is gone.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::notification::NotificationPreferences;
 use sid_core::models::{
     AnomalyEventId, AnomalyEventRecord, IpReputation, MutationContext, ProfileId,
@@ -77,7 +77,7 @@ fn float(row: &Row, name: &str) -> SidResult<f64> {
 }
 
 /// The allowlist, oldest entry first.
-fn allowlist(tx: &Statements<'_>) -> SidResult<Vec<(String, String, DateTime<Utc>)>> {
+fn allowlist(tx: &Statements<'_>) -> SidResult<Vec<(String, String, Timestamp)>> {
     let rows = tx.run(
         "MATCH (w:SidIpAllowlistEntry)
          RETURN w.cidr AS cidr, w.description AS description, w.created_at AS created_at",
@@ -201,7 +201,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let ip = ip.to_owned();
         self.transaction(move |tx| {
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let stored = tx.run(
                 "MATCH (r:SidIpReputation) WHERE r.ip = $ip
                  RETURN r.failed_count AS failed, r.success_count AS succeeded",
@@ -313,7 +313,7 @@ impl CoordinodeBackend {
     ) -> SidResult<u64> {
         let cutoff = crate::decay_cutoff(older_than)?;
         self.transaction(move |tx| {
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let idle = tx.run(
                 "MATCH (r:SidIpReputation) WHERE r.updated_at < $cutoff
                  RETURN r.ip AS ip, r.failed_count AS failed, r.success_count AS succeeded",
@@ -385,7 +385,7 @@ impl CoordinodeBackend {
                     Params::default()
                         .with("cidr", Value::String(cidr.clone()))
                         .with("description", Value::String(description.clone()))
-                        .with("now", time(Utc::now())),
+                        .with("now", time(Timestamp::now())),
                 )?;
             }
             Self::allowlist_changed(tx, &ctx)?;
@@ -413,7 +413,7 @@ impl CoordinodeBackend {
 
     pub(super) async fn list_ip_allowlist_entries(
         &self,
-    ) -> SidResult<Vec<(String, String, DateTime<Utc>)>> {
+    ) -> SidResult<Vec<(String, String, Timestamp)>> {
         self.read(allowlist).await
     }
 
@@ -421,7 +421,7 @@ impl CoordinodeBackend {
         &self,
         cidr: &str,
         description: &str,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let wanted = (cidr.to_owned(), description.to_owned(), created_at);
@@ -517,7 +517,7 @@ impl CoordinodeBackend {
                 succeeded: r.success_count,
             }
             .score();
-            let at = |t: Option<DateTime<Utc>>| t.map_or(Value::Null, time);
+            let at = |t: Option<Timestamp>| t.map_or(Value::Null, time);
             // Concurrent importers meet on the unique address.
             tx.run(
                 "CREATE (r:SidIpReputation {ip: $ip, failed_count: $failed,

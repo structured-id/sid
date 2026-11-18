@@ -176,9 +176,7 @@ impl RevocationCache {
     /// lifetime: it keeps each revocation for the longest lifetime an issuer
     /// may give a token.
     pub fn receiver_view(shared: Arc<dyn CacheBackend>) -> Arc<Self> {
-        let lifetime = crate::jwt::AccessTokenTtl::MAX
-            .duration()
-            .to_std()
+        let lifetime = std::time::Duration::try_from(crate::jwt::AccessTokenTtl::MAX.duration())
             .expect("the longest access-token lifetime is positive");
         Arc::new(Self::new(lifetime, shared))
     }

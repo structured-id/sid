@@ -209,7 +209,7 @@ async fn test_a_session_fingerprint_is_not_listed_as_a_device() {
     let mut session = sid_core::models::Session::new(
         owner.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.device_id = Some(sid_authn::sign_in_security::device_id("Mozilla/5.0"));
     svc.storage

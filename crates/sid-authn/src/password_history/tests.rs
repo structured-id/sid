@@ -81,7 +81,7 @@ fn snapshot(owner: ProfileId, epoch: &NewKeyEpoch, entries: Vec<[u8; 32]>) -> Pa
                     operation: uuid::Uuid::now_v7(),
                     policy_version: 1,
                 },
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             })
             .collect(),
     }
@@ -649,7 +649,7 @@ fn the_comparison_domain_binds_the_whole_manifest() {
         public_key: [1; 32],
         ksf: KSF,
         ksf_salt: [2; 32],
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let base = comparison_domain(&epoch);
     let mut other = epoch;

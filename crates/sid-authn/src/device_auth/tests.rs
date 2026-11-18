@@ -89,7 +89,7 @@ fn test_validate_poll_authorized() {
         sid_core::models::ProfileId::generate(),
         sid_core::models::GrantAuthentication {
             session: sid_core::models::SessionId::generate(),
-            authenticated_at: chrono::Utc::now(),
+            authenticated_at: jiff::Timestamp::now(),
             amr: vec!["pwd".into()],
             assurance_level: sid_core::models::AuthLevel::Basic,
             elevation: None,
@@ -121,7 +121,7 @@ fn test_validate_poll_expired_status() {
 #[test]
 fn test_validate_poll_expired_by_time() {
     let mut auth = make_pending_auth();
-    auth.expires_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+    auth.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10);
     assert!(matches!(
         validate_poll(&auth),
         Err(DeviceAuthError::ExpiredToken)

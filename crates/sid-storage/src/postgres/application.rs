@@ -10,6 +10,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{PostgresBackend, insert_error};
 use crate::pg_row::{ApplicationRow, OAuth2ClientRow, ProtectedResourceRow, ResourceAccessRow};
+use crate::pg_time::ToPg;
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
@@ -59,8 +60,8 @@ impl PostgresBackend {
         .bind(app.project_id)
         .bind(&app.name)
         .bind(revision(app.revision, "application")?)
-        .bind(app.created_at)
-        .bind(app.updated_at)
+        .bind(app.created_at.pg())
+        .bind(app.updated_at.pg())
         .bind(app.system.map(SystemIntegration::as_str))
         .execute(&mut **tx)
         .await
@@ -85,8 +86,8 @@ impl PostgresBackend {
         .bind(resource.scopes.join(" "))
         .bind(resource.state.as_str())
         .bind(revision(resource.revision, "protected resource")?)
-        .bind(resource.created_at)
-        .bind(resource.updated_at)
+        .bind(resource.created_at.pg())
+        .bind(resource.updated_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("protected resource", e))?;
@@ -186,10 +187,10 @@ impl PostgresBackend {
         )
         .bind(app.id)
         .bind(&app.name)
-        .bind(app.updated_at)
+        .bind(app.updated_at.pg())
         .bind(revision(app.revision, "application")?)
         .bind(app.project_id)
-        .bind(app.created_at)
+        .bind(app.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(failed("update application"))?
@@ -377,8 +378,8 @@ impl PostgresBackend {
         .bind(resource.scopes.join(" "))
         .bind(resource.state.as_str())
         .bind(revision(resource.revision, "protected resource")?)
-        .bind(resource.created_at)
-        .bind(resource.updated_at)
+        .bind(resource.created_at.pg())
+        .bind(resource.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("protected resource", e))?
@@ -428,12 +429,12 @@ impl PostgresBackend {
         .bind(resource.id)
         .bind(resource.scopes.join(" "))
         .bind(resource.state.as_str())
-        .bind(resource.updated_at)
+        .bind(resource.updated_at.pg())
         .bind(revision(resource.revision, "protected resource")?)
         .bind(resource.application_id)
         .bind(resource.issuer_id)
         .bind(resource.indicator.as_str())
-        .bind(resource.created_at)
+        .bind(resource.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(failed("update protected resource"))?
@@ -514,7 +515,7 @@ impl PostgresBackend {
         .bind(machine_client)
         .bind(access.resource_id)
         .bind(access.scopes.join(" "))
-        .bind(access.created_at)
+        .bind(access.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(failed("set resource access"))?;

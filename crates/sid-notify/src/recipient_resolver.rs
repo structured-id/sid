@@ -7,7 +7,7 @@
 //!
 //! Includes TTL cache to avoid per-event gRPC calls (default: 5 minutes).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_plugin::notification::Recipient;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ struct CachedRecipient {
     email: Option<String>,
     phone: Option<String>,
     locale: String,
-    cached_at: DateTime<Utc>,
+    cached_at: Timestamp,
 }
 
 /// Resolves recipient contact details from sid-identity via gRPC.
@@ -221,9 +221,7 @@ impl RecipientResolver {
     async fn get_cached(&self, profile_id: &str) -> Option<CachedRecipient> {
         let cache = self.cache.read().await;
         let entry = cache.get(profile_id)?;
-        let age = Utc::now()
-            .signed_duration_since(entry.cached_at)
-            .to_std()
+        let age = Duration::try_from(Timestamp::now().duration_since(entry.cached_at))
             .unwrap_or(Duration::MAX);
         if age < self.cache_ttl {
             Some(entry.clone())
@@ -297,7 +295,7 @@ impl RecipientResolver {
             email,
             phone,
             locale: "en".to_string(), // TODO: resolve from profile preferences
-            cached_at: Utc::now(),
+            cached_at: Timestamp::now(),
         })
     }
 

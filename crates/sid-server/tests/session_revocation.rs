@@ -23,7 +23,7 @@ fn session() -> Session {
     Session::new(
         profile_id(),
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     )
 }
 
@@ -37,8 +37,8 @@ fn refresh_token(session: &Session, hash: &[u8]) -> RefreshToken {
         client_id: "client".into(),
         scopes: vec!["openid".into()],
         resource: sid_core::models::ResourceId::generate(),
-        expires_at: chrono::Utc::now() + chrono::Duration::days(1),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24),
+        created_at: jiff::Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: id,

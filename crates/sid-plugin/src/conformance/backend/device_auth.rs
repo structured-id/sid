@@ -3,7 +3,8 @@
 //! replaced, decided once, polled no faster than their interval, and
 //! redeemed for tokens exactly once.
 
-use chrono::{Duration, Utc};
+use crate::conformance::trunc;
+use jiff::{SignedDuration as Duration, Timestamp, Unit};
 use sid_core::Error;
 use sid_core::models::{
     DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
@@ -40,17 +41,16 @@ async fn stored_request(backend: &dyn StorageBackend) -> (DeviceAuthorizationCod
 
 /// `profile`'s approval from a session that stepped up with a second factor.
 fn approval(profile: &Profile) -> DeviceAuthDecision {
-    use chrono::SubsecRound;
     DeviceAuthDecision::Authorize {
         profile: profile.id,
         authentication: sid_core::models::GrantAuthentication {
             session: sid_core::models::SessionId::generate(),
-            authenticated_at: Utc::now().trunc_subsecs(0),
+            authenticated_at: trunc(Timestamp::now(), Unit::Second),
             amr: vec!["pwd".into(), "otp".into()],
             assurance_level: sid_core::models::AuthLevel::Standard,
             elevation: Some(sid_core::models::session::Elevation {
                 level: sid_core::models::AuthLevel::Elevated,
-                until: (Utc::now() + Duration::minutes(5)).trunc_subsecs(0),
+                until: trunc(Timestamp::now() + Duration::from_mins(5), Unit::Second),
             }),
         },
     }
@@ -135,7 +135,7 @@ pub async fn test_device_auth_decided_once(backend: &dyn StorageBackend) {
     expired.id = sid_core::models::DeviceAuthCodeId::new();
     expired.device_code_hash = Uuid::now_v7().as_bytes().to_vec();
     expired.user_code = format!("X{}", &expired.user_code[1..]);
-    expired.expires_at = Utc::now() - Duration::seconds(1);
+    expired.expires_at = Timestamp::now() - Duration::from_secs(1);
     backend
         .create_device_auth_code(&expired, test_audit())
         .await

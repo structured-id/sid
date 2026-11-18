@@ -5,8 +5,8 @@
 //! BYTEA column with TOAST auto-externalizes large blobs (>2KB).
 //! Optimistic concurrency via version column.
 
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use sid_core::models::{BlobError, BlobMeta, BlobStorageStatus, EncryptedBlob, ProfileId};
 use sid_plugin::blob_store::BlobStore;
 use sqlx::PgPool;
@@ -27,7 +27,7 @@ struct BlobRow {
     ciphertext: Vec<u8>,
     nonce: Vec<u8>,
     version: i64,
-    updated_at: DateTime<Utc>,
+    updated_at: PgTime,
 }
 
 #[derive(sqlx::FromRow)]
@@ -35,7 +35,7 @@ struct BlobMetaRow {
     version: i64,
     size_bytes: i32,
     storage_status: String,
-    updated_at: DateTime<Utc>,
+    updated_at: PgTime,
 }
 
 fn parse_storage_status(s: &str) -> BlobStorageStatus {
@@ -69,7 +69,7 @@ impl BlobStore for PostgresBlobStore {
                 ciphertext: r.ciphertext,
                 nonce,
                 version: r.version as u64,
-                updated_at: r.updated_at,
+                updated_at: r.updated_at.jiff(),
             }
         }))
     }
@@ -81,7 +81,7 @@ impl BlobStore for PostgresBlobStore {
         expected_version: u64,
     ) -> Result<u64, BlobError> {
         let new_version = expected_version as i64 + 1;
-        let now = Utc::now();
+        let now = jiff::Timestamp::now().pg();
 
         if expected_version == 0 {
             // Initial upload — INSERT with conflict handling.
@@ -189,7 +189,7 @@ impl BlobStore for PostgresBlobStore {
         Ok(row.map(|r| BlobMeta {
             version: r.version as u64,
             size_bytes: r.size_bytes as u64,
-            updated_at: r.updated_at,
+            updated_at: r.updated_at.jiff(),
             storage_status: parse_storage_status(&r.storage_status),
         }))
     }

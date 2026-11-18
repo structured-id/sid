@@ -177,7 +177,7 @@ impl Account {
                     site_favicon,
                     status: consent_status(r.status.is_active()),
                     connected_at: Some(prost_types::Timestamp {
-                        seconds: r.consented_at.timestamp(),
+                        seconds: r.consented_at.as_second(),
                         nanos: 0,
                     }),
                     claims_mandatory: count(DomainClaimType::Data),
@@ -250,7 +250,7 @@ impl Account {
             site_favicon,
             status: consent_status(record.status.is_active()),
             connected_at: Some(prost_types::Timestamp {
-                seconds: record.consented_at.timestamp(),
+                seconds: record.consented_at.as_second(),
                 nanos: 0,
             }),
             claims_mandatory: of_type(v1a::ClaimType::Mandatory),
@@ -424,7 +424,7 @@ impl Account {
         let command = KeyedCommand::by_profile::<keyed::AddPhone>(profile_id, operation, &req);
         command
             .execute(&*self.storage, || async {
-                let now = chrono::Utc::now();
+                let now = jiff::Timestamp::now();
                 let phone = ProfilePhone {
                     id: ProfilePhoneId::new(),
                     profile_id,
@@ -510,7 +510,7 @@ impl Account {
                         profile_id,
                         phone_id,
                         &settings,
-                        chrono::Utc::now(),
+                        jiff::Timestamp::now(),
                         ctx,
                     )
                     .await?
@@ -544,7 +544,7 @@ impl Account {
                     .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .set_primary_profile_phone(profile_id, phone_id, chrono::Utc::now(), ctx)
+                    .set_primary_profile_phone(profile_id, phone_id, jiff::Timestamp::now(), ctx)
                     .await?
                 {
                     return Err(AccountError::PhoneNotFound(phone_id).into());
@@ -595,7 +595,7 @@ impl Account {
         let command = KeyedCommand::by_profile::<keyed::AddEmail>(profile_id, operation, &req);
         command
             .execute(&*self.storage, || async {
-                let now = chrono::Utc::now();
+                let now = jiff::Timestamp::now();
                 let email = ProfileEmail {
                     id: ProfileEmailId::new(),
                     profile_id,
@@ -673,7 +673,7 @@ impl Account {
                         profile_id,
                         email_id,
                         &settings,
-                        chrono::Utc::now(),
+                        jiff::Timestamp::now(),
                         ctx,
                     )
                     .await?
@@ -705,7 +705,7 @@ impl Account {
                     .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .set_primary_profile_email(profile_id, email_id, chrono::Utc::now(), ctx)
+                    .set_primary_profile_email(profile_id, email_id, jiff::Timestamp::now(), ctx)
                     .await?
                 {
                     return Err(AccountError::EmailNotFound(email_id).into());

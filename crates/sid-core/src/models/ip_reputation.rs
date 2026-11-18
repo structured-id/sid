@@ -2,7 +2,7 @@
 //! The reputation an installation learned for a client address from its
 //! sign-in outcomes.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// The sign-in outcomes counted for one address. Its score,
@@ -13,8 +13,8 @@ pub struct IpReputation {
     pub ip: String,
     pub failed_count: i64,
     pub success_count: i64,
-    pub first_seen_at: DateTime<Utc>,
-    pub last_failed_at: Option<DateTime<Utc>>,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
+    pub first_seen_at: Timestamp,
+    pub last_failed_at: Option<Timestamp>,
+    pub last_success_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
 }

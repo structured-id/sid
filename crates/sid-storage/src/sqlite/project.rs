@@ -454,7 +454,7 @@ impl SqliteBackend {
         if revoked {
             return Err(SidError::Revoked(format!("initial access token {iat}")));
         }
-        if expires_at <= chrono::Utc::now() {
+        if expires_at <= jiff::Timestamp::now() {
             return Err(SidError::Expired(format!("initial access token {iat}")));
         }
         if max_clients > 0 && registered >= max_clients {

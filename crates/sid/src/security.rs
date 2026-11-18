@@ -78,7 +78,7 @@ fn internal(operation: &'static str, cause: impl std::fmt::Display) -> SecurityE
 }
 
 /// An IP allowlist entry as stored: CIDR, description and creation time.
-type AllowlistEntry = (String, String, chrono::DateTime<chrono::Utc>);
+type AllowlistEntry = (String, String, jiff::Timestamp);
 
 /// The security policy of one installation.
 pub struct Security {
@@ -184,7 +184,7 @@ impl Security {
                 description: r.description,
                 risk_score: r.risk_score,
                 timestamp: Some(prost_types::Timestamp {
-                    seconds: r.timestamp.timestamp(),
+                    seconds: r.timestamp.as_second(),
                     nanos: 0,
                 }),
             })

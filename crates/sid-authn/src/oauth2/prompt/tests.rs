@@ -44,7 +44,7 @@ fn test_prompt_refuses_invalid_combinations() {
 /// `max_age=N` the last N seconds; nothing else sets a limit.
 #[test]
 fn test_authenticated_after() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let login = Prompt::parse(Some("login")).unwrap();
     let plain = Prompt::default();
     assert_eq!(login.authenticated_after(None, now), Some(now));
@@ -52,7 +52,7 @@ fn test_authenticated_after() {
     assert_eq!(plain.authenticated_after(Some(0), now), Some(now));
     assert_eq!(
         plain.authenticated_after(Some(600), now),
-        Some(now - Duration::seconds(600))
+        Some(now - SignedDuration::from_secs(600))
     );
     assert_eq!(plain.authenticated_after(None, now), None);
 }

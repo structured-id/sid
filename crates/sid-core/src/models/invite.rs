@@ -5,7 +5,7 @@
 //! random code, configurable max uses, optional expiry, and metadata for
 //! pre-filling profile fields on registration.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -109,7 +109,7 @@ pub struct InviteRedemption {
     pub profile_id: ProfileId,
     /// `None` for a registration that installed no credential.
     pub credential_id: Option<CredentialId>,
-    pub redeemed_at: DateTime<Utc>,
+    pub redeemed_at: Timestamp,
 }
 
 // ── Invite entity ───────────────────────────────────────────────
@@ -140,12 +140,12 @@ pub struct Invite {
     pub use_count: u32,
 
     /// Expiration timestamp. None = no expiry.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 
     /// Whether this invite is active (not revoked).
     pub active: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl Invite {
@@ -155,7 +155,7 @@ impl Invite {
             return InviteStatus::Revoked;
         }
         if let Some(expires_at) = self.expires_at
-            && Utc::now() > expires_at
+            && Timestamp::now() > expires_at
         {
             return InviteStatus::Expired;
         }

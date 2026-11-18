@@ -211,7 +211,7 @@ fn claims() -> SessionClaims {
     SessionClaims {
         sub: "subject-1".into(),
         iss: ISSUER.into(),
-        exp: chrono::Utc::now().timestamp() + 3600,
+        exp: jiff::Timestamp::now().as_second() + 3600,
         iat: 0,
         auth_time: 0,
         acr: "urn:sid:acr:basic".into(),
@@ -1082,7 +1082,7 @@ fn logout_token(
         "sub": "subject-1",
         "aud": client,
         "iat": iat,
-        "exp": chrono::Utc::now().timestamp() + 120,
+        "exp": jiff::Timestamp::now().as_second() + 120,
         "jti": random_token(),
         "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
     });
@@ -1129,7 +1129,7 @@ async fn a_back_channel_logout_ends_the_application_session() {
         .await
         .unwrap();
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now);
     let answer = f
         .adapter
@@ -1171,7 +1171,7 @@ async fn a_logout_without_its_session_ends_nothing() {
         "ops-web",
         "logout+jwt",
         None,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter
@@ -1189,7 +1189,7 @@ async fn a_logout_without_its_session_ends_nothing() {
 async fn an_invalid_logout_request_ends_nothing() {
     let (f, key) = issuing_fixture(memory());
     let (id, _) = signed_in(&f, false).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut requests = vec![
         logout_post(&logout_token(
             &key,
@@ -1239,7 +1239,7 @@ async fn a_logout_the_store_cannot_record_is_retried() {
         "ops-web",
         "logout+jwt",
         Some("issuer-session-1"),
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter

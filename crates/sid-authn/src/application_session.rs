@@ -748,7 +748,7 @@ impl<C: ApplicationClient> BrowserSessions<C> {
     /// refusal ends this session: the user signs in again, nothing is left
     /// holding a token the issuer no longer honours.
     async fn current_token(&self, id: &str, session: BffSession) -> Result<Bearer, SessionFailure> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         if !due(&session, now) {
             return Ok(Bearer::held(id, &session));
         }

@@ -32,7 +32,7 @@
 //! are projected from the JOIN onto the Principal struct for convenience.
 //!
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -174,13 +174,13 @@ pub struct Principal {
     /// When the last successful verification occurred (OTP confirmed, KYC passed, etc.).
     /// Used for: TTL computation, contestation (later verified_at wins), audit trail.
     /// None = never verified.
-    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<Timestamp>,
 
     /// When the current verification expires (verified_at + policy TTL).
     /// After this time, background job sets `verified = false`.
     /// None = never expires (or never verified).
     /// Default TTL: email = 0 (never), phone = 180 days.
-    pub verification_expires: Option<DateTime<Utc>>,
+    pub verification_expires: Option<Timestamp>,
 
     /// The profile this principal routes login to. `None` once released;
     /// a claim alone never sets it.
@@ -211,8 +211,8 @@ pub struct Principal {
     /// Populated from PrincipalBinding when loaded by profile.
     pub source_phone_id: Option<ProfilePhoneId>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// The identifier entity alone: the `principals` row without any binding context.
@@ -226,21 +226,21 @@ pub struct PrincipalEntity {
     pub principal_type: PrincipalType,
     pub value: String,
     pub verified: bool,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub verification_expires: Option<DateTime<Utc>>,
+    pub verified_at: Option<Timestamp>,
+    pub verification_expires: Option<Timestamp>,
     pub assigned_profile_id: Option<ProfileId>,
     pub assignment_revision: i64,
     /// See [`Principal::email_policy_revision`].
     pub email_policy_revision: Option<i64>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl PrincipalEntity {
     /// Check if verification has expired.
     pub fn is_verification_expired(&self) -> bool {
         match self.verification_expires {
-            Some(expires) => Utc::now() > expires,
+            Some(expires) => Timestamp::now() > expires,
             None => false, // no expiry set = never expires
         }
     }
@@ -313,7 +313,7 @@ pub struct PrincipalBinding {
     /// FK to profile_phones entry this binding was created from.
     pub source_phone_id: Option<ProfilePhoneId>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl PrincipalBinding {
@@ -327,7 +327,7 @@ impl PrincipalBinding {
             source_field: None,
             source_email_id: None,
             source_phone_id: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
@@ -361,7 +361,7 @@ pub struct EmailKeyDisposition {
     pub to_revision: i64,
     pub outcome: EmailKeyOutcome,
     pub reason: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: Timestamp,
 }
 
 /// A principal as stored, for a move between stores: the entity with its
@@ -396,7 +396,7 @@ impl StoredPrincipal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailPolicyActivation {
     pub revision: i64,
-    pub activated_at: DateTime<Utc>,
+    pub activated_at: Timestamp,
 }
 
 /// A released principal kept from reuse until `until`, known only by its
@@ -405,8 +405,8 @@ pub struct EmailPolicyActivation {
 pub struct QuarantinedPrincipal {
     pub principal_hash: String,
     pub principal_type: String,
-    pub until: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub until: Timestamp,
+    pub created_at: Timestamp,
 }
 
 /// Whether a Profile may route login through a Principal.
@@ -466,7 +466,7 @@ impl Principal {
         principal_type: PrincipalType,
         value: impl Into<String>,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: PrincipalId::new(),
             profile_id,
@@ -527,11 +527,11 @@ impl Principal {
     /// this proof only when it creates the entity; an existing entity keeps
     /// its assignment and proof.
     pub fn verify(&mut self, ttl_days: u32) {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.verified = true;
         self.verified_at = Some(now);
         self.verification_expires = if ttl_days > 0 {
-            Some(now + chrono::Duration::days(i64::from(ttl_days)))
+            Some(now + jiff::SignedDuration::from_hours(i64::from(ttl_days) * 24))
         } else {
             None
         };
@@ -553,13 +553,13 @@ impl Principal {
     /// Clear the proof after its lifetime; the assignment stays.
     pub fn expire_verification(&mut self) {
         self.verified = false;
-        self.updated_at = Utc::now();
+        self.updated_at = Timestamp::now();
     }
 
     /// Check if verification has expired.
     pub fn is_verification_expired(&self) -> bool {
         match self.verification_expires {
-            Some(expires) => Utc::now() > expires,
+            Some(expires) => Timestamp::now() > expires,
             None => false, // no expiry set = never expires
         }
     }

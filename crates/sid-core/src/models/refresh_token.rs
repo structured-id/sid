@@ -9,7 +9,7 @@
 //! triggers when two different tokens from the same family are used for rotation.
 //! Grace window (default 30s) allows concurrent retries after network failure.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
@@ -76,8 +76,8 @@ pub struct RefreshToken<O = ProfileId> {
     /// tokens for it and no other.
     pub resource: ResourceId,
 
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
 
     /// Whether this token has been revoked.
     pub revoked: bool,
@@ -91,7 +91,7 @@ pub struct RefreshToken<O = ProfileId> {
 
     /// Grace window expiration: after rotation, old token remains valid until
     /// this timestamp for concurrent retry scenarios. `None` = no grace (active token).
-    pub grace_expires_at: Option<DateTime<Utc>>,
+    pub grace_expires_at: Option<Timestamp>,
 
     /// JWK thumbprint of the DPoP key this token is bound to: using it needs
     /// a proof for that key (RFC 9449 §5). `None` = not sender-constrained.
@@ -169,13 +169,13 @@ impl<O> ValidatedRefreshToken<O> {
 impl<O> RefreshToken<O> {
     /// Check if token is expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Timestamp::now() > self.expires_at
     }
 
     /// Check if token is within its grace window (revoked but grace not yet expired).
     pub fn is_within_grace_window(&self) -> bool {
         match self.grace_expires_at {
-            Some(grace) => Utc::now() < grace,
+            Some(grace) => Timestamp::now() < grace,
             None => false,
         }
     }

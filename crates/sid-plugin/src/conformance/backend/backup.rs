@@ -68,7 +68,7 @@ pub async fn test_restore_returns_the_backed_up_state<B, L, Bk, BkF, P, Rs, RsF>
         .unwrap();
     let project = Project::new(format!("backup_{tag}"), None);
     let period = live
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;

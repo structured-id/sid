@@ -67,22 +67,23 @@ pub struct SetRequest {
     pub managed: BTreeSet<RoleId>,
     /// Each managed role the holder has afterwards, with its end (`None`:
     /// no end).
-    pub assignments: Vec<(RoleId, Option<chrono::DateTime<chrono::Utc>>)>,
+    pub assignments: Vec<(RoleId, Option<jiff::Timestamp>)>,
     pub expected_revision: u64,
 }
 
 /// `at` to the whole millisecond: every store keeps an end at least that
 /// precisely, so a stored end reads back as granted.
-fn whole_millisecond(at: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
-    use chrono::SubsecRound;
-    at.trunc_subsecs(3)
+fn whole_millisecond(at: jiff::Timestamp) -> jiff::Timestamp {
+    at.round(
+        jiff::TimestampRound::new()
+            .smallest(jiff::Unit::Millisecond)
+            .mode(jiff::RoundMode::Trunc),
+    )
+    .expect("truncating an instant stays representable")
 }
 
 /// Whether a requested end is the held one.
-fn same_end(
-    requested: Option<chrono::DateTime<chrono::Utc>>,
-    held: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
+fn same_end(requested: Option<jiff::Timestamp>, held: Option<jiff::Timestamp>) -> bool {
     requested.map(whole_millisecond) == held.map(whole_millisecond)
 }
 
@@ -333,7 +334,7 @@ impl RoleAdministration {
         if wanted
             .values()
             .flatten()
-            .any(|until| *until <= chrono::Utc::now())
+            .any(|until| *until <= jiff::Timestamp::now())
         {
             return Err(Error::Validation("an end is not in the future".into()));
         }
@@ -774,7 +775,7 @@ impl RoleAdministration {
         }
         let validity = proposed
             .expires_at
-            .map(|at| (at - chrono::Utc::now()).num_seconds());
+            .map(|at| at.duration_since(jiff::Timestamp::now()).as_secs());
         for candidate in self.envelopes_of(holder, &proposed.scope).await? {
             // Never outlast the authority it was granted under.
             if candidate

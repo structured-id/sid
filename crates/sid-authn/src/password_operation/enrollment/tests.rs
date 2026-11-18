@@ -85,7 +85,7 @@ async fn an_abandoned_registration_loses_its_key() {
         .unwrap();
     assert_eq!(owed.state, WorkState::Pending);
     assert!(
-        owed.not_before > chrono::Utc::now(),
+        owed.not_before > jiff::Timestamp::now(),
         "due at the registration's expiry, not before"
     );
     assert_eq!(
@@ -189,7 +189,7 @@ async fn an_abort_before_its_preparation_fences_it() {
     let admission = EnrollmentAdmission {
         operation: id.into_uuid(),
         owner_domain: domain,
-        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5),
     };
     storage.enqueue_work(&admission.work()).await.unwrap();
     let handler = EnrollmentHandler::new(
@@ -312,8 +312,8 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
         max_attempts: successor.max_attempts,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     };
     assert!(matches!(handler.handle(&next).await, WorkOutcome::Retry(_)));
     assert!(
@@ -380,13 +380,13 @@ async fn ended_enrollment_records_are_compacted() {
     }
 
     assert_eq!(
-        compact_enrollments(storage.as_ref(), Some(&evaluation), chrono::Utc::now())
+        compact_enrollments(storage.as_ref(), Some(&evaluation), jiff::Timestamp::now())
             .await
             .unwrap(),
         0,
         "young records stay"
     );
-    let later = chrono::Utc::now() + chrono::Duration::days(2);
+    let later = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(48);
     compact_enrollments(storage.as_ref(), Some(&evaluation), later)
         .await
         .unwrap();
@@ -442,7 +442,7 @@ async fn a_separate_evaluator_compacts_only_ended_fences() {
         .unwrap();
 
     assert_eq!(
-        compact_evaluator_fences(&evaluation, chrono::Utc::now())
+        compact_evaluator_fences(&evaluation, jiff::Timestamp::now())
             .await
             .unwrap(),
         0,
@@ -455,7 +455,7 @@ async fn a_separate_evaluator_compacts_only_ended_fences() {
             .await
             .unwrap()
     );
-    let later = chrono::Utc::now() + chrono::Duration::days(2);
+    let later = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(48);
     assert_eq!(
         compact_evaluator_fences(&evaluation, later).await.unwrap(),
         1
@@ -483,7 +483,7 @@ async fn first_enrollments_record_their_cleanup() {
     let cleanup = EnrollmentAdmission {
         operation: uuid::Uuid::now_v7(),
         owner_domain: [0; 32],
-        expires_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now(),
     }
     .work()
     .kind;

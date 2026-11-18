@@ -8,8 +8,8 @@
 //! advance or write it, and a write fenced by a connector holds the
 //! connector and the credential it acted with.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::machine_user::{
     CredentialStatus, ImpersonationGrant, MachineOwner, MachineRestrictions, MachineUser,
     MachineUserCredential, MachineUserStatus,
@@ -315,7 +315,7 @@ pub(super) fn check_connector_fence(
             .with("connector", bin(connector_id.as_bytes())),
     )?;
     let usable = match rows.first() {
-        Some(row) => connector_credential(row)?.is_usable_at(Utc::now()),
+        Some(row) => connector_credential(row)?.is_usable_at(Timestamp::now()),
         None => false,
     };
     if !usable || !hold_first(tx, &rows)? {
@@ -435,7 +435,7 @@ impl CoordinodeBackend {
                             .map_or(Value::Null, |v| Value::Int(i64::from(v))),
                     )
                     .with("expires_at", opt_time(m.expires_at))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             if rows.is_empty() {
                 return Ok(Decision::Abandon(false));
@@ -461,7 +461,7 @@ impl CoordinodeBackend {
                     .with("id", bin(machine.as_bytes()))
                     .with("from", Value::String(from.as_str().into()))
                     .with("to", Value::String(to.as_str().into()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             if rows.is_empty() {
                 return Ok(Decision::Abandon(false));
@@ -557,7 +557,7 @@ impl CoordinodeBackend {
         machine: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let (old_kid, new) = (old_kid.to_owned(), new.clone());
@@ -657,7 +657,8 @@ impl CoordinodeBackend {
         &self,
         within_days: u32,
     ) -> SidResult<Vec<MachineUserCredential>> {
-        let cutoff = Utc::now() + chrono::Duration::days(i64::from(within_days));
+        let cutoff =
+            Timestamp::now() + jiff::SignedDuration::from_hours(i64::from(within_days) * 24);
         self.read(move |tx| {
             machine_credentials_where(
                 tx,
@@ -906,7 +907,7 @@ impl CoordinodeBackend {
                     .with("id", bin(connector_id.as_bytes()))
                     .with("revision", Value::Int(revision))
                     .with("name", Value::String(display_name.clone()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             if rows.is_empty() {
                 return Ok(Decision::Abandon(false));
@@ -940,7 +941,7 @@ impl CoordinodeBackend {
                     .with("id", bin(connector_id.as_bytes()))
                     .with("from", Value::String(from.as_str().into()))
                     .with("to", Value::String(to.as_str().into()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             if rows.is_empty() {
                 return Ok(Decision::Abandon(false));
@@ -1010,7 +1011,7 @@ impl CoordinodeBackend {
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let new = new.clone();

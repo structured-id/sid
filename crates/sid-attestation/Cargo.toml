@@ -59,6 +59,6 @@ sid-test-issuer = { path = "../sid-test-issuer" }
 tokio-stream = "0.1"
 # The device-key proofs a client signs for the enrollment ceremony.
 base64 = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }

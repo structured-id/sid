@@ -6,7 +6,7 @@
 //!
 //! Classification: P1 (Critical) → P4 (Low).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use uuid::Uuid;
@@ -177,13 +177,13 @@ pub struct PostMortemReport {
     pub timeline: Vec<TimelineEntry>,
     pub remediation_steps: Vec<String>,
     pub created_by: ProfileId,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Entry in an incident timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEntry {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub description: String,
     pub actor: Option<String>,
 }
@@ -233,7 +233,7 @@ pub struct IncidentData {
     pub id: IncidentId,
     pub severity: Severity,
     pub category: IncidentCategory,
-    pub detected_at: DateTime<Utc>,
+    pub detected_at: Timestamp,
     pub detection_source: DetectionSource,
     pub affected_entities: Vec<AffectedEntity>,
     pub correlation_id: String,
@@ -241,7 +241,7 @@ pub struct IncidentData {
     pub assignee: Option<ProfileId>,
     pub root_cause: Option<String>,
     pub remediation: Option<String>,
-    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<Timestamp>,
     pub post_mortem: Option<PostMortemReport>,
 }
 
@@ -267,7 +267,7 @@ impl Incident<Detected> {
                 id: IncidentId::new(),
                 severity,
                 category,
-                detected_at: Utc::now(),
+                detected_at: Timestamp::now(),
                 detection_source,
                 affected_entities,
                 correlation_id,
@@ -320,7 +320,7 @@ impl Incident<Triaging> {
     /// Mark as false positive → resolve immediately.
     pub fn false_positive(mut self, reason: &str) -> Incident<Resolved> {
         self.data.root_cause = Some(format!("False positive: {reason}"));
-        self.data.resolved_at = Some(Utc::now());
+        self.data.resolved_at = Some(Timestamp::now());
         Incident {
             data: self.data,
             _state: PhantomData,
@@ -343,7 +343,7 @@ impl Incident<Investigating> {
     pub fn resolve(mut self, root_cause: &str, remediation: &str) -> Incident<Resolved> {
         self.data.root_cause = Some(root_cause.to_string());
         self.data.remediation = Some(remediation.to_string());
-        self.data.resolved_at = Some(Utc::now());
+        self.data.resolved_at = Some(Timestamp::now());
         Incident {
             data: self.data,
             _state: PhantomData,
@@ -480,13 +480,13 @@ mod tests {
             summary: "Account takeover via stolen cookie".to_string(),
             root_cause: "Weak session binding".to_string(),
             timeline: vec![TimelineEntry {
-                timestamp: Utc::now(),
+                timestamp: Timestamp::now(),
                 description: "Anomaly detected".to_string(),
                 actor: Some("system".to_string()),
             }],
             remediation_steps: vec!["Enable device binding".to_string()],
             created_by: ProfileId::generate(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let post_mortem = resolved.post_mortem(report);

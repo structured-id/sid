@@ -5,7 +5,7 @@
 //! SCIM provisioning, federation, or identity brokering. Stored as
 //! metadata on the profile for admin analytics.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::profile::ProfileId;
@@ -112,7 +112,7 @@ pub struct RegistrationSource {
     /// Client application through which registration occurred.
     pub client_id: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl RegistrationSource {
@@ -124,7 +124,7 @@ impl RegistrationSource {
             referrer_id: None,
             utm: UtmParams::default(),
             client_id,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
@@ -136,7 +136,7 @@ impl RegistrationSource {
             referrer_id: None,
             utm: UtmParams::default(),
             client_id,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
@@ -148,7 +148,7 @@ impl RegistrationSource {
             referrer_id: None,
             utm: UtmParams::default(),
             client_id: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 }

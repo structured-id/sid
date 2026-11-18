@@ -5,7 +5,7 @@
 //! comparison follows the attribute's case rule, a missing value matches no
 //! comparison, and retired profiles are never listed.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::profile_email::EmailLabel;
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter as F, DirectoryOperator as Op, DirectoryQuery,
@@ -40,7 +40,7 @@ async fn add_user(
         PrincipalType::Username,
         format!("{user_name}#{domain}"),
     ));
-    let now = Utc::now();
+    let now = Timestamp::now();
     for (i, email) in emails.iter().enumerate() {
         write.add_emails.push(ProfileEmail {
             id: ProfileEmailId::new(),

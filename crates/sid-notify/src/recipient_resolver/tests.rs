@@ -111,7 +111,7 @@ async fn test_resolver_cache_hit() {
                 email: Some("cached@sid.example.com".into()),
                 phone: None,
                 locale: "de".into(),
-                cached_at: Utc::now(),
+                cached_at: Timestamp::now(),
             },
         )
         .await;
@@ -140,7 +140,7 @@ async fn test_resolver_cache_expired() {
                 email: Some("old@sid.example.com".into()),
                 phone: None,
                 locale: "en".into(),
-                cached_at: Utc::now() - chrono::Duration::seconds(10),
+                cached_at: Timestamp::now() - jiff::SignedDuration::from_secs(10),
             },
         )
         .await;
@@ -167,7 +167,7 @@ async fn test_resolver_invalidate() {
                 email: Some("cached@sid.example.com".into()),
                 phone: None,
                 locale: "en".into(),
-                cached_at: Utc::now(),
+                cached_at: Timestamp::now(),
             },
         )
         .await;

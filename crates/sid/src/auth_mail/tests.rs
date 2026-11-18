@@ -201,10 +201,12 @@ async fn ended_mail_records_are_dropped_after_retention() {
     store.enqueue_work(&other).await.unwrap();
 
     assert_eq!(
-        purge_ended_mail(store.as_ref(), Utc::now()).await.unwrap(),
+        purge_ended_mail(store.as_ref(), Timestamp::now())
+            .await
+            .unwrap(),
         0
     );
-    let later = Utc::now() + MAIL_RECORD_RETENTION + chrono::Duration::minutes(1);
+    let later = Timestamp::now() + MAIL_RECORD_RETENTION + SignedDuration::from_mins(1);
     assert_eq!(purge_ended_mail(store.as_ref(), later).await.unwrap(), 1);
 
     assert!(store.get_work(ended.id).await.unwrap().is_none());
@@ -229,8 +231,8 @@ async fn code_mail_refuses_malformed_work() {
         max_attempts: 8,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        due_at: Timestamp::now(),
     };
 
     assert!(matches!(
@@ -365,7 +367,7 @@ async fn expired_reset_is_not_delivered() {
     );
     assert!(
         resets
-            .pending_delivery(session, expires_at - chrono::Duration::seconds(1))
+            .pending_delivery(session, expires_at - SignedDuration::from_secs(1))
             .await
             .unwrap()
             .is_some()

@@ -96,7 +96,7 @@ pub(crate) fn session_claims() -> SessionClaims {
     SessionClaims {
         sub: "up_01HY000000000000000000".into(),
         iss: BFF_ISSUER.into(),
-        exp: chrono::Utc::now().timestamp() + 3600,
+        exp: jiff::Timestamp::now().as_second() + 3600,
         iat: 1_000_000_000,
         auth_time: 1_000_000_000,
         acr: "standard".into(),

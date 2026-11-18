@@ -96,7 +96,7 @@ fn values(settings: &sid_core::models::LoginSettings) -> SidResult<Params> {
             Value::Binary(settings.status_policy.tag().to_vec()),
         )
         .with("revision", Value::Int(revision))
-        .with("now", super::time(chrono::Utc::now())))
+        .with("now", super::time(jiff::Timestamp::now())))
 }
 
 /// Creates the settings node from [`values`].

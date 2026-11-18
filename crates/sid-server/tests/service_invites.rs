@@ -77,7 +77,7 @@ async fn invites() -> Invites {
                     client_id: ISSUER.into(),
                     resource_id: api.id,
                     scopes,
-                    created_at: chrono::Utc::now(),
+                    created_at: jiff::Timestamp::now(),
                 },
                 AuditEntry::system("test", "access").into(),
             )

@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{
     AttributeMappingEntry, GroupMappingEntry, PrincipalId, ProfileAssurance, ProfileId,
     ProfileType, ProfileVisibility,
@@ -24,8 +24,8 @@ fn test_profile() -> Profile {
         migration_started_at: None,
         migration_completed_at: None,
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -46,8 +46,8 @@ fn test_principals(profile_id: ProfileId) -> Vec<Principal> {
             source_field: None,
             source_email_id: None,
             source_phone_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         },
         Principal {
             id: PrincipalId::new(),
@@ -64,8 +64,8 @@ fn test_principals(profile_id: ProfileId) -> Vec<Principal> {
             source_field: Some("email".into()),
             source_email_id: None,
             source_phone_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         },
     ]
 }

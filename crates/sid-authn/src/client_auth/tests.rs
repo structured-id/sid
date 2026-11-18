@@ -140,7 +140,7 @@ mod verify {
     use crate::client_assertion::AssertionJtiLog;
     use crate::jwt::JwtService;
     use crate::oauth2::OAuth2Server;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use sid_core::models::*;
 
@@ -189,7 +189,7 @@ mod verify {
             subject_type: SubjectType::Public,
             sector_identifier_uri: None,
             contacts: vec![],
-            client_id_issued_at: Utc::now(),
+            client_id_issued_at: Timestamp::now(),
             client_secret_expires_at: None,
             registration_iat: None,
             registration_access_token_hash: None,
@@ -209,13 +209,13 @@ mod verify {
             unified_input: false,
             org_id: None,
             revision: 0,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
     /// An assertion of [`CLIENT`] for `audience`, signed with its key.
     fn assertion(audience: &str, jti: &str) -> ClientAuthentication {
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         let claims = serde_json::json!({
             "iss": CLIENT, "sub": CLIENT, "aud": audience,
             "exp": now + 120, "iat": now, "jti": jti,

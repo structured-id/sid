@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use secrecy::SecretString;
 use sid_core::models::{ProfileId, Session};
 
@@ -88,13 +88,20 @@ fn each_credential_names_its_header() {
 #[test]
 fn cookie_lifetime_is_taken_at_delivery() {
     let cookie = BrowserCookie::new("__Host-sid_account").unwrap();
-    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
+    let mut session = Session::new(
+        ProfileId::generate(),
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     let credential = BrowserCredential::bind(&mut session);
     // The session being stored.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     // Sampled before delivery: what remains then bounds what delivery takes,
     // and lies a whole second below a lifetime taken at bind time.
-    let remaining = (session.expires_at - Utc::now()).num_seconds();
+    let remaining = session
+        .expires_at
+        .duration_since(Timestamp::now())
+        .as_secs();
     let signed = credential.signed_in(&cookie, &session);
     assert!(
         signed.expires_in <= remaining,
@@ -108,7 +115,11 @@ fn cookie_lifetime_is_taken_at_delivery() {
 #[test]
 fn browser_sign_in_binds_the_cookie_to_the_session() {
     let cookie = BrowserCookie::new("__Host-sid_account").unwrap();
-    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
+    let mut session = Session::new(
+        ProfileId::generate(),
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     assert!(session.browser_secret_hash.is_none());
 
     let signed = BrowserCredential::bind(&mut session).signed_in(&cookie, &session);
@@ -139,7 +150,11 @@ fn browser_sign_in_binds_the_cookie_to_the_session() {
 /// sign-in a new one: a replaced session's token is not carried over.
 #[test]
 fn browser_sign_in_gives_the_session_a_csrf_token() {
-    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
+    let mut session = Session::new(
+        ProfileId::generate(),
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     assert!(session.browser_csrf.is_none());
     BrowserCredential::bind(&mut session);
     let first = session.browser_csrf.expect("bound session has a token");

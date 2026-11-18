@@ -2,7 +2,8 @@
 //! A profile's own phones and emails: created once, and one primary per
 //! profile moved in a single write.
 
-use chrono::{DateTime, Utc};
+use crate::pg_time::ToPg;
+use jiff::Timestamp;
 use sid_core::models::{ProfileEmail, ProfileId, ProfilePhone};
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -88,12 +89,12 @@ pub(super) async fn clear_primary(
     tx: &mut Tx<'_>,
     contacts: Contacts,
     profile_id: ProfileId,
-    at: DateTime<Utc>,
+    at: Timestamp,
 ) -> SidResult<()> {
     lock(tx, contacts, profile_id).await?;
     sqlx::query(contacts.clear())
         .bind(profile_id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("clear primary"))?;
@@ -107,7 +108,7 @@ pub(super) async fn make_primary(
     contacts: Contacts,
     profile_id: ProfileId,
     id: Uuid,
-    at: DateTime<Utc>,
+    at: Timestamp,
 ) -> SidResult<bool> {
     lock(tx, contacts, profile_id).await?;
     let exists: bool = sqlx::query_scalar(contacts.exists())
@@ -121,14 +122,14 @@ pub(super) async fn make_primary(
     }
     sqlx::query(contacts.clear())
         .bind(profile_id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("clear primary"))?;
     sqlx::query(contacts.set())
         .bind(id)
         .bind(profile_id)
-        .bind(at)
+        .bind(at.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("set primary"))?;
@@ -160,9 +161,9 @@ pub(super) async fn insert_phone(tx: &mut Tx<'_>, phone: &ProfilePhone) -> SidRe
     .bind(phone.can_receive_fax)
     .bind(phone.can_receive_voice)
     .bind(phone.verified)
-    .bind(phone.verified_at)
-    .bind(phone.created_at)
-    .bind(phone.updated_at)
+    .bind(phone.verified_at.pg())
+    .bind(phone.created_at.pg())
+    .bind(phone.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("profile phone", e))?;
@@ -183,9 +184,9 @@ pub(super) async fn insert_email(tx: &mut Tx<'_>, email: &ProfileEmail) -> SidRe
     .bind(&email.custom_label)
     .bind(email.is_primary)
     .bind(email.verified)
-    .bind(email.verified_at)
-    .bind(email.created_at)
-    .bind(email.updated_at)
+    .bind(email.verified_at.pg())
+    .bind(email.created_at.pg())
+    .bind(email.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("profile email", e))?;

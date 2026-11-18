@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! PAT, Quarantine, ClosureRequest, ExportJob, and MagicLink operations for SQLite backend.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -220,7 +220,7 @@ impl SqliteBackend {
         ip: Option<&str>,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let used = sqlx::query(
             "UPDATE personal_access_tokens
@@ -248,7 +248,7 @@ impl SqliteBackend {
         revoked_by: &str,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let revoked = sqlx::query(
             "UPDATE personal_access_tokens SET status = 'revoked', revoked_at = ?, revoked_by = ?
@@ -324,7 +324,8 @@ impl SqliteBackend {
         days: u32,
         audit: MutationContext,
     ) -> SidResult<u64> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_hours(i64::from(days) * 24);
         let cutoff_str = fmt_dt(&cutoff);
         let mut tx = self.begin_write().await?;
         let result = sqlx::query(
@@ -332,7 +333,7 @@ impl SqliteBackend {
              WHERE status = 'active'
              AND ((last_used_at IS NULL AND created_at < ?) OR (last_used_at IS NOT NULL AND last_used_at < ?))",
         )
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(&cutoff_str)
         .bind(&cutoff_str)
         .execute(&mut *tx)
@@ -347,7 +348,7 @@ impl SqliteBackend {
         &self,
         principal_hash: &str,
         principal_type: &str,
-        quarantine_until: DateTime<Utc>,
+        quarantine_until: Timestamp,
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
@@ -359,7 +360,7 @@ impl SqliteBackend {
         .bind(principal_hash)
         .bind(principal_type)
         .bind(fmt_dt(&quarantine_until))
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -370,7 +371,7 @@ impl SqliteBackend {
         &self,
         principal_hash: &str,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM principal_quarantine WHERE principal_hash = ? AND quarantine_until > ?",
         )
@@ -386,7 +387,7 @@ impl SqliteBackend {
         &self,
         audit: MutationContext,
     ) -> SidResult<u64> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let result = sqlx::query("DELETE FROM principal_quarantine WHERE quarantine_until <= ?")
             .bind(&now)
@@ -471,7 +472,7 @@ impl SqliteBackend {
     async fn transition_export_job(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         audit: MutationContext,
         sql: &'static str,
     ) -> SidResult<bool> {
@@ -494,7 +495,7 @@ impl SqliteBackend {
     pub(crate) async fn acknowledge_export_job_impl(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.transition_export_job(
@@ -510,7 +511,7 @@ impl SqliteBackend {
     pub(crate) async fn expire_export_job_impl(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.transition_export_job(
@@ -652,7 +653,7 @@ impl SqliteBackend {
              RETURNING *",
         )
         .bind(id)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -669,7 +670,7 @@ impl SqliteBackend {
         &self,
         audit: MutationContext,
     ) -> SidResult<u64> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let result = sqlx::query("DELETE FROM magic_link_sessions WHERE expires_at < ?")
             .bind(&now)
@@ -683,7 +684,7 @@ impl SqliteBackend {
         &self,
         email: &str,
     ) -> SidResult<u32> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM magic_link_sessions WHERE email = ? AND consumed = 0 AND expires_at > ?",
         )
