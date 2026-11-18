@@ -102,3 +102,54 @@ async fn a_key_without_an_id_is_refused() {
         Err(RpClientError::Invalid(_))
     ));
 }
+
+/// A call whose answer was lost or broken may have taken effect; an
+/// exhausted issuer did nothing; any other answer refused the call; a call
+/// that never left was not sent. Browser sessions keep a session through the
+/// first two and end it on a refused refresh, so the line between them
+/// decides whether a user is signed out.
+#[test]
+fn a_failed_call_says_what_it_did() {
+    use tonic::{Code, Status};
+    for code in [
+        Code::Unavailable,
+        Code::Cancelled,
+        Code::DeadlineExceeded,
+        Code::Unknown,
+        Code::Internal,
+        Code::Aborted,
+        Code::DataLoss,
+    ] {
+        assert!(
+            matches!(
+                GrantFailure::from(RpClientError::Rpc(Status::new(code, "lost"))),
+                GrantFailure::Uncertain(_)
+            ),
+            "{code:?}"
+        );
+    }
+    assert!(matches!(
+        GrantFailure::from(RpClientError::Rpc(Status::resource_exhausted("busy"))),
+        GrantFailure::Declined(_)
+    ));
+    for code in [
+        Code::InvalidArgument,
+        Code::Unauthenticated,
+        Code::PermissionDenied,
+        Code::NotFound,
+        Code::FailedPrecondition,
+        Code::Unimplemented,
+    ] {
+        assert!(
+            matches!(
+                GrantFailure::from(RpClientError::Rpc(Status::new(code, "refused"))),
+                GrantFailure::Refused(_)
+            ),
+            "{code:?}"
+        );
+    }
+    assert!(matches!(
+        GrantFailure::from(RpClientError::Invalid("no key id".into())),
+        GrantFailure::NotSent(_)
+    ));
+}

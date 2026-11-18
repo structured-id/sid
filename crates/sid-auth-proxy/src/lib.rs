@@ -14,8 +14,10 @@ pub mod translation;
 
 use std::sync::Arc;
 
-use sid_authn::bff_session::BffSessionStore;
+use sid_authn::application_session::BrowserSessions;
+#[cfg(test)]
 use sid_authn::issuer_directory::IssuerDirectory;
+use sid_infra::issuer_client::RpClient;
 
 #[cfg(test)]
 #[path = "../../../tests/support/crypto.rs"]
@@ -24,29 +26,17 @@ mod test_crypto;
 /// Shared state of the proxy's handlers.
 #[derive(Clone, Debug)]
 pub struct ProxyState {
-    /// The installation's public URL, the base of its issuers' URLs.
-    pub issuer_url: String,
-    /// The installation's OIDC issuers, whose tokens the BFF verifies.
-    pub issuers: Arc<IssuerDirectory>,
-    /// Lazy gRPC channel to the SID server (token endpoint, health).
+    /// Lazy gRPC channel to the SID server (health).
     pub grpc_channel: tonic::transport::Channel,
-    /// Revoked tokens and sessions, as every SID process records them.
-    pub revocation: Arc<sid_authn::revocation_cache::RevocationCache>,
-    /// Whether the BFF endpoints answer. Read through [`ProxyState::bff`],
-    /// which also requires the client key.
-    pub bff_enabled: bool,
-    /// The BFF as the account integration's client; absent without a
-    /// configured client key.
-    pub account: Option<Arc<sid_infra::issuer_client::RpClient>>,
+    /// The BFF's browser sessions as the account integration's client; absent
+    /// when the BFF is off or has no client key, and its endpoints then answer
+    /// 404.
+    pub bff: Option<Arc<BrowserSessions<RpClient>>>,
     /// Where `/api/*` goes: the account API's gRPC-Web endpoint.
     pub api_upstream: Option<url::Url>,
     /// HTTP client for the account API. Follows no redirect: the API's
     /// answer goes back to the browser as it is.
     pub http: reqwest::Client,
-    /// BFF session store, in the BFF's own database shared by its replicas.
-    pub bff_sessions: Arc<BffSessionStore>,
-    /// BFF session cookie name (e.g., "__Host-sid-bff").
-    pub bff_cookie_name: String,
     /// Dev mode: skip the Secure flag on cookies (localhost without HTTPS).
     pub bff_dev_mode: bool,
 }
@@ -93,28 +83,14 @@ pub(crate) fn test_issuers() -> Arc<IssuerDirectory> {
     ))
 }
 
-/// A proxy state for tests: BFF switched on but without a client key, so its
-/// endpoints are off unless a test gives it one.
+/// A proxy state for tests: the BFF off unless a test gives it its sessions.
 #[cfg(test)]
 pub(crate) fn test_state() -> ProxyState {
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     ProxyState {
-        issuer_url: "https://sid.example.com".into(),
-        issuers: test_issuers(),
         grpc_channel: test_channel(),
-        revocation: sid_authn::revocation_cache::RevocationCache::receiver_view(cache.clone()),
-        bff_enabled: true,
-        account: None,
+        bff: None,
         api_upstream: None,
         http: test_crypto::with_tls(api_client),
-        bff_sessions: Arc::new(BffSessionStore::new(
-            Arc::new(sid_plugin::InProcessCeremonyState::new()),
-            std::time::Duration::from_secs(86400),
-            std::time::Duration::from_secs(3600),
-            std::time::Duration::from_secs(300),
-        )),
-        bff_cookie_name: "__Host-sid-bff".into(),
         bff_dev_mode: false,
     }
 }

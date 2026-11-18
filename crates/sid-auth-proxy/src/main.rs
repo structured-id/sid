@@ -21,6 +21,7 @@ use secrecy::SecretString;
 use sid_auth_proxy::config::ProxyConfig;
 use sid_auth_proxy::shield::Shield;
 use sid_auth_proxy::{ProxyState, api_client, bff, health, metrics};
+use sid_authn::application_session::BrowserSessions;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_key::ClientKey;
 use sid_infra::issuer_client::RpClient;
@@ -139,22 +140,26 @@ async fn main() -> anyhow::Result<()> {
             (None, None) => Arc::new(sid_plugin::InProcessCeremonyState::new()),
         };
 
+    // The BFF answers only when it is switched on and holds its client key.
+    let bff = account.filter(|_| config.bff_enabled()).map(|client| {
+        Arc::new(BrowserSessions::new(
+            client,
+            issuers,
+            Arc::new(BffSessionStore::new(
+                session_store,
+                std::time::Duration::from_secs(config.bff_max_age()),
+                std::time::Duration::from_secs(config.bff_idle_timeout()),
+                std::time::Duration::from_secs(config.bff_pending_ttl()),
+            )),
+            revocation,
+            config.bff_cookie_name().to_string(),
+        ))
+    });
     let state = ProxyState {
-        issuer_url: config.issuer_url().to_string(),
-        issuers,
         grpc_channel,
-        revocation,
-        bff_enabled: config.bff_enabled(),
-        account,
+        bff,
         api_upstream,
         http: api_client()?,
-        bff_sessions: Arc::new(BffSessionStore::new(
-            session_store,
-            std::time::Duration::from_secs(config.bff_max_age()),
-            std::time::Duration::from_secs(config.bff_idle_timeout()),
-            std::time::Duration::from_secs(config.bff_pending_ttl()),
-        )),
-        bff_cookie_name: config.bff_cookie_name().to_string(),
         bff_dev_mode: config.bff_dev_mode(),
     };
 
