@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.31](https://github.com/structured-id/sid/compare/v0.2.30...v0.2.31) - 2026-11-18
+
+### Added
+
+- *(issuer)* root-address the installation base issuer ([#694](https://github.com/structured-id/sid/pull/694))
+
+### Other
+
+- *(deps)* replace chrono with jiff ([#687](https://github.com/structured-id/sid/pull/687))
+
 ## [0.2.30](https://github.com/structured-id/sid/compare/v0.2.29...v0.2.30) - 2026-11-17
 
 ### Added
