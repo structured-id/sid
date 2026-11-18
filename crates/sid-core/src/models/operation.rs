@@ -4,7 +4,7 @@
 //! same transaction as its effect, so a retry after a lost response finds
 //! the result instead of executing the command again.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -142,7 +142,7 @@ impl std::fmt::Display for OperationPeriod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuedOperationPeriod {
     pub period: OperationPeriod,
-    pub accepted_until: DateTime<Utc>,
+    pub accepted_until: Timestamp,
 }
 
 /// The policy a store issues and retires periods under, the same for every
@@ -152,8 +152,8 @@ pub struct IssuedOperationPeriod {
 /// `result_bytes`; a commit beyond either is refused before it takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationPeriodPolicy {
-    pub acceptance: chrono::Duration,
-    pub retention: chrono::Duration,
+    pub acceptance: SignedDuration,
+    pub retention: SignedDuration,
     pub capacity: u64,
     pub result_bytes: u64,
 }
@@ -162,7 +162,7 @@ pub struct OperationPeriodPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPeriodRecord {
     pub issued: IssuedOperationPeriod,
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: Timestamp,
 }
 
 /// A store's periods, carried between stores with its completions: every
@@ -226,7 +226,7 @@ pub struct OperationCompletion {
     /// When the completion stops being kept: past it the key resolves to
     /// nothing and the record is dropped. `None` keeps it until its owner
     /// purges it.
-    pub retain_until: Option<DateTime<Utc>>,
+    pub retain_until: Option<Timestamp>,
 }
 
 impl OperationCompletion {
@@ -259,7 +259,7 @@ impl OperationCompletion {
 
     /// The same completion, kept no longer than `until`.
     #[must_use]
-    pub fn retained_until(mut self, until: DateTime<Utc>) -> Self {
+    pub fn retained_until(mut self, until: Timestamp) -> Self {
         self.retain_until = Some(until);
         self
     }
@@ -269,7 +269,7 @@ impl OperationCompletion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub completion: OperationCompletion,
-    pub completed_at: DateTime<Utc>,
+    pub completed_at: Timestamp,
 }
 
 impl OperationRecord {

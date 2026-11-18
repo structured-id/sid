@@ -7,7 +7,7 @@
 //! decides what a completion may commit and what may be delivered again.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
     ActorFence, BrowserSecretHash, Credential, CredentialFence, OperationKey, RevocationReason,
@@ -222,7 +222,7 @@ pub struct RetainedCompletion {
     /// The sealing context: this completion at this issuer.
     pub context: String,
     /// The end of the completion's redelivery.
-    pub deadline: chrono::DateTime<Utc>,
+    pub deadline: Timestamp,
     /// What a retry must present again.
     pub inputs: Vec<u8>,
 }
@@ -320,7 +320,7 @@ pub async fn second_factor_requirements<H: PendingSignInHost>(
     pending: &Session<H::Owner>,
     method: &str,
 ) -> Result<LoginRequirements, H::Error> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let requirements = host.requirements(pending.profile_id).await?;
     if !requirements.met_with(pending, AuthLevel::Standard, method, now) {
         let mut completed = pending.clone();
@@ -530,7 +530,7 @@ pub async fn redeliver_second_factor<H: PendingSignInHost>(
     )
     .await
     .map_err(PendingError::from)?;
-    if delivery.deadline <= Utc::now() {
+    if delivery.deadline <= Timestamp::now() {
         return Ok(None);
     }
     let ended = || -> H::Error { PendingError::SessionEnded.into() };
@@ -545,7 +545,7 @@ pub async fn redeliver_second_factor<H: PendingSignInHost>(
         return Err(ended());
     }
     let requirements = host.requirements(session.profile_id).await?;
-    if let LoginDecision::StepUp(unmet) = requirements.decide(&session, Utc::now()) {
+    if let LoginDecision::StepUp(unmet) = requirements.decide(&session, Timestamp::now()) {
         return Err(PendingError::StepUp(unmet).into());
     }
     if delivery.bearer_token().is_some() && !host.bearer_deliverable(&delivery, &session).await? {

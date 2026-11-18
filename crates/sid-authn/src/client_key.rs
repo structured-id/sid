@@ -148,7 +148,7 @@ impl ClientKey {
     /// fresh random `jti`: an RFC 7523 §3 client assertion when `issuer` is
     /// the client id, a registration proof when it is the key's own id.
     pub fn sign(&self, issuer: &str, audience: &str) -> Result<String, ClientKeyError> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let mut jti = [0u8; 16];
         rand::rngs::SysRng
             .try_fill_bytes(&mut jti)

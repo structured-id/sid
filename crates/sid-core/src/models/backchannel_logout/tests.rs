@@ -2,13 +2,13 @@
 
 use super::*;
 use crate::models::{ProfileId, Session};
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 
 fn session(client_id: Option<&str>) -> Session {
     let mut session = Session::new(
         ProfileId::generate(),
         None,
-        Utc::now() + chrono::Duration::hours(1),
+        Timestamp::now() + SignedDuration::from_hours(1),
     );
     session.client_id = client_id.map(str::to_string);
     session

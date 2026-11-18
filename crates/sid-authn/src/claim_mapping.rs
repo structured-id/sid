@@ -121,7 +121,7 @@ fn resolve_source(
             "roles" => Some(serde_json::json!(&profile.roles)),
             "status" => Some(serde_json::json!(profile.status.as_str())),
             // Temporal fields
-            "updated_at" => Some(serde_json::json!(profile.updated_at.timestamp())),
+            "updated_at" => Some(serde_json::json!(profile.updated_at.as_second())),
             _ => None, // Unknown field → skip
         };
     }
@@ -221,8 +221,8 @@ mod tests {
             is_primary: true,
             verified: true,
             verified_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -660,8 +660,8 @@ mod tests {
             can_receive_voice: true,
             verified: true,
             verified_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         };
         let claims = resolve_claims(
             &[
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn test_resolve_profile_updated_at() {
         let profile = test_profile();
-        let expected = profile.updated_at.timestamp();
+        let expected = profile.updated_at.as_second();
         let claims = resolve_test(
             &[ClaimMapping {
                 source: "profile.updated_at".to_string(),

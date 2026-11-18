@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use prost::Message;
 use secrecy::ExposeSecret;
 use sid_authn::bearer_secret;
@@ -323,7 +323,7 @@ impl Provisioning {
         let mut moved = current.clone();
         moved.state = target;
         moved.revision += 1;
-        moved.updated_at = Utc::now();
+        moved.updated_at = Timestamp::now();
         let response = connector_to_proto(&moved);
         let ctx: MutationContext = AuditEntry::admin(
             caller.profile_id.to_string(),
@@ -520,7 +520,7 @@ impl Provisioning {
                     id,
                     old,
                     &credential,
-                    Utc::now() + rotation_grace(),
+                    Timestamp::now() + rotation_grace(),
                     ctx.with_operation(command.completion(recorded.encode_to_vec())),
                 )
                 .await
@@ -684,12 +684,10 @@ fn credential_to_proto(c: &ProvisioningCredential) -> pb::ConnectorCredential {
 /// An expiry that is a valid time in the future, never replaced by another.
 fn future_expiry(
     ts: Option<prost_types::Timestamp>,
-) -> Result<Option<chrono::DateTime<Utc>>, ProvisioningError> {
+) -> Result<Option<Timestamp>, ProvisioningError> {
     ts.map(|ts| {
-        u32::try_from(ts.nanos)
-            .ok()
-            .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-            .filter(|at| *at > Utc::now())
+        crate::wire::from_timestamp(&ts)
+            .filter(|at| *at > Timestamp::now())
             .ok_or_else(|| invalid("expires_at", "not a time in the future"))
     })
     .transpose()
@@ -716,7 +714,7 @@ fn replayed_connector(result: &[u8]) -> Result<pb::ProvisioningConnector, Provis
 fn issue(
     connector: ProvisioningConnectorId,
     kind: ConnectorCredentialKind,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: Option<Timestamp>,
 ) -> (
     ProvisioningCredential,
     String,

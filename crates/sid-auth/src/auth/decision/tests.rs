@@ -128,7 +128,7 @@ pub(crate) fn fixture_with(orders_routes: &str, orders: Option<bool>) -> Fixture
             resources,
         ),
         applications: Arc::new(PolicyEngine::from_yaml(&applications(orders_routes)).unwrap()),
-        revocation: crate::revocation_view(cache),
+        revocation: sid_authn::revocation_cache::RevocationCache::receiver_view(cache),
         authz: crate::test_channel(),
         checker: None,
         token_state: Some(Arc::new(AtIssuer(Some(true)))),
@@ -164,7 +164,7 @@ pub(crate) fn access_token(
     aud: &str,
     exp_offset: i64,
 ) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sign(
         key,
         "at+jwt",
@@ -264,7 +264,7 @@ async fn test_token_signed_by_another_key_is_refused() {
 #[tokio::test]
 async fn test_sign_in_and_id_tokens_are_refused() {
     let f = fixture();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let sign_in = sign(
         &f.key,
         "JWT",

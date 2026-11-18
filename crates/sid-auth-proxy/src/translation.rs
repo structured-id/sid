@@ -8,7 +8,23 @@
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 
-use sid_auth::auth::jwt::ForwardAuthClaims;
+/// What a translation discloses to one upstream: the verified values its
+/// policy permits that application, and nothing more. A value the request
+/// did not prove is absent and renders empty, never invented; roles are not
+/// group membership.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpstreamIdentity {
+    /// The application's subject: the opaque `sub` of its token.
+    pub subject: String,
+    /// The email the policy discloses to this application.
+    pub email: Option<String>,
+    /// The display name the policy discloses to this application.
+    pub display_name: Option<String>,
+    /// The username the policy discloses to this application.
+    pub preferred_username: Option<String>,
+    /// The groups the policy discloses to this application.
+    pub groups: Vec<String>,
+}
 
 /// Auth translation configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -56,25 +72,25 @@ fn default_content() -> String {
 
 /// Apply auth translation to produce headers for the upstream.
 pub fn translate(
-    claims: &ForwardAuthClaims,
+    identity: &UpstreamIdentity,
     config: &AuthTranslation,
     raw_token: Option<&str>,
 ) -> HeaderMap {
     match config.mode {
-        TranslationMode::Header => translate_headers(claims, &config.headers),
+        TranslationMode::Header => translate_headers(identity, &config.headers),
         TranslationMode::Cookie => translate_cookie(config, raw_token),
     }
 }
 
 /// Header mode: render templates in header values.
 fn translate_headers(
-    claims: &ForwardAuthClaims,
+    identity: &UpstreamIdentity,
     templates: &std::collections::HashMap<String, String>,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
     for (name, template) in templates {
-        let value = render_template(template, claims);
+        let value = render_template(template, identity);
         if let (Ok(name), Ok(val)) = (
             HeaderName::try_from(name.as_str()),
             HeaderValue::from_str(&value),
@@ -115,40 +131,31 @@ fn translate_cookie(config: &AuthTranslation, raw_token: Option<&str>) -> Header
 /// Simple template renderer for auth translation headers.
 ///
 /// Supported placeholders:
-/// - `{{ .Email }}` — primary email
-/// - `{{ .Subject }}` — OIDC `sub` claim (polymorphic: UUID or pairwise hash)
-/// - `{{ .User }}` — **deprecated alias** for `{{ .Subject }}` (backwards compat)
-/// - `{{ .DisplayName }}` — display name
-/// - `{{ .Groups }}` — comma-separated roles
-/// - `{{ .Groups | join ';' }}` — semicolon-separated roles
-/// - `{{ .PreferredUsername }}` — username
-fn render_template(template: &str, claims: &ForwardAuthClaims) -> String {
+/// Supported placeholders:
+/// - `{{ .Email }}`: the disclosed email
+/// - `{{ .Subject }}`: the application's subject (opaque: UUID or pairwise)
+/// - `{{ .User }}`: the same subject, the forward-auth user template
+/// - `{{ .DisplayName }}`: the disclosed display name
+/// - `{{ .PreferredUsername }}`: the disclosed username
+/// - `{{ .Groups }}` / `{{ .Groups | join ',' }}`: comma-separated groups
+/// - `{{ .Groups | join ';' }}`: semicolon-separated groups
+fn render_template(template: &str, identity: &UpstreamIdentity) -> String {
     let mut result = template.to_string();
 
-    result = result.replace("{{ .Email }}", claims.email.as_deref().unwrap_or(""));
-    result = result.replace("{{ .Subject }}", &claims.sub);
-    // Backwards compatibility: {{ .User }} is deprecated alias for {{ .Subject }}
-    result = result.replace("{{ .User }}", &claims.sub);
-    result = result.replace("{{ .DisplayName }}", claims.name.as_deref().unwrap_or(""));
+    result = result.replace("{{ .Email }}", identity.email.as_deref().unwrap_or(""));
+    result = result.replace("{{ .Subject }}", &identity.subject);
+    result = result.replace("{{ .User }}", &identity.subject);
+    result = result.replace(
+        "{{ .DisplayName }}",
+        identity.display_name.as_deref().unwrap_or(""),
+    );
     result = result.replace(
         "{{ .PreferredUsername }}",
-        claims.preferred_username.as_deref().unwrap_or(""),
+        identity.preferred_username.as_deref().unwrap_or(""),
     );
-
-    // Groups with custom separator
-    if result.contains("{{ .Groups | join ';' }}") {
-        let groups = claims.roles.replace(' ', ";");
-        result = result.replace("{{ .Groups | join ';' }}", &groups);
-    }
-    if result.contains("{{ .Groups | join ',' }}") {
-        let groups = claims.roles.replace(' ', ",");
-        result = result.replace("{{ .Groups | join ',' }}", &groups);
-    }
-    // Default groups (comma-separated)
-    if result.contains("{{ .Groups }}") {
-        let groups = claims.roles.replace(' ', ",");
-        result = result.replace("{{ .Groups }}", &groups);
-    }
+    result = result.replace("{{ .Groups | join ';' }}", &identity.groups.join(";"));
+    result = result.replace("{{ .Groups | join ',' }}", &identity.groups.join(","));
+    result = result.replace("{{ .Groups }}", &identity.groups.join(","));
 
     result
 }

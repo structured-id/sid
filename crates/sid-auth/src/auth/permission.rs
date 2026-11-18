@@ -180,7 +180,7 @@ fn refuses_evidence(status: &tonic::Status) -> bool {
 
 /// How long sid-authz may use a confirmation of a checked proof: enough to
 /// retry the question about the same pending request.
-const CONFIRMATION_WINDOW: chrono::Duration = chrono::Duration::seconds(30);
+const CONFIRMATION_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_secs(30);
 
 /// What the verifier confirms about one original request whose DPoP `proof`
 /// it checked for a token bound to `jkt`: the method, the external URI
@@ -193,17 +193,15 @@ pub(crate) fn dpop_confirmation(
     uri: &str,
     exp: i64,
     proof: &sid_authn::dpop::VerifiedProof,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> sid_proto::sid::v1::authn::RequestConfirmation {
     use sid_proto::sid::v1::authn::{RequestConfirmation, SenderProofProfile};
     let htu = uri.split(['?', '#']).next().unwrap_or(uri);
-    let until = std::cmp::min(now + CONFIRMATION_WINDOW, {
-        chrono::DateTime::from_timestamp(exp, 0).unwrap_or(now)
-    });
-    let at = |t: chrono::DateTime<chrono::Utc>| prost_types::Timestamp {
-        seconds: t.timestamp(),
-        nanos: i32::try_from(t.timestamp_subsec_nanos()).unwrap_or(0),
-    };
+    let until = std::cmp::min(
+        now + CONFIRMATION_WINDOW,
+        jiff::Timestamp::from_second(exp).unwrap_or(now),
+    );
+    let at = sid_proto::time::to_proto;
     RequestConfirmation {
         profile: SenderProofProfile::Dpop.into(),
         method: method.to_owned(),

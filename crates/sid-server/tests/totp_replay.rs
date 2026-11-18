@@ -25,9 +25,9 @@ async fn enrolled(svc: &TestServices, profile: &Profile, seed: &[u8]) -> (String
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2);
     let (bearer, session) =
         issue_token_with_session(&svc.jwt, profile, &["openid".to_string()], session);
     svc.storage
@@ -142,7 +142,7 @@ async fn enrollment_code_cannot_be_reused() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);

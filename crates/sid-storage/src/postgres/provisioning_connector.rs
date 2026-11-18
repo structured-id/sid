@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Provisioning connectors and their credentials.
 
-use chrono::{DateTime, Utc};
+use crate::pg_time::{FromPg, PgTime, ToPg};
+use jiff::Timestamp;
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::provisioning_connector::MAX_USABLE_CONNECTOR_CREDENTIALS;
 use sid_core::models::{
@@ -33,8 +34,8 @@ struct ConnectorRow {
     display_name: String,
     state: String,
     revision: i64,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: PgTime,
+    updated_at: PgTime,
 }
 
 impl ConnectorRow {
@@ -48,8 +49,8 @@ impl ConnectorRow {
             display_name: self.display_name,
             state: stored::<ConnectorState>(&self.state)?,
             revision: self.revision,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -61,8 +62,8 @@ struct CredentialRow {
     kind: String,
     status: String,
     verifier: String,
-    expires_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
+    expires_at: Option<PgTime>,
+    created_at: PgTime,
 }
 
 impl CredentialRow {
@@ -73,8 +74,8 @@ impl CredentialRow {
             kind: stored::<ConnectorCredentialKind>(&self.kind)?,
             status: stored::<CredentialStatus>(&self.status)?,
             verifier: self.verifier,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -204,8 +205,8 @@ impl PostgresBackend {
         .bind(&c.display_name)
         .bind(c.state.as_str())
         .bind(c.revision)
-        .bind(c.created_at)
-        .bind(c.updated_at)
+        .bind(c.created_at.pg())
+        .bind(c.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("provisioning connector", e))?;
@@ -295,8 +296,8 @@ impl PostgresBackend {
         .bind(cred.kind.as_str())
         .bind(cred.status.as_str())
         .bind(&cred.verifier)
-        .bind(cred.expires_at)
-        .bind(cred.created_at)
+        .bind(cred.expires_at.pg())
+        .bind(cred.created_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("provisioning credential", e))?;
@@ -360,7 +361,7 @@ impl PostgresBackend {
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.connector_tx().await?;
@@ -373,7 +374,7 @@ impl PostgresBackend {
         )
         .bind(old)
         .bind(connector_id)
-        .bind(grace_until)
+        .bind(grace_until.pg())
         .execute(&mut *tx)
         .await
         .map_err(failed("rotate connector credential"))?

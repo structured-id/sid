@@ -2,7 +2,8 @@
 //! Machine users and their credentials: a create never replaces, and a
 //! lifecycle change or a rotation never undoes a concurrent one.
 
-use chrono::{DateTime, Duration, Utc};
+use crate::conformance::days;
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::machine_user::{
     CredentialStatus, MachineCredentialType, MachineUserCredential, MachineUserStatus,
@@ -237,7 +238,7 @@ pub async fn test_rotate_machine_credential(backend: &dyn StorageBackend) {
         .unwrap();
 
     let (first, second) = (secret(&mu), secret(&mu));
-    let grace_until = Utc::now() + Duration::hours(72);
+    let grace_until = Timestamp::now() + Duration::from_hours(72);
     let (a, b) = tokio::join!(
         backend.rotate_machine_credential(mu.id, &old.kid, &first, grace_until, test_audit()),
         backend.rotate_machine_credential(mu.id, &old.kid, &second, grace_until, test_audit()),
@@ -292,7 +293,7 @@ pub async fn test_rotate_machine_credential(backend: &dyn StorageBackend) {
 
     // A credential that ends before the grace would keeps its own end.
     let other = stored_machine_user(backend).await;
-    let soon = Utc::now() + Duration::hours(1);
+    let soon = Timestamp::now() + Duration::from_hours(1);
     let mut short = secret(&other);
     short.expires_at = Some(soon);
     backend
@@ -315,7 +316,7 @@ pub async fn test_rotate_machine_credential(backend: &dyn StorageBackend) {
 }
 
 /// The stored end of credential `kid`.
-async fn expiry_of(backend: &dyn StorageBackend, kid: &str) -> Option<DateTime<Utc>> {
+async fn expiry_of(backend: &dyn StorageBackend, kid: &str) -> Option<Timestamp> {
     backend
         .get_machine_credential_by_kid(kid)
         .await
@@ -325,10 +326,10 @@ async fn expiry_of(backend: &dyn StorageBackend, kid: &str) -> Option<DateTime<U
 }
 
 /// `stored` is `expected`, within storage time precision.
-fn assert_close(stored: Option<DateTime<Utc>>, expected: DateTime<Utc>) {
+fn assert_close(stored: Option<Timestamp>, expected: Timestamp) {
     let stored = stored.expect("a rotated credential has an end");
     assert!(
-        (stored - expected).num_milliseconds().abs() < 1000,
+        stored.duration_since(expected).as_millis().abs() < 1000,
         "{stored} != {expected}"
     );
 }
@@ -384,7 +385,7 @@ pub async fn test_cascade_revokes_grace_period_credentials(backend: &dyn Storage
                 mu.id,
                 &old.kid,
                 &new,
-                Utc::now() + Duration::hours(72),
+                Timestamp::now() + Duration::from_hours(72),
                 test_audit()
             )
             .await
@@ -460,19 +461,17 @@ pub async fn test_machine_users_by_client_and_project(backend: &dyn StorageBacke
 /// expired or expiring within the window, never a later one, one without an
 /// expiry or a revoked one.
 pub async fn test_machine_credentials_listing_and_expiry(backend: &dyn StorageBackend) {
-    use chrono::{Duration, Utc};
-
     let mu = stored_machine_user(backend).await;
     let other = stored_machine_user(backend).await;
     let mut expired = secret(&mu);
-    expired.expires_at = Some(Utc::now() - Duration::days(1));
+    expired.expires_at = Some(Timestamp::now() - days(1));
     let mut soon = secret(&mu);
-    soon.expires_at = Some(Utc::now() + Duration::days(3));
+    soon.expires_at = Some(Timestamp::now() + days(3));
     let mut later = secret(&mu);
-    later.expires_at = Some(Utc::now() + Duration::days(90));
+    later.expires_at = Some(Timestamp::now() + days(90));
     let permanent = secret(&mu);
     let mut revoked = secret(&mu);
-    revoked.expires_at = Some(Utc::now() + Duration::days(1));
+    revoked.expires_at = Some(Timestamp::now() + days(1));
     revoked.status = CredentialStatus::Revoked;
     let foreign = secret(&other);
     for c in [&expired, &soon, &later, &permanent, &revoked, &foreign] {

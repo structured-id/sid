@@ -435,7 +435,7 @@ async fn harness() -> Harness {
 
 /// An access token of the issuer for `aud`, with `extra` claims merged in.
 fn access_token(key: &jsonwebtoken::EncodingKey, aud: &str, extra: serde_json::Value) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut claims = serde_json::json!({
         "sub": SUBJECT, "iss": ISSUER, "aud": [aud], "client_id": "orders-web",
         "exp": now + 3600, "iat": now, "auth_time": now,
@@ -606,7 +606,7 @@ async fn http_registry_down_is_503() {
 #[tokio::test]
 async fn http_revoked_session_is_refused() {
     let h = harness().await;
-    sid_auth::revocation_view(h.cache.clone())
+    sid_authn::revocation_cache::RevocationCache::receiver_view(h.cache.clone())
         .revoke_session("sess_01".into())
         .await
         .unwrap();
@@ -670,7 +670,7 @@ fn dpop_proof(htu: &str, token: &str) -> String {
     header.jwk = Some(jwk);
     let payload = serde_json::json!({
         "jti": format!("{:032x}", rand::random::<u128>()), "htm": "GET", "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(

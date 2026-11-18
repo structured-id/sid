@@ -82,8 +82,8 @@ fn envelope(roles: &[&Role], ceiling: &[&str], kinds: &[RecipientKind]) -> Admin
     }
 }
 
-fn in_days(days: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now() + chrono::Duration::days(days)
+fn in_days(days: i64) -> jiff::Timestamp {
+    jiff::Timestamp::now() + jiff::SignedDuration::from_hours(days * 24)
 }
 
 /// `profile` as an installation administrator: the assignment is its authority.

@@ -5,7 +5,7 @@
 //! answer of the account API) and the calls made under them belong to the
 //! transport adapters.
 
-use sid_core::models::{IssuerHandle, ResourceIndicator, scope_list};
+use sid_core::models::{ResourceIndicator, scope_list};
 
 use crate::client_connection::ClientConnection;
 
@@ -20,9 +20,11 @@ pub struct ConnectionError(pub String);
 /// the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
-    /// Exact issuer identifier, `{installation}/i/{handle}`.
+    /// Exact issuer identifier: the installation's URL for its root-addressed
+    /// base issuer, `{installation}/i/{handle}` for a scoped one.
     pub issuer: String,
-    /// The handle in `issuer`, which names it in token endpoint calls.
+    /// The handle that names `issuer` in token endpoint calls; empty for the
+    /// root-addressed base issuer.
     pub issuer_handle: String,
     /// The adapter's web client.
     pub client_id: String,
@@ -67,12 +69,9 @@ impl Connection {
         if bundle.token_endpoint_auth_method != "private_key_jwt" {
             return invalid("the client does not authenticate by key");
         }
-        let prefix = format!("{}/i/", installation_url.trim_end_matches('/'));
-        let Some(issuer_handle) = bundle
-            .issuer
-            .strip_prefix(&prefix)
-            .filter(|handle| IssuerHandle::parse(handle).is_ok())
-            .map(str::to_owned)
+        let Some(issuer_handle) =
+            crate::issuer::installation_issuer_handle(installation_url, &bundle.issuer)
+                .map(str::to_owned)
         else {
             return invalid("the issuer is not one of this installation's");
         };

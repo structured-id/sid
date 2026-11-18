@@ -4,7 +4,7 @@
 //! Enterprises register via direct certificate exchange (no DNS required).
 //! After verification, they receive a Scoped CA for issuing binding certificates.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -90,12 +90,12 @@ pub struct EnterpriseRegistration {
     pub enrollment_token: String,
 
     /// When the enterprise was verified.
-    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<Timestamp>,
 
     /// When the enrollment was revoked.
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl EnterpriseRegistration {
@@ -118,7 +118,7 @@ impl EnterpriseRegistration {
             enrollment_token,
             verified_at: None,
             revoked_at: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
@@ -139,7 +139,7 @@ impl EnterpriseRegistration {
     pub fn mark_verified(&mut self, scoped_ca_cert_id: CertificateId) {
         self.enrollment_status = EnrollmentStatus::Verified;
         self.scoped_ca_cert_id = Some(scoped_ca_cert_id);
-        self.verified_at = Some(Utc::now());
+        self.verified_at = Some(Timestamp::now());
     }
 
     /// Activate (after first binding cert issued).
@@ -155,7 +155,7 @@ impl EnterpriseRegistration {
     /// Revoke enrollment.
     pub fn mark_revoked(&mut self) {
         self.enrollment_status = EnrollmentStatus::Revoked;
-        self.revoked_at = Some(Utc::now());
+        self.revoked_at = Some(Timestamp::now());
     }
 }
 

@@ -8,7 +8,7 @@
 //! Cooldown: skip counter resets after `skip_cooldown_days` of inactivity.
 //! State persisted via ProfileMetadata (key = `passkey_prompt_state`).
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use sid_core::models::security_policy::{PasskeyPromptConfig, PasskeyPromptMode};
 
@@ -21,9 +21,9 @@ pub struct PasskeyPromptState {
     /// Number of times the user dismissed the prompt.
     pub skip_count: u32,
     /// When the user first dismissed the prompt.
-    pub first_skipped_at: Option<DateTime<Utc>>,
+    pub first_skipped_at: Option<Timestamp>,
     /// When the user last dismissed the prompt.
-    pub last_skipped_at: Option<DateTime<Utc>>,
+    pub last_skipped_at: Option<Timestamp>,
 }
 
 impl PasskeyPromptState {
@@ -88,8 +88,8 @@ pub fn decide(
 
     // Check cooldown reset: if last skip was > cooldown_days ago, treat as fresh.
     if let Some(last) = state.last_skipped_at {
-        let cooldown = chrono::Duration::days(config.skip_cooldown_days as i64);
-        if Utc::now() - last > cooldown {
+        let cooldown = days(i64::from(config.skip_cooldown_days));
+        if Timestamp::now().duration_since(last) > cooldown {
             return PromptDecision::Banner;
         }
     }
@@ -107,6 +107,11 @@ pub fn decide(
     }
 }
 
+/// `n` whole days.
+fn days(n: i64) -> SignedDuration {
+    SignedDuration::from_hours(n * 24)
+}
+
 /// Record a prompt dismissal. Returns updated state.
 ///
 /// Handles cooldown reset: if last skip was > `cooldown_days` ago,
@@ -115,12 +120,12 @@ pub fn record_dismissal(
     state: Option<PasskeyPromptState>,
     cooldown_days: u32,
 ) -> PasskeyPromptState {
-    let now = Utc::now();
+    let now = Timestamp::now();
     match state {
         Some(mut s) => {
             // Check cooldown reset.
             if let Some(last) = s.last_skipped_at
-                && (now - last).num_days() > cooldown_days as i64
+                && now.duration_since(last).as_secs() / 86_400 > i64::from(cooldown_days)
             {
                 s.skip_count = 0;
                 s.first_skipped_at = Some(now);
@@ -189,8 +194,8 @@ mod tests {
         for count in 0..3 {
             let state = PasskeyPromptState {
                 skip_count: count,
-                first_skipped_at: Some(Utc::now()),
-                last_skipped_at: Some(Utc::now()),
+                first_skipped_at: Some(Timestamp::now()),
+                last_skipped_at: Some(Timestamp::now()),
             };
             assert_eq!(
                 decide(&config, Some(&state), false),
@@ -207,8 +212,8 @@ mod tests {
         for count in 3..5 {
             let state = PasskeyPromptState {
                 skip_count: count,
-                first_skipped_at: Some(Utc::now()),
-                last_skipped_at: Some(Utc::now()),
+                first_skipped_at: Some(Timestamp::now()),
+                last_skipped_at: Some(Timestamp::now()),
             };
             assert_eq!(
                 decide(&config, Some(&state), false),
@@ -224,8 +229,8 @@ mod tests {
         let config = default_config();
         let state = PasskeyPromptState {
             skip_count: 5,
-            first_skipped_at: Some(Utc::now()),
-            last_skipped_at: Some(Utc::now()),
+            first_skipped_at: Some(Timestamp::now()),
+            last_skipped_at: Some(Timestamp::now()),
         };
         assert_eq!(decide(&config, Some(&state), false), PromptDecision::None);
     }
@@ -235,8 +240,8 @@ mod tests {
         let config = default_config();
         let state = PasskeyPromptState {
             skip_count: 4,
-            first_skipped_at: Some(Utc::now() - chrono::Duration::days(30)),
-            last_skipped_at: Some(Utc::now() - chrono::Duration::days(15)),
+            first_skipped_at: Some(Timestamp::now() - days(30)),
+            last_skipped_at: Some(Timestamp::now() - days(15)),
         };
         // Last skip was 15 days ago, cooldown is 14 → reset → banner.
         assert_eq!(decide(&config, Some(&state), false), PromptDecision::Banner);
@@ -247,8 +252,8 @@ mod tests {
         let config = default_config();
         let state = PasskeyPromptState {
             skip_count: 4,
-            first_skipped_at: Some(Utc::now() - chrono::Duration::days(10)),
-            last_skipped_at: Some(Utc::now() - chrono::Duration::days(5)),
+            first_skipped_at: Some(Timestamp::now() - days(10)),
+            last_skipped_at: Some(Timestamp::now() - days(5)),
         };
         // Last skip was 5 days ago, cooldown is 14 → still active → modal.
         assert_eq!(decide(&config, Some(&state), false), PromptDecision::Modal);
@@ -268,8 +273,8 @@ mod tests {
     fn test_record_dismissal_increments() {
         let state = PasskeyPromptState {
             skip_count: 2,
-            first_skipped_at: Some(Utc::now()),
-            last_skipped_at: Some(Utc::now()),
+            first_skipped_at: Some(Timestamp::now()),
+            last_skipped_at: Some(Timestamp::now()),
         };
         let result = record_dismissal(Some(state), 14);
         assert_eq!(result.skip_count, 3);
@@ -277,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_record_dismissal_cooldown_reset() {
-        let old = Utc::now() - chrono::Duration::days(20);
+        let old = Timestamp::now() - days(20);
         let state = PasskeyPromptState {
             skip_count: 4,
             first_skipped_at: Some(old),
@@ -294,8 +299,8 @@ mod tests {
     fn test_passkey_prompt_state_serde_roundtrip() {
         let state = PasskeyPromptState {
             skip_count: 3,
-            first_skipped_at: Some(Utc::now()),
-            last_skipped_at: Some(Utc::now()),
+            first_skipped_at: Some(Timestamp::now()),
+            last_skipped_at: Some(Timestamp::now()),
         };
         let json = serde_json::to_string(&state).unwrap();
         let parsed: PasskeyPromptState = serde_json::from_str(&json).unwrap();

@@ -4,7 +4,7 @@
 //! Core types for sid-notify integration. Notifications are published
 //! to NATS JetStream and consumed by the sid-notify autonomous binary.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -161,9 +161,9 @@ pub struct NotificationRequest {
     /// Used for email confirmation to unverified addresses.
     pub delivery_address: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// TTL — notification becomes irrelevant after this time.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl NotificationRequest {
@@ -180,7 +180,7 @@ impl NotificationRequest {
             priority: NotificationPriority::Normal,
             params: std::collections::HashMap::new(),
             delivery_address: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             expires_at: None,
         }
     }
@@ -201,14 +201,14 @@ impl NotificationRequest {
     }
 
     pub fn with_ttl(mut self, ttl_seconds: i64) -> Self {
-        self.expires_at = Some(self.created_at + chrono::Duration::seconds(ttl_seconds));
+        self.expires_at = Some(self.created_at + SignedDuration::from_secs(ttl_seconds));
         self
     }
 
     /// Whether this notification has expired.
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map(|exp| Utc::now() >= exp)
+            .map(|exp| Timestamp::now() >= exp)
             .unwrap_or(false)
     }
 }
@@ -228,7 +228,7 @@ pub struct DeliveryResult {
     /// Error message (if failed).
     pub error: Option<String>,
 
-    pub delivered_at: Option<DateTime<Utc>>,
+    pub delivered_at: Option<Timestamp>,
 }
 
 impl DeliveryResult {
@@ -250,7 +250,7 @@ impl DeliveryResult {
             attempt_count: 1,
             provider_id: Some(provider_id.into()),
             error: None,
-            delivered_at: Some(Utc::now()),
+            delivered_at: Some(Timestamp::now()),
         }
     }
 
@@ -359,7 +359,7 @@ pub struct NotificationPreferences {
     /// Per-category settings.
     pub categories: Vec<CategoryPreference>,
     /// Last update timestamp.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl NotificationPreferences {
@@ -392,7 +392,7 @@ impl NotificationPreferences {
                     channels: vec![NotificationChannel::Email],
                 },
             ],
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         }
     }
 

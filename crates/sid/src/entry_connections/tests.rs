@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use secrecy::ExposeSecret;
-use sid_core::models::{IssuerAuthority, IssuerId, IssuerSigningKey, Organization};
+use sid_core::models::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, Organization};
 
 use super::*;
 use crate::test_support::{administrator, keys, operation, storage, stored_profile};
@@ -17,6 +17,11 @@ struct Installed {
 }
 
 async fn installed() -> Installed {
+    installed_with(false).await
+}
+
+/// [`installed`], its issuer the root-addressed base issuer when `root`.
+async fn installed_with(root: bool) -> Installed {
     let storage: Arc<dyn StorageBackend> = storage().await;
     let org = Organization::implicit_community("sid.example.com");
     let ctx = || MutationContext::from(AuditEntry::system("test", "installation"));
@@ -26,10 +31,14 @@ async fn installed() -> Installed {
         .unwrap();
     let org = storage.instance_organization().await.unwrap().unwrap().id;
     let (id, handle) = (IssuerId::generate(), IssuerHandle::generate());
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let issuer = OidcIssuer {
         id,
-        canonical_url: format!("https://sid.example.com/i/{handle}"),
+        canonical_url: if root {
+            "https://sid.example.com".to_owned()
+        } else {
+            format!("https://sid.example.com/i/{handle}")
+        },
         handle,
         authority: IssuerAuthority::Local,
         recipient_org: org,
@@ -51,7 +60,11 @@ async fn installed() -> Installed {
     );
     let admin = administrator(stored_profile(storage.as_ref(), "admin").await);
     Installed {
-        connections: EntryConnections::new(storage.clone(), keys()),
+        connections: EntryConnections::new(
+            storage.clone(),
+            keys(),
+            Arc::new(IssuerRegistry::new(storage.clone(), keys()).with_base_issuer(&issuer)),
+        ),
         storage,
         issuer,
         admin,
@@ -238,6 +251,49 @@ async fn a_registered_connection_serves_an_entry() {
             handle: created.handle,
             name: created.name,
         }]
+    );
+}
+
+/// The root-addressed base issuer's sign-in page reaches its connections at
+/// the root route, and its handle route offers none; a scoped issuer's
+/// root route offers none of its connections. The connection registers the
+/// root callback, built from the issuer URL.
+#[tokio::test]
+async fn sign_in_connections_follow_the_issuers_route() {
+    let i = installed_with(true).await;
+    let created = i.create("create-root", OUTSIDE).await;
+    let stored = i
+        .storage
+        .entry_connection(EntryHandle::parse(&created.handle).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.callback,
+        "https://sid.example.com/auth/federation/callback"
+    );
+    let offered = |handle: String| {
+        let connections = &i.connections;
+        async move {
+            connections
+                .sign_in_connections(&handle)
+                .await
+                .unwrap()
+                .connections
+        }
+    };
+    assert_eq!(offered(String::new()).await.len(), 1);
+    assert!(offered(i.issuer.handle.to_string()).await.is_empty());
+
+    let i = installed().await;
+    i.create("create-scoped", OUTSIDE).await;
+    assert!(
+        i.connections
+            .sign_in_connections("")
+            .await
+            .unwrap()
+            .connections
+            .is_empty()
     );
 }
 
@@ -561,7 +617,7 @@ async fn provisioning_does_not_take_an_administrators_connection() {
 async fn a_caller_without_the_administrator_role_is_refused() {
     let i = installed().await;
     let profile = stored_profile(i.storage.as_ref(), "user").await;
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     let user = Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
         sub: profile.to_string(),
         pid: Some(profile.to_string()),

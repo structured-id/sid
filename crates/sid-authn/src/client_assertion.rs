@@ -274,7 +274,7 @@ async fn verify(
     // The replay record outlives only an assertion expiring within the
     // accepted lifetime; a later `exp` could be replayed once it is gone
     // (RFC 7523 §3 item 7 lets the server bound how far ahead `exp` is).
-    let now = u64::try_from(chrono::Utc::now().timestamp())
+    let now = u64::try_from(jiff::Timestamp::now().as_second())
         .map_err(|_| SidError::Internal("system clock before the epoch".into()))?;
     if claims.exp > now + MAX_ASSERTION_LIFETIME_SECS {
         return Err(SidError::AuthenticationFailed(

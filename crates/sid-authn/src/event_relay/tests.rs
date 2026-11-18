@@ -16,8 +16,8 @@ fn claimed(work: NewWork) -> ClaimedWork {
         max_attempts: work.max_attempts,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     }
 }
 
@@ -155,11 +155,7 @@ impl WorkStore for RecordingStore {
     async fn import_work(&self, _: &sid_core::models::WorkSnapshot) -> sid_core::Result<bool> {
         unimplemented!()
     }
-    async fn purge_ended_work(
-        &self,
-        _: &WorkKind,
-        _: chrono::DateTime<chrono::Utc>,
-    ) -> sid_core::Result<u64> {
+    async fn purge_ended_work(&self, _: &WorkKind, _: jiff::Timestamp) -> sid_core::Result<u64> {
         unimplemented!()
     }
 }
@@ -352,8 +348,8 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
             max_attempts: plan.max_attempts,
             generation: 1,
             expires_at: None,
-            created_at: chrono::Utc::now(),
-            due_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            due_at: jiff::Timestamp::now(),
         })
         .await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");

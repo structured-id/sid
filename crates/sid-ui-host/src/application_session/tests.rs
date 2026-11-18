@@ -2,13 +2,20 @@
 
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
+use sid_authn::bff_session::SessionClaims;
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::client_key::ClientKey;
 use sid_authn::issuer_directory::{
     IssuerRecord, IssuerSource, RegistryUnavailable, ResourceRecord,
 };
+use sid_authn::relying_party::Connection;
 use sid_plugin::cache::{CacheBackend, CacheError, CacheResult, InMemoryCacheBackend};
 use sid_plugin::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
+use tonic::Code;
 
 use super::*;
 
@@ -153,14 +160,21 @@ pub(crate) struct Fixture {
 /// An adapter over `store`, with the connection delivered or, when
 /// `delivered` is false, to be asked of an issuer that never answers.
 pub(crate) fn fixture(store: Arc<dyn CeremonyStateStore>, delivered: bool) -> Fixture {
-    fixture_with(store, Arc::new(InMemoryCacheBackend::new()), delivered)
+    fixture_with(
+        store,
+        Arc::new(InMemoryCacheBackend::new()),
+        delivered,
+        Arc::new(NoIssuers),
+    )
 }
 
-/// [`fixture`] with revocation notices over `cache`.
+/// [`fixture`] with revocation notices over `cache` and the issuers `source`
+/// describes.
 fn fixture_with(
     store: Arc<dyn CeremonyStateStore>,
     cache: Arc<dyn CacheBackend>,
     delivered: bool,
+    source: Arc<dyn IssuerSource>,
 ) -> Fixture {
     let key = ClientKey::generate_ed25519().unwrap().0;
     let client = if delivered {
@@ -174,7 +188,7 @@ fn fixture_with(
     Fixture {
         adapter: ApplicationSessions::new(
             Arc::new(client),
-            Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(NoIssuers))),
+            Arc::new(IssuerDirectory::new(INSTALLATION, source)),
             sessions.clone(),
             revocation.clone(),
             COOKIE.into(),
@@ -182,6 +196,11 @@ fn fixture_with(
         sessions,
         revocation,
     }
+}
+
+/// 256 random bits, base64url: a token id no other test shares.
+fn random_token() -> String {
+    URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
 pub(crate) fn memory() -> Arc<dyn CeremonyStateStore> {
@@ -192,7 +211,7 @@ fn claims() -> SessionClaims {
     SessionClaims {
         sub: "subject-1".into(),
         iss: ISSUER.into(),
-        exp: chrono::Utc::now().timestamp() + 3600,
+        exp: jiff::Timestamp::now().as_second() + 3600,
         iat: 0,
         auth_time: 0,
         acr: "urn:sid:acr:basic".into(),
@@ -720,192 +739,11 @@ async fn only_the_applications_origin_uses_the_session() {
     );
 }
 
-/// A session read before the refresh claim may predate a refresh another
-/// replica completed under an earlier, expired claim: after winning the
-/// claim the adapter uses what the store holds instead of presenting the
-/// rotated refresh token. The issuer is unreachable here, so any refresh
-/// attempt would be an outage.
-#[tokio::test]
-async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
-    let f = fixture(memory(), true);
-    let mut expired = claims();
-    expired.exp = 0;
-    let (id, _) = f
-        .sessions
-        .create_session(
-            "access-0".into(),
-            Some("refresh-0".into()),
-            expired,
-            &connection().binding(),
-        )
-        .await
-        .unwrap();
-    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
-    assert!(matches!(
-        f.sessions
-            .replace_tokens(
-                &id,
-                &"refresh-0".into(),
-                "access-1".into(),
-                Some("refresh-1".into()),
-                claims(),
-            )
-            .await
-            .unwrap(),
-        sid_authn::bff_session::TokenReplacement::Replaced
-    ));
-    let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.token().expose_secret(), "access-1");
-}
-
-/// A refresh that completed with a token still inside the refresh margin (its
-/// lifetime capped by an approaching step-up or issuer-session expiry) does
-/// not hold the next request: that request refreshes the new version at once
-/// instead of waiting for a change no replica is making. The issuer is
-/// unreachable here, so the refresh attempt answers as the issuer, not as a
-/// wait for another replica.
-#[tokio::test(start_paused = true)]
-async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
-    let f = fixture(memory(), true);
-    let mut near_end = claims();
-    near_end.exp = chrono::Utc::now().timestamp() + 10;
-    let (id, _) = f
-        .sessions
-        .create_session(
-            "access-1".into(),
-            Some("refresh-1".into()),
-            near_end.clone(),
-            &connection().binding(),
-        )
-        .await
-        .unwrap();
-    // The earlier refresh: claimed, completed, its new token near its end too.
-    assert!(matches!(
-        f.sessions
-            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD, |_| true)
-            .await
-            .unwrap(),
-        RefreshClaim::Claimed(_)
-    ));
-    f.sessions
-        .replace_tokens(
-            &id,
-            &"refresh-1".into(),
-            "access-2".into(),
-            Some("refresh-2".into()),
-            near_end,
-        )
-        .await
-        .unwrap();
-
-    let session = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let refused = f.adapter.current_token(&id, session).await.unwrap_err();
-    assert_eq!(refused.code(), Code::Unavailable);
-    assert!(
-        refused.message().contains("issuer"),
-        "the call refreshed instead of waiting: {refused:?}"
-    );
-}
-
-/// A refresh started from a snapshot older than the session claims the version
-/// it actually presents: a caller holding that version then sees the refresh
-/// in flight and waits, instead of taking the claim over as a finished one and
-/// presenting the same refresh token a second time. The issuer is unreachable
-/// here, so the first refresh fails and keeps its claim for its hold.
-#[tokio::test(start_paused = true)]
-async fn the_claim_names_the_version_actually_refreshed() {
-    let f = fixture(memory(), true);
-    let mut near_end = claims();
-    near_end.exp = chrono::Utc::now().timestamp() + 10;
-    let (id, _) = f
-        .sessions
-        .create_session(
-            "access-1".into(),
-            Some("refresh-1".into()),
-            near_end.clone(),
-            &connection().binding(),
-        )
-        .await
-        .unwrap();
-    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
-    // Another replica rotated `refresh-1` under a claim that has since expired.
-    f.sessions
-        .replace_tokens(
-            &id,
-            &"refresh-1".into(),
-            "access-2".into(),
-            Some("refresh-2".into()),
-            near_end,
-        )
-        .await
-        .unwrap();
-
-    let first = f.adapter.current_token(&id, stale).await.unwrap_err();
-    assert!(first.message().contains("issuer"), "{first:?}");
-
-    let session = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let second = f.adapter.current_token(&id, session).await.unwrap_err();
-    assert_eq!(second.code(), Code::Unavailable);
-    assert!(
-        !second.message().contains("issuer"),
-        "refresh-2 was presented twice: {second:?}"
-    );
-}
-
-/// A stale read whose session another replica already refreshed to a token
-/// that is still usable answers with that token and claims nothing: the next
-/// call, once that token nears its end, refreshes it at once instead of
-/// waiting out a claim no refresh is behind. The issuer is unreachable here,
-/// so the second call answers as the issuer, not as a wait.
-#[tokio::test(start_paused = true)]
-async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
-    let f = fixture(memory(), true);
-    let mut expired = claims();
-    expired.exp = 0;
-    let (id, _) = f
-        .sessions
-        .create_session(
-            "access-1".into(),
-            Some("refresh-1".into()),
-            expired,
-            &connection().binding(),
-        )
-        .await
-        .unwrap();
-    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let mut usable = claims();
-    // Usable for two more seconds, then inside the refresh margin.
-    usable.exp = chrono::Utc::now().timestamp() + REFRESH_MARGIN_SECS + 2;
-    f.sessions
-        .replace_tokens(
-            &id,
-            &"refresh-1".into(),
-            "access-2".into(),
-            Some("refresh-2".into()),
-            usable,
-        )
-        .await
-        .unwrap();
-
-    let token = f.adapter.current_token(&id, stale).await.unwrap();
-    assert_eq!(token.token().expose_secret(), "access-2");
-
-    // Token lifetimes run on the wall clock, which a paused runtime does not
-    // advance.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    let near_end = f.sessions.get_session(&id).await.unwrap().unwrap();
-    let refused = f.adapter.current_token(&id, near_end).await.unwrap_err();
-    assert!(
-        refused.message().contains("issuer"),
-        "the call waited for a refresh nobody was making: {refused:?}"
-    );
-}
-
 /// A directory whose every lookup outlasts a refresh claim, as a cold cache
 /// in front of a slow registry does.
 struct SlowIssuers;
 
-/// Longer than [`REFRESH_HOLD`].
+/// Longer than a refresh claim's hold.
 const SLOW_LOOKUP: Duration = Duration::from_secs(20);
 
 #[async_trait::async_trait]
@@ -1013,7 +851,7 @@ async fn a_refresh_ends_within_its_claim() {
     );
     let mut expired = claims();
     expired.exp = 0;
-    let (id, _) = sessions
+    let (id, csrf) = sessions
         .create_session(
             "access-1".into(),
             Some("refresh-1".into()),
@@ -1022,12 +860,12 @@ async fn a_refresh_ends_within_its_claim() {
         )
         .await
         .unwrap();
-    let session = sessions.get_session(&id).await.unwrap().unwrap();
+    let call = with_cookie((), &format!("{COOKIE}={id}"), Some(&csrf));
 
     let started = tokio::time::Instant::now();
-    let refused = adapter.current_token(&id, session).await.unwrap_err();
+    let refused = adapter.bearer(call.metadata()).await.unwrap_err();
     assert!(
-        started.elapsed() < REFRESH_HOLD,
+        started.elapsed() < sid_authn::application_session::REFRESH_HOLD,
         "the refresh outlived its claim: {:?}",
         started.elapsed()
     );
@@ -1081,7 +919,7 @@ async fn an_unreachable_store_is_unavailable_not_signed_out() {
 /// their issuer as always.
 #[tokio::test]
 async fn a_session_is_served_with_the_cache_down() {
-    let f = fixture_with(memory(), Arc::new(Down), true);
+    let f = fixture_with(memory(), Arc::new(Down), true, Arc::new(NoIssuers));
     let (id, _) = signed_in(&f, false).await;
     let session = f
         .adapter
@@ -1174,21 +1012,6 @@ async fn a_repeated_sign_out_is_harmless() {
     assert_eq!(ended.into_inner().grant, GrantOutcome::Unknown as i32);
 }
 
-/// The return path stays on this origin (RFC 9700 §4.11).
-#[test]
-fn only_local_paths_are_returned_to() {
-    assert_eq!(local_path("/ca?x=1"), "/ca?x=1");
-    for foreign in [
-        "",
-        "https://evil.example.com/",
-        "//evil.example.com",
-        "/\\evil",
-        "/a\nb",
-    ] {
-        assert_eq!(local_path(foreign), "/", "{foreign:?}");
-    }
-}
-
 /// The issued session cookie is host-only, TLS-only and HttpOnly.
 #[tokio::test]
 async fn the_session_cookie_is_host_only_and_http_only() {
@@ -1232,8 +1055,12 @@ fn issuing_fixture(store: Arc<dyn CeremonyStateStore>) -> (Fixture, jsonwebtoken
         issuer: ISSUER.into(),
         keys: vec![("issuer-key-1".into(), public)],
     });
-    let mut f = fixture(store, true);
-    f.adapter.issuers = Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(source)));
+    let f = fixture_with(
+        store,
+        Arc::new(InMemoryCacheBackend::new()),
+        true,
+        Arc::new(source),
+    );
     let signing = jsonwebtoken::EncodingKey::from_ed_pem(pem.expose_secret().as_bytes()).unwrap();
     (f, signing)
 }
@@ -1255,7 +1082,7 @@ fn logout_token(
         "sub": "subject-1",
         "aud": client,
         "iat": iat,
-        "exp": chrono::Utc::now().timestamp() + 120,
+        "exp": jiff::Timestamp::now().as_second() + 120,
         "jti": random_token(),
         "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
     });
@@ -1302,7 +1129,7 @@ async fn a_back_channel_logout_ends_the_application_session() {
         .await
         .unwrap();
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now);
     let answer = f
         .adapter
@@ -1344,7 +1171,7 @@ async fn a_logout_without_its_session_ends_nothing() {
         "ops-web",
         "logout+jwt",
         None,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter
@@ -1362,7 +1189,7 @@ async fn a_logout_without_its_session_ends_nothing() {
 async fn an_invalid_logout_request_ends_nothing() {
     let (f, key) = issuing_fixture(memory());
     let (id, _) = signed_in(&f, false).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut requests = vec![
         logout_post(&logout_token(
             &key,
@@ -1412,7 +1239,7 @@ async fn a_logout_the_store_cannot_record_is_retried() {
         "ops-web",
         "logout+jwt",
         Some("issuer-session-1"),
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter

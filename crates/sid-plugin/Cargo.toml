@@ -12,7 +12,7 @@ sid-core = { workspace = true }
 sid-crypto = { workspace = true, features = ["std"] }
 sid-keys = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

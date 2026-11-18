@@ -4,6 +4,8 @@
 use sid_core::Result as SidResult;
 use sid_core::models::RefreshToken;
 
+use crate::pg_time::ToPg;
+
 /// Insert `token` in `tx`; an existing id or token hash is a `Conflict`.
 pub(super) async fn insert(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -21,12 +23,12 @@ pub(super) async fn insert(
     .bind(token.profile_id)
     .bind(&token.client_id)
     .bind(token.scopes.join(" "))
-    .bind(token.expires_at)
-    .bind(token.created_at)
+    .bind(token.expires_at.pg())
+    .bind(token.created_at.pg())
     .bind(token.revoked)
     .bind(token.replaced_by)
     .bind(token.family_id)
-    .bind(token.grace_expires_at)
+    .bind(token.grace_expires_at.pg())
     .bind(&token.dpop_jkt)
     .bind(token.resource)
     .execute(&mut **tx)

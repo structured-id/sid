@@ -5,7 +5,7 @@
 //! Every deployment has at least one. A CE installation is a single implicit
 //! Community organization created at first boot.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 pub use sid_ids::OrgId;
@@ -96,7 +96,7 @@ pub struct Organization {
     pub status: OrgStatus,
     /// The domain shown in binding certificates; never part of identity.
     pub canonical_domain: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl Organization {
@@ -108,7 +108,7 @@ impl Organization {
             org_type: OrgType::Community,
             status: OrgStatus::Active,
             canonical_domain: canonical_domain.into(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 }
@@ -120,7 +120,7 @@ impl Organization {
 pub struct OrganizationReference {
     pub id: OrgId,
     /// When this installation first held it.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl OrganizationReference {
@@ -128,7 +128,7 @@ impl OrganizationReference {
     pub fn new(id: OrgId) -> Self {
         Self {
             id,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 }

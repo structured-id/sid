@@ -196,7 +196,7 @@ pub async fn stale_keys_are_quarantined(
 /// A contact of `profile` at `address`, as an authorized operation
 /// establishes it.
 fn evidence(profile: ProfileId, address: &str) -> ProfileEmail {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     ProfileEmail {
         id: ProfileEmailId::new(),
         profile_id: profile,

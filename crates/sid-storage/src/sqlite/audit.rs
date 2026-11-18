@@ -49,13 +49,13 @@ impl SqliteAuditLog {
         let id = uuid::Uuid::now_v7().to_string();
         // Truncate to millisecond precision to match SQLite TEXT storage format.
         // This ensures compute_record_hash() produces the same hash before and after round-trip.
-        let timestamp = {
-            let now = chrono::Utc::now();
-            let millis = now.timestamp_millis();
-            chrono::DateTime::from_timestamp_millis(millis)
-                .unwrap()
-                .with_timezone(&chrono::Utc)
-        };
+        let timestamp = jiff::Timestamp::now()
+            .round(
+                jiff::TimestampRound::new()
+                    .smallest(jiff::Unit::Millisecond)
+                    .mode(jiff::RoundMode::Trunc),
+            )
+            .map_err(|e| AuditError::Other(format!("record time: {e}")))?;
 
         let mut record = AuditRecord {
             id: id.clone(),
@@ -75,9 +75,7 @@ impl SqliteAuditLog {
         };
         record.hash = compute_record_hash(&record);
 
-        let ts_str = record
-            .timestamp
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let ts_str = millis_text(&record.timestamp);
         let metadata_str = serde_json::to_string(&record.metadata).unwrap_or_default();
 
         // Insert record
@@ -138,19 +136,19 @@ impl AuditLog for SqliteAuditLog {
     async fn query(
         &self,
         chain_id: &str,
-        from: Option<chrono::DateTime<chrono::Utc>>,
-        to: Option<chrono::DateTime<chrono::Utc>>,
+        from: Option<jiff::Timestamp>,
+        to: Option<jiff::Timestamp>,
     ) -> Result<Vec<AuditRecord>, AuditError> {
         let mut sql = String::from("SELECT * FROM audit_records WHERE chain_id = ?");
         let mut binds: Vec<String> = vec![chain_id.to_string()];
 
         if let Some(f) = from {
             sql.push_str(" AND timestamp >= ?");
-            binds.push(f.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            binds.push(millis_text(&f));
         }
         if let Some(t) = to {
             sql.push_str(" AND timestamp <= ?");
-            binds.push(t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            binds.push(millis_text(&t));
         }
         sql.push_str(" ORDER BY sequence ASC");
 
@@ -248,11 +246,7 @@ impl AuditLog for SqliteAuditLog {
             )
             .bind(&record.id)
             // At the precision the record was taken: its hash covers it.
-            .bind(
-                record
-                    .timestamp
-                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-            )
+            .bind(record.timestamp.to_string())
             .bind(&record.chain_id)
             .bind(sequence_value(record.sequence)?)
             .bind(&record.actor_id)
@@ -301,6 +295,12 @@ impl AuditLog for SqliteAuditLog {
     }
 }
 
+/// A record time as stored: milliseconds, fixed width, so the text sorts as
+/// time does.
+fn millis_text(at: &jiff::Timestamp) -> String {
+    at.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
 fn sequence_value(sequence: u64) -> Result<i64, AuditError> {
     i64::try_from(sequence).map_err(|_| AuditError::Other(format!("sequence {sequence}")))
 }
@@ -328,11 +328,10 @@ async fn stored_chain(
             Ok::<_, AuditError>(ChainCheckpoint {
                 sequence: row.get::<i64, _>("sequence") as u64,
                 hash: digest(&row, "hash")?,
-                cut_before: chrono::DateTime::parse_from_rfc3339(
-                    &row.get::<String, _>("cut_before"),
-                )
-                .map_err(|e| AuditError::Other(format!("cut_before: {e}")))?
-                .with_timezone(&chrono::Utc),
+                cut_before: row
+                    .get::<String, _>("cut_before")
+                    .parse()
+                    .map_err(|e| AuditError::Other(format!("cut_before: {e}")))?,
             })
         })
         .transpose()?;
@@ -380,9 +379,7 @@ fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> Result<AuditRecord, Aud
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
     let ts_str: String = row.get("timestamp");
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&ts_str)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
+    let timestamp = ts_str.parse().unwrap_or_else(|_| jiff::Timestamp::now());
 
     Ok(AuditRecord {
         id: row.get("id"),

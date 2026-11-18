@@ -5,6 +5,7 @@ use sid_core::Result as SidResult;
 use sid_core::models::MachineUserCredential;
 
 use super::insert_error;
+use crate::pg_time::ToPg;
 
 /// Insert a new credential; an existing kid is a `Conflict`, never an update.
 pub(super) async fn insert(
@@ -22,8 +23,8 @@ pub(super) async fn insert(
     .bind(cred.status.as_str())
     .bind(&cred.credential_data)
     .bind(cred.algorithm.as_deref())
-    .bind(cred.expires_at)
-    .bind(cred.created_at)
+    .bind(cred.expires_at.pg())
+    .bind(cred.created_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("machine credential", e))?;

@@ -262,7 +262,7 @@ async fn a_transcoded_adapter_route_is_answered_at_its_rpc_path() {
 /// refresh never outlives its claim.
 #[test]
 fn an_issuer_call_ends_before_its_refresh_claim() {
-    assert!(ISSUER_CALL_TIMEOUT < crate::application_session::REFRESH_HOLD);
+    assert!(ISSUER_CALL_TIMEOUT < sid_authn::application_session::REFRESH_HOLD);
 }
 
 /// An issuer that accepts the connection and never answers fails the call at

@@ -40,7 +40,7 @@ fn make_test_invite() -> Invite {
         use_count: 0,
         expires_at: None,
         active: true,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -79,7 +79,7 @@ fn test_invite_status_revoked() {
 #[test]
 fn test_invite_status_expired() {
     let mut invite = make_test_invite();
-    invite.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+    invite.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(1));
     assert_eq!(invite.status(), InviteStatus::Expired);
     assert!(!invite.is_usable());
 }
@@ -87,7 +87,7 @@ fn test_invite_status_expired() {
 #[test]
 fn test_invite_revoke_overrides_expiry() {
     let mut invite = make_test_invite();
-    invite.expires_at = Some(Utc::now() + chrono::Duration::hours(24));
+    invite.expires_at = Some(Timestamp::now() + jiff::SignedDuration::from_hours(24));
     invite.revoke();
     assert_eq!(invite.status(), InviteStatus::Revoked);
 }

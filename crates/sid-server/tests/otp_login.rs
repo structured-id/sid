@@ -65,9 +65,9 @@ async fn bind_mailbox(svc: &TestServices, holder: &Profile, key: &str, mailbox: 
         custom_label: None,
         is_primary: true,
         verified: true,
-        verified_at: Some(chrono::Utc::now()),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        verified_at: Some(jiff::Timestamp::now()),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .create_profile_email(&contact, AuditEntry::system("test", "contact").into())
@@ -112,7 +112,7 @@ async fn pending_mail(
             .unwrap()
             .into_uuid(),
         uuid::Uuid::from_slice(&owed.payload[16..]).unwrap(),
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
     )
     .await
     .unwrap()
@@ -273,8 +273,8 @@ async fn code_signs_in_the_assigned_holder() {
                 is_primary: true,
                 verified: false,
                 verified_at: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
             },
             AuditEntry::system("test", "contact").into(),
         )

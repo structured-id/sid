@@ -16,6 +16,7 @@ use std::sync::Arc;
 use coordinode_core::graph::node::NodeId;
 use coordinode_core::graph::types::Value;
 use coordinode_embed::{Database, DatabaseError, TransactionId};
+use jiff::Timestamp;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -178,7 +179,7 @@ fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult
     if let Some(generation) = &ctx.generation {
         session::insert_generation(tx, generation)?;
     }
-    audit::append(tx, chain, ctx.audit, chrono::Utc::now())?;
+    audit::append(tx, chain, ctx.audit, Timestamp::now())?;
     for owed in &ctx.work {
         work::insert(tx, owed)?;
     }
@@ -543,18 +544,17 @@ pub(super) fn page(value: u64) -> SidResult<Value> {
         .map_err(|_| SidError::Validation(format!("page bound {value} out of range")))
 }
 
-pub(super) fn time(t: chrono::DateTime<chrono::Utc>) -> Value {
-    Value::Int(t.timestamp_micros())
+pub(super) fn time(t: Timestamp) -> Value {
+    Value::Int(t.as_microsecond())
 }
 
 /// `t` as [`time`] stores it and [`get_time`] reads it back: a value the
 /// store issues itself is answered as every later reader sees it.
-pub(super) fn stored_time(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
-    use chrono::SubsecRound;
-    t.trunc_subsecs(6)
+pub(super) fn stored_time(t: Timestamp) -> Timestamp {
+    crate::micros(t)
 }
 
-pub(super) fn opt_time(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
+pub(super) fn opt_time(t: Option<Timestamp>) -> Value {
     t.map_or(Value::Null, time)
 }
 
@@ -624,16 +624,13 @@ pub(super) fn get_bytes(row: &Row, name: &str) -> SidResult<Vec<u8>> {
     }
 }
 
-pub(super) fn get_time(row: &Row, name: &str) -> SidResult<chrono::DateTime<chrono::Utc>> {
+pub(super) fn get_time(row: &Row, name: &str) -> SidResult<Timestamp> {
     let micros = get_int(row, name)?;
-    chrono::DateTime::from_timestamp_micros(micros)
-        .ok_or_else(|| SidError::Storage(format!("{name} is no instant: {micros}")))
+    Timestamp::from_microsecond(micros)
+        .map_err(|_| SidError::Storage(format!("{name} is no instant: {micros}")))
 }
 
-pub(super) fn get_opt_time(
-    row: &Row,
-    name: &str,
-) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+pub(super) fn get_opt_time(row: &Row, name: &str) -> SidResult<Option<Timestamp>> {
     match row.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(_) => get_time(row, name).map(Some),

@@ -34,7 +34,7 @@ sid-authn = { workspace = true }
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 
 # gRPC services and the client to the SID server
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 # The field the authorization API names when it refuses a request's token.
 tonic-types = { workspace = true }
 tokio-stream = "0.1"
@@ -67,7 +67,7 @@ url = { workspace = true }
 globset = { workspace = true }
 
 secrecy = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 uuid = { workspace = true }
 # The token state source is a trait over the remote and in-process issuer.
 async-trait = { workspace = true }

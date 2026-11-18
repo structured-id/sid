@@ -63,7 +63,7 @@ pub async fn test_update_records_the_state_it_left(backend: &dyn StorageBackend)
     let change = sid_core::models::ProjectChange {
         name: Some(format!("renamed_{}", Uuid::now_v7().simple())),
         description: None,
-        updated_at: chrono::Utc::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     let updated = backend
         .update_project(
@@ -171,7 +171,7 @@ pub async fn test_operation_results_travel_between_stores(backend: &dyn StorageB
 
     let mut moved = mine.clone();
     moved.completion.namespace = namespace();
-    moved.completed_at -= chrono::Duration::days(1);
+    moved.completed_at -= crate::conformance::days(1);
     assert!(backend.import_operation_result(&moved).await.unwrap());
     let restored = backend
         .get_operation_result(&moved.completion.namespace, &key)
@@ -180,8 +180,8 @@ pub async fn test_operation_results_travel_between_stores(backend: &dyn StorageB
         .expect("imported");
     assert_eq!(restored.completion, moved.completion);
     assert_eq!(
-        restored.completed_at.timestamp_millis(),
-        moved.completed_at.timestamp_millis()
+        restored.completed_at.as_millisecond(),
+        moved.completed_at.as_millisecond()
     );
 
     let retry = Project::new(format!("op_{}", Uuid::now_v7().simple()), None);

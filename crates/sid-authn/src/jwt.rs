@@ -7,7 +7,7 @@
 use std::fmt;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, decode_header,
     encode,
@@ -190,8 +190,8 @@ pub struct JwtService {
     verifier: TokenVerifier,
     decoding_key: DecodingKey,
     issuer: String,
-    access_token_ttl: Duration,
-    id_token_ttl: Duration,
+    access_token_ttl: SignedDuration,
+    id_token_ttl: SignedDuration,
     /// Base64url-encoded SHA-256 thumbprint of the public key (used as `kid`)
     key_id: String,
     /// Raw public key bytes (32 bytes Ed25519) for JWK Set
@@ -373,7 +373,7 @@ pub struct ClientGrant<'a> {
     /// The request's DPoP key, binding the token to it (RFC 9449 §6).
     pub dpop: Option<&'a DPopBinding>,
     /// The client's own lifetime cap; never extends the issuer's.
-    pub max_lifetime: Option<Duration>,
+    pub max_lifetime: Option<SignedDuration>,
 }
 
 /// RFC 8693 §4.1 actor claim.
@@ -522,8 +522,8 @@ impl AccessTokenTtl {
     }
 
     /// The lifetime as a duration.
-    pub fn duration(self) -> Duration {
-        Duration::minutes(i64::from(self.0))
+    pub fn duration(self) -> SignedDuration {
+        SignedDuration::from_mins(i64::from(self.0))
     }
 }
 
@@ -577,7 +577,7 @@ impl JwtService {
             decoding_key,
             issuer,
             access_token_ttl: AccessTokenTtl::default().duration(),
-            id_token_ttl: Duration::hours(1),
+            id_token_ttl: SignedDuration::from_hours(1),
             key_id,
             public_key_bytes,
         })
@@ -600,14 +600,14 @@ impl JwtService {
     }
 
     /// Set ID token TTL (default: 1 hour).
-    pub fn with_id_token_ttl(mut self, ttl: Duration) -> Self {
+    pub fn with_id_token_ttl(mut self, ttl: SignedDuration) -> Self {
         self.id_token_ttl = ttl;
         self
     }
 
     /// Get access token TTL in seconds.
     pub fn access_token_ttl_secs(&self) -> i64 {
-        self.access_token_ttl.num_seconds()
+        self.access_token_ttl.as_secs()
     }
 
     /// Issue an access token JWT.
@@ -659,7 +659,7 @@ impl JwtService {
         dpop_binding: Option<&DPopBinding>,
         custom_claims: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> SidResult<String> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let (acr, exp) = token_assurance(session, now, now + self.access_token_ttl);
         let iss = signer.iss().to_owned();
         let (aud, client_id, typ, credential_kind) = match audience {
@@ -682,9 +682,9 @@ impl JwtService {
             aud: vec![aud],
             client_id,
             iss,
-            exp: exp.timestamp(),
-            iat: now.timestamp(),
-            auth_time: session.authenticated_at.timestamp(),
+            exp: exp.as_second(),
+            iat: now.as_second(),
+            auth_time: session.authenticated_at.as_second(),
             acr: acr.acr_value().to_string(),
             scope: scopes.join(" "),
             roles: roles.join(" "),
@@ -728,7 +728,7 @@ impl JwtService {
         signer: &S,
         grant: &ClientGrant<'_>,
     ) -> SidResult<String> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let lifetime = grant
             .max_lifetime
             .map_or(self.access_token_ttl, |cap| cap.min(self.access_token_ttl));
@@ -738,9 +738,9 @@ impl JwtService {
             aud: vec![grant.resource.to_owned()],
             client_id: Some(grant.client_id.to_owned()),
             iss: signer.iss().to_owned(),
-            exp: (now + lifetime).timestamp(),
-            iat: now.timestamp(),
-            auth_time: now.timestamp(),
+            exp: (now + lifetime).as_second(),
+            iat: now.as_second(),
+            auth_time: now.as_second(),
             acr: sid_core::models::session::AuthLevel::Basic
                 .acr_value()
                 .to_string(),
@@ -765,7 +765,7 @@ impl JwtService {
         original: &AccessTokenClaims,
         session: &Session,
     ) -> SidResult<String> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let (acr, exp) = token_assurance(session, now, now + self.access_token_ttl);
 
         let claims = AccessTokenClaims {
@@ -774,9 +774,9 @@ impl JwtService {
             iss: self.issuer.clone(),
             aud: vec![self.issuer.clone()],
             client_id: None,
-            exp: exp.timestamp(),
-            iat: now.timestamp(),
-            auth_time: session.authenticated_at.timestamp(),
+            exp: exp.as_second(),
+            iat: now.as_second(),
+            auth_time: session.authenticated_at.as_second(),
             acr: acr.acr_value().to_string(),
             scope: original.scope.clone(),
             roles: original.roles.clone(),
@@ -848,16 +848,16 @@ impl JwtService {
         primary_phone: Option<&ProfilePhone>,
         presentation: Option<&serde_json::Value>,
     ) -> SidResult<String> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let exp = now + self.id_token_ttl;
 
         let claims = IdTokenClaims {
             sub: sub.to_string(),
             iss: signer.iss().to_owned(),
             aud: client_id.to_string(),
-            exp: exp.timestamp(),
-            iat: now.timestamp(),
-            auth_time: session.authenticated_at.timestamp(),
+            exp: exp.as_second(),
+            iat: now.as_second(),
+            auth_time: session.authenticated_at.as_second(),
             acr: session.assurance_at(now).acr_value().to_string(),
             amr: session.amr.clone(),
             sid: Some(session.id.to_string()),
@@ -872,7 +872,7 @@ impl JwtService {
             email_verified: primary_email.map(|e| e.verified),
             phone_number: primary_phone.map(|p| p.formatted_e164()),
             phone_number_verified: primary_phone.map(|p| p.verified),
-            updated_at: Some(profile.updated_at.timestamp()),
+            updated_at: Some(profile.updated_at.as_second()),
             binding_presentation: presentation.cloned(),
         };
 
@@ -929,8 +929,8 @@ impl JwtService {
     ) -> SidResult<String> {
         use sid_core::models::machine_user::IMPERSONATION_MAX_LIFETIME_SECONDS;
 
-        let now = Utc::now();
-        let ttl = Duration::seconds(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
+        let now = Timestamp::now();
+        let ttl = SignedDuration::from_secs(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
         let exp = (now + ttl).min(session.expires_at);
 
         let claims = AccessTokenClaims {
@@ -939,9 +939,9 @@ impl JwtService {
             iss: self.issuer.clone(),
             aud: vec![self.issuer.clone()],
             client_id: None,
-            exp: exp.timestamp(),
-            iat: now.timestamp(),
-            auth_time: now.timestamp(),
+            exp: exp.as_second(),
+            iat: now.as_second(),
+            auth_time: now.as_second(),
             acr: "urn:sid:acr:impersonation".to_string(),
             scope: scopes.join(" "),
             roles: String::new(),
@@ -978,13 +978,13 @@ pub fn logout_token_signed_by<S: TokenSigner>(
     client_id: &str,
     session_id: Option<&str>,
 ) -> SidResult<String> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let claims = LogoutTokenClaims {
         sub: sub.to_string(),
         iss: signer.iss().to_owned(),
         aud: client_id.to_string(),
-        iat: now.timestamp(),
-        exp: (now + Duration::seconds(LOGOUT_TOKEN_TTL_SECS)).timestamp(),
+        iat: now.as_second(),
+        exp: (now + SignedDuration::from_secs(LOGOUT_TOKEN_TTL_SECS)).as_second(),
         jti: uuid::Uuid::now_v7().to_string(),
         events: serde_json::Value::Object(serde_json::Map::from_iter([(
             BACKCHANNEL_LOGOUT_EVENT.to_owned(),
@@ -1048,9 +1048,9 @@ fn pem_to_der(pem: &[u8]) -> SidResult<Vec<u8>> {
 /// `ttl_end`, the session's end, or the step-up it claims.
 fn token_assurance<O>(
     session: &Session<O>,
-    now: chrono::DateTime<Utc>,
-    ttl_end: chrono::DateTime<Utc>,
-) -> (sid_core::models::session::AuthLevel, chrono::DateTime<Utc>) {
+    now: Timestamp,
+    ttl_end: Timestamp,
+) -> (sid_core::models::session::AuthLevel, Timestamp) {
     let level = session.assurance_at(now);
     let mut exp = ttl_end.min(session.expires_at);
     if let Some(elevation) = session.elevation

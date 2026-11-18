@@ -101,7 +101,7 @@ fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
 
 /// An Orders token bound to the fixture proof key.
 fn bound_token(key: &jsonwebtoken::EncodingKey) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sign(
         key,
         "at+jwt",
@@ -142,7 +142,7 @@ fn proof(htm: &str, htu: &str, token: &str) -> String {
     header.jwk = Some(jwk);
     let payload = serde_json::json!({
         "jti": uuid::Uuid::now_v7().to_string(), "htm": htm, "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(
@@ -211,7 +211,7 @@ async fn a_call_without_a_token_for_this_resource_is_unauthenticated() {
 #[tokio::test]
 async fn a_token_of_another_kind_is_unauthenticated() {
     let f = fixture();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = |client: bool| {
         let mut claims = serde_json::json!({
             "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS],
@@ -266,7 +266,7 @@ async fn a_token_of_another_kind_is_unauthenticated() {
 #[tokio::test]
 async fn the_credentials_kind_and_scopes_bound_the_call() {
     let f = fixture();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = |kind: Option<&str>, scope: &str| {
         let mut claims = serde_json::json!({
             "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS], "client_id": "orders-console",

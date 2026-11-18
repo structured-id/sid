@@ -12,8 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     AbandonedEnrollment, AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryEpochUse,
     HistoryKsf, HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, KeyLifecycle,
@@ -239,7 +239,7 @@ fn set_status(tx: &Statements<'_>, id: HistoryEpochId, status: HistoryEpochUse) 
 fn owner_uses(
     tx: &Statements<'_>,
     domain: &[u8; 32],
-) -> SidResult<Vec<(Uuid, HistoryEpochId, DateTime<Utc>)>> {
+) -> SidResult<Vec<(Uuid, HistoryEpochId, Timestamp)>> {
     let rows = tx.run(
         "MATCH (u:SidHistoryKeyUse) WHERE u.owner_domain = $d
          RETURN u.operation AS operation, u.epoch_id AS epoch_id, u.expires_at AS expires_at",
@@ -649,7 +649,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
                             Params::default()
                                 .with("op", uuid(&operation))
                                 .with("d", domain_value(&domain))
-                                .with("at", time(Utc::now())),
+                                .with("at", time(Timestamp::now())),
                         )?;
                     }
                 }
@@ -702,7 +702,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
                 let owner = owner_turn(tx, &domain)?;
                 let params = Params::default()
                     .with("d", domain_value(&domain))
-                    .with("at", time(Utc::now()));
+                    .with("at", time(Timestamp::now()));
                 // The fence keeps the time of the first purge.
                 let fence = if owner.purged {
                     "MATCH (o:SidHistoryOwner) WHERE o.domain = $d
@@ -728,7 +728,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
             .await
     }
 
-    async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> SidResult<u64> {
+    async fn compact_abandoned(&self, before: Timestamp, audit: AuditEntry) -> SidResult<u64> {
         self.backend
             .transaction(move |tx| {
                 let mut dropped = 0u64;
@@ -772,7 +772,7 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
         self.backend.read(move |tx| epoch_key(tx, epoch)).await
     }
 
-    async fn write_cutoff(&self) -> SidResult<Option<DateTime<Utc>>> {
+    async fn write_cutoff(&self) -> SidResult<Option<Timestamp>> {
         self.backend
             .read(|tx| read_cutoff(tx, Cutoff::Evaluator))
             .await
@@ -780,9 +780,9 @@ impl HistoryKeyStore for CoordinodeHistoryKeyStore {
 
     async fn raise_write_cutoff(
         &self,
-        not_before: DateTime<Utc>,
+        not_before: Timestamp,
         audit: AuditEntry,
-    ) -> SidResult<DateTime<Utc>> {
+    ) -> SidResult<Timestamp> {
         self.backend
             .transaction(move |tx| {
                 let (cutoff, moved) = raise_cutoff(tx, Cutoff::Evaluator, not_before)?;

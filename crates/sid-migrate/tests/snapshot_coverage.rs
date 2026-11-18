@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Duration, SubsecRound, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_authn::snapshot_rules::AuthnSnapshotRules;
 use sid_core::models::consent::{ClaimType, ConsentRecord, ConsentStatus};
 use sid_core::models::notification::NotificationPreferences;
@@ -110,6 +110,20 @@ fn ctx() -> MutationContext {
     AuditEntry::system("test", "coverage").into()
 }
 
+/// `at` cut down to whole `unit`s, as a store of that precision keeps it.
+fn trunc(at: Timestamp, unit: jiff::Unit) -> Timestamp {
+    at.round(
+        jiff::TimestampRound::new()
+            .smallest(unit)
+            .mode(jiff::RoundMode::Trunc),
+    )
+    .expect("truncation stays in range")
+}
+
+fn days(n: i64) -> Duration {
+    Duration::from_hours(n * 24)
+}
+
 /// A quoted column value with a time in it written at microsecond
 /// precision: stores write the same instant at millisecond or microsecond
 /// precision depending on the path that wrote it.
@@ -117,12 +131,8 @@ fn normalized(value: &str) -> String {
     let Some(text) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) else {
         return value.to_owned();
     };
-    match chrono::DateTime::parse_from_rfc3339(text) {
-        Ok(time) => format!(
-            "'{}'",
-            time.with_timezone(&Utc)
-                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-        ),
+    match text.parse::<Timestamp>() {
+        Ok(time) => format!("'{}'", time.strftime("%Y-%m-%dT%H:%M:%S%.6fZ")),
         Err(_) => value.to_owned(),
     }
 }
@@ -206,7 +216,7 @@ async fn installation(source: &SqliteBackend) -> Installation {
         )
         .await
         .unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), jiff::Unit::Millisecond);
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),
@@ -320,7 +330,7 @@ fn client_for(app: &Application, org: OrgId) -> OAuth2Client {
 async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profile {
     let profile = Profile::new(Some("coverage"));
     source.create_profile(&profile, ctx()).await.unwrap();
-    let expires = Utc::now() + Duration::hours(1);
+    let expires = Timestamp::now() + Duration::from_hours(1);
     let authorizing = Session::new(profile.id, None, expires);
     source
         .create_session_atomic(&authorizing, 0, None, ctx())
@@ -336,8 +346,8 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         code_challenge: None,
         nonce: None,
         authentication: authorizing.grant_authentication(),
-        expires_at: Utc::now() + Duration::minutes(5),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_mins(5),
+        created_at: Timestamp::now(),
         used: false,
         session_id: None,
         // A snapshot carries the proof made for the code's sign-in.
@@ -353,8 +363,8 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         client_id: installation.client.client_id.clone(),
         scopes: vec!["openid".into()],
         resource: installation.resource.id,
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + days(30),
+        created_at: Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: family,
@@ -368,8 +378,8 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         session_id: session.id,
         key_jkt: "jkt".into(),
         credential_hashes: vec![vec![n; 32]],
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + days(30),
+        created_at: Timestamp::now(),
     };
     // The session's first native generation commits with the session.
     let current = generation(1);
@@ -386,7 +396,7 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
         .rotate_refresh_token(
             first.id,
             &token(family),
-            Utc::now() + Duration::seconds(30),
+            Timestamp::now() + Duration::from_secs(30),
             ctx(),
         )
         .await
@@ -398,7 +408,7 @@ async fn signed_in(source: &SqliteBackend, installation: &Installation) -> Profi
                 exchange: NativeExchange::from_bytes(&[7; 16]).unwrap(),
                 successor: &generation(2),
                 sealed: b"sealed",
-                redeliver_until: Utc::now() + Duration::seconds(30),
+                redeliver_until: Timestamp::now() + Duration::from_secs(30),
             },
             ctx(),
         )
@@ -424,7 +434,7 @@ async fn registered(source: &SqliteBackend) -> Profile {
     )
     .unwrap();
     source.register_profile(&registration, ctx()).await.unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     source
         .create_profile_phone(
             &ProfilePhone {
@@ -651,7 +661,7 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
     {
         use sid_plugin::entry_connection::EntryConnectionStore;
         let handle = EntryHandle::generate();
-        let now = Utc::now().trunc_subsecs(6);
+        let now = trunc(Timestamp::now(), jiff::Unit::Microsecond);
         let connection = EntryConnection {
             handle,
             owner: ConnectionOwner::Administration,
@@ -693,7 +703,7 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
         )
         .await
         .unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     source
         .create_initial_access_token(
             &InitialAccessToken {
@@ -707,7 +717,7 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
                 allowed_redirect_patterns: vec!["https://app.sid.example.com/*".into()],
                 created_by: profile.id,
                 revoked: false,
-                expires_at: now + Duration::days(1),
+                expires_at: now + days(1),
                 created_at: now,
             },
             ctx(),
@@ -776,10 +786,8 @@ async fn integrations(source: &SqliteBackend, profile: &Profile) {
 /// branding draft, a Cedar policy, a profile grant, a pending device code,
 /// a pending magic link and a quarantined released principal.
 async fn settings(source: &SqliteBackend, installation: &Installation, profile: &Profile) {
-    use chrono::Timelike;
     // Below the stores' microseconds, as a host clock may report it.
-    let now = Utc::now()
-        .with_nanosecond(123_456_789)
+    let now = Timestamp::new(Timestamp::now().as_second(), 123_456_789)
         .expect("a nanosecond within the second");
     source
         .create_branding_config(
@@ -834,7 +842,7 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
         .unwrap();
     // A code redeemed into a session that has expired since: the code names
     // the session, so the session moves with it.
-    let ended = Session::new(profile.id, None, now - Duration::hours(1));
+    let ended = Session::new(profile.id, None, now - Duration::from_hours(1));
     source.create_session(&ended, ctx()).await.unwrap();
     let mut redeemed = DeviceAuthorizationCode::new(
         installation.client.client_id.clone(),
@@ -846,7 +854,7 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
     );
     redeemed.status = DeviceAuthStatus::Redeemed;
     redeemed.authorized_by = Some(profile.id);
-    redeemed.authorized_at = Some(now - Duration::hours(2));
+    redeemed.authorized_at = Some(now - Duration::from_hours(2));
     redeemed.redeemed_session_id = Some(ended.id);
     source
         .create_device_auth_code(&redeemed, ctx())
@@ -863,7 +871,7 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
         .await
         .unwrap();
     source
-        .quarantine_principal("released-hash", "email", now + Duration::days(30), ctx())
+        .quarantine_principal("released-hash", "email", now + days(30), ctx())
         .await
         .unwrap();
 }
@@ -880,7 +888,7 @@ async fn settings(source: &SqliteBackend, installation: &Installation, profile: 
 /// this build.
 async fn activity(source: &SqliteBackend, installation: &Installation, profile: &Profile) {
     use sid_plugin::{CeremonyStateStore, SignInHistoryStore};
-    let now = Utc::now();
+    let now = Timestamp::now();
     source
         .set_enrollment_policy(
             &EnrollmentPolicy {
@@ -905,7 +913,7 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
         metadata: Default::default(),
         max_uses: 2,
         use_count: 0,
-        expires_at: Some(now + Duration::days(7)),
+        expires_at: Some(now + days(7)),
         active: true,
         created_at: now,
     };
@@ -1258,7 +1266,7 @@ async fn history(source: &SqliteBackend) {
                 ksf: HistoryKsf::DEFAULT,
                 ksf_salt: [4; 32],
                 status: HistoryEpochUse::Active,
-                created_at: Utc::now().trunc_subsecs(3),
+                created_at: trunc(Timestamp::now(), jiff::Unit::Millisecond),
             },
             key: WrappedHistoryKey(
                 sid_keys::EncryptedField {
@@ -1328,11 +1336,11 @@ async fn history(source: &SqliteBackend) {
         .unwrap()
         .revision;
     let mut successor = new_epoch(owner_domain);
-    successor.epoch.created_at = epoch.epoch.created_at + Duration::milliseconds(1);
+    successor.epoch.created_at = epoch.epoch.created_at + Duration::from_millis(1);
     keys.rotate_epoch(&successor, epoch.epoch.id, revision, key_audit())
         .await
         .unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     keys.prepare_epochs(
         &HistoryPreparation {
             owner_domain,
@@ -1343,7 +1351,7 @@ async fn history(source: &SqliteBackend) {
             },
             window: vec![epoch.epoch.id],
             operation: Uuid::now_v7(),
-            expires_at: now + Duration::minutes(10),
+            expires_at: now + Duration::from_mins(10),
             now,
         },
         key_audit(),
@@ -1356,7 +1364,7 @@ async fn history(source: &SqliteBackend) {
     keys.purge_owner(&[9; 32], key_audit()).await.unwrap();
 
     source
-        .current_operation_period(Utc::now(), Duration::hours(1))
+        .current_operation_period(Timestamp::now(), Duration::from_hours(1))
         .await
         .unwrap();
     source
@@ -1378,7 +1386,7 @@ async fn populated() -> SqliteBackend {
     // Retention cut the oldest records: the chains resume from checkpoints.
     assert!(
         source
-            .drop_expired_audit_records(Utc::now() + Duration::days(62), ctx())
+            .drop_expired_audit_records(Timestamp::now() + days(62), ctx())
             .await
             .unwrap()
             > 0

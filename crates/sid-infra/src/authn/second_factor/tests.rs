@@ -91,7 +91,11 @@ async fn an_installed_session_is_signed_in() {
     let alice = account(&store).await;
     let (session, cookie) = stored(
         &store,
-        Session::new(alice, None, chrono::Utc::now() + chrono::Duration::hours(1)),
+        Session::new(
+            alice,
+            None,
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+        ),
     )
     .await;
     let found = browser_factor(

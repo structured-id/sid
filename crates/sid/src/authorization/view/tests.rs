@@ -69,7 +69,7 @@ fn test_assignment_to_proto_with_scope_and_expiry() {
         RoleId::generate(),
     );
     assignment.scope = Some("project:abc".to_string());
-    assignment.expires_at = Some(chrono::Utc::now());
+    assignment.expires_at = Some(jiff::Timestamp::now());
 
     let proto = assignment_to_proto(&assignment);
     assert_eq!(proto.scope, Some("project:abc".to_string()));

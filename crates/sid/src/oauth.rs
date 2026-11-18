@@ -429,6 +429,12 @@ impl OAuth {
             })
     }
 
+    /// The issuer whose protocol endpoints a request reached by the route's
+    /// handle ([`IssuerRegistry::routed`]).
+    pub async fn routed_issuer(&self, handle: &str) -> sid_core::Result<Option<OidcIssuer>> {
+        self.issuers.routed(handle).await
+    }
+
     /// The issuer a request's path names, when it serves clients of
     /// `client_org`. An unknown handle and a client of another issuer both
     /// yield `None`: to the caller the client is unknown at this endpoint,

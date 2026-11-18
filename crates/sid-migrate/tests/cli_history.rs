@@ -71,10 +71,8 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
             ksf: HistoryKsf::DEFAULT,
             ksf_salt: [4; 32],
             status: HistoryEpochUse::Active,
-            created_at: chrono::DateTime::from_timestamp_millis(
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .unwrap(),
+            created_at: jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond())
+                .unwrap(),
         },
         key: WrappedHistoryKey(
             sid_keys::EncryptedField {

@@ -12,7 +12,7 @@
 //! it over the same transport, so only the client that started the operation
 //! continues it, and a page on another site cannot.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sid_core::models::BrowserCsrfToken;
 use subtle::ConstantTimeEq;
@@ -64,11 +64,11 @@ impl CeremonyContext {
     pub fn headers(
         self,
         cookie: &BrowserCookie,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Vec<(&'static str, String)> {
         match self.csrf {
             Some(csrf) => {
-                let max_age = (expires_at - Utc::now()).num_seconds();
+                let max_age = expires_at.duration_since(Timestamp::now()).as_secs();
                 vec![
                     ("set-cookie", cookie.set(&self.secret, max_age)),
                     (CSRF_HEADER, BrowserCsrf::encode(&csrf)),

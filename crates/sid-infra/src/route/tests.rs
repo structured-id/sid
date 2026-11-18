@@ -2,6 +2,48 @@
 
 use super::*;
 
+/// The root routes of the base issuer, read from the proto rules, are its
+/// protocol endpoints only: the browser API mount, the cabinet, Central's
+/// hosted entry and the scoped forms are not, so an edge never sends them to
+/// the base issuer.
+#[test]
+fn the_root_issuer_endpoints_are_its_protocol_routes() {
+    for path in [
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+        "/jwks",
+        "/userinfo",
+        "/oauth2/authorize",
+        "/oauth2/end-session",
+        "/oauth2/token",
+        "/oauth2/introspect",
+        "/oauth2/revoke",
+        "/oauth2/device",
+        "/oauth2/register",
+        "/oauth2/register/client-1",
+        "/auth/federation/start",
+        "/auth/federation/callback",
+        "/auth/federation/connections",
+    ] {
+        assert_eq!(root_issuer_endpoint(path), Some(path), "{path}");
+    }
+    for path in [
+        "/",
+        "/dashboard/",
+        "/api/sid.v1.authn.AuthService/OpaqueLoginStart",
+        "/auth/entry",
+        "/oauth2",
+        "/oauth2/unknown",
+        "/oauth2/register/",
+        "/oauth2/register/client-1/x",
+        "/jwksx",
+        "/.well-known/oauth-authorization-server/i/0123456789abcdef0123456789abcdef",
+        "/i/0123456789abcdef0123456789abcdef/jwks",
+    ] {
+        assert_eq!(root_issuer_endpoint(path), None, "{path}");
+    }
+}
+
 /// The gRPC path is split off `/api/...`.
 #[test]
 fn api_method_names_the_grpc_path() {

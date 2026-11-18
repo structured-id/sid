@@ -4,8 +4,9 @@
 //! records under fresh identifiers, so a harness may run them concurrently
 //! against one shared store.
 
+use crate::conformance::trunc;
 use async_trait::async_trait;
-use chrono::{SubsecRound, Utc};
+use jiff::{Timestamp, Unit};
 use sid_core::models::{
     ApplicationId, ApplicationType, AuthLevel, ClientKeySet, EnforcementMode, IssuerId,
     LoginStrategy, OAuth2Client, OrgId, ProjectId, ProtectedResource, ResourceAccess, ResourceId,
@@ -59,7 +60,7 @@ fn client_keys() -> ClientKeySet {
 /// A new confidential web client that can authenticate by its registered
 /// method, its times at the millisecond precision every store keeps.
 pub fn client() -> OAuth2Client {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     OAuth2Client {
         client_id: format!("conformance-{}", Uuid::now_v7().simple()),
         project_id: ProjectId::SYSTEM,
@@ -106,7 +107,7 @@ pub fn client() -> OAuth2Client {
 
 /// A new active resource of `issuer` under a fresh indicator.
 pub fn resource(issuer: IssuerId) -> ProtectedResource {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     ProtectedResource {
         id: ResourceId::generate(),
         application_id: Some(ApplicationId::generate()),
@@ -154,7 +155,7 @@ pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
         client_id: registered.client_id.clone(),
         resource_id: api.id,
         scopes: vec!["orders.read".into()],
-        created_at: Utc::now().trunc_subsecs(3),
+        created_at: trunc(Timestamp::now(), Unit::Millisecond),
     })
     .await;
     h.set_default_resource(&registered.client_id, api.id).await;
@@ -270,7 +271,7 @@ pub async fn resource_access_exact<H: RegistryHarness>(h: &H) {
         client_id: granted_client.client_id.clone(),
         resource_id: api.id,
         scopes: vec!["orders.read".into()],
-        created_at: Utc::now().trunc_subsecs(3),
+        created_at: trunc(Timestamp::now(), Unit::Millisecond),
     };
     h.grant_access(&granted).await;
     let registry = h.registry();

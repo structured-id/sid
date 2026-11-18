@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Duration;
+use jiff::SignedDuration as Duration;
 
 fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
     let id = Uuid::now_v7();
@@ -11,8 +11,8 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource: ResourceId::generate(),
-        expires_at: Utc::now() + expires_in,
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + expires_in,
+        created_at: Timestamp::now(),
         revoked,
         replaced_by: None,
         family_id: id,
@@ -34,8 +34,8 @@ fn test_validated_token_reads_without_a_copy_profile_id() {
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: ResourceId::generate(),
-        expires_at: Utc::now() + Duration::days(1),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_hours(24),
+        created_at: Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: id,
@@ -50,27 +50,27 @@ fn test_validated_token_reads_without_a_copy_profile_id() {
 
 fn make_token_with_grace(expires_in: Duration, revoked: bool, grace_secs: i64) -> RefreshToken {
     let mut token = make_token(expires_in, revoked);
-    token.grace_expires_at = Some(Utc::now() + Duration::seconds(grace_secs));
+    token.grace_expires_at = Some(Timestamp::now() + Duration::from_secs(grace_secs));
     token
 }
 
 #[test]
 fn test_valid_token() {
-    let token = make_token(Duration::days(30), false);
+    let token = make_token(Duration::from_hours(30 * 24), false);
     assert!(!token.is_expired());
     assert!(token.is_valid());
 }
 
 #[test]
 fn test_expired_token() {
-    let token = make_token(Duration::seconds(-1), false);
+    let token = make_token(Duration::from_secs(-1), false);
     assert!(token.is_expired());
     assert!(!token.is_valid());
 }
 
 #[test]
 fn test_revoked_token_no_grace() {
-    let token = make_token(Duration::days(30), true);
+    let token = make_token(Duration::from_hours(30 * 24), true);
     assert!(!token.is_expired());
     assert!(!token.is_valid());
     assert!(!token.is_within_grace_window());
@@ -78,20 +78,20 @@ fn test_revoked_token_no_grace() {
 
 #[test]
 fn test_revoked_and_expired() {
-    let token = make_token(Duration::seconds(-1), true);
+    let token = make_token(Duration::from_secs(-1), true);
     assert!(!token.is_valid());
 }
 
 #[test]
 fn test_revoked_within_grace_window() {
-    let token = make_token_with_grace(Duration::days(30), true, 30);
+    let token = make_token_with_grace(Duration::from_hours(30 * 24), true, 30);
     assert!(token.is_within_grace_window());
     assert!(token.is_valid());
 }
 
 #[test]
 fn test_revoked_grace_expired() {
-    let token = make_token_with_grace(Duration::days(30), true, -5);
+    let token = make_token_with_grace(Duration::from_hours(30 * 24), true, -5);
     assert!(!token.is_within_grace_window());
     assert!(!token.is_valid());
 }
@@ -99,26 +99,26 @@ fn test_revoked_grace_expired() {
 #[test]
 fn test_active_token_with_grace_is_valid() {
     // Non-revoked token with grace_expires_at set should still be valid
-    let token = make_token_with_grace(Duration::days(30), false, 30);
+    let token = make_token_with_grace(Duration::from_hours(30 * 24), false, 30);
     assert!(token.is_valid());
 }
 
 #[test]
 fn test_scopes_string() {
-    let token = make_token(Duration::days(1), false);
+    let token = make_token(Duration::from_hours(24), false);
     assert_eq!(token.scopes_string(), "openid profile");
 }
 
 #[test]
 fn test_scopes_string_empty() {
-    let mut token = make_token(Duration::days(1), false);
+    let mut token = make_token(Duration::from_hours(24), false);
     token.scopes = vec![];
     assert_eq!(token.scopes_string(), "");
 }
 
 #[test]
 fn test_family_id_default() {
-    let token = make_token(Duration::days(1), false);
+    let token = make_token(Duration::from_hours(24), false);
     assert_eq!(token.family_id, token.id, "first token: family_id == id");
 }
 
@@ -138,8 +138,8 @@ fn test_validate_valid_token_consumes_self() {
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource,
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_hours(30 * 24),
+        created_at: Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: id,
@@ -163,7 +163,7 @@ fn test_validate_valid_token_consumes_self() {
 #[test]
 fn test_validate_revoked_no_grace_returns_theft() {
     let session_id = SessionId::generate();
-    let mut token = make_token(Duration::days(30), true);
+    let mut token = make_token(Duration::from_hours(30 * 24), true);
     token.session_id = session_id;
     let family_id = token.family_id;
 
@@ -179,7 +179,7 @@ fn test_validate_revoked_no_grace_returns_theft() {
 
 #[test]
 fn test_validate_revoked_within_grace_succeeds() {
-    let token = make_token_with_grace(Duration::days(30), true, 30);
+    let token = make_token_with_grace(Duration::from_hours(30 * 24), true, 30);
     let validated = token
         .validate()
         .expect("should succeed within grace window");
@@ -188,7 +188,7 @@ fn test_validate_revoked_within_grace_succeeds() {
 
 #[test]
 fn test_validate_revoked_grace_expired_returns_theft() {
-    let token = make_token_with_grace(Duration::days(30), true, -5);
+    let token = make_token_with_grace(Duration::from_hours(30 * 24), true, -5);
     let family_id = token.family_id;
     let session_id = token.session_id;
 
@@ -204,7 +204,7 @@ fn test_validate_revoked_grace_expired_returns_theft() {
 
 #[test]
 fn test_validate_expired_returns_error() {
-    let token = make_token(Duration::seconds(-1), false);
+    let token = make_token(Duration::from_secs(-1), false);
     let err = token.validate().unwrap_err();
     assert_eq!(err, RefreshTokenError::Expired);
 }
@@ -212,7 +212,7 @@ fn test_validate_expired_returns_error() {
 #[test]
 fn test_validate_expired_and_revoked_returns_expired() {
     // Expired is checked first: the token is unusable regardless of revocation
-    let token = make_token(Duration::seconds(-1), true);
+    let token = make_token(Duration::from_secs(-1), true);
     let err = token.validate().unwrap_err();
     assert_eq!(err, RefreshTokenError::Expired);
 }

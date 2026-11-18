@@ -4,7 +4,7 @@
 //! First-class non-human identity for CI/CD, bots, and service-to-service auth.
 //! Uses OAuth2 client credentials grant. Parallel to Profile but non-interactive.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::{OrgId, ProfileId, ProjectId};
@@ -243,10 +243,10 @@ pub struct MachineUser {
     pub max_token_lifetime: Option<u32>,
 
     /// Hard expiration (if set, machine user stops working after this).
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl MachineUser {
@@ -256,7 +256,7 @@ impl MachineUser {
         display_name: impl Into<String>,
         owner: MachineOwner,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: MachineUserId::generate(),
             project_id,
@@ -277,7 +277,7 @@ impl MachineUser {
 
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map(|exp| Utc::now() >= exp)
+            .map(|exp| Timestamp::now() >= exp)
             .unwrap_or(false)
     }
 
@@ -307,7 +307,7 @@ impl<'a> ActiveMachineUser<'a> {
     /// Suspend the machine user. Consumes wrapper.
     pub fn suspend(self) {
         self.0.status = MachineUserStatus::Suspended;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     pub fn inner(&self) -> &MachineUser {
@@ -363,8 +363,8 @@ pub struct MachineUserCredential {
     /// Algorithm (e.g. "RS256", "ES256" for private_key_jwt).
     pub algorithm: Option<String>,
 
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<Timestamp>,
+    pub created_at: Timestamp,
 }
 
 /// CE hardcoded credential rotation policy.
@@ -392,20 +392,20 @@ impl MachineUserCredential {
             credential_data: credential_data.into(),
             algorithm: None,
             expires_at: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map(|exp| Utc::now() >= exp)
+            .map(|exp| Timestamp::now() >= exp)
             .unwrap_or(false)
     }
 
     /// Whether credential exceeds max age policy.
     pub fn exceeds_max_age(&self) -> bool {
-        let age = Utc::now() - self.created_at;
-        age.num_days() > MAX_CREDENTIAL_AGE_DAYS as i64
+        let age = Timestamp::now().duration_since(self.created_at);
+        age.as_secs() / 86_400 > MAX_CREDENTIAL_AGE_DAYS as i64
     }
 }
 
@@ -454,7 +454,7 @@ pub struct ImpersonationGrant {
     /// Scopes allowed when impersonating. `["*"]` = all scopes.
     pub allowed_scopes: Vec<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl ImpersonationGrant {
@@ -469,7 +469,7 @@ impl ImpersonationGrant {
             target_type,
             target: target.into(),
             allowed_scopes,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 

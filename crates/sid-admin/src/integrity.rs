@@ -13,7 +13,7 @@
 //!
 //! Run with `sid-admin integrity check` (manual, recommended weekly).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
@@ -108,9 +108,9 @@ impl LayerResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityReport {
     /// When the check started.
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     /// When the check completed.
-    pub completed_at: DateTime<Utc>,
+    pub completed_at: Timestamp,
     /// Which layers were checked.
     pub layers: Vec<LayerResult>,
     /// Overall verdict.
@@ -171,7 +171,7 @@ impl IntegrityService {
     ///
     /// Each layer runs independently. Failures in one layer don't prevent others.
     pub async fn run_check(&self, request: &IntegrityCheckRequest) -> IntegrityReport {
-        let started_at = Utc::now();
+        let started_at = Timestamp::now();
         let layers_to_check = Self::resolve_layers(request);
         let mut layer_results = Vec::with_capacity(layers_to_check.len());
 
@@ -194,7 +194,7 @@ impl IntegrityService {
             layer_results.push(result);
         }
 
-        let completed_at = Utc::now();
+        let completed_at = Timestamp::now();
         let total_entities_checked: u64 = layer_results.iter().map(|l| l.entities_checked).sum();
         let total_issues_found: u64 = layer_results.iter().map(|l| l.issues_found).sum();
         let passed = layer_results.iter().all(|l| l.passed());
@@ -526,8 +526,8 @@ mod tests {
     #[test]
     fn test_report_serde_roundtrip() {
         let report = IntegrityReport {
-            started_at: Utc::now(),
-            completed_at: Utc::now(),
+            started_at: Timestamp::now(),
+            completed_at: Timestamp::now(),
             layers: vec![LayerResult {
                 layer: VerificationLayer::AuditChain,
                 entities_checked: 10,

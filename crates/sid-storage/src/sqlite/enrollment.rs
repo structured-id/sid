@@ -192,7 +192,7 @@ impl SqliteBackend {
             " ORDER BY created_at DESC, id DESC LIMIT ?3 OFFSET ?4"
         ))
         .bind(filter.status.map(|s| s.as_str()))
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
         .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .bind(filter.search_pattern())
@@ -210,7 +210,7 @@ impl SqliteBackend {
              OR created_by_name LIKE ?3 ESCAPE '\\')"
         ))
         .bind(filter.status.map(|s| s.as_str()))
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(filter.search_pattern())
         .fetch_one(&self.pool)
         .await
@@ -262,7 +262,7 @@ impl SqliteBackend {
             invite_columns!()
         ))
         .bind(id)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Try use invite failed: {e}")))?;
@@ -372,7 +372,7 @@ impl SqliteBackend {
 
     pub(crate) async fn count_registrations_by_source_impl(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: jiff::Timestamp,
     ) -> SidResult<Vec<(RegistrationSourceType, u64)>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT source_type, COUNT(*) FROM registration_sources \
@@ -394,7 +394,7 @@ impl SqliteBackend {
 
     pub(crate) async fn top_referrers_impl(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: jiff::Timestamp,
         limit: u64,
     ) -> SidResult<Vec<(ProfileId, u64)>> {
         let rows: Vec<(ProfileId, i64)> = sqlx::query_as(

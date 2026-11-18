@@ -15,7 +15,7 @@ fn blob(ciphertext: &[u8], nonce: u8) -> EncryptedBlob {
         ciphertext: ciphertext.to_vec(),
         nonce: [nonce; 12],
         version: 0,
-        updated_at: chrono::Utc::now(),
+        updated_at: jiff::Timestamp::now(),
     }
 }
 

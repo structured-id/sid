@@ -94,7 +94,7 @@ pub struct FlowConfig {
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u32,
 
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: jiff::Timestamp,
 }
 
 fn default_timeout() -> u32 {
@@ -271,8 +271,8 @@ pub struct FlowAction {
     #[serde(default)]
     pub revision: u64,
 
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 /// Action-type-specific configuration.
@@ -388,7 +388,7 @@ mod tests {
             flow_type: FlowType::Authentication,
             steps,
             timeout_seconds: 300,
-            updated_at: chrono::Utc::now(),
+            updated_at: jiff::Timestamp::now(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -424,8 +424,8 @@ mod tests {
             on_error: ActionOnError::Continue,
             enabled: true,
             revision: 0,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         };
 
         let json = serde_json::to_string(&action).unwrap();

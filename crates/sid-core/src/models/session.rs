@@ -3,8 +3,8 @@
 //!
 //! Represents an active user session with scopes, assurance level, and metadata.
 
-use chrono::{DateTime, Utc};
 use core::net::IpAddr;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -122,7 +122,7 @@ pub struct Elevation {
     /// `Elevated` or `Critical`.
     pub level: AuthLevel,
     /// When it lapses.
-    pub until: DateTime<Utc>,
+    pub until: Timestamp,
 }
 
 /// What a completed authentication changes on a session: its own level, its
@@ -131,7 +131,7 @@ pub struct Elevation {
 pub struct SessionAuthentication {
     pub assurance_level: AuthLevel,
     pub elevation: Option<Elevation>,
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: Timestamp,
     pub amr: Vec<String>,
 }
 
@@ -148,13 +148,13 @@ pub struct AcceptedEvidence {
     /// The attested methods (RFC 8176), kept as the issuer stated them.
     pub amr: Vec<String>,
     /// When the holder actually authenticated at the issuer.
-    pub auth_time: DateTime<Utc>,
+    pub auth_time: Timestamp,
 }
 
 impl AcceptedEvidence {
     /// The evidence with the ACR the token names: a shared SID URN, or no
     /// level for any other string.
-    pub fn new(acr: Option<&str>, amr: Vec<String>, auth_time: DateTime<Utc>) -> Self {
+    pub fn new(acr: Option<&str>, amr: Vec<String>, auth_time: Timestamp) -> Self {
         Self {
             acr: acr.and_then(|value| {
                 value
@@ -173,12 +173,12 @@ impl AcceptedEvidence {
     /// as every step-up is, counted from `auth_time`: admitting the evidence
     /// later, again or on a refresh never restarts the window, and a window
     /// that already ended grants nothing.
-    pub fn authentication(&self, now: DateTime<Utc>) -> Option<SessionAuthentication> {
+    pub fn authentication(&self, now: Timestamp) -> Option<SessionAuthentication> {
         let level = self.acr?;
         let elevation = (level >= AuthLevel::Elevated)
             .then(|| Elevation {
                 level,
-                until: self.auth_time + chrono::Duration::minutes(ELEVATION_TTL_MINUTES),
+                until: self.auth_time + SignedDuration::from_mins(ELEVATION_TTL_MINUTES),
             })
             .filter(|e| e.until > now);
         Some(SessionAuthentication {
@@ -198,7 +198,7 @@ pub struct GrantAuthentication {
     /// The IdP session that authenticated; never disclosed to the recipient,
     /// it links the redeemed session to it for logout.
     pub session: SessionId,
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: Timestamp,
     pub amr: Vec<String>,
     /// The session's own level.
     pub assurance_level: AuthLevel,
@@ -312,7 +312,7 @@ pub struct Session<O = ProfileId> {
 
     /// When authentication actually happened (for session decay).
     /// Used by sid-proxy to compute decay level from JWT claims.
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: Timestamp,
 
     /// Authentication methods used (RFC 8176 `amr` claim).
     /// Cumulative within session — step-up adds methods, never removes.
@@ -339,11 +339,11 @@ pub struct Session<O = ProfileId> {
     /// After this deadline, the session should be blocked or require
     /// step-up authentication to comply with the security policy.
     /// Only meaningful when `policy_grace` is `true`.
-    pub grace_deadline: Option<DateTime<Utc>>,
+    pub grace_deadline: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub last_activity_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub last_activity_at: Option<Timestamp>,
 
     /// Set when a browser signed in with this session: the hash of the
     /// secret its IdP session cookie holds.
@@ -362,8 +362,8 @@ pub struct Session<O = ProfileId> {
 
 impl<O> Session<O> {
     /// Create a new session.
-    pub fn new(profile_id: O, ip_address: Option<IpAddr>, expires_at: DateTime<Utc>) -> Self {
-        let now = Utc::now();
+    pub fn new(profile_id: O, ip_address: Option<IpAddr>, expires_at: Timestamp) -> Self {
+        let now = Timestamp::now();
         Self {
             id: SessionId::generate(),
             profile_id,
@@ -394,7 +394,7 @@ impl Session {
     /// Create a provisional session (from OTP/passwordless).
     /// TTL: 15 minutes, restricted scopes, passkey prompt enabled.
     pub fn new_provisional(profile_id: ProfileId, ip_address: Option<IpAddr>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: SessionId::generate(),
             profile_id,
@@ -417,7 +417,7 @@ impl Session {
             policy_grace: false,
             grace_deadline: None,
             created_at: now,
-            expires_at: now + chrono::Duration::minutes(15),
+            expires_at: now + SignedDuration::from_mins(15),
             last_activity_at: None,
             browser_secret_hash: None,
             browser_csrf: None,
@@ -442,7 +442,7 @@ impl<O> Session<O> {
         let mut session = Self::new(
             owner,
             ip_address,
-            Utc::now() + chrono::Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES),
+            Timestamp::now() + SignedDuration::from_mins(PENDING_SECOND_FACTOR_TTL_MINUTES),
         );
         session.scopes = vec![SECOND_FACTOR_SCOPE.to_string()];
         session.assurance_level = assurance;
@@ -492,12 +492,12 @@ impl<O> Session<O> {
     /// Whether the session has ended: at its `expires_at` and after. A token
     /// it bounds is valid only before that instant (RFC 7519 §4.1.4).
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        Timestamp::now() >= self.expires_at
     }
 
     /// Update last activity timestamp.
     pub fn touch(&mut self) {
-        self.last_activity_at = Some(Utc::now());
+        self.last_activity_at = Some(Timestamp::now());
     }
 
     /// Raise the assurance (after MFA or a step-up); never lowers it.
@@ -505,7 +505,7 @@ impl<O> Session<O> {
     /// [`ELEVATION_TTL_MINUTES`] from now.
     /// Use `as_active().elevate()` from outside this crate.
     pub(crate) fn elevate(&mut self, level: AuthLevel) {
-        let now = Utc::now();
+        let now = Timestamp::now();
         if level < AuthLevel::Elevated {
             if level > self.assurance_level {
                 self.assurance_level = level;
@@ -516,14 +516,14 @@ impl<O> Session<O> {
         if current.is_none_or(|held| level >= held) {
             self.elevation = Some(Elevation {
                 level,
-                until: now + chrono::Duration::minutes(ELEVATION_TTL_MINUTES),
+                until: now + SignedDuration::from_mins(ELEVATION_TTL_MINUTES),
             });
         }
     }
 
     /// The assurance in force at `now`: the step-up while it lasts, the
     /// session's own level otherwise.
-    pub fn assurance_at(&self, now: DateTime<Utc>) -> AuthLevel {
+    pub fn assurance_at(&self, now: Timestamp) -> AuthLevel {
         match self.elevation {
             Some(e) if e.until > now => e.level.max(self.assurance_level),
             _ => self.assurance_level,
@@ -540,7 +540,9 @@ impl<O> Session<O> {
 
     /// Compute session decay level based on time since authentication.
     pub fn decay_level(&self) -> SessionDecayLevel {
-        let hours = (Utc::now() - self.authenticated_at).num_hours();
+        let hours = Timestamp::now()
+            .duration_since(self.authenticated_at)
+            .as_hours();
         if hours < FULL_TRUST_HOURS {
             SessionDecayLevel::Full
         } else if hours < HIGH_TRUST_HOURS {
@@ -555,7 +557,7 @@ impl<O> Session<O> {
     /// Reset `authenticated_at` after re-authentication (restores full trust).
     /// Use `as_active().refresh_authentication()` from outside this crate.
     pub(crate) fn refresh_authentication(&mut self) {
-        self.authenticated_at = Utc::now();
+        self.authenticated_at = Timestamp::now();
     }
 
     /// Check if the session has a specific scope.
@@ -566,14 +568,14 @@ impl<O> Session<O> {
     /// Whether the grace period has expired (enforcement should become hard).
     pub fn grace_expired(&self) -> bool {
         match self.grace_deadline {
-            Some(deadline) => Utc::now() >= deadline,
+            Some(deadline) => Timestamp::now() >= deadline,
             None => false,
         }
     }
 
     /// Enter policy grace mode with a deadline.
     /// Use `as_active().enter_grace()` from outside this crate.
-    pub(crate) fn enter_grace(&mut self, deadline: DateTime<Utc>) {
+    pub(crate) fn enter_grace(&mut self, deadline: Timestamp) {
         self.policy_grace = true;
         self.grace_deadline = Some(deadline);
     }
@@ -639,7 +641,7 @@ impl<'a, O> ActiveSession<'a, O> {
     }
 
     /// Enter policy grace mode with a deadline.
-    pub fn enter_grace(&mut self, deadline: DateTime<Utc>) {
+    pub fn enter_grace(&mut self, deadline: Timestamp) {
         self.0.enter_grace(deadline);
     }
 
@@ -672,8 +674,8 @@ impl<'a, O> ExpiredSession<'a, O> {
     }
 
     /// How long ago the session expired.
-    pub fn expired_since(&self) -> chrono::Duration {
-        Utc::now() - self.0.expires_at
+    pub fn expired_since(&self) -> SignedDuration {
+        Timestamp::now().duration_since(self.0.expires_at)
     }
 }
 

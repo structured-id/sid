@@ -3,7 +3,7 @@
 //! and export. Each scenario uses its own work kind, so scenarios sharing one
 //! database never see each other's work.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::{NewWork, WorkCompletion, WorkFailure, WorkId, WorkKind, WorkState};
 use std::collections::HashSet;
 use std::slice::from_ref;
@@ -25,7 +25,7 @@ fn work(kind: &WorkKind) -> NewWork {
     NewWork::new(kind.clone(), b"payload".to_vec())
 }
 
-fn retry(error: &str, at: DateTime<Utc>) -> WorkFailure {
+fn retry(error: &str, at: Timestamp) -> WorkFailure {
     WorkFailure {
         error: error.to_string(),
         ambiguous: false,
@@ -118,7 +118,7 @@ pub async fn claim_carries_creation_and_due_times(store: &dyn WorkStore) {
 
     // The store keeps its own time precision; the retry time is read back
     // from the record rather than compared with the value passed in.
-    let retry_at = Utc::now() + Duration::milliseconds(200);
+    let retry_at = Timestamp::now() + Duration::from_millis(200);
     assert!(
         store
             .fail_work(first.id, first.generation, &retry("down", retry_at))
@@ -159,9 +159,9 @@ pub async fn ended_work_is_purged(store: &dyn WorkStore) {
     let theirs = work(&other);
     store.enqueue_work(&theirs).await.unwrap();
 
-    let earlier = Utc::now() - Duration::hours(1);
+    let earlier = Timestamp::now() - Duration::from_hours(1);
     assert_eq!(store.purge_ended_work(&kind, earlier).await.unwrap(), 0);
-    let later = Utc::now() + Duration::seconds(5);
+    let later = Timestamp::now() + Duration::from_secs(5);
     assert_eq!(store.purge_ended_work(&kind, later).await.unwrap(), 1);
     assert!(store.get_work(claimed[0].id).await.unwrap().is_none());
     assert!(
@@ -204,7 +204,7 @@ pub async fn work_of_a_kind_is_reported(store: &dyn WorkStore) {
     );
     assert!(store.has_work_of_kind(&kind).await.unwrap(), "ended work");
 
-    let later = Utc::now() + Duration::seconds(5);
+    let later = Timestamp::now() + Duration::from_secs(5);
     store.purge_ended_work(&kind, later).await.unwrap();
     assert!(!store.has_work_of_kind(&kind).await.unwrap(), "purged");
 }
@@ -279,7 +279,11 @@ pub async fn lease_fences_stale_worker(store: &dyn WorkStore) {
     );
     assert!(
         !store
-            .fail_work(item.id, first[0].generation, &retry("stale", Utc::now()))
+            .fail_work(
+                item.id,
+                first[0].generation,
+                &retry("stale", Timestamp::now())
+            )
             .await
             .unwrap()
     );
@@ -327,7 +331,7 @@ pub async fn retries_then_fails(store: &dyn WorkStore) {
         .claim_work(from_ref(&kind), "w", 10, LEASE)
         .await
         .unwrap();
-    let later = Utc::now() + Duration::hours(1);
+    let later = Timestamp::now() + Duration::from_hours(1);
     assert!(
         store
             .fail_work(item.id, first[0].generation, &retry("smtp 451", later))
@@ -349,7 +353,7 @@ pub async fn retries_then_fails(store: &dyn WorkStore) {
     // A retry already due is handed out again, and the last attempt ends it.
     // The retry time comes from this process's clock, so "due" is set in the
     // past rather than at a now the store's clock may not have reached.
-    let now = Utc::now() - Duration::seconds(5);
+    let now = Timestamp::now() - Duration::from_secs(5);
     let mut next = work(&kind);
     next.max_attempts = 2;
     store.enqueue_work(&next).await.unwrap();
@@ -411,7 +415,7 @@ pub async fn dead_letter_alert_commits_with_failure(store: &dyn WorkStore) {
         error: "reply lost".into(),
         ambiguous: true,
         // Already due, whatever the store's clock says.
-        retry_at: Some(Utc::now() - Duration::seconds(5)),
+        retry_at: Some(Timestamp::now() - Duration::from_secs(5)),
         on_dead: Some(alert.clone()),
     };
     assert!(
@@ -466,10 +470,10 @@ pub async fn dead_letter_alert_commits_with_failure(store: &dyn WorkStore) {
 pub async fn expired_and_future_are_not_claimed(store: &dyn WorkStore) {
     let kind = unique_kind("expiry");
     let mut expired = work(&kind);
-    expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+    expired.expires_at = Some(Timestamp::now() - Duration::from_secs(1));
     store.enqueue_work(&expired).await.unwrap();
     let mut future = work(&kind);
-    future.not_before = Some(Utc::now() + Duration::hours(1));
+    future.not_before = Some(Timestamp::now() + Duration::from_hours(1));
     store.enqueue_work(&future).await.unwrap();
 
     assert!(
@@ -633,7 +637,7 @@ pub async fn export_import_round_trip(store: &dyn WorkStore) {
         .fail_work(items[1].id, generation(items[1].id), &permanent)
         .await
         .unwrap();
-    let later = Utc::now() + Duration::hours(1);
+    let later = Timestamp::now() + Duration::from_hours(1);
     store
         .fail_work(items[2].id, generation(items[2].id), &retry("busy", later))
         .await
@@ -673,8 +677,8 @@ pub async fn export_import_round_trip(store: &dyn WorkStore) {
         assert_eq!(got.ambiguous, want.ambiguous);
         assert_eq!(got.result, want.result);
         assert_eq!(
-            got.not_before.timestamp_millis(),
-            want.not_before.timestamp_millis()
+            got.not_before.as_millisecond(),
+            want.not_before.as_millisecond()
         );
     }
     let states: Vec<_> = exported.iter().map(|w| w.at_rest().state).collect();

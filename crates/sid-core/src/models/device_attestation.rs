@@ -6,7 +6,7 @@
 //! because attestation lives in sid-attestation (crypto boundary),
 //! while device metadata lives in sid-identity (UX boundary).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::{DeviceId, ProfileId};
@@ -211,9 +211,9 @@ pub struct DeviceAttestation {
     /// Authenticator Attestation GUID (WebAuthn AAGUID).
     pub aaguid: Option<String>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
 }
 
 impl DeviceAttestation {
@@ -227,7 +227,7 @@ impl DeviceAttestation {
         key_storage: KeyStorageType,
         public_jwk: String,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: DeviceAttestationId::generate(),
             device_id,
@@ -248,8 +248,8 @@ impl DeviceAttestation {
     /// Revoke this attestation (device removed or compromised).
     pub fn revoke(&mut self) {
         self.status = AttestationStatus::Revoked;
-        self.revoked_at = Some(Utc::now());
-        self.updated_at = Utc::now();
+        self.revoked_at = Some(Timestamp::now());
+        self.updated_at = Timestamp::now();
     }
 
     /// Whether the device key is backed by hardware.

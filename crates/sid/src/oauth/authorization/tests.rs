@@ -79,7 +79,7 @@ fn a_kept_request_states_what_it_asks_of_the_sign_in() {
         })
     };
     let later = |pending: &PendingAuthorization, seconds: i64| {
-        pending.sign_in_requirements(pending.arrived_at + chrono::Duration::seconds(seconds))
+        pending.sign_in_requirements(pending.arrived_at + jiff::SignedDuration::from_secs(seconds))
     };
     let none = arrived(None, None, None);
     assert_eq!(later(&none, 5), SignInRequirements::default());

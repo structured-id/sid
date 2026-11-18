@@ -75,7 +75,7 @@ fn proof_for(htm: &str, htu: &str) -> String {
         "jti": uuid::Uuid::now_v7().to_string(),
         "htm": htm,
         "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(
         "../../sid-authn/tests/fixtures/test_es256_private.pem"

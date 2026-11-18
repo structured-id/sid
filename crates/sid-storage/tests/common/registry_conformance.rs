@@ -5,7 +5,7 @@
 //! project, retirement by removing the resource's application.
 
 use async_trait::async_trait;
-use chrono::{SubsecRound, Utc};
+use jiff::{RoundMode, Timestamp, TimestampRound, Unit};
 use sid_core::models::{
     Application, ApplicationId, IssuerId, OAuth2Client, OrgId, ProjectId, ProtectedResource,
     ResourceAccess, ResourceId,
@@ -19,7 +19,13 @@ use super::{instance_org, test_audit};
 pub struct AdminRegistry<'a>(pub &'a dyn StorageBackend);
 
 fn application(id: ApplicationId, name: &str) -> Application {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::now()
+        .round(
+            TimestampRound::new()
+                .smallest(Unit::Millisecond)
+                .mode(RoundMode::Trunc),
+        )
+        .unwrap();
     Application {
         id,
         project_id: ProjectId::SYSTEM,

@@ -5,7 +5,7 @@
 //! Includes per-application security policy overrides and
 //! Dynamic Client Registration (RFC 7591/7592) support.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::claim_mapping::ClaimMapping;
@@ -190,9 +190,9 @@ pub struct InitialAccessToken {
     /// Glob patterns for allowed redirect URIs (e.g., `https://*.example.com/callback`).
     pub allowed_redirect_patterns: Vec<String>,
     /// When the token expires.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     /// When the token was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Administrator Profile that created this token.
     pub created_by: ProfileId,
     /// Whether this token has been revoked.
@@ -318,10 +318,10 @@ pub struct OAuth2Client {
     pub contacts: Vec<String>,
 
     /// When the client_id was issued (= created_at for static clients).
-    pub client_id_issued_at: DateTime<Utc>,
+    pub client_id_issued_at: Timestamp,
 
     /// When the client_secret expires. None = no expiry.
-    pub client_secret_expires_at: Option<DateTime<Utc>>,
+    pub client_secret_expires_at: Option<Timestamp>,
 
     /// The initial access token this client was dynamically registered
     /// with; `None` for an administrator-created client. Its constraints
@@ -408,7 +408,7 @@ pub struct OAuth2Client {
     /// update applies only over the revision it was read at.
     pub revision: u64,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl OAuth2Client {

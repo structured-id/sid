@@ -212,7 +212,7 @@ async fn test_aggregator_merges_labels() {
                 labels: vec![IpLabel::Blocklisted],
                 risk_score: Some(0.9),
                 source: "test_blocklist".to_string(),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
             }))
         }
         async fn refresh(&self) -> Result<(), IpIntelError> {
@@ -255,7 +255,7 @@ async fn test_aggregator_risk_score_max() {
                 labels: vec![],
                 risk_score: Some(self.0),
                 source: format!("score_{}", self.0),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
             }))
         }
         async fn refresh(&self) -> Result<(), IpIntelError> {
@@ -484,7 +484,7 @@ async fn test_aggregator_allowlist_clears_negative_labels() {
                 labels: vec![IpLabel::Allowed],
                 risk_score: Some(0.0),
                 source: "test_allowlist".to_string(),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
             }))
         }
         async fn refresh(&self) -> Result<(), IpIntelError> {
@@ -1004,7 +1004,7 @@ impl IpIntelligenceProvider for SelfLearnedStub {
             labels: vec![IpLabel::Blocklisted],
             risk_score: Some(score),
             source: "self_learned".to_string(),
-            expires_at: Utc::now() + chrono::Duration::seconds(60),
+            expires_at: Timestamp::now() + SignedDuration::from_secs(60),
         }))
     }
 
@@ -1137,7 +1137,7 @@ impl IpIntelligenceProvider for AllowlistStub {
             labels: vec![IpLabel::Allowed],
             risk_score: Some(0.0),
             source: "admin_allowlist".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(24),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(24),
         }))
     }
     async fn refresh(&self) -> Result<(), IpIntelError> {

@@ -4,7 +4,7 @@
 //! Validates client registration requests, enforces IAT constraints,
 //! and manages client self-service (read/update/delete via RAT).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use secrecy::SecretBox;
 #[cfg(test)]
 use sid_core::models::InitialAccessTokenId;
@@ -37,8 +37,8 @@ pub struct ClientRegistrationRequest {
 pub struct ClientRegistrationResponse {
     pub client_id: String,
     pub client_secret: Option<SecretBox<String>>,
-    pub client_id_issued_at: DateTime<Utc>,
-    pub client_secret_expires_at: Option<DateTime<Utc>>,
+    pub client_id_issued_at: Timestamp,
+    pub client_secret_expires_at: Option<Timestamp>,
     pub registration_access_token: SecretBox<String>,
     pub registration_client_uri: String,
 }
@@ -318,7 +318,7 @@ pub fn validate_iat_constraints(
     req: &ClientRegistrationRequest,
 ) -> Result<(), DcrError> {
     // Token expired?
-    if iat.expires_at < Utc::now() {
+    if iat.expires_at < Timestamp::now() {
         return Err(DcrError::IatExpired);
     }
 

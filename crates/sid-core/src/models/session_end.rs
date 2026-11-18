@@ -16,7 +16,7 @@ pub const SESSION_REVOCATION_KIND: &str = "session.revocation";
 /// How long an ended session's access tokens can still be valid: the longest
 /// access token lifetime a deployment may configure (sixty minutes). Its
 /// revocation is retried that long, then is moot and expires.
-pub const SESSION_REVOCATION_WINDOW: chrono::Duration = chrono::Duration::minutes(60);
+pub const SESSION_REVOCATION_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_mins(60);
 
 /// Attempts of one revocation: enough that its handler's schedule, repeating
 /// its last delay, keeps retrying through [`SESSION_REVOCATION_WINDOW`].
@@ -46,7 +46,7 @@ impl SessionRevocation {
             self.session_id.as_bytes(),
         ));
         work.max_attempts = SESSION_REVOCATION_ATTEMPTS;
-        work.expires_at = Some(chrono::Utc::now() + SESSION_REVOCATION_WINDOW);
+        work.expires_at = Some(jiff::Timestamp::now() + SESSION_REVOCATION_WINDOW);
         work
     }
 }

@@ -116,7 +116,7 @@ fn test_claim_preview_no_profile() {
 }
 
 fn phone(id: ProfilePhoneId, label: PhoneLabel) -> ProfilePhone {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     ProfilePhone {
         id,
         profile_id: ProfileId::generate(),
@@ -136,7 +136,7 @@ fn phone(id: ProfilePhoneId, label: PhoneLabel) -> ProfilePhone {
 }
 
 fn email(id: ProfileEmailId, label: EmailLabel) -> ProfileEmail {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     ProfileEmail {
         id,
         profile_id: ProfileId::generate(),
@@ -153,7 +153,7 @@ fn email(id: ProfileEmailId, label: EmailLabel) -> ProfileEmail {
 
 #[test]
 fn test_phone_to_proto_all_fields() {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let mut p = phone(ProfilePhoneId::new(), PhoneLabel::Work);
     p.e164 = 380501234567;
     p.extension = Some(5678);
@@ -180,7 +180,7 @@ fn test_phone_to_proto_all_fields() {
 
 #[test]
 fn test_email_to_proto_all_fields() {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let mut e = email(ProfileEmailId::new(), EmailLabel::Work);
     e.email = "alice@sid.example.com".to_string();
     e.custom_label = Some("Corporate".to_string());

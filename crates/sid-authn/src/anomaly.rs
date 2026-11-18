@@ -125,7 +125,7 @@ pub struct LoginContext {
     pub prev_longitude: Option<f64>,
     /// When the profile last signed in; `None` for a profile that never has.
     /// The travel rule takes its speed from it, the new-device rule its baseline.
-    pub prev_login_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub prev_login_at: Option<jiff::Timestamp>,
     /// Previous login country (ISO 3166-1 alpha-2, from GeoIP on previous session IP).
     pub prev_country: Option<String>,
     /// Countries where this profile regularly logs in (login_count >= threshold).
@@ -456,8 +456,8 @@ impl AnomalyDetector {
             return None;
         }
 
-        let elapsed = chrono::Utc::now() - prev_at;
-        let elapsed_hours = elapsed.num_seconds() as f64 / 3600.0;
+        let elapsed = jiff::Timestamp::now().duration_since(prev_at);
+        let elapsed_hours = elapsed.as_secs() as f64 / 3600.0;
         if elapsed_hours <= 0.0 {
             return None; // Same timestamp or clock skew — skip.
         }

@@ -121,7 +121,11 @@ struct Fixture {
 
 /// A fresh, sufficient sign-in of `profile`.
 async fn signed_in(storage: &dyn StorageBackend, profile: ProfileId) -> KeyCaller {
-    let session = Session::new(profile, None, Utc::now() + chrono::Duration::hours(1));
+    let session = Session::new(
+        profile,
+        None,
+        Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     storage
         .create_session(&session, AuditEntry::system("test", "session").into())
         .await
@@ -154,7 +158,7 @@ async fn fixture() -> Fixture {
 /// A fresh operation context of the caller's next keyed call.
 async fn operation(storage: &dyn StorageBackend, key: &str) -> Option<OperationContext> {
     let period = storage
-        .current_operation_period(Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;
@@ -818,7 +822,11 @@ async fn only_the_owners_sign_in_starts_a_ceremony() {
 #[tokio::test]
 async fn a_provisional_session_binds_no_key() {
     let f = fixture().await;
-    let mut session = Session::new(f.profile, None, Utc::now() + chrono::Duration::hours(1));
+    let mut session = Session::new(
+        f.profile,
+        None,
+        Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     session.is_provisional = true;
     f.storage
         .create_session(&session, AuditEntry::system("test", "session").into())

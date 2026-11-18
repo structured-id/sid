@@ -13,8 +13,8 @@
 //! authenticated, its refresh tokens, its codes and its native generations
 //! with it.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::session::{Elevation, SECOND_FACTOR_SCOPE};
 use sid_core::models::{
     AuthCodeRedemption, AuthLevel, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
@@ -452,7 +452,7 @@ fn create_limited(
     let mut evicted = Vec::new();
     // A pending second-factor context takes no place, so it evicts nothing.
     if max_sessions > 0 && !session.awaits_second_factor() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut counted: Vec<Session> = profile_sessions(tx, session.profile_id)?
             .into_iter()
             .filter(|s| {
@@ -624,7 +624,7 @@ fn claim_live_session(tx: &Statements<'_>, id: SessionId) -> SidResult<bool> {
         "MATCH (s:SidSession) WHERE s.id = $id AND s.expires_at > $now RETURN id(s) AS node",
         Params::default()
             .with("id", session_value(id))
-            .with("now", time(Utc::now())),
+            .with("now", time(Timestamp::now())),
     )?;
     claim_first(tx, &rows)
 }
@@ -646,7 +646,7 @@ pub(super) fn check_fence(
     tx: &Statements<'_>,
     session: SessionId,
     profile: ProfileId,
-    fresh_until: Option<DateTime<Utc>>,
+    fresh_until: Option<Timestamp>,
 ) -> SidResult<()> {
     let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
     let owner = tx.run(
@@ -662,7 +662,7 @@ pub(super) fn check_fence(
     if !super::hold_first(tx, &owner)? || !can_sign_in {
         return Err(fenced("belongs to an account that can no longer sign in"));
     }
-    let now = Utc::now();
+    let now = Timestamp::now();
     let live = tx.run(
         "MATCH (s:SidSession) WHERE s.id = $id AND s.profile_id = $profile
              AND s.expires_at > $now
@@ -713,7 +713,7 @@ impl CoordinodeBackend {
                 authenticated_at: stored.authenticated_at,
                 amr: stored.amr.clone(),
             };
-            if stored.expires_at <= Utc::now() || current != expected {
+            if stored.expires_at <= Timestamp::now() || current != expected {
                 return Ok(Decision::Abandon(false));
             }
             tx.run(
@@ -793,7 +793,7 @@ impl CoordinodeBackend {
             .await
     }
 
-    pub(super) async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> SidResult<()> {
+    pub(super) async fn touch_session(&self, id: SessionId, at: Timestamp) -> SidResult<()> {
         self.transaction(move |tx| {
             let Some(stored) = get(tx, id)? else {
                 return Ok(Decision::Abandon(()));
@@ -913,7 +913,7 @@ impl CoordinodeBackend {
         &self,
         old: Uuid,
         new: &RefreshToken,
-        grace_expires_at: DateTime<Utc>,
+        grace_expires_at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let new = new.clone();
@@ -925,7 +925,7 @@ impl CoordinodeBackend {
             let Some(stored) = rows.first().map(token).transpose()? else {
                 return Ok(Decision::Abandon(false));
             };
-            let now = Utc::now();
+            let now = Timestamp::now();
             let usable = stored.expires_at > now
                 && (!stored.revoked || stored.grace_expires_at.is_some_and(|g| g > now));
             if !usable {
@@ -1112,7 +1112,7 @@ impl CoordinodeBackend {
                     redeliver_until: until,
                     sealed: Some(stored),
                     ..
-                } if rotated_by == exchange && Utc::now() < until => {
+                } if rotated_by == exchange && Timestamp::now() < until => {
                     Ok(Decision::Abandon(NativeRotationOutcome::Redeliver(stored)))
                 }
                 NativeGenerationState::Rotated { .. } => {

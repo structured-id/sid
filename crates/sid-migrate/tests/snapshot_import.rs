@@ -13,6 +13,23 @@ use sid_plugin::{
 use sid_storage::snapshot::{self, ImportResult, Snapshot, SnapshotError, VerifyResult};
 use sid_storage::sqlite::SqliteBackend;
 
+/// The current time cut down to whole `unit`s, as a store of that precision
+/// keeps it.
+fn now_in(unit: jiff::Unit) -> jiff::Timestamp {
+    jiff::Timestamp::now()
+        .round(
+            jiff::TimestampRound::new()
+                .smallest(unit)
+                .mode(jiff::RoundMode::Trunc),
+        )
+        .expect("truncation stays in range")
+}
+
+/// `at` with its fraction of a second replaced by `nanos`.
+fn with_nanos(at: jiff::Timestamp, nanos: i32) -> jiff::Timestamp {
+    jiff::Timestamp::new(at.as_second(), nanos).expect("a nanosecond within the second")
+}
+
 /// A standalone SQLite installation's stores: the backend, its audit log
 /// and the history evaluator's key store, all in the same database.
 struct Stores<'a> {
@@ -820,8 +837,7 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     };
     let mut old = evaluator.new_epoch(domain, ksf).await.unwrap();
     let mut active = evaluator.new_epoch(domain, ksf).await.unwrap();
-    let now =
-        chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+    let now = now_in(jiff::Unit::Microsecond);
     old.epoch.created_at = now;
     active.epoch.created_at = now;
     source
@@ -1132,10 +1148,7 @@ fn sealed_epoch(
             ksf: HistoryKsf::DEFAULT,
             ksf_salt: [4; 32],
             status: HistoryEpochUse::Active,
-            created_at: chrono::DateTime::from_timestamp_millis(
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .unwrap(),
+            created_at: now_in(jiff::Unit::Millisecond),
         },
         key: WrappedHistoryKey(
             sid_keys::EncryptedField {
@@ -1437,13 +1450,12 @@ async fn only_the_same_snapshot_resumes_into_an_initialized_target() {
 /// live and revoked, exactly as the source held them.
 #[tokio::test]
 async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
-    use chrono::{SubsecRound, Timelike, Utc};
     use sid_core::models::*;
     let mut org = Organization::implicit_community("sid.example.com");
     // A time below the microsecond, as a host clock reporting nanoseconds
     // gives it.
-    org.created_at = org.created_at.with_nanosecond(123_456_789).unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    org.created_at = with_nanos(org.created_at, 123_456_789);
+    let now = now_in(jiff::Unit::Millisecond);
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),
@@ -1525,10 +1537,9 @@ async fn the_issuer_registry_and_device_bindings_move_with_the_snapshot() {
 /// registered one foreign site never being able to back up or move again.
 #[tokio::test]
 async fn an_issuer_for_a_referenced_organization_moves_with_it() {
-    use chrono::{SubsecRound, Utc};
     use sid_core::models::*;
     let org = Organization::implicit_community("sid.example.com");
-    let now = Utc::now().trunc_subsecs(3);
+    let now = now_in(jiff::Unit::Millisecond);
     let issuer_for = |recipient_org: OrgId| {
         let handle = IssuerHandle::generate();
         OidcIssuer {
@@ -1811,7 +1822,7 @@ async fn history_keys_move_with_the_evaluators_own_key_versions() {
 async fn history_write_cutoffs_move_with_the_snapshot() {
     use sid_core::models::*;
     use sid_plugin::history_keys::HistoryKeyStore;
-    let at = |micros| chrono::DateTime::from_timestamp_micros(micros).unwrap();
+    let at = |micros| jiff::Timestamp::from_microsecond(micros).unwrap();
     let org = Organization::implicit_community("sid.example.com");
     let source = installation(&org).await;
     let credential_cutoff = at(1_790_000_000_000_000);
@@ -1928,7 +1939,7 @@ async fn credentials_with_microsecond_timestamps_resume_their_import() {
         .unwrap();
     let mut snapshot = export(&source).await.unwrap();
     let mut credential = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
-    let at = chrono::DateTime::from_timestamp_micros(1_760_000_000_123_456).unwrap();
+    let at = jiff::Timestamp::from_microsecond(1_760_000_000_123_456).unwrap();
     credential.created_at = at;
     credential.last_used_at = Some(at);
     snapshot.credentials.push(credential.clone());
@@ -1974,7 +1985,6 @@ async fn provision_issuer(
 /// its scopes. A second import adds nothing.
 #[tokio::test]
 async fn applications_resources_and_access_survive_migration() {
-    use chrono::{SubsecRound, Utc};
     use sid_core::models::{
         Application, ApplicationId, IssuerAuthority, IssuerHandle, IssuerId, OidcIssuer,
         Organization, ProjectId, ProtectedResource, ResourceAccess, ResourceId, ResourceIndicator,
@@ -1983,7 +1993,7 @@ async fn applications_resources_and_access_survive_migration() {
 
     let org = Organization::implicit_community("sid.example.com");
     let handle = IssuerHandle::generate();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = now_in(jiff::Unit::Millisecond);
     let issuer = OidcIssuer {
         id: IssuerId::generate(),
         canonical_url: format!("https://sid.example.com/i/{handle}"),
@@ -2568,7 +2578,7 @@ async fn dependents_listed_first_restore_after_their_references() {
     let ctx = || AuditEntry::system("test", "order").into();
     let profile = Profile::new(Some("ordered"));
     source.create_profile(&profile, ctx()).await.unwrap();
-    let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+    let expires = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1);
     let idp = Session::new(profile.id, None, expires);
     source.create_session(&idp, ctx()).await.unwrap();
     let mut application = Session::new(profile.id, None, expires);

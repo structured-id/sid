@@ -1,5 +1,4 @@
 use super::*;
-use chrono::TimeZone;
 
 #[test]
 fn test_generate_id_is_unique() {
@@ -33,10 +32,7 @@ async fn test_a_nanosecond_clock_keeps_the_chain_verifiable() {
         .await
         .expect("Failed to run migrations");
     let chain_id = format!("profile:{}", uuid::Uuid::now_v7());
-    let at = Utc
-        .timestamp_opt(1_790_000_000, 123_456_789)
-        .single()
-        .expect("valid instant");
+    let at = Timestamp::new(1_790_000_000, 123_456_789).expect("valid instant");
 
     let mut tx = pool.begin().await.unwrap();
     for _ in 0..2 {

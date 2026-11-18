@@ -89,9 +89,11 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         &self,
         key: &str,
         value: &V,
-        deadline: chrono::DateTime<chrono::Utc>,
+        deadline: jiff::Timestamp,
     ) -> Result<bool, ChallengeStoreError> {
-        let Ok(left) = (deadline - chrono::Utc::now()).to_std() else {
+        let Ok(left) =
+            std::time::Duration::try_from(deadline.duration_since(jiff::Timestamp::now()))
+        else {
             return Ok(false);
         };
         if left.is_zero() {
@@ -156,12 +158,14 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         key: &str,
         read: &Versioned<V>,
         value: &V,
-        deadline: chrono::DateTime<chrono::Utc>,
+        deadline: jiff::Timestamp,
     ) -> Result<Option<Versioned<V>>, ChallengeStoreError>
     where
         V: Clone,
     {
-        let Ok(left) = (deadline - chrono::Utc::now()).to_std() else {
+        let Ok(left) =
+            std::time::Duration::try_from(deadline.duration_since(jiff::Timestamp::now()))
+        else {
             return Ok(None);
         };
         if left.is_zero() {
