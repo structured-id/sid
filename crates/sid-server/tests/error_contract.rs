@@ -109,7 +109,9 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         .await
         .add(OidcProviderServiceServer::new(
             sid_server::grpc::oidc_provider_service::OidcProviderServiceImpl::new(
-                auth, project, None,
+                auth,
+                project,
+                std::sync::Arc::new(None::<url::Url>),
             ),
         ))
         .await

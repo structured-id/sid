@@ -217,7 +217,7 @@ impl Installation {
             self.issuer.clone(),
             None,
         ));
-        let provider = OidcProviderServiceImpl::new(auth, project, None);
+        let provider = OidcProviderServiceImpl::new(auth, project, Arc::new(None::<url::Url>));
         let tokens = sid_authn::resource_token::ResourceTokenVerifier::new(
             issuers.clone(),
             self.issuer.clone(),

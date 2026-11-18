@@ -48,26 +48,45 @@ const NO_ISSUER: &str = "-";
 const GET_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/GetUserInfo";
 const POST_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/PostUserInfo";
 
+/// Where the authorization endpoint sends a user who must sign in, asked each
+/// time one must: a host's interactive branch can open after the server
+/// started. `None` sends the client `login_required`.
+#[tonic::async_trait]
+pub trait SignInPage: Send + Sync {
+    /// The page now; an error refuses the request instead of answering
+    /// `login_required` for a page that may exist.
+    async fn sign_in_page(&self) -> Result<Option<url::Url>, Status>;
+}
+
+/// A deployment's fixed page, or none.
+#[tonic::async_trait]
+impl SignInPage for Option<url::Url> {
+    async fn sign_in_page(&self) -> Result<Option<url::Url>, Status> {
+        Ok(self.clone())
+    }
+}
+
 pub struct OidcProviderServiceImpl {
     auth: Arc<AuthServiceImpl>,
     project: Arc<ProjectServiceImpl>,
-    login_url: Option<url::Url>,
+    sign_in_page: Arc<dyn SignInPage>,
 }
 
 impl OidcProviderServiceImpl {
     /// The issuer endpoints over the engine's OAuth of `auth`: discovery,
     /// keys, UserInfo and the OAuth endpoints; the registration endpoints
-    /// run the logic of `project`; a user who must sign in is sent to
-    /// `login_url`, or, without one, the client gets `login_required`.
+    /// run the logic of `project`; a user who must sign in is sent to the
+    /// page `sign_in_page` names then, or, without one, the client gets
+    /// `login_required`.
     pub fn new(
         auth: Arc<AuthServiceImpl>,
         project: Arc<ProjectServiceImpl>,
-        login_url: Option<url::Url>,
+        sign_in_page: Arc<dyn SignInPage>,
     ) -> Self {
         Self {
             auth,
             project,
-            login_url,
+            sign_in_page,
         }
     }
 
@@ -164,15 +183,21 @@ impl OidcProviderServiceImpl {
                 Ok(answer(&[(key, &value)]))
             }
             Ok(BrowserAuthorization::NoInteraction(error)) => Ok(answer(&[("error", error)])),
-            Ok(BrowserAuthorization::SignIn { reference }) => Ok(
-                match (
-                    &self.login_url,
-                    continuation(&issuer.canonical_url, &client_id, &reference),
-                ) {
-                    (Some(login), Some(back)) => oauth_http::sign_in(login, &back),
-                    _ => answer(&[("error", "login_required")]),
-                },
-            ),
+            Ok(BrowserAuthorization::SignIn { reference }) => {
+                let login = match self.sign_in_page.sign_in_page().await {
+                    Ok(login) => login,
+                    Err(status) => return Ok(refused(status)),
+                };
+                Ok(
+                    match (
+                        login,
+                        continuation(&issuer.canonical_url, &client_id, &reference),
+                    ) {
+                        (Some(login), Some(back)) => oauth_http::sign_in(&login, &back),
+                        _ => answer(&[("error", "login_required")]),
+                    },
+                )
+            }
             Err(status) => Ok(refused(status)),
         }
     }

@@ -115,13 +115,14 @@ pub struct CeComponents {
     /// The installation's OIDC issuers and their signers.
     pub issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     /// The sign-in page the authorization endpoint sends users to: the
-    /// account UI's, or, set by the host before serving, the entry of the
-    /// interactive branch it serves for the issuer.
-    pub login_url: Option<url::Url>,
+    /// account UI's, or, set by the host before serving, a source naming the
+    /// entry of the interactive branch it serves for the issuer once that
+    /// branch is open.
+    pub sign_in_page: Arc<dyn crate::grpc::oidc_provider_service::SignInPage>,
     /// The account UI's sign-in page, the one page whose origin runs the
     /// browser ceremonies: the auth service admits them from it and the HTTP
     /// form allows it credentialed CORS. A host's interactive branch replaces
-    /// only [`login_url`](Self::login_url), never this.
+    /// only [`sign_in_page`](Self::sign_in_page), never this.
     pub ceremony_page: Option<url::Url>,
     /// The one authorization evaluator of this process.
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
@@ -1067,7 +1068,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         audit_retention,
         migration_deadline_days,
         issuers,
-        login_url: ceremony_page.clone(),
+        sign_in_page: Arc::new(ceremony_page.clone()),
         ceremony_page,
         authz_engine,
         organization,

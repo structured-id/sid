@@ -17,7 +17,7 @@ use sid_proto::sid::v1::oidc_provider_service_server::{
     OidcProviderService, OidcProviderServiceServer,
 };
 use sid_proto::sid::v1::{IssuerHandleRequest, JsonWebKeySet, ProviderMetadata};
-use sid_server::grpc::oidc_provider_service::OidcProviderServiceImpl;
+use sid_server::grpc::oidc_provider_service::{OidcProviderServiceImpl, SignInPage};
 use tonic::{Code, Request};
 
 fn provider_of(svc: &TestServices) -> OidcProviderServiceImpl {
@@ -26,11 +26,15 @@ fn provider_of(svc: &TestServices) -> OidcProviderServiceImpl {
 
 /// The provider sending a user who must sign in to `login_url`.
 fn provider_signing_in_at(svc: &TestServices, login_url: Option<&str>) -> OidcProviderServiceImpl {
-    OidcProviderServiceImpl::new(
-        svc.auth.clone(),
-        svc.project.clone(),
-        login_url.map(|url| url::Url::parse(url).unwrap()),
+    provider_asking(
+        svc,
+        Arc::new(login_url.map(|url| url::Url::parse(url).unwrap())),
     )
+}
+
+/// The provider asking `page` where a user who must sign in goes.
+fn provider_asking(svc: &TestServices, page: Arc<dyn SignInPage>) -> OidcProviderServiceImpl {
+    OidcProviderServiceImpl::new(svc.auth.clone(), svc.project.clone(), page)
 }
 
 fn services() -> (TestServices, OidcProviderServiceImpl) {
@@ -1767,11 +1771,25 @@ async fn browser_of(
     login_url: Option<&str>,
     client: sid_core::models::OAuth2Client,
 ) -> Browser {
+    let page = Arc::new(login_url.map(|url| url::Url::parse(url).unwrap()));
+    browser_from(user, page, client).await
+}
+
+/// A browser whose provider asks `page` where a user who must sign in goes.
+async fn browser_asking(page: Arc<dyn SignInPage>) -> Browser {
+    browser_from(signed_in().await, page, common::test_client()).await
+}
+
+async fn browser_from(
+    user: SignedIn,
+    page: Arc<dyn SignInPage>,
+    client: sid_core::models::OAuth2Client,
+) -> Browser {
     common::store_client(&*user.svc.storage, &client)
         .await
         .unwrap();
     common::open_userinfo_to_clients(&user.svc).await;
-    let base = over_http(provider_signing_in_at(&user.svc, login_url)).await;
+    let base = over_http(provider_asking(&user.svc, page)).await;
     let issuer = format!("{base}/i/{}", user.svc.issuer.handle);
     Browser {
         user,
@@ -1983,6 +2001,70 @@ async fn authorize_sends_an_anonymous_user_to_sign_in() {
     assert_eq!(query["error"], "login_required");
     assert_eq!(query["state"], "xyz");
     assert!(!query.contains_key("code"));
+}
+
+/// A sign-in page that opens after the provider was built, as a host's
+/// interactive branch does once its provisioning step ran.
+struct OpensLater(std::sync::OnceLock<url::Url>);
+
+#[tonic::async_trait]
+impl SignInPage for OpensLater {
+    async fn sign_in_page(&self) -> Result<Option<url::Url>, tonic::Status> {
+        Ok(self.0.get().cloned())
+    }
+}
+
+/// A source that cannot tell whether a page exists.
+struct Unanswered;
+
+#[tonic::async_trait]
+impl SignInPage for Unanswered {
+    async fn sign_in_page(&self) -> Result<Option<url::Url>, tonic::Status> {
+        Err(tonic::Status::unavailable("the store did not answer"))
+    }
+}
+
+/// The sign-in page is asked each time a user must sign in: a page that opens
+/// after the endpoint was built takes the next anonymous user, who got
+/// `login_required` before it opened. Bug prevented: an issuer whose sign-in
+/// branch a provisioning step opened after the server started answered every
+/// client `login_required` until it was restarted.
+#[tokio::test]
+async fn a_sign_in_page_opened_after_start_takes_the_next_user() {
+    let page = Arc::new(OpensLater(std::sync::OnceLock::new()));
+    let browser = browser_asking(page.clone()).await;
+    let ask = || {
+        no_redirects()
+            .get(with_query(
+                &browser.authorize,
+                &authorize_query(REDIRECT_URI),
+            ))
+            .send()
+    };
+
+    let query = redirect_query(&ask().await.unwrap(), REDIRECT_URI);
+    assert_eq!(query["error"], "login_required");
+
+    page.0.set(url::Url::parse(LOGIN_URL).unwrap()).unwrap();
+    let query = redirect_query(&ask().await.unwrap(), LOGIN_URL);
+    browser.continuation(&query["rd"]);
+}
+
+/// A source that cannot answer refuses the request with a page: the client is
+/// never told `login_required` while a sign-in page may exist.
+#[tokio::test]
+async fn an_unanswered_sign_in_page_refuses_the_request() {
+    let browser = browser_asking(Arc::new(Unanswered)).await;
+    let response = no_redirects()
+        .get(with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    assert!(response.headers().get("location").is_none());
 }
 
 /// A Profile's own sign-in session is relied on only while it stands and
