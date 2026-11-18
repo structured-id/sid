@@ -2,8 +2,9 @@
 //! [`IssuerStore`] scenarios: one issuer per authority and recipient
 //! organization, found by its handle, stored with its first signing key.
 
+use crate::conformance::trunc;
 use async_trait::async_trait;
-use chrono::{SubsecRound, Utc};
+use jiff::{Timestamp, Unit};
 use sid_core::models::{
     AuditEntry, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, MutationContext,
     OidcIssuer, OrgId,
@@ -29,7 +30,7 @@ fn ctx() -> MutationContext {
 /// A new local issuer of `org` with its generation-1 key, its times at the
 /// millisecond precision every store keeps.
 fn issuer(org: OrgId) -> (OidcIssuer, IssuerSigningKey) {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     let id = IssuerId::generate();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {

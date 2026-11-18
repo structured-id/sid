@@ -152,6 +152,8 @@ impl TryFrom<&sid::v1::common::IpAddress> for core::net::IpAddr {
     }
 }
 
+pub mod time;
+
 /// The Google API types the SID protos use, such as `google.api.HttpBody`.
 pub mod google {
     pub mod api {

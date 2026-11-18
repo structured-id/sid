@@ -1,5 +1,5 @@
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{
     ApplicationId, InitialAccessTokenId, IssuerId, ProjectId, ResourceId, ResourceIndicator,
 };
@@ -27,7 +27,7 @@ fn client(kind: ApplicationType) -> OAuth2Client {
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -47,7 +47,7 @@ fn client(kind: ApplicationType) -> OAuth2Client {
         unified_input: false,
         org_id: None,
         revision: 3,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -99,8 +99,8 @@ fn test_resource_to_proto() {
         scopes: vec!["orders.read".into()],
         state: ResourceState::Retired,
         revision: 2,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let proto = resource_to_proto(&resource, ISSUER);
     assert_eq!(proto.id, Some(resource.id.into()));
@@ -131,8 +131,8 @@ fn test_application_to_proto_carries_its_roles() {
         name: "Orders".into(),
         system: None,
         revision: 1,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let proto = application_to_proto(&app, Some(client_to_proto(&c, ISSUER)), None);
     assert_eq!(proto.id, Some(app.id.into()));
@@ -155,8 +155,8 @@ fn test_system_integration_is_shown() {
         name: "Account".into(),
         system: Some(sid_core::models::SystemIntegration::Account),
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let proto = application_to_proto(&app, None, None);
     assert_eq!(
@@ -212,7 +212,7 @@ fn test_role_to_proto() {
 /// profile identifier, not a string.
 #[test]
 fn test_iat_to_proto_types_its_ids() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let creator = sid_core::models::ProfileId::generate();
     let token = InitialAccessToken {
         id: InitialAccessTokenId::generate(),

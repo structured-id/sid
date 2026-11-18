@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -133,7 +133,7 @@ impl DataExportService {
                     .storage
                     .expire_export_job(
                         j.id,
-                        Utc::now(),
+                        Timestamp::now(),
                         AuditEntry::system("export.expired", profile_id.to_string()).into(),
                     )
                     .await?
@@ -205,7 +205,7 @@ impl DataExportService {
         }
         let acknowledged = self
             .storage
-            .acknowledge_export_job(job.id, Utc::now(), ctx)
+            .acknowledge_export_job(job.id, Timestamp::now(), ctx)
             .await?;
         if !acknowledged {
             return Err(SidError::InvalidState(
@@ -251,11 +251,11 @@ impl DataExportService {
         // PATs (no secret values).
         let pats = self.storage.list_pats_by_profile(profile_id).await?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         Ok(json!({
             "export_version": "1.0",
-            "exported_at": now.to_rfc3339(),
+            "exported_at": now.to_string(),
             "profile": {
                 "id": profile.id.to_string(),
                 "username": profile.username,
@@ -267,7 +267,7 @@ impl DataExportService {
                 "formatted_name": profile.formatted_name(),
                 "profile_type": format!("{:?}", profile.profile_type),
                 "status": profile.status.as_str(),
-                "created_at": profile.created_at.to_rfc3339(),
+                "created_at": profile.created_at.to_string(),
             },
             "principals": identifiers.iter().map(|i| json!({
                 "type": i.principal_type.as_str(),
@@ -278,12 +278,12 @@ impl DataExportService {
             "credentials": credentials.iter().map(|c| json!({
                 "id": c.id.0.to_string(),
                 "type": c.credential_type.as_str(),
-                "created_at": c.created_at.to_rfc3339(),
+                "created_at": c.created_at.to_string(),
             })).collect::<Vec<_>>(),
             "sessions": sessions.iter().map(|s| json!({
                 "id": s.id.to_string(),
-                "created_at": s.created_at.to_rfc3339(),
-                "expires_at": s.expires_at.to_rfc3339(),
+                "created_at": s.created_at.to_string(),
+                "expires_at": s.expires_at.to_string(),
                 "user_agent": s.user_agent,
             })).collect::<Vec<_>>(),
             "metadata": metadata.iter().map(|m| json!({
@@ -294,8 +294,8 @@ impl DataExportService {
                 "id": p.id.to_string(),
                 "name": p.name,
                 "status": p.status.as_str(),
-                "created_at": p.created_at.to_rfc3339(),
-                "expires_at": p.expires_at.map(|e| e.to_rfc3339()),
+                "created_at": p.created_at.to_string(),
+                "expires_at": p.expires_at.map(|e| e.to_string()),
             })).collect::<Vec<_>>(),
         }))
     }
@@ -337,7 +337,7 @@ mod tests {
         assert!(!job.is_expired());
 
         // Force expire.
-        job.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+        job.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(1));
         assert!(job.is_expired());
     }
 

@@ -15,7 +15,7 @@ use sid_core::models::security_policy::{CountryMode, NetworkPolicy, NetworkViola
 use sid_plugin::cache::NoCacheBackend;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -201,7 +201,7 @@ impl IpIntelligenceProvider for BlocklistStubProvider {
             labels: vec![IpLabel::Blocklisted],
             risk_score: Some(1.0),
             source: "test_blocklist".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 
@@ -301,7 +301,7 @@ impl IpIntelligenceProvider for DatacenterStubProvider {
             labels: vec![IpLabel::Datacenter],
             risk_score: Some(0.4),
             source: "test_datacenter".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 
@@ -486,7 +486,7 @@ impl IpIntelligenceProvider for AllowlistStubProvider {
             labels: vec![IpLabel::Allowed],
             risk_score: Some(0.0),
             source: "test_allowlist".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
     async fn refresh(&self) -> Result<(), IpIntelError> {

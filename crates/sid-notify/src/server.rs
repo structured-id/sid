@@ -360,7 +360,7 @@ async fn keep_operations(
         tokio::select! {
             () = &mut stopped => return,
             _ = ticks.tick() => {
-                sid_authn::operation::upkeep(operations.as_ref(), chrono::Utc::now()).await;
+                sid_authn::operation::upkeep(operations.as_ref(), jiff::Timestamp::now()).await;
                 // A test send whose outcome was never recorded holds its
                 // binding; once its period is retired no attempt can send
                 // again, and nothing is left to reconcile.
@@ -536,10 +536,7 @@ fn build_proto_template(
         channels: meta.channels.iter().map(channel_to_proto).collect(),
         trigger: meta.trigger.clone(),
         customized,
-        updated_at: content.map(|content| prost_types::Timestamp {
-            seconds: content.updated_at.timestamp(),
-            nanos: content.updated_at.timestamp_subsec_nanos() as i32,
-        }),
+        updated_at: content.map(|content| sid_proto::time::to_proto(content.updated_at)),
         content: content.map(|content| admin::TemplateContent {
             channel: channel as i32,
             locale: locale.to_string(),
@@ -595,10 +592,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
                 channels: s.channels.iter().map(channel_to_proto).collect(),
                 trigger: s.trigger,
                 customized: s.customized,
-                updated_at: s.updated_at.map(|t| prost_types::Timestamp {
-                    seconds: t.timestamp(),
-                    nanos: t.timestamp_subsec_nanos() as i32,
-                }),
+                updated_at: s.updated_at.map(sid_proto::time::to_proto),
             })
             .collect();
 
@@ -678,7 +672,7 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
                     push_title: proto_content.push_title,
                     push_body: proto_content.push_body,
                     push_action_url: proto_content.push_action_url,
-                    updated_at: chrono::Utc::now(),
+                    updated_at: jiff::Timestamp::now(),
                 };
                 self.store
                     .update_template(&req.template_id, channel, &locale, stored, |left, meta| {

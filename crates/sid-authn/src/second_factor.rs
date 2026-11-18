@@ -652,7 +652,7 @@ pub async fn offered_factors<O: Copy + Send + Sync>(
     owner: O,
     requirements: &LoginRequirements,
     first: &Session<O>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<Vec<StepUpMethod>, FactorError> {
     let mut factors = Vec::new();
     if requirements.met_with(first, AuthLevel::Standard, TOTP_AMR, now)
@@ -689,7 +689,7 @@ pub async fn enrollable_factors<O: Clone + Send + Sync>(
     requirements: &LoginRequirements,
     first: &Session<O>,
     passkey_satisfies_mfa: bool,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<Vec<StepUpMethod>, FactorError> {
     if !requirements.met_with(first, AuthLevel::Standard, TOTP_AMR, now) {
         return Ok(Vec::new());

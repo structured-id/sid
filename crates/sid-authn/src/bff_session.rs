@@ -13,7 +13,7 @@
 //! (every user would be signed out) or as an unused sign-in (its `state`
 //! could be replayed).
 //!
-//! Timestamps are absolute (`DateTime<Utc>`), not `Instant`, because a
+//! Timestamps are absolute (`Timestamp`), not `Instant`, because a
 //! monotonic clock means nothing to the process that reads the value back.
 //! Expiry is checked at use: the store refuses each entry past its idle
 //! window, and the absolute deadline is checked against `created_at` on read.
@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,7 @@ pub struct PendingSignIn {
     pub nonce: String,
     /// The local path to return to.
     pub redirect_url: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// A session: the tokens a browser never sees.
@@ -157,8 +157,8 @@ pub struct BffSession {
     pub claims: SessionClaims,
     /// The synchronizer token the page echoes on every state-changing call.
     pub csrf_token: String,
-    pub created_at: DateTime<Utc>,
-    pub last_access: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub last_access: Timestamp,
     /// The connection its tokens were issued under; an adapter with another
     /// connection does not use the session.
     pub connection: String,
@@ -228,7 +228,7 @@ impl BffSessionStore {
     ) -> SessionResult<(String, String)> {
         let session_id = generate_token();
         let csrf_token = generate_token();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let session = BffSession {
             access_token,
             refresh_token,
@@ -270,7 +270,7 @@ impl BffSessionStore {
         // add a round trip to every authenticated request. Half the window is
         // refresh enough: a session in use is rewritten long before its TTL
         // runs out, and one that goes quiet still expires on time.
-        let now = Utc::now();
+        let now = Timestamp::now();
         let due = age(session.last_access) >= self.idle_timeout / 2;
         session.last_access = now;
         // The push replaces exactly what was read: a session another replica
@@ -437,7 +437,7 @@ impl BffSessionStore {
             code_verifier,
             nonce,
             redirect_url,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         self.store
             .put_ceremony_state(
@@ -626,8 +626,8 @@ fn ended_key(iss: &str, sid: &str) -> String {
 
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp
 /// in the future has no age yet.
-fn age(then: DateTime<Utc>) -> Duration {
-    (Utc::now() - then).to_std().unwrap_or(Duration::ZERO)
+fn age(then: Timestamp) -> Duration {
+    Duration::try_from(Timestamp::now().duration_since(then)).unwrap_or(Duration::ZERO)
 }
 
 /// Whether a value has the shape [`generate_token`] produces.

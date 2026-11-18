@@ -162,7 +162,7 @@ fn with_token<T>(msg: T, token: &str) -> Request<T> {
 async fn keyed<T>(f: &Fixture, msg: T, token: &str, key: &str) -> Request<T> {
     let period = f
         .storage
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;

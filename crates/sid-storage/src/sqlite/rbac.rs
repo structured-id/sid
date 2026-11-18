@@ -196,7 +196,7 @@ where
     )
     .bind(Role::installation_administrator().id)
     .bind(sid_core::models::INSTALLATION_SCOPE)
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .bind(profile)
     .bind(profile)
     .fetch_one(executor)
@@ -217,7 +217,7 @@ pub(crate) async fn administrators(
     )
     .bind(Role::installation_administrator().id)
     .bind(sid_core::models::INSTALLATION_SCOPE)
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .fetch_all(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("read administrators: {e}")))
@@ -292,7 +292,7 @@ pub(super) async fn administrator_assignments(
     )
     .bind(Role::installation_administrator().id)
     .bind(sid_core::models::INSTALLATION_SCOPE)
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .fetch_all(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("read administrator assignments: {e}")))
@@ -399,7 +399,7 @@ pub(crate) async fn check_authority_in_tx(
          WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
     )
     .bind(basis.assignment)
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .fetch_optional(&mut **tx)
     .await
     .map_err(read)?;
@@ -901,7 +901,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         let updated = sqlx::query("UPDATE groups SET description = ?, updated_at = ? WHERE id = ?")
             .bind(description)
-            .bind(fmt_dt(&chrono::Utc::now()))
+            .bind(fmt_dt(&jiff::Timestamp::now()))
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -1210,7 +1210,7 @@ impl SqliteBackend {
         &self,
         within_hours: i64,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let cutoff = fmt_dt(&(chrono::Utc::now() + chrono::Duration::hours(within_hours)));
+        let cutoff = fmt_dt(&crate::hours_from_now(within_hours)?);
         let rows = sqlx::query(
             "SELECT * FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at <= ?",
         )
@@ -1227,7 +1227,7 @@ impl SqliteBackend {
         &self,
         mut audit: MutationContext,
     ) -> SidResult<Vec<RoleAssignment>> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let expired = sqlx::query(
             "DELETE FROM role_assignments WHERE expires_at IS NOT NULL AND expires_at < ? \

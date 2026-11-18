@@ -41,7 +41,7 @@ impl MockStorage {
     /// Register a protected resource of an application of `project`, or of
     /// no application when `project` is none.
     pub fn register_resource(&self, project: Option<ProjectId>) -> ResourceId {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let application = project.map(|project_id| {
             let app = Application {
                 id: ApplicationId::generate(),
@@ -127,11 +127,7 @@ impl sid_plugin::WorkStore for MockStorage {
     async fn import_work(&self, _: &WorkSnapshot) -> Result<bool> {
         unimplemented!()
     }
-    async fn purge_ended_work(
-        &self,
-        _: &WorkKind,
-        _: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
+    async fn purge_ended_work(&self, _: &WorkKind, _: jiff::Timestamp) -> Result<u64> {
         unimplemented!()
     }
 }
@@ -261,7 +257,7 @@ impl sid_plugin::GrantStore for MockStorage {
     async fn list_sessions(&self, _: &ProfileId) -> Result<Vec<Session>> {
         unimplemented!()
     }
-    async fn touch_session(&self, _: SessionId, _: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    async fn touch_session(&self, _: SessionId, _: jiff::Timestamp) -> Result<()> {
         unimplemented!()
     }
     async fn delete_session(
@@ -293,7 +289,7 @@ impl sid_plugin::GrantStore for MockStorage {
         &self,
         _: uuid::Uuid,
         _: &RefreshToken,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _audit: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -442,15 +438,15 @@ impl sid_plugin::OperationResultStore for MockStorage {
     }
     async fn current_operation_period(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
-        _: chrono::Duration,
+        _: jiff::Timestamp,
+        _: jiff::SignedDuration,
     ) -> Result<sid_core::models::IssuedOperationPeriod> {
         unimplemented!()
     }
     async fn admit_operation_period(&self, _: sid_core::models::OperationPeriod) -> Result<()> {
         unimplemented!()
     }
-    async fn retire_operation_periods(&self, _: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+    async fn retire_operation_periods(&self, _: jiff::Timestamp) -> Result<u64> {
         unimplemented!()
     }
     async fn export_operation_periods(&self) -> Result<sid_core::models::OperationPeriodState> {
@@ -465,18 +461,10 @@ impl sid_plugin::OperationResultStore for MockStorage {
     async fn record_outcome(&self, _: MutationContext) -> Result<()> {
         unimplemented!()
     }
-    async fn purge_operation_results(
-        &self,
-        _: &str,
-        _: &str,
-        _: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
+    async fn purge_operation_results(&self, _: &str, _: &str, _: jiff::Timestamp) -> Result<u64> {
         unimplemented!()
     }
-    async fn purge_expired_operation_results(
-        &self,
-        _: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
+    async fn purge_expired_operation_results(&self, _: jiff::Timestamp) -> Result<u64> {
         unimplemented!()
     }
     async fn get_operation_result(
@@ -572,7 +560,7 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
     async fn get_most_recent_session_ip(
         &self,
         _: ProfileId,
-    ) -> Result<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
+    ) -> Result<Option<(std::net::IpAddr, jiff::Timestamp)>> {
         Ok(None)
     }
     async fn has_recent_session_from_ip(
@@ -677,14 +665,14 @@ impl sid_plugin::CredentialStore for MockStorage {
     ) -> Result<sid_core::models::PasswordHistory> {
         unimplemented!()
     }
-    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    async fn history_write_cutoff(&self) -> Result<Option<jiff::Timestamp>> {
         unimplemented!()
     }
     async fn raise_history_write_cutoff(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
-    ) -> Result<chrono::DateTime<chrono::Utc>> {
+    ) -> Result<jiff::Timestamp> {
         unimplemented!()
     }
     async fn reseal_credential_data(
@@ -799,7 +787,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: ProfileId,
         _: ProfilePhoneId,
         _: &PhoneSettings,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -808,7 +796,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: ProfileId,
         _: ProfilePhoneId,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -835,7 +823,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: ProfileId,
         _: ProfileEmailId,
         _: &EmailSettings,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -844,7 +832,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: ProfileId,
         _: ProfileEmailId,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -943,9 +931,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn remove_ip_allowlist_entry(&self, _: &str, _: MutationContext) -> Result<()> {
         Ok(())
     }
-    async fn list_ip_allowlist_entries(
-        &self,
-    ) -> Result<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+    async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, jiff::Timestamp)>> {
         Ok(vec![])
     }
 
@@ -1393,7 +1379,7 @@ impl sid_plugin::StorageBackend for MockStorage {
             return Ok(false);
         };
         group.description = description.map(str::to_owned);
-        group.updated_at = chrono::Utc::now();
+        group.updated_at = jiff::Timestamp::now();
         Ok(true)
     }
     async fn delete_group(&self, id: GroupId, _audit: MutationContext) -> Result<()> {
@@ -1626,7 +1612,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         within_hours: i64,
     ) -> Result<Vec<RoleAssignment>> {
-        let deadline = chrono::Utc::now() + chrono::Duration::hours(within_hours);
+        let deadline = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(within_hours);
         let assignments = self.role_assignments.lock().unwrap();
         Ok(assignments
             .iter()
@@ -1638,7 +1624,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _audit: MutationContext,
     ) -> Result<Vec<RoleAssignment>> {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let mut assignments = self.role_assignments.lock().unwrap();
         let (expired, kept) = assignments
             .drain(..)
@@ -2087,7 +2073,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: MachineUserId,
         _: &str,
         _: &MachineUserCredential,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _audit: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -2176,7 +2162,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: sid_core::models::ProvisioningConnectorId,
         _: sid_core::models::ProvisioningCredentialId,
         _: &sid_core::models::ProvisioningCredential,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -2242,7 +2228,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: &str,
         _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _audit: MutationContext,
     ) -> Result<()> {
         unimplemented!()
@@ -2284,7 +2270,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn acknowledge_export_job(
         &self,
         _: uuid::Uuid,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         Ok(false)
@@ -2292,7 +2278,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn expire_export_job(
         &self,
         _: uuid::Uuid,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         Ok(false)
@@ -2359,7 +2345,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: &str,
         _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
@@ -2513,12 +2499,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn try_job_lock(&self, _: i64) -> Result<Option<sid_plugin::storage::JobLock>> {
         unimplemented!()
     }
-    async fn ensure_audit_partition(&self, _: chrono::NaiveDate) -> Result<bool> {
+    async fn ensure_audit_partition(&self, _: jiff::civil::Date) -> Result<bool> {
         unimplemented!()
     }
     async fn drop_expired_audit_records(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<u64> {
         unimplemented!()
@@ -2562,7 +2548,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: BrandingConfigId,
         _: ProjectId,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<bool> {
         Ok(false)
@@ -2640,15 +2626,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
     async fn count_registrations_by_source(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
     ) -> Result<Vec<(sid_core::models::RegistrationSourceType, u64)>> {
         Ok(vec![])
     }
-    async fn top_referrers(
-        &self,
-        _: chrono::DateTime<chrono::Utc>,
-        _: u64,
-    ) -> Result<Vec<(ProfileId, u64)>> {
+    async fn top_referrers(&self, _: jiff::Timestamp, _: u64) -> Result<Vec<(ProfileId, u64)>> {
         Ok(vec![])
     }
     async fn get_notification_preferences(

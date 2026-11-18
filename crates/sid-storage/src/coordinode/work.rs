@@ -51,7 +51,7 @@ pub(super) fn insert(tx: &Statements<'_>, work: &NewWork) -> SidResult<bool> {
     if !found.is_empty() {
         return Ok(false);
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     tx.create_absent(
         "CREATE (w:SidWork {id: $id, kind: $kind, payload: $payload, state: 'pending',
             attempts: 0, max_attempts: $max_attempts, generation: 0, ambiguous: false,
@@ -127,12 +127,12 @@ impl WorkStore for CoordinodeBackend {
         if kinds.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let lease = chrono::Duration::from_std(lease)
+        let lease = jiff::SignedDuration::try_from(lease)
             .map_err(|_| SidError::Validation("lease out of range".into()))?;
         let kinds = kinds_value(kinds);
         let worker = worker.to_owned();
         self.transaction(move |tx| {
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             let at = |p: Params| p.with("kinds", kinds.clone()).with("now", time(now));
             // Past its validity: expired, never attempted again.
             tx.run(
@@ -228,7 +228,7 @@ impl WorkStore for CoordinodeBackend {
     ) -> SidResult<bool> {
         let (result, owed) = (result.map(str::to_owned), owed.to_vec());
         self.transaction(move |tx| {
-            let now = time(chrono::Utc::now());
+            let now = time(jiff::Timestamp::now());
             Ok(
                 if complete_claimed(tx, id, generation, result.as_deref(), &owed, &now)? {
                     Decision::Commit(true)
@@ -246,7 +246,7 @@ impl WorkStore for CoordinodeBackend {
         }
         let works = works.to_vec();
         self.transaction(move |tx| {
-            let now = time(chrono::Utc::now());
+            let now = time(jiff::Timestamp::now());
             let mut done = Vec::with_capacity(works.len());
             for work in &works {
                 done.push(complete_claimed(
@@ -304,7 +304,7 @@ impl WorkStore for CoordinodeBackend {
                     .with("retry_at", opt_time(failure.retry_at))
                     .with("error", Value::String(failure.error.clone()))
                     .with("ambiguous", Value::Bool(failure.ambiguous))
-                    .with("now", time(chrono::Utc::now())),
+                    .with("now", time(jiff::Timestamp::now())),
             )?;
             if dead && let Some(alert) = &failure.on_dead {
                 // One alert per dead work: the failure it reports is already
@@ -327,11 +327,7 @@ impl WorkStore for CoordinodeBackend {
         .await
     }
 
-    async fn purge_ended_work(
-        &self,
-        kind: &WorkKind,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
+    async fn purge_ended_work(&self, kind: &WorkKind, before: jiff::Timestamp) -> SidResult<u64> {
         let kind = kind.as_str().to_owned();
         self.transaction(move |tx| {
             let rows = tx.run(

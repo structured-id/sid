@@ -203,7 +203,7 @@ impl Pdp {
                 &uri,
                 claims.exp,
                 proof,
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
             )),
             _ => None,
         };

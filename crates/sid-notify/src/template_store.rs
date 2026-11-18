@@ -9,7 +9,8 @@
 
 use crate::routing::RoutingTable;
 use crate::template::TemplateEngine;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
+use jiff_sqlx::{Timestamp as PgTime, ToSqlx};
 use sid_core::models::OperationCompletion;
 use sqlx::PgConnection;
 use std::collections::HashMap;
@@ -61,7 +62,7 @@ pub(crate) struct StoredContent {
     pub(crate) push_title: String,
     pub(crate) push_body: String,
     pub(crate) push_action_url: String,
-    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) updated_at: Timestamp,
 }
 
 /// Template metadata for listing.
@@ -264,7 +265,7 @@ impl TemplateStore {
             if let Some(tmpl) = engine_guard.get(name) {
                 // All defaults are email-only currently.
                 let channels = vec![Channel::Email];
-                let now = Utc::now();
+                let now = Timestamp::now();
 
                 metas.push(TemplateMeta {
                     template_id: name.to_string(),
@@ -306,16 +307,16 @@ impl TemplateStore {
         customized_only: bool,
     ) -> Result<Vec<TemplateSummary>, TemplateStoreError> {
         // The latest customization of each customized template.
-        let customized: HashMap<String, DateTime<Utc>> =
-            sqlx::query_as::<_, (String, DateTime<Utc>)>(
-                "SELECT template_id, max(updated_at) FROM notification_template_overrides
+        let customized: HashMap<String, Timestamp> = sqlx::query_as::<_, (String, PgTime)>(
+            "SELECT template_id, max(updated_at) FROM notification_template_overrides
              GROUP BY template_id",
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| store_error("list template customizations", e))?
-            .into_iter()
-            .collect();
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| store_error("list template customizations", e))?
+        .into_iter()
+        .map(|(id, at)| (id, at.to_jiff()))
+        .collect();
 
         let mut result = Vec::new();
         for meta in &self.defaults {
@@ -410,7 +411,7 @@ impl TemplateStore {
                 push_title: String::new(),
                 push_body: String::new(),
                 push_action_url: String::new(),
-                updated_at: Utc::now(),
+                updated_at: Timestamp::now(),
             }))
     }
 
@@ -496,7 +497,7 @@ impl TemplateStore {
         .bind(&content.push_title)
         .bind(&content.push_body)
         .bind(&content.push_action_url)
-        .bind(content.updated_at)
+        .bind(content.updated_at.to_sqlx())
         .execute(&mut *tx)
         .await
         .map_err(|e| store_error("store a template customization", e))?;
@@ -608,7 +609,7 @@ pub(crate) struct TemplateSummary {
     pub(crate) channels: Vec<Channel>,
     pub(crate) trigger: String,
     pub(crate) customized: bool,
-    pub(crate) updated_at: Option<DateTime<Utc>>,
+    pub(crate) updated_at: Option<Timestamp>,
 }
 
 /// Template store errors.
@@ -637,7 +638,7 @@ struct OverrideRow {
     push_title: String,
     push_body: String,
     push_action_url: String,
-    updated_at: DateTime<Utc>,
+    updated_at: PgTime,
 }
 
 /// The customization of `template_id` on `channel` in `locale`, read in
@@ -668,7 +669,7 @@ async fn override_in(
         push_title: row.push_title,
         push_body: row.push_body,
         push_action_url: row.push_action_url,
-        updated_at: row.updated_at,
+        updated_at: row.updated_at.to_jiff(),
     }))
 }
 

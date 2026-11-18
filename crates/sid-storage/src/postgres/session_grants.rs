@@ -14,6 +14,7 @@ use sqlx::Row;
 
 use super::PostgresBackend;
 use super::native_session::{insert_generation, presented_row};
+use crate::pg_time::{FromPg, PgTime, ToPg};
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
@@ -38,15 +39,15 @@ pub(super) async fn insert_auth_code(tx: &mut Tx<'_>, code: &AuthorizationCode) 
     .bind(code.scopes.join(" "))
     .bind(&code.code_challenge)
     .bind(&code.nonce)
-    .bind(code.expires_at)
-    .bind(code.created_at)
+    .bind(code.expires_at.pg())
+    .bind(code.created_at.pg())
     .bind(code.used)
     .bind(code.resource)
-    .bind(code.authentication.authenticated_at)
+    .bind(code.authentication.authenticated_at.pg())
     .bind(code.authentication.amr.join(" "))
     .bind(code.authentication.assurance_level.as_str())
     .bind(code.authentication.elevation.map(|e| e.level.as_str()))
-    .bind(code.authentication.elevation.map(|e| e.until))
+    .bind(code.authentication.elevation.map(|e| e.until.pg()))
     .bind(code.authentication.session)
     .bind(code.session_id)
     .bind(&code.presentation)
@@ -90,8 +91,9 @@ fn stored_generation(
             credential_hashes,
             expires_at: presented.expires_at,
             created_at: row
-                .try_get("created_at")
-                .map_err(|e| SidError::Storage(format!("native generation: {e}")))?,
+                .try_get::<PgTime, _>("created_at")
+                .map_err(|e| SidError::Storage(format!("native generation: {e}")))?
+                .jiff(),
         },
         state: presented.state,
     })
@@ -129,7 +131,7 @@ async fn insert_stored_generation(
         .bind(stored.generation.id)
         .bind(exchange.as_bytes().as_slice())
         .bind(successor)
-        .bind(redeliver_until)
+        .bind(redeliver_until.pg())
         .bind(sealed)
         .execute(&mut **tx)
         .await

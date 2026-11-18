@@ -105,7 +105,7 @@ fn pending(purpose: Change) -> PendingOperation<ProfileId, Change> {
         credential_identifier: [7; 16],
         registration_request: None,
         current_password: CurrentPassword::Absent,
-        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5),
     }
 }
 
@@ -115,7 +115,7 @@ fn admission(kind: OwnerKind, owner_domain: [u8; 32]) -> HistoryAdmission {
         id: PasswordOperationId::generate(),
         owner_domain,
         kind,
-        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5),
         charge_key: charge_key("profile:test"),
         live: LiveDomains::default(),
         window: vec![],
@@ -583,7 +583,7 @@ async fn a_stored_operation_ends_at_its_deadline() {
         manager(3),
     );
     let mut op = pending(change());
-    op.expires_at = chrono::Utc::now() + chrono::Duration::milliseconds(60);
+    op.expires_at = jiff::Timestamp::now() + jiff::SignedDuration::from_millis(60);
     ops.store(&op).await.unwrap();
     let op = ops.take(&op.id).await.unwrap();
     ops.store(&op).await.unwrap();
@@ -1276,7 +1276,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
 
     // The live set the credential service sends with a preparation.
     let prepare = async |live: HistoryLiveSet| {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         keys.prepare_epochs(
             &sid_core::models::HistoryPreparation {
                 owner_domain: domain,
@@ -1320,7 +1320,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
     // like the epochs', so the replacement is not before it.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let cutoff =
-        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+        jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond()).unwrap();
     keys.raise_write_cutoff(cutoff, audit("test"))
         .await
         .unwrap();
@@ -1503,7 +1503,7 @@ async fn an_admission_repeats_exactly_or_conflicts() {
     let changed: [fn(&mut HistoryAdmission); 4] = [
         |a| a.owner_domain = [5; 32],
         |a| a.kind = OwnerKind::Decoy,
-        |a| a.expires_at += chrono::Duration::seconds(1),
+        |a| a.expires_at += jiff::SignedDuration::from_secs(1),
         |a| a.charge_key = charge_key("profile:other"),
     ];
     for change in changed {
@@ -1535,8 +1535,8 @@ async fn an_admission_outside_its_bounds_is_refused() {
         manager(3),
     );
     let bounds: [fn(&mut HistoryAdmission); 4] = [
-        |a| a.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1),
-        |a| a.expires_at = chrono::Utc::now() + chrono::Duration::hours(1),
+        |a| a.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1),
+        |a| a.expires_at = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         |a| a.charge_key.clear(),
         |a| a.charge_key = "x".repeat(MAX_CHARGE_KEY + 1),
     ];
@@ -1573,16 +1573,16 @@ async fn an_admission_from_a_clock_slightly_ahead_is_admitted() {
         manager(3),
         manager(3),
     );
-    let ttl = chrono::Duration::from_std(OPERATION_TTL).unwrap();
+    let ttl = jiff::SignedDuration::try_from(OPERATION_TTL).unwrap();
     let mut ahead = admission(OwnerKind::New, [8; 32]);
-    ahead.expires_at = chrono::Utc::now() + ttl + chrono::Duration::seconds(30);
+    ahead.expires_at = jiff::Timestamp::now() + ttl + jiff::SignedDuration::from_secs(30);
     evaluation
         .prepare(&ahead)
         .await
         .expect("an expiry within the clock-skew tolerance");
 
     let mut beyond = admission(OwnerKind::New, [9; 32]);
-    beyond.expires_at = chrono::Utc::now() + ttl + chrono::Duration::seconds(90);
+    beyond.expires_at = jiff::Timestamp::now() + ttl + jiff::SignedDuration::from_secs(90);
     let refused = evaluation.prepare(&beyond).await.unwrap_err();
     assert_eq!(invalid_field_of(&refused), "expires_at");
 }
@@ -1647,7 +1647,7 @@ async fn the_evaluator_applies_the_stored_write_cutoff() {
     // Another replica raises the cutoff in the shared store.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let cutoff =
-        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+        jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond()).unwrap();
     storage
         .history_keys()
         .raise_write_cutoff(cutoff, audit("test"))
@@ -1692,7 +1692,7 @@ fn a_selection_the_history_does_not_require_is_refused() {
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [key; 32],
         status,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let entry = |epoch: &HistoryEpoch, seq| HistoryEntry {
         epoch: epoch.id,
@@ -1702,7 +1702,7 @@ fn a_selection_the_history_does_not_require_is_refused() {
             operation: uuid::Uuid::now_v7(),
             policy_version: 1,
         },
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let (active, old, emptied) = (
         epoch(HistoryEpochUse::Active, 1),
@@ -1914,7 +1914,7 @@ async fn only_an_admitted_live_operation_is_evaluated() {
             &EvaluatorOperation {
                 owner_domain: [1; 32],
                 kind: OwnerKind::Existing,
-                expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+                expires_at: jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1),
                 charge_key: charge_key("profile:test"),
                 epochs: vec![],
                 evaluation: None,
@@ -1990,7 +1990,7 @@ fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [key; 32],
         status,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let (active, old) = (
         epoch(HistoryEpochUse::Active, 1),
@@ -2072,11 +2072,9 @@ fn an_organization_and_its_uuid_are_one_history_scope() {
 /// after `now`, which would replace every new epoch again and again.
 #[test]
 fn the_history_write_cutoff_is_a_past_instant() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let now: jiff::Timestamp = "2026-10-02T00:00:00Z".parse().unwrap();
     let past = parse_history_write_cutoff("2026-10-01T12:00:00Z", now).unwrap();
-    assert_eq!(past.to_rfc3339(), "2026-10-01T12:00:00+00:00");
+    assert_eq!(past.to_string(), "2026-10-01T12:00:00Z");
     assert_eq!(
         parse_history_write_cutoff("2026-10-01T15:00:00+03:00", now).unwrap(),
         past
@@ -2105,7 +2103,7 @@ fn the_history_write_cutoff_is_a_past_instant() {
 #[test]
 fn a_malformed_admission_is_refused_by_its_field() {
     use sid_proto::sid::v1::authn::PasswordHistoryOwnerKind;
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let expires_at = jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5);
     let good = PreparePasswordHistoryRequest {
         operation_id: Some(PasswordOperationId::generate().into()),
         owner_domain: vec![3; 32],
@@ -2204,7 +2202,7 @@ fn a_remote_selection_must_describe_its_domains() {
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [6; 32],
         status: HistoryEpochUse::Active,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     }
     .descriptor();
     let good = preparation_response(std::slice::from_ref(&described));

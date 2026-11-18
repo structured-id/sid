@@ -66,7 +66,7 @@ fn claims(exp: i64) -> sid_authn::bff_session::SessionClaims {
 }
 
 fn in_an_hour() -> i64 {
-    chrono::Utc::now().timestamp() + 3600
+    jiff::Timestamp::now().as_second() + 3600
 }
 
 /// A signed-in state with the fake API behind `/api`, and the session's id

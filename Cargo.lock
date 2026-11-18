@@ -768,9 +768,9 @@ dependencies = [
 
 [[package]]
 name = "cedar-policy"
-version = "4.14.1"
+version = "4.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ab947d799cd1bacd4a060d2657c667fdb2559bae9b75319344d48fb6e22f408"
+checksum = "a4298ed812e86a2e1cab931b184891e73c011b128af45c9c9a75f9bf89dbaaef"
 dependencies = [
  "cedar-policy-core",
  "cedar-policy-formatter",
@@ -789,9 +789,9 @@ dependencies = [
 
 [[package]]
 name = "cedar-policy-core"
-version = "4.14.1"
+version = "4.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84f39a1d02e72014885b6c33d5ec4fbd0c7ede5ed1069b3a9e5775874bca066b"
+checksum = "f3c9caf9738df654b3fa32666a58584e1bd92a97f8ea0f6006ca9a51bef7731f"
 dependencies = [
  "chrono",
  "educe",
@@ -817,9 +817,9 @@ dependencies = [
 
 [[package]]
 name = "cedar-policy-formatter"
-version = "4.14.1"
+version = "4.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d778cb4470373659f37e4065646ea0080932f3ee77bd156ab0ecff6a7876357"
+checksum = "30c7e58c63808423ea96f46664059210cb9b68010ac40a83f9e29983d0a2b452"
 dependencies = [
  "cedar-policy-core",
  "itertools 0.15.0",
@@ -890,10 +890,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -993,25 +991,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a"
 dependencies = [
  "error-code",
-]
-
-[[package]]
-name = "cloudevents-sdk"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47598c8e3f47e1cfb787750e1bef5de56cb288d757b7b753ace8b5f5b6a1c7f8"
-dependencies = [
- "base64 0.22.1",
- "bitflags 2.13.2",
- "chrono",
- "delegate-attr",
- "hostname",
- "serde",
- "serde_json",
- "snafu",
- "url",
- "uuid",
- "web-sys",
 ]
 
 [[package]]
@@ -1739,17 +1718,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delegate-attr"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a84c9a9c129b98e707ac9a31e204c10c064dd9f949b7da362310ff1a8b137d79"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2144,7 +2112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3262,9 +3230,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ac703058abac89e5c39b0b879dce2b6b14a4ba36600c7e7e3d0c60a6883ef3c"
 dependencies = [
  "defmt",
- "jiff-core",
- "jiff-static",
- "jiff-tzdb-platform",
+ "jiff-core 0.1.2",
+ "jiff-static 0.2.39",
+ "jiff-tzdb-platform 0.1.3",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core 1.0.0",
+ "jiff-static 1.0.0",
+ "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -3283,15 +3267,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-sqlx"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4996ad290ff7f7081becdda47e28556fbebb81618c599eac5d09182b5a60e38"
+dependencies = [
+ "jiff 1.0.0",
+ "sqlx",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dc32470c67eb7d0e9ccb74303fa925313dc04cecb1aa048beaa6f391e36a93d"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.2",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core 1.0.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3301,12 +3316,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
 
 [[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
 name = "jiff-tzdb-platform"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
 dependencies = [
- "jiff-tzdb",
+ "jiff-tzdb 0.1.9",
+]
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb 1.0.0",
 ]
 
 [[package]]
@@ -3985,7 +4015,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4815,7 +4845,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -4836,7 +4866,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5395,7 +5425,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5453,7 +5483,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5681,7 +5711,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -5801,7 +5831,7 @@ dependencies = [
  "hex",
  "indexmap 1.9.3",
  "indexmap 2.14.2",
- "jiff",
+ "jiff 0.2.39",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
@@ -5922,8 +5952,8 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sid-admin"
 version = "0.2.30"
 dependencies = [
- "chrono",
  "hex",
+ "jiff 1.0.0",
  "serde",
  "serde_json",
  "sid-authn",
@@ -5945,7 +5975,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.23.1",
- "chrono",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "serde_json",
  "sid-auth",
@@ -5977,12 +6007,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "chrono",
  "ed25519-dalek 3.0.0",
  "envoy-types",
  "globset",
  "http",
  "http-body-util",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "prost-types",
  "rand 0.10.3",
@@ -6021,10 +6051,10 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "chrono",
  "dashmap",
  "getrandom 0.4.3",
  "http-body-util",
+ "jiff 1.0.0",
  "prometheus",
  "reqwest",
  "secrecy",
@@ -6061,7 +6091,6 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bcrypt",
- "chrono",
  "criterion",
  "dashmap",
  "ed25519-dalek 3.0.0",
@@ -6073,6 +6102,7 @@ dependencies = [
  "hybrid-array",
  "idna",
  "ipnet",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "maxminddb",
  "opentelemetry",
@@ -6124,9 +6154,9 @@ version = "0.2.30"
 dependencies = [
  "async-trait",
  "cedar-policy",
- "chrono",
  "coordinode-embed",
  "dashmap",
+ "jiff 1.0.0",
  "serde",
  "serde_json",
  "sid-core",
@@ -6144,12 +6174,11 @@ name = "sid-core"
 version = "0.2.30"
 dependencies = [
  "aes-gcm",
- "chrono",
- "cloudevents-sdk",
  "group",
  "hex",
  "hkdf",
  "hmac",
+ "jiff 1.0.0",
  "pasta_curves",
  "pbkdf2",
  "rand 0.10.3",
@@ -6211,9 +6240,9 @@ version = "0.2.30"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
- "chrono",
  "der 0.8.3",
  "hex",
+ "jiff 1.0.0",
  "p256",
  "rand 0.10.3",
  "serde",
@@ -6275,13 +6304,13 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bytes",
- "chrono",
  "fred",
  "futures",
  "hickory-resolver",
  "http",
  "http-body",
  "http-body-util",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "prost",
  "prost-reflect",
@@ -6335,10 +6364,10 @@ version = "0.2.30"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "ff",
  "group",
+ "jiff 1.0.0",
  "pasta_curves",
  "rand 0.10.3",
  "secrecy",
@@ -6368,11 +6397,12 @@ dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
- "chrono",
  "futures",
  "handlebars",
  "hex",
  "hmac",
+ "jiff 1.0.0",
+ "jiff-sqlx",
  "jsonwebtoken",
  "lettre",
  "prost",
@@ -6497,9 +6527,9 @@ name = "sid-plugin"
 version = "0.2.30"
 dependencies = [
  "async-trait",
- "chrono",
  "futures",
  "group",
+ "jiff 1.0.0",
  "pasta_curves",
  "rcgen",
  "reqwest",
@@ -6525,6 +6555,7 @@ name = "sid-proto"
 version = "0.2.30"
 dependencies = [
  "glob",
+ "jiff 1.0.0",
  "prost",
  "prost-build",
  "prost-reflect",
@@ -6552,7 +6583,7 @@ version = "0.2.30"
 dependencies = [
  "async-trait",
  "axum",
- "chrono",
+ "jiff 1.0.0",
  "prost-types",
  "reqwest",
  "secrecy",
@@ -6601,7 +6632,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "chrono",
  "dashmap",
  "ff",
  "futures",
@@ -6609,6 +6639,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "ipnet",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -6674,11 +6705,12 @@ name = "sid-storage"
 version = "0.2.30"
 dependencies = [
  "async-trait",
- "chrono",
  "coordinode-core",
  "coordinode-embed",
  "futures",
  "group",
+ "jiff 1.0.0",
+ "jiff-sqlx",
  "libsqlite3-sys",
  "pasta_curves",
  "rmp-serde",
@@ -6705,9 +6737,9 @@ name = "sid-test-issuer"
 version = "0.2.30"
 dependencies = [
  "arc-swap",
- "chrono",
  "ff",
  "group",
+ "jiff 1.0.0",
  "pasta_curves",
  "rand 0.10.3",
  "secrecy",
@@ -6743,10 +6775,10 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bytes",
- "chrono",
  "hex",
  "http",
  "http-body-util",
+ "jiff 1.0.0",
  "jsonwebtoken",
  "percent-encoding",
  "rand 0.10.3",
@@ -6928,27 +6960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "snafu"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
-dependencies = [
- "snafu-derive",
-]
-
-[[package]]
-name = "snafu-derive"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7038,7 +7049,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
- "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -7111,7 +7121,6 @@ dependencies = [
  "bitflags 2.13.2",
  "byteorder",
  "bytes",
- "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -7139,7 +7148,6 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
  "byteorder",
- "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -7173,7 +7181,6 @@ version = "0.9.0"
 source = "git+https://github.com/launchbadge/sqlx?branch=main#ae659a0ca4e5e6708e589abc216f734deddb8e29"
 dependencies = [
  "atoi",
- "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -7289,9 +7296,10 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64 0.23.1",
- "chrono",
  "hex",
  "ipnet",
+ "jiff 1.0.0",
+ "jiff-sqlx",
  "jsonwebtoken",
  "opentelemetry",
  "prost",
@@ -7676,10 +7684,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7688,7 +7696,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8689,7 +8697,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

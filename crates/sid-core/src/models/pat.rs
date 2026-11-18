@@ -7,7 +7,7 @@
 //! Token format: `sid_pat_{base62_random}` (total ~48 chars).
 //! Prefix `sid_pat_` enables secret scanning in CI/CD.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::ProfileId;
@@ -87,17 +87,17 @@ pub struct PersonalAccessToken {
 
     pub status: PatStatus,
 
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
+    pub last_used_at: Option<Timestamp>,
     pub last_used_ip: Option<String>,
     pub use_count: u64,
 
     /// When this token was revoked.
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
     /// Who revoked it (profile_id of revoker).
     pub revoked_by: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Token prefix for secret scanning.
@@ -170,12 +170,12 @@ impl PersonalAccessToken {
             use_count: 0,
             revoked_at: None,
             revoked_by: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
     /// Set expiration.
-    pub fn with_expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+    pub fn with_expires_at(mut self, expires_at: Timestamp) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
@@ -183,7 +183,7 @@ impl PersonalAccessToken {
     /// Whether the token has expired (by time).
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map(|exp| Utc::now() >= exp)
+            .map(|exp| Timestamp::now() >= exp)
             .unwrap_or(false)
     }
 
@@ -194,7 +194,7 @@ impl PersonalAccessToken {
 
     /// Record a usage event.
     pub fn record_use(&mut self, ip: Option<String>) {
-        self.last_used_at = Some(Utc::now());
+        self.last_used_at = Some(Timestamp::now());
         self.last_used_ip = ip;
         self.use_count += 1;
     }
@@ -230,7 +230,7 @@ impl<'a> ActivePat<'a> {
     /// Revoke the token. Consumes wrapper.
     pub fn revoke(self, revoked_by: Option<String>) {
         self.0.status = PatStatus::Revoked;
-        self.0.revoked_at = Some(Utc::now());
+        self.0.revoked_at = Some(Timestamp::now());
         self.0.revoked_by = revoked_by;
     }
 

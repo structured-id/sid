@@ -137,7 +137,7 @@ async fn approval_assigns_the_requested_role() {
     assert_eq!(assigned[0].scope, None);
     assert_eq!(assigned[0].provenance, granted_by_root(&s));
     let expiry = assigned[0].expires_at.expect("a timed request expires");
-    let hours = (expiry - chrono::Utc::now()).num_minutes();
+    let hours = expiry.duration_since(jiff::Timestamp::now()).as_mins();
     assert!((7 * 60..=8 * 60).contains(&hours), "{hours} minutes left");
 }
 
@@ -206,14 +206,14 @@ async fn an_approval_that_cannot_grant_records_nothing() {
 #[tokio::test]
 async fn a_temporary_role_is_the_project_role() {
     let s = setup().await;
-    let expires = chrono::Utc::now() + chrono::Duration::days(1);
+    let expires = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24);
     let grant = |role: &str| {
         authed(
             GrantTemporaryRoleRequest {
                 profile_id: Some(s.user.id.into()),
                 role: role.to_string(),
                 expires_at: Some(prost_types::Timestamp {
-                    seconds: expires.timestamp(),
+                    seconds: expires.as_second(),
                     nanos: 0,
                 }),
                 justification: "incident".into(),
@@ -243,8 +243,8 @@ async fn a_temporary_role_is_the_project_role() {
     assert_eq!(assigned[0].scope, None);
     assert_eq!(assigned[0].provenance, granted_by_root(&s));
     assert_eq!(
-        assigned[0].expires_at.map(|t| t.timestamp()),
-        Some(expires.timestamp())
+        assigned[0].expires_at.map(|t| t.as_second()),
+        Some(expires.as_second())
     );
 }
 

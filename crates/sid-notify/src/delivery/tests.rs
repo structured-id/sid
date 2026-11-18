@@ -2,7 +2,7 @@
 use super::*;
 use crate::recipient_resolver::RecipientResolver;
 use crate::template::TemplateEngine;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_authn::event_relay::{EventFanoutHandler, EventRelayHandler};
 use sid_authn::work_runner::{RunnerConfig, WorkRunner};
 use sid_core::models::RequiredReceiver;
@@ -41,7 +41,7 @@ fn accepted() -> Result<DeliveryReceipt, DeliveryError> {
     Ok(DeliveryReceipt {
         message_id: "m-42".into(),
         channel: "email".into(),
-        timestamp: Utc::now(),
+        timestamp: Timestamp::now(),
         provider: "smtp".into(),
     })
 }
@@ -119,8 +119,8 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
         max_attempts: MAX_ATTEMPTS,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        due_at: Timestamp::now(),
     }
 }
 
@@ -142,7 +142,7 @@ async fn settle(
                 &sid_core::models::WorkFailure {
                     error: error.clone(),
                     ambiguous: false,
-                    retry_at: Some(Utc::now()),
+                    retry_at: Some(Timestamp::now()),
                     on_dead: None,
                 },
             )
@@ -559,7 +559,7 @@ fn customized(subject: &str, html: &str, sms: &str) -> crate::template_store::St
         push_title: String::new(),
         push_body: String::new(),
         push_action_url: String::new(),
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -912,11 +912,7 @@ impl WorkStore for SlowStore {
         self.inner.get_work(id).await
     }
 
-    async fn purge_ended_work(
-        &self,
-        kind: &WorkKind,
-        before: chrono::DateTime<Utc>,
-    ) -> sid_core::Result<u64> {
+    async fn purge_ended_work(&self, kind: &WorkKind, before: Timestamp) -> sid_core::Result<u64> {
         self.inner.purge_ended_work(kind, before).await
     }
 

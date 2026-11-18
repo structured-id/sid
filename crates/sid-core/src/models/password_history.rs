@@ -8,7 +8,7 @@
 //! material. [`WrappedHistoryKey`] is the evaluator's alone: the checker may
 //! see its bytes but cannot unwrap them without the evaluator's key access.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -160,7 +160,7 @@ pub struct HistoryEpochDescriptor {
     pub ksf_salt: [u8; 32],
     /// When the evaluator created the epoch's key, before sealing or first
     /// use: what a history write cutoff is compared with.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// One epoch of one owner as the credential service keeps it: the public
@@ -179,7 +179,7 @@ pub struct HistoryEpoch<O = ProfileId> {
     pub ksf_salt: [u8; 32],
     pub status: HistoryEpochUse,
     /// When the evaluator created the epoch's key (its descriptor's).
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl<O> HistoryEpoch<O> {
@@ -210,7 +210,7 @@ pub struct KeyEpoch {
     /// The KSF salt of every entry under this epoch.
     pub ksf_salt: [u8; 32],
     pub status: HistoryEpochUse,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl KeyEpoch {
@@ -248,7 +248,7 @@ pub struct HistoryEntry {
     pub seq: i64,
     pub entry: [u8; 32],
     pub evidence: HistoryEvidence,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Where a retained entry came from: the accepted operation and the policy
@@ -423,8 +423,8 @@ pub struct HistoryPreparation {
     pub operation: Uuid,
     /// When the operation can no longer use its epochs: past it nothing of the
     /// operation is evaluated again.
-    pub expires_at: DateTime<Utc>,
-    pub now: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub now: Timestamp,
 }
 
 /// A new epoch with its sealed key, written by the evaluator before its
@@ -502,7 +502,7 @@ impl HistoryArchive {
             // An unusable key would be stored and then refuse every later
             // password operation of the owner.
             if e.owner != self.owner
-                || e.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || e.created_at.subsec_nanosecond() % 1000 != 0
                 || ids.insert(e.id, e.status).is_some()
                 || !valid_ksf(&e.ksf)
                 || pallas_point(&e.public_key).is_none()
@@ -523,7 +523,7 @@ impl HistoryArchive {
             // The next accepted password takes the newest sequence plus one.
             if entry.seq <= 0
                 || entry.seq == i64::MAX
-                || entry.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || entry.created_at.subsec_nanosecond() % 1000 != 0
                 || entry.evidence.policy_version > i32::MAX as u32
                 || !entries.insert((entry.epoch, entry.seq))
                 || !matches!(
@@ -591,7 +591,7 @@ pub struct KeyLifecycle {
 pub struct KeyUse {
     pub operation: uuid::Uuid,
     pub epoch: HistoryEpochId,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// What the evaluator's store keeps beside the owners' keys: the first
@@ -609,21 +609,21 @@ pub struct KeyStoreRecords {
 pub struct AbandonedEnrollment {
     pub operation: uuid::Uuid,
     pub owner_domain: [u8; 32],
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
 }
 
 /// An owner whose keys were destroyed: nothing is created for it again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgedOwner {
     pub owner_domain: [u8; 32],
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
 }
 
 /// One record of the evaluator's own audit trail, in its order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyAuditRecord {
     pub sequence: i64,
-    pub occurred_at: DateTime<Utc>,
+    pub occurred_at: Timestamp,
     pub actor_id: String,
     pub actor_type: String,
     pub action: String,
@@ -697,7 +697,7 @@ impl KeyArchive {
                 ));
             }
             if e.owner_domain != self.owner_domain
-                || e.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || e.created_at.subsec_nanosecond() % 1000 != 0
                 || ids.insert(e.id, e.status).is_some()
                 || !valid_ksf(&e.ksf)
                 || pallas_point(&e.public_key).is_none()
@@ -763,11 +763,14 @@ impl KeyArchive {
 /// A lower bound as stores keep instants, to the microsecond: rounded up, so
 /// storing a write cutoff never lets an epoch created just before it through
 /// and storing a due time never makes work due before it.
-pub fn stored_instant(not_before: DateTime<Utc>) -> DateTime<Utc> {
-    match not_before.timestamp_subsec_nanos() % 1000 {
-        0 => not_before,
-        nanos => not_before + chrono::Duration::nanoseconds(i64::from(1000 - nanos)),
-    }
+pub fn stored_instant(not_before: Timestamp) -> Timestamp {
+    not_before
+        .round(
+            jiff::TimestampRound::new()
+                .smallest(jiff::Unit::Microsecond)
+                .mode(jiff::RoundMode::Ceil),
+        )
+        .expect("a stored instant is far below the largest timestamp")
 }
 
 /// What an accepted password installation writes to its owner's history in
@@ -822,7 +825,7 @@ impl<O> HistoryCommit<O> {
         if self.epochs.iter().enumerate().any(|(i, e)| {
             self.epochs[..i].iter().any(|o| o.id == e.id)
                 || !valid_ksf(&e.ksf)
-                || e.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || e.created_at.subsec_nanosecond() % 1000 != 0
         }) {
             return Err(Error::Validation(
                 "a history commit names each valid epoch once".to_string(),
@@ -842,15 +845,16 @@ impl<O> HistoryCommit<O> {
 
     /// The acceptance time before which an older entry is dropped by this
     /// commit made at `now`; `None` when age drops nothing.
-    pub fn expires_before(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        (self.max_age_days > 0).then(|| now - chrono::Duration::days(i64::from(self.max_age_days)))
+    pub fn expires_before(&self, now: Timestamp) -> Option<Timestamp> {
+        (self.max_age_days > 0)
+            .then(|| now - SignedDuration::from_hours(i64::from(self.max_age_days) * 24))
     }
 
     /// Refuse a commit that writes under an epoch created before the history
     /// write cutoff `not_before` (none when no cutoff was ever set). Only the
     /// epoch taking the new entry counts: older epochs named for comparison
     /// are not written to.
-    pub fn check_write_cutoff(&self, not_before: Option<DateTime<Utc>>) -> Result<()> {
+    pub fn check_write_cutoff(&self, not_before: Option<Timestamp>) -> Result<()> {
         match (not_before, self.epochs.first()) {
             (Some(cutoff), Some(written)) if written.created_at < cutoff => {
                 Err(Error::Fenced(format!(
@@ -871,14 +875,14 @@ pub const ENROLLMENT_ADMISSION_KIND: &str = "password_history.enrollment";
 /// How long after a password operation's expiry a finish that took the
 /// operation before it may still commit: its proof verification and history
 /// KSF run in between. Past the [`commit_deadline`] the finish refuses.
-pub const ENROLLMENT_FINISH_GRACE: chrono::Duration = chrono::Duration::minutes(5);
+pub const ENROLLMENT_FINISH_GRACE: SignedDuration = SignedDuration::from_mins(5);
 
 /// How far apart the replicas' clocks may be: a cleanup due by one replica's
 /// clock waits this long beyond the deadline another replica enforces.
-pub const REPLICA_CLOCK_SKEW: chrono::Duration = chrono::Duration::minutes(1);
+pub const REPLICA_CLOCK_SKEW: SignedDuration = SignedDuration::from_mins(1);
 
 /// The last instant an operation expiring at `expires_at` may commit.
-pub fn commit_deadline(expires_at: DateTime<Utc>) -> DateTime<Utc> {
+pub fn commit_deadline(expires_at: Timestamp) -> Timestamp {
     expires_at + ENROLLMENT_FINISH_GRACE
 }
 
@@ -920,7 +924,7 @@ pub struct EnrollmentAdmission {
     /// The password operation (16 UUIDv7 bytes).
     pub operation: Uuid,
     pub owner_domain: [u8; 32],
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 impl EnrollmentAdmission {

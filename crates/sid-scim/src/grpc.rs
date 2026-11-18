@@ -411,7 +411,7 @@ impl ScimService for ScimServiceImpl {
         }
 
         check_single_primary(&req.emails, &req.phone_numbers).map_err(refusal::mapping)?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone());
 
         // Replace contact emails and phones (profile_emails, profile_phones).
@@ -627,7 +627,7 @@ impl ScimService for ScimServiceImpl {
             }
         }
 
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let identifiers = self
             .storage
             .get_principals_by_profile(profile_id)

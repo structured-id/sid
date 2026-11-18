@@ -9,7 +9,7 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::credential::CredentialStatus;
 use sid_core::models::{
     AuditEntry, Credential, CredentialData, CredentialId, CredentialRevocation, CredentialType,
@@ -42,8 +42,8 @@ fn ctx() -> MutationContext {
 }
 
 /// The current time at the microsecond precision every store keeps.
-fn micros_now() -> chrono::DateTime<Utc> {
-    chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).expect("a current time")
+fn micros_now() -> Timestamp {
+    crate::conformance::trunc(Timestamp::now(), jiff::Unit::Microsecond)
 }
 
 /// A descriptor as the evaluator issues one.
@@ -1059,7 +1059,7 @@ pub async fn history_of_another_owner_is_refused<H: CredentialHarness>(h: &H) {
 /// only rises, and a repeated raise is a no-op. Raises the store-wide cutoff.
 pub async fn history_write_cutoff_fences_commits<H: CredentialHarness>(h: &H) {
     let store = h.store();
-    let at = |offset_ms: i64| micros_now() + chrono::Duration::milliseconds(offset_ms);
+    let at = |offset_ms: i64| micros_now() + jiff::SignedDuration::from_millis(offset_ms);
     let created = |key: u8, created_at| HistoryEpochDescriptor {
         created_at,
         ..descriptor(key)
@@ -1161,7 +1161,7 @@ pub async fn history_write_cutoff_races_a_commit<H: CredentialHarness>(h: &H) {
     let store = h.store();
     let (owner, password) = owner_with_password(h).await;
     let epoch = HistoryEpochDescriptor {
-        created_at: micros_now() - chrono::Duration::minutes(1),
+        created_at: micros_now() - jiff::SignedDuration::from_mins(1),
         ..descriptor(71)
     };
     let cutoff = micros_now();

@@ -10,7 +10,7 @@
 //! runs [`write_cutoff_only_rises`], [`abandoned_fences_are_compacted`] and
 //! [`purged_owner_keeps_nothing`] each on a store of its own.
 
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     AuditEntry, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryLiveSet, HistoryPreparation,
     HistorySuite, KeyArchive, KeyEpoch, NewKeyEpoch, WrappedHistoryKey, history_key_context,
@@ -44,8 +44,7 @@ fn new_epoch(owner_domain: [u8; 32], key: u8) -> NewKeyEpoch {
             ksf_salt: [key.wrapping_add(1); 32],
             status: HistoryEpochUse::Active,
             // Stored at microsecond precision by every backend.
-            created_at: chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
-                .unwrap(),
+            created_at: Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap(),
         },
         key: WrappedHistoryKey(
             sid_keys::EncryptedField {
@@ -76,7 +75,7 @@ async fn prepare(
     owner_domain: [u8; 32],
     live: HistoryLiveSet,
     operation: Uuid,
-    expires_at: chrono::DateTime<Utc>,
+    expires_at: Timestamp,
 ) -> sid_core::Result<Vec<HistoryEpochId>> {
     let window = live.live.clone();
     prepare_window(store, owner_domain, live, window, operation, expires_at).await
@@ -89,7 +88,7 @@ async fn prepare_window(
     live: HistoryLiveSet,
     window: Vec<HistoryEpochId>,
     operation: Uuid,
-    expires_at: chrono::DateTime<Utc>,
+    expires_at: Timestamp,
 ) -> sid_core::Result<Vec<HistoryEpochId>> {
     store
         .prepare_epochs(
@@ -99,7 +98,7 @@ async fn prepare_window(
                 window,
                 operation,
                 expires_at,
-                now: Utc::now(),
+                now: Timestamp::now(),
             },
             audit(),
         )
@@ -233,7 +232,7 @@ pub async fn owner_domains_are_separate(store: &dyn HistoryKeyStore) {
         mine,
         live(1, &[their_epoch.id], &[]),
         Uuid::now_v7(),
-        Utc::now(),
+        Timestamp::now(),
     )
     .await
     .expect_err("another owner's epoch");
@@ -291,7 +290,7 @@ pub async fn epoch_rotation(store: &dyn HistoryKeyStore) {
 /// window naming an epoch outside the live set is refused.
 pub async fn window_selects_without_retiring(store: &dyn HistoryKeyStore) {
     let domain = owner();
-    let later = Utc::now() + chrono::Duration::minutes(15);
+    let later = Timestamp::now() + SignedDuration::from_mins(15);
     let old = store
         .ensure_epoch(&new_epoch(domain, 51), audit())
         .await
@@ -354,7 +353,7 @@ pub async fn lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
         .ensure_epoch(&new_epoch(domain, 41), audit())
         .await
         .unwrap();
-    let later = Utc::now() + chrono::Duration::minutes(15);
+    let later = Timestamp::now() + SignedDuration::from_mins(15);
     // At revision 1 `first` holds an entry; it is then replaced, effective
     // from revision 2.
     let before_rotation = live(1, &[first.id], &[]);
@@ -368,7 +367,7 @@ pub async fn lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
     let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
     let (ra, rb) = tokio::join!(
         prepare(store, domain, before_rotation.clone(), a, later),
-        prepare(store, domain, before_rotation.clone(), b, Utc::now()),
+        prepare(store, domain, before_rotation.clone(), b, Timestamp::now()),
     );
     assert_eq!(ra.unwrap(), vec![second.id, first.id]);
     assert_eq!(rb.unwrap(), vec![second.id, first.id]);
@@ -389,9 +388,15 @@ pub async fn lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
     assert!(epoch_ids(store, domain).await.contains(&first.id));
 
     // An older live set changes nothing: it neither retires nor rolls back.
-    prepare(store, domain, before_rotation, Uuid::now_v7(), Utc::now())
-        .await
-        .unwrap();
+    prepare(
+        store,
+        domain,
+        before_rotation,
+        Uuid::now_v7(),
+        Timestamp::now(),
+    )
+    .await
+    .unwrap();
     assert!(epoch_ids(store, domain).await.contains(&first.id));
 
     // Naming `a` settled releases it; `b` expired already. `first` is
@@ -428,9 +433,15 @@ pub async fn stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
         .rotate_epoch(&new_epoch(domain, 52), first.id, 2, audit())
         .await
         .unwrap();
-    let selected = prepare(store, domain, live(1, &[], &[]), Uuid::now_v7(), Utc::now())
-        .await
-        .unwrap();
+    let selected = prepare(
+        store,
+        domain,
+        live(1, &[], &[]),
+        Uuid::now_v7(),
+        Timestamp::now(),
+    )
+    .await
+    .unwrap();
     assert_eq!(selected, vec![second.id]);
     assert!(
         epoch_ids(store, domain).await.contains(&first.id),
@@ -441,7 +452,7 @@ pub async fn stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
         domain,
         live(2, &[first.id], &[]),
         Uuid::now_v7(),
-        Utc::now(),
+        Timestamp::now(),
     )
     .await
     .unwrap();
@@ -454,8 +465,8 @@ pub async fn stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
 /// nothing and reports the cutoff in force.
 pub async fn write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
     let at = |offset_ms: i64| {
-        chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
-            + chrono::Duration::milliseconds(offset_ms)
+        Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap()
+            + SignedDuration::from_millis(offset_ms)
     };
     let first = at(-1000);
     let raised = store.raise_write_cutoff(first, audit()).await.unwrap();
@@ -476,7 +487,7 @@ pub async fn write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
     );
     assert_eq!(store.write_cutoff().await.unwrap(), Some(later));
     // A finer instant is kept rounded up, never down.
-    let fine = later + chrono::Duration::nanoseconds(1500);
+    let fine = later + SignedDuration::from_nanos(1500);
     let kept = store.raise_write_cutoff(fine, audit()).await.unwrap();
     assert!(kept >= fine);
 }
@@ -562,7 +573,7 @@ pub async fn abandoned_enrollment_is_reclaimed(store: &dyn HistoryKeyStore) {
         kept_domain,
         live(1, &[kept.epoch.id], &[]),
         Uuid::now_v7(),
-        Utc::now(),
+        Timestamp::now(),
     )
     .await
     .unwrap();
@@ -625,7 +636,7 @@ pub async fn purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
         .await
         .unwrap();
     let operation = Uuid::now_v7();
-    let expires = Utc::now() + chrono::Duration::minutes(5);
+    let expires = Timestamp::now() + SignedDuration::from_mins(5);
     prepare(
         store,
         purged,
@@ -673,14 +684,14 @@ pub async fn purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
 
     assert_eq!(
         store
-            .compact_abandoned(Utc::now() - chrono::Duration::hours(1), audit())
+            .compact_abandoned(Timestamp::now() - SignedDuration::from_hours(1), audit())
             .await
             .unwrap(),
         0
     );
     assert!(
         store
-            .compact_abandoned(Utc::now() + chrono::Duration::seconds(5), audit())
+            .compact_abandoned(Timestamp::now() + SignedDuration::from_secs(5), audit())
             .await
             .unwrap()
             >= 1
@@ -724,7 +735,7 @@ pub async fn abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
         .unwrap();
     assert_eq!(
         store
-            .compact_abandoned(Utc::now() - chrono::Duration::hours(1), audit())
+            .compact_abandoned(Timestamp::now() - SignedDuration::from_hours(1), audit())
             .await
             .unwrap(),
         0
@@ -738,7 +749,7 @@ pub async fn abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
 
     assert!(
         store
-            .compact_abandoned(Utc::now() + chrono::Duration::seconds(5), audit())
+            .compact_abandoned(Timestamp::now() + SignedDuration::from_secs(5), audit())
             .await
             .unwrap()
             >= 1
@@ -750,7 +761,7 @@ pub async fn abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
 /// repeats add nothing; a conflicting or malformed archive mutates nothing.
 pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
     let domain = owner();
-    let now = chrono::DateTime::from_timestamp_micros(1_790_000_000_123_456).unwrap();
+    let now = Timestamp::from_microsecond(1_790_000_000_123_456).unwrap();
     let mut active = new_epoch(domain, 61);
     let mut replaced = new_epoch(domain, 62);
     active.epoch.created_at = now;
@@ -762,12 +773,12 @@ pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
         sid_core::models::KeyUse {
             operation: Uuid::now_v7(),
             epoch: active.epoch.id,
-            expires_at: now + chrono::Duration::minutes(5),
+            expires_at: now + SignedDuration::from_mins(5),
         },
         sid_core::models::KeyUse {
             operation: Uuid::now_v7(),
             epoch: replaced.epoch.id,
-            expires_at: now + chrono::Duration::minutes(6),
+            expires_at: now + SignedDuration::from_mins(6),
         },
     ];
     uses.sort_unstable_by_key(|u| (u.operation, u.epoch));

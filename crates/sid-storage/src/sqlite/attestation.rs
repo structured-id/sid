@@ -264,7 +264,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("revoke device attestation: {e}"));
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let revoked = sqlx::query(
             "UPDATE device_attestations SET status = 'revoked', revoked_at = ?, updated_at = ?

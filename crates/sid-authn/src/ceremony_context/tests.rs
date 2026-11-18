@@ -2,7 +2,7 @@
 //! A context continues only for the client and transport that opened it,
 //! by its own secret and, for the browser, its own CSRF token.
 
-use chrono::Duration;
+use jiff::SignedDuration;
 
 use super::*;
 
@@ -14,7 +14,7 @@ fn cookie() -> BrowserCookie {
 /// start delivered them.
 fn browser() -> (BrowserSecret, String, CeremonyBinding) {
     let (context, binding) = CeremonyContext::open(CeremonyClient::Browser);
-    let headers = context.headers(&cookie(), Utc::now() + Duration::minutes(10));
+    let headers = context.headers(&cookie(), Timestamp::now() + SignedDuration::from_mins(10));
     let [("set-cookie", set), (CSRF_HEADER, csrf)] = headers.as_slice() else {
         panic!("a browser gets its cookie and CSRF token: {headers:?}");
     };
@@ -24,7 +24,7 @@ fn browser() -> (BrowserSecret, String, CeremonyBinding) {
 
 fn native() -> (BrowserSecret, CeremonyBinding) {
     let (context, binding) = CeremonyContext::open(CeremonyClient::Native);
-    let headers = context.headers(&cookie(), Utc::now() + Duration::minutes(10));
+    let headers = context.headers(&cookie(), Timestamp::now() + SignedDuration::from_mins(10));
     let [("authorization", bearer)] = headers.as_slice() else {
         panic!("a native client gets its bearer: {headers:?}");
     };

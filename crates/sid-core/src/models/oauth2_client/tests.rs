@@ -24,7 +24,7 @@ fn make_public_client() -> OAuth2Client {
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -44,7 +44,7 @@ fn make_public_client() -> OAuth2Client {
         federation_timeout_ms: 500,
         unified_input: false,
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -73,7 +73,7 @@ fn make_confidential_client() -> OAuth2Client {
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -93,7 +93,7 @@ fn make_confidential_client() -> OAuth2Client {
         federation_timeout_ms: 500,
         unified_input: false,
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 

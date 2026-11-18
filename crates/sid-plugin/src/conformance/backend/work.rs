@@ -3,7 +3,7 @@
 //! contract itself is the work store conformance. Each scenario uses its own
 //! work kind, so scenarios sharing one database never see each other's work.
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::{
     Event, LOGOUT_DELIVERY_ATTEMPTS, LogoutDelivery, NewWork, RevocationReason, Session,
@@ -70,7 +70,7 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
         "late@sid.example.com",
         "hash-late".into(),
     );
-    expired.expires_at = Utc::now() - Duration::minutes(1);
+    expired.expires_at = Timestamp::now() - Duration::from_mins(1);
     backend
         .create_magic_link_session(&expired, super::test_audit())
         .await
@@ -118,7 +118,7 @@ pub async fn test_session_limit_evicts_oldest(backend: &dyn StorageBackend) {
 
     let mut oldest = super::create_test_session(profile.id);
     oldest.client_id = Some(client.client_id.clone());
-    oldest.created_at = Utc::now() - Duration::minutes(2);
+    oldest.created_at = Timestamp::now() - Duration::from_mins(2);
     backend
         .create_session_atomic(&oldest, 0, None, super::test_audit())
         .await
@@ -266,9 +266,9 @@ pub async fn test_expired_role_assignments_owe_event(backend: &dyn StorageBacken
         .unwrap();
     let principal = RoleAssignmentPrincipal::Profile(profile.id);
     let expired = RoleAssignment::new(principal.clone(), role.id)
-        .with_expiry(Utc::now() - Duration::hours(1));
+        .with_expiry(Timestamp::now() - Duration::from_hours(1));
     let active = RoleAssignment::new(principal.clone(), role.id)
-        .with_expiry(Utc::now() + Duration::hours(24));
+        .with_expiry(Timestamp::now() + Duration::from_hours(24));
     let permanent = RoleAssignment::new(principal, role.id);
     for a in [&expired, &active, &permanent] {
         backend

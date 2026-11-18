@@ -40,7 +40,7 @@ const ABORT_EVENT_NAMESPACE: uuid::Uuid =
 /// work, its abort's completion and the evaluator's fence. Past an
 /// operation's lifetime and the tolerated clock skew no preparation, finish
 /// or commit of it can still arrive, so each is then no longer needed.
-const ENROLLMENT_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(1);
+const ENROLLMENT_RECORD_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(24);
 
 /// Drop the records of first enrollments and owner purges that ended more
 /// than a day ago: their ended work, the aborts' completions and, with the
@@ -49,7 +49,7 @@ const ENROLLMENT_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(1);
 pub async fn compact_enrollments(
     storage: &(impl WorkStore + OperationResultStore + ?Sized),
     evaluation: Option<&HistoryEvaluation>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> sid_core::Result<u64> {
     let before = now - ENROLLMENT_RECORD_RETENTION;
     let mut dropped = 0;
@@ -86,7 +86,7 @@ pub async fn compact_enrollments(
 /// running it at once only repeat it. Returns how many fences were dropped.
 pub async fn compact_evaluator_fences(
     evaluation: &HistoryEvaluation,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> sid_core::Result<u64> {
     evaluation
         .compact_abandoned(now - ENROLLMENT_RECORD_RETENTION)

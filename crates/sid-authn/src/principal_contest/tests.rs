@@ -34,8 +34,8 @@ fn claimed(check: &ContestCheck) -> ClaimedWork {
         max_attempts: work.max_attempts,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     }
 }
 

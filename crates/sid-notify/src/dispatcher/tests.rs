@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_plugin::notification::{ChannelHealth, NotificationPriority};
 
 /// Test channel that accepts or refuses every message.
@@ -27,7 +27,7 @@ impl NotificationChannel for TestChannel {
         Ok(DeliveryReceipt {
             message_id: "m-1".into(),
             channel: self.id.into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             provider: "test".into(),
         })
     }

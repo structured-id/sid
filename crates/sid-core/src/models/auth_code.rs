@@ -4,7 +4,7 @@
 //! Short-lived authorization codes for OAuth2 code flow.
 //! Uses consume-self pattern: `exchange()` takes ownership, preventing reuse.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -65,8 +65,8 @@ pub struct AuthorizationCode<O = ProfileId> {
     /// How the user authenticated in the session that authorized the code.
     pub authentication: GrantAuthentication,
 
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
 
     /// Whether this code has already been exchanged.
     pub used: bool,
@@ -163,7 +163,7 @@ impl<O> ExchangedCode<O> {
 impl<O> AuthorizationCode<O> {
     /// Check if code is expired.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Timestamp::now() > self.expires_at
     }
 
     /// Check if code is usable (not used, not expired).

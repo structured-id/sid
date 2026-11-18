@@ -9,7 +9,7 @@
 //! the mailbox and never binds a credential to an existing account. A new
 //! registration binds its first credential inside its own ceremony, not here.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::session::{AuthLevel, FULL_TRUST_HOURS};
 use sid_core::models::{
     Credential, CredentialType, CurrentPasswordRule, ProfileId, Session, SessionId,
@@ -67,7 +67,7 @@ pub fn check_enrollment<O>(
     active: &[Credential<O>],
     credential_type: CredentialType,
     passkey_satisfies_mfa: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), EnrollmentRefusal> {
     check_binding(
         session,
@@ -86,7 +86,7 @@ pub fn check_binding<O>(
     active: &[Credential<O>],
     assurance: AuthLevel,
     passkey_satisfies_mfa: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), EnrollmentRefusal> {
     // A provisional session, a sign-in still owing its second factor among
     // them, binds nothing here.
@@ -97,7 +97,8 @@ pub fn check_binding<O>(
     if session.assurance_at(now) < required {
         return Err(EnrollmentRefusal::Insufficient { required });
     }
-    if now - session.authenticated_at >= chrono::Duration::hours(FULL_TRUST_HOURS) {
+    if now.duration_since(session.authenticated_at) >= SignedDuration::from_hours(FULL_TRUST_HOURS)
+    {
         return Err(EnrollmentRefusal::Stale { required });
     }
     Ok(())
@@ -127,14 +128,16 @@ pub fn check_sign_in_enrollment<O>(
 pub fn current_password_required_in<O>(
     session: &Session<O>,
     rule: CurrentPasswordRule,
-    now: DateTime<Utc>,
-) -> chrono::Duration {
+    now: Timestamp,
+) -> SignedDuration {
     let window = match rule {
-        CurrentPasswordRule::Always => return chrono::Duration::zero(),
-        CurrentPasswordRule::AfterMinutes(minutes) => chrono::Duration::minutes(i64::from(minutes))
-            .min(chrono::Duration::hours(FULL_TRUST_HOURS)),
+        CurrentPasswordRule::Always => return SignedDuration::ZERO,
+        CurrentPasswordRule::AfterMinutes(minutes) => SignedDuration::from_mins(i64::from(minutes))
+            .min(SignedDuration::from_hours(FULL_TRUST_HOURS)),
     };
-    (session.authenticated_at + window - now).max(chrono::Duration::zero())
+    (session.authenticated_at + window)
+        .duration_since(now)
+        .max(SignedDuration::ZERO)
 }
 
 /// Check that `session` may replace the account's password at `now`.
@@ -148,7 +151,7 @@ pub fn check_password_change<O>(
     passkey_satisfies_mfa: bool,
     rule: CurrentPasswordRule,
     proven: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), EnrollmentRefusal> {
     if session.is_provisional {
         return Err(EnrollmentRefusal::Provisional);
@@ -160,7 +163,7 @@ pub fn check_password_change<O>(
     if session.assurance_at(now) < required {
         return Err(EnrollmentRefusal::Insufficient { required });
     }
-    if proven || current_password_required_in(session, rule, now) > chrono::Duration::zero() {
+    if proven || current_password_required_in(session, rule, now) > SignedDuration::ZERO {
         Ok(())
     } else {
         Err(EnrollmentRefusal::CurrentPasswordRequired)
@@ -207,7 +210,7 @@ pub async fn authorize(
         &active,
         credential_type,
         passkey_satisfies_mfa,
-        Utc::now(),
+        Timestamp::now(),
     )?)
 }
 
@@ -228,7 +231,7 @@ pub async fn authorize_binding(
         &active,
         assurance,
         passkey_satisfies_mfa,
-        Utc::now(),
+        Timestamp::now(),
     )?;
     Ok(session)
 }
@@ -275,7 +278,7 @@ pub fn binding_fence(session: &Session) -> sid_core::models::ActorFence {
     sid_core::models::ActorFence::Session {
         session: session.id,
         profile: session.profile_id,
-        fresh_until: Some(session.authenticated_at + chrono::Duration::hours(FULL_TRUST_HOURS)),
+        fresh_until: Some(session.authenticated_at + SignedDuration::from_hours(FULL_TRUST_HOURS)),
     }
 }
 
@@ -314,7 +317,7 @@ pub async fn password_change_authority(
         passkey_satisfies_mfa,
         rule,
         false,
-        Utc::now(),
+        Timestamp::now(),
     ) {
         Ok(()) => Ok(false),
         Err(EnrollmentRefusal::CurrentPasswordRequired) => Ok(true),
@@ -329,9 +332,13 @@ pub async fn password_change_requirement(
     storage: &dyn sid_plugin::StorageBackend,
     caller: &Caller,
     rule: CurrentPasswordRule,
-) -> Result<chrono::Duration, EnrollmentError> {
+) -> Result<SignedDuration, EnrollmentError> {
     let session = own_session(storage, caller).await?;
-    Ok(current_password_required_in(&session, rule, Utc::now()))
+    Ok(current_password_required_in(
+        &session,
+        rule,
+        Timestamp::now(),
+    ))
 }
 
 /// The caller's own live interactive session, as stored.

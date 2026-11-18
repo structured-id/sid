@@ -131,7 +131,7 @@ async fn test_expired_assignment_filtered() {
         .unwrap();
 
     let mut assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id);
-    assignment.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    assignment.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
     storage
         .create_role_assignment(
             &assignment,
@@ -160,7 +160,7 @@ async fn test_non_expired_assignment_included() {
         .unwrap();
 
     let mut assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id);
-    assignment.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    assignment.expires_at = Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1));
     storage
         .create_role_assignment(
             &assignment,
@@ -327,7 +327,7 @@ async fn assigned(
     storage: &Arc<MockStorage>,
     profile_id: ProfileId,
     role_id: RoleId,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<jiff::Timestamp>,
 ) -> RoleAssignment {
     let mut assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role_id);
     assignment.expires_at = expires_at;
@@ -576,7 +576,7 @@ async fn test_list_expiring_role_assignments() {
 
     // Assignment expiring in 12 hours
     let a1 = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id)
-        .with_expiry(chrono::Utc::now() + chrono::Duration::hours(12));
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(12));
     storage
         .create_role_assignment(
             &a1,
@@ -587,7 +587,7 @@ async fn test_list_expiring_role_assignments() {
 
     // Assignment expiring in 96 hours (outside 72h window)
     let a2 = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id)
-        .with_expiry(chrono::Utc::now() + chrono::Duration::hours(96));
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(96));
     storage
         .create_role_assignment(
             &a2,
@@ -634,7 +634,7 @@ async fn test_cleanup_expired_role_assignments() {
 
     // Expired assignment
     let a1 = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id)
-        .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1));
+        .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1));
     storage
         .create_role_assignment(
             &a1,
@@ -645,7 +645,7 @@ async fn test_cleanup_expired_role_assignments() {
 
     // Still active assignment
     let a2 = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id)
-        .with_expiry(chrono::Utc::now() + chrono::Duration::hours(24));
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24));
     storage
         .create_role_assignment(
             &a2,
@@ -705,7 +705,7 @@ async fn test_assign_role_with_expiry() {
         .await
         .unwrap();
 
-    let expiry = chrono::Utc::now() + chrono::Duration::hours(4);
+    let expiry = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(4);
     let assignment = assigned(&storage, profile_id, role.id, Some(expiry)).await;
 
     assert_eq!(assignment.expires_at, Some(expiry));

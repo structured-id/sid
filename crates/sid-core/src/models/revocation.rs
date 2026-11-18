@@ -4,7 +4,7 @@
 //! Tracks revocation requests and their cascading effects across entities.
 //! Used for audit trail and ensuring complete revocation of dependent resources.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -208,7 +208,7 @@ pub struct CascadeEntry {
     /// Which tier this revocation falls into.
     pub tier: CascadeTier,
     /// When this entity was revoked.
-    pub revoked_at: DateTime<Utc>,
+    pub revoked_at: Timestamp,
 }
 
 /// Revocation request — tracks a revocation and its cascade.
@@ -230,9 +230,9 @@ pub struct RevocationRequest {
     /// Entities revoked as part of the cascade.
     pub cascade_entries: Vec<CascadeEntry>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// When all cascade tiers completed.
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
 }
 
 impl RevocationRequest {
@@ -254,7 +254,7 @@ impl RevocationRequest {
             },
             initiated_by: initiated_by.into(),
             cascade_entries: vec![],
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             completed_at: None,
         }
     }
@@ -270,13 +270,13 @@ impl RevocationRequest {
             target,
             entity_id: entity_id.into(),
             tier,
-            revoked_at: Utc::now(),
+            revoked_at: Timestamp::now(),
         });
     }
 
     /// Mark the cascade as fully completed.
     pub fn complete(&mut self) {
-        self.completed_at = Some(Utc::now());
+        self.completed_at = Some(Timestamp::now());
     }
 
     /// Total number of entities revoked (primary + cascade).

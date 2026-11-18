@@ -17,7 +17,7 @@
 //! Every refusal is the same `unauthenticated`, so a caller learns nothing
 //! about which check failed.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::provisioning_connector::{
     CONNECTOR_CLIENT_SECRET_PREFIX, SCIM_BEARER_PREFIX,
 };
@@ -72,7 +72,7 @@ fn usable(
 ) -> bool {
     credential.connector_id == connector.id
         && credential.kind == kind
-        && credential.is_usable_at(Utc::now())
+        && credential.is_usable_at(Timestamp::now())
         && connector.is_active()
         && connector.direction == ProvisioningDirection::Inbound
 }

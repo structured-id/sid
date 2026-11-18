@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_authn::jwt::JwtService;
 use sid_core::models::{Profile, Session};
 
@@ -24,8 +24,12 @@ fn jwt() -> JwtService {
 fn custom_claims_cannot_override_registered_claims() {
     let jwt = jwt();
     let profile = Profile::new(Some("alice"));
-    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
-    let far_future = (Utc::now() + Duration::days(3650)).timestamp();
+    let session = Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
+    let far_future = (Timestamp::now() + SignedDuration::from_hours(3650 * 24)).as_second();
     let mut custom = HashMap::new();
     custom.insert("sub".to_string(), serde_json::json!("attacker"));
     custom.insert("pid".to_string(), serde_json::json!("attacker"));

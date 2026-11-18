@@ -3,7 +3,7 @@
 //! descriptors and retained entries. No key is stored here and no tag ever
 //! arrives; the evaluator keeps its keys in its own store.
 
-use chrono::{DateTime, Utc};
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use sid_core::models::{
     HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor,
     HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf, HistorySuite, PasswordHistory,
@@ -45,11 +45,11 @@ type EpochRow = (
     i32,
     Vec<u8>,
     String,
-    DateTime<Utc>,
+    PgTime,
 );
 
 /// epoch_id, seq, entry, operation_id, policy_version, created_at
-type EntryRow = (Uuid, i64, Vec<u8>, Uuid, i32, DateTime<Utc>);
+type EntryRow = (Uuid, i64, Vec<u8>, Uuid, i32, PgTime);
 
 /// The epoch columns [`EpochRow`] reads, as a literal for static queries.
 macro_rules! epoch_columns {
@@ -74,7 +74,7 @@ fn epoch_from_row(row: EpochRow) -> SidResult<HistoryEpoch> {
         },
         ksf_salt: fixed32(salt, "ksf_salt")?,
         status: HistoryEpochUse::parse(&status)?,
-        created_at,
+        created_at: created_at.jiff(),
     })
 }
 
@@ -89,7 +89,7 @@ fn entry_from_row(row: EntryRow) -> SidResult<HistoryEntry> {
             policy_version: u32::try_from(policy_version)
                 .map_err(|_| SidError::Storage("column policy_version: negative".into()))?,
         },
-        created_at,
+        created_at: created_at.jiff(),
     })
 }
 
@@ -235,7 +235,7 @@ pub(super) async fn import_archive(
         .bind(entry.entry.as_slice())
         .bind(entry.evidence.operation)
         .bind(signed(entry.evidence.policy_version, "policy version")?)
-        .bind(entry.created_at)
+        .bind(entry.created_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("archive entry"))?;
@@ -262,7 +262,7 @@ async fn insert_epoch(
     .bind(signed(e.ksf.lanes, "KSF lanes")?)
     .bind(e.ksf_salt.as_slice())
     .bind(e.status.as_str())
-    .bind(e.created_at)
+    .bind(e.created_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(storage("epoch insert"))?;
@@ -291,7 +291,7 @@ async fn record_descriptor(
     .bind(signed(d.ksf.passes, "KSF passes")?)
     .bind(signed(d.ksf.lanes, "KSF lanes")?)
     .bind(d.ksf_salt.as_slice())
-    .bind(d.created_at)
+    .bind(d.created_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(storage("descriptor insert"))?;
@@ -323,12 +323,12 @@ pub(super) async fn apply_in_tx(
     commit.validate()?;
     // The write cutoff first, shared: a raise holds this row exclusively, so
     // a raise and a commit are serialized in one order on every path.
-    let not_before: Option<DateTime<Utc>> =
+    let not_before: Option<PgTime> =
         sqlx::query_scalar("SELECT not_before FROM password_history_write_cutoff FOR SHARE")
             .fetch_one(&mut **tx)
             .await
             .map_err(storage("write cutoff"))?;
-    commit.check_write_cutoff(not_before)?;
+    commit.check_write_cutoff(not_before.jiff())?;
     let owner = commit.owner;
     if commit.expected_revision == 0 {
         // First history of this owner: whoever creates the row owns revision 1.
@@ -366,7 +366,7 @@ pub(super) async fn apply_in_tx(
     for d in &commit.epochs {
         record_descriptor(tx, owner, d).await?;
     }
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let active = commit.epochs[0].id.0;
     sqlx::query(
         "UPDATE password_history_epochs SET status = 'compare_only'
@@ -402,7 +402,7 @@ pub(super) async fn apply_in_tx(
         .bind(entry.as_slice())
         .bind(commit.evidence.operation)
         .bind(policy_version)
-        .bind(now)
+        .bind(now.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("entry insert"))?;
@@ -425,7 +425,7 @@ pub(super) async fn apply_in_tx(
         )
         .bind(owner)
         .bind(seq)
-        .bind(before)
+        .bind(before.pg())
         .execute(&mut **tx)
         .await
         .map_err(storage("age retention"))?;

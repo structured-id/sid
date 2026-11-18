@@ -21,6 +21,22 @@ pub mod principal_store;
 pub mod sign_in_history;
 pub mod work_store;
 
+/// `n` days of 24 hours: the scenarios' unit for lifetimes and ages.
+fn days(n: i64) -> jiff::SignedDuration {
+    jiff::SignedDuration::from_hours(n * 24)
+}
+
+/// `at` truncated to `unit`, the precision a scenario compares stored
+/// instants at.
+fn trunc(at: jiff::Timestamp, unit: jiff::Unit) -> jiff::Timestamp {
+    at.round(
+        jiff::TimestampRound::new()
+            .smallest(unit)
+            .mode(jiff::RoundMode::Trunc),
+    )
+    .expect("truncating an instant stays representable")
+}
+
 /// A history epoch's public key: `(n + 1)·G` on Pallas, so each `n` gives a
 /// distinct valid point and none is the identity.
 fn history_public_key(n: u8) -> [u8; 32] {

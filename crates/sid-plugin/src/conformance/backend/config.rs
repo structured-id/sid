@@ -17,7 +17,7 @@ fn flow(project: sid_core::models::ProjectId, flow_type: FlowType, timeout: u32)
         flow_type,
         steps: HashMap::new(),
         timeout_seconds: timeout,
-        updated_at: chrono::Utc::now(),
+        updated_at: jiff::Timestamp::now(),
     }
 }
 

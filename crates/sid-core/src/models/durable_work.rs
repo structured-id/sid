@@ -3,7 +3,7 @@
 //! (transactional outbox): stored, claimed by one worker at a time under a
 //! fenced lease, retried, and ended in a recorded outcome.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -110,9 +110,9 @@ pub struct NewWork {
     pub payload: Vec<u8>,
     /// Earliest time a worker may take it; `None` is due at once, stamped by
     /// the store's own clock so a skewed replica clock cannot delay it.
-    pub not_before: Option<DateTime<Utc>>,
+    pub not_before: Option<Timestamp>,
     /// After this the work is expired, never attempted.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     /// Attempts before the work fails (dead-letter).
     pub max_attempts: u32,
 }
@@ -143,13 +143,13 @@ pub struct ClaimedWork {
     pub attempt: u32,
     pub max_attempts: u32,
     pub generation: i64,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     /// When the work was stored.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Its due time when claimed: the first due time or the retry time a
     /// failed attempt set. Work reclaimed after a lapsed lease keeps the due
     /// time of the attempt that lapsed.
-    pub due_at: DateTime<Utc>,
+    pub due_at: Timestamp,
 }
 
 /// A done attempt as recorded on its work: what it produced and the
@@ -172,7 +172,7 @@ pub struct WorkFailure {
     pub ambiguous: bool,
     /// When to try again; `None` is a permanent failure. The work also fails
     /// when no attempts remain.
-    pub retry_at: Option<DateTime<Utc>>,
+    pub retry_at: Option<Timestamp>,
     /// Work enqueued in the same transaction when this failure ends the work
     /// (the dead-letter alert), so a recorded failure never lacks it.
     pub on_dead: Option<NewWork>,
@@ -192,10 +192,10 @@ pub struct WorkRecord {
     pub ambiguous: bool,
     /// What completing it produced (a provider receipt), if anything.
     pub result: Option<String>,
-    pub not_before: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub not_before: Timestamp,
+    pub expires_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// A piece of work as carried from one store to another: its record and

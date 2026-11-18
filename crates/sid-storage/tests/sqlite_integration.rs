@@ -35,8 +35,9 @@ async fn test_decay_ip_reputation() {
         let pool = pool.clone();
         Box::pin(async move {
             // The engine stores times as RFC 3339 text with milliseconds.
-            let past = (chrono::Utc::now() - chrono::Duration::hours(2))
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let past = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2))
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
             sqlx::query("UPDATE ip_reputation SET updated_at = ? WHERE ip = ?")
                 .bind(past)
                 .bind(ip)
@@ -423,7 +424,8 @@ async fn seed_profiles(backend: &SqliteBackend, n: u64) {
     // The store's own timestamp form (RFC 3339, microseconds, `Z`).
     let at = like
         .created_at
-        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        .strftime("%Y-%m-%dT%H:%M:%S%.6fZ")
+        .to_string();
     let mut tx = backend.pool().begin().await.unwrap();
     for _ in 0..shortfall {
         sqlx::query(
@@ -578,10 +580,7 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&r.id)
-                .bind(
-                    r.timestamp
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                )
+                .bind(r.timestamp.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
                 .bind(&r.chain_id)
                 .bind(r.sequence as i64)
                 .bind(&r.actor_id)
@@ -1025,7 +1024,7 @@ async fn stale_contact(
 ) -> uuid::Uuid {
     use sid_plugin::storage::StorageBackend;
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let contact = sid_core::models::ProfileEmail {
         id: sid_core::models::ProfileEmailId::new(),
         profile_id: profile,

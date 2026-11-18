@@ -82,7 +82,7 @@ pub enum ActorFence {
     Session {
         session: super::SessionId,
         profile: super::ProfileId,
-        fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+        fresh_until: Option<jiff::Timestamp>,
     },
 }
 

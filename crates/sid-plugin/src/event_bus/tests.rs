@@ -190,7 +190,7 @@ async fn test_lagging_subscriber_is_dropped() {
 async fn test_replay_unsupported_is_an_error() {
     let bus = InProcessEventBus::new();
     let err = bus
-        .replay(chrono::Utc::now(), None, EventFilter::default())
+        .replay(jiff::Timestamp::now(), None, EventFilter::default())
         .await
         .unwrap_err();
     assert!(matches!(err, EventBusError::ReplayUnsupported), "{err:?}");

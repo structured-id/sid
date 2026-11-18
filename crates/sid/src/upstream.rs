@@ -296,7 +296,7 @@ impl Upstream {
             if let Some(logo) = &req.logo_url {
                 provider.logo_url = optional(logo);
             }
-            provider.updated_at = chrono::Utc::now();
+            provider.updated_at = jiff::Timestamp::now();
             let response = UpstreamProviderResponse {
                 provider: Some(provider_to_proto(&provider)),
             };

@@ -192,7 +192,7 @@ fn claims() -> SessionClaims {
     SessionClaims {
         sub: "subject-1".into(),
         iss: ISSUER.into(),
-        exp: chrono::Utc::now().timestamp() + 3600,
+        exp: jiff::Timestamp::now().as_second() + 3600,
         iat: 0,
         auth_time: 0,
         acr: "urn:sid:acr:basic".into(),
@@ -768,7 +768,7 @@ async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
 async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
     let f = fixture(memory(), true);
     let mut near_end = claims();
-    near_end.exp = chrono::Utc::now().timestamp() + 10;
+    near_end.exp = jiff::Timestamp::now().as_second() + 10;
     let (id, _) = f
         .sessions
         .create_session(
@@ -816,7 +816,7 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
 async fn the_claim_names_the_version_actually_refreshed() {
     let f = fixture(memory(), true);
     let mut near_end = claims();
-    near_end.exp = chrono::Utc::now().timestamp() + 10;
+    near_end.exp = jiff::Timestamp::now().as_second() + 10;
     let (id, _) = f
         .sessions
         .create_session(
@@ -875,7 +875,7 @@ async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
     let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
     let mut usable = claims();
     // Usable for two more seconds, then inside the refresh margin.
-    usable.exp = chrono::Utc::now().timestamp() + REFRESH_MARGIN_SECS + 2;
+    usable.exp = jiff::Timestamp::now().as_second() + REFRESH_MARGIN_SECS + 2;
     f.sessions
         .replace_tokens(
             &id,
@@ -1255,7 +1255,7 @@ fn logout_token(
         "sub": "subject-1",
         "aud": client,
         "iat": iat,
-        "exp": chrono::Utc::now().timestamp() + 120,
+        "exp": jiff::Timestamp::now().as_second() + 120,
         "jti": random_token(),
         "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
     });
@@ -1302,7 +1302,7 @@ async fn a_back_channel_logout_ends_the_application_session() {
         .await
         .unwrap();
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now);
     let answer = f
         .adapter
@@ -1344,7 +1344,7 @@ async fn a_logout_without_its_session_ends_nothing() {
         "ops-web",
         "logout+jwt",
         None,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter
@@ -1362,7 +1362,7 @@ async fn a_logout_without_its_session_ends_nothing() {
 async fn an_invalid_logout_request_ends_nothing() {
     let (f, key) = issuing_fixture(memory());
     let (id, _) = signed_in(&f, false).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut requests = vec![
         logout_post(&logout_token(
             &key,
@@ -1412,7 +1412,7 @@ async fn a_logout_the_store_cannot_record_is_retried() {
         "ops-web",
         "logout+jwt",
         Some("issuer-session-1"),
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     let answer = f
         .adapter

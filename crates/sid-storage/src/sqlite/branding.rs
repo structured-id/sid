@@ -2,7 +2,7 @@
 //! Branding configurations for the SQLite backend: content in `data`,
 //! status, revision and last change in their columns.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{BrandingConfig, BrandingConfigId, MutationContext, ProjectId},
@@ -85,7 +85,7 @@ impl SqliteBackend {
         &self,
         id: BrandingConfigId,
         project_id: ProjectId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);
