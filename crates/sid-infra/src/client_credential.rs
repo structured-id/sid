@@ -247,8 +247,13 @@ impl ClientCredential {
         scope: Option<&'static str>,
     ) -> Result<Self, CredentialError> {
         let invalid = |why: String| CredentialError::Config(why);
-        let handle = sid_authn::issuer::installation_issuer_handle(base, &config.issuer)
+        // The configured issuer is read as written; whether it is one of the
+        // installation this credential's channel reaches is the
+        // installation's condition, decided apart from the reading.
+        let handle = sid_authn::issuer::InstallationIssuers::new(base)
+            .select(&config.issuer)
             .ok_or_else(|| invalid("the issuer is not one of this installation".into()))?
+            .wire()
             .to_owned();
         if config.client_id.is_empty() {
             return Err(invalid("the client_id is empty".into()));

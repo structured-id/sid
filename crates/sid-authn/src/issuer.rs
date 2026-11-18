@@ -51,19 +51,87 @@ pub fn base_issuer_url(base: &Url) -> SidResult<String> {
     base_url(base)
 }
 
-/// The handle by which this installation's registry names `issuer`, an exact
-/// issuer identifier, when it is one of the installation at `base` (its
-/// public URL): empty for the root-addressed base issuer (`issuer` is `base`
-/// itself), the handle for a scoped issuer (`{base}/i/{handle}`), `None` for
-/// any other URL.
-pub fn installation_issuer_handle<'a>(base: &str, issuer: &'a str) -> Option<&'a str> {
-    let base = base.trim_end_matches('/');
-    let rest = issuer.strip_prefix(base)?;
-    if rest.is_empty() {
-        return Some(rest);
+/// Which issuer of an installation an issuer URL selects: the base issuer
+/// at the installation's root, or a scoped issuer by its organization
+/// segment `/i/{handle}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssuerSelector {
+    Root,
+    Scoped(IssuerHandle),
+}
+
+impl IssuerSelector {
+    /// The selector as the installation's RPCs take it (`issuer_handle`,
+    /// `GetOidcIssuerRequest.handle`): empty for the root-addressed base
+    /// issuer, the handle otherwise.
+    pub fn wire(&self) -> &str {
+        match self {
+            Self::Root => "",
+            Self::Scoped(handle) => handle.as_str(),
+        }
     }
-    rest.strip_prefix("/i/")
-        .filter(|handle| IssuerHandle::parse(handle).is_ok())
+}
+
+/// An issuer URL as written: where it lives and which issuer it selects
+/// there. Reading it decides nothing about whose issuer it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuerParts<'a> {
+    /// The URL before the organization segment; the whole URL for a
+    /// root-addressed issuer.
+    pub location: &'a str,
+    pub selector: IssuerSelector,
+}
+
+/// Read `issuer`, an issuer URL: `…/i/{handle}` selects that scoped issuer,
+/// any other URL its location's base issuer. A malformed segment, a longer
+/// path after it, a query, a fragment or what is not a URL is `None`, never
+/// the base issuer.
+pub fn read_issuer(issuer: &str) -> Option<IssuerParts<'_>> {
+    let url = Url::parse(issuer).ok()?;
+    if !url.has_host() || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    match issuer.rsplit_once("/i/") {
+        Some((location, segment)) if Url::parse(location).is_ok_and(|l| l.has_host()) => {
+            Some(IssuerParts {
+                location,
+                selector: IssuerSelector::Scoped(IssuerHandle::parse(segment).ok()?),
+            })
+        }
+        _ => Some(IssuerParts {
+            location: issuer,
+            selector: IssuerSelector::Root,
+        }),
+    }
+}
+
+/// The receiver's condition for an issuer of its installation: the
+/// installation it is configured for, at its public URL. A URL is one of
+/// its issuers only at that location; the segment alone admits nothing.
+#[derive(Debug, Clone)]
+pub struct InstallationIssuers {
+    location: String,
+}
+
+impl InstallationIssuers {
+    /// The issuers of the installation at `public_url`.
+    pub fn new(public_url: &str) -> Self {
+        Self {
+            location: public_url.trim_end_matches('/').to_owned(),
+        }
+    }
+
+    /// Whether `parts` lives at this installation.
+    pub fn admits(&self, parts: &IssuerParts<'_>) -> bool {
+        parts.location == self.location
+    }
+
+    /// The issuer `issuer` selects, when this installation admits it.
+    pub fn select(&self, issuer: &str) -> Option<IssuerSelector> {
+        read_issuer(issuer)
+            .filter(|parts| self.admits(parts))
+            .map(|parts| parts.selector)
+    }
 }
 
 /// Whether `issuer` has the scoped form `…/i/{its handle}`; otherwise its
