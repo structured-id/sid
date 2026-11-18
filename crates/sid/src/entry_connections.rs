@@ -20,14 +20,15 @@ use prost::Message;
 use secrecy::SecretString;
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::federated_entry::TrustedIssuer;
+use sid_authn::issuer::IssuerRegistry;
 use sid_authn::operation::{KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::entry_connection::{
     CALLBACK, MAX_NAME, credential_context, is_issuer_identifier, is_use_return,
 };
 use sid_core::models::{
-    AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerHandle,
-    MutationContext, OidcIssuer, OperationCompletion, OperationContext, OperationKey, OrgId,
+    AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, MutationContext,
+    OidcIssuer, OperationCompletion, OperationContext, OperationKey, OrgId,
 };
 use sid_keys::KeyManager;
 use sid_plugin::storage::StorageBackend;
@@ -158,11 +159,21 @@ pub struct EntryConnections {
     storage: Arc<dyn StorageBackend>,
     /// Seals and opens the connections' client credentials.
     keys: Arc<dyn KeyManager>,
+    /// The installation's issuers, by handle and by route.
+    issuers: Arc<IssuerRegistry>,
 }
 
 impl EntryConnections {
-    pub fn new(storage: Arc<dyn StorageBackend>, keys: Arc<dyn KeyManager>) -> Self {
-        Self { storage, keys }
+    pub fn new(
+        storage: Arc<dyn StorageBackend>,
+        keys: Arc<dyn KeyManager>,
+        issuers: Arc<IssuerRegistry>,
+    ) -> Self {
+        Self {
+            storage,
+            keys,
+            issuers,
+        }
     }
 
     async fn stored(&self, handle: EntryHandle) -> Result<EntryConnection, EntryConnectionError> {
@@ -172,14 +183,13 @@ impl EntryConnections {
             .ok_or(EntryConnectionError::NotFound(handle))
     }
 
-    /// The installation issuer `handle` names.
+    /// The installation issuer `handle` names (the empty handle naming the
+    /// root-addressed base issuer).
     async fn issuer(&self, handle: &str) -> Result<OidcIssuer, EntryConnectionError> {
-        let unknown = || EntryConnectionError::UnknownIssuer(handle.to_owned());
-        let handle = IssuerHandle::parse(handle).map_err(|_| unknown())?;
-        self.storage
-            .oidc_issuer_by_handle(&handle)
+        self.issuers
+            .by_handle(handle)
             .await?
-            .ok_or_else(unknown)
+            .ok_or_else(|| EntryConnectionError::UnknownIssuer(handle.to_owned()))
     }
 
     async fn seal(
@@ -424,14 +434,15 @@ impl EntryConnections {
         }
     }
 
-    /// The enabled connections of the installation issuer `issuer_handle`
-    /// names, as its sign-in page offers them: public, the user is not
-    /// signed in yet. An unknown issuer offers none.
+    /// The enabled connections of the installation issuer whose route
+    /// `issuer_handle` names ([`IssuerRegistry::routed`]), as its sign-in
+    /// page offers them: public, the user is not signed in yet. An unknown
+    /// issuer offers none.
     pub async fn sign_in_connections(
         &self,
         issuer_handle: &str,
     ) -> Result<ListSignInConnectionsResponse, EntryConnectionError> {
-        let Ok(issuer) = self.issuer(issuer_handle).await else {
+        let Some(issuer) = self.issuers.routed(issuer_handle).await? else {
             return Ok(ListSignInConnectionsResponse::default());
         };
         let connections = self.storage.list_entry_connections().await?;

@@ -289,6 +289,144 @@ async fn discovery_over_http_uses_the_registered_names() {
     );
 }
 
+/// Services whose installation base issuer is root-addressed, as a server
+/// start provisions it; the harness reads the stored issuer back.
+async fn root_services() -> (TestServices, OidcProviderServiceImpl) {
+    root_services_over(MockStorage::new()).await
+}
+
+/// [`root_services`] over `storage`.
+async fn root_services_over(storage: MockStorage) -> (TestServices, OidcProviderServiceImpl) {
+    sid_authn::issuer::ensure_base_issuer(
+        &storage,
+        common::test_key_manager().as_ref(),
+        &url::Url::parse("https://sid.example.com").unwrap(),
+        common::test_org(),
+    )
+    .await
+    .unwrap();
+    let svc = TestServices::new(storage);
+    let provider = provider_of(&svc);
+    (svc, provider)
+}
+
+/// The installation's root-addressed base issuer answers discovery at the
+/// root, both locations naming it exactly, every advertised endpoint is a
+/// served root path, and the same documents are not served under its
+/// handle, where they would name another URL than the one fetched (OIDC
+/// Discovery 1.0 §4.3, RFC 8414 §3.3).
+#[tokio::test]
+async fn the_root_issuer_is_discovered_at_the_root() {
+    let (svc, provider) = root_services().await;
+    assert_eq!(svc.issuer.canonical_url, "https://sid.example.com");
+    let base = over_http(provider).await;
+
+    let oidc: Value = get(format!("{base}/.well-known/openid-configuration"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rfc8414: Value = get(format!("{base}/.well-known/oauth-authorization-server"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(oidc, rfc8414);
+    assert_eq!(oidc["issuer"], json!("https://sid.example.com"));
+    assert_eq!(
+        oidc["token_endpoint"],
+        json!("https://sid.example.com/oauth2/token")
+    );
+
+    for (name, endpoint) in oidc.as_object().unwrap() {
+        if !(name.ends_with("_endpoint") || name == "jwks_uri") {
+            continue;
+        }
+        let url = url::Url::parse(endpoint.as_str().unwrap()).unwrap();
+        assert_ne!(
+            get(format!("{base}{}", url.path())).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{name}: {endpoint} is not served"
+        );
+    }
+    let jwks: Value = get(format!("{base}/jwks"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1);
+
+    let handle = svc.issuer.handle.to_string();
+    for path in [
+        format!("/i/{handle}/.well-known/openid-configuration"),
+        format!("/.well-known/oauth-authorization-server/i/{handle}"),
+        format!("/i/{handle}/jwks"),
+    ] {
+        assert_eq!(
+            get(format!("{base}{path}")).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+/// Where the installation's base issuer is scoped (`/i/<handle>`), the root
+/// route names no issuer: it never stands in for that one or another.
+#[tokio::test]
+async fn the_root_route_names_no_scoped_issuer() {
+    let (svc, provider) = services();
+    assert!(
+        svc.issuer
+            .canonical_url
+            .ends_with(&format!("/i/{}", svc.issuer.handle))
+    );
+    let base = over_http(provider).await;
+    for path in [
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+        "/jwks",
+    ] {
+        assert_eq!(
+            get(format!("{base}{path}")).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+/// The token endpoint of a root-addressed base issuer serves its clients at
+/// the root path, and its handle path reaches no issuer: the client is
+/// unknown there (RFC 6749 §5.2), never served by the root issuer.
+#[tokio::test]
+async fn the_root_issuers_token_endpoint_is_at_the_root() {
+    let (svc, provider) = root_services_over(
+        MockStorage::new().with_client(confidential_client("service", SERVICE_SECRET)),
+    )
+    .await;
+    let base = over_http(provider).await;
+    let grant = [("grant_type", "client_credentials")];
+    let basic = Some(("service", SERVICE_SECRET));
+
+    let issued = post_form(&format!("{base}/oauth2/token"), &grant, basic).await;
+    assert_eq!(issued.status(), 200);
+    let issued: Value = issued.json().await.unwrap();
+    assert!(issued["access_token"].is_string(), "{issued}");
+
+    let scoped = post_form(
+        &format!("{base}/i/{}/oauth2/token", svc.issuer.handle),
+        &grant,
+        basic,
+    )
+    .await;
+    assert_oauth_error(scoped, 401, "invalid_client").await;
+}
+
 /// Every endpoint the discovery document advertises is a route the
 /// transcoder serves: a client following discovery never meets a path the
 /// server does not have (RFC 8414 §2). A path no route answers is 404; a
