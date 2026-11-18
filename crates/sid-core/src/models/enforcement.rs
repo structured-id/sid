@@ -4,7 +4,7 @@
 //! Runtime result of evaluating a security policy against the current
 //! session/profile state. Produced at login time and on step-up requests.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::device::DeviceAssurance;
@@ -92,7 +92,7 @@ pub struct EnforcementDecision {
     pub violations: Vec<PolicyViolation>,
 
     /// When the grace period expires (only set if action is Grace).
-    pub grace_deadline: Option<DateTime<Utc>>,
+    pub grace_deadline: Option<Timestamp>,
 
     /// Days remaining until grace expiry.
     pub days_remaining: Option<u32>,
@@ -320,7 +320,7 @@ mod tests {
                     allowed_methods: vec![MfaMethod::Totp],
                 },
             }],
-            grace_deadline: Some(Utc::now() + chrono::Duration::days(30)),
+            grace_deadline: Some(Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24)),
             days_remaining: Some(30),
             required_actions: vec![RequiredAction::EnrollMfa {
                 allowed_methods: vec![MfaMethod::Totp],

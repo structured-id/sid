@@ -2,8 +2,9 @@
 //! Completions of keyed commands, committed with their effect, and the
 //! periods they are admitted under.
 
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationCompletion, OperationKey, OperationPeriod,
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
@@ -168,7 +169,7 @@ pub(super) async fn record_in_tx(
     .bind(&operation.fingerprint)
     .bind(&operation.result)
     .bind(period)
-    .bind(operation.retain_until)
+    .bind(operation.retain_until.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
@@ -399,9 +400,9 @@ type RecordRow = (
     String,
     Vec<u8>,
     Vec<u8>,
-    DateTime<Utc>,
+    PgTime,
     Option<i64>,
-    Option<DateTime<Utc>>,
+    Option<PgTime>,
 );
 
 /// namespace, op_key, method, fingerprint, result, completed_at, period,
@@ -412,9 +413,9 @@ type FullRow = (
     String,
     Vec<u8>,
     Vec<u8>,
-    DateTime<Utc>,
+    PgTime,
     Option<i64>,
-    Option<DateTime<Utc>>,
+    Option<PgTime>,
 );
 
 pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
@@ -439,9 +440,9 @@ pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
                         fingerprint,
                         result,
                         period: period.map(period_of).transpose()?,
-                        retain_until,
+                        retain_until: retain_until.jiff(),
                     },
-                    completed_at,
+                    completed_at: completed_at.jiff(),
                 })
             },
         )
@@ -492,9 +493,9 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
     .bind(&c.method)
     .bind(&c.fingerprint)
     .bind(&c.result)
-    .bind(record.completed_at)
+    .bind(record.completed_at.pg())
     .bind(c.period.map(column).transpose()?)
-    .bind(c.retain_until)
+    .bind(c.retain_until.pg())
     .execute(&mut *tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
@@ -535,9 +536,9 @@ pub(super) async fn get(
                     fingerprint,
                     result,
                     period: period.map(period_of).transpose()?,
-                    retain_until,
+                    retain_until: retain_until.jiff(),
                 },
-                completed_at,
+                completed_at: completed_at.jiff(),
             })
         },
     )
@@ -545,12 +546,12 @@ pub(super) async fn get(
 }
 
 /// period, accepted_until
-type PeriodRow = (i64, DateTime<Utc>);
+type PeriodRow = (i64, PgTime);
 
 fn issued((period, accepted_until): PeriodRow) -> SidResult<IssuedOperationPeriod> {
     Ok(IssuedOperationPeriod {
         period: period_of(period)?,
-        accepted_until,
+        accepted_until: accepted_until.jiff(),
     })
 }
 
@@ -627,19 +628,19 @@ async fn retire(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, periods: &[i64])
 
 async fn current_period(
     pool: &PgPool,
-    now: DateTime<Utc>,
-    acceptance: Duration,
+    now: Timestamp,
+    acceptance: SignedDuration,
 ) -> SidResult<IssuedOperationPeriod> {
     let until = now
-        .checked_add_signed(acceptance)
-        .ok_or_else(|| SidError::Validation("operation period acceptance out of range".into()))?;
+        .checked_add(acceptance)
+        .map_err(|_| SidError::Validation("operation period acceptance out of range".into()))?;
     let current = || {
         sqlx::query_as::<_, PeriodRow>(
             "SELECT period, accepted_until FROM operation_periods
              WHERE issued_at <= $1 AND accepted_until > $1
              ORDER BY period DESC LIMIT 1",
         )
-        .bind(now)
+        .bind(now.pg())
     };
     if let Some(row) = current()
         .fetch_optional(pool)
@@ -675,8 +676,8 @@ async fn current_period(
                  RETURNING period, accepted_until",
             )
             .bind(next)
-            .bind(now)
-            .bind(until)
+            .bind(now.pg())
+            .bind(until.pg())
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?;
@@ -690,7 +691,7 @@ async fn current_period(
     issued(row)
 }
 
-async fn retire_periods(pool: &PgPool, before: DateTime<Utc>) -> SidResult<u64> {
+async fn retire_periods(pool: &PgPool, before: Timestamp) -> SidResult<u64> {
     let mut tx = pool
         .begin()
         .await
@@ -698,7 +699,7 @@ async fn retire_periods(pool: &PgPool, before: DateTime<Utc>) -> SidResult<u64> 
     lock_issued_through(&mut tx).await?;
     let ended: Vec<i64> =
         sqlx::query_scalar("SELECT period FROM operation_periods WHERE accepted_until < $1")
-            .bind(before)
+            .bind(before.pg())
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
@@ -710,7 +711,7 @@ async fn retire_periods(pool: &PgPool, before: DateTime<Utc>) -> SidResult<u64> 
 }
 
 /// period, issued_at, accepted_until
-type PeriodRecordRow = (i64, DateTime<Utc>, DateTime<Utc>);
+type PeriodRecordRow = (i64, PgTime, PgTime);
 
 async fn export_periods(pool: &PgPool) -> SidResult<OperationPeriodState> {
     let mut tx = pool
@@ -734,7 +735,7 @@ async fn export_periods(pool: &PgPool) -> SidResult<OperationPeriodState> {
             .map(|(period, issued_at, accepted_until)| {
                 Ok(OperationPeriodRecord {
                     issued: issued((period, accepted_until))?,
-                    issued_at,
+                    issued_at: issued_at.jiff(),
                 })
             })
             .collect::<SidResult<_>>()?,
@@ -773,8 +774,8 @@ async fn import_periods(pool: &PgPool, state: &OperationPeriodState) -> SidResul
              VALUES ($1, $2, $3)",
         )
         .bind(period)
-        .bind(record.issued_at)
-        .bind(record.issued.accepted_until)
+        .bind(record.issued_at.pg())
+        .bind(record.issued.accepted_until.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation period import: {e}")))?;
@@ -791,12 +792,7 @@ async fn import_periods(pool: &PgPool, state: &OperationPeriodState) -> SidResul
     Ok(())
 }
 
-/// A stored policy duration; a negative or out-of-range one is an error.
-fn seconds(column: &str, value: i64) -> SidResult<Duration> {
-    Duration::try_seconds(value)
-        .filter(|d| *d >= Duration::zero())
-        .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
-}
+use crate::stored_seconds as seconds;
 
 /// A stored positive bound.
 fn bound(column: &str, value: i64) -> SidResult<u64> {
@@ -831,12 +827,7 @@ async fn admit_period(pool: &PgPool, period: OperationPeriod) -> SidResult<()> {
     admit(&mut conn, column(period)?, false).await
 }
 
-async fn purge(
-    pool: &PgPool,
-    namespace: &str,
-    method: &str,
-    before: DateTime<Utc>,
-) -> SidResult<u64> {
+async fn purge(pool: &PgPool, namespace: &str, method: &str, before: Timestamp) -> SidResult<u64> {
     // The bindings of the dropped completions go in the same statement.
     let dropped: i64 = sqlx::query_scalar(
         "WITH gone AS (
@@ -850,14 +841,14 @@ async fn purge(
     )
     .bind(namespace)
     .bind(method)
-    .bind(before)
+    .bind(before.pg())
     .fetch_one(pool)
     .await
     .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))?;
     Ok(dropped as u64)
 }
 
-async fn purge_expired(pool: &PgPool, now: DateTime<Utc>) -> SidResult<u64> {
+async fn purge_expired(pool: &PgPool, now: Timestamp) -> SidResult<u64> {
     let dropped: i64 = sqlx::query_scalar(
         "WITH gone AS (
              DELETE FROM operation_results WHERE retain_until <= $1
@@ -867,7 +858,7 @@ async fn purge_expired(pool: &PgPool, now: DateTime<Utc>) -> SidResult<u64> {
              WHERE r.namespace = g.namespace AND r.op_key = g.op_key)
          SELECT count(*) FROM gone",
     )
-    .bind(now)
+    .bind(now.pg())
     .fetch_one(pool)
     .await
     .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))?;
@@ -1062,8 +1053,8 @@ impl OperationResultStore for PgOperationStore {
 
     async fn current_operation_period(
         &self,
-        now: DateTime<Utc>,
-        acceptance: Duration,
+        now: Timestamp,
+        acceptance: SignedDuration,
     ) -> SidResult<IssuedOperationPeriod> {
         current_period(&self.pool, now, acceptance).await
     }
@@ -1072,7 +1063,7 @@ impl OperationResultStore for PgOperationStore {
         admit_period(&self.pool, period).await
     }
 
-    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+    async fn retire_operation_periods(&self, before: Timestamp) -> SidResult<u64> {
         retire_periods(&self.pool, before).await
     }
 
@@ -1107,12 +1098,12 @@ impl OperationResultStore for PgOperationStore {
         &self,
         namespace: &str,
         method: &str,
-        before: DateTime<Utc>,
+        before: Timestamp,
     ) -> SidResult<u64> {
         purge(&self.pool, namespace, method, before).await
     }
 
-    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+    async fn purge_expired_operation_results(&self, now: Timestamp) -> SidResult<u64> {
         purge_expired(&self.pool, now).await
     }
 
@@ -1163,8 +1154,8 @@ impl OperationResultStore for PostgresBackend {
 
     async fn current_operation_period(
         &self,
-        now: DateTime<Utc>,
-        acceptance: Duration,
+        now: Timestamp,
+        acceptance: SignedDuration,
     ) -> SidResult<IssuedOperationPeriod> {
         current_period(&self.pool, now, acceptance).await
     }
@@ -1173,7 +1164,7 @@ impl OperationResultStore for PostgresBackend {
         admit_period(&self.pool, period).await
     }
 
-    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+    async fn retire_operation_periods(&self, before: Timestamp) -> SidResult<u64> {
         retire_periods(&self.pool, before).await
     }
 
@@ -1207,12 +1198,12 @@ impl OperationResultStore for PostgresBackend {
         &self,
         namespace: &str,
         method: &str,
-        before: DateTime<Utc>,
+        before: Timestamp,
     ) -> SidResult<u64> {
         purge(&self.pool, namespace, method, before).await
     }
 
-    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+    async fn purge_expired_operation_results(&self, now: Timestamp) -> SidResult<u64> {
         purge_expired(&self.pool, now).await
     }
 

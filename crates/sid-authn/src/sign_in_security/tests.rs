@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::ProfileId;
 use sid_core::models::SecurityPolicy;
 use sid_core::models::security_policy::{NetworkPolicy, NetworkViolationReaction};
@@ -28,8 +28,8 @@ impl SignInHistoryStore for KnownElsewhere {
     async fn get_most_recent_session_ip(
         &self,
         _: ProfileId,
-    ) -> sid_core::Result<Option<(IpAddr, chrono::DateTime<Utc>)>> {
-        Ok(Some(("198.51.100.1".parse().unwrap(), Utc::now())))
+    ) -> sid_core::Result<Option<(IpAddr, Timestamp)>> {
+        Ok(Some(("198.51.100.1".parse().unwrap(), Timestamp::now())))
     }
 
     async fn has_recent_session_from_ip(
@@ -76,7 +76,7 @@ impl IpIntelligenceProvider for Blocklist {
             labels: vec![IpLabel::Blocklisted],
             risk_score: None,
             source: "test".to_owned(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 
@@ -179,7 +179,7 @@ fn accepted(assurance_level: AuthLevel, amr: &[&str]) -> SessionAuthentication {
     SessionAuthentication {
         assurance_level,
         elevation: None,
-        authenticated_at: Utc::now(),
+        authenticated_at: Timestamp::now(),
         amr: amr.iter().map(|m| (*m).to_owned()).collect(),
     }
 }
@@ -414,7 +414,7 @@ impl IpIntelligenceProvider for Datacenter {
             labels: vec![IpLabel::Datacenter],
             risk_score: None,
             source: "test".to_owned(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 

@@ -306,9 +306,9 @@ fn named_subject(named: &SubjectReference) -> Result<String, Status> {
 
 /// Longest time a confirmation may be used for its pending request: long
 /// enough to retry the permission call, short enough that it is no permit.
-const MAX_CONFIRMATION_WINDOW: chrono::Duration = chrono::Duration::seconds(60);
+const MAX_CONFIRMATION_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 /// Clock difference tolerated between the verifier and this service.
-const CONFIRMATION_CLOCK_SKEW: chrono::Duration = chrono::Duration::seconds(5);
+const CONFIRMATION_CLOCK_SKEW: jiff::SignedDuration = jiff::SignedDuration::from_secs(5);
 
 /// INVALID_ARGUMENT for a confirmation that does not fit its token or
 /// request; never read as an allow or as a bearer token.
@@ -317,9 +317,8 @@ fn confirmation_unfit(field: &'static str, why: &str) -> Status {
 }
 
 /// The time `ts` stands for, if any.
-fn instant(ts: Option<&prost_types::Timestamp>) -> Option<chrono::DateTime<chrono::Utc>> {
-    let ts = ts?;
-    chrono::DateTime::from_timestamp(ts.seconds, u32::try_from(ts.nanos).ok()?)
+fn instant(ts: Option<&prost_types::Timestamp>) -> Option<jiff::Timestamp> {
+    sid_proto::time::from_proto(ts?)
 }
 
 /// Whether `status` refuses a request's token or proof as evidence: the
@@ -365,7 +364,7 @@ fn confirmed_proof(
 fn check_confirmation(
     confirmation: &RequestConfirmation,
     claims: &sid_authn::jwt::AccessTokenClaims,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<(), Status> {
     match &claims.cnf {
         Some(cnf) if cnf.jkt == confirmation.jkt => {}
@@ -429,13 +428,15 @@ fn check_confirmation(
             "expired",
         ));
     }
-    if valid_until <= verified_at || valid_until - verified_at > MAX_CONFIRMATION_WINDOW {
+    if valid_until <= verified_at
+        || valid_until.duration_since(verified_at) > MAX_CONFIRMATION_WINDOW
+    {
         return Err(confirmation_unfit(
             "valid_until",
             "outside the allowed window",
         ));
     }
-    if valid_until.timestamp() > claims.exp {
+    if valid_until.as_second() > claims.exp {
         return Err(confirmation_unfit(
             "valid_until",
             "beyond the token's expiry",
@@ -983,7 +984,7 @@ impl AuthzServiceImpl {
                 {
                     return Err(checker_denied());
                 }
-                check_confirmation(confirmation, &claims, chrono::Utc::now())?;
+                check_confirmation(confirmation, &claims, jiff::Timestamp::now())?;
                 self.admit_confirmed_proof(
                     confirmation,
                     &request.access_token,

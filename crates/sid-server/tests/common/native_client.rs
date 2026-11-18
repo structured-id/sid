@@ -85,7 +85,7 @@ pub fn proof_with(key: &AppKey, htu: &str, binds: Binds<'_>) -> String {
         "jti": uuid::Uuid::now_v7().to_string(),
         "htm": "POST",
         "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     match binds {
         Binds::Ceremony(reference) => {

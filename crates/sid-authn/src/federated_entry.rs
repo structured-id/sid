@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -108,7 +108,7 @@ struct Pending {
     /// What the entry asked the issuer for.
     request: EntryRequest,
     /// The entry's end, fixed when it started; no later step extends it.
-    deadline: DateTime<Utc>,
+    deadline: Timestamp,
 }
 
 /// How far a returned entry has come, kept under the browser's binding so a
@@ -123,7 +123,7 @@ enum Progress {
     /// still holding it past the lease has stopped.
     Exchanging {
         pending: Pending,
-        owned_until: DateTime<Utc>,
+        owned_until: Timestamp,
     },
     /// The token response arrived and is kept for validation.
     Received { pending: Pending, id_token: String },
@@ -170,7 +170,7 @@ pub struct Returned {
     pub operation: String,
     /// The entry's end: whatever the caller keeps for its retries lives no
     /// longer.
-    pub deadline: DateTime<Utc>,
+    pub deadline: Timestamp,
     /// The Binding presentation the issuer returned in the ID Token (the
     /// [`PRESENTATION_CLAIM`] value, a JWS in General JSON Serialization), as
     /// received and NOT verified here: the caller verifies its path, the
@@ -338,8 +338,8 @@ impl FederatedEntry {
         let url = reqwest::Url::parse_with_params(&discovery.authorization_endpoint, &params)
             .map_err(|e| EntryError::Issuer(format!("authorization endpoint: {e}")))?;
         let browser = BrowserSecret::generate();
-        let deadline = Utc::now()
-            + chrono::Duration::from_std(PENDING_TTL).expect("the pending lifetime fits");
+        let deadline = Timestamp::now()
+            + SignedDuration::try_from(PENDING_TTL).expect("the pending lifetime fits");
         self.pending
             .insert_until(
                 &self.key(&state, &browser),
@@ -438,8 +438,8 @@ impl FederatedEntry {
                     let pending = pending.clone();
                     let owned = Progress::Exchanging {
                         pending: pending.clone(),
-                        owned_until: Utc::now()
-                            + chrono::Duration::from_std(EXCHANGE_LEASE)
+                        owned_until: Timestamp::now()
+                            + SignedDuration::try_from(EXCHANGE_LEASE)
                                 .expect("the exchange lease fits"),
                     };
                     // The version this return stored is the one it owns:
@@ -509,7 +509,7 @@ impl FederatedEntry {
                     pending,
                     owned_until,
                 } => {
-                    if *owned_until > Utc::now() {
+                    if *owned_until > Timestamp::now() {
                         return Err(EntryError::InProgress);
                     }
                     let continuation = pending.continuation.clone();
@@ -662,7 +662,7 @@ impl FederatedEntry {
             .get("auth_time")
             .ok_or_else(|| EntryError::Token("no auth_time".into()))?
             .as_i64()
-            .and_then(|t| Utc.timestamp_opt(t, 0).single())
+            .and_then(|t| Timestamp::from_second(t).ok())
             .ok_or_else(|| EntryError::Token("a malformed auth_time".into()))?;
         let amr = claims
             .get("amr")

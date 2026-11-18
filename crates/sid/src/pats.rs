@@ -125,12 +125,12 @@ impl Pats {
                 .expires_at
                 .as_ref()
                 .ok_or(PatError::MissingField("expires_at"))?;
-            let expires_at = u32::try_from(expires_at.nanos)
-                .ok()
-                .and_then(|nanos| chrono::DateTime::from_timestamp(expires_at.seconds, nanos))
+            let expires_at = crate::wire::from_timestamp(expires_at)
                 .ok_or_else(|| invalid("expires_at", "not a representable time"))?;
-            let now = chrono::Utc::now();
-            if expires_at > now + chrono::Duration::days(i64::from(PAT_MAX_LIFETIME_DAYS)) {
+            let now = jiff::Timestamp::now();
+            if expires_at
+                > now + jiff::SignedDuration::from_hours(i64::from(PAT_MAX_LIFETIME_DAYS) * 24)
+            {
                 return Err(invalid(
                     "expires_at",
                     format!("at most {PAT_MAX_LIFETIME_DAYS} days ahead"),

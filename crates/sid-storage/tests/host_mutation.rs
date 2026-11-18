@@ -181,7 +181,7 @@ mod postgres {
         let session = Session::new(
             profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::seconds(2),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_secs(2),
         );
         backend
             .create_session(&session, audit("session"))

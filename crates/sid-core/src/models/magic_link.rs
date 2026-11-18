@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Magic link session model for database persistence.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -38,8 +38,8 @@ pub struct MagicLinkSession {
     pub sealed_token: Vec<u8>,
     /// Whether this link has been consumed (single-use).
     pub consumed: bool,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
 }
 
 impl MagicLinkSession {
@@ -49,7 +49,7 @@ impl MagicLinkSession {
         destination: impl Into<String>,
         token_hash: String,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: Uuid::now_v7(),
             email: email.into(),
@@ -58,12 +58,12 @@ impl MagicLinkSession {
             sealed_token: Vec::new(),
             consumed: false,
             created_at: now,
-            expires_at: now + chrono::Duration::seconds(MAGIC_LINK_EXPIRY_SECS),
+            expires_at: now + SignedDuration::from_secs(MAGIC_LINK_EXPIRY_SECS),
         }
     }
 
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        Timestamp::now() >= self.expires_at
     }
 }
 
@@ -92,7 +92,7 @@ mod tests {
             "alice@sid.example.com",
             "hash".to_string(),
         );
-        session.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        session.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
         assert!(session.is_expired());
     }
 }

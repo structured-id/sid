@@ -1,6 +1,6 @@
 use super::*;
 use crate::system_integration::{AccountSettings, ensure_account_integration};
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     AuditEntry, ClientKeySet, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
     MutationContext, Organization, ResourceId, ResourceState,
@@ -37,7 +37,7 @@ async fn registration() -> Registration {
         .insert_instance_organization(&org, ctx())
         .await
         .unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),

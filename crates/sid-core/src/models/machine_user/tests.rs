@@ -57,7 +57,7 @@ fn test_machine_user_suspend() {
 #[test]
 fn test_machine_user_expired() {
     let mut mu = make_machine_user();
-    mu.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+    mu.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(1));
     assert!(mu.is_expired());
     assert!(!mu.can_authenticate());
 }
@@ -65,7 +65,7 @@ fn test_machine_user_expired() {
 #[test]
 fn test_machine_user_not_expired() {
     let mut mu = make_machine_user();
-    mu.expires_at = Some(Utc::now() + chrono::Duration::days(30));
+    mu.expires_at = Some(Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24));
     assert!(!mu.is_expired());
     assert!(mu.can_authenticate());
 }
@@ -131,7 +131,7 @@ fn test_credential_expired() {
         MachineCredentialType::PrivateKeyJwt,
         "public_key_pem",
     );
-    cred.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+    cred.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(1));
     assert!(cred.is_expired());
 }
 

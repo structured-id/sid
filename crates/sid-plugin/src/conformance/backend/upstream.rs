@@ -30,7 +30,7 @@ fn login(email: &str) -> UpstreamLogin {
         email: Some(email.into()),
         name: None,
         picture: None,
-        at: chrono::Utc::now(),
+        at: jiff::Timestamp::now(),
     }
 }
 

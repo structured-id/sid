@@ -22,7 +22,7 @@ fn a_reread_snapshot_resumes_under_the_same_record() {
         use_count: 0,
         expires_at: None,
         active: true,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     });
     let reread = Snapshot::parse(&snapshot.to_json().unwrap()).unwrap();
     assert_eq!(

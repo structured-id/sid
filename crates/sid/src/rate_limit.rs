@@ -6,7 +6,7 @@
 //! counter. `RateLimitStats` records blocked requests for the
 //! SecurityService.GetRateLimitDashboard RPC.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_plugin::cache::{CacheBackend, CacheResult};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +40,7 @@ impl RateLimiter {
         if limit == 0 {
             return Ok(true);
         }
-        self.check_at(client_id, limit, Utc::now().timestamp_millis())
+        self.check_at(client_id, limit, Timestamp::now().as_millisecond())
             .await
     }
 

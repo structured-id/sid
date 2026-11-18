@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_authn::caller::{CallerError, Verified};
 use sid_authn::challenge_store::{ChallengeStore, ChallengeStoreError};
 use sid_authn::issuer::AddressedIssuer;
@@ -109,7 +109,7 @@ pub struct PendingAuthorization {
     prompt: Option<String>,
     max_age: Option<u32>,
     /// When the request arrived: `prompt=login` and `max_age` count from it.
-    arrived_at: DateTime<Utc>,
+    arrived_at: Timestamp,
     /// The interaction `prompt` asked for (account selection, consent) has
     /// been offered on the sign-in page.
     interacted: bool,
@@ -132,7 +132,7 @@ impl PendingAuthorization {
             resource: request.resource,
             prompt: request.prompt,
             max_age: request.max_age,
-            arrived_at: Utc::now(),
+            arrived_at: Timestamp::now(),
             interacted: false,
         }
     }
@@ -158,8 +158,9 @@ impl PendingAuthorization {
     /// an authentication must be. `prompt=login` asks for one after the
     /// request arrived and `max_age` for one within its seconds, both
     /// counted from arrival as the authorization counts them.
-    pub fn sign_in_requirements(&self, now: DateTime<Utc>) -> SignInRequirements {
-        let elapsed = (now - self.arrived_at).to_std().unwrap_or_default();
+    pub fn sign_in_requirements(&self, now: Timestamp) -> SignInRequirements {
+        let elapsed =
+            std::time::Duration::try_from(now.duration_since(self.arrived_at)).unwrap_or_default();
         let login = self
             .prompt
             .as_deref()
@@ -293,7 +294,7 @@ impl OAuth {
             .with_client(client, acr)
             .for_account(self.storage.as_ref(), profile_id)
             .await?;
-        match requirements.decide(session, Utc::now()) {
+        match requirements.decide(session, Timestamp::now()) {
             LoginDecision::Allow { audited } => {
                 if !audited.is_empty() {
                     info!(
@@ -306,7 +307,7 @@ impl OAuth {
             LoginDecision::StepUp(unmet) => {
                 info!(
                     client = %request.client_id,
-                    session_acr = ?session.assurance_at(Utc::now()),
+                    session_acr = ?session.assurance_at(Timestamp::now()),
                     session_amr = ?session.amr,
                     ?unmet,
                     "Authorize: step-up required"
@@ -400,7 +401,7 @@ impl OAuth {
         // authorizes codes for other clients.
         verified.require_installation()?;
         let prompt = Prompt::parse(request.prompt.as_deref())?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let session_id = SessionId::parse(&verified.claims.sid).map_err(|e| {
             tracing::error!(error = %e, "read session id of a verified token");
             AuthorizationError::Internal
@@ -449,7 +450,7 @@ impl OAuth {
             .await?
             .for_account(self.storage.as_ref(), profile)
             .await?;
-        Ok(match requirements.decide(&session, Utc::now()) {
+        Ok(match requirements.decide(&session, Timestamp::now()) {
             LoginDecision::Allow { .. } => Some(session),
             LoginDecision::StepUp(_) => None,
         })
@@ -494,7 +495,7 @@ impl Authorizations {
         // The endpoint's own path named the issuer the request was kept for.
         let (client, issuer) = oauth.authorize_client(&request, None).await?;
         let prompt = Prompt::parse(pending.prompt.as_deref())?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let after = prompt.authenticated_after(pending.max_age, pending.arrived_at);
         let session = session.filter(|session| {
             sign_in.authorizes(session, now)
@@ -587,7 +588,7 @@ impl Authorizations {
         authorization_request: &str,
     ) -> Result<SignInRequirements, AuthorizationError> {
         let (_, kept, _, _) = self.kept(oauth, authorization_request, None).await?;
-        Ok(kept.sign_in_requirements(Utc::now()))
+        Ok(kept.sign_in_requirements(Timestamp::now()))
     }
 
     /// The user declined to sign in for the kept request
@@ -620,11 +621,22 @@ impl Authorizations {
     ) -> Result<(String, PendingAuthorization, OAuth2Client, OidcIssuer), AuthorizationError> {
         let refused = || AuthorizationError::NotWaiting;
         let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
-        let handle = url
-            .path()
-            .strip_prefix("/i/")
-            .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
-            .ok_or_else(refused)?;
+        // The authorization endpoint's route: the root for the root-addressed
+        // base issuer, `/i/<handle>` for a scoped one; the request was kept
+        // under the handle of the issuer that route reached.
+        let route = match url.path() {
+            "/oauth2/authorize" => "",
+            path => path
+                .strip_prefix("/i/")
+                .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
+                .ok_or_else(refused)?,
+        };
+        let handle = oauth
+            .routed_issuer(route)
+            .await?
+            .ok_or_else(refused)?
+            .handle
+            .to_string();
         let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
         let (Some(client_id), Some(request_uri)) =
             (query.get("client_id"), query.get("request_uri"))
@@ -638,7 +650,7 @@ impl Authorizations {
             .continuations
             .read(reference)
             .await?
-            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle)
+            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle.as_str())
             .ok_or_else(refused)?;
         let (client, issuer) = oauth
             .authorize_client(&kept.request(), addressed)

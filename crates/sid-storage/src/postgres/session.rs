@@ -4,6 +4,8 @@
 use sid_core::models::{Session, SessionAuthentication, SessionId};
 use sid_core::{Error as SidError, Result as SidResult};
 
+use crate::pg_time::ToPg;
+
 /// Insert `session` in `tx`; an existing session with its id is a
 /// `Conflict`, never replaced.
 pub(super) async fn write(
@@ -28,16 +30,16 @@ pub(super) async fn write(
     .bind(session.scopes_string())
     .bind(session.assurance_level.as_str())
     .bind(session.elevation.map(|e| e.level.as_str()))
-    .bind(session.elevation.map(|e| e.until))
-    .bind(session.authenticated_at)
+    .bind(session.elevation.map(|e| e.until.pg()))
+    .bind(session.authenticated_at.pg())
     .bind(session.amr.join(" "))
     .bind(session.is_provisional)
     .bind(session.passkey_prompt)
     .bind(session.policy_grace)
-    .bind(session.grace_deadline)
-    .bind(session.created_at)
-    .bind(session.expires_at)
-    .bind(session.last_activity_at)
+    .bind(session.grace_deadline.pg())
+    .bind(session.created_at.pg())
+    .bind(session.expires_at.pg())
+    .bind(session.last_activity_at.pg())
     .bind(session.browser_secret_hash.map(|h| h.as_bytes().to_vec()))
     .bind(session.browser_csrf.map(|t| t.as_bytes().to_vec()))
     .bind(session.authenticated_by)
@@ -85,12 +87,12 @@ pub(super) async fn record_authentication(
     .bind(id)
     .bind(expected.assurance_level.as_str())
     .bind(expected.elevation.map(|e| e.level.as_str()))
-    .bind(expected.elevation.map(|e| e.until))
-    .bind(expected.authenticated_at)
+    .bind(expected.elevation.map(|e| e.until.pg()))
+    .bind(expected.authenticated_at.pg())
     .bind(new.assurance_level.as_str())
     .bind(new.elevation.map(|e| e.level.as_str()))
-    .bind(new.elevation.map(|e| e.until))
-    .bind(new.authenticated_at)
+    .bind(new.elevation.map(|e| e.until.pg()))
+    .bind(new.authenticated_at.pg())
     .bind(new.amr.join(" "))
     .bind(expected.amr.join(" "))
     .execute(&mut **tx)

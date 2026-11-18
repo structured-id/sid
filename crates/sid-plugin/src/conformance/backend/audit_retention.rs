@@ -5,7 +5,8 @@
 
 use std::future::Future;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use jiff::Timestamp;
+use jiff::civil::date;
 use sid_core::models::audit::{
     ActorType, AuditDigest, AuditOutcome, AuditRecord, compute_record_hash,
 };
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use super::test_audit;
 
-fn at(s: &str) -> DateTime<Utc> {
+fn at(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
 
@@ -80,14 +81,12 @@ pub async fn test_audit_retention_keeps_chains_verifiable<Ins, Fut>(
     Fut: Future<Output = ()>,
 {
     assert!(matches!(
-        backend
-            .ensure_audit_partition(NaiveDate::from_ymd_opt(2001, 1, 15).unwrap())
-            .await,
+        backend.ensure_audit_partition(date(2001, 1, 15)).await,
         Err(sid_core::Error::Validation(_))
     ));
     for month in [1, 3] {
         backend
-            .ensure_audit_partition(NaiveDate::from_ymd_opt(2001, month, 1).unwrap())
+            .ensure_audit_partition(date(2001, month, 1))
             .await
             .unwrap();
     }

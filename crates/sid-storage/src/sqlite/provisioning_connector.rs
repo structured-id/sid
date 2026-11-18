@@ -3,7 +3,7 @@
 //! Writes run under the backend's single-writer transaction, so a state
 //! check, a count and the write it allows are one step.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::provisioning_connector::MAX_USABLE_CONNECTOR_CREDENTIALS;
 use sid_core::models::{
     ConnectorState, MutationContext, OrgId, ProvisioningConnector, ProvisioningConnectorId,
@@ -107,7 +107,7 @@ pub(super) async fn check_connector_fence(
     else {
         return Err(fenced());
     };
-    if row_to_credential(&row)?.is_usable_at(Utc::now()) {
+    if row_to_credential(&row)?.is_usable_at(Timestamp::now()) {
         Ok(())
     } else {
         Err(fenced())
@@ -124,7 +124,7 @@ pub(super) async fn bump_connector_revision(
         "UPDATE provisioning_connectors SET revision = revision + 1, updated_at = ?
          WHERE id = ?",
     )
-    .bind(fmt_dt(&Utc::now()))
+    .bind(fmt_dt(&Timestamp::now()))
     .bind(connector)
     .execute(&mut **tx)
     .await
@@ -219,7 +219,7 @@ impl SqliteBackend {
              WHERE id = ? AND revision = ? AND state <> 'retired'",
         )
         .bind(display_name)
-        .bind(fmt_dt(&Utc::now()))
+        .bind(fmt_dt(&Timestamp::now()))
         .bind(id)
         .bind(revision)
         .execute(&mut *tx)
@@ -251,7 +251,7 @@ impl SqliteBackend {
              WHERE id = ? AND state = ?",
         )
         .bind(to.as_str())
-        .bind(fmt_dt(&Utc::now()))
+        .bind(fmt_dt(&Timestamp::now()))
         .bind(id)
         .bind(from.as_str())
         .execute(&mut *tx)
@@ -309,7 +309,7 @@ impl SqliteBackend {
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;

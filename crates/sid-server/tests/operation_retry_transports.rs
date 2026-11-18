@@ -165,7 +165,7 @@ impl Installation {
         let session = Session::new(
             profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         self.storage
             .create_session(&session, AuditEntry::system("test", "session").into())

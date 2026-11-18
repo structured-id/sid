@@ -6,7 +6,7 @@
 //!
 //! Supports full backup and GDPR profile export.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sid_crypto::CryptoPrimitives;
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ pub struct BackupManifest {
     /// Unique backup ID.
     pub id: BackupId,
     /// When the backup was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Backup type.
     pub backup_type: BackupType,
     /// Current status.
@@ -419,7 +419,7 @@ impl BackupService {
 
         BackupManifest {
             id: BackupId::new(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             backup_type,
             status: BackupStatus::InProgress,
             components,

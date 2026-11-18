@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::audit::{
     AuditChain, AuditDigest, AuditEntry, AuditError, AuditRecord, ChainCheckpoint, ChainHead,
     compute_record_hash,
@@ -38,7 +38,7 @@ pub(super) fn append(
     tx: &Statements<'_>,
     chain: &str,
     entry: AuditEntry,
-    at: DateTime<Utc>,
+    at: Timestamp,
 ) -> SidResult<AuditRecord> {
     let chain_value = || Value::String(chain.to_owned());
     let head = tx.run(
@@ -199,13 +199,10 @@ impl CoordinodeBackend {
     /// moving each chain's checkpoint to its last removed record first.
     pub(super) async fn drop_expired_audit_records(
         &self,
-        cut_before: DateTime<Utc>,
+        cut_before: Timestamp,
         ctx: sid_core::models::MutationContext,
     ) -> SidResult<u64> {
-        let boundary = NaiveDate::from_ymd_opt(cut_before.year(), cut_before.month(), 1)
-            .and_then(|d| d.and_hms_opt(0, 0, 0))
-            .map(|t| t.and_utc())
-            .ok_or_else(|| SidError::Validation(format!("no month start for {cut_before}")))?;
+        let boundary = crate::month_start(cut_before)?;
         self.transaction(move |tx| {
             let expired = tx.run(
                 "MATCH (r:SidAuditRecord) WHERE r.at < $boundary
@@ -259,7 +256,7 @@ impl AuditLog for CoordinodeBackend {
     async fn log(&self, chain_id: &str, entry: AuditEntry) -> Result<AuditRecord, AuditError> {
         let chain = chain_id.to_owned();
         self.transaction(move |tx| {
-            append(tx, &chain, entry.clone(), Utc::now()).map(Decision::Commit)
+            append(tx, &chain, entry.clone(), Timestamp::now()).map(Decision::Commit)
         })
         .await
         .map_err(|e| AuditError::WriteFailed(e.to_string()))
@@ -268,8 +265,8 @@ impl AuditLog for CoordinodeBackend {
     async fn query(
         &self,
         chain_id: &str,
-        from: Option<DateTime<Utc>>,
-        to: Option<DateTime<Utc>>,
+        from: Option<Timestamp>,
+        to: Option<Timestamp>,
     ) -> Result<Vec<AuditRecord>, AuditError> {
         let chain = chain_id.to_owned();
         self.transaction(move |tx| {

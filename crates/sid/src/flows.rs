@@ -152,7 +152,7 @@ impl Flows {
                 0 => DEFAULT_TIMEOUT_SECONDS,
                 t => t,
             },
-            updated_at: chrono::Utc::now(),
+            updated_at: jiff::Timestamp::now(),
         };
         command
             .execute(&*self.storage, || async {
@@ -209,7 +209,7 @@ impl Flows {
         };
         config.validate().map_err(|why| invalid("webhook", why))?;
         let on_error = on_error_from_proto(req.on_error)?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let action = FlowAction {
             id: FlowActionId::generate(),
             project_id,
@@ -327,7 +327,7 @@ impl Flows {
                 if let Some(enabled) = req.enabled {
                     action.enabled = enabled;
                 }
-                action.updated_at = chrono::Utc::now();
+                action.updated_at = jiff::Timestamp::now();
                 let response = action_to_proto(&action);
                 let audit = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),

@@ -121,7 +121,7 @@ fn set_of(who: ProfileId) -> RoleAssignmentSet {
 
 fn days(n: i64) -> prost_types::Timestamp {
     prost_types::Timestamp {
-        seconds: (chrono::Utc::now() + chrono::Duration::days(n)).timestamp(),
+        seconds: (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * n)).as_second(),
         nanos: 0,
     }
 }

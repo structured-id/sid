@@ -5,7 +5,7 @@
 //! imported entries and the write cutoff fencing registrations and resets.
 //! The capability's own scenarios are `sid_plugin::conformance::credential_store`.
 
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     Credential, CredentialData, CredentialType, HistoryCommit, HistoryEpochDescriptor,
     HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf, HistorySuite, NewRegistration,
@@ -25,9 +25,13 @@ fn descriptor(key: u8) -> HistoryEpochDescriptor {
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [key.wrapping_add(1); 32],
         // Stored to the microsecond by every backend.
-        created_at: chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros())
-            .unwrap(),
+        created_at: now_micros(),
     }
+}
+
+/// Now, to the microsecond every backend stores.
+fn now_micros() -> Timestamp {
+    Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap()
 }
 
 /// A commit of one entry under `epochs[0]`, the operation's selection.
@@ -87,7 +91,7 @@ pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBacke
     let (owner, _) = profile_with_password(backend, "hist_archive").await;
     // Preserve PostgreSQL's full microsecond precision across SQLite transfer;
     // millisecond formatting loses provenance and breaks an exact retry.
-    let now = chrono::DateTime::from_timestamp_micros(1_790_000_000_123_456).unwrap();
+    let now = Timestamp::from_microsecond(1_790_000_000_123_456).unwrap();
     let epoch = |key: u8, status| {
         let d = descriptor(key);
         HistoryEpoch {
@@ -214,16 +218,15 @@ pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBacke
         let mut expected = decoded.clone();
         let old = expected.epochs[0]
             .created_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
         sqlx::query("UPDATE password_history_epochs SET created_at = ? WHERE id = ?")
             .bind(&old)
             .bind(expected.epochs[0].id.0)
             .execute(sqlite.pool())
             .await
             .unwrap();
-        expected.epochs[0].created_at = chrono::DateTime::parse_from_rfc3339(&old)
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        expected.epochs[0].created_at = old.parse().unwrap();
         expected.epochs.sort_by_key(|e| (e.created_at, e.id));
         assert_eq!(
             sqlite.export_password_history(owner).await.unwrap(),
@@ -271,8 +274,8 @@ pub async fn test_registration_writes_first_history(backend: &dyn StorageBackend
 /// its revision race drops nothing either.
 pub async fn test_history_age_retention(backend: &dyn StorageBackend) {
     use sid_core::models::{HistoryArchive, HistoryEntry, HistoryEpoch};
-    let now = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
-    let days = |n: i64| now - chrono::Duration::days(n);
+    let now = now_micros();
+    let days = |n: i64| now - SignedDuration::from_hours(n * 24);
     let seeded = |name: &'static str, key: u8, ages: Vec<i64>| async move {
         let (owner, password) = profile_with_password(backend, name).await;
         let d = HistoryEpochDescriptor {
@@ -471,10 +474,7 @@ pub async fn test_reset_history_is_compare_and_swap(backend: &dyn StorageBackend
 /// profile, and the reset stays verified with the old password kept. Raises
 /// the store-wide cutoff.
 pub async fn test_history_write_cutoff_fences_registration_and_reset(backend: &dyn StorageBackend) {
-    let at = |offset_ms: i64| {
-        chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
-            + chrono::Duration::milliseconds(offset_ms)
-    };
+    let at = |offset_ms: i64| now_micros() + SignedDuration::from_millis(offset_ms);
     let created = |key: u8, created_at| HistoryEpochDescriptor {
         created_at,
         ..descriptor(key)

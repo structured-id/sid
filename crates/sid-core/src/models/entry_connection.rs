@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use sid_keys::EncryptedField;
@@ -220,8 +220,8 @@ pub struct EntryConnection {
     /// Stored revision: 0 when created, moved on by every change. A change
     /// applies only over the revision it was read at.
     pub revision: u64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl EntryConnection {

@@ -545,7 +545,7 @@ async fn test_introspect_expired_permission() {
         role.id,
     )
     .on_resource(common::userinfo_resource(&svc).await)
-    .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1));
+    .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
     svc.storage
         .create_role_assignment(&expired, AuditEntry::system("test", "inspection").into())
         .await
@@ -1365,7 +1365,7 @@ async fn test_code_tokens_report_the_authorizing_authentication() {
     let mut session =
         common::authenticated_session(&profile, sid_core::models::AuthLevel::Standard, 40);
     session.amr = vec!["pwd".into(), "otp".into(), "mfa".into()];
-    let authenticated_at = session.authenticated_at.timestamp();
+    let authenticated_at = session.authenticated_at.as_second();
     let bearer = common::stored_session_token(&svc, &profile, session).await;
 
     let code = match svc
@@ -1744,7 +1744,8 @@ async fn test_e2e_refresh_token_theft_detection() {
         let mut inner = svc.mock_storage.inner.lock().unwrap();
         for token in inner.refresh_tokens_by_hash.values_mut() {
             if token.grace_expires_at.is_some() {
-                token.grace_expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+                token.grace_expires_at =
+                    Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10));
             }
         }
     }
@@ -1953,7 +1954,7 @@ async fn test_authorize_acr_values_step_up_required() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) = common::issue_token_with_session(
         &svc.jwt,
@@ -2028,7 +2029,7 @@ async fn test_authorize_acr_values_satisfied() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Standard);
     let (bearer, session) = common::issue_token_with_session(
@@ -2095,7 +2096,7 @@ async fn test_authorize_client_required_acr_enforced() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -2155,7 +2156,7 @@ async fn test_authorize_client_required_amr_enforced() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.amr = vec!["pwd".to_string()];
     let (bearer, session) =
@@ -2227,7 +2228,7 @@ async fn test_authorize_client_amr_satisfied() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.amr = vec!["pwd".to_string(), "hwk".to_string()];
     let (bearer, session) = common::issue_token_with_session(
@@ -2495,7 +2496,7 @@ async fn test_id_token_contains_sid_claim() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
 
     let id_token = jwt
@@ -2526,7 +2527,7 @@ async fn test_id_token_oidc_standard_claims_from_profile_fields() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
 
     let id_token = jwt
@@ -2560,7 +2561,7 @@ async fn test_id_token_oidc_standard_claims_from_profile_fields() {
     assert!(claims.phone_number_verified.is_none());
 
     // updated_at from Profile.updated_at
-    assert_eq!(claims.updated_at, Some(profile.updated_at.timestamp()));
+    assert_eq!(claims.updated_at, Some(profile.updated_at.as_second()));
 }
 
 #[tokio::test]
@@ -2571,7 +2572,7 @@ async fn test_id_token_no_email_omits_email_verified() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
 
     let id_token = jwt
@@ -2832,7 +2833,7 @@ async fn test_admin_delete_project_in_use_is_refused() {
     let custom = Project::new("Busy Project", None::<sid_core::models::ProfileId>);
     let project_id = custom.id;
     let svc = TestServices::new(MockStorage::new().with_project(custom));
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
         project_id,
@@ -4176,8 +4177,8 @@ async fn test_get_profile_returns_primary_email_in_proto() {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .create_profile_email(&pe, AuditEntry::system("test", "setup").into())
@@ -4222,8 +4223,8 @@ async fn test_admin_get_profile_by_email() {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .create_profile_email(&email, AuditEntry::system("test", "setup").into())
@@ -4275,7 +4276,7 @@ async fn test_admin_list_sessions() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "test").into())
@@ -4305,7 +4306,7 @@ async fn test_admin_revoke_session() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "test").into())
@@ -4338,7 +4339,7 @@ async fn test_admin_revoke_all_sessions() {
         let session = Session::new(
             profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         svc.storage
             .create_session(&session, AuditEntry::system("test", "test").into())
@@ -5160,8 +5161,8 @@ async fn stored_refresh_token(svc: &TestServices, raw: &str) -> sid_core::models
         profile_id: test_profile().id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".to_string()],
-        expires_at: chrono::Utc::now() + chrono::Duration::days(1),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24),
+        created_at: jiff::Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: id,
@@ -5246,7 +5247,7 @@ async fn test_revoke_refresh_token_ends_its_grant() {
     previous.family_id = current.family_id;
     previous.revoked = true;
     previous.replaced_by = Some(current.id);
-    previous.grace_expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(30));
+    previous.grace_expires_at = Some(jiff::Timestamp::now() + jiff::SignedDuration::from_secs(30));
     svc.mock_storage
         .inner
         .lock()
@@ -5384,10 +5385,10 @@ async fn test_introspect_expired_token() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     // The token expires with its session, already past.
-    session.expires_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    session.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(5);
     let userinfo = sid_authn::issuer::userinfo_endpoint(&svc.issuer.canonical_url);
     let expired = svc
         .jwt
@@ -5667,14 +5668,14 @@ async fn test_magic_link_verify_issues_provisional_session() {
         .expect("session stored");
     assert_eq!(session.profile_id, profile.id);
     assert!(session.is_provisional);
-    assert!(session.expires_at <= chrono::Utc::now() + chrono::Duration::minutes(15));
+    assert!(session.expires_at <= jiff::Timestamp::now() + jiff::SignedDuration::from_mins(15));
     let provisional = sid_core::models::Session::new_provisional(profile.id, None);
     assert_eq!(session.scopes, provisional.scopes);
     // Mailbox possession over a second channel, as for an emailed code:
     // `mca` (RFC 8176 §2); the registry has no link method.
     assert_eq!(session.amr, vec!["mca".to_string()]);
     let claims = svc.jwt.validate_access_token(&access_token).unwrap();
-    assert!(claims.exp <= session.expires_at.timestamp());
+    assert!(claims.exp <= session.expires_at.as_second());
     assert!(i64::from(resp.expires_in) <= 15 * 60);
 }
 
@@ -5876,7 +5877,11 @@ async fn test_admin_suspend_ends_live_sessions() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let mut session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     session.client_id = Some("rp-client".into());
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -6053,7 +6058,11 @@ async fn test_admin_rpc_revoke_all_sessions() {
     let svc = TestServices::new(storage);
 
     // Create a session first
-    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "test").into())
         .await
@@ -6081,7 +6090,11 @@ async fn test_admin_revoke_all_sessions_stops_tokens_and_owes_logout() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let mut session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     session.client_id = Some("rp-client".into());
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -7229,8 +7242,8 @@ async fn test_verify_otp_wrong_code() {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .create_profile_email(&pe, AuditEntry::system("test", "setup").into())
@@ -7294,8 +7307,8 @@ async fn test_resend_otp_after_request() {
         is_primary: true,
         verified: true,
         verified_at: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .create_profile_email(&pe, AuditEntry::system("test", "setup").into())
@@ -7355,7 +7368,7 @@ async fn test_delete_mfa_credential_not_found() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
 
@@ -7392,7 +7405,7 @@ async fn test_delete_totp_credential_then_reenroll() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
 
@@ -7666,7 +7679,7 @@ async fn test_request_step_up_totp_returns_empty_challenge() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
     let storage = MockStorage::new()
@@ -7697,7 +7710,7 @@ async fn test_request_step_up_recovery_returns_empty_challenge() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let recovery_cred = Credential::new(profile.id, CredentialType::Recovery, vec![1, 2, 3], None);
     let storage = MockStorage::new()
@@ -7729,7 +7742,7 @@ async fn test_request_step_up_webauthn_no_passkeys_enrolled() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(
@@ -7765,7 +7778,7 @@ async fn test_request_step_up_webauthn_invalid_session() {
     let unstored = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let req = step_up_request(&svc, &profile, &unstored, StepUpMethod::Webauthn);
     let err = svc.auth.request_step_up(req).await.unwrap_err();
@@ -7780,7 +7793,7 @@ async fn test_request_step_up_unspecified_returns_available_methods() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
     let webauthn_cred = Credential::new(profile.id, CredentialType::WebAuthn, vec![1, 2, 3], None);
@@ -7820,10 +7833,10 @@ async fn test_request_step_up_unspecified_medium_decay_totp_only_fails_precondit
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     // 5 hours ago → Medium decay.
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(5);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(5);
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
     let storage = MockStorage::new()
         .with_profile(profile.clone())
@@ -7851,7 +7864,7 @@ async fn test_request_step_up_unspecified_no_methods_fails_precondition() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     // No MFA credentials registered for this profile.
     let storage = MockStorage::new()
@@ -7878,10 +7891,10 @@ async fn test_request_step_up_medium_decay_only_phishing_resistant() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     // Set authenticated_at to 5 hours ago → Medium decay.
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(5);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(5);
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
     let webauthn_cred = Credential::new(profile.id, CredentialType::WebAuthn, vec![1, 2, 3], None);
     let recovery_cred = Credential::new(profile.id, CredentialType::Recovery, vec![1, 2, 3], None);
@@ -7922,9 +7935,9 @@ async fn test_request_step_up_medium_decay_rejects_totp() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(5);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(5);
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
     let storage = MockStorage::new()
         .with_profile(profile.clone())
@@ -7953,9 +7966,9 @@ async fn test_request_step_up_low_decay_requires_reauth() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(13);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(13);
     let storage = MockStorage::new()
         .with_profile(profile.clone())
         .with_session(session.clone());
@@ -7984,9 +7997,9 @@ async fn test_complete_step_up_totp_elevates_session() {
     let mut session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
-    session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    session.authenticated_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2);
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
     svc.storage
@@ -8092,7 +8105,7 @@ async fn recovery_step_up_fixture(
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -8318,7 +8331,7 @@ async fn test_complete_step_up_totp_wrong_code() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -8376,7 +8389,7 @@ async fn test_complete_step_up_no_mfa_enrolled() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -8419,7 +8432,7 @@ async fn test_complete_step_up_webauthn_expired_challenge() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -8464,7 +8477,7 @@ async fn test_complete_step_up_webauthn_no_challenge_id() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let (bearer, session) =
         common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
@@ -9699,8 +9712,8 @@ async fn test_expired_proof_keeps_route() {
         .unwrap();
     let mut p = Principal::new_email(profile.id, "expired@sid.example.com");
     p.verified = true;
-    p.verified_at = Some(chrono::Utc::now() - chrono::Duration::days(400));
-    p.verification_expires = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    p.verified_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(400 * 24));
+    p.verification_expires = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24));
     svc.storage
         .save_principal(&p, AuditEntry::system("test", "setup").into())
         .await
@@ -10111,7 +10124,7 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
     let mut earlier = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     earlier.client_id = Some("rp-client".into());
     use sha2::{Digest, Sha256};
@@ -10478,7 +10491,11 @@ async fn test_event_session_revoked_on_revoke() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     let session_id = session.id;
     let storage = MockStorage::new()
         .with_profile(profile.clone())
@@ -10529,7 +10546,11 @@ async fn test_event_session_revoked_on_admin_revoke_all() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     let session_id = session.id;
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -10579,7 +10600,11 @@ async fn test_event_mfa_disabled_on_credential_delete() {
     let pid = profile.id;
 
     // Create elevated session (required for MFA credential deletion)
-    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
+    let mut session = Session::new(
+        pid,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
 
     // Create a TOTP credential
@@ -10764,8 +10789,8 @@ fn setup_iat_for_dcr(storage: MockStorage) -> (MockStorage, String) {
         allowed_scopes: vec!["openid".into(), "profile".into()],
         allowed_grant_types: vec!["authorization_code".into()],
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24),
+        created_at: jiff::Timestamp::now(),
         created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     };

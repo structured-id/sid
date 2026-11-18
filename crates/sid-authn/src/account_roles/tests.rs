@@ -87,7 +87,7 @@ async fn only_a_live_installation_wide_assignment_counts() {
     administer(
         &storage,
         installation_wide(expired.id)
-            .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
     )
     .await;
     assert!(

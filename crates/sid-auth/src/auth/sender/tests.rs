@@ -45,7 +45,7 @@ fn proof(jti: &str, htu: &str, token: &str) -> String {
     header.jwk = Some(jwk);
     let payload = serde_json::json!({
         "jti": jti, "htm": "GET", "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(

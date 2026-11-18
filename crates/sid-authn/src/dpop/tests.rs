@@ -31,7 +31,7 @@ fn build_dpop_proof(method: &str, url: &str, iat_offset_secs: i64, jti: &str) ->
     header.typ = Some("dpop+jwt".to_string());
     header.jwk = Some(jwk);
 
-    let now = chrono::Utc::now().timestamp() + iat_offset_secs;
+    let now = jiff::Timestamp::now().as_second() + iat_offset_secs;
     let payload = serde_json::json!({
         "jti": jti,
         "htm": method,
@@ -247,7 +247,7 @@ async fn test_dpop_private_key_in_jwk_rejected() {
         "jti": "private-jwk-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let signing_input = format!(
         "{}.{}",
@@ -290,7 +290,7 @@ async fn test_dpop_symmetric_algorithm_rejected() {
         "jti": "sym-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -331,7 +331,7 @@ async fn test_dpop_proof_signed_by_another_key_rejected() {
         "jti": "other-key-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let signing_key = EncodingKey::from_ec_pem(include_bytes!(
         "../../tests/fixtures/test_es256_private.pem"
@@ -364,7 +364,7 @@ async fn test_dpop_unknown_key_type_rejected() {
         "jti": "unknown-kty-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -396,7 +396,7 @@ async fn test_dpop_algorithm_not_matching_key_type_rejected() {
         "jti": "alg-mismatch-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -425,7 +425,7 @@ async fn test_dpop_wrong_typ_rejected() {
         "jti": "typ-jti",
         "htm": "POST",
         "htu": "https://sid.example.com/token",
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
     });
     let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -519,7 +519,7 @@ async fn test_a_request_holds_its_proof_admission() {
     let scope = "https://sid.example.com/i/a resource-1";
     let proof = VerifiedProof {
         jti: "j".into(),
-        iat: chrono::Utc::now().timestamp(),
+        iat: jiff::Timestamp::now().as_second(),
     };
     let first = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
     let retried = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
@@ -551,7 +551,7 @@ async fn test_a_request_holds_its_proof_admission() {
 
     let stale = VerifiedProof {
         jti: "old".into(),
-        iat: chrono::Utc::now().timestamp() - 120,
+        iat: jiff::Timestamp::now().as_second() - 120,
     };
     assert!(matches!(
         validator
@@ -567,7 +567,7 @@ async fn test_undecided_admission_is_unavailable() {
     let validator = DPopValidator::new(Arc::new(crate::test_support::DownCeremonies));
     let proof = VerifiedProof {
         jti: "j".into(),
-        iat: chrono::Utc::now().timestamp(),
+        iat: jiff::Timestamp::now().as_second(),
     };
     assert!(matches!(
         validator
@@ -645,7 +645,7 @@ fn build_resource_proof(jti: &str, ath: Option<&str>) -> String {
     header.typ = Some("dpop+jwt".to_string());
     header.jwk = Some(jwk);
     let mut payload = serde_json::json!({
-        "jti": jti, "htm": "GET", "htu": RESOURCE, "iat": chrono::Utc::now().timestamp(),
+        "jti": jti, "htm": "GET", "htu": RESOURCE, "iat": jiff::Timestamp::now().as_second(),
     });
     if let Some(ath) = ath {
         payload["ath"] = serde_json::Value::String(ath.to_string());
@@ -717,7 +717,7 @@ fn build_native_proof(typ: &str, htu: &str, jti: &str, claims: serde_json::Value
     header.typ = Some(typ.to_string());
     header.jwk = Some(jwk);
     let mut payload = serde_json::json!({
-        "jti": jti, "htm": "POST", "htu": htu, "iat": chrono::Utc::now().timestamp(),
+        "jti": jti, "htm": "POST", "htu": htu, "iat": jiff::Timestamp::now().as_second(),
     });
     for (name, value) in claims.as_object().unwrap() {
         payload[name] = value.clone();

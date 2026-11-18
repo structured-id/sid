@@ -35,7 +35,7 @@ fn claims_for(issuer: &OidcIssuer) -> Claims {
         iss: issuer.canonical_url.clone(),
         sub: "subject".into(),
         aud: "client".into(),
-        exp: chrono::Utc::now().timestamp() + 60,
+        exp: jiff::Timestamp::now().as_second() + 60,
     }
 }
 
@@ -95,6 +95,64 @@ async fn a_changed_base_url_does_not_rewrite_the_issuer() {
         .await
         .unwrap();
     assert_eq!(later.canonical_url, first.canonical_url);
+}
+
+/// An installation's base issuer is its root origin, not `/i/<handle>`
+/// (auth/oidc-issuer-model.md, stable issuer identity); its record still
+/// holds a handle, and a later start reads it back unchanged.
+#[tokio::test]
+async fn the_base_issuer_is_the_root_origin() {
+    let (storage, org) = installation().await;
+    let keys = key_manager();
+    let first = ensure_base_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    assert_eq!(first.canonical_url, "https://id.sid.example.com");
+    assert_eq!(first.handle.as_str().len(), 32);
+    let again = ensure_base_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    assert_eq!(first, again);
+}
+
+/// An issuer already stored keeps its URL whichever form a later start asks
+/// for: a scoped base issuer is not silently moved to the root, and a root
+/// one not moved under `/i/`.
+#[tokio::test]
+async fn a_stored_issuer_keeps_its_form() {
+    let (storage, org) = installation().await;
+    let keys = key_manager();
+    let scoped = ensure_local_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let reopened = ensure_base_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    assert_eq!(reopened.canonical_url, scoped.canonical_url);
+
+    let (storage, org) = installation().await;
+    let root = ensure_base_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let reopened = ensure_local_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    assert_eq!(reopened.canonical_url, root.canonical_url);
+}
+
+/// The root form follows the issuer URL rules: no trailing slash, and plain
+/// `http` only on a loopback host.
+#[test]
+fn the_base_issuer_url_follows_the_issuer_rules() {
+    assert_eq!(
+        base_issuer_url(&Url::parse("https://id.sid.example.com/").unwrap()).unwrap(),
+        "https://id.sid.example.com"
+    );
+    assert!(base_issuer_url(&Url::parse("http://id.sid.example.com").unwrap()).is_err());
+    assert_eq!(
+        base_issuer_url(&Url::parse("http://127.0.0.1:8080").unwrap()).unwrap(),
+        "http://127.0.0.1:8080"
+    );
 }
 
 /// Replicas starting together agree on one issuer and one key.
@@ -430,7 +488,7 @@ const ORDERS: &str = "https://resources.example/orders";
 /// Access-token claims as an issuer puts them in a token that `client-1`
 /// requested for the Orders resource.
 fn access_claims(iss: &str) -> crate::jwt::AccessTokenClaims {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     crate::jwt::AccessTokenClaims {
         sub: "subject".into(),
         pid: None,
@@ -466,6 +524,63 @@ async fn only_stored_handles_resolve() {
     assert_eq!(registry.by_handle(unknown.as_str()).await.unwrap(), None);
     for malformed in ["", "../etc", "0123456789ABCDEF0123456789ABCDEF"] {
         assert_eq!(registry.by_handle(malformed).await.unwrap(), None);
+    }
+}
+
+/// The empty handle names the installation's base issuer only when that one
+/// is root-addressed and the registry was told it; its own handle names it
+/// too. A scoped base issuer leaves the empty handle naming nothing.
+#[tokio::test]
+async fn the_empty_handle_names_only_a_root_base_issuer() {
+    let (storage, org) = installation().await;
+    let keys = key_manager();
+    let root = ensure_base_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let storage = Arc::new(storage);
+    let plain = IssuerRegistry::new(storage.clone(), keys.clone());
+    assert_eq!(plain.by_handle("").await.unwrap(), None);
+    let registry = IssuerRegistry::new(storage, keys.clone()).with_base_issuer(&root);
+    assert_eq!(registry.by_handle("").await.unwrap(), Some(root.clone()));
+    assert_eq!(
+        registry.by_handle(root.handle.as_str()).await.unwrap(),
+        Some(root)
+    );
+
+    let (storage, org) = installation().await;
+    let scoped = ensure_local_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let registry = IssuerRegistry::new(Arc::new(storage), keys).with_base_issuer(&scoped);
+    assert_eq!(registry.by_handle("").await.unwrap(), None);
+}
+
+/// An issuer URL of the installation at `base` maps to the handle its
+/// registry names it by: empty for the root origin, the handle for
+/// `{base}/i/{handle}`; any other URL, a malformed handle, a longer path or
+/// another host maps to none.
+#[test]
+fn installation_issuer_urls_map_to_handles() {
+    let handle = IssuerHandle::generate();
+    let base = "https://id.sid.example.com/";
+    assert_eq!(
+        installation_issuer_handle(base, "https://id.sid.example.com"),
+        Some("")
+    );
+    let scoped = format!("https://id.sid.example.com/i/{handle}");
+    assert_eq!(
+        installation_issuer_handle(base, &scoped),
+        Some(handle.as_str())
+    );
+    for other in [
+        "https://id.sid.example.com/".to_owned(),
+        "https://id.sid.example.com/i/not-a-handle".to_owned(),
+        format!("https://id.sid.example.com/i/{handle}/jwks"),
+        format!("https://id.sid.example.com.evil.example/i/{handle}"),
+        "https://other.sid.example.com".to_owned(),
+        "https://id.sid.example.comx".to_owned(),
+    ] {
+        assert_eq!(installation_issuer_handle(base, &other), None, "{other}");
     }
 }
 
@@ -626,7 +741,7 @@ async fn a_logout_token_is_for_its_client_alone() {
             .unwrap();
     assert!(verifier.validate_logout_token(&token, "client-2").is_err());
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = |extra: serde_json::Value| {
         let mut claims = serde_json::json!({
             "iss": issuer.canonical_url,
@@ -676,7 +791,7 @@ async fn a_logout_token_is_for_its_client_alone() {
 async fn a_token_without_the_logout_event_is_refused() {
     let (registry, issuer) = registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let token = signer
         .sign(
             Some("logout+jwt"),
@@ -726,7 +841,7 @@ async fn id_token_hints_are_this_issuers_id_tokens() {
     let (other_registry, other) = self::registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
     let verifier = registry.verifier(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let live = signer
         .sign(None, &id_claims(&issuer.canonical_url, now + 60))
@@ -768,7 +883,7 @@ async fn an_id_token_is_the_clients_own() {
     let (registry, issuer) = registry().await;
     let signer = registry.signer(&issuer).await.unwrap();
     let verifier = registry.verifier(&issuer).await.unwrap();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let with_nonce = |mut claims: crate::jwt::IdTokenClaims, nonce: Option<&str>| {
         claims.nonce = nonce.map(str::to_owned);
         signer.sign(None, &claims).unwrap()

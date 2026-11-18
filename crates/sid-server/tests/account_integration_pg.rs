@@ -6,7 +6,7 @@
 
 mod common;
 
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_authn::system_integration::{
     AccountSettings, account_integration, ensure_account_integration,
 };
@@ -40,7 +40,7 @@ async fn issuer(storage: &PostgresBackend) -> OidcIssuer {
     let org = sid_authn::instance_org::ensure(storage, "sid.example.com")
         .await
         .unwrap();
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
         id: IssuerId::generate(),

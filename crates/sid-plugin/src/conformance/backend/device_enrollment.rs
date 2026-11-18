@@ -398,7 +398,7 @@ pub async fn test_a_revocation_holds_only_under_a_live_sign_in(backend: &dyn Sto
         .revoke_device_attestation(
             key.device_id,
             test_audit().fenced_by(fence(Some(
-                chrono::Utc::now() - chrono::Duration::seconds(1),
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1),
             ))),
         )
         .await
@@ -426,7 +426,7 @@ pub async fn test_a_revocation_holds_only_under_a_live_sign_in(backend: &dyn Sto
                 test_audit().fenced_by(ActorFence::Session {
                     session: current.session.id,
                     profile: current.profile.id,
-                    fresh_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                    fresh_until: Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)),
                 }),
             )
             .await
@@ -469,13 +469,12 @@ pub async fn test_a_rotation_racing_a_revocation_settles(backend: &dyn StorageBa
 /// that already has another binding, is another Profile's or is missing
 /// refuses it.
 pub async fn test_a_device_binding_is_restored_as_stored(backend: &dyn StorageBackend) {
-    use chrono::SubsecRound;
     let owner = owner(backend).await;
     let device = Device::new(owner.profile.id, DeviceType::Mobile);
     backend.create_device(&device, test_audit()).await.unwrap();
     let mut restored = binding(&device, "key-restored");
     restored.status = AttestationStatus::Revoked;
-    restored.created_at = restored.created_at.trunc_subsecs(3);
+    restored.created_at = crate::conformance::trunc(restored.created_at, jiff::Unit::Millisecond);
     restored.updated_at = restored.created_at;
     restored.revoked_at = Some(restored.created_at);
 

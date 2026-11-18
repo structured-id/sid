@@ -113,7 +113,7 @@ fn test_record_matches_same_call_only() {
             b"result".to_vec(),
         )
         .in_period(OperationPeriod::new(3)),
-        completed_at: Utc::now(),
+        completed_at: Timestamp::now(),
     };
     assert!(record.matches("sid.v1.ProjectService/CreateProject", b"inputs", period));
     assert!(!record.matches("sid.v1.ProjectService/CreateProject", b"other", period));

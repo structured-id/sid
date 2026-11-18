@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     ClientCredential, EntryHandle, IssuerAuthority, IssuerHandle, IssuerId, LoginSettings,
     MutationContext, ProfileType,
@@ -48,7 +48,7 @@ async fn installed(owner: ConnectionOwner, source: Option<OrgId>) -> Installed {
         handle,
         authority: IssuerAuthority::Local,
         recipient_org: OrgId::generate(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let handle = EntryHandle::generate();
     let connection = EntryConnection {
@@ -69,8 +69,8 @@ async fn installed(owner: ConnectionOwner, source: Option<OrgId>) -> Installed {
         }),
         enabled: true,
         revision: 0,
-        created_at: Utc::now().trunc_subsecs(6),
-        updated_at: Utc::now().trunc_subsecs(6),
+        created_at: Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap(),
+        updated_at: Timestamp::from_microsecond(Timestamp::now().as_microsecond()).unwrap(),
     };
     // Admission reads the connection back as the entry used it.
     storage
@@ -496,12 +496,12 @@ fn returned(i: &Installed, subject: &str, presentation: Option<Vec<u8>>) -> Retu
         evidence: AcceptedEvidence {
             acr: None,
             amr: vec!["pwd".into()],
-            auth_time: Utc::now(),
+            auth_time: Timestamp::now(),
         },
         continuation: format!("{}/oauth2/authorize?client_id=app", i.issuer.canonical_url),
         requested: Default::default(),
         operation: "operation".into(),
-        deadline: Utc::now() + chrono::Duration::minutes(5),
+        deadline: Timestamp::now() + jiff::SignedDuration::from_mins(5),
         presentation,
         challenge: CHALLENGE.into(),
         verifier_context: i.connection.callback.clone(),

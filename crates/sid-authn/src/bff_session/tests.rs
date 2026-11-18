@@ -258,7 +258,7 @@ async fn idle_session(s: &BffSessionStore, probe: &Probe) -> (String, BffSession
         .unwrap();
     let raw = probe.stored(&id).await.unwrap();
     let mut session: BffSession = serde_json::from_slice(&raw).unwrap();
-    session.last_access = Utc::now() - chrono::Duration::hours(2);
+    session.last_access = Timestamp::now() - jiff::SignedDuration::from_hours(2);
     probe
         .inner
         .put_ceremony_state(SESSIONS, &id, &serde_json::to_vec(&session).unwrap(), LONG)
@@ -343,7 +343,7 @@ async fn test_replace_tokens_applies_over_a_concurrent_write() {
     let probe = Arc::new(Probe::new());
     let s = build(probe.clone(), LONG, LONG);
     let (id, mut touched) = idle_session(&s, &probe).await;
-    touched.last_access = Utc::now();
+    touched.last_access = Timestamp::now();
 
     probe.after_next_read(
         id.clone(),
@@ -1158,15 +1158,15 @@ async fn test_records_of_the_previous_shape_are_not_read() {
         "refresh_token": null,
         "claims": test_claims(),
         "csrf_token": "c",
-        "created_at": Utc::now(),
-        "last_access": Utc::now(),
+        "created_at": Timestamp::now(),
+        "last_access": Timestamp::now(),
         "connection": CONN,
     });
     let previous_pending = serde_json::json!({
         "code_verifier": "v",
         "nonce": "n",
         "redirect_url": "/",
-        "created_at": Utc::now(),
+        "created_at": Timestamp::now(),
     });
     for (namespace, key, value) in [
         ("bff_session_2", id.clone(), &previous_session),
@@ -1242,8 +1242,8 @@ fn test_debug_hides_the_tokens() {
         refresh_token: Some(SecretString::from("super-secret-refresh")),
         claims: test_claims(),
         csrf_token: "super-secret-csrf".into(),
-        created_at: Utc::now(),
-        last_access: Utc::now(),
+        created_at: Timestamp::now(),
+        last_access: Timestamp::now(),
         connection: CONN.into(),
         token_refused: false,
     };

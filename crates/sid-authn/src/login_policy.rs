@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::ActorFence;
 use sid_core::models::oauth2_client::OAuth2Client;
 use sid_core::models::security_policy::{EnforcementMode, MfaEnforcement, SecurityPolicy};
@@ -182,7 +182,7 @@ impl LoginRequirements {
     /// What `session`'s authentication leaves unmet at `now`: the level in
     /// force then (a lapsed step-up no longer counts), the methods it used and
     /// its age from when it happened.
-    pub fn unmet<O>(&self, session: &Session<O>, now: DateTime<Utc>) -> Unmet {
+    pub fn unmet<O>(&self, session: &Session<O>, now: Timestamp) -> Unmet {
         let assurance = session.assurance_at(now);
         let required = self.policy_assurance().max(self.account_protection);
         let acr = (assurance < required).then_some(required);
@@ -212,7 +212,7 @@ impl LoginRequirements {
         session: &Session<O>,
         level: AuthLevel,
         method: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> bool {
         let mut completed = session.clone();
         completed.assurance_level = completed.assurance_level.max(level);
@@ -226,7 +226,7 @@ impl LoginRequirements {
     /// under soft or hard enforcement and is allowed, but reported, under
     /// audit, except the account's own enabled protection, which audit does
     /// not waive.
-    pub fn decide<O>(&self, session: &Session<O>, now: DateTime<Utc>) -> LoginDecision {
+    pub fn decide<O>(&self, session: &Session<O>, now: Timestamp) -> LoginDecision {
         let unmet = self.unmet(session, now);
         let protection_unmet = session.assurance_at(now) < self.account_protection;
         if unmet.is_empty() || (self.enforcement == EnforcementMode::Audit && !protection_unmet) {
@@ -244,9 +244,9 @@ pub fn local_authentication<O>(
     owner: O,
     assurance: AuthLevel,
     amr: &[String],
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Session<O> {
-    let mut probe = Session::new(owner, None, now + chrono::Duration::hours(1));
+    let mut probe = Session::new(owner, None, now + jiff::SignedDuration::from_hours(1));
     probe.assurance_level = assurance;
     probe.amr = amr.to_vec();
     probe.authenticated_at = now;
@@ -255,8 +255,8 @@ pub fn local_authentication<O>(
 
 /// How long ago `at` was at `now`; none when `at` is in the future, which no
 /// authentication age can be trusted from.
-fn authentication_age(at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Duration> {
-    (now - at).to_std().ok()
+fn authentication_age(at: Timestamp, now: Timestamp) -> Option<Duration> {
+    Duration::try_from(now.duration_since(at)).ok()
 }
 
 #[cfg(test)]

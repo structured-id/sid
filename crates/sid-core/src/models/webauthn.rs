@@ -5,7 +5,7 @@
 //! The raw `Credential` stores this as opaque bytes in `data`;
 //! this module provides structured access for WebAuthn-specific fields.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::CredentialId;
@@ -125,8 +125,8 @@ pub struct WebAuthnCredential {
     /// User-visible name for this authenticator.
     pub display_name: Option<String>,
 
-    pub registered_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub registered_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
 }
 
 impl WebAuthnCredential {
@@ -147,7 +147,7 @@ impl WebAuthnCredential {
             backed_up: false,
             aaguid: None,
             display_name: None,
-            registered_at: Utc::now(),
+            registered_at: Timestamp::now(),
             last_used_at: None,
         }
     }
@@ -158,11 +158,11 @@ impl WebAuthnCredential {
     pub fn update_sign_count(&mut self, new_count: u32) -> bool {
         if new_count > self.sign_count {
             self.sign_count = new_count;
-            self.last_used_at = Some(Utc::now());
+            self.last_used_at = Some(Timestamp::now());
             true
         } else if new_count == 0 && self.sign_count == 0 {
             // Some authenticators always report 0 — allow it.
-            self.last_used_at = Some(Utc::now());
+            self.last_used_at = Some(Timestamp::now());
             true
         } else {
             // Counter went backwards or stayed the same (>0) — suspicious.

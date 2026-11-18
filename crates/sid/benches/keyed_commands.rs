@@ -53,7 +53,7 @@ fn report(mode: &str, what: &str, mut samples: Vec<Duration>) {
 
 /// An installation administrator, as a verified token describes one.
 fn administrator() -> Caller {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let profile = uuid::Uuid::now_v7().to_string();
     Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
         sub: profile.clone(),
@@ -131,7 +131,7 @@ async fn run(mode: &str, storage: Arc<dyn StorageBackend>, size: Size) {
     let projects = Arc::new(projects(storage.clone()).await);
     let caller = administrator();
     let period = storage
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;

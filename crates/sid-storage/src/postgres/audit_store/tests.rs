@@ -1,8 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use chrono::Duration;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Span};
 use sid_plugin::audit::AuditLog;
 
 use super::*;
+
+/// The UTC date of `at`.
+fn day(at: Timestamp) -> Date {
+    at.to_zoned_datetime(TimeZone::UTC).date()
+}
+
+/// The month start `months` before the month start `at`.
+fn months_before(at: Timestamp, months: i64) -> Timestamp {
+    at.to_zoned_datetime(TimeZone::UTC)
+        .checked_sub(Span::new().months(months))
+        .unwrap()
+        .timestamp()
+}
 
 fn database_url() -> String {
     std::env::var("SID_STORAGE_TEST_DATABASE_URL")
@@ -45,8 +60,7 @@ async fn drop_schema(schema: &str) {
 }
 
 /// Whether the monthly partition of the month starting at `month` exists.
-async fn partition_exists(pool: &PgPool, month: chrono::NaiveDate) -> bool {
-    use chrono::Datelike;
+async fn partition_exists(pool: &PgPool, month: Date) -> bool {
     let name = format!("audit_records_{:04}_{:02}", month.year(), month.month());
     sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(name)
@@ -60,10 +74,8 @@ async fn partition_exists(pool: &PgPool, month: chrono::NaiveDate) -> bool {
 #[tokio::test]
 async fn the_schema_prepares_this_and_next_month() {
     let (_store, pool, schema) = store().await;
-    let this = audit_retention::month_start(Utc::now())
-        .unwrap()
-        .date_naive();
-    let next = this.checked_add_months(Months::new(1)).unwrap();
+    let this = day(audit_retention::month_start(Timestamp::now()).unwrap());
+    let next = this.checked_add(Span::new().months(1)).unwrap();
     let prepared = (
         partition_exists(&pool, this).await,
         partition_exists(&pool, next).await,
@@ -79,9 +91,9 @@ async fn the_schema_prepares_this_and_next_month() {
 #[tokio::test]
 async fn an_expired_month_leaves_a_verifiable_chain() {
     let (store, pool, schema) = store().await;
-    let this = audit_retention::month_start(Utc::now()).unwrap();
-    let old = this.checked_sub_months(Months::new(3)).unwrap();
-    audit_retention::ensure_partition(&pool, old.date_naive())
+    let this = audit_retention::month_start(Timestamp::now()).unwrap();
+    let old = months_before(this, 3);
+    audit_retention::ensure_partition(&pool, day(old))
         .await
         .unwrap();
     let chain = "org:expiry";
@@ -91,7 +103,7 @@ async fn an_expired_month_leaves_a_verifiable_chain() {
             &mut tx,
             chain,
             AuditEntry::system("test", format!("old {i}")),
-            old + Duration::days(1),
+            old + SignedDuration::from_hours(24),
         )
         .await
         .unwrap();
@@ -103,7 +115,7 @@ async fn an_expired_month_leaves_a_verifiable_chain() {
 
     let removed = store
         .drop_expired(
-            this.checked_sub_months(Months::new(1)).unwrap(),
+            months_before(this, 1),
             "site:audit_retention",
             AuditEntry::system("audit_retention", "expired months removed"),
         )

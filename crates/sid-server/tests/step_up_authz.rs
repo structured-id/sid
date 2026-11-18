@@ -24,7 +24,7 @@ fn session_of(profile: &Profile) -> Session {
     Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     )
 }
 

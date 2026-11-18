@@ -4,7 +4,7 @@
 //! Reset sessions are separate from regular sessions — shorter TTL (30m),
 //! limited capabilities (only password reset operations), single-use token.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -106,10 +106,10 @@ pub struct PasswordResetSession {
     /// session.
     pub sealed_token: Vec<u8>,
     pub status: ResetSessionStatus,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub verified_at: Option<Timestamp>,
+    pub completed_at: Option<Timestamp>,
 }
 
 impl PasswordResetSession {
@@ -122,8 +122,13 @@ impl PasswordResetSession {
         destination: String,
         token_hash: String,
     ) -> Self {
-        use chrono::SubsecRound;
-        let now = Utc::now().trunc_subsecs(6);
+        let now = Timestamp::now()
+            .round(
+                jiff::TimestampRound::new()
+                    .smallest(jiff::Unit::Microsecond)
+                    .mode(jiff::RoundMode::Trunc),
+            )
+            .expect("truncating the present instant stays representable");
         Self {
             id: ResetSessionId::new(),
             profile_id,
@@ -133,14 +138,14 @@ impl PasswordResetSession {
             sealed_token: Vec::new(),
             status: ResetSessionStatus::Pending,
             created_at: now,
-            expires_at: now + Duration::seconds(RESET_SESSION_TTL_SECS),
+            expires_at: now + SignedDuration::from_secs(RESET_SESSION_TTL_SECS),
             verified_at: None,
             completed_at: None,
         }
     }
 
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        Timestamp::now() >= self.expires_at
     }
 }
 

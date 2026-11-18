@@ -46,7 +46,7 @@ async fn fixture() -> Fixture {
     let session = Session::new(
         victim.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let storage = MockStorage::new()
         .with_profile(victim.clone())
@@ -54,7 +54,7 @@ async fn fixture() -> Fixture {
         .with_credential(credential.clone())
         .with_session(session.clone());
     let svc = TestServices::new(storage);
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let principal = Principal {
         id: PrincipalId::new(),
         profile_id: victim.id,

@@ -536,7 +536,7 @@ async fn new_invites_take_the_stored_defaults() {
     let created = invite(&svc, &service, &admin, 0).await;
     assert_eq!(created.max_uses, 5);
     let expires = created.expires_at.expect("the default expiry").seconds;
-    let in_48h = (chrono::Utc::now() + chrono::Duration::hours(48)).timestamp();
+    let in_48h = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(48)).as_second();
     assert!((expires - in_48h).abs() <= 60, "{expires} vs {in_48h}");
 
     // The request's own limit wins over the default.
@@ -591,7 +591,7 @@ async fn new_invites_take_the_stored_defaults() {
         sid_proto::sid::v1::admin::CreateInviteRequest {
             never_expires: true,
             expires_at: Some(prost_types::Timestamp {
-                seconds: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                seconds: (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)).as_second(),
                 nanos: 0,
             }),
             ..Default::default()

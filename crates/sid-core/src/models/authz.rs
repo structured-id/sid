@@ -6,7 +6,7 @@
 
 use core::num::NonZeroU8;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,13 +48,13 @@ pub struct Role {
     /// Stored revision: 0 for a new role, moved on by every update. An update
     /// applies only over the revision it was read at.
     pub revision: u64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Role {
     pub fn new(project_id: ProjectId, key: impl Into<String>, name: impl Into<String>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: RoleId::generate(),
             project_id,
@@ -269,13 +269,13 @@ pub struct Group {
     pub description: Option<String>,
     /// Parent group for nested hierarchies; always None.
     pub parent_group_id: Option<GroupId>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Group {
     pub fn new(project_id: ProjectId, name: impl Into<String>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: GroupId::generate(),
             project_id,
@@ -298,7 +298,7 @@ impl Group {
 pub struct GroupMember {
     pub group_id: GroupId,
     pub profile_id: ProfileId,
-    pub added_at: DateTime<Utc>,
+    pub added_at: Timestamp,
 }
 
 impl GroupMember {
@@ -306,7 +306,7 @@ impl GroupMember {
         Self {
             group_id,
             profile_id,
-            added_at: Utc::now(),
+            added_at: Timestamp::now(),
         }
     }
 }
@@ -493,8 +493,8 @@ pub struct RoleAssignment {
     /// Optional scope constraint (e.g., "project:abc123").
     pub scope: Option<String>,
     /// Optional expiry (temporary role assignment).
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<Timestamp>,
+    pub created_at: Timestamp,
     /// For an administrative assignment, what its holder may administer in
     /// its scope (D050 B); `None` for an ordinary working assignment.
     #[serde(default)]
@@ -522,7 +522,7 @@ impl RoleAssignment {
             role_id,
             scope: None,
             expires_at: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             admin: None,
             policy_admin: None,
             provenance: None,
@@ -578,20 +578,22 @@ impl RoleAssignment {
     }
 
     /// Set expiry for this role assignment (builder pattern).
-    pub fn with_expiry(mut self, expires_at: DateTime<Utc>) -> Self {
+    pub fn with_expiry(mut self, expires_at: Timestamp) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
 
     /// Check if this assignment has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
+        self.expires_at
+            .map(|exp| Timestamp::now() > exp)
+            .unwrap_or(false)
     }
 
     /// Hours remaining until expiry, or None if no expiry / already expired.
     pub fn hours_until_expiry(&self) -> Option<i64> {
         self.expires_at.and_then(|exp| {
-            let hours = (exp - Utc::now()).num_hours();
+            let hours = exp.duration_since(Timestamp::now()).as_hours();
             if hours >= 0 { Some(hours) } else { None }
         })
     }
@@ -603,7 +605,7 @@ impl RoleAssignment {
         self.governance_event(
             event_types::GOVERNANCE_ROLE_EXPIRED,
             format!("expired:{}", self.id),
-            serde_json::json!({ "expired_at": self.expires_at.map(|t| t.to_rfc3339()) }),
+            serde_json::json!({ "expired_at": self.expires_at.map(|t| t.to_string()) }),
         )
     }
 
@@ -615,7 +617,7 @@ impl RoleAssignment {
             event_types::GOVERNANCE_ROLE_EXPIRING,
             format!("expiring:{}:{threshold}", self.id),
             serde_json::json!({
-                "expires_at": self.expires_at.map(|t| t.to_rfc3339()),
+                "expires_at": self.expires_at.map(|t| t.to_string()),
                 "hours_left": hours_left,
                 "threshold": threshold,
             }),
@@ -745,8 +747,8 @@ pub struct CedarPolicy {
     /// Stored revision: 0 for a new policy, moved on by every update. An
     /// update applies only over the revision it was read at.
     pub revision: u64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl CedarPolicy {
@@ -756,7 +758,7 @@ impl CedarPolicy {
         policy_text: impl Into<String>,
         effect: PolicyEffect,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: CedarPolicyId::generate(),
             scope,
@@ -813,14 +815,14 @@ pub struct ProfileGrant {
     /// Who granted this access (admin profile ID or "system").
     pub granted_by: Option<String>,
     /// Optional expiry (temporary access).
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ProfileGrant {
     pub fn new(project_id: ProjectId, profile_id: ProfileId, role_keys: Vec<String>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ProfileGrantId::new(),
             project_id,
@@ -835,7 +837,9 @@ impl ProfileGrant {
 
     /// Check if this grant has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
+        self.expires_at
+            .map(|exp| Timestamp::now() > exp)
+            .unwrap_or(false)
     }
 
     /// Check if this grant includes a specific role key.

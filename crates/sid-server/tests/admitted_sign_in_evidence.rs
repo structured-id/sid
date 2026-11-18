@@ -33,11 +33,11 @@ async fn repeats_record_no_further_sign_in() {
     let authentication = sid_core::models::session::AcceptedEvidence::new(
         Some("urn:sid:acr:basic"),
         vec!["pwd".into()],
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
     )
-    .authentication(chrono::Utc::now())
+    .authentication(jiff::Timestamp::now())
     .unwrap();
-    let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let deadline = jiff::Timestamp::now() + jiff::SignedDuration::from_mins(10);
     let completion = || sid_server::grpc::auth_service::AdmittedCompletion {
         operation: "entry-evidence",
         deadline,

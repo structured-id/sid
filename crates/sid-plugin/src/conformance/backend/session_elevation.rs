@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! A session's time-bound step-up and its last authentication survive storage.
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::session::{AuthLevel, Elevation};
 use sid_plugin::storage::StorageBackend;
 
@@ -27,14 +27,14 @@ pub async fn test_session_elevation_roundtrip(backend: &dyn StorageBackend) {
         .unwrap()
         .authentication();
 
-    let until = Utc::now() + Duration::minutes(15);
+    let until = Timestamp::now() + Duration::from_mins(15);
     let mut stepped_up = before.clone();
     stepped_up.assurance_level = AuthLevel::Standard;
     stepped_up.elevation = Some(Elevation {
         level: AuthLevel::Critical,
         until,
     });
-    stepped_up.authenticated_at = Utc::now() + Duration::seconds(5);
+    stepped_up.authenticated_at = Timestamp::now() + Duration::from_secs(5);
     assert!(
         backend
             .record_session_authentication(session.id, &before, &stepped_up, test_audit())
@@ -50,10 +50,10 @@ pub async fn test_session_elevation_roundtrip(backend: &dyn StorageBackend) {
     assert_eq!(stored.assurance_level, AuthLevel::Standard);
     let elevation = stored.elevation.expect("elevation kept");
     assert_eq!(elevation.level, AuthLevel::Critical);
-    assert_eq!(elevation.until.timestamp_millis(), until.timestamp_millis());
+    assert_eq!(elevation.until.as_millisecond(), until.as_millisecond());
     assert_eq!(
-        stored.authenticated_at.timestamp_millis(),
-        stepped_up.authenticated_at.timestamp_millis(),
+        stored.authenticated_at.as_millisecond(),
+        stepped_up.authenticated_at.as_millisecond(),
         "a re-authentication was not stored"
     );
     assert_eq!(stored.assurance_at(until), AuthLevel::Standard);

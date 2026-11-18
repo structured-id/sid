@@ -3,7 +3,7 @@
 //! per held job, taken under the database write lock.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::storage::{JobLock, JobLockHolder};
 use sqlx::SqlitePool;
@@ -13,11 +13,11 @@ use super::{SqliteBackend, fmt_dt};
 /// How long a held lock survives a holder that vanished without releasing
 /// it. A job runs within this time; one that takes longer may be started a
 /// second time by another process.
-const JOB_LOCK_LEASE: chrono::Duration = chrono::Duration::hours(1);
+const JOB_LOCK_LEASE: SignedDuration = SignedDuration::from_hours(1);
 
 impl SqliteBackend {
     pub(super) async fn try_job_lock_impl(&self, job: i64) -> SidResult<Option<JobLock>> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let holder = uuid::Uuid::new_v4().to_string();
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM job_locks WHERE job = ? AND expires_at <= ?")

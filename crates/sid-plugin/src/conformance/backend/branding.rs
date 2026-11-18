@@ -3,7 +3,7 @@
 //! at, published in one write that archives the previous publication, and a
 //! project has at most one published config.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{BrandingConfig, BrandingConfigId, BrandingStatus, Project, ProjectId};
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ async fn project(backend: &dyn StorageBackend) -> ProjectId {
 }
 
 fn draft(project_id: ProjectId) -> BrandingConfig {
-    let now = Utc::now();
+    let now = Timestamp::now();
     BrandingConfig {
         id: BrandingConfigId::generate(),
         project_id,
@@ -81,7 +81,7 @@ pub async fn test_branding_draft_write_contract(backend: &dyn StorageBackend) {
 
     assert!(
         backend
-            .publish_branding_config(config.id, project_id, Utc::now(), test_audit())
+            .publish_branding_config(config.id, project_id, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
@@ -118,14 +118,14 @@ pub async fn test_branding_publish_contract(backend: &dyn StorageBackend) {
     }
     assert!(
         backend
-            .publish_branding_config(foreign.id, other_project, Utc::now(), test_audit())
+            .publish_branding_config(foreign.id, other_project, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
 
     assert!(
         !backend
-            .publish_branding_config(first.id, other_project, Utc::now(), test_audit())
+            .publish_branding_config(first.id, other_project, Timestamp::now(), test_audit())
             .await
             .unwrap(),
         "a draft is published in its own project only"
@@ -138,13 +138,13 @@ pub async fn test_branding_publish_contract(backend: &dyn StorageBackend) {
 
     assert!(
         backend
-            .publish_branding_config(first.id, project_id, Utc::now(), test_audit())
+            .publish_branding_config(first.id, project_id, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
     assert!(
         backend
-            .publish_branding_config(second.id, project_id, Utc::now(), test_audit())
+            .publish_branding_config(second.id, project_id, Timestamp::now(), test_audit())
             .await
             .unwrap()
     );
@@ -163,7 +163,7 @@ pub async fn test_branding_publish_contract(backend: &dyn StorageBackend) {
     );
     assert!(
         !backend
-            .publish_branding_config(first.id, project_id, Utc::now(), test_audit())
+            .publish_branding_config(first.id, project_id, Timestamp::now(), test_audit())
             .await
             .unwrap(),
         "an archived config is not published again"
@@ -198,8 +198,8 @@ pub async fn test_branding_concurrent_publish(backend: &dyn StorageBackend) {
         .await
         .unwrap();
     let (ra, rb) = tokio::join!(
-        backend.publish_branding_config(a.id, project_id, Utc::now(), test_audit()),
-        backend.publish_branding_config(b.id, project_id, Utc::now(), test_audit()),
+        backend.publish_branding_config(a.id, project_id, Timestamp::now(), test_audit()),
+        backend.publish_branding_config(b.id, project_id, Timestamp::now(), test_audit()),
     );
     // Each publish either wins, or waits and then archives the other.
     assert!(ra.unwrap() && rb.unwrap());

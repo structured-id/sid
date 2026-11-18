@@ -186,11 +186,11 @@ async fn an_assignment_expiry_is_a_future_timestamp() {
     let userinfo = common::userinfo_resource(&svc).await;
     for (i, expires_at) in [
         prost_types::Timestamp {
-            seconds: chrono::Utc::now().timestamp() + 3600,
+            seconds: jiff::Timestamp::now().as_second() + 3600,
             nanos: 2_000_000_000,
         },
         prost_types::Timestamp {
-            seconds: chrono::Utc::now().timestamp() - 60,
+            seconds: jiff::Timestamp::now().as_second() - 60,
             nanos: 0,
         },
     ]
@@ -238,8 +238,8 @@ async fn a_retired_resource_takes_no_inspector() {
         name: "Retiring API".into(),
         system: None,
         revision: 0,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     let resource = sid_core::models::ProtectedResource {
         id: ResourceId::generate(),
@@ -250,8 +250,8 @@ async fn a_retired_resource_takes_no_inspector() {
         scopes: vec![],
         state: sid_core::models::ResourceState::Active,
         revision: 0,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     let audit = || sid_core::models::AuditEntry::system("test", "api").into();
     svc.storage

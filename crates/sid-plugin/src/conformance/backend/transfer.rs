@@ -3,7 +3,8 @@
 //! is, an import writes it exactly as exported, a repeat writes nothing and a
 //! different record under a stored key is a conflict that writes nothing.
 
-use chrono::{Duration, DurationRound, Utc};
+use crate::conformance::{days, trunc};
+use jiff::{SignedDuration as Duration, Timestamp, Unit};
 use sid_core::Error;
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::{
@@ -196,9 +197,7 @@ pub async fn test_email_policy_activation_moves(backend: &dyn StorageBackend) {
 /// A quarantine entry is exported as stored and restores exactly.
 pub async fn test_quarantine_moves_as_stored(backend: &dyn StorageBackend) {
     let hash = format!("hash-{}", Uuid::now_v7());
-    let until = (Utc::now() + Duration::days(30))
-        .duration_trunc(Duration::milliseconds(1))
-        .unwrap();
+    let until = trunc(Timestamp::now() + days(30), Unit::Millisecond);
     backend
         .quarantine_principal(&hash, "email", until, test_audit())
         .await
@@ -218,7 +217,7 @@ pub async fn test_quarantine_moves_as_stored(backend: &dyn StorageBackend) {
             .unwrap()
     );
     let mut differing = held.clone();
-    differing.until += Duration::days(1);
+    differing.until += days(1);
     let refused = backend
         .import_principal_quarantine(&differing, test_audit())
         .await;
@@ -325,10 +324,8 @@ pub async fn test_user_handles_move_as_stored(backend: &dyn StorageBackend) {
 }
 
 /// An instant every store keeps exactly.
-fn instant() -> chrono::DateTime<Utc> {
-    Utc::now()
-        .duration_trunc(Duration::microseconds(1))
-        .unwrap()
+fn instant() -> Timestamp {
+    trunc(Timestamp::now(), Unit::Microsecond)
 }
 
 /// What the sign-in rules learned and fired moves as stored: IP reputation
@@ -422,7 +419,7 @@ pub async fn test_signals_move_as_stored(backend: &dyn StorageBackend) {
     assert!(listed.contains(&moved));
 
     let cidr = format!("moved-{}", Uuid::now_v7().simple());
-    let added = instant() - Duration::days(3);
+    let added = instant() - days(3);
     assert!(
         backend
             .import_ip_allowlist_entry(&cidr, "moved", added, test_audit())
@@ -516,7 +513,7 @@ pub async fn test_sign_in_records_move_as_stored(backend: &dyn StorageBackend) {
         country: "DE".into(),
         login_count: 4,
         designated: true,
-        first_seen: instant() - Duration::days(9),
+        first_seen: instant() - days(9),
         last_seen: instant(),
         ..held
     };
@@ -630,7 +627,7 @@ pub async fn test_enrollment_records_move_as_stored(backend: &dyn StorageBackend
         .import_invite_redemption(
             invite.id,
             &InviteRedemption {
-                redeemed_at: redemption.redeemed_at + Duration::seconds(1),
+                redeemed_at: redemption.redeemed_at + Duration::from_secs(1),
                 ..redemption.clone()
             },
             test_audit(),

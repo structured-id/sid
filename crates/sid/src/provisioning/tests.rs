@@ -25,21 +25,21 @@ fn a_display_name_is_one_to_two_hundred_characters() {
 fn an_expiry_is_a_future_time() {
     assert_eq!(future_expiry(None).unwrap(), None);
     let future = prost_types::Timestamp {
-        seconds: Utc::now().timestamp() + 3600,
+        seconds: Timestamp::now().as_second() + 3600,
         nanos: 0,
     };
     assert!(future_expiry(Some(future)).unwrap().is_some());
     for bad in [
         prost_types::Timestamp {
-            seconds: Utc::now().timestamp() - 60,
+            seconds: Timestamp::now().as_second() - 60,
             nanos: 0,
         },
         prost_types::Timestamp {
-            seconds: Utc::now().timestamp() + 3600,
+            seconds: Timestamp::now().as_second() + 3600,
             nanos: -1,
         },
         prost_types::Timestamp {
-            seconds: Utc::now().timestamp() + 3600,
+            seconds: Timestamp::now().as_second() + 3600,
             nanos: 2_000_000_000,
         },
     ] {

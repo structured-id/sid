@@ -55,7 +55,7 @@ fn test_session_round_trips_with_its_profile() {
     let session = Session::new(
         profile,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let mut snapshot = Snapshot::new("sqlite");
     snapshot.sessions.push(session.clone());

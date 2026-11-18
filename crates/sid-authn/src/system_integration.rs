@@ -244,7 +244,7 @@ pub async fn ensure_account_integration(
             client_id: integration.client.client_id.clone(),
             resource_id: integration.resource.id,
             scopes: ACCOUNT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         };
         storage
             .set_resource_access(
@@ -267,7 +267,7 @@ fn new_integration(
     installation_url: &str,
     settings: &AccountSettings,
 ) -> SidResult<(Application, OAuth2Client, ProtectedResource)> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,

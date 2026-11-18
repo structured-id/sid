@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_crypto::with_tls;
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_core::models::{
     AttributeMapping, GroupPushConfig, OutboundSyncConfig, ProjectId, ScimOutboundTarget,
     ScimOutboundTargetId,
@@ -23,8 +23,8 @@ fn test_target() -> ScimOutboundTarget {
             retry_backoff_base_secs: 1,
         },
         enabled: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 

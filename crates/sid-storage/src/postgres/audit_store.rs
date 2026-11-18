@@ -2,7 +2,7 @@
 //! Audit chains in the PostgreSQL database of a host whose own tables live
 //! there, so its mutations commit their audit record with their effect.
 
-use chrono::{DateTime, Months, Utc};
+use jiff::Timestamp;
 use sid_core::models::audit::AuditEntry;
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::PgPool;
@@ -80,7 +80,7 @@ impl PgAuditStore {
         .await
         .map_err(schema_error)?;
         tx.commit().await.map_err(schema_error)?;
-        self.prepare_partitions(Utc::now()).await
+        self.prepare_partitions(Timestamp::now()).await
     }
 
     /// Append `entry` to `chain_id` inside the host mutation's transaction
@@ -101,11 +101,14 @@ impl PgAuditStore {
     /// Create the partitions of the month `now` falls in and the next one,
     /// so records never land in the default partition. Idempotent and safe
     /// on every replica.
-    pub async fn prepare_partitions(&self, now: DateTime<Utc>) -> SidResult<()> {
-        let this = audit_retention::month_start(now)?.date_naive();
+    pub async fn prepare_partitions(&self, now: Timestamp) -> SidResult<()> {
+        let this = now
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .first_of_month();
         let next = this
-            .checked_add_months(Months::new(1))
-            .ok_or_else(|| SidError::Validation(format!("no month after {this}")))?;
+            .checked_add(jiff::Span::new().months(1))
+            .map_err(|_| SidError::Validation(format!("no month after {this}")))?;
         for month in [this, next] {
             audit_retention::ensure_partition(&self.pool, month).await?;
         }
@@ -118,7 +121,7 @@ impl PgAuditStore {
     /// `chain_id` in the same transaction. Returns the records removed.
     pub async fn drop_expired(
         &self,
-        cut_before: DateTime<Utc>,
+        cut_before: Timestamp,
         chain_id: &str,
         entry: AuditEntry,
     ) -> SidResult<u64> {

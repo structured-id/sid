@@ -33,9 +33,7 @@ pub async fn shared_cache(
 pub fn revocation_view(
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
 ) -> Arc<sid_authn::revocation_cache::RevocationCache> {
-    let lifetime = sid_authn::jwt::AccessTokenTtl::MAX
-        .duration()
-        .to_std()
+    let lifetime = std::time::Duration::try_from(sid_authn::jwt::AccessTokenTtl::MAX.duration())
         .expect("the longest access-token lifetime is positive");
     Arc::new(sid_authn::revocation_cache::RevocationCache::new(
         lifetime, cache,

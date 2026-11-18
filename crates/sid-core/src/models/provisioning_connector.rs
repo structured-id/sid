@@ -4,7 +4,7 @@
 //! non-human actor with its own credentials and grants. Neither a Profile, a
 //! machine user nor a login-handle principal.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::OrgId;
@@ -96,8 +96,8 @@ pub struct ProvisioningConnector {
     /// Advances with every change, so a check made against an older revision
     /// can be fenced at the write it authorizes.
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ProvisioningConnector {
@@ -107,7 +107,7 @@ impl ProvisioningConnector {
         direction: ProvisioningDirection,
         display_name: impl Into<String>,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ProvisioningConnectorId::generate(),
             org_id,
@@ -189,8 +189,8 @@ impl ConnectorCredentialKind {
 pub const MAX_USABLE_CONNECTOR_CREDENTIALS: usize = MAX_ACTIVE_CREDENTIALS;
 
 /// How long a rotated-out credential keeps working.
-pub fn rotation_grace() -> Duration {
-    Duration::hours(i64::from(ROTATION_GRACE_PERIOD_HOURS))
+pub fn rotation_grace() -> SignedDuration {
+    SignedDuration::from_hours(i64::from(ROTATION_GRACE_PERIOD_HOURS))
 }
 
 /// One credential of a connector, stored only as the verifier of its secret.
@@ -204,8 +204,8 @@ pub struct ProvisioningCredential {
     pub verifier: String,
     /// When it stops working: its own expiry, or the end of the grace a
     /// rotation gave it.
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<Timestamp>,
+    pub created_at: Timestamp,
 }
 
 impl ProvisioningCredential {
@@ -222,13 +222,13 @@ impl ProvisioningCredential {
             status: CredentialStatus::Active,
             verifier: verifier.into(),
             expires_at: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 
     /// Whether it authenticates at `now`: active or in its grace, and not
     /// past its expiry.
-    pub fn is_usable_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_usable_at(&self, now: Timestamp) -> bool {
         self.status.is_usable() && self.expires_at.is_none_or(|end| now < end)
     }
 }

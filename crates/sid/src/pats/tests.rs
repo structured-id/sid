@@ -79,7 +79,7 @@ fn test_pat_to_proto_with_optional_fields() {
         "sid_pat_xyzw1234",
         vec!["admin".into()],
     )
-    .with_expires_at(chrono::Utc::now() + chrono::Duration::days(30));
+    .with_expires_at(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24));
     pat.description = Some("CI/CD deployment key".into());
     pat.record_use(Some("10.0.0.1".into()));
     let proto = pat_to_proto(&pat);

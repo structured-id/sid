@@ -15,6 +15,7 @@ use sid_core::{
 use sqlx::Row;
 
 use super::PostgresBackend;
+use crate::pg_time::{FromPg, PgTime, ToPg};
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
@@ -34,8 +35,8 @@ pub(super) async fn insert_generation(
     .bind(generation.id)
     .bind(generation.session_id)
     .bind(&generation.key_jkt)
-    .bind(generation.expires_at)
-    .bind(generation.created_at)
+    .bind(generation.expires_at.pg())
+    .bind(generation.created_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|e| super::insert_error("native generation", e))?;
@@ -76,8 +77,9 @@ pub(super) fn presented_row(row: &sqlx::postgres::PgRow) -> SidResult<NativePres
                 .map_err(get)?
                 .ok_or_else(|| SidError::Storage("column successor_id: missing".into()))?,
             redeliver_until: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("redeliver_until")
+                .try_get::<Option<PgTime>, _>("redeliver_until")
                 .map_err(get)?
+                .jiff()
                 .ok_or_else(|| SidError::Storage("column redeliver_until: missing".into()))?,
             sealed: row.try_get("sealed").map_err(get)?,
         },
@@ -86,7 +88,7 @@ pub(super) fn presented_row(row: &sqlx::postgres::PgRow) -> SidResult<NativePres
         generation: row.try_get("id").map_err(get)?,
         session_id: row.try_get("session_id").map_err(get)?,
         key_jkt: row.try_get("key_jkt").map_err(get)?,
-        expires_at: row.try_get("expires_at").map_err(get)?,
+        expires_at: row.try_get::<PgTime, _>("expires_at").map_err(get)?.jiff(),
         state,
     })
 }
@@ -156,7 +158,7 @@ impl PostgresBackend {
                 .bind(rotation.presented)
                 .bind(rotation.exchange.as_bytes().as_slice())
                 .bind(rotation.successor.id)
-                .bind(rotation.redeliver_until)
+                .bind(rotation.redeliver_until.pg())
                 .bind(rotation.sealed)
                 .execute(&mut *tx)
                 .await
@@ -172,7 +174,7 @@ impl PostgresBackend {
                 redeliver_until,
                 sealed: Some(sealed),
                 ..
-            } if exchange == rotation.exchange && chrono::Utc::now() < redeliver_until => {
+            } if exchange == rotation.exchange && jiff::Timestamp::now() < redeliver_until => {
                 Ok(NativeRotationOutcome::Redeliver(sealed))
             }
             NativeGenerationState::Rotated { .. } => Ok(NativeRotationOutcome::Retired),

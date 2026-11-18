@@ -295,7 +295,7 @@ async fn an_unusable_connector_or_credential_is_refused() {
         ConnectorCredentialKind::ScimBearer,
         issued.verifier.clone(),
     );
-    expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    expired.expires_at = Some(Timestamp::now() - jiff::SignedDuration::from_secs(1));
     assert!(
         storage
             .add_provisioning_credential(&expired, audit())
@@ -323,7 +323,7 @@ async fn an_unusable_connector_or_credential_is_refused() {
 /// Verified claims of an access token issued to `client_id` naming `sub`
 /// and the credential `sid`.
 fn claims(client_id: &str, sub: &str, sid: &str) -> AccessTokenClaims {
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     AccessTokenClaims {
         sub: sub.into(),
         pid: None,

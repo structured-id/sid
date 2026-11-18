@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! A Profile's pairwise identity at one organization.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::ProfileId;
@@ -59,8 +59,8 @@ pub struct ServiceBinding {
     /// Per-profile allocation counter, the last index of the binding's HD
     /// derivation path; unique within the profile.
     pub binding_index: u32,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub last_used_at: Timestamp,
 }
 
 #[cfg(test)]

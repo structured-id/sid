@@ -137,5 +137,100 @@ pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
     }
 }
 
+/// One HTTP route of an issuer method: its path segments, `None` for a
+/// `{variable}` segment.
+#[cfg(feature = "issuer-routes")]
+type Route = Vec<Option<String>>;
+
+/// The root routes of the root-addressed base issuer, read once from the
+/// `google.api.http` rules: of every method bound under `/i/{issuer_handle}`,
+/// each binding that names no issuer handle. The shared-host browser RPCs,
+/// mounted under `/i/{handle}/api`, have no root binding and are not among
+/// them.
+#[cfg(feature = "issuer-routes")]
+static ROOT_ROUTES: std::sync::LazyLock<Vec<Route>> = std::sync::LazyLock::new(|| {
+    use prost_reflect::{DescriptorPool, Value};
+    let pool = DescriptorPool::decode(sid_proto::FILE_DESCRIPTOR_SET)
+        .expect("the built-in descriptor set decodes");
+    let http = pool
+        .get_extension_by_name("google.api.http")
+        .expect("google/api/annotations.proto is in the descriptor set");
+    let mut routes = Vec::new();
+    for method in pool
+        .services()
+        .flat_map(|service| service.methods().collect::<Vec<_>>())
+    {
+        let options = method.options();
+        if !options.has_extension(&http) {
+            continue;
+        }
+        let Value::Message(rule) = options.get_extension(&http).into_owned() else {
+            continue;
+        };
+        let mut patterns = Vec::new();
+        http_patterns(&rule, &mut patterns);
+        if !patterns.iter().any(|p| p.starts_with("/i/{issuer_handle}")) {
+            continue;
+        }
+        routes.extend(
+            patterns
+                .iter()
+                .filter(|p| !p.contains("{issuer_handle}"))
+                .map(|p| {
+                    p.split('/')
+                        .skip(1)
+                        .map(|segment| (!segment.starts_with('{')).then(|| segment.to_owned()))
+                        .collect::<Route>()
+                }),
+        );
+    }
+    routes
+});
+
+/// Every path pattern of the HTTP rule `rule`, its additional bindings
+/// included (`google/api/http.proto`).
+#[cfg(feature = "issuer-routes")]
+fn http_patterns(rule: &prost_reflect::DynamicMessage, out: &mut Vec<String>) {
+    use prost_reflect::Value;
+    for verb in ["get", "put", "post", "delete", "patch"] {
+        if let Some(value) = rule.get_field_by_name(verb)
+            && let Value::String(pattern) = value.as_ref()
+            && !pattern.is_empty()
+        {
+            out.push(pattern.clone());
+        }
+    }
+    if let Some(value) = rule.get_field_by_name("additional_bindings")
+        && let Value::List(bindings) = value.as_ref()
+    {
+        for binding in bindings {
+            if let Value::Message(binding) = binding {
+                http_patterns(binding, out);
+            }
+        }
+    }
+}
+
+/// `path` when it is a root route of the root-addressed base issuer (its
+/// discovery, keys, UserInfo, OAuth and federated entry endpoints), the
+/// endpoint path [`issuer_cookies`] classifies; `None` for any other path.
+#[cfg(feature = "issuer-routes")]
+pub fn root_issuer_endpoint(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    ROOT_ROUTES
+        .iter()
+        .any(|route| {
+            route.len() == segments.len()
+                && route
+                    .iter()
+                    .zip(&segments)
+                    .all(|(expected, segment)| match expected {
+                        Some(literal) => literal == segment,
+                        None => !segment.is_empty(),
+                    })
+        })
+        .then_some(path)
+}
+
 #[cfg(test)]
 mod tests;

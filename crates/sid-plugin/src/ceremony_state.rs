@@ -151,7 +151,7 @@ pub struct CeremonyRecords {
 
 impl CeremonyRecords {
     /// Keep only the records still live at `at`.
-    pub fn retain_live_at(&mut self, at: chrono::DateTime<chrono::Utc>) {
+    pub fn retain_live_at(&mut self, at: jiff::Timestamp) {
         self.states.retain(|s| s.expires_at > at);
         self.counts.retain(|c| c.window_ends > at);
     }
@@ -163,7 +163,7 @@ pub struct CeremonyEntry {
     pub namespace: String,
     pub key: String,
     pub value: Vec<u8>,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: jiff::Timestamp,
 }
 
 /// A count under `(namespace, key)` in a window ending at `window_ends`.
@@ -172,7 +172,7 @@ pub struct CeremonyCount {
     pub namespace: String,
     pub key: String,
     pub count: u64,
-    pub window_ends: chrono::DateTime<chrono::Utc>,
+    pub window_ends: jiff::Timestamp,
 }
 
 /// A state or admission by (namespace, key): its value and its deadline.
@@ -349,14 +349,18 @@ impl CeremonyStateStore for InProcessCeremonyState {
     }
 
     async fn export_ceremony_state(&self) -> Result<CeremonyRecords> {
-        let (now, wall) = (std::time::Instant::now(), chrono::Utc::now());
+        let (now, wall) = (std::time::Instant::now(), jiff::Timestamp::now());
         let at = |deadline: std::time::Instant| {
-            chrono::Duration::from_std(deadline - now)
+            wall.checked_add(deadline - now)
                 .ok()
-                .and_then(|left| wall.checked_add_signed(left))
                 // Milliseconds, the precision every store keeps a deadline at.
                 .and_then(|t| {
-                    chrono::DurationRound::duration_trunc(t, chrono::Duration::milliseconds(1)).ok()
+                    t.round(
+                        jiff::TimestampRound::new()
+                            .smallest(jiff::Unit::Millisecond)
+                            .mode(jiff::RoundMode::Trunc),
+                    )
+                    .ok()
                 })
                 .ok_or_else(|| sid_core::Error::Internal("ceremony deadline out of range".into()))
         };
@@ -390,10 +394,13 @@ impl CeremonyStateStore for InProcessCeremonyState {
     }
 
     async fn import_ceremony_state(&self, records: &CeremonyRecords) -> Result<u64> {
-        let (now, wall) = (std::time::Instant::now(), chrono::Utc::now());
+        let (now, wall) = (std::time::Instant::now(), jiff::Timestamp::now());
         // A deadline already past on this clock holds nothing.
-        let until =
-            |at: chrono::DateTime<chrono::Utc>| (at - wall).to_std().ok().map(|left| now + left);
+        let until = |at: jiff::Timestamp| {
+            std::time::Duration::try_from(at.duration_since(wall))
+                .ok()
+                .map(|left| now + left)
+        };
         let mut entries = self.entries();
         let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         // Checked before any write: a conflict stores nothing.

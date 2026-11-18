@@ -126,8 +126,10 @@ impl Authorization {
                     access_req.justification = Some(req.justification.clone());
                 }
                 access_req.requested_duration_hours = requested_duration_hours;
-                access_req.expires_at =
-                    Some(chrono::Utc::now() + chrono::Duration::days(DEFAULT_REQUEST_EXPIRY_DAYS));
+                access_req.expires_at = Some(
+                    jiff::Timestamp::now()
+                        + jiff::SignedDuration::from_hours(DEFAULT_REQUEST_EXPIRY_DAYS * 24),
+                );
                 let response = AccessRequestResponse {
                     request_id: Some(access_req.id.into()),
                     status: status_to_proto(DomainStatus::Pending),
@@ -329,9 +331,7 @@ impl Authorization {
         let expires_at = req
             .expires_at
             .ok_or(AuthorizationError::MissingField("expires_at"))?;
-        let expires_dt = u32::try_from(expires_at.nanos)
-            .ok()
-            .and_then(|nanos| chrono::DateTime::from_timestamp(expires_at.seconds, nanos))
+        let expires_dt = crate::wire::from_timestamp(&expires_at)
             .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))?;
         let command = KeyedCommand::by_profile::<keyed::GrantTemporaryRole>(
             administrator_id,
@@ -342,7 +342,7 @@ impl Authorization {
             .execute(&*self.storage, || async {
                 // Only a new grant must end in the future: a retry of a
                 // completed one answers with it even after its expiry.
-                if expires_dt <= chrono::Utc::now() {
+                if expires_dt <= jiff::Timestamp::now() {
                     return Err(invalid_field("expires_at", "not a timestamp in the future").into());
                 }
                 self.existing_profile(profile_id).await?;
