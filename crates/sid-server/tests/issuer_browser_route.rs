@@ -391,6 +391,96 @@ async fn grpc_web_through_the_transcoder() {
     }
 }
 
+/// A sign-in finish sent over the annotated HTTP binding through the
+/// transcoder: its ProtoJSON body, from `origin`.
+async fn http_finish(
+    addr: SocketAddr,
+    finish: &sid_proto::sid::v1::OpaqueLoginFinishRequest,
+    origin: &str,
+) -> reqwest::Response {
+    use base64::Engine as _;
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let body = serde_json::json!({
+        "principal": finish.principal,
+        "credentialFinalization": b64(&finish.credential_finalization),
+        "loginId": { "value": b64(&finish.login_id.as_ref().unwrap().value) },
+    });
+    common::crypto::with_tls(sid_plugin::client_builder)
+        .build()
+        .unwrap()
+        .post(format!("http://{addr}/v1/auth/opaque/login/finish"))
+        .header("origin", origin)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A sign-in completed over the annotated HTTP binding, as a browser page
+/// calls it through the embedded transcoder, reaches the browser with its
+/// session cookie as a response header (host-only, Secure, HttpOnly, Lax)
+/// and no credential in the JSON body; the cookie's secret is the one the
+/// stored session holds the hash of. From a foreign origin the same binding
+/// sets no cookie (auth/session-management.md, cookie establishment).
+#[tokio::test]
+async fn an_http_sign_in_delivers_its_session_cookie() {
+    use common::opaque_client::{register, start_login};
+    use sid_authn::browser_session::{BrowserCookie, DEFAULT_COOKIE_NAME};
+
+    const PASSWORD: &[u8] = b"transcoded-sign-in-password-2026";
+    let svc = TestServices::new(MockStorage::new());
+    register(&svc, &svc, "http@sid.example.com", PASSWORD).await;
+    let addr = transcoder(&svc).await;
+
+    let finish = start_login(&svc, "http@sid.example.com", PASSWORD).await;
+    let answer = http_finish(addr, &finish, common::SIGN_IN_ORIGIN).await;
+    assert_eq!(answer.status(), reqwest::StatusCode::OK);
+    let cookies: Vec<String> = answer
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_owned())
+        .collect();
+    assert!(answer.headers().get("authorization").is_none());
+    let body: serde_json::Value = answer.json().await.unwrap();
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let cookie = &cookies[0];
+    assert!(
+        cookie.starts_with(&format!("{DEFAULT_COOKIE_NAME}=")),
+        "{cookie}"
+    );
+    assert!(
+        cookie.contains("; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age="),
+        "{cookie}"
+    );
+    assert!(!cookie.contains("Domain"), "{cookie}");
+    let pair = cookie.split(';').next().unwrap();
+    let secret = pair.split_once('=').unwrap().1;
+    assert!(
+        !body.to_string().contains(secret),
+        "the cookie's secret is in the body: {body}"
+    );
+
+    let session_id = body["sessionId"]["value"].as_str().unwrap();
+    use base64::Engine as _;
+    let id = sid_core::models::SessionId::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(session_id)
+            .unwrap(),
+    )
+    .unwrap();
+    let session = svc.storage.get_session(id).await.unwrap().unwrap();
+    assert_eq!(
+        session.browser_secret_hash,
+        Some(BrowserCookie::default().secret([pair]).unwrap().hash())
+    );
+
+    let foreign = start_login(&svc, "http@sid.example.com", PASSWORD).await;
+    let refused = http_finish(addr, &foreign, "https://evil.example.com").await;
+    assert!(refused.headers().get("set-cookie").is_none());
+    assert_ne!(refused.status(), reqwest::StatusCode::OK);
+}
+
 /// Native gRPC keeps its own paths on the transcoder's port: the API path is
 /// the browser's mount, not a rename of the services.
 #[tokio::test]
