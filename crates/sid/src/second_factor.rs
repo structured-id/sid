@@ -503,9 +503,11 @@ impl SecondFactors {
     ) -> Result<FinishTotpEnrollmentResponse, SecondFactorError> {
         let profile_id = enroller.profile_id();
         require_totp_code_format(code)?;
-        let secret = self.ceremonies.take_totp_enrollment(profile_id).await?;
-        // The account may have changed since the start.
+        // The account may have changed since the start. Checked before the
+        // single-use enrollment is taken, so a refused caller leaves it for
+        // the authorized one.
         self.totp_authority(sign_in, enroller).await?;
+        let secret = self.ceremonies.take_totp_enrollment(profile_id).await?;
         let enrolled = self
             .ceremonies
             .enroll_totp(
