@@ -232,7 +232,7 @@ async fn test_check_expired_role_denies() {
         .unwrap();
 
     let mut assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id);
-    assignment.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    assignment.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
     storage
         .create_role_assignment(&assignment, AuditEntry::system("test", "test").into())
         .await
@@ -513,7 +513,7 @@ async fn test_service_principals_hold_project_roles() {
             RoleAssignmentPrincipal::MachineUser(expired_machine),
             role.id,
         )
-        .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
     ] {
         storage
             .create_role_assignment(&assignment, AuditEntry::system("test", "test").into())
@@ -816,7 +816,7 @@ async fn test_inspection_needs_a_live_resource_assignment() {
             role.id,
         )
         .on_resource(resource)
-        .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
     )
     .await;
     let mut project_wide =
@@ -1555,7 +1555,7 @@ async fn only_a_live_installation_wide_assignment_administers() {
             Role::installation_administrator().id,
         )
         .on_installation()
-        .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        .with_expiry(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
     )
     .await;
     assert!(!a.on_project(expired, "profiles.write").await);

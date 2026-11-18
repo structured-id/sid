@@ -114,7 +114,7 @@ pub struct MockStorageInner {
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
     /// The admin IP allowlist: CIDR, description and creation time.
-    ip_allowlist: Vec<(String, String, chrono::DateTime<chrono::Utc>)>,
+    ip_allowlist: Vec<(String, String, jiff::Timestamp)>,
     /// Durable work items with their payload and lease deadline.
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
@@ -137,26 +137,26 @@ pub struct MockStorageInner {
     /// The revision from which each replaced epoch stopped being active.
     key_replaced: HashMap<HistoryEpochId, i64>,
     /// (operation, epoch, expiry) of each epoch a prepared operation uses.
-    key_uses: Vec<(Uuid, HistoryEpochId, chrono::DateTime<chrono::Utc>)>,
+    key_uses: Vec<(Uuid, HistoryEpochId, jiff::Timestamp)>,
     /// The evaluator's audit entries, in order.
     key_audits: Vec<AuditEntry>,
     /// The evaluator's own key custody versions.
     history_key_versions: Vec<sid_keys::KeyVersionParams>,
     /// Purged owner domains and when they were purged.
-    key_purged: HashMap<[u8; 32], chrono::DateTime<chrono::Utc>>,
+    key_purged: HashMap<[u8; 32], jiff::Timestamp>,
     /// The first enrollment that created each epoch it created.
     key_created_by: HashMap<HistoryEpochId, Uuid>,
     /// Aborted first enrollments: their owner domain and when they were.
-    key_abandoned: HashMap<Uuid, ([u8; 32], chrono::DateTime<chrono::Utc>)>,
+    key_abandoned: HashMap<Uuid, ([u8; 32], jiff::Timestamp)>,
     /// The credential side's history write cutoff.
-    history_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    history_write_cutoff: Option<jiff::Timestamp>,
     /// The evaluator's history write cutoff.
-    key_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    key_write_cutoff: Option<jiff::Timestamp>,
     /// WebAuthn user handles by (profile, relying party).
     webauthn_user_handles: HashMap<(ProfileId, String), WebAuthnUserHandle>,
 }
 
-type StoredWork = (WorkRecord, Vec<u8>, Option<chrono::DateTime<chrono::Utc>>);
+type StoredWork = (WorkRecord, Vec<u8>, Option<jiff::Timestamp>);
 
 impl MockStorageInner {
     /// Whether `basis` still holds. No group memberships here, so an authority
@@ -329,7 +329,7 @@ impl MockStorage {
     /// of that window would: a replay of one then reads as theft.
     #[allow(dead_code)]
     pub fn end_refresh_grace(&self) {
-        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let past = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1);
         for token in self
             .inner
             .lock()
@@ -362,14 +362,14 @@ impl MockStorage {
     /// the period test clients name their commands with.
     pub fn unclaimed() -> Self {
         let mut inner = MockStorageInner::default();
-        let epoch = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        let epoch = jiff::Timestamp::UNIX_EPOCH;
         inner.operation_periods_issued = 1;
         inner.operation_periods.insert(
             1,
             sid_core::models::OperationPeriodRecord {
                 issued: sid_core::models::IssuedOperationPeriod {
                     period: sid_core::models::OperationPeriod::new(1),
-                    accepted_until: epoch + chrono::Duration::days(365 * 1000),
+                    accepted_until: epoch + jiff::SignedDuration::from_hours(365 * 1000 * 24),
                 },
                 issued_at: epoch,
             },
@@ -421,7 +421,7 @@ impl MockStorage {
         let mut inner = self.inner.lock().unwrap();
         for code in inner.device_codes.values_mut() {
             if let Some(t) = code.last_polled_at.as_mut() {
-                *t -= chrono::Duration::seconds(code.interval.into());
+                *t -= jiff::SignedDuration::from_secs(code.interval.into());
             }
         }
     }
@@ -596,7 +596,7 @@ impl MockStorage {
                     client_id: client_id.clone(),
                     resource_id: resource.id,
                     scopes: resource.scopes.clone(),
-                    created_at: chrono::Utc::now(),
+                    created_at: jiff::Timestamp::now(),
                 });
             }
             let client = inner
@@ -827,7 +827,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         if inner
             .key_abandoned
             .entry(operation)
-            .or_insert((*owner_domain, chrono::Utc::now()))
+            .or_insert((*owner_domain, jiff::Timestamp::now()))
             .0
             != *owner_domain
         {
@@ -885,7 +885,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
 
     async fn compact_abandoned(
         &self,
-        before: chrono::DateTime<chrono::Utc>,
+        before: jiff::Timestamp,
         audit: AuditEntry,
     ) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
@@ -904,7 +904,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         inner
             .key_purged
             .entry(*owner_domain)
-            .or_insert_with(chrono::Utc::now);
+            .or_insert_with(jiff::Timestamp::now);
         let destroyed = inner.key_epochs.remove(owner_domain).unwrap_or_default();
         let ids: HashSet<HistoryEpochId> = destroyed.iter().map(|e| e.epoch.id).collect();
         inner.key_lifecycle.remove(owner_domain);
@@ -1045,15 +1045,15 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
             .map(|e| e.key.clone()))
     }
 
-    async fn write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+    async fn write_cutoff(&self) -> SidResult<Option<jiff::Timestamp>> {
         Ok(self.inner.lock().unwrap().key_write_cutoff)
     }
 
     async fn raise_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         audit: AuditEntry,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<jiff::Timestamp> {
         let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.key_write_cutoff {
@@ -1288,7 +1288,7 @@ impl MockStorageInner {
         }
         let mut evicted = Vec::new();
         if max_sessions > 0 {
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             let mut active: Vec<Session> = self
                 .sessions
                 .values()
@@ -1322,7 +1322,7 @@ impl MockStorageInner {
     fn native_session_live(&self, id: SessionId) -> bool {
         self.sessions
             .get(&id)
-            .is_some_and(|s| s.expires_at > chrono::Utc::now())
+            .is_some_and(|s| s.expires_at > jiff::Timestamp::now())
     }
 
     fn insert_native_generation(&mut self, generation: &NativeGeneration) {
@@ -1422,11 +1422,7 @@ impl GrantStore for MockStorage {
         Ok(sessions)
     }
 
-    async fn touch_session(
-        &self,
-        id: SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
+    async fn touch_session(&self, id: SessionId, at: jiff::Timestamp) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(session) = inner.sessions.get_mut(&id) {
             session.last_activity_at = Some(session.last_activity_at.map_or(at, |t| t.max(at)));
@@ -1470,7 +1466,7 @@ impl GrantStore for MockStorage {
         _ctx: MutationContext,
     ) -> SidResult<NativeRotationOutcome> {
         let mut inner = self.inner.lock().unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let Some(presented) = inner.native_generations.get(&rotation.presented).cloned() else {
             return Ok(NativeRotationOutcome::Ended);
         };
@@ -1563,7 +1559,7 @@ impl GrantStore for MockStorage {
         &self,
         old_id: Uuid,
         new: &RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        grace_expires_at: jiff::Timestamp,
         _audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -1867,16 +1863,16 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
 impl sid_plugin::OperationResultStore for MockStorage {
     async fn operation_period_policy(&self) -> SidResult<sid_core::models::OperationPeriodPolicy> {
         Ok(sid_core::models::OperationPeriodPolicy {
-            acceptance: chrono::Duration::hours(1),
-            retention: chrono::Duration::days(1),
+            acceptance: jiff::SignedDuration::from_hours(1),
+            retention: jiff::SignedDuration::from_hours(24),
             capacity: 100_000,
             result_bytes: 65_536,
         })
     }
     async fn current_operation_period(
         &self,
-        now: chrono::DateTime<chrono::Utc>,
-        acceptance: chrono::Duration,
+        now: jiff::Timestamp,
+        acceptance: jiff::SignedDuration,
     ) -> SidResult<sid_core::models::IssuedOperationPeriod> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(current) = inner
@@ -1908,10 +1904,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
     ) -> SidResult<()> {
         self.inner.lock().unwrap().admit_operation_period(period)
     }
-    async fn retire_operation_periods(
-        &self,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
+    async fn retire_operation_periods(&self, before: jiff::Timestamp) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
         let ended: Vec<u64> = inner
             .operation_periods
@@ -1961,7 +1954,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         &self,
         namespace: &str,
         method: &str,
-        before: chrono::DateTime<chrono::Utc>,
+        before: jiff::Timestamp,
     ) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.operations.len();
@@ -1970,10 +1963,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         });
         Ok((held - inner.operations.len()) as u64)
     }
-    async fn purge_expired_operation_results(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
+    async fn purge_expired_operation_results(&self, now: jiff::Timestamp) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.operations.len();
         inner
@@ -1987,7 +1977,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         key: &OperationKey,
     ) -> SidResult<Option<OperationRecord>> {
         let inner = self.inner.lock().unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Ok(inner
             .operations
             .get(&(namespace.to_string(), key.as_str().to_string()))
@@ -2034,7 +2024,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         if let Some(period) = proposal.period {
             inner.admit_operation_period(period)?;
         }
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         match inner.operations.get(&slot) {
             Some(r) if r.completion.retain_until.is_some_and(|until| until <= now) => {
                 inner.operations.remove(&slot);
@@ -2082,7 +2072,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         &self,
     ) -> SidResult<Vec<sid_core::models::OperationResourceBinding>> {
         let inner = self.inner.lock().unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Ok(inner
             .operation_resources
             .iter()
@@ -2161,7 +2151,7 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: ProfileId,
-    ) -> SidResult<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(std::net::IpAddr, jiff::Timestamp)>> {
         let inner = self.inner.lock().unwrap();
         if inner.login_history_fails {
             return Err(sid_core::Error::Storage("read recent session".into()));
@@ -2185,7 +2175,8 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         if inner.login_history_fails {
             return Err(sid_core::Error::Storage("read sessions by ip".into()));
         }
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(window.as_secs() as i64);
         let found = inner.sessions.values().any(|s| {
             s.profile_id == profile_id
                 && s.ip_address == Some(ip)
@@ -2205,7 +2196,8 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         if inner.login_history_fails {
             return Err(sid_core::Error::Storage("read sessions by device".into()));
         }
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(window.as_secs() as i64);
         let found = inner.sessions.values().any(|s| {
             s.profile_id == profile_id
                 && s.device_id == Some(device_id)
@@ -2399,7 +2391,7 @@ impl CredentialStore for MockStorage {
             credential.data = new.data.clone();
             credential.policy_evidence = new.policy_evidence;
             credential.opaque_credential_identifier = new.opaque_credential_identifier;
-            credential.last_used_at = Some(chrono::Utc::now());
+            credential.last_used_at = Some(jiff::Timestamp::now());
         }
         Ok(true)
     }
@@ -2409,15 +2401,15 @@ impl CredentialStore for MockStorage {
         Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
     }
 
-    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+    async fn history_write_cutoff(&self) -> SidResult<Option<jiff::Timestamp>> {
         Ok(self.inner.lock().unwrap().history_write_cutoff)
     }
 
     async fn raise_history_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         ctx: MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<jiff::Timestamp> {
         let not_before = sid_core::models::password_history::stored_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
         match inner.history_write_cutoff {
@@ -2698,7 +2690,7 @@ impl StorageBackend for MockStorage {
                 .invite
             {
                 let code = code.trim().to_uppercase();
-                let now = chrono::Utc::now();
+                let now = jiff::Timestamp::now();
                 let invite = inner.invites.iter_mut().find(|i| {
                     i.code.to_uppercase() == code
                         && i.active
@@ -2827,7 +2819,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         settings: &sid_core::models::PhoneSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -2871,7 +2863,7 @@ impl StorageBackend for MockStorage {
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -2962,7 +2954,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         id: ProfileEmailId,
         settings: &sid_core::models::EmailSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -2997,7 +2989,7 @@ impl StorageBackend for MockStorage {
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -3158,7 +3150,7 @@ impl StorageBackend for MockStorage {
 
     async fn expire_principal_verifications(&self) -> SidResult<i64> {
         let mut inner = self.inner.lock().unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let mut lapsed = std::collections::HashSet::new();
         for principal in inner.principals.values_mut() {
             if principal.verified && principal.verification_expires.is_some_and(|e| e < now) {
@@ -3432,7 +3424,7 @@ impl StorageBackend for MockStorage {
             None => left.push((
                 cidr.to_string(),
                 description.to_string(),
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
             )),
         }
         ctx.record_effect(&left)?;
@@ -3453,9 +3445,7 @@ impl StorageBackend for MockStorage {
         inner.ip_allowlist = left;
         Ok(())
     }
-    async fn list_ip_allowlist_entries(
-        &self,
-    ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+    async fn list_ip_allowlist_entries(&self) -> SidResult<Vec<(String, String, jiff::Timestamp)>> {
         let inner = self.inner.lock().unwrap();
         if inner.allowlist_reads_fail {
             return Err(sid_core::Error::Storage("list the allowlist".into()));
@@ -3726,7 +3716,7 @@ impl StorageBackend for MockStorage {
                 r.application_id = None;
                 r.state = ResourceState::Retired;
                 r.revision += 1;
-                r.updated_at = chrono::Utc::now();
+                r.updated_at = jiff::Timestamp::now();
                 r.id
             })
             .collect();
@@ -4210,7 +4200,7 @@ impl StorageBackend for MockStorage {
         ctx: MutationContext,
     ) -> SidResult<sid_core::models::ServiceBinding> {
         let mut inner = self.inner.lock().unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         if let Some(existing) = inner
             .service_bindings
             .iter_mut()
@@ -4336,7 +4326,7 @@ impl StorageBackend for MockStorage {
         if token.revoked {
             return Err(sid_core::Error::Revoked("initial access token".into()));
         }
-        if token.expires_at <= chrono::Utc::now() {
+        if token.expires_at <= jiff::Timestamp::now() {
             return Err(sid_core::Error::Expired("initial access token".into()));
         }
         if token.max_clients > 0 && token.clients_registered >= token.max_clients {
@@ -5207,10 +5197,10 @@ impl StorageBackend for MockStorage {
             .device_codes
             .get_mut(&id)
             .ok_or_else(|| sid_core::Error::NotFound(format!("device authorization {id}")))?;
-        let now = chrono::Utc::now();
-        let too_soon = code
-            .last_polled_at
-            .is_some_and(|t| now - t < chrono::Duration::seconds(code.interval.into()));
+        let now = jiff::Timestamp::now();
+        let too_soon = code.last_polled_at.is_some_and(|t| {
+            now.duration_since(t) < jiff::SignedDuration::from_secs(code.interval.into())
+        });
         code.last_polled_at = Some(now);
         if too_soon {
             code.interval += 5;
@@ -5453,7 +5443,7 @@ impl StorageBackend for MockStorage {
         let status = stored.status;
         *stored = mu.clone();
         stored.status = status;
-        stored.updated_at = chrono::Utc::now();
+        stored.updated_at = jiff::Timestamp::now();
         Ok(true)
     }
     async fn transition_machine_user(
@@ -5474,7 +5464,7 @@ impl StorageBackend for MockStorage {
         inner.owe(&audit)?;
         let stored = inner.machine_users.get_mut(&id).expect("read above");
         stored.status = to;
-        stored.updated_at = chrono::Utc::now();
+        stored.updated_at = jiff::Timestamp::now();
         Ok(true)
     }
     async fn delete_machine_user(
@@ -5602,7 +5592,7 @@ impl StorageBackend for MockStorage {
             .expect("read above");
         c.display_name = display_name.to_string();
         c.revision += 1;
-        c.updated_at = chrono::Utc::now();
+        c.updated_at = jiff::Timestamp::now();
         Ok(true)
     }
 
@@ -5626,7 +5616,7 @@ impl StorageBackend for MockStorage {
             .expect("read above");
         c.state = to;
         c.revision += 1;
-        c.updated_at = chrono::Utc::now();
+        c.updated_at = jiff::Timestamp::now();
         if to == ConnectorState::Retired {
             for cred in inner
                 .provisioning_credentials
@@ -5681,7 +5671,7 @@ impl StorageBackend for MockStorage {
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: jiff::Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         use sid_core::models::machine_user::CredentialStatus;
@@ -5804,7 +5794,7 @@ impl StorageBackend for MockStorage {
         machine_user_id: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: jiff::Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -5928,7 +5918,7 @@ impl StorageBackend for MockStorage {
         &self,
         _: &str,
         _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _audit: MutationContext,
     ) -> SidResult<()> {
         Ok(())
@@ -6006,7 +5996,7 @@ impl StorageBackend for MockStorage {
     async fn acknowledge_export_job(
         &self,
         id: Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -6025,7 +6015,7 @@ impl StorageBackend for MockStorage {
     async fn expire_export_job(
         &self,
         id: Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
         _: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
@@ -6144,7 +6134,7 @@ impl StorageBackend for MockStorage {
         &self,
         _: &str,
         _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
@@ -6389,7 +6379,7 @@ impl StorageBackend for MockStorage {
         &self,
         _: sid_core::models::BrandingConfigId,
         _: ProjectId,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> SidResult<bool> {
         Ok(false)
@@ -6494,26 +6484,22 @@ impl StorageBackend for MockStorage {
     }
     async fn count_registrations_by_source(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
     ) -> SidResult<Vec<(sid_core::models::RegistrationSourceType, u64)>> {
         Ok(vec![])
     }
-    async fn top_referrers(
-        &self,
-        _: chrono::DateTime<chrono::Utc>,
-        _: u64,
-    ) -> SidResult<Vec<(ProfileId, u64)>> {
+    async fn top_referrers(&self, _: jiff::Timestamp, _: u64) -> SidResult<Vec<(ProfileId, u64)>> {
         Ok(vec![])
     }
     async fn try_job_lock(&self, _: i64) -> SidResult<Option<sid_plugin::storage::JobLock>> {
         unimplemented!("job locks are exercised by the storage conformance suite")
     }
-    async fn ensure_audit_partition(&self, _: chrono::NaiveDate) -> SidResult<bool> {
+    async fn ensure_audit_partition(&self, _: jiff::civil::Date) -> SidResult<bool> {
         unimplemented!("audit retention is exercised by the storage conformance suite")
     }
     async fn drop_expired_audit_records(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
+        _: jiff::Timestamp,
         _: MutationContext,
     ) -> SidResult<u64> {
         unimplemented!("audit retention is exercised by the storage conformance suite")
@@ -6563,7 +6549,7 @@ impl StorageBackend for MockStorage {
     async fn list_pending_access_requests(
         &self,
     ) -> SidResult<Vec<sid_core::models::AccessRequest>> {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Ok(self
             .inner
             .lock()
@@ -6684,7 +6670,7 @@ impl StorageBackend for MockStorage {
             return Ok(false);
         }
         reset.status = ResetSessionStatus::Verified;
-        reset.verified_at = Some(chrono::Utc::now());
+        reset.verified_at = Some(jiff::Timestamp::now());
         inner.owe(&ctx)?;
         Ok(true)
     }
@@ -6721,7 +6707,7 @@ impl StorageBackend for MockStorage {
         }
         let reset = inner.reset_sessions.get_mut(&id.0).expect("checked above");
         reset.status = ResetSessionStatus::Completed;
-        reset.completed_at = Some(chrono::Utc::now());
+        reset.completed_at = Some(jiff::Timestamp::now());
         let profile_id = reset.profile_id;
         inner.credentials.retain(|_, c| {
             c.profile_id != profile_id
@@ -6927,7 +6913,7 @@ impl MockStorageInner {
                 seq,
                 entry: *entry,
                 evidence: commit.evidence.clone(),
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             });
         }
         // Retain the newest `depth` accepted passwords; an emptied epoch is
@@ -6936,7 +6922,7 @@ impl MockStorageInner {
             .entries
             .retain(|e| e.seq > seq - i64::from(commit.retention));
         // Age retention: the newest (this commit's) always stays.
-        if let Some(before) = commit.expires_before(chrono::Utc::now()) {
+        if let Some(before) = commit.expires_before(jiff::Timestamp::now()) {
             history
                 .entries
                 .retain(|e| e.seq == seq || e.created_at >= before);
@@ -7032,7 +7018,7 @@ impl MockStorageInner {
             );
             // A completion past its retention no longer holds the key: it
             // goes with its binding.
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             match self.operations.get(&slot) {
                 Some(r) if r.completion.retain_until.is_none_or(|until| until > now) => {
                     return Err(sid_core::Error::OperationCompleted(slot.1));
@@ -7055,7 +7041,7 @@ impl MockStorageInner {
                 slot,
                 OperationRecord {
                     completion: operation.clone(),
-                    completed_at: chrono::Utc::now(),
+                    completed_at: jiff::Timestamp::now(),
                 },
             );
         }
@@ -7066,7 +7052,7 @@ impl MockStorageInner {
         if self.work.contains_key(&work.id) {
             return Ok(false);
         }
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let record = WorkRecord {
             id: work.id,
             kind: work.kind.clone(),
@@ -7101,8 +7087,8 @@ impl sid_plugin::WorkStore for MockStorage {
         limit: u32,
         lease: std::time::Duration,
     ) -> SidResult<Vec<ClaimedWork>> {
-        let now = chrono::Utc::now();
-        let lease_until = now + chrono::Duration::from_std(lease).expect("lease in range");
+        let now = jiff::Timestamp::now();
+        let lease_until = now + jiff::SignedDuration::try_from(lease).expect("lease in range");
         let mut inner = self.inner.lock().unwrap();
         let mut claimed = Vec::new();
         for (record, payload, until) in inner.work.values_mut() {
@@ -7165,7 +7151,7 @@ impl sid_plugin::WorkStore for MockStorage {
         let (r, _, until) = inner.work.get_mut(&id).expect("checked above");
         r.state = WorkState::Completed;
         r.result = result.map(str::to_string);
-        r.updated_at = chrono::Utc::now();
+        r.updated_at = jiff::Timestamp::now();
         *until = None;
         Ok(true)
     }
@@ -7181,7 +7167,7 @@ impl sid_plugin::WorkStore for MockStorage {
             Some((r, _, until)) if r.generation == generation && r.state == WorkState::Claimed => {
                 r.state = WorkState::Completed;
                 r.result = result.map(str::to_string);
-                r.updated_at = chrono::Utc::now();
+                r.updated_at = jiff::Timestamp::now();
                 *until = None;
                 Ok(true)
             }
@@ -7209,7 +7195,7 @@ impl sid_plugin::WorkStore for MockStorage {
                 }
                 r.last_error = Some(failure.error.clone());
                 r.ambiguous = failure.ambiguous;
-                r.updated_at = chrono::Utc::now();
+                r.updated_at = jiff::Timestamp::now();
                 *until = None;
                 dead
             }
@@ -7256,11 +7242,7 @@ impl sid_plugin::WorkStore for MockStorage {
         Ok(true)
     }
 
-    async fn purge_ended_work(
-        &self,
-        kind: &WorkKind,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
+    async fn purge_ended_work(&self, kind: &WorkKind, before: jiff::Timestamp) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.work.len();
         inner.work.retain(|_, (r, _, _)| {

@@ -108,7 +108,11 @@ impl PendingSignInHost for Host {
         owner: ProfileId,
         ip_address: Option<std::net::IpAddr>,
     ) -> Session<ProfileId> {
-        Session::new(owner, ip_address, Utc::now() + chrono::Duration::hours(1))
+        Session::new(
+            owner,
+            ip_address,
+            Timestamp::now() + jiff::SignedDuration::from_hours(1),
+        )
     }
     async fn commit(
         &self,

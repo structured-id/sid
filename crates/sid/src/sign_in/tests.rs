@@ -113,15 +113,15 @@ async fn new_session_follows_policy_lifetime() {
     let mut policy = SecurityPolicy::ce_default();
     policy.session.max_lifetime_hours = 0;
     sign_in.set_policy(policy.clone());
-    assert_eq!(sign_in.session_lifetime(), Duration::hours(24));
+    assert_eq!(sign_in.session_lifetime(), SignedDuration::from_hours(24));
     policy.session.max_lifetime_hours = 3;
     sign_in.set_policy(policy);
-    assert_eq!(sign_in.session_lifetime(), Duration::hours(3));
+    assert_eq!(sign_in.session_lifetime(), SignedDuration::from_hours(3));
     let session = sign_in.new_session(profile, None);
     assert_eq!(session.profile_id, profile);
     assert_eq!(session.scopes, ["openid", "profile", "email"]);
-    let lifetime = session.expires_at - Utc::now();
-    assert!(lifetime > Duration::minutes(179) && lifetime <= Duration::hours(3));
+    let lifetime = session.expires_at.duration_since(Timestamp::now());
+    assert!(lifetime > SignedDuration::from_mins(179) && lifetime <= SignedDuration::from_hours(3));
 }
 
 /// A native client gets the stored session's access token, expiring no
@@ -641,7 +641,7 @@ async fn sign_in_decision(
     client: Option<&sid_core::models::OAuth2Client>,
     method: LoginMethod,
 ) -> LoginDecision {
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let probe = sid_authn::login_policy::local_authentication(
         sid_core::models::ProfileId::generate(),
         method.auth_level(policy.auth.passkey_satisfies_mfa),
@@ -693,7 +693,7 @@ fn test_client_with_acr(
         subject_type: sid_core::models::SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: chrono::Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -713,7 +713,7 @@ fn test_client_with_acr(
         unified_input: false,
         org_id: None,
         revision: 0,
-        created_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 

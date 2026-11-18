@@ -7,7 +7,7 @@
 
 use std::net::IpAddr;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use sid_authn::dpop::DPopValidator;
 use sid_authn::login_policy::{LoginDecision, LoginPolicySource};
 use sid_authn::native_session::{NativePolicy, RefreshRequest};
@@ -33,7 +33,7 @@ pub struct AdmittedCompletion<'a> {
     /// The operation's stable reference, its key.
     pub operation: &'a str,
     /// When the operation ends; nothing is delivered again after.
-    pub deadline: chrono::DateTime<Utc>,
+    pub deadline: Timestamp,
 }
 
 impl AdmittedCompletion<'_> {
@@ -221,7 +221,7 @@ impl SignIn {
         // new sign-in: its retained delivery is gone with it.
         if completion
             .as_ref()
-            .is_some_and(|c| c.deadline <= Utc::now())
+            .is_some_and(|c| c.deadline <= Timestamp::now())
         {
             return Err(SignInError::AuthenticationFailed);
         }
@@ -436,7 +436,7 @@ impl SignIn {
         )
         .await
         .map_err(|e| internal("open the retained sign-in delivery", e))?;
-        if delivery.deadline <= Utc::now() {
+        if delivery.deadline <= Timestamp::now() {
             return Err(SignInError::AuthenticationFailed);
         }
         // The commit is the whole sign-in: what it owes (its evictions'
@@ -486,7 +486,7 @@ impl SignIn {
                 session.profile_id,
             )
             .await?;
-        if let LoginDecision::StepUp(unmet) = requirements.decide(session, Utc::now()) {
+        if let LoginDecision::StepUp(unmet) = requirements.decide(session, Timestamp::now()) {
             return Err(SignInRefusal::StepUp(unmet).into());
         }
         delivery

@@ -34,7 +34,7 @@ where
 
     let before = open().await;
     let period = before
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;

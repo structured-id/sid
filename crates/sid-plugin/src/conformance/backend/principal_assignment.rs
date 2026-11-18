@@ -2,7 +2,8 @@
 //! Principal assignment: one explicit assignment routes an email/phone
 //! principal; other holders' claims never change it.
 
-use chrono::{Duration, Utc};
+use crate::conformance::days;
+use jiff::Timestamp;
 use sid_core::models::{Principal, PrincipalType, Profile};
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -159,8 +160,8 @@ pub async fn test_proof_expiry_keeps_assignment(backend: &dyn StorageBackend) {
     let holder = profile(backend, "expiring").await;
     let mut principal = Principal::new_email(holder.id, &value);
     principal.verified = true;
-    principal.verified_at = Some(Utc::now() - Duration::days(200));
-    principal.verification_expires = Some(Utc::now() - Duration::days(20));
+    principal.verified_at = Some(Timestamp::now() - days(200));
+    principal.verification_expires = Some(Timestamp::now() - days(20));
     backend
         .save_principal(&principal, test_audit())
         .await

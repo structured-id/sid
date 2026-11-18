@@ -3,7 +3,7 @@
 //! ready (to downloaded while the window is open, to expired once it closed),
 //! and committed with the mutation's audit and owed work.
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::{ExportFormat, ExportJob, ExportStatus, NewWork, WorkKind};
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -72,7 +72,7 @@ pub async fn test_export_job_roundtrip(backend: &dyn StorageBackend) {
 /// window expires only a ready export, never an acknowledged one.
 pub async fn test_export_job_status_transitions(backend: &dyn StorageBackend) {
     let pid = stored_profile(backend).await;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     let preparing = ExportJob::new(pid, ExportFormat::Json);
     backend
@@ -92,7 +92,7 @@ pub async fn test_export_job_status_transitions(backend: &dyn StorageBackend) {
     let window_end = job.expires_at.expect("ready export has a window");
     assert!(
         !backend
-            .acknowledge_export_job(job.id, window_end + Duration::seconds(1), test_audit())
+            .acknowledge_export_job(job.id, window_end + Duration::from_secs(1), test_audit())
             .await
             .unwrap(),
         "an expired export was acknowledged"
@@ -112,7 +112,7 @@ pub async fn test_export_job_status_transitions(backend: &dyn StorageBackend) {
     );
     assert!(
         !backend
-            .expire_export_job(job.id, window_end + Duration::seconds(1), test_audit())
+            .expire_export_job(job.id, window_end + Duration::from_secs(1), test_audit())
             .await
             .unwrap(),
         "an acknowledged export was expired"
@@ -135,7 +135,7 @@ pub async fn test_export_job_status_transitions(backend: &dyn StorageBackend) {
         backend
             .expire_export_job(
                 lapsed.id,
-                lapsed.expires_at.unwrap() + Duration::seconds(1),
+                lapsed.expires_at.unwrap() + Duration::from_secs(1),
                 test_audit()
             )
             .await

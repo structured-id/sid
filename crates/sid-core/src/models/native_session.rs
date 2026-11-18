@@ -5,7 +5,7 @@
 //! generation once; a retry of the same exchange within the redelivery
 //! window receives the committed successor again, and nothing branches.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,8 +40,8 @@ pub struct NativeGeneration {
     pub key_jkt: String,
     /// SHA-256 of each credential, never the credential itself.
     pub credential_hashes: Vec<Vec<u8>>,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
 }
 
 /// Where the generation a presented credential belongs to stands.
@@ -55,7 +55,7 @@ pub enum NativeGenerationState {
     Rotated {
         exchange: NativeExchange,
         successor: Uuid,
-        redeliver_until: DateTime<Utc>,
+        redeliver_until: Timestamp,
         sealed: Option<Vec<u8>>,
     },
 }
@@ -66,7 +66,7 @@ pub struct NativePresented {
     pub generation: Uuid,
     pub session_id: SessionId,
     pub key_jkt: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub state: NativeGenerationState,
 }
 
@@ -98,7 +98,7 @@ pub struct NativeRotation<'a> {
     pub successor: &'a NativeGeneration,
     /// The successor's credentials, sealed for redelivery.
     pub sealed: &'a [u8],
-    pub redeliver_until: DateTime<Utc>,
+    pub redeliver_until: Timestamp,
 }
 
 /// What committing a rotation found.

@@ -121,9 +121,9 @@ fn in_period<T>(msg: T, token: &str, key: &str, period: u64) -> Request<T> {
 /// A period the store issues after the test's own, far in the future so the
 /// test can retire everything before it.
 async fn later_period(svc: &TestServices) -> sid_core::models::IssuedOperationPeriod {
-    let later = chrono::DateTime::<chrono::Utc>::MAX_UTC - chrono::Duration::days(1);
+    let later = jiff::Timestamp::MAX - jiff::SignedDuration::from_hours(24);
     svc.storage
-        .current_operation_period(later, chrono::Duration::hours(1))
+        .current_operation_period(later, jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
 }
@@ -160,7 +160,7 @@ async fn test_retired_or_unissued_period_is_refused_before_effects() {
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let issued = later_period(&svc).await;
     svc.storage
-        .retire_operation_periods(issued.accepted_until + chrono::Duration::seconds(1))
+        .retire_operation_periods(issued.accepted_until + jiff::SignedDuration::from_secs(1))
         .await
         .unwrap();
 
@@ -205,7 +205,7 @@ async fn test_retired_period_leaves_no_effect_before_the_commit() {
     let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
     let issued = later_period(&svc).await;
     svc.storage
-        .retire_operation_periods(issued.accepted_until + chrono::Duration::seconds(1))
+        .retire_operation_periods(issued.accepted_until + jiff::SignedDuration::from_secs(1))
         .await
         .unwrap();
     let before = svc
@@ -499,7 +499,7 @@ async fn test_revoke_all_sessions_retry_keeps_a_later_session() {
         let session = sid_core::models::Session::new(
             user.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
         svc.storage
             .create_session(
@@ -949,7 +949,7 @@ async fn secret_authenticates(svc: &TestServices, client_id: &str, secret: &str)
         "https://api-{}.sid.example.com/",
         uuid::Uuid::new_v4().simple()
     );
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,

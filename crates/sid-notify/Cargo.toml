@@ -39,8 +39,9 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Time
-chrono = { workspace = true }
+# Time; PostgreSQL `timestamptz` through jiff-sqlx.
+jiff = { workspace = true }
+jiff-sqlx = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
@@ -80,7 +81,7 @@ async-nats = { workspace = true }
 futures = { workspace = true }
 
 # gRPC
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 tonic-reflection = { workspace = true }
 sid-proto = { workspace = true, features = ["grpc"] }
 prost = { workspace = true }

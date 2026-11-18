@@ -30,7 +30,7 @@ fn token_for(profile: &Profile) -> String {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     test_jwt()
         .issue_access_token(
@@ -250,8 +250,8 @@ impl EventBus for HistoryBus {
     }
     async fn replay(
         &self,
-        _: chrono::DateTime<chrono::Utc>,
-        _: Option<chrono::DateTime<chrono::Utc>>,
+        _: jiff::Timestamp,
+        _: Option<jiff::Timestamp>,
         _: EventFilter,
     ) -> sid_plugin::event_bus::EventBusResult<mpsc::Receiver<Event>> {
         let (tx, rx) = mpsc::channel(16);

@@ -9,7 +9,7 @@ mod common;
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::session::{AcceptedEvidence, AuthLevel, ELEVATION_TTL_MINUTES};
 use sid_core::models::{AuditEntry, EnrollmentMode, Profile, SecurityPolicy};
 use sid_plugin::storage::StorageBackend;
@@ -78,7 +78,7 @@ fn evidence(acr: &str, amr: &[&str], age: Duration) -> AcceptedEvidence {
     AcceptedEvidence::new(
         Some(acr),
         amr.iter().map(|m| (*m).to_owned()).collect(),
-        Utc::now() - age,
+        Timestamp::now() - age,
     )
 }
 
@@ -93,9 +93,9 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
     let accepted = evidence(
         "urn:sid:acr:standard",
         &["pwd", "otp"],
-        Duration::minutes(2),
+        Duration::from_mins(2),
     );
-    let authentication = accepted.authentication(Utc::now()).unwrap();
+    let authentication = accepted.authentication(Timestamp::now()).unwrap();
 
     let mut request = tonic::Request::new(());
     request
@@ -126,8 +126,8 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
     assert_eq!(session.assurance_level, AuthLevel::Standard);
     assert_eq!(session.amr, ["pwd", "otp"]);
     assert_eq!(
-        session.authenticated_at.timestamp(),
-        accepted.auth_time.timestamp()
+        session.authenticated_at.as_second(),
+        accepted.auth_time.as_second()
     );
 }
 
@@ -139,8 +139,8 @@ async fn insufficient_evidence_is_refused() {
     let storage = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Standard);
     let profile = profile(storage.as_ref()).await;
-    let authentication = evidence("urn:sid:acr:basic", &["pwd"], Duration::minutes(1))
-        .authentication(Utc::now())
+    let authentication = evidence("urn:sid:acr:basic", &["pwd"], Duration::from_mins(1))
+        .authentication(Timestamp::now())
         .unwrap();
     let refused = auth
         .complete_admitted_sign_in(
@@ -171,8 +171,8 @@ async fn a_sign_in_for_no_application_is_weighed_by_the_organization() {
     let storage = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Standard);
     let profile = profile(storage.as_ref()).await;
-    let short = evidence("urn:sid:acr:basic", &["pwd"], Duration::minutes(1))
-        .authentication(Utc::now())
+    let short = evidence("urn:sid:acr:basic", &["pwd"], Duration::from_mins(1))
+        .authentication(Timestamp::now())
         .unwrap();
     let refused = auth
         .complete_admitted_sign_in(
@@ -196,9 +196,9 @@ async fn a_sign_in_for_no_application_is_weighed_by_the_organization() {
     let sufficient = evidence(
         "urn:sid:acr:standard",
         &["pwd", "otp"],
-        Duration::minutes(1),
+        Duration::from_mins(1),
     )
-    .authentication(Utc::now())
+    .authentication(Timestamp::now())
     .unwrap();
     let signed_in = auth
         .complete_admitted_sign_in(
@@ -234,9 +234,9 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     let fresh = evidence(
         "urn:sid:acr:elevated",
         &["hwk", "pop", "mfa"],
-        Duration::minutes(1),
+        Duration::from_mins(1),
     )
-    .authentication(Utc::now())
+    .authentication(Timestamp::now())
     .unwrap();
     let signed_in = auth
         .complete_admitted_sign_in(
@@ -257,14 +257,14 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
         .unwrap();
     let elevation = session.elevation.expect("the step-up");
     assert_eq!(elevation.level, AuthLevel::Elevated);
-    assert!(elevation.until <= Utc::now() + Duration::minutes(ELEVATION_TTL_MINUTES));
+    assert!(elevation.until <= Timestamp::now() + Duration::from_mins(ELEVATION_TTL_MINUTES));
 
     let stale = evidence(
         "urn:sid:acr:elevated",
         &["hwk", "pop", "mfa"],
-        Duration::minutes(ELEVATION_TTL_MINUTES + 1),
+        Duration::from_mins(ELEVATION_TTL_MINUTES + 1),
     )
-    .authentication(Utc::now())
+    .authentication(Timestamp::now())
     .unwrap();
     let refused = auth
         .complete_admitted_sign_in(
@@ -304,9 +304,9 @@ async fn a_suspended_profile_is_not_signed_in() {
     let authentication = evidence(
         "urn:sid:acr:standard",
         &["pwd", "otp"],
-        Duration::minutes(1),
+        Duration::from_mins(1),
     )
-    .authentication(Utc::now())
+    .authentication(Timestamp::now())
     .unwrap();
     let refused = auth
         .complete_admitted_sign_in(
@@ -335,7 +335,7 @@ fn operation() -> String {
 
 fn completion(
     operation: &str,
-    deadline: chrono::DateTime<Utc>,
+    deadline: Timestamp,
 ) -> sid_server::grpc::auth_service::AdmittedCompletion<'_> {
     sid_server::grpc::auth_service::AdmittedCompletion {
         operation,
@@ -351,8 +351,8 @@ fn cookie(signed_in: &sid_authn::sign_in_delivery::SignedIn) -> String {
 }
 
 fn basic() -> sid_core::models::session::SessionAuthentication {
-    evidence("urn:sid:acr:basic", &["pwd"], Duration::minutes(1))
-        .authentication(Utc::now())
+    evidence("urn:sid:acr:basic", &["pwd"], Duration::from_mins(1))
+        .authentication(Timestamp::now())
         .unwrap()
 }
 
@@ -365,7 +365,7 @@ async fn a_repeated_operation_gets_the_same_session_again() {
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let request = tonic::Request::new(());
 
     let first = auth
@@ -408,7 +408,7 @@ async fn the_retained_delivery_ends_with_its_operation() {
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     auth.complete_admitted_sign_in(
         &tonic::Request::new(()),
         &profile,
@@ -429,8 +429,8 @@ async fn the_retained_delivery_ends_with_its_operation() {
         .unwrap()
         .expect("the retained delivery");
     assert_eq!(
-        record.completion.retain_until.map(|t| t.timestamp_millis()),
-        Some(deadline.timestamp_millis())
+        record.completion.retain_until.map(|t| t.as_millisecond()),
+        Some(deadline.as_millisecond())
     );
 }
 
@@ -503,7 +503,7 @@ async fn a_repeat_after_the_assignment_was_retired_is_refused() {
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let read = assigned(storage.as_ref(), &profile).await;
     auth.complete_admitted_sign_in(
         &tonic::Request::new(()),
@@ -555,7 +555,7 @@ async fn a_repeat_under_a_relinked_assignment_is_refused() {
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let read = assigned(storage.as_ref(), &profile).await;
     let principal = storage
         .get_principals_by_profile(profile.id)
@@ -625,7 +625,7 @@ async fn concurrent_repeats_commit_one_session() {
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let request = tonic::Request::new(());
     let authentication = basic();
     let assignment = assigned(storage.as_ref(), &profile).await;
@@ -666,7 +666,7 @@ async fn a_repeat_for_another_profile_gets_nothing() {
     let first = profile(storage.as_ref()).await;
     let other = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let request = tonic::Request::new(());
     auth.complete_admitted_sign_in(
         &request,
@@ -746,7 +746,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
 
     outage.down.store(true, std::sync::atomic::Ordering::SeqCst);
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let signed_in = auth
         .complete_admitted_sign_in(
             &request,
@@ -811,7 +811,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
     );
     let profile = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let request = tonic::Request::new(());
     auth.complete_admitted_sign_in(
         &request,
@@ -863,7 +863,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
     // Ended.
     let profile_a = profile(storage.as_ref()).await;
     let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
+    let deadline = Timestamp::now() + Duration::from_mins(10);
     let first = auth
         .complete_admitted_sign_in(
             &request,
@@ -961,7 +961,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
     // repeat neither gets the session again nor signs in anew.
     let profile_c = profile(storage.as_ref()).await;
     let op = operation();
-    let soon = Utc::now() + Duration::milliseconds(800);
+    let soon = Timestamp::now() + Duration::from_millis(800);
     auth.complete_admitted_sign_in(
         &request,
         &profile_c,

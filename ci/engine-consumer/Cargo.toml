@@ -49,7 +49,7 @@ sha2 = "0.11"
 # The host's own CoordiNode database.
 coordinode-embed = { version = "0.9", optional = true }
 async-trait = "0.1"
-chrono = "0.4"
+jiff = "1"
 secrecy = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 url = "2"

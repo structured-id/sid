@@ -477,6 +477,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .unwrap_or_else(|e| panic!("SID_REFRESH_TOKEN_TTL_DAYS: {e}")),
         None => 30,
     };
+    let refresh_token_ttl = refresh_token_ttl_days
+        .checked_mul(24)
+        .and_then(jiff::SignedDuration::try_from_hours)
+        .unwrap_or_else(|| {
+            panic!("SID_REFRESH_TOKEN_TTL_DAYS: {refresh_token_ttl_days} days is out of range")
+        });
 
     // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
@@ -629,10 +635,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     );
 
     // ── OAuth2 ──
-    let oauth2 = Arc::new(
-        OAuth2Server::new(jwt.clone())
-            .with_refresh_token_ttl(chrono::Duration::days(refresh_token_ttl_days)),
-    );
+    let oauth2 = Arc::new(OAuth2Server::new(jwt.clone()).with_refresh_token_ttl(refresh_token_ttl));
 
     let app_state = AppState {
         storage: storage.clone(),
@@ -920,6 +923,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let entry_connections = Arc::new(sid::entry_connections::EntryConnections::new(
         storage.clone(),
         key_manager.clone(),
+        issuers.clone(),
     ));
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
@@ -1564,13 +1568,13 @@ where
 /// instant. Unset means none; a malformed or future value stops startup.
 fn history_epoch_cutoff(
     input: Result<String, std::env::VarError>,
-) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+) -> anyhow::Result<Option<jiff::Timestamp>> {
     const NAME: &str = "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE";
     let Some(value) = setting(NAME, input)? else {
         return Ok(None);
     };
     let cutoff =
-        sid_authn::password_operation::parse_history_write_cutoff(&value, chrono::Utc::now())
+        sid_authn::password_operation::parse_history_write_cutoff(&value, jiff::Timestamp::now())
             .context(NAME)?;
     Ok(Some(cutoff))
 }

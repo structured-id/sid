@@ -750,7 +750,7 @@ async fn stored_connector(
     installation: &Installation,
     org: OrgId,
     direction: ProvisioningDirection,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<jiff::Timestamp>,
 ) -> String {
     let audit = || AuditEntry::system("test", "connector").into();
     let connector = ProvisioningConnector::new(org, direction, "elsewhere");
@@ -826,7 +826,7 @@ async fn refuses_before_effects(engine: Engine) {
     let proof_bound =
         forged(&|c| c["cnf"] = json!({ "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I" }));
     let expired = forged(&|c| {
-        let past = chrono::Utc::now().timestamp() - 600;
+        let past = jiff::Timestamp::now().as_second() - 600;
         c["iat"] = json!(past - 60);
         c["exp"] = json!(past);
     });
@@ -851,7 +851,7 @@ async fn refuses_before_effects(engine: Engine) {
         &installation,
         installation.org,
         ProvisioningDirection::Inbound,
-        Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
+        Some(jiff::Timestamp::now() - jiff::SignedDuration::from_mins(1)),
     )
     .await;
     let administrator = common::issue_admin_token(

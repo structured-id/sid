@@ -163,7 +163,7 @@ impl SqliteBackend {
         .bind(fmt_dt(&new.authenticated_at))
         .bind(new.amr.join(" "))
         .bind(id)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(expected.assurance_level.as_str())
         .bind(expected.elevation.map(|e| e.level.as_str()))
         .bind(fmt_dt_opt(expected.elevation.map(|e| e.until)))
@@ -266,7 +266,7 @@ impl SqliteBackend {
         let mut evicted = Vec::new();
         // A pending second-factor context takes no place, so it evicts nothing.
         if max_sessions > 0 && !session.awaits_second_factor() {
-            let now = fmt_dt(&chrono::Utc::now());
+            let now = fmt_dt(&jiff::Timestamp::now());
             let active: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sessions WHERE profile_id = ? AND expires_at > ?
                  AND NOT (is_provisional AND scopes = ?)",
@@ -334,7 +334,7 @@ impl SqliteBackend {
     pub(crate) async fn touch_session_impl(
         &self,
         id: SessionId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: jiff::Timestamp,
     ) -> SidResult<()> {
         sqlx::query(
             "UPDATE sessions SET last_activity_at = ?

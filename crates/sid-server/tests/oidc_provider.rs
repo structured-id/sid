@@ -293,6 +293,144 @@ async fn discovery_over_http_uses_the_registered_names() {
     );
 }
 
+/// Services whose installation base issuer is root-addressed, as a server
+/// start provisions it; the harness reads the stored issuer back.
+async fn root_services() -> (TestServices, OidcProviderServiceImpl) {
+    root_services_over(MockStorage::new()).await
+}
+
+/// [`root_services`] over `storage`.
+async fn root_services_over(storage: MockStorage) -> (TestServices, OidcProviderServiceImpl) {
+    sid_authn::issuer::ensure_base_issuer(
+        &storage,
+        common::test_key_manager().as_ref(),
+        &url::Url::parse("https://sid.example.com").unwrap(),
+        common::test_org(),
+    )
+    .await
+    .unwrap();
+    let svc = TestServices::new(storage);
+    let provider = provider_of(&svc);
+    (svc, provider)
+}
+
+/// The installation's root-addressed base issuer answers discovery at the
+/// root, both locations naming it exactly, every advertised endpoint is a
+/// served root path, and the same documents are not served under its
+/// handle, where they would name another URL than the one fetched (OIDC
+/// Discovery 1.0 §4.3, RFC 8414 §3.3).
+#[tokio::test]
+async fn the_root_issuer_is_discovered_at_the_root() {
+    let (svc, provider) = root_services().await;
+    assert_eq!(svc.issuer.canonical_url, "https://sid.example.com");
+    let base = over_http(provider).await;
+
+    let oidc: Value = get(format!("{base}/.well-known/openid-configuration"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rfc8414: Value = get(format!("{base}/.well-known/oauth-authorization-server"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(oidc, rfc8414);
+    assert_eq!(oidc["issuer"], json!("https://sid.example.com"));
+    assert_eq!(
+        oidc["token_endpoint"],
+        json!("https://sid.example.com/oauth2/token")
+    );
+
+    for (name, endpoint) in oidc.as_object().unwrap() {
+        if !(name.ends_with("_endpoint") || name == "jwks_uri") {
+            continue;
+        }
+        let url = url::Url::parse(endpoint.as_str().unwrap()).unwrap();
+        assert_ne!(
+            get(format!("{base}{}", url.path())).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{name}: {endpoint} is not served"
+        );
+    }
+    let jwks: Value = get(format!("{base}/jwks"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1);
+
+    let handle = svc.issuer.handle.to_string();
+    for path in [
+        format!("/i/{handle}/.well-known/openid-configuration"),
+        format!("/.well-known/oauth-authorization-server/i/{handle}"),
+        format!("/i/{handle}/jwks"),
+    ] {
+        assert_eq!(
+            get(format!("{base}{path}")).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+/// Where the installation's base issuer is scoped (`/i/<handle>`), the root
+/// route names no issuer: it never stands in for that one or another.
+#[tokio::test]
+async fn the_root_route_names_no_scoped_issuer() {
+    let (svc, provider) = services();
+    assert!(
+        svc.issuer
+            .canonical_url
+            .ends_with(&format!("/i/{}", svc.issuer.handle))
+    );
+    let base = over_http(provider).await;
+    for path in [
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+        "/jwks",
+    ] {
+        assert_eq!(
+            get(format!("{base}{path}")).await.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+/// The token endpoint of a root-addressed base issuer serves its clients at
+/// the root path, and its handle path reaches no issuer: the client is
+/// unknown there (RFC 6749 §5.2), never served by the root issuer.
+#[tokio::test]
+async fn the_root_issuers_token_endpoint_is_at_the_root() {
+    let (svc, provider) = root_services_over(
+        MockStorage::new().with_client(confidential_client("service", SERVICE_SECRET)),
+    )
+    .await;
+    let base = over_http(provider).await;
+    let grant = [("grant_type", "client_credentials")];
+    let basic = Some(("service", SERVICE_SECRET));
+
+    let issued = post_form(&format!("{base}/oauth2/token"), &grant, basic).await;
+    assert_eq!(issued.status(), 200);
+    let issued: Value = issued.json().await.unwrap();
+    assert!(issued["access_token"].is_string(), "{issued}");
+
+    let scoped = post_form(
+        &format!("{base}/i/{}/oauth2/token", svc.issuer.handle),
+        &grant,
+        basic,
+    )
+    .await;
+    assert_oauth_error(scoped, 401, "invalid_client").await;
+}
+
 /// Every endpoint the discovery document advertises is a route the
 /// transcoder serves: a client following discovery never meets a path the
 /// server does not have (RFC 8414 §2). A path no route answers is 404; a
@@ -416,7 +554,7 @@ async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     session.browser_secret_hash = Some(secret.hash());
@@ -426,7 +564,7 @@ async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie
             .with_session(session.clone()),
         cookie.clone(),
     );
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     svc.storage
         .create_profile_email(
             &sid_core::models::ProfileEmail {
@@ -528,7 +666,7 @@ fn dpop_proof(htm: &str, htu: &str, token: &str) -> String {
         "jti": uuid::Uuid::now_v7().to_string(),
         "htm": htm,
         "htu": htu,
-        "iat": chrono::Utc::now().timestamp(),
+        "iat": jiff::Timestamp::now().as_second(),
         "ath": sid_authn::dpop::access_token_hash(token),
     });
     let key = EncodingKey::from_ec_pem(include_bytes!(
@@ -1314,8 +1452,8 @@ async fn registration_endpoints() -> (TestServices, String) {
         allowed_scopes: vec!["openid".into(), "profile".into()],
         allowed_grant_types: vec!["authorization_code".into(), "refresh_token".into()],
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        created_at: chrono::Utc::now(),
+        expires_at: jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+        created_at: jiff::Timestamp::now(),
         created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     };
@@ -1810,7 +1948,7 @@ async fn sign_in_again(browser: &mut Browser) -> sid_core::models::Session {
     let mut session = sid_core::models::Session::new(
         browser.user.profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     browser
@@ -2035,6 +2173,37 @@ async fn the_sign_in_page_reads_the_kept_requests_context() {
     sign_in_again(&mut browser).await;
     let query = redirect_query(&browser.get(&back).await, REDIRECT_URI);
     assert!(query.contains_key("code"), "{query:?}");
+}
+
+/// At the root-addressed base issuer, a browser without a session is sent to
+/// sign in with a continuation at the root authorization endpoint, and the
+/// sign-in page reads that kept request's context. Bug prevented: the kept
+/// request found only under `/i/<handle>`, refusing every sign-in at a root
+/// issuer.
+#[tokio::test]
+async fn the_root_issuers_sign_in_reads_its_kept_request() {
+    let (svc, _) = root_services().await;
+    common::store_client(&*svc.storage, &common::test_client())
+        .await
+        .unwrap();
+    common::open_userinfo_to_clients(&svc).await;
+    let base = over_http(provider_signing_in_at(&svc, Some(LOGIN_URL))).await;
+    let response = no_redirects()
+        .get(with_query(
+            &format!("{base}/oauth2/authorize"),
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let rd = redirect_query(&response, LOGIN_URL)["rd"].clone();
+    assert!(
+        rd.starts_with("https://sid.example.com/oauth2/authorize?"),
+        "{rd}"
+    );
+    let context = sign_in_context(&svc, &rd, None).await.unwrap();
+    assert_eq!(context.issuer, "https://sid.example.com");
+    assert_eq!(context.client_name, common::test_client().client_name);
 }
 
 /// A request that does not match what the issuer kept is refused before the
@@ -2398,7 +2567,7 @@ async fn authorize_needs_a_live_full_session() {
 
     for limited in [
         |s: &mut sid_core::models::Session| {
-            s.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1)
+            s.expires_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)
         },
         |s: &mut sid_core::models::Session| s.is_provisional = true,
     ] {
@@ -2481,7 +2650,7 @@ async fn authorize_records_activity_only_on_accepted_use() {
     redirect_query(&browser.get(&refused).await, REDIRECT_URI);
     assert_eq!(last().await, None);
 
-    let before = chrono::Utc::now();
+    let before = jiff::Timestamp::now();
     let accepted = with_query(&browser.authorize, &authorize_query(REDIRECT_URI));
     assert!(redirect_query(&browser.get(&accepted).await, REDIRECT_URI).contains_key("code"));
     assert!(last().await.is_some_and(|at| at >= before));
@@ -2509,7 +2678,7 @@ async fn authorize_continues_on_another_replica() {
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     a.storage
@@ -2560,7 +2729,7 @@ impl Browser {
         let mut session = sid_core::models::Session::new(
             self.user.profile.id,
             None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
         )
         .with_grant_authentication(&self.user.session.grant_authentication());
         session.client_id = Some("test-client".into());
@@ -3053,7 +3222,7 @@ fn signed_in_over(
     let mut session = sid_core::models::Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
     let svc = TestServices::with_cache(

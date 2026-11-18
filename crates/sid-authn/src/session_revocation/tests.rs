@@ -13,8 +13,8 @@ fn claimed(work: NewWork) -> ClaimedWork {
         max_attempts: work.max_attempts,
         generation: 1,
         expires_at: None,
-        created_at: chrono::Utc::now(),
-        due_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
     }
 }
 
@@ -48,7 +48,7 @@ async fn owed_revocation_revokes_the_session_tokens() {
 /// default five attempts gave up within half a minute.
 #[test]
 fn a_revocation_is_retried_while_a_token_can_live() {
-    let ended_at = chrono::Utc::now();
+    let ended_at = jiff::Timestamp::now();
     let work = sid_core::models::SessionRevocation {
         session_id: SessionId::generate().to_string(),
     }
@@ -58,7 +58,7 @@ fn a_revocation_is_retried_while_a_token_can_live() {
         Arc::new(InMemoryCacheBackend::new()),
     )))
     .retry_schedule();
-    let longest = crate::jwt::AccessTokenTtl::MAX.duration().to_std().unwrap();
+    let longest = Duration::try_from(crate::jwt::AccessTokenTtl::MAX.duration()).unwrap();
     let retried: Duration = (1..work.max_attempts)
         .map(|attempt| handler_schedule.after(attempt))
         .sum();

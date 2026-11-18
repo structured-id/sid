@@ -274,7 +274,7 @@ impl DPopValidator {
         proof: &VerifiedProof,
         holder: &[u8],
     ) -> Result<(), DPopError> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let age = now - proof.iat;
         if age < -FUTURE_IAT_ALLOWANCE_SECS || age > i64::from(DPopProof::MAX_AGE_SECONDS) {
             return Err(DPopError::Expired {
@@ -373,7 +373,7 @@ impl DPopValidator {
         }
 
         // 9. Check iat freshness (within MAX_AGE window)
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let age = now - payload.iat;
         if age < -FUTURE_IAT_ALLOWANCE_SECS || age > DPopProof::MAX_AGE_SECONDS as i64 {
             return Err(DPopError::Expired {

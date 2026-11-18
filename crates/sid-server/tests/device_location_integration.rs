@@ -60,7 +60,7 @@ fn create_test_session_with_device(
     let mut session = Session::new(
         profile_id,
         Some(ip.parse().unwrap()),
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     session.device_id = device_id;
     session
@@ -281,7 +281,7 @@ async fn test_pipeline_roaming_suppression() {
         longitude: Some(26.10),
         prev_latitude: Some(50.45), // Kyiv
         prev_longitude: Some(30.52),
-        prev_login_at: Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+        prev_login_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5)),
         prev_country: Some("UA".to_string()),
         designated_countries: vec!["UA".to_string(), "RO".to_string()],
     };
@@ -310,7 +310,7 @@ async fn test_pipeline_new_country_not_suppressed() {
         longitude: Some(-46.63),
         prev_latitude: Some(50.45), // Kyiv
         prev_longitude: Some(30.52),
-        prev_login_at: Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+        prev_login_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5)),
         prev_country: Some("UA".to_string()),
         designated_countries: vec!["UA".to_string(), "RO".to_string()],
     };

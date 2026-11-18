@@ -58,7 +58,7 @@ impl NotificationChannel for Recorded {
         Ok(DeliveryReceipt {
             message_id: uuid::Uuid::now_v7().to_string(),
             channel: "email".into(),
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             provider: "recorded".into(),
         })
     }
@@ -206,9 +206,9 @@ impl Installation {
             custom_label: None,
             is_primary: true,
             verified: true,
-            verified_at: Some(chrono::Utc::now()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            verified_at: Some(jiff::Timestamp::now()),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         };
         self.storage
             .create_profile_email(&contact, AuditEntry::system("test", "contact").into())

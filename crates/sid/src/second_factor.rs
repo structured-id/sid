@@ -503,9 +503,11 @@ impl SecondFactors {
     ) -> Result<FinishTotpEnrollmentResponse, SecondFactorError> {
         let profile_id = enroller.profile_id();
         require_totp_code_format(code)?;
-        let secret = self.ceremonies.take_totp_enrollment(profile_id).await?;
-        // The account may have changed since the start.
+        // The account may have changed since the start. Checked before the
+        // single-use enrollment is taken, so a refused caller leaves it for
+        // the authorized one.
         self.totp_authority(sign_in, enroller).await?;
+        let secret = self.ceremonies.take_totp_enrollment(profile_id).await?;
         let enrolled = self
             .ceremonies
             .enroll_totp(
@@ -1020,8 +1022,8 @@ impl SecondFactors {
             .validate_access_token(&new_token)
             .map_err(|e| internal("read the stepped-up token", e))?
             .exp;
-        let deadline = chrono::DateTime::from_timestamp(claims.exp.min(replacement_exp), 0)
-            .unwrap_or_else(chrono::Utc::now)
+        let deadline = jiff::Timestamp::from_second(claims.exp.min(replacement_exp))
+            .unwrap_or_else(|_| jiff::Timestamp::now())
             .min(elevated.expires_at);
         let sealed = sid_authn::sign_in_delivery::retain_bearer(
             sign_in.keys(),
@@ -1069,7 +1071,7 @@ impl SecondFactors {
             Err(e) => return Err(spent_concurrently(e)),
         };
         let acr = session
-            .assurance_at(chrono::Utc::now())
+            .assurance_at(jiff::Timestamp::now())
             .acr_value()
             .to_string();
         let amr = session.amr.clone();
@@ -1096,7 +1098,7 @@ impl SecondFactors {
     ) -> Result<(), SecondFactorError> {
         // Both are Unix-second timestamps of this era: the difference cannot
         // overflow; a negative one is a token already expired.
-        let remaining = u64::try_from(claims.exp - chrono::Utc::now().timestamp()).unwrap_or(0);
+        let remaining = u64::try_from(claims.exp - jiff::Timestamp::now().as_second()).unwrap_or(0);
         sign_in
             .revocation()
             .revoke_jti(
@@ -1145,7 +1147,7 @@ impl SecondFactors {
         )
         .await
         .map_err(|e| internal("open the stepped-up token", e))?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         if delivery.deadline <= now {
             return Ok(None);
         }

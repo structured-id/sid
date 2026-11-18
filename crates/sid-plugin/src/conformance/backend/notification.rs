@@ -62,7 +62,7 @@ pub async fn test_notification_preferences_replace(backend: &dyn StorageBackend)
         .find(|c| c.category == NotificationCategory::LoginNotifications)
         .expect("the defaults name login notifications")
         .enabled = false;
-    changed.updated_at = chrono::Utc::now();
+    changed.updated_at = jiff::Timestamp::now();
     backend
         .save_notification_preferences(&changed, test_audit())
         .await

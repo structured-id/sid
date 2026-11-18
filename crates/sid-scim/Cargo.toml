@@ -15,11 +15,11 @@ sid-core = { path = "../sid-core" }
 sid-infra = { workspace = true, features = ["authn-grpc"] }
 sid-plugin = { path = "../sid-plugin" }
 sid-proto = { path = "../sid-proto", features = ["grpc"] }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-chrono = { workspace = true }
+jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 prost-types = { workspace = true }

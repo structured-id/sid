@@ -262,7 +262,7 @@ async fn a_revoked_site_starts_no_authorization() {
     let callback = sid_fed::participant::Mount::parse(&mount)
         .unwrap()
         .at(sid_core::models::entry_connection::CALLBACK);
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,

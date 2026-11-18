@@ -101,7 +101,7 @@ async fn test_get_operation_period_answers_the_current_period() {
     assert!(first.period > 0);
     assert_eq!(first, again);
     let until = first.accepted_until.expect("an acceptance bound");
-    assert!(until.seconds > chrono::Utc::now().timestamp());
+    assert!(until.seconds > jiff::Timestamp::now().as_second());
 }
 
 /// What the inner service saw of a call.

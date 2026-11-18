@@ -4,7 +4,7 @@
 //! Tracks known devices per profile for trust management,
 //! anomaly detection, and session scoping.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::ProfileId;
@@ -127,13 +127,13 @@ pub struct Device {
     /// NOT the exact IP — used for anomaly detection.
     pub last_ip_geo: Option<String>,
 
-    pub first_seen_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
+    pub first_seen_at: Timestamp,
+    pub last_seen_at: Timestamp,
 }
 
 impl Device {
     pub fn new(profile_id: ProfileId, device_type: DeviceType) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: DeviceId::generate(),
             profile_id,
@@ -152,7 +152,7 @@ impl Device {
 
     /// Record activity — update last seen timestamp.
     pub fn touch(&mut self) {
-        self.last_seen_at = Utc::now();
+        self.last_seen_at = Timestamp::now();
     }
 
     /// Mark as trusted by user.
@@ -163,7 +163,7 @@ impl Device {
         {
             self.assurance = DeviceAssurance::Trusted;
         }
-        self.last_seen_at = Utc::now();
+        self.last_seen_at = Timestamp::now();
     }
 
     /// Revoke trust.
@@ -172,12 +172,12 @@ impl Device {
         if self.assurance == DeviceAssurance::Trusted {
             self.assurance = DeviceAssurance::Recognized;
         }
-        self.last_seen_at = Utc::now();
+        self.last_seen_at = Timestamp::now();
     }
 
     /// Days since last activity.
     pub fn days_inactive(&self) -> i64 {
-        (Utc::now() - self.last_seen_at).num_days()
+        Timestamp::now().duration_since(self.last_seen_at).as_secs() / 86_400
     }
 }
 

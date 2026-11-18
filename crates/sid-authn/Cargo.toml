@@ -56,7 +56,7 @@ jsonwebtoken = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 base64 = { workspace = true }
 sha2 = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 uuid = { workspace = true }
 
 # WebAuthn
@@ -140,10 +140,10 @@ ff = { workspace = true }
 pasta_curves = { workspace = true }
 halo2_proofs = { workspace = true }
 rand = { workspace = true }
-tokio = { workspace = true }
+# Refresh claims and their holds are tested on a paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 # The password operation's tests store to a file.
 tempfile = "3"
-chrono = { workspace = true }
 criterion = { version = "0.8", features = ["html_reports"] }
 # Reads what the runner's observation recorded.
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing"] }

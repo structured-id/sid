@@ -103,8 +103,8 @@ fn test_dlq_entry_creation() {
         entity_type: OutboundEntityType::User,
         error: "connection refused".into(),
         attempts: 3,
-        first_attempt: Utc::now(),
-        last_attempt: Utc::now(),
+        first_attempt: Timestamp::now(),
+        last_attempt: Timestamp::now(),
     };
     assert_eq!(entry.attempts, 3);
     assert_eq!(entry.entity_type, OutboundEntityType::User);

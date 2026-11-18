@@ -233,9 +233,7 @@ async fn adapter(
     // process learns of none, and every call it forwards is still admitted
     // by its issuer.
     let cache = sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref()).await?;
-    let lifetime = sid_authn::jwt::AccessTokenTtl::MAX
-        .duration()
-        .to_std()
+    let lifetime = std::time::Duration::try_from(sid_authn::jwt::AccessTokenTtl::MAX.duration())
         .context("the longest access-token lifetime is positive")?;
     let revocation = Arc::new(RevocationCache::new(lifetime, cache));
     // Revocations made anywhere reach this process before it answers.

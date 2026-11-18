@@ -7,7 +7,7 @@
 //! Built-in channels: Email (SMTP), Webhook (HTTP+HMAC), Web Push (VAPID).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -74,7 +74,7 @@ pub struct DeliveryReceipt {
     pub channel: String,
 
     /// When the delivery was attempted.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 
     /// Provider name (e.g., "smtp", "twilio", "fcm").
     pub provider: String,
@@ -106,7 +106,7 @@ pub struct ChannelHealth {
     pub message: Option<String>,
 
     /// Last successful delivery timestamp.
-    pub last_success: Option<DateTime<Utc>>,
+    pub last_success: Option<Timestamp>,
 }
 
 /// Error during notification delivery.
@@ -257,7 +257,7 @@ mod tests {
         let health = ChannelHealth {
             healthy: true,
             message: None,
-            last_success: Some(Utc::now()),
+            last_success: Some(Timestamp::now()),
         };
 
         let json = serde_json::to_string(&health).unwrap();
@@ -283,7 +283,7 @@ mod tests {
                 Ok(DeliveryReceipt {
                     message_id: "msg_001".into(),
                     channel: "test".into(),
-                    timestamp: Utc::now(),
+                    timestamp: Timestamp::now(),
                     provider: "dummy".into(),
                 })
             }

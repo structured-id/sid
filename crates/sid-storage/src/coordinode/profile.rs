@@ -5,8 +5,8 @@
 //! addresses are unique per profile through a key of both; its one primary
 //! contact through `primary_of`, which only the primary carries.
 
-use chrono::{DateTime, Utc};
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     EmailLabel, EmailSettings, MutationContext, PhoneLabel, PhoneSettings, Profile, ProfileEmail,
     ProfileEmailId, ProfileId, ProfilePhone, ProfilePhoneId,
@@ -325,7 +325,7 @@ fn clear_primary(
     tx: &Statements<'_>,
     label: &str,
     profile: ProfileId,
-    at: DateTime<Utc>,
+    at: Timestamp,
 ) -> SidResult<()> {
     tx.run(
         &format!(
@@ -604,7 +604,7 @@ fn set_primary(
     label: &str,
     profile: ProfileId,
     id: &uuid::Uuid,
-    at: DateTime<Utc>,
+    at: Timestamp,
 ) -> SidResult<bool> {
     let owned = tx.run(
         &format!(
@@ -791,7 +791,7 @@ impl CoordinodeBackend {
         owner: ProfileId,
         id: ProfilePhoneId,
         settings: &PhoneSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let settings = settings.clone();
@@ -830,7 +830,7 @@ impl CoordinodeBackend {
         &self,
         owner: ProfileId,
         id: ProfilePhoneId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transaction(move |tx| {
@@ -900,7 +900,7 @@ impl CoordinodeBackend {
         owner: ProfileId,
         id: ProfileEmailId,
         settings: &EmailSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         let settings = settings.clone();
@@ -934,7 +934,7 @@ impl CoordinodeBackend {
         &self,
         owner: ProfileId,
         id: ProfileEmailId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transaction(move |tx| {

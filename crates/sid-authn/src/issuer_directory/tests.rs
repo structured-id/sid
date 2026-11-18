@@ -183,6 +183,47 @@ fn record(handle: &str, kids: &[&str]) -> IssuerRecord {
     }
 }
 
+/// The installation's root-addressed base issuer is named by the empty
+/// handle: a token whose `iss` is the installation URL itself finds it, and
+/// so does a resource registered under it. A registry answer naming another
+/// URL for the empty handle (a scoped issuer, another host) names nothing.
+#[tokio::test]
+async fn the_root_base_issuer_is_the_installation_url() {
+    let root = IssuerRecord {
+        issuer: BASE.into(),
+        keys: vec![("k1".into(), [7; 32])],
+    };
+    let registry = Registry::with(vec![("", root)]);
+    registry.put_resource("", orders(BASE.into(), true));
+    let directory = IssuerDirectory::new(&format!("{BASE}/"), registry.clone());
+
+    let issuer = directory.for_token(BASE, "k1").await.unwrap().unwrap();
+    assert_eq!(issuer.issuer, BASE);
+    assert!(directory.resource(BASE, ORDERS).await.unwrap().is_some());
+    assert!(
+        directory
+            .for_token(&format!("{BASE}/"), "k1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    for answered in [issuer_url(HANDLE), "https://evil.example.com".to_owned()] {
+        let registry = Registry::with(vec![(
+            "",
+            IssuerRecord {
+                issuer: answered.clone(),
+                keys: vec![("k1".into(), [7; 32])],
+            },
+        )]);
+        let directory = IssuerDirectory::new(BASE, registry);
+        assert!(
+            directory.for_token(BASE, "k1").await.unwrap().is_none(),
+            "{answered}"
+        );
+    }
+}
+
 /// A stored handle resolves to its issuer with its keys; the answer is
 /// reused for later requests.
 #[tokio::test]
@@ -306,7 +347,7 @@ fn signed(key: &Key, typ: &str, claims: &impl serde::Serialize) -> String {
 }
 
 fn access_claims(iss: &str, aud: &str) -> AccessTokenClaims {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     AccessTokenClaims {
         sub: "subject".into(),
         pid: None,
@@ -403,7 +444,7 @@ async fn an_issued_access_token_must_be_the_named_issuers_for_the_resource() {
 async fn an_issued_id_token_must_match_client_and_nonce() {
     let (directory, own, _) = two_issuers();
     let iss = issuer_url(HANDLE);
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let id: IdTokenClaims = serde_json::from_value(serde_json::json!({
         "iss": iss, "sub": "subject", "aud": "ops-web",
         "exp": now + 60, "iat": now, "auth_time": now,

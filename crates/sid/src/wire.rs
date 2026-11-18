@@ -87,11 +87,4 @@ pub(crate) fn struct_to_json(s: prost_types::Struct) -> serde_json::Value {
     )
 }
 
-/// `at` as a protobuf timestamp.
-pub(crate) fn to_timestamp(at: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: at.timestamp(),
-        // Sub-second nanoseconds are below 2·10⁹ (a leap second), within i32.
-        nanos: at.timestamp_subsec_nanos() as i32,
-    }
-}
+pub(crate) use sid_proto::time::{from_proto as from_timestamp, to_proto as to_timestamp};

@@ -10,7 +10,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::browser_session::{BrowserCookie, BrowserCsrf};
 use sid_authn::captcha::{CaptchaGate, CaptchaProvider};
@@ -233,7 +233,7 @@ pub struct RetainedSignIn<'a> {
     /// The sealing context: this operation of this issuer.
     pub context: String,
     /// The end of the operation; the delivery is never redelivered after.
-    pub deadline: chrono::DateTime<Utc>,
+    pub deadline: Timestamp,
     /// The operation's significant inputs: a repeat must present them again.
     pub inputs: Vec<u8>,
 }
@@ -591,7 +591,7 @@ impl SignIn {
             ) => owed,
             Err(refused) => return Err(refused),
         };
-        let now = Utc::now();
+        let now = Timestamp::now();
         let first = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
         let credentials: &dyn CredentialStore<Owner = ProfileId> = self.storage.as_ref();
         let factors = sid_authn::second_factor::offered_factors(
@@ -786,11 +786,14 @@ impl SignIn {
             )
             .await?;
         if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
-            requirements.decide(session, Utc::now())
+            requirements.decide(session, Timestamp::now())
         {
             return Err(SignInRefusal::StepUp(unmet).into());
         }
-        Ok((session.expires_at - Utc::now()).num_seconds())
+        Ok(session
+            .expires_at
+            .duration_since(Timestamp::now())
+            .as_secs())
     }
 
     /// Whether the session `session_id` is still valid, as `caller` may ask:
@@ -809,7 +812,7 @@ impl SignIn {
         };
         match self.storage.get_session(session_id).await? {
             Some(session) if caller.require_self_or_admin(session.profile_id).is_ok() => {
-                if session.expires_at <= Utc::now() {
+                if session.expires_at <= Timestamp::now() {
                     return Ok(invalid);
                 }
                 Ok(sid_proto::sid::v1::ValidateSessionResponse {
@@ -850,7 +853,7 @@ impl SignIn {
     /// Whether `session` may authorize an application at `now`: not
     /// expired, not provisional, and used within the installation's idle
     /// limit.
-    pub fn authorizes(&self, session: &Session, now: chrono::DateTime<Utc>) -> bool {
+    pub fn authorizes(&self, session: &Session, now: Timestamp) -> bool {
         if session.expires_at <= now || session.is_provisional {
             return false;
         }
@@ -858,7 +861,7 @@ impl SignIn {
             0 => true,
             hours => {
                 let last = session.last_activity_at.unwrap_or(session.created_at);
-                now - last <= Duration::hours(i64::from(hours))
+                now.duration_since(last) <= SignedDuration::from_hours(i64::from(hours))
             }
         }
     }
@@ -867,8 +870,11 @@ impl SignIn {
     /// installation's absolute lifetime when it sets one, with the sign-in
     /// scopes; its authentication is the caller's to set.
     pub fn new_session(&self, profile_id: ProfileId, ip_address: Option<IpAddr>) -> Session {
-        let mut session =
-            Session::new(profile_id, ip_address, Utc::now() + self.session_lifetime());
+        let mut session = Session::new(
+            profile_id,
+            ip_address,
+            Timestamp::now() + self.session_lifetime(),
+        );
         session.scopes = vec![
             "openid".to_string(),
             "profile".to_string(),
@@ -1058,10 +1064,10 @@ impl SignIn {
 
     /// How long a full session lives: the policy's absolute lifetime, a day
     /// when it sets none.
-    pub fn session_lifetime(&self) -> Duration {
+    pub fn session_lifetime(&self) -> SignedDuration {
         match self.policy.session.max_lifetime_hours {
-            0 => Duration::hours(24),
-            hours => Duration::hours(i64::from(hours)),
+            0 => SignedDuration::from_hours(24),
+            hours => SignedDuration::from_hours(i64::from(hours)),
         }
     }
 
@@ -1378,7 +1384,7 @@ impl SignIn {
                 // the sealed delivery with them: the session, its generation
                 // and the answer to a lost response commit together.
                 let (token, expires_in) = self.access_token(profile, &session).await?;
-                let token_expires_at = Utc::now() + Duration::seconds(expires_in);
+                let token_expires_at = Timestamp::now() + SignedDuration::from_secs(expires_in);
                 let (generation, refresh) = match first {
                     Some((generation, set)) => (Some(generation), Some(set)),
                     None => (None, None),
@@ -1448,10 +1454,12 @@ impl SignIn {
             )
             .map_err(|e| internal("issue access token", e))?;
         // The token expires with the session when the session is shorter.
-        let expires_in = self
-            .jwt
-            .access_token_ttl_secs()
-            .min((session.expires_at - Utc::now()).num_seconds());
+        let expires_in = self.jwt.access_token_ttl_secs().min(
+            session
+                .expires_at
+                .duration_since(Timestamp::now())
+                .as_secs(),
+        );
         Ok((access_token.into(), expires_in))
     }
 

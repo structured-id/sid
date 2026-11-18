@@ -79,7 +79,7 @@ async fn admit_registration(
          RETURNING id",
     )
     .bind(code.trim().to_uppercase())
-    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(fmt_dt(&jiff::Timestamp::now()))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| SidError::Storage(format!("spend invite: {e}")))?;
@@ -609,7 +609,7 @@ impl SqliteBackend {
             .bind(invite)
             .bind(profile.id)
             .bind(credential.as_ref().map(|c| c.id.0))
-            .bind(fmt_dt(&chrono::Utc::now()))
+            .bind(fmt_dt(&jiff::Timestamp::now()))
             .execute(&mut *tx)
             .await
             .map_err(|e| super::insert_error("invite redemption", e))?;
@@ -927,7 +927,7 @@ impl SqliteBackend {
         )
         .bind(principal_id.0)
         .bind(profile_id)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .execute(&mut *tx)
         .await
         .map_err(|e| super::principal_write_error("reconcile email key", e))?
@@ -1454,7 +1454,7 @@ impl SqliteBackend {
         .bind(verified)
         .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
         .bind(artifact)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id.0)
         .bind(expected)
         .fetch_optional(&mut *tx)
@@ -1512,7 +1512,7 @@ impl SqliteBackend {
             "UPDATE credentials SET last_used_at = ?
              WHERE id = ? AND status = 'active' RETURNING profile_id",
         )
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id.0)
         .fetch_optional(&mut *tx)
         .await
@@ -1536,7 +1536,7 @@ impl SqliteBackend {
              WHERE id = ? AND status = 'active' AND data = ?",
         )
         .bind(&spend.left)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(spend.credential.0)
         .bind(&spend.read)
         .execute(&mut **tx)
@@ -1566,7 +1566,7 @@ impl SqliteBackend {
              WHERE id = ? AND status = 'active' AND data = ? RETURNING profile_id",
         )
         .bind(data)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .bind(id.0)
         .bind(expected)
         .fetch_optional(&mut *tx)

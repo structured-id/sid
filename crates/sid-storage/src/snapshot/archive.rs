@@ -10,7 +10,7 @@
 //! key protects this archive only: it is not a key-encryption key, opens no
 //! sealed field and does not replace independent recovery of server keys.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sid_crypto::CryptoPrimitives;
@@ -54,7 +54,7 @@ pub struct Manifest {
     /// The snapshot format inside.
     pub format: u32,
     pub snapshot_id: uuid::Uuid,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub source_backend: String,
     pub installation_org: Option<sid_core::models::OrgId>,
     /// SHA-256 of the snapshot JSON, checked after decryption.

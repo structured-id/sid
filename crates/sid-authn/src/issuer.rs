@@ -35,12 +35,48 @@ use crate::jwt::{
 use crate::sealed_secret;
 
 /// The issuer URL of `handle` under `base`, the deployment's public URL:
-/// `{base}/i/{handle}`.
+/// `{base}/i/{handle}`, the form of a scoped issuer.
 ///
 /// OIDC Discovery 1.0 §3 and RFC 8414 §2: an issuer is an `https` URL
 /// without query or fragment. Plain `http` is accepted only on a loopback
 /// host, for local development.
 pub fn issuer_url(base: &Url, handle: &IssuerHandle) -> SidResult<String> {
+    Ok(format!("{}/i/{}", base_url(base)?, handle.as_str()))
+}
+
+/// The issuer URL of an installation's base issuer: `base` itself, its
+/// configured root origin (auth/oidc-issuer-model.md, stable issuer identity),
+/// under the same rules as [`issuer_url`].
+pub fn base_issuer_url(base: &Url) -> SidResult<String> {
+    base_url(base)
+}
+
+/// The handle by which this installation's registry names `issuer`, an exact
+/// issuer identifier, when it is one of the installation at `base` (its
+/// public URL): empty for the root-addressed base issuer (`issuer` is `base`
+/// itself), the handle for a scoped issuer (`{base}/i/{handle}`), `None` for
+/// any other URL.
+pub fn installation_issuer_handle<'a>(base: &str, issuer: &'a str) -> Option<&'a str> {
+    let base = base.trim_end_matches('/');
+    let rest = issuer.strip_prefix(base)?;
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    rest.strip_prefix("/i/")
+        .filter(|handle| IssuerHandle::parse(handle).is_ok())
+}
+
+/// Whether `issuer` has the scoped form `…/i/{its handle}`; otherwise its
+/// URL is its installation's root origin.
+pub fn is_scoped(issuer: &OidcIssuer) -> bool {
+    issuer
+        .canonical_url
+        .strip_suffix(issuer.handle.as_str())
+        .is_some_and(|rest| rest.ends_with("/i/"))
+}
+
+/// `base` without a trailing slash, when it is a valid issuer location.
+fn base_url(base: &Url) -> SidResult<String> {
     let loopback = matches!(base.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     match base.scheme() {
         "https" => {}
@@ -56,33 +92,72 @@ pub fn issuer_url(base: &Url, handle: &IssuerHandle) -> SidResult<String> {
             "issuer URL must not have a query or fragment".into(),
         ));
     }
-    Ok(format!(
-        "{}/i/{}",
-        base.as_str().trim_end_matches('/'),
-        handle.as_str()
-    ))
+    Ok(base.as_str().trim_end_matches('/').to_owned())
 }
 
-/// The installation's own issuer for `org`, created with its first signing
-/// key under `base` on the first start. A later start keeps the stored one,
-/// whatever `base` it is given: the issuer URL changes only by migration.
+/// Where an issuer's canonical URL lives under the deployment's base URL;
+/// the provisioning owner chooses it (auth/oidc-issuer-model.md, stable
+/// issuer identity and current entry addresses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuerAddress {
+    /// The configured root origin: an installation's base issuer, standalone
+    /// CE/EE or platform EE.
+    Root,
+    /// `/i/<handle>` under it: a hosted organization, an additional contour
+    /// or a recipient this installation issues to.
+    Scoped,
+}
+
+/// The issuer this installation's authority keeps for `org`, scoped under
+/// `base` (`{base}/i/{handle}`), created with its first signing key on first
+/// use. A later call keeps the stored one, whatever `base` it is given: the
+/// issuer URL changes only by migration.
 pub async fn ensure_local_issuer(
     storage: &dyn IssuerStore,
     keys: &dyn KeyManager,
     base: &Url,
     org: OrgId,
 ) -> SidResult<OidcIssuer> {
+    ensure_issuer(storage, keys, base, org, IssuerAddress::Scoped).await
+}
+
+/// The installation's base issuer for its own organization `org`, at the
+/// root origin `base` itself, created with its first signing key on the
+/// first start. Its record still holds a handle, its registry and cookie
+/// discriminator. A later start keeps the stored issuer and its URL, whatever
+/// `base` it is given and whichever form it was created in: the issuer URL
+/// changes only by migration.
+pub async fn ensure_base_issuer(
+    storage: &dyn IssuerStore,
+    keys: &dyn KeyManager,
+    base: &Url,
+    org: OrgId,
+) -> SidResult<OidcIssuer> {
+    ensure_issuer(storage, keys, base, org, IssuerAddress::Root).await
+}
+
+async fn ensure_issuer(
+    storage: &dyn IssuerStore,
+    keys: &dyn KeyManager,
+    base: &Url,
+    org: OrgId,
+    address: IssuerAddress,
+) -> SidResult<OidcIssuer> {
     if let Some(issuer) = storage.oidc_issuer_for(IssuerAuthority::Local, org).await? {
         return Ok(issuer);
     }
     let handle = IssuerHandle::generate();
+    let canonical_url = match address {
+        IssuerAddress::Root => base_issuer_url(base)?,
+        IssuerAddress::Scoped => issuer_url(base, &handle)?,
+    };
     let issuer = OidcIssuer {
         id: sid_core::models::IssuerId::generate(),
-        canonical_url: issuer_url(base, &handle)?,
+        canonical_url,
         handle,
         authority: IssuerAuthority::Local,
         recipient_org: org,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     let first_key = new_signing_key(keys, &issuer, 1).await?;
     // Replicas starting together race here: the first insert is kept and
@@ -237,7 +312,7 @@ pub async fn ensure_issuer_resource(
     {
         return with_actions(storage, issuer, &indicator, stored, scopes, name).await;
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -313,7 +388,7 @@ async fn with_actions(
         }
         let mut updated = stored.clone();
         updated.scopes.extend(missing);
-        updated.updated_at = chrono::Utc::now();
+        updated.updated_at = jiff::Timestamp::now();
         let audit = AuditEntry::system("issuer_resource.actions_added", issuer.id.to_string());
         storage
             .update_protected_resource(&updated, audit.into())
@@ -353,7 +428,7 @@ async fn new_signing_key(
         key_id: key_id(&public_key),
         public_key,
         sealed_private_key,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     })
 }
 
@@ -725,6 +800,9 @@ pub struct IssuerRegistry {
     storage: Arc<dyn IssuerStore>,
     keys: Arc<dyn KeyManager>,
     signers: DashMap<IssuerId, Arc<IssuerSigner>>,
+    /// The installation's base issuer when it is root-addressed: what an
+    /// empty handle names.
+    root: Option<OidcIssuer>,
 }
 
 impl std::fmt::Debug for IssuerRegistry {
@@ -741,16 +819,46 @@ impl IssuerRegistry {
             storage,
             keys,
             signers: DashMap::new(),
+            root: None,
         }
     }
 
-    /// The issuer named by `handle` as it appears in a request path; text
-    /// that is not a stored handle names no issuer.
+    /// The registry of an installation whose base issuer is `base`, as the
+    /// composition that provisioned it knows it: when `base` is root-addressed
+    /// an empty handle names it (the root routes and the lookups of the
+    /// installation's own services); a scoped base issuer leaves the empty
+    /// handle naming nothing.
+    pub fn with_base_issuer(mut self, base: &OidcIssuer) -> Self {
+        self.root = (!is_scoped(base)).then(|| base.clone());
+        self
+    }
+
+    /// The issuer named by `handle` as it appears in a request path, or for
+    /// an empty handle the root-addressed base issuer; text that is not a
+    /// stored handle names no issuer.
     pub async fn by_handle(&self, handle: &str) -> SidResult<Option<OidcIssuer>> {
+        if handle.is_empty() {
+            return Ok(self.root.clone());
+        }
         let Ok(handle) = IssuerHandle::parse(handle) else {
             return Ok(None);
         };
         self.storage.oidc_issuer_by_handle(&handle).await
+    }
+
+    /// The issuer whose HTTP routes a request reached by the route's
+    /// `handle`: `/i/<handle>` names only an issuer whose canonical URL is
+    /// that path, the root routes (no handle) only the root-addressed base
+    /// issuer. So every document names exactly the issuer it was fetched for
+    /// (OIDC Discovery 1.0 §4.3, RFC 8414 §3.3), an unknown handle names no
+    /// issuer, and nothing falls back to another one or is read from the
+    /// request's host (auth/oidc-issuer-model.md, stable issuer identity).
+    pub async fn routed(&self, handle: &str) -> SidResult<Option<OidcIssuer>> {
+        let root = handle.is_empty();
+        Ok(self
+            .by_handle(handle)
+            .await?
+            .filter(|issuer| is_scoped(issuer) != root))
     }
 
     /// The base issuer of `org`, if it has one.

@@ -7,7 +7,7 @@
 //! in the same store, in the same transaction.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::Result;
 use sid_core::models::{
     AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryPreparation, KeyArchive, KeyEpoch,
@@ -64,7 +64,7 @@ pub trait HistoryKeyStore: Send + Sync {
     /// expiry; past it the preparation is refused as expired, so `before`
     /// must lie at least the operation lifetime and the tolerated clock skew
     /// in the past. Returns how many were dropped.
-    async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> Result<u64>;
+    async fn compact_abandoned(&self, before: Timestamp, audit: AuditEntry) -> Result<u64>;
 
     /// Store `new` as the owner's active epoch when it has none. When it
     /// already has an active epoch nothing is written and that epoch is
@@ -114,16 +114,16 @@ pub trait HistoryKeyStore: Send + Sync {
 
     /// The history write cutoff this store records: no epoch created before
     /// it is selected to take entries or evaluated; `None` when none was set.
-    async fn write_cutoff(&self) -> Result<Option<DateTime<Utc>>>;
+    async fn write_cutoff(&self) -> Result<Option<Timestamp>>;
 
     /// Raise the write cutoff to `not_before`, shared by every replica.
     /// Monotonic: an equal or earlier value changes nothing. Returns the
     /// cutoff in force.
     async fn raise_write_cutoff(
         &self,
-        not_before: DateTime<Utc>,
+        not_before: Timestamp,
         audit: AuditEntry,
-    ) -> Result<DateTime<Utc>>;
+    ) -> Result<Timestamp>;
 
     /// The non-secret derivation parameters of the key versions sealing this
     /// store's history keys: the evaluator's own key custody, apart from any

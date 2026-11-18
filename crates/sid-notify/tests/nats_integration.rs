@@ -321,7 +321,7 @@ async fn test_history_alone_is_not_work() {
     bus.publish(event.clone()).await.unwrap();
     let _replayed = bus
         .replay(
-            chrono::Utc::now() - chrono::Duration::seconds(5),
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5),
             None,
             Default::default(),
         )
@@ -755,7 +755,7 @@ async fn test_a_terminal_outcome_after_handoff_is_not_revived() {
                 &sid_core::models::WorkFailure {
                     error: "worker restarted".into(),
                     ambiguous: false,
-                    retry_at: Some(chrono::Utc::now()),
+                    retry_at: Some(jiff::Timestamp::now()),
                     on_dead: None,
                 },
             )

@@ -31,6 +31,21 @@ fn a_provisioned_connection_is_accepted() {
     );
 }
 
+/// A connection to the installation's root-addressed base issuer is
+/// accepted with the empty handle that names it, and its endpoints are at
+/// the root.
+#[test]
+fn a_connection_to_the_root_issuer_is_accepted() {
+    let mut root = bundle();
+    root.issuer = INSTALLATION.into();
+    let connection = Connection::accept(root, INSTALLATION).unwrap();
+    assert_eq!(connection.issuer_handle, "");
+    assert_eq!(
+        connection.token_endpoint(),
+        format!("{INSTALLATION}/oauth2/token")
+    );
+}
+
 /// A connection that would have the BFF sign in at another installation,
 /// under a handle that is not one, as a client it cannot authenticate, or
 /// without its target, is refused, wherever it came from.

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use sid::entry_connections::EntryConnections;
 use sid::federated_admission::resolve;
 use sid_authn::federated_entry::{EntryError, EntryRequest, FederatedEntry, TrustedIssuer};
-use sid_core::models::{EntryConnection, EntryHandle, IssuerHandle, OidcIssuer};
+use sid_core::models::{EntryConnection, EntryHandle, OidcIssuer};
 use sid_fed::recipient::PresentedIdentities;
 use sid_infra::authn::ceremony::Deliver as _;
 use sid_infra::oauth_http;
@@ -151,10 +151,12 @@ impl FederatedEntryServiceImpl {
             warn!(error = %e, "{what}");
             NoStep::Unavailable
         };
-        let handle = IssuerHandle::parse(issuer_handle).map_err(|_| NoStep::UnknownIssuer)?;
+        // The issuer whose entry route the browser reached: its own path, or
+        // the root for the root-addressed base issuer.
         let issuer = self
-            .storage
-            .oidc_issuer_by_handle(&handle)
+            .auth
+            .oauth()
+            .routed_issuer(issuer_handle)
             .await
             .map_err(|e| unavailable(&e, "installation issuer lookup"))?
             .ok_or(NoStep::UnknownIssuer)?;
@@ -236,7 +238,7 @@ impl FederatedEntryServiceImpl {
         };
         // A resumed admission keeps the original authentication time and
         // evidence bounds: the evidence is the one kept with the entry.
-        let Some(authentication) = returned.evidence.authentication(chrono::Utc::now()) else {
+        let Some(authentication) = returned.evidence.authentication(jiff::Timestamp::now()) else {
             warn!("federated entry evidence is no longer current");
             return Err(Refusal::over("Sign-in was not completed"));
         };

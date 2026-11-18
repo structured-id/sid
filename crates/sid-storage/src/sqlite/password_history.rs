@@ -242,15 +242,14 @@ impl Cutoff {
 async fn read_cutoff(
     conn: &mut sqlx::SqliteConnection,
     which: Cutoff,
-) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+) -> SidResult<Option<jiff::Timestamp>> {
     let stored: Option<String> = sqlx::query_scalar(which.select())
         .fetch_one(&mut *conn)
         .await
         .map_err(storage("write cutoff"))?;
     stored
         .map(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .map(|t| t.with_timezone(&chrono::Utc))
+            s.parse()
                 .map_err(|e| SidError::Storage(format!("stored write cutoff {s:?}: {e}")))
         })
         .transpose()
@@ -261,8 +260,8 @@ async fn read_cutoff(
 async fn raise_cutoff(
     tx: &mut WriteTx,
     which: Cutoff,
-    not_before: chrono::DateTime<chrono::Utc>,
-) -> SidResult<(chrono::DateTime<chrono::Utc>, bool)> {
+    not_before: jiff::Timestamp,
+) -> SidResult<(jiff::Timestamp, bool)> {
     let not_before = sid_core::models::password_history::stored_instant(not_before);
     if let Some(current) = read_cutoff(tx, which).await?
         && current >= not_before
@@ -315,7 +314,7 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
     for d in &commit.epochs {
         record_descriptor(tx, owner, d).await?;
     }
-    let accepted_at = chrono::Utc::now();
+    let accepted_at = jiff::Timestamp::now();
     let now = fmt_dt(&accepted_at);
     let active = commit.epochs[0].id.0;
     sqlx::query(
@@ -378,7 +377,8 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
         .await
         .map_err(storage("age retention"))?;
         for (old, created_at) in rows {
-            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+            let created_at: jiff::Timestamp = created_at
+                .parse()
                 .map_err(|e| SidError::Storage(format!("entry created_at: {e}")))?;
             if created_at < before {
                 sqlx::query("DELETE FROM password_history_entries WHERE owner_id = ? AND seq = ?")
@@ -493,18 +493,16 @@ impl SqliteBackend {
         })
     }
 
-    pub(crate) async fn history_write_cutoff_impl(
-        &self,
-    ) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+    pub(crate) async fn history_write_cutoff_impl(&self) -> SidResult<Option<jiff::Timestamp>> {
         let mut conn = self.pool.acquire().await.map_err(storage("read"))?;
         read_cutoff(&mut conn, Cutoff::Credential).await
     }
 
     pub(crate) async fn raise_history_write_cutoff_impl(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         audit: sid_core::models::MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<jiff::Timestamp> {
         let mut tx = self.begin_write().await?;
         let (cutoff, moved) = raise_cutoff(&mut tx, Cutoff::Credential, not_before).await?;
         if moved {
@@ -1231,7 +1229,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
 
     async fn compact_abandoned(
         &self,
-        before: chrono::DateTime<chrono::Utc>,
+        before: jiff::Timestamp,
         audit: AuditEntry,
     ) -> SidResult<u64> {
         let mut tx = self.begin_write().await?;
@@ -1248,7 +1246,8 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             .await
             .map_err(storage("fence compaction"))?;
             for (id, fenced_at) in rows {
-                let fenced_at = chrono::DateTime::parse_from_rfc3339(&fenced_at)
+                let fenced_at: jiff::Timestamp = fenced_at
+                    .parse()
                     .map_err(|e| SidError::Storage(format!("{at}: {e}")))?;
                 if fenced_at < before {
                     sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -1279,16 +1278,16 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         Ok(key.map(WrappedHistoryKey))
     }
 
-    async fn write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+    async fn write_cutoff(&self) -> SidResult<Option<jiff::Timestamp>> {
         let mut conn = self.pool.acquire().await.map_err(storage("read"))?;
         read_cutoff(&mut conn, Cutoff::Evaluator).await
     }
 
     async fn raise_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         audit: AuditEntry,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<jiff::Timestamp> {
         let mut tx = self.begin_write().await?;
         let (cutoff, moved) = raise_cutoff(&mut tx, Cutoff::Evaluator, not_before).await?;
         if moved {

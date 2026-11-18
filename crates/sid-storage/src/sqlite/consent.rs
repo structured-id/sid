@@ -115,7 +115,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<ClaimGrantChange> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("change claim grant: {e}"));
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let active = sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = ?")
             .bind(id.0)
@@ -218,7 +218,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         audit: MutationContext,
     ) -> SidResult<u64> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let revoked = sqlx::query(
             "UPDATE consents SET status = 'revoked', revoked_at = ?, updated_at = ? \

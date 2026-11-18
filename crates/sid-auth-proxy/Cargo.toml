@@ -16,13 +16,12 @@ name = "sid_auth_proxy"
 path = "src/lib.rs"
 
 [dependencies]
-# Token claims and revocation view shared with the decision service.
-sid-auth = { path = "../sid-auth", default-features = false }
-# The installation's issuer directory and the verification of the tokens its
-# issuer returns to the BFF.
+# The installation's issuer directory, the verification of the tokens its
+# issuer returns to the BFF and the revocations every SID process records.
 sid-authn = { workspace = true }
-# The issuer registry and the BFF's client at its issuer, over gRPC.
-sid-infra = { workspace = true, features = ["issuer-client"] }
+# The issuer registry and the BFF's client at its issuer, over gRPC; the
+# cache its replicas share.
+sid-infra = { workspace = true, features = ["issuer-client", "redis"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-core = { workspace = true }
@@ -37,7 +36,7 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 
 # gRPC client (channel to the SID server)
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 tonic-health = { workspace = true }
 
 # Async runtime
@@ -47,7 +46,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-saphyr = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 
 # BFF: PKCE, CSRF comparison
 getrandom = { workspace = true }
@@ -79,3 +78,5 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 # Replica tests run against the real shared cache.
 sid-infra = { workspace = true, features = ["redis"] }
+# A real issuer over gRPC, for the BFF's sign-in and sign-out against it.
+sid-test-issuer = { path = "../sid-test-issuer" }

@@ -158,9 +158,9 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
     let authentication = sid_core::models::session::AcceptedEvidence::new(
         Some("urn:sid:acr:basic"),
         vec!["pwd".into()],
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
     )
-    .authentication(chrono::Utc::now())
+    .authentication(jiff::Timestamp::now())
     .unwrap();
     let assignment = common::federated_assignment(svc.storage.as_ref(), holder.id).await;
 
@@ -219,9 +219,9 @@ async fn admitted_with_captcha(ip: IpAddr, operation: &'static str) -> Admitted 
     let authentication = sid_core::models::session::AcceptedEvidence::new(
         Some("urn:sid:acr:basic"),
         vec!["pwd".into()],
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
     )
-    .authentication(chrono::Utc::now())
+    .authentication(jiff::Timestamp::now())
     .unwrap();
     let assignment = common::federated_assignment(svc.storage.as_ref(), holder.id).await;
     let refusal = svc
@@ -263,7 +263,7 @@ async fn admitted_with_captcha(ip: IpAddr, operation: &'static str) -> Admitted 
 fn completion(operation: &str) -> sid_server::grpc::auth_service::AdmittedCompletion<'_> {
     sid_server::grpc::auth_service::AdmittedCompletion {
         operation,
-        deadline: chrono::Utc::now() + chrono::Duration::minutes(10),
+        deadline: jiff::Timestamp::now() + jiff::SignedDuration::from_mins(10),
     }
 }
 

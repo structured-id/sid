@@ -9,7 +9,7 @@
 mod common;
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_token, test_profile};
+use common::{TestServices, test_profile};
 use sid_core::models::{
     AuditEntry, AuthLevel, Credential, CredentialData, CredentialType, ProfileId, Session,
 };
@@ -677,9 +677,20 @@ async fn test_handler_finish_totp_enrollment_no_pending() {
         .await
         .unwrap();
 
-    let token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    // The caller's session stands, so only the missing enrollment refuses.
+    let session = Session::new(
+        profile.id,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
+    svc.storage
+        .create_session(&session, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let (token, _) =
+        common::issue_token_with_session(&svc.jwt, &profile, &["openid".to_string()], session);
 
-    // Try to finish without starting — must fail.
+    // Try to finish without starting: must fail.
     let req = authed_request(
         FinishTotpEnrollmentRequest {
             code: "123456".to_string(),
@@ -877,7 +888,7 @@ async fn test_handler_verify_recovery_code_success() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "setup").into())
@@ -953,7 +964,7 @@ async fn test_handler_verify_recovery_code_single_use() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "setup").into())
@@ -1013,7 +1024,7 @@ async fn test_handler_verify_recovery_code_no_credential() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "setup").into())

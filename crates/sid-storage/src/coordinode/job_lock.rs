@@ -3,8 +3,8 @@
 //! job, unique by job, for every instance sharing the database.
 
 use async_trait::async_trait;
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::{SignedDuration, Timestamp};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::storage::{JobLock, JobLockHolder};
 use uuid::Uuid;
@@ -14,14 +14,14 @@ use super::{CoordinodeBackend, Decision, Params, time, uuid};
 /// How long a held lock survives a holder that vanished without releasing
 /// it. A job runs within this time; one that takes longer may be started a
 /// second time by another instance.
-const JOB_LOCK_LEASE: chrono::Duration = chrono::Duration::hours(1);
+const JOB_LOCK_LEASE: SignedDuration = SignedDuration::from_hours(1);
 
 impl CoordinodeBackend {
     pub(super) async fn try_job_lock(&self, job: i64) -> SidResult<Option<JobLock>> {
         let holder = Uuid::new_v4();
         let taken = self
             .transaction(move |tx| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let params = Params::default()
                     .with("job", Value::Int(job))
                     .with("holder", uuid(&holder))

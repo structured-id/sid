@@ -4,7 +4,8 @@
 //! issuer; explicit client-to-resource access.
 
 use super::{create_test_oauth2_client, instance_org, test_audit};
-use chrono::{SubsecRound, Utc};
+use crate::conformance::trunc;
+use jiff::{SignedDuration, Timestamp, Unit};
 use sid_core::Error as SidError;
 use sid_core::models::{
     Application, ApplicationId, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
@@ -17,7 +18,7 @@ use uuid::Uuid;
 /// The installation organization's local issuer, provisioned on first use.
 pub async fn instance_issuer(backend: &dyn StorageBackend) -> IssuerId {
     let org = instance_org(backend).await;
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     let id = IssuerId::generate();
     let handle = IssuerHandle::generate();
     let issuer = OidcIssuer {
@@ -51,7 +52,7 @@ pub async fn instance_issuer(backend: &dyn StorageBackend) -> IssuerId {
 /// A new application in `project`, stored at millisecond precision so what is
 /// read back equals it exactly.
 pub fn application(project_id: ProjectId, name: &str) -> Application {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     Application {
         id: ApplicationId::generate(),
         project_id,
@@ -65,7 +66,7 @@ pub fn application(project_id: ProjectId, name: &str) -> Application {
 
 /// The application a test client names, in its project.
 pub fn application_of(client: &OAuth2Client) -> Application {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     Application {
         id: client.application_id,
         project_id: client.project_id,
@@ -97,7 +98,7 @@ fn unique_indicator() -> ResourceIndicator {
 }
 
 pub fn resource(app: &Application, issuer: IssuerId) -> ProtectedResource {
-    let now = Utc::now().trunc_subsecs(3);
+    let now = trunc(Timestamp::now(), Unit::Millisecond);
     ProtectedResource {
         id: ResourceId::generate(),
         application_id: Some(app.id),
@@ -137,7 +138,7 @@ fn access(client: &OAuth2Client, resource: &ProtectedResource, scopes: &[&str]) 
         client_id: client.client_id.clone(),
         resource_id: resource.id,
         scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
-        created_at: Utc::now().trunc_subsecs(3),
+        created_at: trunc(Timestamp::now(), Unit::Millisecond),
     }
 }
 
@@ -338,7 +339,7 @@ pub async fn test_project_in_use_is_not_deleted(backend: &dyn StorageBackend) {
             .await
             .unwrap()
     );
-    let now = Utc::now();
+    let now = Timestamp::now();
     let target = ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: format!("held-{}", Uuid::now_v7().simple()),
@@ -477,7 +478,7 @@ pub async fn test_application_update_and_list(backend: &dyn StorageBackend) {
 
     let mut renamed = first.clone();
     renamed.name = "Renamed".into();
-    renamed.updated_at = Utc::now().trunc_subsecs(3);
+    renamed.updated_at = trunc(Timestamp::now(), Unit::Millisecond);
     assert!(
         backend
             .update_application(&renamed, test_audit())
@@ -531,7 +532,8 @@ pub async fn test_records_update_from_the_object_they_were_created_with(
     let issuer = instance_issuer(backend).await;
     let project = system_project(backend).await;
     // A sub-microsecond part no store keeps.
-    let created = Utc::now().trunc_subsecs(3) + chrono::Duration::nanoseconds(1_234_567);
+    let created =
+        trunc(Timestamp::now(), Unit::Millisecond) + SignedDuration::from_nanos(1_234_567);
     let mut app = application(project, "Fine clock");
     app.created_at = created;
     let mut client = client_of(&app);
@@ -734,7 +736,7 @@ pub async fn test_resource_access(backend: &dyn StorageBackend) {
     // Setting again replaces the scopes and keeps the creation time; two
     // writers of one pair leave one access.
     let mut wider = access(&web, &api, &["orders.read", "orders.write"]);
-    wider.created_at = granted.created_at + chrono::Duration::seconds(5);
+    wider.created_at = granted.created_at + SignedDuration::from_secs(5);
     let (a, b) = tokio::join!(
         backend.set_resource_access(&wider, test_audit()),
         backend.set_resource_access(&wider, test_audit()),
@@ -896,7 +898,7 @@ pub async fn test_machine_user_resource_access(backend: &dyn StorageBackend) {
         client_id: ci.client_id.clone(),
         resource_id: api.id,
         scopes: vec!["orders.read".into()],
-        created_at: Utc::now().trunc_subsecs(3),
+        created_at: trunc(Timestamp::now(), Unit::Millisecond),
     };
     backend
         .set_resource_access(&granted, test_audit())

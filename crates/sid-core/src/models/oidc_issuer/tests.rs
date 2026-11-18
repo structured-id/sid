@@ -71,7 +71,7 @@ fn key_for(issuer_id: IssuerId, generation: u32) -> IssuerSigningKey {
         key_id: "kid".into(),
         public_key: [7; 32],
         sealed_private_key: vec![1],
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     }
 }
 
@@ -82,7 +82,7 @@ fn some_issuer() -> OidcIssuer {
         canonical_url: "https://sid.example.com/i/x".into(),
         authority: IssuerAuthority::Local,
         recipient_org: OrgId::generate(),
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     }
 }
 
@@ -127,7 +127,7 @@ fn signing_key_debug_hides_the_sealed_key() {
         public_key: [7; 32],
         sealed_private_key: vec![0xAB; 48],
         // A fixed time: the current one can itself contain "171".
-        created_at: chrono::DateTime::UNIX_EPOCH,
+        created_at: jiff::Timestamp::UNIX_EPOCH,
     };
     let shown = format!("{key:?}");
     // The bytes as a derived Debug prints them; a bare "171" also occurs in

@@ -23,7 +23,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use chrono::{DateTime, SubsecRound, Utc};
+use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit};
 use rand::RngExt;
 use sid_core::models::{NewWork, WorkKind};
 use sid_plugin::CeremonyStateStore;
@@ -120,7 +120,7 @@ pub struct CodeDelivery {
 pub struct PendingCode {
     pub destination: String,
     pub code: secrecy::SecretString,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// An OTP session as the store holds it.
@@ -128,7 +128,7 @@ pub struct PendingCode {
 struct StoredOtpSession {
     code_hash: String,
     target: String,
-    expires_at: DateTime<Utc>,
+    expires_at: Timestamp,
     /// The current code's issue: a resent code gets a new one.
     issue: Uuid,
     /// The mailbox the code is sent to, bound at the request; `None` when
@@ -290,7 +290,7 @@ impl OtpService {
         &self,
         session_id: Uuid,
         issue: Uuid,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Option<PendingCode>, OtpError> {
         let Some(Read { session, .. }) = self.live(&session_id.to_string()).await? else {
             return Ok(None);
@@ -361,15 +361,25 @@ impl OtpService {
         )
         .await
         .map_err(|e| OtpError::Internal(format!("seal the code: {e}")))?;
-        let expiry = chrono::Duration::from_std(OTP_EXPIRY)
-            .map_err(|e| OtpError::Internal(e.to_string()))?;
+        // At the precision every store keeps a deadline, so the code and the
+        // work mailing it expire at the same instant.
+        let expires_at = SignedDuration::try_from(OTP_EXPIRY)
+            .ok()
+            .and_then(|expiry| Timestamp::now().checked_add(expiry).ok())
+            .and_then(|at| {
+                at.round(
+                    TimestampRound::new()
+                        .smallest(Unit::Microsecond)
+                        .mode(RoundMode::Trunc),
+                )
+                .ok()
+            })
+            .ok_or_else(|| OtpError::Internal("the code expiry is out of range".into()))?;
         Ok((
             StoredOtpSession {
                 code_hash,
                 target: target.to_string(),
-                // At the precision every store keeps a deadline, so the
-                // code and the work mailing it expire at the same instant.
-                expires_at: (Utc::now() + expiry).trunc_subsecs(6),
+                expires_at,
                 issue,
                 destination,
                 sealed_code,
@@ -419,7 +429,7 @@ impl OtpService {
 
         // Ending a session ends only the state read here: a code resent in
         // the meantime stays usable.
-        if Utc::now() >= read.session.expires_at {
+        if Timestamp::now() >= read.session.expires_at {
             self.end(&key, &read).await?;
             return Ok(OtpVerifyResult::Expired);
         }

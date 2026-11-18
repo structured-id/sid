@@ -4,7 +4,7 @@
 //! Tracks user consent for data sharing with external sites/services.
 //! Every claim shared requires explicit consent; users can revoke at any time.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -237,10 +237,10 @@ pub struct ClaimGrant {
     pub claim_type: ClaimType,
 
     /// When this grant was given.
-    pub granted_at: DateTime<Utc>,
+    pub granted_at: Timestamp,
 
     /// When this grant was revoked (if revoked).
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
 }
 
 impl ClaimGrant {
@@ -254,7 +254,7 @@ impl ClaimGrant {
             consent_id,
             claim_name: claim_name.into(),
             claim_type,
-            granted_at: Utc::now(),
+            granted_at: Timestamp::now(),
             revoked_at: None,
         }
     }
@@ -265,7 +265,7 @@ impl ClaimGrant {
 
     pub fn revoke(&mut self) {
         if self.revoked_at.is_none() {
-            self.revoked_at = Some(Utc::now());
+            self.revoked_at = Some(Timestamp::now());
         }
     }
 }
@@ -287,18 +287,18 @@ pub struct ConsentRecord {
     pub grants: Vec<ClaimGrant>,
 
     /// When consent was first given.
-    pub consented_at: DateTime<Utc>,
+    pub consented_at: Timestamp,
 
     /// When consent was fully revoked (all claims).
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
 
     /// When consent was last updated (new grants or revocations).
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl ConsentRecord {
     pub fn new(profile_id: ProfileId, client_id: impl Into<String>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ConsentId::new(),
             profile_id,
@@ -315,7 +315,7 @@ impl ConsentRecord {
     /// renews that grant, granting an active one changes nothing.
     pub fn grant_claim(&mut self, claim_name: impl Into<String>, claim_type: ClaimType) {
         let claim_name = claim_name.into();
-        let now = Utc::now();
+        let now = Timestamp::now();
         match self.grants.iter_mut().find(|g| g.claim_name == claim_name) {
             Some(grant) if grant.is_active() => return,
             Some(grant) => {
@@ -392,14 +392,14 @@ impl<'a> RequestedConsent<'a> {
     /// User grants consent — transition to Active. Consumes wrapper.
     pub fn grant(self) {
         self.0.status = ConsentStatus::Active;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// User denies consent — transition to Revoked. Consumes wrapper.
     pub fn deny(self) {
         self.0.status = ConsentStatus::Revoked;
-        self.0.revoked_at = Some(Utc::now());
-        self.0.updated_at = Utc::now();
+        self.0.revoked_at = Some(Timestamp::now());
+        self.0.updated_at = Timestamp::now();
     }
 
     pub fn inner(&self) -> &ConsentRecord {
@@ -417,8 +417,8 @@ impl<'a> ActiveConsent<'a> {
             grant.revoke();
         }
         self.0.status = ConsentStatus::Revoked;
-        self.0.revoked_at = Some(Utc::now());
-        self.0.updated_at = Utc::now();
+        self.0.revoked_at = Some(Timestamp::now());
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Revoke a specific claim by name.
@@ -428,7 +428,7 @@ impl<'a> ActiveConsent<'a> {
                 grant.revoke();
             }
         }
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     pub fn inner(&self) -> &ConsentRecord {

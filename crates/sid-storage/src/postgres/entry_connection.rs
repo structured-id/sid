@@ -4,8 +4,8 @@
 //! as one step; the issuer's uniqueness decides between two registrations
 //! of one issuer.
 
+use crate::pg_time::{FromPg, PgTime, ToPg};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use sid_core::models::{
     ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerId, MutationContext,
     OrgId,
@@ -72,11 +72,13 @@ fn connection_of(row: &sqlx::postgres::PgRow) -> SidResult<EntryConnection> {
         revision: u64::try_from(revision)
             .map_err(|_| SidError::Storage("a negative entry connection revision".into()))?,
         created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(column("created_at"))?,
+            .try_get::<PgTime, _>("created_at")
+            .map_err(column("created_at"))?
+            .jiff(),
         updated_at: row
-            .try_get::<DateTime<Utc>, _>("updated_at")
-            .map_err(column("updated_at"))?,
+            .try_get::<PgTime, _>("updated_at")
+            .map_err(column("updated_at"))?
+            .jiff(),
     })
 }
 
@@ -151,8 +153,8 @@ impl EntryConnectionStore for PostgresBackend {
         .bind(credential_bytes(&connection.credential))
         .bind(connection.enabled)
         .bind(stored_revision(connection.revision)?)
-        .bind(connection.created_at)
-        .bind(connection.updated_at)
+        .bind(connection.created_at.pg())
+        .bind(connection.updated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("entry connection", e))?;
@@ -198,7 +200,7 @@ impl EntryConnectionStore for PostgresBackend {
         .bind(connection.credential.method())
         .bind(credential_bytes(&connection.credential))
         .bind(connection.enabled)
-        .bind(connection.updated_at)
+        .bind(connection.updated_at.pg())
         .bind(stored_revision(connection.revision)?)
         .execute(&mut *tx)
         .await

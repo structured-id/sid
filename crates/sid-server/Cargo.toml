@@ -43,7 +43,7 @@ sid-infra = { workspace = true, features = [
 sid-serve = { workspace = true }
 sid-notify = { workspace = true }
 ipnet = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 # Reads which field a refusal names, to tell a refused token from other refusals.
 tonic-types = { workspace = true }
 tonic-health = { workspace = true }
@@ -64,7 +64,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
@@ -149,10 +149,9 @@ sid-plugin = { workspace = true }
 # Passkey ceremonies run against a software authenticator.
 sid-authn = { workspace = true, features = ["soft-authenticator"] }
 sid-proto = { workspace = true }
-chrono = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 tonic-types = { workspace = true }
 # The synchronous test harness provisions the installation's issuer over the
 # in-memory store, whose operations complete without awaiting.

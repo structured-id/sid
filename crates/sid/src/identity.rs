@@ -413,7 +413,7 @@ impl Identity {
         if let Some(contact) = contacts.into_iter().find(|c| c.email == address) {
             return Ok(contact);
         }
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let contact = ProfileEmail {
             id: sid_core::models::ProfileEmailId::new(),
             profile_id,
@@ -870,7 +870,7 @@ impl Identity {
                 if let Some(v) = req.honorific_suffix {
                     profile.honorific_suffix = Some(v);
                 }
-                profile.updated_at = chrono::Utc::now();
+                profile.updated_at = jiff::Timestamp::now();
 
                 // The profile as this edit leaves it, with the contacts it
                 // has: the edit changes no contact.

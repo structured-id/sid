@@ -3,7 +3,7 @@
 //! settings changed field by field, one primary moved in a single write
 //! (`BEGIN IMMEDIATE` serializes the writers).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -85,7 +85,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         settings: &PhoneSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
@@ -124,7 +124,7 @@ impl SqliteBackend {
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);
@@ -204,7 +204,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         settings: &EmailSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
@@ -237,7 +237,7 @@ impl SqliteBackend {
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);

@@ -3,9 +3,9 @@
 //! and RFC 8414 metadata, the JWK Set (RFC 7517) of the keys that sign its
 //! tokens, UserInfo (OIDC Core 1.0 §5.3), and the HTTP form of its OAuth
 //! endpoints (token, introspection, revocation, device authorization) over
-//! the same logic as AuthService. Every answer belongs to the issuer the
-//! handle names; there is no issuer-less endpoint and no fallback to another
-//! issuer.
+//! the same logic as AuthService. Every answer belongs to the issuer whose
+//! route was reached: `/i/{handle}` for a scoped issuer, the root for the
+//! installation's root-addressed base issuer; no fallback to another issuer.
 
 use std::sync::Arc;
 
@@ -40,6 +40,9 @@ use sid_infra::oauth_http::{self, Form};
 /// fetching the next: a new signing generation is published well before it
 /// signs anything.
 const JWKS_CACHE_CONTROL: &str = "public, max-age=3600, stale-while-revalidate=600";
+
+/// A handle naming no issuer: not a handle's form, so no lookup resolves it.
+const NO_ISSUER: &str = "-";
 
 /// The UserInfo RPCs, as a native gRPC client calls them.
 const GET_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/GetUserInfo";
@@ -104,7 +107,10 @@ impl OidcProviderServiceImpl {
             Some(issuer) => issuer,
             None => return Ok(oauth_http::page(404, "Unknown issuer")),
         };
-        let (metadata, _, asked) = request.into_parts();
+        let (metadata, _, mut asked) = request.into_parts();
+        // The typed logic resolves the issuer by its handle, which the root
+        // route does not carry.
+        asked.issuer_handle = issuer.handle.to_string();
         let pending = match asked.request_uri.as_deref() {
             None => PendingAuthorization::arrived(asked),
             Some(uri) => {
@@ -308,12 +314,46 @@ fn form_authorize_request(
 }
 
 impl OidcProviderServiceImpl {
-    /// The issuer `handle` names for a page answer; `None` for no issuer.
+    /// The issuer whose endpoint the route with `handle` reached (the root
+    /// route has none; see [`sid::oauth::OAuth::routed_issuer`]); `None` for
+    /// no issuer.
     async fn page_issuer(&self, handle: &str) -> Result<Option<OidcIssuer>, Status> {
-        match self.auth.oauth().issuer_by_handle(handle).await {
-            Ok(issuer) => Ok(Some(issuer)),
-            Err(ProviderError::IssuerNotFound(_)) => Ok(None),
-            Err(e) => Err(provider_refusal(e)),
+        self.auth
+            .oauth()
+            .routed_issuer(handle)
+            .await
+            .map_err(internal)
+    }
+
+    /// The handle of the issuer the route with `handle` reached, which the
+    /// typed logic resolves; [`NO_ISSUER`] when it reached none, so the typed
+    /// logic answers as for an unknown handle. Never the empty handle, which
+    /// names the root-addressed base issuer.
+    async fn routed_handle(&self, handle: &str) -> Result<String, Status> {
+        Ok(self
+            .page_issuer(handle)
+            .await?
+            .map_or_else(|| NO_ISSUER.to_owned(), |issuer| issuer.handle.to_string()))
+    }
+
+    /// `request` with its route's handle replaced by [`Self::routed_handle`].
+    async fn routed(
+        &self,
+        mut request: Request<ProtocolRequest>,
+    ) -> Result<Request<ProtocolRequest>, Status> {
+        let asked = std::mem::take(&mut request.get_mut().issuer_handle);
+        request.get_mut().issuer_handle = self.routed_handle(&asked).await?;
+        Ok(request)
+    }
+
+    /// The handle of the issuer the route with `handle` reached, or the
+    /// refusal of an unknown issuer naming the handle asked for.
+    async fn provider_handle(&self, handle: &str) -> Result<String, Status> {
+        match self.page_issuer(handle).await? {
+            Some(issuer) => Ok(issuer.handle.to_string()),
+            None => Err(provider_refusal(ProviderError::IssuerNotFound(
+                handle.to_string(),
+            ))),
         }
     }
 
@@ -334,9 +374,12 @@ impl OidcProviderServiceImpl {
             method: &target.method,
             uri: &target.uri,
         });
+        let handle = self
+            .provider_handle(&request.get_ref().issuer_handle)
+            .await?;
         self.auth
             .oauth()
-            .user_info(&request.get_ref().issuer_handle, presented)
+            .user_info(&handle, presented)
             .await
             .map(Response::new)
             .map_err(provider_refusal)
@@ -462,9 +505,12 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<IssuerHandleRequest>,
     ) -> Result<Response<ProviderMetadata>, Status> {
+        let handle = self
+            .provider_handle(&request.into_inner().issuer_handle)
+            .await?;
         self.auth
             .oauth()
-            .provider_metadata(&request.into_inner().issuer_handle)
+            .provider_metadata(&handle)
             .await
             .map(Response::new)
             .map_err(provider_refusal)
@@ -475,10 +521,13 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<IssuerHandleRequest>,
     ) -> Result<Response<JsonWebKeySet>, Status> {
+        let handle = self
+            .provider_handle(&request.into_inner().issuer_handle)
+            .await?;
         let mut response = Response::new(
             self.auth
                 .oauth()
-                .jwks(&request.into_inner().issuer_handle)
+                .jwks(&handle)
                 .await
                 .map_err(provider_refusal)?,
         );
@@ -600,6 +649,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
     /// Every grant of the token endpoint. The DPoP proof comes from the
     /// `dpop` metadata only (RFC 9449 §4.1), never from the form.
     async fn token(&self, request: Request<ProtocolRequest>) -> Result<Response<HttpBody>, Status> {
+        let request = self.routed(request).await?;
         let parsed = form_request(request, |form, issuer_handle| OAuth2TokenRequest {
             grant_type: form.take("grant_type").unwrap_or_default(),
             code: form.take("code"),
@@ -653,6 +703,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<ProtocolRequest>,
     ) -> Result<Response<HttpBody>, Status> {
+        let request = self.routed(request).await?;
         let parsed = form_request(request, |form, issuer_handle| OAuth2IntrospectRequest {
             token: form.take("token").unwrap_or_default(),
             issuer_handle,
@@ -697,6 +748,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<ProtocolRequest>,
     ) -> Result<Response<HttpBody>, Status> {
+        let request = self.routed(request).await?;
         let parsed = form_request(request, |form, issuer_handle| OAuth2RevokeRequest {
             token: form.take("token").unwrap_or_default(),
             token_type_hint: form.take("token_type_hint"),
@@ -726,6 +778,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<ProtocolRequest>,
     ) -> Result<Response<HttpBody>, Status> {
+        let request = self.routed(request).await?;
         let parsed = form_request(request, |form, issuer_handle| DeviceAuthorizationRequest {
             client_id: form.take("client_id"),
             scope: form.take("scope"),
@@ -766,6 +819,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         &self,
         request: Request<ProtocolRequest>,
     ) -> Result<Response<HttpBody>, Status> {
+        let request = self.routed(request).await?;
         let (metadata, extensions, protocol) = request.into_parts();
         let presented = bearer_presented(&metadata);
         let typed = match client_metadata::Metadata::parse(protocol.body.as_ref()) {
@@ -804,7 +858,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         let presented = bearer_presented(&metadata);
         let typed = sid_proto::sid::v1::GetRegisteredClientRequest {
             client_id: managed.client_id,
-            issuer_handle: managed.issuer_handle,
+            issuer_handle: self.routed_handle(&managed.issuer_handle).await?,
         };
         match self
             .project
@@ -826,8 +880,9 @@ impl OidcProviderService for OidcProviderServiceImpl {
     ) -> Result<Response<HttpBody>, Status> {
         let (metadata, extensions, managed) = request.into_parts();
         let presented = bearer_presented(&metadata);
+        let handle = self.routed_handle(&managed.issuer_handle).await?;
         let typed = match client_metadata::Metadata::parse(managed.body.as_ref())
-            .and_then(|parsed| parsed.into_update(managed.client_id, managed.issuer_handle))
+            .and_then(|parsed| parsed.into_update(managed.client_id, handle))
         {
             Ok(typed) => typed,
             Err(invalid) => return Ok(invalid_metadata(&invalid)),
@@ -854,7 +909,7 @@ impl OidcProviderService for OidcProviderServiceImpl {
         let presented = bearer_presented(&metadata);
         let typed = sid_proto::sid::v1::DeleteRegisteredClientRequest {
             client_id: managed.client_id,
-            issuer_handle: managed.issuer_handle,
+            issuer_handle: self.routed_handle(&managed.issuer_handle).await?,
         };
         match self
             .project

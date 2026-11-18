@@ -18,6 +18,7 @@ pub mod account_closure;
 pub mod account_roles;
 pub mod admin_claim;
 pub mod anomaly;
+pub mod application_session;
 pub mod backchannel_logout;
 pub mod bearer_secret;
 pub mod bff_session;

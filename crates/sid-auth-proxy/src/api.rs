@@ -2,37 +2,20 @@
 //! `/api/*`: the account API through the BFF. The browser sends its session
 //! cookie and CSRF token; the BFF forwards the request to the account API
 //! with the session's access token as `Authorization: Bearer` (RFC 6750
-//! §2.1), refreshing it first when it is about to expire. Neither the cookie
-//! nor the CSRF token reaches the API, and nothing the API sets as a cookie
-//! reaches the browser.
+//! §2.1), refreshed first when it is due. Neither the cookie nor the CSRF
+//! token reaches the API, and nothing the API sets as a cookie reaches the
+//! browser.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderName, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use secrecy::ExposeSecret;
 
 use crate::ProxyState;
-use secrecy::{ExposeSecret, SecretString};
-use sid_authn::bff_session::{BffSession, RefreshClaim, TokenReplacement};
-
-use crate::bff::{connected, csrf_matches, signed_in, verified_claims};
-
-/// An access token this close to expiry is refreshed before use, so it does
-/// not expire between the BFF and the API.
-const REFRESH_MARGIN_SECS: i64 = 30;
-/// How long one replica holds a session's refresh: longer than a token
-/// endpoint call.
-const REFRESH_HOLD: Duration = Duration::from_secs(15);
-/// How long the holder of a refresh claim may take from claiming it to
-/// storing the result: inside the hold, with room for the shared store's
-/// clock and the last write.
-const REFRESH_WORK: Duration = Duration::from_secs(12);
-const _: () = assert!(REFRESH_WORK.as_secs() < REFRESH_HOLD.as_secs());
-/// How often a replica that did not win the refresh looks for its result.
-const REFRESH_POLL: Duration = Duration::from_millis(200);
+use crate::bff::{browser_request, refusal, sessions};
 
 /// Hop-by-hop headers (RFC 9110 §7.6.1) and the ones the BFF owns: none
 /// crosses it in either direction.
@@ -60,29 +43,25 @@ pub async fn api_handler(
     uri: axum::http::Uri,
     body: Body,
 ) -> Response {
-    let (session_id, session) = match signed_in(&state, &headers).await {
-        Ok(found) => found,
+    let sessions = match sessions(&state) {
+        Ok(sessions) => sessions,
         Err(status) => return status.into_response(),
     };
-    // Every API call changes or reads account data on the user's behalf, so
-    // a request another site can make the browser send is refused: the
-    // session's CSRF token, handed to the page with its session check,
-    // proves the page on this origin sent it.
-    if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
-        && !csrf_matches(&headers, &session)
-    {
-        tracing::warn!("BFF API: CSRF token mismatch");
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let Some(upstream) = state.api_upstream.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let Some(target) = api_target(upstream, &path, uri.query()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let access_token = match current_token(&state, &session_id, session).await {
-        Ok(token) => token,
-        Err(status) => return status.into_response(),
+    // A request that can change account data must come from the page on this
+    // origin and echo the session's CSRF token, handed to the page with its
+    // session check: another site can make the browser send it, but not that.
+    let bearer = match sessions
+        .bearer(&browser_request(sessions, &headers, &method))
+        .await
+    {
+        Ok(bearer) => bearer,
+        Err(failure) => return refusal(failure).into_response(),
     };
 
     let mut forwarded = reqwest::header::HeaderMap::new();
@@ -91,8 +70,8 @@ pub async fn api_handler(
             forwarded.append(name.clone(), value.clone());
         }
     }
-    if let Ok(bearer) = format!("Bearer {}", access_token.expose_secret()).parse() {
-        forwarded.insert(header::AUTHORIZATION, bearer);
+    if let Ok(value) = format!("Bearer {}", bearer.token().expose_secret()).parse() {
+        forwarded.insert(header::AUTHORIZATION, value);
     }
     if let Ok(peer) = peer.ip().to_string().parse() {
         forwarded.append("x-forwarded-for", peer);
@@ -112,6 +91,18 @@ pub async fn api_handler(
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
+    // The API refused the token for want of a usable credential: a gRPC-Web
+    // answer carries `UNAUTHENTICATED` (16) in its headers when it has no
+    // body. The session refreshes before its next use, which tells an ended
+    // grant from a token that alone is no longer usable.
+    if answer
+        .headers()
+        .get("grpc-status")
+        .is_some_and(|status| status.as_bytes() == b"16")
+        && let Err(failure) = sessions.refused(&bearer).await
+    {
+        return refusal(failure).into_response();
+    }
 
     let mut response = Response::builder().status(answer.status());
     if let Some(out) = response.headers_mut() {
@@ -141,167 +132,6 @@ fn api_target(upstream: &url::Url, path: &str, query: Option<&str>) -> Option<ur
             .path()
             .starts_with(upstream.path().trim_end_matches('/'));
     stays.then_some(target)
-}
-
-/// The session's access token, refreshed first when it is about to expire.
-///
-/// One replica refreshes; the others wait for its result in the shared
-/// store. A refused refresh (the grant was revoked or expired) ends the
-/// session: 401. A refresh that cannot be done now is 503, and the session
-/// stays for the next request.
-async fn current_token(
-    state: &ProxyState,
-    session_id: &str,
-    session: BffSession,
-) -> Result<SecretString, StatusCode> {
-    let now = chrono::Utc::now().timestamp();
-    if session.claims.exp - now > REFRESH_MARGIN_SECS {
-        return Ok(session.access_token);
-    }
-    let Some(from) = session.refresh_token.clone() else {
-        return Err(end_session(state, session_id).await);
-    };
-    // The claim lapses after its hold whatever happens here, and another
-    // replica may then present the same refresh token: everything up to
-    // storing the result ends before, or is abandoned. Counted from before the
-    // claim is made, so it never outlasts the claim.
-    let deadline = tokio::time::Instant::now() + REFRESH_WORK;
-    // The session read before the claim may be older than a refresh another
-    // replica completed under an earlier, now expired claim: the claim hands
-    // back what the store holds now, so a refresh token that was already
-    // rotated is never presented.
-    let session = match state
-        .bff_sessions
-        .claim_refresh(session_id, &from, REFRESH_HOLD, |current| {
-            current.claims.exp - now <= REFRESH_MARGIN_SECS
-        })
-        .await
-    {
-        Ok(RefreshClaim::Claimed(current)) => *current,
-        Ok(RefreshClaim::Current(current)) => return Ok(current.access_token),
-        Ok(RefreshClaim::HeldElsewhere) => {
-            return refreshed_elsewhere(state, session_id, session.access_token.expose_secret())
-                .await;
-        }
-        Ok(RefreshClaim::Ended) => return Err(StatusCode::UNAUTHORIZED),
-        Err(e) => {
-            tracing::error!(error = %e, "BFF API: cannot claim the refresh");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    };
-    // A lost answer is retried by the next request inside the issuer's grace
-    // window for a replaced refresh token.
-    tokio::time::timeout_at(deadline, refresh_claimed(state, session_id, session, now))
-        .await
-        .unwrap_or_else(|_| {
-            tracing::error!("BFF API: the refresh did not finish within its claim");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        })
-}
-
-/// The refresh of `session`, whose claim this caller holds.
-async fn refresh_claimed(
-    state: &ProxyState,
-    session_id: &str,
-    session: BffSession,
-    now: i64,
-) -> Result<SecretString, StatusCode> {
-    if session.claims.exp - now > REFRESH_MARGIN_SECS {
-        return Ok(session.access_token);
-    }
-    let Some(refresh_token) = session.refresh_token.clone() else {
-        return Err(end_session(state, session_id).await);
-    };
-
-    let (link, connection) = connected(state).await?;
-    let tokens = match link
-        .refresh(connection, refresh_token.expose_secret().to_owned())
-        .await
-    {
-        Ok(tokens) => tokens,
-        Err(sid_infra::issuer_client::RpClientError::Rpc(status)) if !transient(&status) => {
-            tracing::info!(error = %status, "BFF API: refresh refused, session ended");
-            return Err(end_session(state, session_id).await);
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "BFF API: refresh failed");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    };
-    let claims = verified_claims(state, connection, &tokens.access_token)
-        .await?
-        .refreshed(&session.claims);
-    let access_token = SecretString::from(tokens.access_token);
-    match state
-        .bff_sessions
-        .replace_tokens(
-            session_id,
-            &refresh_token,
-            access_token.clone(),
-            tokens.refresh_token.map(SecretString::from),
-            claims,
-        )
-        .await
-    {
-        Ok(TokenReplacement::Replaced) => Ok(access_token),
-        // A newer refresh landed first; its tokens stand.
-        Ok(TokenReplacement::Superseded(current)) => Ok(current.access_token),
-        Ok(TokenReplacement::Ended) => Err(StatusCode::UNAUTHORIZED),
-        Err(e) => {
-            tracing::error!(error = %e, "BFF API: cannot store the refreshed tokens");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-/// The token another replica's refresh stored, once it is there.
-async fn refreshed_elsewhere(
-    state: &ProxyState,
-    session_id: &str,
-    stale: &str,
-) -> Result<SecretString, StatusCode> {
-    let deadline = tokio::time::Instant::now() + REFRESH_HOLD;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(REFRESH_POLL).await;
-        match state.bff_sessions.get_session(session_id).await {
-            Ok(Some(session)) if session.bearer() != stale => {
-                return Ok(session.access_token);
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(StatusCode::UNAUTHORIZED),
-            Err(e) => {
-                tracing::error!(error = %e, "BFF API: cannot read the session");
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
-        }
-    }
-    tracing::warn!("BFF API: another replica's refresh did not finish");
-    Err(StatusCode::SERVICE_UNAVAILABLE)
-}
-
-/// Whether a refused call may succeed if repeated: SID or the path to it
-/// failed, not the grant.
-fn transient(status: &tonic::Status) -> bool {
-    use tonic::Code;
-    matches!(
-        status.code(),
-        Code::Unavailable
-            | Code::DeadlineExceeded
-            | Code::Internal
-            | Code::Unknown
-            | Code::ResourceExhausted
-            | Code::Aborted
-            | Code::Cancelled
-    )
-}
-
-/// Destroy the session and answer 401: the user signs in again.
-async fn end_session(state: &ProxyState, session_id: &str) -> StatusCode {
-    if let Err(e) = state.bff_sessions.destroy_session(session_id).await {
-        tracing::error!(error = %e, "BFF API: cannot destroy an ended session");
-        return StatusCode::SERVICE_UNAVAILABLE;
-    }
-    StatusCode::UNAUTHORIZED
 }
 
 #[cfg(test)]

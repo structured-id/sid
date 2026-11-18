@@ -4,7 +4,7 @@
 //! does not hold gets an error naming it, never a partial effect.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::anomaly_event::AnomalyEventRecord;
 use sid_core::models::consent::{ConsentId, ConsentRecord};
 use sid_core::models::device_attestation::{DeviceAttestation, DeviceAttestationId};
@@ -174,7 +174,7 @@ impl GrantStore for CoordinodeBackend {
         CoordinodeBackend::list_sessions(self, *owner).await
     }
 
-    async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> Result<()> {
+    async fn touch_session(&self, id: SessionId, at: Timestamp) -> Result<()> {
         CoordinodeBackend::touch_session(self, id, at).await
     }
 
@@ -211,7 +211,7 @@ impl GrantStore for CoordinodeBackend {
         &self,
         old_id: Uuid,
         new: &RefreshToken,
-        grace_expires_at: DateTime<Utc>,
+        grace_expires_at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::rotate_refresh_token(self, old_id, new, grace_expires_at, ctx).await
@@ -310,15 +310,15 @@ impl CredentialStore for CoordinodeBackend {
         CoordinodeBackend::get_password_history(self, owner).await
     }
 
-    async fn history_write_cutoff(&self) -> Result<Option<DateTime<Utc>>> {
+    async fn history_write_cutoff(&self) -> Result<Option<Timestamp>> {
         CoordinodeBackend::history_write_cutoff(self).await
     }
 
     async fn raise_history_write_cutoff(
         &self,
-        not_before: DateTime<Utc>,
+        not_before: Timestamp,
         ctx: MutationContext,
-    ) -> Result<DateTime<Utc>> {
+    ) -> Result<Timestamp> {
         CoordinodeBackend::raise_history_write_cutoff(self, not_before, ctx).await
     }
 
@@ -430,7 +430,7 @@ impl SignInHistoryStore for CoordinodeBackend {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: ProfileId,
-    ) -> Result<Option<(std::net::IpAddr, DateTime<Utc>)>> {
+    ) -> Result<Option<(std::net::IpAddr, Timestamp)>> {
         CoordinodeBackend::get_most_recent_session_ip(self, profile_id).await
     }
 
@@ -571,7 +571,7 @@ impl StorageBackend for CoordinodeBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         settings: &PhoneSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::update_profile_phone_settings(self, profile_id, id, settings, at, ctx)
@@ -582,7 +582,7 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::set_primary_profile_phone(self, profile_id, id, at, ctx).await
@@ -616,7 +616,7 @@ impl StorageBackend for CoordinodeBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         settings: &EmailSettings,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::update_profile_email_settings(self, profile_id, id, settings, at, ctx)
@@ -627,7 +627,7 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::set_primary_profile_email(self, profile_id, id, at, ctx).await
@@ -791,7 +791,7 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::remove_ip_allowlist_entry(self, cidr, ctx).await
     }
 
-    async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, DateTime<Utc>)>> {
+    async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, Timestamp)>> {
         CoordinodeBackend::list_ip_allowlist_entries(self).await
     }
 
@@ -799,7 +799,7 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         cidr: &str,
         description: &str,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::import_ip_allowlist_entry(self, cidr, description, created_at, ctx).await
@@ -1978,7 +1978,7 @@ impl StorageBackend for CoordinodeBackend {
         machine_user_id: MachineUserId,
         old_kid: &str,
         new: &MachineUserCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::rotate_machine_credential(
@@ -2092,7 +2092,7 @@ impl StorageBackend for CoordinodeBackend {
         connector_id: ProvisioningConnectorId,
         old: ProvisioningCredentialId,
         new: &ProvisioningCredential,
-        grace_until: DateTime<Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::rotate_provisioning_credential(
@@ -2177,7 +2177,7 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         principal_hash: &str,
         principal_type: &str,
-        quarantine_until: DateTime<Utc>,
+        quarantine_until: Timestamp,
         ctx: MutationContext,
     ) -> Result<()> {
         CoordinodeBackend::quarantine_principal(
@@ -2293,7 +2293,7 @@ impl StorageBackend for CoordinodeBackend {
     async fn acknowledge_export_job(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::acknowledge_export_job(self, id, at, ctx).await
@@ -2302,7 +2302,7 @@ impl StorageBackend for CoordinodeBackend {
     async fn expire_export_job(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::expire_export_job(self, id, at, ctx).await
@@ -2533,7 +2533,7 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         id: sid_core::models::BrandingConfigId,
         project_id: ProjectId,
-        at: DateTime<Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool> {
         CoordinodeBackend::publish_branding_config(self, id, project_id, at, ctx).await
@@ -2639,16 +2639,12 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn count_registrations_by_source(
         &self,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> Result<Vec<(RegistrationSourceType, u64)>> {
         CoordinodeBackend::count_registrations_by_source(self, since).await
     }
 
-    async fn top_referrers(
-        &self,
-        since: DateTime<Utc>,
-        limit: u64,
-    ) -> Result<Vec<(ProfileId, u64)>> {
+    async fn top_referrers(&self, since: Timestamp, limit: u64) -> Result<Vec<(ProfileId, u64)>> {
         CoordinodeBackend::top_referrers(self, since, limit).await
     }
 
@@ -2658,9 +2654,8 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::try_job_lock(self, job).await
     }
 
-    async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> Result<bool> {
+    async fn ensure_audit_partition(&self, month_start: jiff::civil::Date) -> Result<bool> {
         // Audit records live in one store here: nothing to prepare.
-        use chrono::Datelike;
         if month_start.day() != 1 {
             return Err(SidError::Validation(format!(
                 "{month_start} is not the first day of a month"
@@ -2671,7 +2666,7 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn drop_expired_audit_records(
         &self,
-        cut_before: DateTime<Utc>,
+        cut_before: Timestamp,
         ctx: MutationContext,
     ) -> Result<u64> {
         CoordinodeBackend::drop_expired_audit_records(self, cut_before, ctx).await

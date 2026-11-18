@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Pairwise service bindings: one per (profile, scope), allocated on first use.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::{BindingId, BindingScope, MutationContext, ProfileId, ServiceBinding};
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -60,9 +60,8 @@ fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
     move |e| SidError::Storage(format!("{what}: {e}"))
 }
 
-fn timestamp(text: &str) -> SidResult<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(text)
-        .map(|t| t.with_timezone(&Utc))
+fn timestamp(text: &str) -> SidResult<Timestamp> {
+    text.parse()
         .map_err(|e| SidError::Storage(format!("stored binding timestamp {text:?}: {e}")))
 }
 
@@ -159,7 +158,7 @@ impl SqliteBackend {
         scope: &BindingScope,
         ctx: MutationContext,
     ) -> SidResult<ServiceBinding> {
-        let now = fmt_dt(&Utc::now());
+        let now = fmt_dt(&Timestamp::now());
         let mut tx = self.begin_write().await?;
         let existing: Option<Row> = sqlx::query_as(TOUCH)
             .bind(&now)
