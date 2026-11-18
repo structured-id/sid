@@ -34,7 +34,7 @@ fn state_round_trips_through_its_name() {
 }
 
 fn snapshot(state: WorkState, attempts: u32) -> WorkSnapshot {
-    let now = Utc::now();
+    let now = Timestamp::now();
     WorkSnapshot {
         record: WorkRecord {
             id: WorkId::new(),

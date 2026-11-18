@@ -125,7 +125,7 @@ async fn setup(storage: Arc<dyn StorageBackend>) -> Setup {
 
 fn grant(role: &Role, to: ProfileId) -> RoleAssignment {
     RoleAssignment::new(RoleAssignmentPrincipal::Profile(to), role.id)
-        .with_expiry(chrono::Utc::now() + chrono::Duration::days(5))
+        .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(5 * 24))
 }
 
 async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {

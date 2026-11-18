@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use ipnet::IpNet;
+use jiff::{SignedDuration, Timestamp};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -66,7 +66,7 @@ pub struct IpClassification {
     /// Which provider produced this classification.
     pub source: String,
     /// When this classification expires (cache TTL).
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// Aggregated classification from all providers.
@@ -355,7 +355,7 @@ impl IpIntelligenceProvider for TorExitProvider {
             labels: vec![IpLabel::TorExit],
             risk_score: Some(0.8),
             source: "tor_bulk_exit_list".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 
@@ -639,7 +639,7 @@ impl IpIntelligenceProvider for CloudRangeProvider {
             labels: vec![IpLabel::Datacenter],
             risk_score: Some(0.4),
             source: "cloud_ranges".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(24),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(24),
         }))
     }
 
@@ -949,7 +949,7 @@ impl IpIntelligenceProvider for FireholProvider {
             labels: vec![IpLabel::Blocklisted],
             risk_score: Some(0.9),
             source: "firehol_level1".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(1),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         }))
     }
 
@@ -1079,7 +1079,7 @@ impl IpIntelligenceProvider for SelfLearnedReputationProvider {
                 labels: vec![IpLabel::Blocklisted],
                 risk_score: Some(score),
                 source: "self_learned".to_string(),
-                expires_at: Utc::now() + chrono::Duration::seconds(60),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(60),
             }))
     }
 
@@ -1169,7 +1169,7 @@ impl IpIntelligenceProvider for AllowlistProvider {
             labels: vec![IpLabel::Allowed],
             risk_score: Some(0.0),
             source: "admin_allowlist".to_string(),
-            expires_at: Utc::now() + chrono::Duration::hours(24),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(24),
         }))
     }
 

@@ -3,7 +3,7 @@
 //!
 //! Replaces scalar `Profile.email` / `Profile.email_verified` with a 1:N table.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -59,10 +59,10 @@ pub struct ProfileEmail {
     pub verified: bool,
 
     /// When verification was last confirmed.
-    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// The owner's edit of an email's label: each field given replaces the

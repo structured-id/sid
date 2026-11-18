@@ -19,6 +19,11 @@ ignore = [
     # the fixed 1.0.10; async-nats 0.50 → tokio-websockets 0.10 still asks
     # for 0.26.
     "RUSTSEC-2026-0381",
+    # chrono unmaintained (no vulnerability). This workspace no longer uses
+    # it; it stays only as a dependency of cedar-policy-core 4.15 (sid-authz)
+    # and of coordinode-query 0.9 (sid-storage). Remove once cedar drops
+    # chrono and a crates.io release of coordinode without it is taken.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

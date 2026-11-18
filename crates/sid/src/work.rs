@@ -135,7 +135,7 @@ impl CeWork {
                     Box::pin(async move {
                         match crate::auth_mail::purge_ended_mail(
                             storage.as_ref(),
-                            chrono::Utc::now(),
+                            jiff::Timestamp::now(),
                         )
                         .await
                         {

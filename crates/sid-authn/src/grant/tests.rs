@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     ActorFence, AuthorizationCode, BrowserSecretHash, GrantAuthentication, IssuerId,
     MutationContext, ProtectedResource, RefreshToken, ResourceAccess, ResourceIndicator,
@@ -121,7 +121,7 @@ impl GrantStore for MemoryGrants {
         }))
     }
 
-    async fn touch_session(&self, _id: SessionId, _at: DateTime<Utc>) -> sid_core::Result<()> {
+    async fn touch_session(&self, _id: SessionId, _at: Timestamp) -> sid_core::Result<()> {
         Ok(())
     }
 
@@ -176,7 +176,7 @@ impl GrantStore for MemoryGrants {
         &self,
         old_id: Uuid,
         new: &RefreshToken<Account>,
-        grace_expires_at: DateTime<Utc>,
+        grace_expires_at: Timestamp,
         ctx: MutationContext,
     ) -> sid_core::Result<bool> {
         self.check(&ctx)?;
@@ -275,7 +275,7 @@ fn client() -> OAuth2Client {
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -295,7 +295,7 @@ fn client() -> OAuth2Client {
         unified_input: false,
         org_id: None,
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -313,14 +313,14 @@ fn target_with(client: &OAuth2Client, grant: crate::jwt::UserGrant) -> Target {
         scopes: vec!["account".into()],
         state: ResourceState::Active,
         revision: 0,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let access = ResourceAccess {
         client_id: client.client_id.clone(),
         resource_id: resource.id,
         scopes: vec!["account".into()],
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     Target::from_parts(resource, access, grant)
 }
@@ -402,7 +402,7 @@ impl Host {
                 self.target.resource_id(),
                 GrantAuthentication {
                     session: SessionId::generate(),
-                    authenticated_at: Utc::now(),
+                    authenticated_at: Timestamp::now(),
                     amr: vec!["pwd".into()],
                     assurance_level: sid_core::models::AuthLevel::Basic,
                     elevation: None,
@@ -758,7 +758,7 @@ async fn test_reused_refresh_token_ends_family_and_session() {
     host.grants.with(|g| {
         for token in &mut g.refresh {
             if token.replaced_by.is_some() {
-                token.grace_expires_at = Some(Utc::now() - Duration::seconds(1));
+                token.grace_expires_at = Some(Timestamp::now() - SignedDuration::from_secs(1));
             }
         }
     });
@@ -801,7 +801,7 @@ async fn test_a_bound_token_without_its_key_ends_nothing() {
     host.grants.with(|g| {
         for token in &mut g.refresh {
             if token.replaced_by.is_some() {
-                token.grace_expires_at = Some(Utc::now() - Duration::seconds(1));
+                token.grace_expires_at = Some(Timestamp::now() - SignedDuration::from_secs(1));
             }
         }
     });
@@ -854,7 +854,7 @@ async fn test_refresh_of_an_expired_session_is_refused() {
     let first = redeem_code(&host, code_grant(&code)).await.unwrap();
     let presented = first.refresh_token.unwrap();
     host.grants
-        .with(|g| g.sessions[0].expires_at = Utc::now() - Duration::seconds(1));
+        .with(|g| g.sessions[0].expires_at = Timestamp::now() - SignedDuration::from_secs(1));
 
     let (error, description) = refused(refresh(&host, Some(&presented)).await.unwrap_err());
 
@@ -876,7 +876,8 @@ async fn test_refresh_at_the_session_end_is_refused() {
     let host = Host::new().await;
     let code = host.authorize(Account(7));
     let first = redeem_code(&host, code_grant(&code)).await.unwrap();
-    host.grants.with(|g| g.sessions[0].expires_at = Utc::now());
+    host.grants
+        .with(|g| g.sessions[0].expires_at = Timestamp::now());
 
     let (error, description) = refused(
         refresh(&host, first.refresh_token.as_deref())

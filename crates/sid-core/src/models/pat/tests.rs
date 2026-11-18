@@ -56,14 +56,15 @@ fn test_pat_revoke() {
 
 #[test]
 fn test_pat_expired() {
-    let pat = make_pat().with_expires_at(Utc::now() - chrono::Duration::hours(1));
+    let pat = make_pat().with_expires_at(Timestamp::now() - jiff::SignedDuration::from_hours(1));
     assert!(pat.is_expired());
     assert!(!pat.is_usable());
 }
 
 #[test]
 fn test_pat_not_expired() {
-    let pat = make_pat().with_expires_at(Utc::now() + chrono::Duration::days(30));
+    let pat =
+        make_pat().with_expires_at(Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24));
     assert!(!pat.is_expired());
     assert!(pat.is_usable());
 }

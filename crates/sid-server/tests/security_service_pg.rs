@@ -95,7 +95,7 @@ fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2C
         subject_type: SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: chrono::Utc::now(),
+        client_id_issued_at: jiff::Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -115,7 +115,7 @@ fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2C
         unified_input: false,
         org_id: None,
         revision: 0,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     }
 }
 

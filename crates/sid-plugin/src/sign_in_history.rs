@@ -21,7 +21,7 @@ pub trait SignInHistoryStore: Send + Sync {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: Self::Owner,
-    ) -> Result<Option<(IpAddr, chrono::DateTime<chrono::Utc>)>>;
+    ) -> Result<Option<(IpAddr, jiff::Timestamp)>>;
 
     /// Whether the account had a session from `ip` within `window`.
     ///
@@ -94,7 +94,7 @@ pub struct LoginLocation {
     pub latitude: f64,
     pub longitude: f64,
     pub login_count: i64,
-    pub first_seen: chrono::DateTime<chrono::Utc>,
-    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub first_seen: jiff::Timestamp,
+    pub last_seen: jiff::Timestamp,
     pub designated: bool,
 }

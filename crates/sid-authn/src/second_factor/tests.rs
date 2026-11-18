@@ -208,7 +208,7 @@ async fn a_recovery_spend_removes_its_code_from_the_set_as_read() {
 async fn operation(f: &Fixture, key: &str) -> OperationContext {
     let period = f
         .store
-        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_hours(1))
         .await
         .unwrap()
         .period;
@@ -282,7 +282,7 @@ async fn offered_and_enrollable_factors_follow_the_accounts_protection() {
     use sid_core::models::MfaEnforcement;
     let f = fixture().await;
     let alice = account(&f).await;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let first = crate::login_policy::local_authentication(
         alice,
         AuthLevel::Basic,

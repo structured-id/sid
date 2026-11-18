@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use sid_core::models::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, Organization};
 
@@ -31,7 +31,7 @@ async fn installed_with(root: bool) -> Installed {
         .unwrap();
     let org = storage.instance_organization().await.unwrap().unwrap().id;
     let (id, handle) = (IssuerId::generate(), IssuerHandle::generate());
-    let now = Utc::now().trunc_subsecs(3);
+    let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
     let issuer = OidcIssuer {
         id,
         canonical_url: if root {
@@ -617,7 +617,7 @@ async fn provisioning_does_not_take_an_administrators_connection() {
 async fn a_caller_without_the_administrator_role_is_refused() {
     let i = installed().await;
     let profile = stored_profile(i.storage.as_ref(), "user").await;
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     let user = Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
         sub: profile.to_string(),
         pid: Some(profile.to_string()),

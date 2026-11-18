@@ -12,7 +12,7 @@
 
 #![allow(dead_code)] // Structs will be used incrementally as methods migrate
 
-use chrono::{DateTime, Utc};
+use crate::pg_time::{FromPg, PgTime};
 use secrecy::SecretBox;
 use uuid::Uuid;
 
@@ -85,11 +85,11 @@ pub struct ProfileRow {
     pub max_assurance: String,
     pub manager_id: Option<ProfileId>,
     pub migration_pending: bool,
-    pub migration_started_at: Option<DateTime<Utc>>,
-    pub migration_completed_at: Option<DateTime<Utc>>,
+    pub migration_started_at: Option<PgTime>,
+    pub migration_completed_at: Option<PgTime>,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProfileRow {
@@ -112,11 +112,11 @@ impl ProfileRow {
             visibility: self.visibility.parse().map_err(stored)?,
             manager_id: self.manager_id,
             migration_pending: self.migration_pending,
-            migration_started_at: self.migration_started_at,
-            migration_completed_at: self.migration_completed_at,
+            migration_started_at: self.migration_started_at.jiff(),
+            migration_completed_at: self.migration_completed_at.jiff(),
             revision: u64::try_from(self.revision).map_err(|e| stored(format!("revision: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -138,9 +138,9 @@ pub struct ProfilePhoneRow {
     pub can_receive_fax: bool,
     pub can_receive_voice: bool,
     pub verified: bool,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub verified_at: Option<PgTime>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProfilePhoneRow {
@@ -157,9 +157,9 @@ impl ProfilePhoneRow {
             can_receive_fax: self.can_receive_fax,
             can_receive_voice: self.can_receive_voice,
             verified: self.verified,
-            verified_at: self.verified_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            verified_at: self.verified_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -177,9 +177,9 @@ pub struct ProfileEmailRow {
     pub custom_label: Option<String>,
     pub is_primary: bool,
     pub verified: bool,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub verified_at: Option<PgTime>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProfileEmailRow {
@@ -192,9 +192,9 @@ impl ProfileEmailRow {
             custom_label: self.custom_label,
             is_primary: self.is_primary,
             verified: self.verified,
-            verified_at: self.verified_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            verified_at: self.verified_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -210,13 +210,13 @@ pub struct PrincipalEntityRow {
     pub principal_type: String,
     pub value: String,
     pub verified: bool,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub verification_expires: Option<DateTime<Utc>>,
+    pub verified_at: Option<PgTime>,
+    pub verification_expires: Option<PgTime>,
     pub assigned_profile_id: Option<ProfileId>,
     pub assignment_revision: i64,
     pub email_policy_revision: Option<i64>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl PrincipalEntityRow {
@@ -226,13 +226,13 @@ impl PrincipalEntityRow {
             principal_type: parse_principal_type(&self.principal_type)?,
             value: self.value,
             verified: self.verified,
-            verified_at: self.verified_at,
-            verification_expires: self.verification_expires,
+            verified_at: self.verified_at.jiff(),
+            verification_expires: self.verification_expires.jiff(),
             assigned_profile_id: self.assigned_profile_id,
             assignment_revision: self.assignment_revision,
             email_policy_revision: self.email_policy_revision,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -246,13 +246,13 @@ pub struct PrincipalRow {
     pub principal_type: String,
     pub value: String,
     pub verified: bool,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub verification_expires: Option<DateTime<Utc>>,
+    pub verified_at: Option<PgTime>,
+    pub verification_expires: Option<PgTime>,
     pub assigned_profile_id: Option<ProfileId>,
     pub assignment_revision: i64,
     pub email_policy_revision: Option<i64>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
     // ── Binding fields (from JOIN) ──
     pub binding_id: Uuid,
     pub profile_id: ProfileId,
@@ -276,8 +276,8 @@ impl PrincipalRow {
             principal_type: parse_principal_type(&self.principal_type)?,
             value: self.value,
             verified: self.verified,
-            verified_at: self.verified_at,
-            verification_expires: self.verification_expires,
+            verified_at: self.verified_at.jiff(),
+            verification_expires: self.verification_expires.jiff(),
             assigned_profile_id: self.assigned_profile_id,
             assignment_revision: self.assignment_revision,
             email_policy_revision: self.email_policy_revision,
@@ -285,8 +285,8 @@ impl PrincipalRow {
             source_field: self.source_field,
             source_email_id: self.source_email_id.map(ProfileEmailId),
             source_phone_id: self.source_phone_id.map(ProfilePhoneId),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         };
         Ok(principal.as_seen_by_subject())
     }
@@ -302,7 +302,7 @@ pub struct PrincipalBindingRow {
     pub source_field: Option<String>,
     pub source_email_id: Option<Uuid>,
     pub source_phone_id: Option<Uuid>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl PrincipalBindingRow {
@@ -315,7 +315,7 @@ impl PrincipalBindingRow {
             source_field: self.source_field,
             source_email_id: self.source_email_id.map(ProfileEmailId),
             source_phone_id: self.source_phone_id.map(ProfilePhoneId),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -332,8 +332,8 @@ pub struct CredentialRow {
     pub status: String,
     pub data: Vec<u8>,
     pub label: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: PgTime,
+    pub last_used_at: Option<PgTime>,
     pub policy_version: Option<i32>,
     pub zkpp_verified: bool,
     pub zkpp_artifact: Option<Vec<u8>>,
@@ -364,8 +364,8 @@ impl CredentialRow {
                 .map_err(SidError::Storage)?,
             data: CredentialData::from(self.data),
             label: self.label,
-            created_at: self.created_at,
-            last_used_at: self.last_used_at,
+            created_at: self.created_at.jiff(),
+            last_used_at: self.last_used_at.jiff(),
             policy_evidence: crate::policy_evidence::from_columns(
                 self.zkpp_verified,
                 self.policy_version,
@@ -393,16 +393,16 @@ pub struct SessionRow {
     pub scopes: String,
     pub assurance_level: String,
     pub elevation_level: Option<String>,
-    pub elevation_until: Option<DateTime<Utc>>,
-    pub authenticated_at: DateTime<Utc>,
+    pub elevation_until: Option<PgTime>,
+    pub authenticated_at: PgTime,
     pub amr: String,
     pub is_provisional: bool,
     pub passkey_prompt: bool,
     pub policy_grace: bool,
-    pub grace_deadline: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub last_activity_at: Option<DateTime<Utc>>,
+    pub grace_deadline: Option<PgTime>,
+    pub created_at: PgTime,
+    pub expires_at: PgTime,
+    pub last_activity_at: Option<PgTime>,
     pub browser_secret_hash: Option<Vec<u8>>,
     pub browser_csrf: Option<Vec<u8>>,
     pub authenticated_by: Option<SessionId>,
@@ -417,12 +417,12 @@ fn auth_level(column: &str, value: &str) -> SidResult<AuthLevel> {
 /// A stored step-up: its level and the time it lapses, both or neither.
 fn elevation(
     level: Option<String>,
-    until: Option<DateTime<Utc>>,
+    until: Option<PgTime>,
 ) -> SidResult<Option<sid_core::models::session::Elevation>> {
     match (level, until) {
         (Some(level), Some(until)) => Ok(Some(sid_core::models::session::Elevation {
             level: auth_level("elevation_level", &level)?,
-            until,
+            until: until.jiff(),
         })),
         (None, None) => Ok(None),
         _ => Err(SidError::Storage(
@@ -444,15 +444,15 @@ impl SessionRow {
             scopes: Session::parse_scopes(&self.scopes),
             assurance_level: auth_level("assurance_level", &self.assurance_level)?,
             elevation,
-            authenticated_at: self.authenticated_at,
+            authenticated_at: self.authenticated_at.jiff(),
             amr: split_ws(&self.amr),
             is_provisional: self.is_provisional,
             passkey_prompt: self.passkey_prompt,
             policy_grace: self.policy_grace,
-            grace_deadline: self.grace_deadline,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            last_activity_at: self.last_activity_at,
+            grace_deadline: self.grace_deadline.jiff(),
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            last_activity_at: self.last_activity_at.jiff(),
             browser_secret_hash: self
                 .browser_secret_hash
                 .as_deref()
@@ -479,8 +479,8 @@ pub struct ProjectRow {
     pub description: String,
     pub owner_id: Option<ProfileId>,
     pub is_system: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProjectRow {
@@ -491,8 +491,8 @@ impl ProjectRow {
             description: self.description,
             owner_id: self.owner_id,
             is_system: self.is_system,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -539,10 +539,10 @@ pub struct OAuth2ClientRow {
     pub registration_iat: Option<InitialAccessTokenId>,
     pub registration_access_token_hash: Option<Vec<u8>>,
     pub org_id: Option<sid_core::models::OrgId>,
-    pub client_id_issued_at: DateTime<Utc>,
-    pub client_secret_expires_at: Option<DateTime<Utc>>,
+    pub client_id_issued_at: PgTime,
+    pub client_secret_expires_at: Option<PgTime>,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl OAuth2ClientRow {
@@ -584,8 +584,8 @@ impl OAuth2ClientRow {
                 .map_err(|e| parse("subject_type", e))?,
             sector_identifier_uri: self.sector_identifier_uri,
             contacts: self.contacts,
-            client_id_issued_at: self.client_id_issued_at,
-            client_secret_expires_at: self.client_secret_expires_at,
+            client_id_issued_at: self.client_id_issued_at.jiff(),
+            client_secret_expires_at: self.client_secret_expires_at.jiff(),
             registration_iat: self.registration_iat,
             registration_access_token_hash: self.registration_access_token_hash,
             required_acr: self
@@ -629,7 +629,7 @@ impl OAuth2ClientRow {
             unified_input: self.unified_input,
             org_id: self.org_id,
             revision: u64::try_from(self.revision).map_err(|e| parse("revision", e.to_string()))?,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -645,8 +645,8 @@ pub struct ApplicationRow {
     pub name: String,
     pub system_integration: Option<String>,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ApplicationRow {
@@ -665,8 +665,8 @@ impl ApplicationRow {
                 })?,
             revision: u64::try_from(self.revision)
                 .map_err(|e| SidError::Storage(format!("column revision: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -680,8 +680,8 @@ pub struct ProtectedResourceRow {
     pub scopes: String,
     pub state: String,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProtectedResourceRow {
@@ -698,8 +698,8 @@ impl ProtectedResourceRow {
             scopes: split_ws(&self.scopes),
             state: self.state.parse().map_err(|e| parse("state", e))?,
             revision: u64::try_from(self.revision).map_err(|e| parse("revision", e.to_string()))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -709,7 +709,7 @@ pub struct ResourceAccessRow {
     pub client_id: String,
     pub resource_id: sid_core::models::ResourceId,
     pub scopes: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl ResourceAccessRow {
@@ -718,7 +718,7 @@ impl ResourceAccessRow {
             client_id: self.client_id,
             resource_id: self.resource_id,
             scopes: split_ws(&self.scopes),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         }
     }
 }
@@ -736,12 +736,12 @@ pub struct RefreshTokenRow {
     pub client_id: String,
     pub scopes: String,
     pub resource_id: sid_core::models::ResourceId,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: PgTime,
+    pub created_at: PgTime,
     pub revoked: bool,
     pub replaced_by: Option<Uuid>,
     pub family_id: Uuid,
-    pub grace_expires_at: Option<DateTime<Utc>>,
+    pub grace_expires_at: Option<PgTime>,
     pub dpop_jkt: Option<String>,
 }
 
@@ -755,12 +755,12 @@ impl RefreshTokenRow {
             client_id: self.client_id,
             scopes: split_ws(&self.scopes),
             resource: self.resource_id,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             revoked: self.revoked,
             replaced_by: self.replaced_by,
             family_id: self.family_id,
-            grace_expires_at: self.grace_expires_at,
+            grace_expires_at: self.grace_expires_at.jiff(),
             dpop_jkt: self.dpop_jkt,
         }
     }
@@ -780,16 +780,16 @@ pub struct AuthCodeRow {
     pub resource_id: sid_core::models::ResourceId,
     pub code_challenge: Option<String>,
     pub nonce: Option<String>,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: PgTime,
+    pub created_at: PgTime,
     pub used: bool,
     pub session_id: Option<SessionId>,
     pub authorizing_session_id: SessionId,
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: PgTime,
     pub amr: String,
     pub assurance_level: String,
     pub elevation_level: Option<String>,
-    pub elevation_until: Option<DateTime<Utc>>,
+    pub elevation_until: Option<PgTime>,
     pub presentation: Option<Vec<u8>>,
 }
 
@@ -806,13 +806,13 @@ impl AuthCodeRow {
             nonce: self.nonce,
             authentication: sid_core::models::GrantAuthentication {
                 session: self.authorizing_session_id,
-                authenticated_at: self.authenticated_at,
+                authenticated_at: self.authenticated_at.jiff(),
                 amr: split_ws(&self.amr),
                 assurance_level: auth_level("assurance_level", &self.assurance_level)?,
                 elevation: elevation(self.elevation_level, self.elevation_until)?,
             },
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             used: self.used,
             session_id: self.session_id,
             presentation: self.presentation,
@@ -834,8 +834,8 @@ pub struct RoleRow {
     pub group_label: Option<String>,
     pub permissions: String,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl RoleRow {
@@ -850,8 +850,8 @@ impl RoleRow {
             permissions: Role::parse_permissions(&self.permissions),
             revision: u64::try_from(self.revision)
                 .map_err(|e| sid_core::Error::Storage(format!("role {} revision: {e}", self.id)))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -867,8 +867,8 @@ pub struct GroupRow {
     pub name: String,
     pub description: Option<String>,
     pub parent_group_id: Option<GroupId>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl GroupRow {
@@ -879,8 +879,8 @@ impl GroupRow {
             name: self.name,
             description: self.description,
             parent_group_id: self.parent_group_id,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -893,7 +893,7 @@ impl GroupRow {
 pub struct GroupMemberRow {
     pub group_id: GroupId,
     pub profile_id: ProfileId,
-    pub added_at: DateTime<Utc>,
+    pub added_at: PgTime,
 }
 
 impl GroupMemberRow {
@@ -901,7 +901,7 @@ impl GroupMemberRow {
         GroupMember {
             group_id: self.group_id,
             profile_id: self.profile_id,
-            added_at: self.added_at,
+            added_at: self.added_at.jiff(),
         }
     }
 }
@@ -920,8 +920,8 @@ pub struct RoleAssignmentRow {
     pub provisioning_connector_id: Option<sid_core::models::ProvisioningConnectorId>,
     pub role_id: RoleId,
     pub scope: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<PgTime>,
+    pub created_at: PgTime,
     pub granted_by: Option<String>,
     pub basis_assignment_id: Option<RoleAssignmentId>,
     pub depends_on_assignment_id: Option<RoleAssignmentId>,
@@ -954,8 +954,8 @@ impl RoleAssignmentRow {
             principal,
             role_id: self.role_id,
             scope: self.scope,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
             // The envelope lives in its own tables; the store attaches it.
             admin: None,
             policy_admin: None,
@@ -991,8 +991,8 @@ pub struct CedarPolicyRow {
     pub effect: String,
     pub enabled: bool,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl CedarPolicyRow {
@@ -1010,8 +1010,8 @@ impl CedarPolicyRow {
             effect: parsed("effect", &self.effect)?,
             enabled: self.enabled,
             revision: count("revision", self.revision)?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1025,8 +1025,8 @@ pub struct ProfileMetadataRow {
     pub profile_id: ProfileId,
     pub key: String,
     pub value: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProfileMetadataRow {
@@ -1035,8 +1035,8 @@ impl ProfileMetadataRow {
             profile_id: self.profile_id,
             key: self.key,
             value: self.value,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -1052,9 +1052,9 @@ pub struct ProfileGrantRow {
     pub profile_id: ProfileId,
     pub role_keys: String,
     pub granted_by: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<PgTime>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ProfileGrantRow {
@@ -1066,9 +1066,9 @@ impl ProfileGrantRow {
             // Written space-separated, like role permissions.
             role_keys: split_ws(&self.role_keys),
             granted_by: self.granted_by,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         }
     }
 }
@@ -1089,8 +1089,8 @@ pub struct DeviceRow {
     pub hardware_attested: bool,
     pub fingerprint_hash: Option<String>,
     pub last_ip_geo: Option<String>,
-    pub first_seen_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
+    pub first_seen_at: PgTime,
+    pub last_seen_at: PgTime,
 }
 
 impl DeviceRow {
@@ -1107,8 +1107,8 @@ impl DeviceRow {
             hardware_attested: self.hardware_attested,
             fingerprint_hash: self.fingerprint_hash,
             last_ip_geo: self.last_ip_geo,
-            first_seen_at: self.first_seen_at,
-            last_seen_at: self.last_seen_at,
+            first_seen_at: self.first_seen_at.jiff(),
+            last_seen_at: self.last_seen_at.jiff(),
         })
     }
 }
@@ -1129,9 +1129,9 @@ pub struct DeviceAttestationRow {
     pub attestation_object: Option<Vec<u8>>,
     pub attestation_certificate: Option<Vec<u8>>,
     pub aaguid: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
+    pub revoked_at: Option<PgTime>,
 }
 
 impl DeviceAttestationRow {
@@ -1147,9 +1147,9 @@ impl DeviceAttestationRow {
             attestation_object: self.attestation_object,
             attestation_certificate: self.attestation_certificate,
             aaguid: self.aaguid,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            revoked_at: self.revoked_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
+            revoked_at: self.revoked_at.jiff(),
         })
     }
 }
@@ -1170,17 +1170,17 @@ pub struct DeviceAuthRow {
     pub authorized_by: Option<ProfileId>,
     pub project_id: ProjectId,
     pub interval_secs: i32,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub authorized_at: Option<DateTime<Utc>>,
-    pub last_polled_at: Option<DateTime<Utc>>,
+    pub created_at: PgTime,
+    pub expires_at: PgTime,
+    pub authorized_at: Option<PgTime>,
+    pub last_polled_at: Option<PgTime>,
     pub redeemed_session_id: Option<SessionId>,
     pub authorizing_session_id: Option<SessionId>,
-    pub authenticated_at: Option<DateTime<Utc>>,
+    pub authenticated_at: Option<PgTime>,
     pub amr: Option<String>,
     pub assurance_level: Option<String>,
     pub elevation_level: Option<String>,
-    pub elevation_until: Option<DateTime<Utc>>,
+    pub elevation_until: Option<PgTime>,
 }
 
 impl DeviceAuthRow {
@@ -1188,7 +1188,7 @@ impl DeviceAuthRow {
     fn approval(&self) -> SidResult<Option<sid_core::models::GrantAuthentication>> {
         let (Some(session), Some(authenticated_at), Some(amr), Some(assurance_level)) = (
             self.authorizing_session_id,
-            self.authenticated_at,
+            self.authenticated_at.jiff(),
             self.amr.as_deref(),
             self.assurance_level.as_deref(),
         ) else {
@@ -1218,10 +1218,10 @@ impl DeviceAuthRow {
             authorized_by: self.authorized_by,
             project_id: self.project_id,
             interval: self.interval_secs,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            authorized_at: self.authorized_at,
-            last_polled_at: self.last_polled_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            authorized_at: self.authorized_at.jiff(),
+            last_polled_at: self.last_polled_at.jiff(),
             redeemed_session_id: self.redeemed_session_id,
         })
     }
@@ -1249,8 +1249,8 @@ pub struct UpstreamProviderRow {
     pub display_order: i32,
     pub logo_url: Option<String>,
     pub revision: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl UpstreamProviderRow {
@@ -1279,8 +1279,8 @@ impl UpstreamProviderRow {
             show_on_login: self.show_on_login,
             display_order: self.display_order,
             logo_url: self.logo_url,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1299,8 +1299,8 @@ pub struct UpstreamIdentityRow {
     pub upstream_email: Option<String>,
     pub upstream_name: Option<String>,
     pub upstream_picture: Option<String>,
-    pub linked_at: DateTime<Utc>,
-    pub last_login_at: Option<DateTime<Utc>>,
+    pub linked_at: PgTime,
+    pub last_login_at: Option<PgTime>,
     pub login_count: i64,
 }
 
@@ -1315,8 +1315,8 @@ impl UpstreamIdentityRow {
             upstream_email: self.upstream_email,
             upstream_name: self.upstream_name,
             upstream_picture: self.upstream_picture,
-            linked_at: self.linked_at,
-            last_login_at: self.last_login_at,
+            linked_at: self.linked_at.jiff(),
+            last_login_at: self.last_login_at.jiff(),
             login_count: count("login_count", self.login_count)?,
         })
     }
@@ -1337,13 +1337,13 @@ pub struct PatRow {
     pub scopes: String,
     pub ip_allowlist: String,
     pub status: String,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<PgTime>,
+    pub last_used_at: Option<PgTime>,
     pub last_used_ip: Option<String>,
     pub use_count: i64,
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<PgTime>,
     pub revoked_by: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl PatRow {
@@ -1358,13 +1358,13 @@ impl PatRow {
             scopes: split_ws(&self.scopes),
             ip_allowlist: split_ws(&self.ip_allowlist),
             status: parsed::<PatStatus>("status", &self.status)?,
-            expires_at: self.expires_at,
-            last_used_at: self.last_used_at,
+            expires_at: self.expires_at.jiff(),
+            last_used_at: self.last_used_at.jiff(),
             last_used_ip: self.last_used_ip,
             use_count: count("use_count", self.use_count)?,
-            revoked_at: self.revoked_at,
+            revoked_at: self.revoked_at.jiff(),
             revoked_by: self.revoked_by,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1388,10 +1388,10 @@ pub struct MachineUserRow {
     pub ip_allowlist: String,
     pub rate_limit_rpm: i32,
     pub max_token_lifetime: Option<i32>,
-    pub last_used_at: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<PgTime>,
+    pub expires_at: Option<PgTime>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl MachineUserRow {
@@ -1417,9 +1417,9 @@ impl MachineUserRow {
                 rate_limit_rpm: self.rate_limit_rpm as u32,
             },
             max_token_lifetime: self.max_token_lifetime.map(|v| v as u32),
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1436,8 +1436,8 @@ pub struct MachineCredentialRow {
     pub status: String,
     pub credential_data: String,
     pub algorithm: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<PgTime>,
+    pub created_at: PgTime,
 }
 
 impl MachineCredentialRow {
@@ -1450,8 +1450,8 @@ impl MachineCredentialRow {
             status: self.status.parse().map_err(SidError::Storage)?,
             credential_data: self.credential_data,
             algorithm: self.algorithm,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1466,7 +1466,7 @@ pub struct ImpersonationGrantRow {
     pub target_type: String,
     pub target: String,
     pub allowed_scopes: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl ImpersonationGrantRow {
@@ -1477,7 +1477,7 @@ impl ImpersonationGrantRow {
             target_type: self.target_type.parse().map_err(SidError::Storage)?,
             target: self.target,
             allowed_scopes: split_ws(&self.allowed_scopes),
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1498,8 +1498,8 @@ pub struct InitialAccessTokenRow {
     pub allowed_redirect_patterns: String,
     pub created_by: ProfileId,
     pub revoked: bool,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub expires_at: PgTime,
+    pub created_at: PgTime,
 }
 
 impl InitialAccessTokenRow {
@@ -1515,8 +1515,8 @@ impl InitialAccessTokenRow {
             allowed_redirect_patterns: split_ws(&self.allowed_redirect_patterns),
             created_by: self.created_by,
             revoked: self.revoked,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
+            expires_at: self.expires_at.jiff(),
+            created_at: self.created_at.jiff(),
         }
     }
 }
@@ -1531,8 +1531,8 @@ pub struct ClosureRequestRow {
     pub mode: String,
     pub closure_reason: Option<String>,
     pub requested_by: ProfileId,
-    pub requested_at: DateTime<Utc>,
-    pub grace_period_end: Option<DateTime<Utc>>,
+    pub requested_at: PgTime,
+    pub grace_period_end: Option<PgTime>,
     pub export_status: String,
     pub cancel_count: i32,
     pub legal_hold: Option<serde_json::Value>,
@@ -1550,8 +1550,8 @@ impl ClosureRequestRow {
             mode: parsed::<ClosureMode>("mode", &self.mode)?,
             closure_reason: self.closure_reason,
             requested_by: self.requested_by,
-            requested_at: self.requested_at,
-            grace_period_end: self.grace_period_end,
+            requested_at: self.requested_at.jiff(),
+            grace_period_end: self.grace_period_end.jiff(),
             export_status: parsed::<ExportStatus>("export_status", &self.export_status)?,
             legal_hold,
             cancel_count: count("cancel_count", i64::from(self.cancel_count))?,
@@ -1571,8 +1571,8 @@ pub struct MagicLinkRow {
     pub token_hash: String,
     pub sealed_token: Vec<u8>,
     pub consumed: bool,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub expires_at: PgTime,
 }
 
 impl MagicLinkRow {
@@ -1584,8 +1584,8 @@ impl MagicLinkRow {
             token_hash: self.token_hash,
             sealed_token: self.sealed_token,
             consumed: self.consumed,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
         }
     }
 }
@@ -1603,9 +1603,9 @@ pub struct ExportJobRow {
     pub archive_path: Option<String>,
     pub size_bytes: Option<i64>,
     pub checksum_sha256: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub ready_at: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: PgTime,
+    pub ready_at: Option<PgTime>,
+    pub expires_at: Option<PgTime>,
 }
 
 impl ExportJobRow {
@@ -1618,9 +1618,9 @@ impl ExportJobRow {
             archive_path: self.archive_path,
             size_bytes: self.size_bytes,
             checksum_sha256: self.checksum_sha256,
-            created_at: self.created_at,
-            ready_at: self.ready_at,
-            expires_at: self.expires_at,
+            created_at: self.created_at.jiff(),
+            ready_at: self.ready_at.jiff(),
+            expires_at: self.expires_at.jiff(),
         })
     }
 }
@@ -1641,8 +1641,8 @@ pub struct ScimOutboundTargetRow {
     pub group_push: serde_json::Value,
     pub sync_config: serde_json::Value,
     pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ScimOutboundTargetRow {
@@ -1664,8 +1664,8 @@ impl ScimOutboundTargetRow {
             sync_config: serde_json::from_value(self.sync_config)
                 .map_err(|e| field("sync config", e))?,
             enabled: self.enabled,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1680,11 +1680,11 @@ pub struct ScimOutboundRecordRow {
     pub sid_entity_id: Uuid,
     pub entity_type: String,
     pub downstream_id: Option<String>,
-    pub last_synced_at: DateTime<Utc>,
+    pub last_synced_at: PgTime,
     pub last_error: Option<String>,
     pub failure_count: i32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: PgTime,
+    pub updated_at: PgTime,
 }
 
 impl ScimOutboundRecordRow {
@@ -1694,12 +1694,12 @@ impl ScimOutboundRecordRow {
             sid_entity_id: self.sid_entity_id,
             entity_type: self.entity_type.parse().map_err(SidError::Storage)?,
             downstream_id: self.downstream_id.unwrap_or_default(),
-            last_synced_at: self.last_synced_at,
+            last_synced_at: self.last_synced_at.jiff(),
             last_error: self.last_error,
             failure_count: u32::try_from(self.failure_count)
                 .map_err(|e| SidError::Storage(format!("failure_count: {e}")))?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.jiff(),
+            updated_at: self.updated_at.jiff(),
         })
     }
 }
@@ -1718,8 +1718,8 @@ pub struct ScimOutboundDlqRow {
     pub entity_type: String,
     pub error: String,
     pub attempts: i32,
-    pub first_attempt: DateTime<Utc>,
-    pub last_attempt: DateTime<Utc>,
+    pub first_attempt: PgTime,
+    pub last_attempt: PgTime,
 }
 
 impl ScimOutboundDlqRow {
@@ -1734,8 +1734,8 @@ impl ScimOutboundDlqRow {
             error: self.error,
             attempts: u32::try_from(self.attempts)
                 .map_err(|e| SidError::Storage(format!("attempts: {e}")))?,
-            first_attempt: self.first_attempt,
-            last_attempt: self.last_attempt,
+            first_attempt: self.first_attempt.jiff(),
+            last_attempt: self.last_attempt.jiff(),
         })
     }
 }
@@ -1754,9 +1754,9 @@ pub struct InviteRow {
     pub metadata: serde_json::Value,
     pub max_uses: i32,
     pub use_count: i32,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<PgTime>,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl InviteRow {
@@ -1783,9 +1783,9 @@ impl InviteRow {
             metadata,
             max_uses: self.max_uses as u32,
             use_count: self.use_count as u32,
-            expires_at: self.expires_at,
+            expires_at: self.expires_at.jiff(),
             active: self.active,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1806,7 +1806,7 @@ pub struct RegistrationSourceRow {
     pub utm_term: String,
     pub utm_content: String,
     pub client_id: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: PgTime,
 }
 
 impl RegistrationSourceRow {
@@ -1823,7 +1823,7 @@ impl RegistrationSourceRow {
                 content: self.utm_content,
             },
             client_id: self.client_id,
-            created_at: self.created_at,
+            created_at: self.created_at.jiff(),
         })
     }
 }
@@ -1839,10 +1839,10 @@ pub struct PasswordResetSessionRow {
     pub token_hash: String,
     pub sealed_token: Vec<u8>,
     pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub verified_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: PgTime,
+    pub expires_at: PgTime,
+    pub verified_at: Option<PgTime>,
+    pub completed_at: Option<PgTime>,
 }
 
 impl PasswordResetSessionRow {
@@ -1855,10 +1855,10 @@ impl PasswordResetSessionRow {
             token_hash: self.token_hash,
             sealed_token: self.sealed_token,
             status: self.status.parse().map_err(SidError::Storage)?,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            verified_at: self.verified_at,
-            completed_at: self.completed_at,
+            created_at: self.created_at.jiff(),
+            expires_at: self.expires_at.jiff(),
+            verified_at: self.verified_at.jiff(),
+            completed_at: self.completed_at.jiff(),
         })
     }
 }

@@ -5,8 +5,8 @@
 //! triggers a security rule (brute force, credential stuffing, etc.).
 //! Persisted to anomaly_events table for admin dashboard queries.
 
-use chrono::{DateTime, Utc};
 use core::net::IpAddr;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -51,7 +51,7 @@ pub struct AnomalyEventRecord {
     pub risk_score: i32,
     /// Reaction taken (allow, step_up, require_captcha, block, hard_no).
     pub reaction: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 }
 
 impl AnomalyEventRecord {
@@ -71,7 +71,7 @@ impl AnomalyEventRecord {
             description: description.into(),
             risk_score,
             reaction: reaction.into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
         }
     }
 }

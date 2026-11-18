@@ -14,8 +14,8 @@
 //! not in the runner, and attempts started are the start of processing, which
 //! is zero while no runner runs however much work is accepted.
 
-#[cfg(feature = "telemetry")]
-use chrono::{DateTime, Utc};
+#[cfg(any(feature = "telemetry", test))]
+use jiff::Timestamp;
 use sid_core::models::{ClaimedWork, WorkKind};
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
@@ -74,8 +74,8 @@ impl Settled {
 /// stamps due and creation times, and a store clock ahead of this process
 /// is not a negative wait.
 #[cfg(any(feature = "telemetry", test))]
-fn elapsed(since: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> Duration {
-    (now - since).to_std().unwrap_or(Duration::ZERO)
+fn elapsed(since: Timestamp, now: Timestamp) -> Duration {
+    Duration::try_from(now.duration_since(since)).unwrap_or(Duration::ZERO)
 }
 
 /// One kind's instruments and labels, shared by its attempts.
@@ -102,7 +102,9 @@ impl KindObservation {
         let _ = work;
         Attempt {
             #[cfg(feature = "telemetry")]
-            in_flight: self.inner.start(work, elapsed(work.due_at, Utc::now())),
+            in_flight: self
+                .inner
+                .start(work, elapsed(work.due_at, Timestamp::now())),
         }
     }
 }
@@ -125,7 +127,7 @@ impl Attempt {
 
 #[cfg(feature = "telemetry")]
 mod telemetry {
-    use super::{DateTime, Settled, Utc, WorkKind, elapsed};
+    use super::{Settled, Timestamp, WorkKind, elapsed};
     use opentelemetry::KeyValue;
     use opentelemetry::global;
     use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
@@ -218,7 +220,7 @@ mod telemetry {
     pub(super) struct InFlight {
         instruments: Arc<Instruments>,
         started: Instant,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         settled: bool,
     }
 
@@ -226,7 +228,7 @@ mod telemetry {
         pub(super) fn settle(mut self, settled: Settled) {
             self.settled = true;
             let completion =
-                (settled == Settled::Completed).then(|| elapsed(self.created_at, Utc::now()));
+                (settled == Settled::Completed).then(|| elapsed(self.created_at, Timestamp::now()));
             self.instruments
                 .finished(self.started.elapsed(), completion, settled);
         }

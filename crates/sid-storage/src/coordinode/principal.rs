@@ -121,7 +121,7 @@ pub(super) fn init_email_policy(tx: &Statements<'_>) -> SidResult<Decision<()>> 
         "CREATE (a:SidEmailPolicy {scope: $scope, revision: 1, activated_at: $now})",
         Params::default()
             .with("scope", Value::String(EMAIL_POLICY_SCOPE.into()))
-            .with("now", time(chrono::Utc::now())),
+            .with("now", time(jiff::Timestamp::now())),
     )?;
     Ok(Decision::Commit(()))
 }
@@ -342,7 +342,7 @@ pub(super) fn unbind(tx: &Statements<'_>, id: PrincipalId, holder: ProfileId) ->
         Params::default()
             .with("id", uuid(&id.0))
             .with("holder", profile_value(holder))
-            .with("now", time(chrono::Utc::now())),
+            .with("now", time(jiff::Timestamp::now())),
     )?;
     Ok(true)
 }
@@ -495,7 +495,7 @@ impl CoordinodeBackend {
 
     pub(super) async fn expire_principal_verifications(&self) -> SidResult<i64> {
         self.transaction(|tx| {
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             let rows = tx.run(
                 "MATCH (p:SidPrincipal) WHERE p.verified = true
                    AND p.verification_expires IS NOT NULL AND p.verification_expires < $now
@@ -549,7 +549,7 @@ impl CoordinodeBackend {
                 return Ok(Decision::Abandon(false));
             }
             let active = active_email_revision(tx)?;
-            let now = time(chrono::Utc::now());
+            let now = time(jiff::Timestamp::now());
             tx.run(
                 "MATCH (p:SidPrincipal) WHERE p.id = $id
                  SET p.email_policy_revision = $revision, p.updated_at = $now",
@@ -593,7 +593,7 @@ impl CoordinodeBackend {
         &self,
         hash: &str,
         principal_type: &str,
-        until: chrono::DateTime<chrono::Utc>,
+        until: jiff::Timestamp,
         ctx: MutationContext,
     ) -> SidResult<()> {
         let (hash, principal_type) = (hash.to_owned(), principal_type.to_owned());
@@ -612,7 +612,7 @@ impl CoordinodeBackend {
                         until: $until, created_at: $now})",
                     params
                         .with("type", Value::String(principal_type.clone()))
-                        .with("now", time(chrono::Utc::now())),
+                        .with("now", time(jiff::Timestamp::now())),
                 )?;
             }
             Ok(())
@@ -628,7 +628,7 @@ impl CoordinodeBackend {
                  RETURN q.hash AS hash",
                 Params::default()
                     .with("hash", Value::String(hash.clone()))
-                    .with("now", time(chrono::Utc::now())),
+                    .with("now", time(jiff::Timestamp::now())),
             )?;
             Ok(Decision::Abandon(!rows.is_empty()))
         })
@@ -640,7 +640,7 @@ impl CoordinodeBackend {
             let rows = tx.run(
                 "MATCH (q:SidPrincipalQuarantine) WHERE q.until <= $now
                  DETACH DELETE q RETURN count(*) AS n",
-                Params::default().with("now", time(chrono::Utc::now())),
+                Params::default().with("now", time(jiff::Timestamp::now())),
             )?;
             let removed = get_count(&rows)?;
             if removed == 0 && ctx.work.is_empty() && ctx.operation.is_none() {

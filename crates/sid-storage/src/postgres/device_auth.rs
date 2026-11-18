@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Device authorization requests (RFC 8628).
 
-use chrono::Utc;
+use crate::pg_time::{FromPg, PgTime, ToPg};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     DeviceAuthCodeId, DeviceAuthDecision, DeviceAuthorizationCode, DeviceCodeRedemption,
     DevicePoll, GrantAuthentication, MutationContext, RefreshToken, Session, SessionId,
@@ -25,7 +26,7 @@ fn bind_approval<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     query
         .bind(authentication.map(|a| a.session))
-        .bind(authentication.map(|a| a.authenticated_at))
+        .bind(authentication.map(|a| a.authenticated_at.pg()))
         .bind(authentication.map(|a| a.amr.join(" ")))
         .bind(authentication.map(|a| a.assurance_level.as_str()))
         .bind(
@@ -33,7 +34,11 @@ fn bind_approval<'q>(
                 .and_then(|a| a.elevation)
                 .map(|e| e.level.as_str()),
         )
-        .bind(authentication.and_then(|a| a.elevation).map(|e| e.until))
+        .bind(
+            authentication
+                .and_then(|a| a.elevation)
+                .map(|e| e.until.pg()),
+        )
 }
 
 impl PostgresBackend {
@@ -58,13 +63,13 @@ impl PostgresBackend {
         .bind(&code.user_code)
         .bind(code.scope.as_deref())
         .bind(code.project_id)
-        .bind(code.expires_at)
+        .bind(code.expires_at.pg())
         .bind(code.interval)
         .bind(code.status.as_str())
         .bind(code.authorized_by)
-        .bind(code.authorized_at)
-        .bind(code.last_polled_at)
-        .bind(code.created_at)
+        .bind(code.authorized_at.pg())
+        .bind(code.last_polled_at.pg())
+        .bind(code.created_at.pg())
         .bind(code.redeemed_session_id)
         .bind(code.resource);
         bind_approval(insert, code.authorized_with.as_ref())
@@ -121,7 +126,7 @@ impl PostgresBackend {
     ) -> SidResult<DevicePoll> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
         // The row lock orders concurrent polls: each sees the previous one's time.
-        let (last, interval): (Option<chrono::DateTime<Utc>>, i32) = sqlx::query_as(
+        let (last, interval): (Option<PgTime>, i32) = sqlx::query_as(
             "SELECT last_polled_at, interval_secs FROM device_authorization_codes
              WHERE id = $1 FOR UPDATE",
         )
@@ -130,8 +135,10 @@ impl PostgresBackend {
         .await
         .map_err(storage("read device poll"))?
         .ok_or_else(|| SidError::NotFound(format!("device authorization {}", id.0)))?;
-        let now = Utc::now();
-        let too_soon = last.is_some_and(|t| now - t < chrono::Duration::seconds(interval.into()));
+        let now = Timestamp::now();
+        let too_soon = last
+            .jiff()
+            .is_some_and(|t| now.duration_since(t) < SignedDuration::from_secs(interval.into()));
         let (poll, interval) = if too_soon {
             let grown = interval
                 .checked_add(SLOW_DOWN_STEP_SECS)
@@ -145,7 +152,7 @@ impl PostgresBackend {
              WHERE id = $1",
         )
         .bind(id.0)
-        .bind(now)
+        .bind(now.pg())
         .bind(interval)
         .execute(&mut *tx)
         .await

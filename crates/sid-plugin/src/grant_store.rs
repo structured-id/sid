@@ -5,7 +5,7 @@
 //! host authenticates; CE's is the local Profile.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::Result;
 use sid_core::models::{
     AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, NativePresented,
@@ -85,7 +85,7 @@ pub trait GrantStore: Send + Sync {
 
     /// Record activity on session `id` at `at`; last activity only moves
     /// forward. An unknown session is left alone.
-    async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> Result<()>;
+    async fn touch_session(&self, id: SessionId, at: Timestamp) -> Result<()>;
 
     /// Delete a session by ID and the sessions it authenticated
     /// (`authenticated_by`), returning the ids of every session ended. In
@@ -131,7 +131,7 @@ pub trait GrantStore: Send + Sync {
         &self,
         old_id: Uuid,
         new: &RefreshToken<Self::Owner>,
-        grace_expires_at: DateTime<Utc>,
+        grace_expires_at: Timestamp,
         ctx: MutationContext,
     ) -> Result<bool>;
 

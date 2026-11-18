@@ -180,7 +180,7 @@ impl SqliteBackend {
             Self::commit_unchanged(tx, &audit).await?;
             return Ok(DeviceTrustChange::Unchanged);
         }
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         if trusted {
             let count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE profile_id = ? AND trusted")
@@ -348,7 +348,7 @@ impl SqliteBackend {
         decision: DeviceAuthDecision,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let (status, authorized_by, authorized_at, authentication) = match &decision {
             DeviceAuthDecision::Authorize {
                 profile,
@@ -405,8 +405,10 @@ impl SqliteBackend {
         .ok_or_else(|| SidError::NotFound(format!("device authorization {}", id.0)))?;
         let last = dt_col_opt(&row, "last_polled_at")?;
         let interval: i32 = col(&row, "interval_secs")?;
-        let now = chrono::Utc::now();
-        let too_soon = last.is_some_and(|t| now - t < chrono::Duration::seconds(interval.into()));
+        let now = jiff::Timestamp::now();
+        let too_soon = last.is_some_and(|t| {
+            now.duration_since(t) < jiff::SignedDuration::from_secs(interval.into())
+        });
         let (poll, interval) = if too_soon {
             let grown = interval
                 .checked_add(SLOW_DOWN_STEP_SECS)
@@ -436,7 +438,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<DeviceCodeRedemption> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("redeem device code: {e}"));
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         // Under the write lock: a sign-out of the approving session either
         // came first, leaving the device nothing to redeem, or waits.
@@ -497,7 +499,7 @@ impl SqliteBackend {
         &self,
         audit: MutationContext,
     ) -> SidResult<u64> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let result = sqlx::query(
             "DELETE FROM device_authorization_codes WHERE expires_at < ? AND status = 'pending'",

@@ -320,8 +320,8 @@ async fn attempt(
     };
     let retry_at = retry.then(|| {
         let delay = handler.retry_schedule().after(work.attempt);
-        chrono::Utc::now()
-            + chrono::Duration::from_std(delay).expect("a retry delay is at most one day")
+        jiff::Timestamp::now()
+            + jiff::SignedDuration::try_from(delay).expect("a retry delay is at most one day")
     });
     // The alert is offered on every failure; storage commits it only when
     // this failure ends the work.

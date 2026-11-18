@@ -3,7 +3,8 @@
 //! entry connections owes its caller. Each scenario needs a store that
 //! holds no connection yet.
 
-use chrono::{SubsecRound, Utc};
+use crate::conformance::trunc;
+use jiff::{SignedDuration, Timestamp, Unit};
 use sid_core::Error;
 use sid_core::models::{
     AuditEntry, ClientCredential, ConnectionOwner, EntryConnection, EntryHandle, IssuerId,
@@ -29,7 +30,7 @@ fn sealed(seed: u8) -> ClientCredential {
 /// A new connection to the issuer named by `n`, owned by `owner`.
 fn connection(n: u8, owner: ConnectionOwner) -> EntryConnection {
     // Stores keep times to the microsecond.
-    let now = Utc::now().trunc_subsecs(6);
+    let now = trunc(Timestamp::now(), Unit::Microsecond);
     EntryConnection {
         handle: EntryHandle::generate(),
         owner,
@@ -119,7 +120,7 @@ pub async fn connections_are_listed_in_one_order(store: &dyn EntryConnectionStor
     let mut expected = Vec::new();
     for n in 1..=4u8 {
         let mut held = connection(n, ConnectionOwner::Administration);
-        held.created_at -= chrono::Duration::seconds(i64::from(10 - n / 2));
+        held.created_at -= SignedDuration::from_secs(i64::from(10 - n / 2));
         held.updated_at = held.created_at;
         held.enabled = n % 2 == 0;
         store.create_entry_connection(&held, audit()).await.unwrap();
@@ -139,7 +140,7 @@ pub async fn a_change_applies_over_the_revision_it_read(store: &dyn EntryConnect
 
     let mut disabled = held.clone();
     disabled.enabled = false;
-    disabled.updated_at += chrono::Duration::seconds(1);
+    disabled.updated_at += SignedDuration::from_secs(1);
     assert!(
         store
             .update_entry_connection(&disabled, audit())

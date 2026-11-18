@@ -394,11 +394,9 @@ fn assignment_set_of(set: Option<RoleAssignmentSet>) -> Result<AssignmentSet, Au
 fn future_timestamp(
     ts: prost_types::Timestamp,
     field: &'static str,
-) -> Result<chrono::DateTime<chrono::Utc>, AuthorizationError> {
-    u32::try_from(ts.nanos)
-        .ok()
-        .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-        .filter(|at| *at > chrono::Utc::now())
+) -> Result<jiff::Timestamp, AuthorizationError> {
+    crate::wire::from_timestamp(&ts)
+        .filter(|at| *at > jiff::Timestamp::now())
         .ok_or_else(|| invalid_field(field, "not a timestamp in the future"))
 }
 
@@ -656,7 +654,7 @@ impl Authorization {
             if !req.permissions.is_empty() {
                 role.permissions = req.permissions.clone();
             }
-            role.updated_at = chrono::Utc::now();
+            role.updated_at = jiff::Timestamp::now();
 
             let answer = UpdateRoleResponse {
                 role: Some(role_to_proto(&role)),
@@ -762,13 +760,7 @@ impl Authorization {
             // another value.
             let expires_at = req
                 .expires_at
-                .map(|ts| {
-                    u32::try_from(ts.nanos)
-                        .ok()
-                        .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-                        .filter(|at| *at > chrono::Utc::now())
-                        .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))
-                })
+                .map(|ts| future_timestamp(ts, "expires_at"))
                 .transpose()?;
 
             let mut assignment = RoleAssignment::new(principal, role_id);
@@ -1567,7 +1559,7 @@ impl Authorization {
             if let Some(enabled) = req.enabled {
                 policy.enabled = enabled;
             }
-            policy.updated_at = chrono::Utc::now();
+            policy.updated_at = jiff::Timestamp::now();
 
             // The store writes over the revision just read and moves it on; the
             // answer is the policy as that commit leaves it.
@@ -1846,7 +1838,7 @@ impl Authorization {
             total_unchanged: result.total_unchanged as i32,
             warnings: result.warnings,
             errors: result.errors,
-            simulated_at: Some(to_timestamp(chrono::Utc::now())),
+            simulated_at: Some(to_timestamp(jiff::Timestamp::now())),
         })
     }
 }

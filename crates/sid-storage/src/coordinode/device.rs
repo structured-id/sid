@@ -7,8 +7,8 @@
 //! device authorization is decided, polled and redeemed by writing its own
 //! node: of concurrent writers one commits.
 
-use chrono::Utc;
 use coordinode_core::graph::types::Value;
+use jiff::Timestamp;
 use sid_core::models::{
     AttestationStatus, Device, DeviceAttestation, DeviceAttestationId, DeviceAuthCodeId,
     DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
@@ -389,7 +389,7 @@ impl CoordinodeBackend {
                     .with("id", bin(device_id.as_bytes()))
                     .with("trusted", Value::Bool(trusted))
                     .with("assurance", Value::String(assurance.into()))
-                    .with("now", time(Utc::now())),
+                    .with("now", time(Timestamp::now())),
             )?;
             let changed = rows
                 .first()
@@ -591,7 +591,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transaction(move |tx| {
-            let now = time(Utc::now());
+            let now = time(Timestamp::now());
             let rows = tx.run(
                 "MATCH (a:SidDeviceAttestation) WHERE a.device_id = $id AND a.status <> 'revoked'
                  SET a.status = 'revoked', a.revoked_at = $now, a.updated_at = $now
@@ -801,7 +801,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.transaction(move |tx| {
-            let now = Utc::now();
+            let now = Timestamp::now();
             let pending = auth_where(tx, "c.id = $value", uuid(&id.0))?
                 .is_some_and(|c| c.status == DeviceAuthStatus::Pending && c.expires_at > now);
             if !pending {
@@ -852,10 +852,10 @@ impl CoordinodeBackend {
             // time.
             let c = auth_where(tx, "c.id = $value", uuid(&id.0))?
                 .ok_or_else(|| SidError::NotFound(format!("device authorization {}", id.0)))?;
-            let now = Utc::now();
-            let too_soon = c
-                .last_polled_at
-                .is_some_and(|t| now - t < chrono::Duration::seconds(c.interval.into()));
+            let now = Timestamp::now();
+            let too_soon = c.last_polled_at.is_some_and(|t| {
+                now.duration_since(t) < jiff::SignedDuration::from_secs(c.interval.into())
+            });
             let (poll, interval) = if too_soon {
                 let grown = c
                     .interval
@@ -905,7 +905,7 @@ impl CoordinodeBackend {
                     session_id: c.redeemed_session_id,
                 }));
             }
-            if c.status != DeviceAuthStatus::Authorized || c.expires_at <= Utc::now() {
+            if c.status != DeviceAuthStatus::Authorized || c.expires_at <= Timestamp::now() {
                 return Ok(Decision::Abandon(DeviceCodeRedemption::NotAuthorized));
             }
             // A sign-out of the approving session either came first, leaving
@@ -942,7 +942,7 @@ impl CoordinodeBackend {
             let rows = tx.run(
                 "MATCH (c:SidDeviceAuth) WHERE c.expires_at < $now AND c.status = 'pending'
                  DETACH DELETE c RETURN count(*) AS n",
-                Params::default().with("now", time(Utc::now())),
+                Params::default().with("now", time(Timestamp::now())),
             )?;
             let removed = super::get_count(&rows)?;
             // Nothing expired and nothing owed: no action to record.

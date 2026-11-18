@@ -374,7 +374,7 @@ impl Projects {
         }
         let reference = model::OrganizationReference {
             id: org,
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         };
         self.storage
             .insert_organization_reference(
@@ -634,7 +634,7 @@ impl Projects {
             .as_ref()
             .map(|secret| hash_secret(secret.expose_secret()))
             .transpose()?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         // A federation site's organization, callback and evidence come from
         // its verified statement (`site_client`), never from the request.
         let (org_id, redirect_uris, participant_admission) = match site {
@@ -715,7 +715,7 @@ impl Projects {
             .map_err(|e| invalid_field(fields.indicator, e))?;
         let scopes =
             model::scope_list(&settings.scopes).map_err(|e| invalid_field(fields.scopes, e))?;
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Ok(model::ProtectedResource {
             id: ResourceId::generate(),
             application_id: Some(app.id),
@@ -882,7 +882,7 @@ impl Projects {
         let change = ProjectChange {
             name: req.name,
             description: req.description,
-            updated_at: chrono::Utc::now(),
+            updated_at: jiff::Timestamp::now(),
         };
         let project: Project = command
             .execute_recorded(&*self.storage, || async {
@@ -1047,7 +1047,7 @@ impl Projects {
                     }
                     app.name = name;
                 }
-                app.updated_at = chrono::Utc::now();
+                app.updated_at = jiff::Timestamp::now();
                 // The application as this edit leaves it: the store applies
                 // the edit only to the revision it was read at.
                 let mut left = app.clone();
@@ -1528,7 +1528,7 @@ impl Projects {
         let rat = generate_client_secret();
         let rat_hash = sha256_hash(rat.expose_secret().as_bytes());
 
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         // Enforce registration policy: AdminApproval = client created inactive.
         let policy = model::RegistrationPolicy::default(); // CE default.
         let client_active = match policy {
@@ -1781,13 +1781,16 @@ impl Projects {
                     .ok_or(ProjectError::ProjectNotFound(project_id))?;
 
                 let expires_in = if req.expires_in_seconds > 0 {
-                    chrono::Duration::seconds(req.expires_in_seconds)
+                    jiff::SignedDuration::from_secs(req.expires_in_seconds)
                 } else {
-                    chrono::Duration::hours(24) // default 24h
+                    jiff::SignedDuration::from_hours(24) // default 24h
                 };
                 let token_value = generate_client_secret();
                 let token_hash = sha256_hash(token_value.expose_secret().as_bytes());
-                let now = chrono::Utc::now();
+                let now = jiff::Timestamp::now();
+                let expires_at = now
+                    .checked_add(expires_in)
+                    .map_err(|_| invalid_field("expires_in_seconds", "too far in the future"))?;
                 let token = InitialAccessToken {
                     id: InitialAccessTokenId::generate(),
                     token_hash,
@@ -1797,7 +1800,7 @@ impl Projects {
                     allowed_scopes: req.allowed_scopes.clone(),
                     allowed_grant_types: req.allowed_grant_types.clone(),
                     allowed_redirect_patterns: req.allowed_redirect_patterns.clone(),
-                    expires_at: now + expires_in,
+                    expires_at,
                     created_at: now,
                     created_by: caller.profile_id,
                     revoked: false,
@@ -1930,7 +1933,7 @@ impl Projects {
             .into());
         }
 
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let app = model::Application {
             id: ApplicationId::generate(),
             project_id,
@@ -2136,7 +2139,7 @@ impl Projects {
                 }
             };
         }
-        resource.updated_at = chrono::Utc::now();
+        resource.updated_at = jiff::Timestamp::now();
         // The resource as this edit leaves it: the store applies the edit
         // only to the revision it was read at.
         let mut left = resource.clone();
@@ -2208,7 +2211,7 @@ impl Projects {
             client_id: req.client_id.clone(),
             resource_id: resource.id,
             scopes,
-            created_at: first.unwrap_or_else(chrono::Utc::now),
+            created_at: first.unwrap_or_else(jiff::Timestamp::now),
         };
         let view = access_to_proto(&access);
         let ctx = admin_ctx(

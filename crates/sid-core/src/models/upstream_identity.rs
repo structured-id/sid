@@ -5,7 +5,7 @@
 //! Each profile can have multiple upstream identities (e.g., Google + GitHub).
 //! Each upstream provider can have at most one identity per profile.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -65,10 +65,10 @@ pub struct UpstreamIdentity {
     pub upstream_picture: Option<String>,
 
     /// When this identity was first linked.
-    pub linked_at: DateTime<Utc>,
+    pub linked_at: Timestamp,
 
     /// When the user last authenticated via this upstream identity.
-    pub last_login_at: Option<DateTime<Utc>>,
+    pub last_login_at: Option<Timestamp>,
 
     /// Number of times this identity was used for login.
     pub login_count: u64,
@@ -81,7 +81,7 @@ pub struct UpstreamLogin {
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
 }
 
 impl UpstreamIdentity {
@@ -100,7 +100,7 @@ impl UpstreamIdentity {
             upstream_email: None,
             upstream_name: None,
             upstream_picture: None,
-            linked_at: Utc::now(),
+            linked_at: Timestamp::now(),
             last_login_at: None,
             login_count: 0,
         }
@@ -126,7 +126,7 @@ impl UpstreamIdentity {
 
     /// Record a login event.
     pub fn record_login(&mut self) {
-        self.last_login_at = Some(Utc::now());
+        self.last_login_at = Some(Timestamp::now());
         self.login_count += 1;
     }
 }

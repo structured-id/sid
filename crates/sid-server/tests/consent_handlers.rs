@@ -306,8 +306,8 @@ async fn test_get_consent_detail_phone_masking() {
         source_field: Some("phone".into()),
         source_email_id: None,
         source_phone_id: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
     };
     svc.storage
         .save_principal(&phone, AuditEntry::system("test", "setup").into())

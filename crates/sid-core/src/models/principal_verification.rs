@@ -5,7 +5,7 @@
 //! Each Principal can have multiple verification records (re-verification
 //! creates new record with new TTL, old one expires).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -172,11 +172,11 @@ pub struct PrincipalVerification {
     pub document_metadata: Option<String>,
 
     /// When verification was performed.
-    pub verified_at: DateTime<Utc>,
+    pub verified_at: Timestamp,
 
     /// When this verification expires (trust decay).
     /// After expiry, the principal reverts to Loa0 until re-verified.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl PrincipalVerification {
@@ -189,7 +189,7 @@ impl PrincipalVerification {
             provider: None,
             proof_reference: None,
             document_metadata: None,
-            verified_at: Utc::now(),
+            verified_at: Timestamp::now(),
             expires_at: None,
         }
     }
@@ -199,7 +199,7 @@ impl PrincipalVerification {
         self
     }
 
-    pub fn with_expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+    pub fn with_expires_at(mut self, expires_at: Timestamp) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
@@ -211,7 +211,7 @@ impl PrincipalVerification {
 
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map(|exp| Utc::now() >= exp)
+            .map(|exp| Timestamp::now() >= exp)
             .unwrap_or(false)
     }
 
@@ -224,7 +224,8 @@ impl PrincipalVerification {
     }
 
     pub fn days_until_expiry(&self) -> Option<i64> {
-        self.expires_at.map(|exp| (exp - Utc::now()).num_days())
+        self.expires_at
+            .map(|exp| exp.duration_since(Timestamp::now()).as_secs() / 86_400)
     }
 }
 
@@ -261,14 +262,16 @@ mod tests {
 
     #[test]
     fn test_verification_expired() {
-        let v = make_verification().with_expires_at(Utc::now() - chrono::Duration::hours(1));
+        let v = make_verification()
+            .with_expires_at(Timestamp::now() - jiff::SignedDuration::from_hours(1));
         assert!(v.is_expired());
         assert_eq!(v.effective_assurance(), AssuranceLevel::Loa0);
     }
 
     #[test]
     fn test_verification_not_expired() {
-        let v = make_verification().with_expires_at(Utc::now() + chrono::Duration::days(30));
+        let v = make_verification()
+            .with_expires_at(Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24));
         assert!(!v.is_expired());
         assert_eq!(v.effective_assurance(), AssuranceLevel::Loa1);
     }

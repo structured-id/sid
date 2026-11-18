@@ -321,7 +321,7 @@ impl ApplicationSessions {
     ///
     /// A token the API refused is refreshed whatever its expiry.
     async fn current_token(&self, id: &str, session: BffSession) -> Result<Bearer, Status> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         if !due(&session, now) {
             return Ok(Bearer::held(id, &session));
         }

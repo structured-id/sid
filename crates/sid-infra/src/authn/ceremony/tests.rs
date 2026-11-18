@@ -3,7 +3,7 @@
 //! response metadata, and a later step continues only from the client and
 //! transport that started it.
 
-use chrono::Duration;
+use jiff::SignedDuration;
 use prost::Message;
 use secrecy::SecretString;
 use sid_proto::sid::v1::authn::NativeCredentialSet;
@@ -61,7 +61,7 @@ fn open_browser() -> (Browser, CeremonyBinding, MetadataMap) {
     deliver_context(
         context,
         &cookie(),
-        Utc::now() + Duration::minutes(10),
+        Timestamp::now() + SignedDuration::from_mins(10),
         &mut response,
     )
     .unwrap();
@@ -84,7 +84,7 @@ fn open_native() -> (String, CeremonyBinding, MetadataMap) {
     deliver_context(
         context,
         &cookie(),
-        Utc::now() + Duration::minutes(10),
+        Timestamp::now() + SignedDuration::from_mins(10),
         &mut response,
     )
     .unwrap();

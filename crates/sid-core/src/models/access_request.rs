@@ -3,7 +3,7 @@
 //!
 //! 1-step approval. Optional temporary duration with auto-expiry.
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::profile::ProfileId;
@@ -74,10 +74,10 @@ pub struct AccessRequest {
     pub status: AccessRequestStatus,
     pub reviewed_by: Option<ProfileId>,
     pub review_comment: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub reviewed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub reviewed_at: Option<Timestamp>,
     /// Request auto-expires if admin doesn't act.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl AccessRequest {
@@ -96,7 +96,7 @@ impl AccessRequest {
             status: AccessRequestStatus::Pending,
             reviewed_by: None,
             review_comment: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             reviewed_at: None,
             expires_at: None,
         }
@@ -144,7 +144,7 @@ impl AccessRequest {
         self.status = AccessRequestStatus::Approved;
         self.reviewed_by = Some(reviewer_id);
         self.review_comment = comment;
-        self.reviewed_at = Some(Utc::now());
+        self.reviewed_at = Some(Timestamp::now());
         Ok(())
     }
 
@@ -160,7 +160,7 @@ impl AccessRequest {
         self.status = AccessRequestStatus::Denied;
         self.reviewed_by = Some(reviewer_id);
         self.review_comment = comment;
-        self.reviewed_at = Some(Utc::now());
+        self.reviewed_at = Some(Timestamp::now());
         Ok(())
     }
 
@@ -177,7 +177,7 @@ impl AccessRequest {
     pub fn check_expired(&mut self) -> bool {
         if self.status == AccessRequestStatus::Pending
             && let Some(exp) = self.expires_at
-            && Utc::now() > exp
+            && Timestamp::now() > exp
         {
             self.status = AccessRequestStatus::Expired;
             return true;
@@ -186,9 +186,9 @@ impl AccessRequest {
     }
 
     /// Calculate role expiry based on requested duration. None for permanent.
-    pub fn role_expires_at(&self) -> Option<DateTime<Utc>> {
+    pub fn role_expires_at(&self) -> Option<Timestamp> {
         self.requested_duration_hours
-            .map(|hours| Utc::now() + chrono::Duration::hours(hours as i64))
+            .map(|hours| Timestamp::now() + SignedDuration::from_hours(hours as i64))
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn test_check_expired() {
         let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
-        request.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        request.expires_at = Some(Timestamp::now() - SignedDuration::from_secs(1));
         assert!(request.check_expired());
         assert_eq!(request.status, AccessRequestStatus::Expired);
     }
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn test_not_expired() {
         let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
-        request.expires_at = Some(Utc::now() + chrono::Duration::hours(24));
+        request.expires_at = Some(Timestamp::now() + SignedDuration::from_hours(24));
         assert!(!request.check_expired());
         assert_eq!(request.status, AccessRequestStatus::Pending);
     }
@@ -289,8 +289,8 @@ mod tests {
             AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "viewer");
         request.requested_duration_hours = Some(24);
         let expires = request.role_expires_at().unwrap();
-        let expected = Utc::now() + chrono::Duration::hours(24);
-        assert!((expires - expected).num_seconds().abs() < 1);
+        let expected = Timestamp::now() + SignedDuration::from_hours(24);
+        assert!(expires.duration_since(expected).as_secs().abs() < 1);
     }
 
     #[test]

@@ -28,8 +28,8 @@ pub trait AuditLog: Send + Sync {
     async fn query(
         &self,
         chain_id: &str,
-        from: Option<chrono::DateTime<chrono::Utc>>,
-        to: Option<chrono::DateTime<chrono::Utc>>,
+        from: Option<jiff::Timestamp>,
+        to: Option<jiff::Timestamp>,
     ) -> Result<Vec<AuditRecord>, AuditError>;
 
     /// Verify the integrity of a chain (all hashes valid, all links intact).

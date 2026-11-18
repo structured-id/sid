@@ -4,7 +4,7 @@
 //! In StructuredID CE: Profile IS the user (no separate User entity).
 //! CE instance IS the organization (implicit).
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Validated UUIDv7 identifier of a profile; construction and decoding go through `sid_ids`.
@@ -338,11 +338,11 @@ pub struct ExportJob {
     /// SHA-256 checksum of the archive.
     pub checksum_sha256: Option<String>,
     /// When the export was requested.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// When the export became ready.
-    pub ready_at: Option<DateTime<Utc>>,
+    pub ready_at: Option<Timestamp>,
     /// When the download window expires.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl ExportJob {
@@ -355,7 +355,7 @@ impl ExportJob {
             archive_path: None,
             size_bytes: None,
             checksum_sha256: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             ready_at: None,
             expires_at: None,
         }
@@ -367,9 +367,10 @@ impl ExportJob {
         self.archive_path = Some(archive_path);
         self.size_bytes = Some(size_bytes);
         self.checksum_sha256 = Some(checksum);
-        self.ready_at = Some(Utc::now());
-        self.expires_at =
-            Some(Utc::now() + chrono::Duration::hours(i64::from(EXPORT_DOWNLOAD_WINDOW_HOURS)));
+        self.ready_at = Some(Timestamp::now());
+        self.expires_at = Some(
+            Timestamp::now() + SignedDuration::from_hours(i64::from(EXPORT_DOWNLOAD_WINDOW_HOURS)),
+        );
     }
 
     /// Mark as downloaded.
@@ -379,7 +380,7 @@ impl ExportJob {
 
     /// Check if download window has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.is_some_and(|exp| Utc::now() >= exp)
+        self.expires_at.is_some_and(|exp| Timestamp::now() >= exp)
     }
 }
 
@@ -393,10 +394,10 @@ pub struct LegalHold {
     pub reason: Option<String>,
 
     /// When the hold was placed.
-    pub placed_at: DateTime<Utc>,
+    pub placed_at: Timestamp,
 
     /// Expected duration (informational, hold stays until explicitly lifted).
-    pub expected_end: Option<DateTime<Utc>>,
+    pub expected_end: Option<Timestamp>,
 
     /// Who placed the hold (admin profile_id).
     pub placed_by: ProfileId,
@@ -424,10 +425,10 @@ pub struct ClosureRequest {
     pub requested_by: ProfileId,
 
     /// When closure was requested.
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: Timestamp,
 
     /// When the grace period ends (after which Closed transition happens).
-    pub grace_period_end: Option<DateTime<Utc>>,
+    pub grace_period_end: Option<Timestamp>,
 
     /// Data export status.
     pub export_status: ExportStatus,
@@ -446,7 +447,7 @@ impl ClosureRequest {
             mode,
             closure_reason: None,
             requested_by,
-            requested_at: Utc::now(),
+            requested_at: Timestamp::now(),
             grace_period_end: None,
             export_status: ExportStatus::NotStarted,
             legal_hold: None,
@@ -457,14 +458,15 @@ impl ClosureRequest {
     /// Whether the grace period has elapsed.
     pub fn grace_period_elapsed(&self) -> bool {
         match self.grace_period_end {
-            Some(end) => Utc::now() >= end,
+            Some(end) => Timestamp::now() >= end,
             None => false,
         }
     }
 
     /// Set grace period from now.
     pub fn with_grace_period_days(mut self, days: u32) -> Self {
-        self.grace_period_end = Some(self.requested_at + chrono::Duration::days(days as i64));
+        self.grace_period_end =
+            Some(self.requested_at + SignedDuration::from_hours(days as i64 * 24));
         self
     }
 }
@@ -633,9 +635,9 @@ pub struct Profile {
     #[serde(default)]
     pub migration_pending: bool,
     /// When the migration was first initiated (profile imported with legacy hash).
-    pub migration_started_at: Option<DateTime<Utc>>,
+    pub migration_started_at: Option<Timestamp>,
     /// When the migration was completed (OPAQUE registration finished).
-    pub migration_completed_at: Option<DateTime<Utc>>,
+    pub migration_completed_at: Option<Timestamp>,
 
     /// Stored revision: 0 for a new profile, moved on by every update. An
     /// update applies only over the revision it was read at, so a stale copy
@@ -643,8 +645,8 @@ pub struct Profile {
     pub revision: u64,
 
     /// Timestamps.
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Profile {
@@ -679,7 +681,7 @@ impl Profile {
     /// Create a new personal profile with an optional username.
     /// Username is None when user registers via email or phone only.
     pub fn new(username: Option<impl Into<String>>) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: ProfileId::generate(),
             profile_type: ProfileType::Personal,
@@ -717,19 +719,19 @@ impl<'a> ActiveProfile<'a> {
     /// Suspend this profile (admin action). Consumes the wrapper.
     pub fn suspend(self) {
         self.0.status = ProfileStatus::Suspended;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Request account closure. Consumes the wrapper.
     pub fn request_closure(self) {
         self.0.status = ProfileStatus::ClosureRequested;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Place a legal hold. Consumes the wrapper.
     pub fn place_legal_hold(self) {
         self.0.status = ProfileStatus::LegalHold;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Read-only access to the inner profile.
@@ -745,13 +747,13 @@ impl<'a> SuspendedProfile<'a> {
     /// Re-activate this profile. Consumes the wrapper.
     pub fn reactivate(self) {
         self.0.status = ProfileStatus::Active;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Request closure while suspended. Consumes the wrapper.
     pub fn request_closure(self) {
         self.0.status = ProfileStatus::ClosureRequested;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Read-only access to the inner profile.
@@ -768,7 +770,7 @@ impl<'a> ClosingProfile<'a> {
     /// Cancel closure — restore to Active. Consumes the wrapper.
     pub fn cancel(self) {
         self.0.status = ProfileStatus::Active;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Advance to ExportAvailable. Consumes the wrapper.
@@ -780,7 +782,7 @@ impl<'a> ClosingProfile<'a> {
             .status
             .transition_to(ProfileStatus::ExportAvailable)?;
         self.0.status = new;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
         Ok(())
     }
 
@@ -790,7 +792,7 @@ impl<'a> ClosingProfile<'a> {
     pub fn start_grace_period(self) -> Result<(), &'static str> {
         let new = self.0.status.transition_to(ProfileStatus::GracePeriod)?;
         self.0.status = new;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
         Ok(())
     }
 
@@ -800,14 +802,14 @@ impl<'a> ClosingProfile<'a> {
     pub fn close(self) -> Result<(), &'static str> {
         let new = self.0.status.transition_to(ProfileStatus::Closed)?;
         self.0.status = new;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
         Ok(())
     }
 
     /// Place a legal hold. Consumes the wrapper.
     pub fn place_legal_hold(self) {
         self.0.status = ProfileStatus::LegalHold;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Read-only access to the inner profile.
@@ -823,7 +825,7 @@ impl<'a> ClosedProfile<'a> {
     /// Purge all data (terminal transition). Consumes the wrapper.
     pub fn purge(self) {
         self.0.status = ProfileStatus::Purged;
-        self.0.updated_at = Utc::now();
+        self.0.updated_at = Timestamp::now();
     }
 
     /// Read-only access to the inner profile.
@@ -902,7 +904,7 @@ impl Profile {
     pub fn transition_status(&mut self, target: ProfileStatus) -> Result<(), &'static str> {
         let new = self.status.transition_to(target)?;
         self.status = new;
-        self.updated_at = Utc::now();
+        self.updated_at = Timestamp::now();
         Ok(())
     }
 }

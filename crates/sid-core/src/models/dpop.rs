@@ -4,7 +4,7 @@
 //! RFC 9449: sender-constrained access tokens via client-generated key pairs.
 //! The client proves it holds the private key matching the token's bound public key.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// HTTP method for DPoP proof binding.
@@ -53,7 +53,7 @@ pub struct DPopProof {
     pub htu: String,
 
     /// Issued at timestamp.
-    pub iat: DateTime<Utc>,
+    pub iat: Timestamp,
 
     /// JWK Thumbprint (RFC 7638) of the client's public key.
     pub jwk_thumbprint: String,
@@ -79,7 +79,7 @@ impl DPopProof {
             jti: jti.into(),
             htm,
             htu: htu.into(),
-            iat: Utc::now(),
+            iat: Timestamp::now(),
             jwk_thumbprint: jwk_thumbprint.into(),
             nonce: None,
             ath: None,
@@ -97,8 +97,8 @@ impl DPopProof {
 
     /// Whether this proof has expired.
     pub fn is_expired(&self) -> bool {
-        let age = Utc::now() - self.iat;
-        age.num_seconds() > Self::MAX_AGE_SECONDS as i64
+        let age = Timestamp::now().duration_since(self.iat);
+        age.as_secs() > Self::MAX_AGE_SECONDS as i64
     }
 }
 
@@ -112,14 +112,14 @@ pub struct DPopBinding {
     pub jkt: String,
 
     /// When this binding was created.
-    pub bound_at: DateTime<Utc>,
+    pub bound_at: Timestamp,
 }
 
 impl DPopBinding {
     pub fn new(jkt: impl Into<String>) -> Self {
         Self {
             jkt: jkt.into(),
-            bound_at: Utc::now(),
+            bound_at: Timestamp::now(),
         }
     }
 
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_dpop_proof_expired() {
         let mut proof = make_proof();
-        proof.iat = Utc::now() - chrono::Duration::seconds(200);
+        proof.iat = Timestamp::now() - jiff::SignedDuration::from_secs(200);
         assert!(proof.is_expired());
     }
 

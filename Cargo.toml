@@ -88,7 +88,6 @@ sqlx = { version = "0.9", default-features = false, features = [
     "migrate",
     "json",
     "uuid",
-    "chrono",
 ] }
 
 # Logging/tracing
@@ -116,8 +115,10 @@ async-trait = "0.1"
 # v5: stable logical ids derived from an event and its target (durable work).
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 
-# Time
-chrono = { version = "0.4", features = ["serde"] }
+# Time: instants are `jiff::Timestamp`, spans `jiff::SignedDuration`.
+jiff = { version = "1", features = ["serde"] }
+# PostgreSQL encoding of jiff values (resolves to the patched sqlx below).
+jiff-sqlx = { version = "1", features = ["postgres"] }
 
 # Cryptography (OPAQUE)
 # The OPAQUE and OPRF implementations, kept in this workspace on the current
@@ -147,7 +148,9 @@ idna = "1.1"
 structured-email-address = { version = "0.0.22", default-features = false, features = ["std", "psl"] }
 
 # Cedar policy engine (ABAC)
-cedar-policy = "4"
+# Without the `datetime` extension: no SID policy uses it, and it is the
+# engine's only dependency on a date library.
+cedar-policy = { version = "4", default-features = false, features = ["ipaddr", "decimal"] }
 
 # NATS JetStream (event bus)
 async-nats = "0.52"

@@ -6,8 +6,9 @@
 
 use std::fmt::Debug;
 
+use crate::conformance::days;
 use async_trait::async_trait;
-use chrono::{Duration, DurationRound, Utc};
+use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::session::{AuthLevel, Elevation};
 use sid_core::models::{
@@ -108,14 +109,13 @@ fn end() -> SessionEnd {
 }
 
 /// A time at millisecond precision, which every store keeps.
-fn ms(time: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
-    time.duration_trunc(Duration::milliseconds(1))
-        .expect("a current time truncates")
+fn ms(time: Timestamp) -> Timestamp {
+    crate::conformance::trunc(time, jiff::Unit::Millisecond)
 }
 
 /// A new session of `owner`, its times at the precision every store keeps.
 fn session<O>(owner: O) -> Session<O> {
-    let mut session = Session::new(owner, None, Utc::now() + Duration::hours(1));
+    let mut session = Session::new(owner, None, Timestamp::now() + Duration::from_hours(1));
     session.authenticated_at = ms(session.authenticated_at);
     session.created_at = ms(session.created_at);
     session.expires_at = ms(session.expires_at);
@@ -139,12 +139,12 @@ async fn code<H: GrantHarness>(
     resource: ResourceId,
 ) -> AuthorizationCode<H::Owner> {
     let mut authorizing = session(owner.clone());
-    authorizing.authenticated_at = ms(Utc::now() - Duration::minutes(20));
+    authorizing.authenticated_at = ms(Timestamp::now() - Duration::from_mins(20));
     authorizing.amr = vec!["pwd".into(), "otp".into(), "mfa".into()];
     authorizing.assurance_level = AuthLevel::Standard;
     authorizing.elevation = Some(Elevation {
         level: AuthLevel::Elevated,
-        until: ms(Utc::now() + Duration::minutes(10)),
+        until: ms(Timestamp::now() + Duration::from_mins(10)),
     });
     h.store()
         .create_session_atomic(&authorizing, 0, None, ctx())
@@ -160,8 +160,8 @@ async fn code<H: GrantHarness>(
         code_challenge: Some("challenge".into()),
         nonce: Some("n-0S6_WzA2Mj".into()),
         authentication: authorizing.grant_authentication(),
-        expires_at: Utc::now() + Duration::minutes(5),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + Duration::from_mins(5),
+        created_at: Timestamp::now(),
         used: false,
         session_id: None,
         // The holder's proof made for its sign-in: bytes kept as given.
@@ -179,8 +179,8 @@ fn refresh<O: Clone>(session: &Session<O>, family: Uuid, resource: ResourceId) -
         client_id: "conformance-client".into(),
         scopes: vec!["openid".into()],
         resource,
-        expires_at: Utc::now() + Duration::days(30),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + days(30),
+        created_at: Timestamp::now(),
         revoked: false,
         replaced_by: None,
         family_id: family,
@@ -705,12 +705,12 @@ pub async fn sessions_listed_per_owner<H: GrantHarness>(h: &H) {
     let owner = h.owner().await;
     let other = h.owner().await;
     let mut oldest = session(owner.clone());
-    oldest.created_at = ms(Utc::now() - Duration::hours(3));
-    oldest.expires_at = ms(Utc::now() - Duration::hours(1));
+    oldest.created_at = ms(Timestamp::now() - Duration::from_hours(3));
+    oldest.expires_at = ms(Timestamp::now() - Duration::from_hours(1));
     let mut ended = session(owner.clone());
-    ended.created_at = ms(Utc::now() - Duration::hours(2));
+    ended.created_at = ms(Timestamp::now() - Duration::from_hours(2));
     let mut middle = session(owner.clone());
-    middle.created_at = ms(Utc::now() - Duration::hours(1));
+    middle.created_at = ms(Timestamp::now() - Duration::from_hours(1));
     let newest = session(owner.clone());
     let foreign = session(other.clone());
     for s in [&oldest, &ended, &middle, &newest, &foreign] {
@@ -793,13 +793,13 @@ pub async fn session_end_ends_what_it_authenticated<H: GrantHarness>(h: &H) {
     // The limit evicting a session evicts what it authenticated too.
     let owner = h.owner().await;
     let mut sso = session(owner.clone());
-    sso.created_at = Utc::now() - Duration::minutes(1);
+    sso.created_at = Timestamp::now() - Duration::from_mins(1);
     h.store()
         .create_session_atomic(&sso, 0, None, ctx())
         .await
         .unwrap();
     let mut app = session(owner.clone()).with_grant_authentication(&sso.grant_authentication());
-    app.created_at = Utc::now() - Duration::seconds(30);
+    app.created_at = Timestamp::now() - Duration::from_secs(30);
     h.store()
         .create_session_atomic(&app, 0, None, ctx())
         .await
@@ -853,9 +853,9 @@ pub async fn session_end_takes_refresh_tokens<H: GrantHarness>(h: &H) {
 pub async fn session_limit_evicts_oldest<H: GrantHarness>(h: &H) {
     let owner = h.owner().await;
     let mut oldest = session(owner.clone());
-    oldest.created_at = Utc::now() - Duration::minutes(2);
+    oldest.created_at = Timestamp::now() - Duration::from_mins(2);
     let mut middle = session(owner.clone());
-    middle.created_at = Utc::now() - Duration::minutes(1);
+    middle.created_at = Timestamp::now() - Duration::from_mins(1);
     for s in [&oldest, &middle] {
         let evicted = h
             .store()
@@ -990,15 +990,15 @@ pub async fn touch_session_keeps_latest_activity<H: GrantHarness>(h: &H) {
             .last_activity_at
     };
 
-    let now = ms(Utc::now());
+    let now = ms(Timestamp::now());
     h.store().touch_session(s.id, now).await.unwrap();
     h.store()
-        .touch_session(s.id, now - Duration::minutes(5))
+        .touch_session(s.id, now - Duration::from_mins(5))
         .await
         .unwrap();
     assert_eq!(last_activity().await, Some(now));
 
-    let at = |seconds| now + Duration::seconds(seconds);
+    let at = |seconds| now + Duration::from_secs(seconds);
     let (a, b, c, d) = tokio::join!(
         h.store().touch_session(s.id, at(3)),
         h.store().touch_session(s.id, at(1)),
@@ -1204,7 +1204,7 @@ pub async fn rotate_refresh_token<H: GrantHarness>(h: &H) {
     let family = Uuid::now_v7();
     let old = refresh(&s, family, resource);
     redeemed(h, &s, &old).await;
-    let grace = Utc::now() + Duration::seconds(30);
+    let grace = Timestamp::now() + Duration::from_secs(30);
 
     let first = refresh(&s, family, resource);
     assert!(
@@ -1222,7 +1222,12 @@ pub async fn rotate_refresh_token<H: GrantHarness>(h: &H) {
     let retry = refresh(&s, family, resource);
     assert!(
         h.store()
-            .rotate_refresh_token(old.id, &retry, Utc::now() + Duration::seconds(300), ctx())
+            .rotate_refresh_token(
+                old.id,
+                &retry,
+                Timestamp::now() + Duration::from_secs(300),
+                ctx()
+            )
             .await
             .unwrap()
     );
@@ -1231,8 +1236,8 @@ pub async fn rotate_refresh_token<H: GrantHarness>(h: &H) {
             .await
             .unwrap()
             .grace_expires_at
-            .map(|t| t.timestamp_millis()),
-        Some(window.timestamp_millis()),
+            .map(|t| t.as_millisecond()),
+        Some(window.as_millisecond()),
         "a retry moved the grace window"
     );
 
@@ -1271,7 +1276,12 @@ pub async fn rotate_after_sign_out_is_refused<H: GrantHarness>(h: &H) {
     redeemed(h, &s, &old).await;
     let next = refresh(&s, family, resource);
     h.store()
-        .rotate_refresh_token(old.id, &next, Utc::now() + Duration::seconds(30), ctx())
+        .rotate_refresh_token(
+            old.id,
+            &next,
+            Timestamp::now() + Duration::from_secs(30),
+            ctx(),
+        )
         .await
         .unwrap();
 
@@ -1286,7 +1296,12 @@ pub async fn rotate_after_sign_out_is_refused<H: GrantHarness>(h: &H) {
     let retry = refresh(&s, family, resource);
     assert!(
         !h.store()
-            .rotate_refresh_token(old.id, &retry, Utc::now() + Duration::seconds(30), ctx())
+            .rotate_refresh_token(
+                old.id,
+                &retry,
+                Timestamp::now() + Duration::from_secs(30),
+                ctx()
+            )
             .await
             .unwrap(),
         "a grace window outlived sign-out"
@@ -1304,7 +1319,7 @@ pub async fn concurrent_rotation<H: GrantHarness>(h: &H) {
     let old = refresh(&s, family, resource);
     redeemed(h, &s, &old).await;
     let next: Vec<_> = (0..4).map(|_| refresh(&s, family, resource)).collect();
-    let grace = Utc::now() + Duration::seconds(30);
+    let grace = Timestamp::now() + Duration::from_secs(30);
     let rotate = |i: usize| {
         h.store()
             .rotate_refresh_token(old.id, &next[i], grace, ctx())
@@ -1450,8 +1465,8 @@ fn native_generation<O>(session: &Session<O>, jkt: &str, credentials: usize) -> 
                 hash
             })
             .collect(),
-        expires_at: ms(Utc::now() + Duration::days(30)),
-        created_at: ms(Utc::now()),
+        expires_at: ms(Timestamp::now() + days(30)),
+        created_at: ms(Timestamp::now()),
     }
 }
 
@@ -1545,7 +1560,7 @@ pub async fn native_generation_rotates_once<H: GrantHarness>(h: &H) {
     let (s, first) = native_session(h).await;
     let x = exchange();
     let second = native_generation(&s, "jkt-conformance", 2);
-    let window = ms(Utc::now() + Duration::seconds(30));
+    let window = ms(Timestamp::now() + Duration::from_secs(30));
     let rotate = |successor: &NativeGeneration, exchange: NativeExchange, sealed: &[u8]| {
         let successor = successor.clone();
         let sealed = sealed.to_vec();
@@ -1644,12 +1659,12 @@ pub async fn native_redelivery_ends_with_its_window<H: GrantHarness>(h: &H) {
     let (s, first) = native_session(h).await;
     let x = exchange();
     let second = native_generation(&s, "jkt-conformance", 2);
-    let passed = ms(Utc::now() - Duration::seconds(1));
+    let passed = ms(Timestamp::now() - Duration::from_secs(1));
     fn rotation<'a>(
         presented: Uuid,
         exchange: NativeExchange,
         successor: &'a NativeGeneration,
-        redeliver_until: chrono::DateTime<Utc>,
+        redeliver_until: Timestamp,
     ) -> NativeRotation<'a> {
         NativeRotation {
             presented,
@@ -1688,7 +1703,7 @@ pub async fn concurrent_native_rotation<H: GrantHarness>(h: &H) {
             .map(|_| native_generation(&s, "jkt-conformance", 2))
             .collect();
         let sealed: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 8]).collect();
-        let window = ms(Utc::now() + Duration::seconds(30));
+        let window = ms(Timestamp::now() + Duration::from_secs(30));
         let exchanges: Vec<_> = (0..4)
             .map(|_| if same_exchange { x } else { exchange() })
             .collect();
@@ -1743,7 +1758,7 @@ pub async fn native_generations_end_with_their_session<H: GrantHarness>(h: &H) {
                     exchange: exchange(),
                     successor: &successor,
                     sealed: b"sealed",
-                    redeliver_until: ms(Utc::now() + Duration::seconds(30)),
+                    redeliver_until: ms(Timestamp::now() + Duration::from_secs(30)),
                 },
                 ctx(),
             )
@@ -1838,7 +1853,7 @@ pub async fn session_grants_move_as_stored<H: GrantHarness>(h: &H) {
         AuthCodeRedemption::Redeemed
     );
     let second = refresh(&s, family, resource);
-    let grace = ms(Utc::now() + Duration::seconds(30));
+    let grace = ms(Timestamp::now() + Duration::from_secs(30));
     assert!(
         h.store()
             .rotate_refresh_token(first.id, &second, grace, ctx())

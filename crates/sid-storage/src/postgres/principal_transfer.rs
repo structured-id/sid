@@ -3,7 +3,8 @@
 //! stored, for a move between stores. An import locks the activation row
 //! first, the row every email key write reads.
 
-use chrono::{DateTime, Utc};
+use crate::pg_time::{FromPg, PgTime, ToPg};
+use jiff::Timestamp;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -31,6 +32,14 @@ fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
         .map_err(|e| SidError::Storage(format!("column {name}: {e}")))
 }
 
+fn ts(row: &sqlx::postgres::PgRow, name: &str) -> SidResult<Timestamp> {
+    get::<PgTime>(row, name).map(FromPg::jiff)
+}
+
+fn opt_ts(row: &sqlx::postgres::PgRow, name: &str) -> SidResult<Option<Timestamp>> {
+    get::<Option<PgTime>>(row, name).map(FromPg::jiff)
+}
+
 fn entity(row: &sqlx::postgres::PgRow) -> SidResult<PrincipalEntity> {
     Ok(PrincipalEntity {
         id: PrincipalId(get(row, "id")?),
@@ -39,13 +48,13 @@ fn entity(row: &sqlx::postgres::PgRow) -> SidResult<PrincipalEntity> {
             .map_err(|e| SidError::Storage(format!("principal: {e}")))?,
         value: get(row, "value")?,
         verified: get(row, "verified")?,
-        verified_at: get(row, "verified_at")?,
-        verification_expires: get(row, "verification_expires")?,
+        verified_at: opt_ts(row, "verified_at")?,
+        verification_expires: opt_ts(row, "verification_expires")?,
         assigned_profile_id: get(row, "assigned_profile_id")?,
         assignment_revision: get(row, "assignment_revision")?,
         email_policy_revision: get(row, "email_policy_revision")?,
-        created_at: get(row, "created_at")?,
-        updated_at: get(row, "updated_at")?,
+        created_at: ts(row, "created_at")?,
+        updated_at: ts(row, "updated_at")?,
     })
 }
 
@@ -95,7 +104,7 @@ async fn stored(
                 .map(ProfileEmailId),
             source_phone_id: get::<Option<uuid::Uuid>>(&row, "source_phone_id")?
                 .map(ProfilePhoneId),
-            created_at: get(&row, "created_at")?,
+            created_at: ts(&row, "created_at")?,
         });
     }
     let disposition =
@@ -110,7 +119,7 @@ async fn stored(
                     to_revision: get(&row, "to_revision")?,
                     outcome: outcome(&get::<String>(&row, "disposition")?)?,
                     reason: get(&row, "reason")?,
-                    recorded_at: get(&row, "recorded_at")?,
+                    recorded_at: ts(&row, "recorded_at")?,
                 })
             })
             .transpose()?;
@@ -150,7 +159,7 @@ async fn insert(tx: &mut Tx<'_>, principal: &StoredPrincipal) -> SidResult<()> {
         .bind(d.to_revision)
         .bind(outcome_text(d.outcome))
         .bind(&d.reason)
-        .bind(d.recorded_at)
+        .bind(d.recorded_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|err| super::insert_error("email key disposition", err))?;
@@ -165,13 +174,13 @@ async fn insert(tx: &mut Tx<'_>, principal: &StoredPrincipal) -> SidResult<()> {
     .bind(e.principal_type.as_str())
     .bind(&e.value)
     .bind(e.verified)
-    .bind(e.verified_at)
-    .bind(e.verification_expires)
+    .bind(e.verified_at.pg())
+    .bind(e.verification_expires.pg())
     .bind(e.assigned_profile_id)
     .bind(e.assignment_revision)
     .bind(e.email_policy_revision)
-    .bind(e.created_at)
-    .bind(e.updated_at)
+    .bind(e.created_at.pg())
+    .bind(e.updated_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(|err| super::insert_error("principal", err))?;
@@ -188,7 +197,7 @@ async fn insert(tx: &mut Tx<'_>, principal: &StoredPrincipal) -> SidResult<()> {
         .bind(&claim.source_field)
         .bind(claim.source_email_id.map(|id| id.0))
         .bind(claim.source_phone_id.map(|id| id.0))
-        .bind(claim.created_at)
+        .bind(claim.created_at.pg())
         .execute(&mut **tx)
         .await
         .map_err(|err| super::insert_error("principal binding", err))?;
@@ -200,8 +209,8 @@ fn quarantined(row: &sqlx::postgres::PgRow) -> SidResult<QuarantinedPrincipal> {
     Ok(QuarantinedPrincipal {
         principal_hash: get(row, "principal_hash")?,
         principal_type: get(row, "principal_type")?,
-        until: get::<DateTime<Utc>>(row, "quarantine_until")?,
-        created_at: get(row, "created_at")?,
+        until: ts(row, "quarantine_until")?,
+        created_at: ts(row, "created_at")?,
     })
 }
 
@@ -211,7 +220,7 @@ fn user_handle(row: &sqlx::postgres::PgRow) -> SidResult<StoredUserHandle> {
         rp_id: get(row, "rp_id")?,
         handle: WebAuthnUserHandle::from_slice(&get::<Vec<u8>>(row, "user_handle")?)
             .ok_or_else(|| SidError::Storage("column user_handle: not 16 bytes".into()))?,
-        created_at: get(row, "created_at")?,
+        created_at: ts(row, "created_at")?,
     })
 }
 
@@ -275,7 +284,7 @@ impl PostgresBackend {
         .bind(handle.profile_id)
         .bind(&handle.rp_id)
         .bind(handle.handle.0.as_slice())
-        .bind(handle.created_at)
+        .bind(handle.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("WebAuthn user handle", e))?;
@@ -359,7 +368,7 @@ impl PostgresBackend {
         .map_err(storage)?;
         Ok(EmailPolicyActivation {
             revision: get(&row, "revision")?,
-            activated_at: get(&row, "activated_at")?,
+            activated_at: ts(&row, "activated_at")?,
         })
     }
 
@@ -378,7 +387,7 @@ impl PostgresBackend {
         .map_err(storage)?;
         let held = EmailPolicyActivation {
             revision: get(&row, "revision")?,
-            activated_at: get(&row, "activated_at")?,
+            activated_at: ts(&row, "activated_at")?,
         };
         if held == *activation {
             Self::unchanged_in_tx(tx, &ctx).await?;
@@ -399,7 +408,7 @@ impl PostgresBackend {
              WHERE scope = 'installation'",
         )
         .bind(activation.revision)
-        .bind(activation.activated_at)
+        .bind(activation.activated_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
@@ -453,8 +462,8 @@ impl PostgresBackend {
         )
         .bind(&entry.principal_hash)
         .bind(&entry.principal_type)
-        .bind(entry.until)
-        .bind(entry.created_at)
+        .bind(entry.until.pg())
+        .bind(entry.created_at.pg())
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("principal quarantine", e))?;

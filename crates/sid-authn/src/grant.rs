@@ -11,7 +11,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{
     ActorFence, AuditEntry, AuthCodeRedemption, MutationContext, OAuth2Client, OidcIssuer, Profile,
@@ -244,7 +244,7 @@ pub async fn redeem_code<H: GrantHost>(
     let mut session = Session::new(
         owner.clone(),
         None,
-        Utc::now() + Duration::hours(GRANT_SESSION_TTL_HOURS),
+        Timestamp::now() + SignedDuration::from_hours(GRANT_SESSION_TTL_HOURS),
     )
     .with_grant_authentication(exchanged.authentication());
     session.client_id = Some(client.client_id.clone());
@@ -427,8 +427,10 @@ pub async fn refresh<H: GrantHost>(
         .rotate_refresh_token(
             validated.id(),
             &rotated_to,
-            Utc::now()
-                + Duration::seconds(sid_core::models::refresh_token::DEFAULT_GRACE_WINDOW_SECS),
+            Timestamp::now()
+                + SignedDuration::from_secs(
+                    sid_core::models::refresh_token::DEFAULT_GRACE_WINDOW_SECS,
+                ),
             fenced(
                 AuditEntry::user(owner.to_string(), "token.rotate", rotated_to.id.to_string()),
                 fence,

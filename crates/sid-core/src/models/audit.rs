@@ -4,8 +4,8 @@
 //! Append-only audit records with parallel hash chains per entity.
 //! Hash chain provides tamper-evidence without requiring full event sourcing.
 
-use chrono::{DateTime, Utc};
 use core::net::IpAddr;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -137,7 +137,7 @@ pub struct AuditRecord {
     pub id: String,
 
     /// When the event was recorded.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 
     /// Chain this record belongs to (e.g., "profile:prof_01J8K...", "site:site_01J8K...").
     pub chain_id: String,
@@ -266,7 +266,7 @@ pub struct ChainCheckpoint {
     pub sequence: u64,
     pub hash: AuditDigest,
     /// Records before this time were removed.
-    pub cut_before: DateTime<Utc>,
+    pub cut_before: Timestamp,
 }
 
 /// A hash chain as stored, for a move between stores: its head, the
@@ -374,7 +374,9 @@ const RECORD_DIGEST_DOMAIN: &[u8] = b"sid.audit.record.v1";
 /// then chain id, record id, sequence, timestamp, actor, action, outcome and
 /// the previous digest. Each text field is length-prefixed (u32 BE), so no
 /// content of one field can be read as a boundary of the next; the sequence
-/// is a u64 BE and the previous digest its 32 bytes.
+/// is a u64 BE and the previous digest its 32 bytes. The timestamp is RFC 3339
+/// in UTC with a `Z` suffix and only the fractional digits it needs
+/// (`2026-01-01T00:00:00.5Z`), as `jiff::Timestamp` displays it.
 pub fn compute_record_hash(record: &AuditRecord) -> AuditDigest {
     use sha2::{Digest, Sha256};
 
@@ -391,7 +393,7 @@ pub fn compute_record_hash(record: &AuditRecord) -> AuditDigest {
     text(&mut hasher, &record.chain_id);
     text(&mut hasher, &record.id);
     hasher.update(record.sequence.to_be_bytes());
-    text(&mut hasher, &record.timestamp.to_rfc3339());
+    text(&mut hasher, &record.timestamp.to_string());
     text(&mut hasher, &record.actor_id);
     text(&mut hasher, &record.action);
     text(&mut hasher, &record.outcome.to_string());

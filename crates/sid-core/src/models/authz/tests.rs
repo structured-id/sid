@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use chrono::Duration;
+use jiff::SignedDuration as Duration;
 
 // ── Resource token inspection ─────────────────────────────────
 
@@ -178,7 +178,7 @@ fn test_role_assignment_not_expired() {
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
         RoleId::generate(),
     );
-    assignment.expires_at = Some(Utc::now() + Duration::hours(1));
+    assignment.expires_at = Some(Timestamp::now() + Duration::from_hours(1));
     assert!(!assignment.is_expired());
 }
 
@@ -188,7 +188,7 @@ fn test_role_assignment_expired() {
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
         RoleId::generate(),
     );
-    assignment.expires_at = Some(Utc::now() - Duration::seconds(1));
+    assignment.expires_at = Some(Timestamp::now() - Duration::from_secs(1));
     assert!(assignment.is_expired());
 }
 
@@ -346,7 +346,7 @@ fn test_profile_grant_expired() {
         ProfileId::generate(),
         vec!["temp".into()],
     );
-    grant.expires_at = Some(Utc::now() - Duration::seconds(1));
+    grant.expires_at = Some(Timestamp::now() - Duration::from_secs(1));
     assert!(grant.is_expired());
 }
 
@@ -357,7 +357,7 @@ fn test_profile_grant_not_expired() {
         ProfileId::generate(),
         vec!["temp".into()],
     );
-    grant.expires_at = Some(Utc::now() + Duration::hours(1));
+    grant.expires_at = Some(Timestamp::now() + Duration::from_hours(1));
     assert!(!grant.is_expired());
 }
 
@@ -403,7 +403,7 @@ fn test_role_group() {
 
 #[test]
 fn test_role_assignment_with_expiry() {
-    let expiry = Utc::now() + Duration::hours(48);
+    let expiry = Timestamp::now() + Duration::from_hours(48);
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
         RoleId::generate(),
@@ -420,7 +420,7 @@ fn test_hours_until_expiry_future() {
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
         RoleId::generate(),
     )
-    .with_expiry(Utc::now() + Duration::hours(48));
+    .with_expiry(Timestamp::now() + Duration::from_hours(48));
 
     let hours = assignment.hours_until_expiry().unwrap();
     assert!((47..=48).contains(&hours));
@@ -432,7 +432,7 @@ fn test_hours_until_expiry_past() {
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
         RoleId::generate(),
     )
-    .with_expiry(Utc::now() - Duration::hours(1));
+    .with_expiry(Timestamp::now() - Duration::from_hours(1));
 
     assert!(assignment.hours_until_expiry().is_none());
 }
@@ -460,7 +460,7 @@ fn test_role_expiry_alert_hours_ordered() {
 
 fn temporary(principal: RoleAssignmentPrincipal) -> RoleAssignment {
     RoleAssignment::new(principal, RoleId::generate())
-        .with_expiry(Utc::now() - Duration::seconds(1))
+        .with_expiry(Timestamp::now() - Duration::from_secs(1))
 }
 
 /// The expired event names the assignment, its principal, role and expiry,

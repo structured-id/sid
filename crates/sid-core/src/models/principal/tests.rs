@@ -77,8 +77,8 @@ fn test_principal_verify_no_expiry() {
 fn test_principal_verification_expired() {
     let mut p = Principal::new(ProfileId::generate(), PrincipalType::Phone, "+1234");
     p.verified = true;
-    p.verified_at = Some(Utc::now() - chrono::Duration::days(200));
-    p.verification_expires = Some(Utc::now() - chrono::Duration::days(20)); // expired 20 days ago
+    p.verified_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(200 * 24));
+    p.verification_expires = Some(Timestamp::now() - jiff::SignedDuration::from_hours(20 * 24)); // expired 20 days ago
     assert!(p.is_verification_expired());
 }
 
@@ -296,8 +296,9 @@ fn test_eligibility_assigned_with_expired_proof() {
     let profile_id = ProfileId::generate();
     let mut entity = assigned_to(profile_id);
     entity.verified = false;
-    entity.verified_at = Some(Utc::now() - chrono::Duration::days(200));
-    entity.verification_expires = Some(Utc::now() - chrono::Duration::days(20));
+    entity.verified_at = Some(Timestamp::now() - jiff::SignedDuration::from_hours(200 * 24));
+    entity.verification_expires =
+        Some(Timestamp::now() - jiff::SignedDuration::from_hours(20 * 24));
     let result = check_principal_eligibility(&entity, profile_id, true, CURRENT);
     assert_eq!(result, PrincipalEligibility::Eligible);
 }
@@ -349,7 +350,7 @@ fn disposition(outcome: EmailKeyOutcome, from: i64, to: i64) -> EmailKeyDisposit
         to_revision: to,
         outcome,
         reason: "address not re-established".into(),
-        recorded_at: Utc::now(),
+        recorded_at: Timestamp::now(),
     }
 }
 

@@ -32,7 +32,7 @@ fn service(storage: MockStorage) -> GovernanceServiceImpl {
 
 fn in_one_day() -> prost_types::Timestamp {
     prost_types::Timestamp {
-        seconds: (chrono::Utc::now() + chrono::Duration::days(1)).timestamp(),
+        seconds: (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24)).as_second(),
         nanos: 0,
     }
 }

@@ -4,7 +4,7 @@
 //! Outbound provisioning pushes corporate profile changes to downstream apps
 //! (Slack, GitHub Enterprise, Google Workspace, ACS platforms, etc.).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -54,8 +54,8 @@ pub struct ScimOutboundTarget {
     pub sync_config: OutboundSyncConfig,
     /// Whether this target is active.
     pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Authentication for downstream SCIM API.
@@ -157,13 +157,13 @@ pub struct ScimOutboundRecord {
     /// Downstream SCIM resource ID (returned by the app).
     pub downstream_id: String,
     /// Last successful sync timestamp.
-    pub last_synced_at: DateTime<Utc>,
+    pub last_synced_at: Timestamp,
     /// Last error message (None if last sync succeeded).
     pub last_error: Option<String>,
     /// Number of consecutive failures.
     pub failure_count: u32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Entity type for outbound records.
@@ -217,8 +217,8 @@ pub struct OutboundDlqEntry {
     pub error: String,
     /// Total attempts made.
     pub attempts: u32,
-    pub first_attempt: DateTime<Utc>,
-    pub last_attempt: DateTime<Utc>,
+    pub first_attempt: Timestamp,
+    pub last_attempt: Timestamp,
 }
 
 #[cfg(test)]

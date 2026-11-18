@@ -5,7 +5,7 @@
 //! back from the request. The decisions are the cores'
 //! ([`sid_authn::sign_in_delivery`], [`sid_authn::ceremony_context`]).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_authn::browser_session::{BrowserCookie, BrowserSecret, CSRF_HEADER};
 use sid_authn::ceremony_context::{CeremonyBinding, CeremonyContext, CeremonyRefusal};
 use sid_authn::sign_in_delivery::{self, CeremonyClient, Delivery, NotSignInPage, SignedIn};
@@ -48,7 +48,7 @@ pub fn ceremony_client(
 pub fn deliver_context(
     context: CeremonyContext,
     cookie: &BrowserCookie,
-    expires_at: DateTime<Utc>,
+    expires_at: Timestamp,
     metadata: &mut MetadataMap,
 ) -> Result<(), Status> {
     for (name, value) in context.headers(cookie, expires_at) {

@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use mock_storage::MockStorage;
 
 /// No-op audit log for tests that don't need audit verification.
@@ -66,8 +66,8 @@ impl AuditLog for NoOpAuditLog {
     async fn query(
         &self,
         _chain_id: &str,
-        _from: Option<chrono::DateTime<chrono::Utc>>,
-        _to: Option<chrono::DateTime<chrono::Utc>>,
+        _from: Option<Timestamp>,
+        _to: Option<Timestamp>,
     ) -> Result<Vec<sid_core::models::audit::AuditRecord>, sid_core::models::audit::AuditError>
     {
         Ok(vec![])
@@ -99,7 +99,7 @@ static OPERATION_PERIOD: std::sync::OnceLock<sid_core::models::OperationPeriod> 
 /// its own process, so one test adopts one period.
 pub async fn adopt_operation_period(storage: &dyn sid_plugin::OperationResultStore) {
     let period = storage
-        .current_operation_period(Utc::now(), Duration::hours(1))
+        .current_operation_period(Timestamp::now(), SignedDuration::from_hours(1))
         .await
         .expect("the store issues a period")
         .period;
@@ -184,7 +184,7 @@ impl AuditLog for RecordingAuditLog {
     ) -> Result<sid_core::models::audit::AuditRecord, sid_core::models::audit::AuditError> {
         let record = sid_core::models::audit::AuditRecord {
             id: uuid::Uuid::now_v7().to_string(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             chain_id: chain_id.to_owned(),
             sequence: 0,
             actor_id: entry.actor_id.clone(),
@@ -208,8 +208,8 @@ impl AuditLog for RecordingAuditLog {
     async fn query(
         &self,
         _chain_id: &str,
-        _from: Option<chrono::DateTime<chrono::Utc>>,
-        _to: Option<chrono::DateTime<chrono::Utc>>,
+        _from: Option<Timestamp>,
+        _to: Option<Timestamp>,
     ) -> Result<Vec<sid_core::models::audit::AuditRecord>, sid_core::models::audit::AuditError>
     {
         Ok(vec![])
@@ -370,7 +370,7 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         subject_type: sid_core::models::SubjectType::Public,
         sector_identifier_uri: None,
         contacts: vec![],
-        client_id_issued_at: Utc::now(),
+        client_id_issued_at: Timestamp::now(),
         client_secret_expires_at: None,
         registration_iat: None,
         registration_access_token_hash: None,
@@ -390,7 +390,7 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         unified_input: false,
         org_id: Some(test_org()),
         revision: 0,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -422,7 +422,11 @@ pub async fn store_client(
 
 /// Issue a bearer token for a profile with given scopes.
 pub fn issue_token(jwt: &JwtService, profile: &Profile, scopes: &[String]) -> String {
-    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
+    let session = Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     jwt.issue_access_token(
         &profile.id.to_string(),
         Some(&profile.id.to_string()),
@@ -524,7 +528,11 @@ pub async fn issue_application_token_to(
     scopes: &[String],
     client_id: &str,
 ) -> String {
-    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
+    let session = Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     // A real grant is redeemed from a stored session; its token lives only
     // as long as that session.
     svc.storage
@@ -638,9 +646,13 @@ pub fn authenticated_session(
     level: sid_core::models::AuthLevel,
     minutes_ago: i64,
 ) -> Session {
-    let mut session = Session::new(profile.id, None, Utc::now() + Duration::hours(24));
+    let mut session = Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(24),
+    );
     session.assurance_level = level;
-    session.authenticated_at = Utc::now() - Duration::minutes(minutes_ago);
+    session.authenticated_at = Timestamp::now() - SignedDuration::from_mins(minutes_ago);
     session
 }
 
@@ -832,7 +844,7 @@ pub async fn bind_mailbox(
     key: &str,
     mailbox: &str,
 ) {
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let contact = sid_core::models::ProfileEmail {
         id: sid_core::models::ProfileEmailId::new(),
         profile_id: holder,

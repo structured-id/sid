@@ -38,7 +38,7 @@ fn token(binding: Option<&DPopBinding>) -> (Profile, String) {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     let token = jwt()
         .issue_access_token(
@@ -137,7 +137,7 @@ async fn public_key_verifier_authenticates_the_caller() {
 #[tokio::test]
 async fn token_exchanged_from_unbound_pat_is_refused() {
     let profile = Profile::new(Some("alice"));
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let claims = sid_authn::jwt::AccessTokenClaims {
         sub: profile.id.to_string(),
         pid: Some(profile.id.to_string()),
@@ -177,7 +177,7 @@ async fn token_exchanged_from_unbound_pat_is_refused() {
 /// Installation-session claims for a fresh profile, valid for five minutes.
 fn installation_claims() -> sid_authn::jwt::AccessTokenClaims {
     let profile = Profile::new(Some("alice"));
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sid_authn::jwt::AccessTokenClaims {
         sub: profile.id.to_string(),
         pid: Some(profile.id.to_string()),

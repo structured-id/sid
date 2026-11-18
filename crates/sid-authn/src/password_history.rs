@@ -75,7 +75,7 @@ pub fn comparison_domain(epoch: &HistoryEpochDescriptor) -> [u8; 32] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochPolicy {
     pub ksf: HistoryKsf,
-    pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+    pub not_before: Option<jiff::Timestamp>,
 }
 
 impl EpochPolicy {
@@ -165,9 +165,8 @@ impl HistoryEvaluator {
         // The key's creation instant, fixed before the (asynchronous) seal so
         // a slow seal cannot move it past a write cutoff. Milliseconds,
         // truncated: earlier, never later, than the key's creation.
-        let created_at =
-            chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
-                .expect("current time in range");
+        let created_at = jiff::Timestamp::from_millisecond(jiff::Timestamp::now().as_millisecond())
+            .expect("current time in range");
         let mut rng = UnwrapErr(SysRng);
         let k = <pallas::Scalar as ff::Field>::random(&mut rng);
         let public_key = (pallas::Point::generator() * k).to_affine().to_bytes();

@@ -3,7 +3,7 @@
 //! the interaction: OIDC `prompt` and `max_age` (OpenID Connect Core
 //! §3.1.2.1).
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 use super::AuthorizeError;
 
@@ -53,14 +53,10 @@ impl Prompt {
     /// The oldest authentication the request accepts, at `now`: `login` and
     /// `max_age=0` accept only authentication that happens after the request,
     /// `max_age=N` authentication in the last N seconds; otherwise any.
-    pub fn authenticated_after(
-        self,
-        max_age: Option<u32>,
-        now: DateTime<Utc>,
-    ) -> Option<DateTime<Utc>> {
+    pub fn authenticated_after(self, max_age: Option<u32>, now: Timestamp) -> Option<Timestamp> {
         match (self.login, max_age) {
             (true, _) | (_, Some(0)) => Some(now),
-            (false, Some(seconds)) => Some(now - Duration::seconds(i64::from(seconds))),
+            (false, Some(seconds)) => Some(now - SignedDuration::from_secs(i64::from(seconds))),
             (false, None) => None,
         }
     }

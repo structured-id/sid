@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use prost::Message;
 use sid_authn::caller::{Caller, CallerError, TokenKind};
 use sid_authn::challenge_store::{ChallengeStore, ChallengeStoreError};
@@ -436,8 +436,8 @@ impl DeviceKeys {
 
         let id = DeviceEnrollmentId::generate();
         let challenge: [u8; 32] = rand::random();
-        let expires_at = Utc::now()
-            + chrono::Duration::from_std(CEREMONY_TTL).expect("the ceremony lifetime fits");
+        let expires_at = Timestamp::now()
+            + jiff::SignedDuration::try_from(CEREMONY_TTL).expect("the ceremony lifetime fits");
         self.ceremonies
             .insert(
                 &id.to_string(),

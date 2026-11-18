@@ -10,7 +10,7 @@
 //! - Corporate profiles start as `Provisioned` (unclaimed by their user)
 //! - All principals start `verified: false`
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sid_core::models::{
     Group, GroupId, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId,
     ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, ProfileStatus, ProfileType,
@@ -70,7 +70,7 @@ pub fn scim_create_user_to_sid(
 ) -> Result<CreateUserMapping, MappingError> {
     check_single_primary(&req.emails, &req.phone_numbers)?;
     let profile_id = ProfileId::generate();
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Extract structured name components from SCIM name object
     let (given_name, family_name, middle_name) = req
@@ -184,7 +184,7 @@ pub fn email_key(address: &str) -> Option<String> {
 pub fn email_binding(
     profile_id: ProfileId,
     email: &proto::ScimEmail,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(Principal, ProfileEmail), MappingError> {
     let handle = scim_email(email)?;
     let contact = ProfileEmail {
@@ -212,7 +212,7 @@ pub fn phone_contact(
     value: &str,
     scim_type: &str,
     primary: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<ProfilePhone, MappingError> {
     Ok(ProfilePhone {
         id: ProfilePhoneId::new(),
@@ -373,7 +373,7 @@ pub fn corporate_contact(
     value: String,
     is_primary: bool,
 ) -> Principal {
-    let now = Utc::now();
+    let now = Timestamp::now();
     // Link Principal to Profile field: email→"email", phone→"phone"
     let source_field = match principal_type {
         PrincipalType::Email => Some("email".to_string()),
@@ -444,11 +444,8 @@ fn metadata_str(metadata: &[ProfileMetadata], key: &str) -> String {
         .to_string()
 }
 
-fn timestamp_to_proto(dt: DateTime<Utc>) -> Option<prost_types::Timestamp> {
-    Some(prost_types::Timestamp {
-        seconds: dt.timestamp(),
-        nanos: dt.timestamp_subsec_nanos() as i32,
-    })
+fn timestamp_to_proto(dt: Timestamp) -> Option<prost_types::Timestamp> {
+    Some(sid_proto::time::to_proto(dt))
 }
 
 // ── Extension traits for SID models (corporate profile creation) ──
@@ -459,7 +456,7 @@ trait ProfileExt {
         given_name: Option<String>,
         family_name: Option<String>,
         middle_name: Option<String>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Profile;
 }
 
@@ -469,7 +466,7 @@ impl ProfileExt for Profile {
         given_name: Option<String>,
         family_name: Option<String>,
         middle_name: Option<String>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Profile {
         Profile {
             id,

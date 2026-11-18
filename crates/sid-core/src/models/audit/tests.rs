@@ -16,7 +16,7 @@ fn make_entry() -> AuditEntry {
 fn make_record(chain_id: &str, seq: u64, prev_hash: AuditDigest) -> AuditRecord {
     let mut record = AuditRecord {
         id: format!("rec_{}", seq),
-        timestamp: Utc::now(),
+        timestamp: Timestamp::now(),
         chain_id: chain_id.into(),
         sequence: seq,
         actor_id: "actor".into(),

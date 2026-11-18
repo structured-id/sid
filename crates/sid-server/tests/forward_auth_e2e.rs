@@ -10,9 +10,9 @@ use std::net::SocketAddr;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{Duration, Utc};
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_token, test_profile};
+use jiff::{SignedDuration, Timestamp};
 use sid_core::models::{
     Application, ApplicationId, AuditEntry, Profile, ProjectId, ProtectedResource, ResourceAccess,
     ResourceId, ResourceIndicator, ResourceState, Session,
@@ -80,7 +80,7 @@ async fn register(
     indicator: &str,
     machine_scopes: Option<&[&str]>,
 ) -> ProtectedResource {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
@@ -147,7 +147,11 @@ async fn machine_token(svc: &TestServices) -> String {
 /// A user's access token for `indicator` as the installation's issuer signs
 /// it for client `orders-web`, in a sign-in session the issuer holds.
 async fn user_token(svc: &TestServices, profile: &Profile, indicator: &str) -> String {
-    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
+    let session = Session::new(
+        profile.id,
+        None,
+        Timestamp::now() + SignedDuration::from_hours(1),
+    );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "sign-in").into())
         .await

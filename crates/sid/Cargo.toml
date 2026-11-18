@@ -43,7 +43,7 @@ prost-types = { workspace = true }
 async-trait = { workspace = true }
 # Hashes of issued client secrets.
 argon2 = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
 # The kept state of a sign-in between its steps.
@@ -55,7 +55,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true }
 # The session store's write latency histogram.
 opentelemetry = { workspace = true, optional = true }
@@ -76,6 +76,8 @@ sid-fed = { workspace = true, features = ["test-support"] }
 jsonwebtoken = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sqlx = { workspace = true, features = ["postgres"] }
+# Writes a closure's grace end straight into `timestamptz`.
+jiff-sqlx = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # The file-backed SQLite store of the keyed command bench.
 tempfile = "3"

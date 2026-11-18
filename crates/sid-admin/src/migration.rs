@@ -130,7 +130,7 @@ impl MigrationImportService {
         }
 
         let profile_id = ProfileId::generate();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         // Map legacy display_name + first/last into structured fields.
         let given_name = user
             .first_name

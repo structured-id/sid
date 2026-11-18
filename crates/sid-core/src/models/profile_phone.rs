@@ -5,7 +5,7 @@
 //! Phone number stored as BIGINT e164 (digits only, no `+`).
 //! Extension stored as INTEGER (digits only).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -71,10 +71,10 @@ pub struct ProfilePhone {
     pub verified: bool,
 
     /// When verification was last confirmed.
-    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// The owner's edit of a phone's settings: each field given replaces the
@@ -186,9 +186,9 @@ mod tests {
             can_receive_fax: false,
             can_receive_voice: true,
             verified: true,
-            verified_at: Some(Utc::now()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            verified_at: Some(Timestamp::now()),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
         assert_eq!(phone.formatted_e164(), "+380501234567");
     }
@@ -208,8 +208,8 @@ mod tests {
             can_receive_voice: true,
             verified: false,
             verified_at: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
         assert_eq!(phone.formatted_e164(), "+14185551234;ext=102");
     }

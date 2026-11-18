@@ -290,17 +290,13 @@ impl sid_proto::sid::v1::operation_service_server::OperationService for Operatio
             .map_err(storage_failure)?;
         let issued = self
             .store
-            .current_operation_period(chrono::Utc::now(), policy.acceptance)
+            .current_operation_period(jiff::Timestamp::now(), policy.acceptance)
             .await
             .map_err(storage_failure)?;
         let until = issued.accepted_until;
         Ok(tonic::Response::new(sid_proto::sid::v1::OperationPeriod {
             period: issued.period.get(),
-            accepted_until: Some(prost_types::Timestamp {
-                seconds: until.timestamp(),
-                // At most 999_999_999, within an i32.
-                nanos: until.timestamp_subsec_nanos() as i32,
-            }),
+            accepted_until: Some(sid_proto::time::to_proto(until)),
         }))
     }
 }

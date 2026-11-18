@@ -347,7 +347,7 @@ fn signed(key: &Key, typ: &str, claims: &impl serde::Serialize) -> String {
 }
 
 fn access_claims(iss: &str, aud: &str) -> AccessTokenClaims {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     AccessTokenClaims {
         sub: "subject".into(),
         pid: None,
@@ -444,7 +444,7 @@ async fn an_issued_access_token_must_be_the_named_issuers_for_the_resource() {
 async fn an_issued_id_token_must_match_client_and_nonce() {
     let (directory, own, _) = two_issuers();
     let iss = issuer_url(HANDLE);
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let id: IdTokenClaims = serde_json::from_value(serde_json::json!({
         "iss": iss, "sub": "subject", "aud": "ops-web",
         "exp": now + 60, "iat": now, "auth_time": now,

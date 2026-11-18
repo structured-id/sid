@@ -43,7 +43,7 @@ fn request(
 #[tokio::test]
 async fn taken_username_stores_nothing() {
     let holder = ProfileId::generate();
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let svc = TestServices::new(MockStorage::new());
     svc.storage
         .save_principal(

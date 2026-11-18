@@ -2,14 +2,14 @@ use super::*;
 use sid_core::models::ProfileId;
 
 fn session(level: AuthLevel, authenticated_minutes_ago: i64) -> Session {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut session = Session::new(
         ProfileId::generate(),
         None,
-        now + chrono::Duration::hours(24),
+        now + SignedDuration::from_hours(24),
     );
     session.assurance_level = level;
-    session.authenticated_at = now - chrono::Duration::minutes(authenticated_minutes_ago);
+    session.authenticated_at = now - SignedDuration::from_mins(authenticated_minutes_ago);
     session
 }
 
@@ -33,7 +33,7 @@ fn password_only_account_enrolls_first_strong_factor() {
                 &account,
                 new,
                 true,
-                Utc::now()
+                Timestamp::now()
             ),
             Ok(())
         );
@@ -53,7 +53,7 @@ fn recovery_codes_establish_no_protection() {
             &account,
             CredentialType::Totp,
             true,
-            Utc::now()
+            Timestamp::now()
         ),
         Ok(())
     );
@@ -71,7 +71,7 @@ fn strong_account_refuses_password_session() {
                 &account,
                 new,
                 true,
-                Utc::now()
+                Timestamp::now()
             ),
             Err(EnrollmentRefusal::Insufficient {
                 required: AuthLevel::Standard
@@ -85,7 +85,7 @@ fn strong_account_refuses_password_session() {
             &account,
             CredentialType::Opaque,
             true,
-            Utc::now()
+            Timestamp::now()
         ),
         Ok(())
     );
@@ -101,7 +101,7 @@ fn fresh_sufficient_session_enrolls() {
             &account,
             CredentialType::WebAuthn,
             true,
-            Utc::now()
+            Timestamp::now()
         ),
         Ok(())
     );
@@ -117,7 +117,7 @@ fn stale_session_refuses() {
             &account,
             CredentialType::WebAuthn,
             true,
-            Utc::now()
+            Timestamp::now()
         ),
         Err(EnrollmentRefusal::Stale {
             required: AuthLevel::Standard
@@ -140,14 +140,20 @@ fn a_device_key_binds_at_its_own_assurance() {
                 account,
                 AuthLevel::Basic,
                 true,
-                Utc::now()
+                Timestamp::now()
             ),
             Ok(())
         );
     }
     let provisional = Session::new_provisional(ProfileId::generate(), None);
     assert_eq!(
-        check_binding(&provisional, &basic, AuthLevel::Basic, true, Utc::now()),
+        check_binding(
+            &provisional,
+            &basic,
+            AuthLevel::Basic,
+            true,
+            Timestamp::now()
+        ),
         Err(EnrollmentRefusal::Provisional)
     );
     assert_eq!(
@@ -156,7 +162,7 @@ fn a_device_key_binds_at_its_own_assurance() {
             &basic,
             AuthLevel::Basic,
             true,
-            Utc::now()
+            Timestamp::now()
         ),
         Err(EnrollmentRefusal::Stale {
             required: AuthLevel::Basic
@@ -180,7 +186,7 @@ fn provisional_session_refuses() {
                 &account,
                 CredentialType::WebAuthn,
                 true,
-                Utc::now()
+                Timestamp::now()
             ),
             Err(EnrollmentRefusal::Provisional)
         );
@@ -198,7 +204,7 @@ fn change(
         true,
         rule,
         proven,
-        Utc::now(),
+        Timestamp::now(),
     )
 }
 
@@ -207,10 +213,10 @@ fn change(
 #[test]
 fn always_rule_requires_the_current_password() {
     let fresh = session(AuthLevel::Basic, 0);
-    let now = Utc::now();
+    let now = Timestamp::now();
     assert_eq!(
         current_password_required_in(&fresh, CurrentPasswordRule::Always, now),
-        chrono::Duration::zero()
+        SignedDuration::ZERO
     );
     assert_eq!(
         change(&fresh, CurrentPasswordRule::Always, false),
@@ -225,19 +231,19 @@ fn always_rule_requires_the_current_password() {
 fn relaxed_rule_counts_down_from_the_last_authentication() {
     let rule = CurrentPasswordRule::AfterMinutes(5);
     let recent = session(AuthLevel::Basic, 2);
-    let now = Utc::now();
+    let now = Timestamp::now();
     let left = current_password_required_in(&recent, rule, now);
     assert_eq!(
         left,
-        recent.authenticated_at + chrono::Duration::minutes(5) - now
+        (recent.authenticated_at + SignedDuration::from_mins(5)).duration_since(now)
     );
-    assert!(left > chrono::Duration::minutes(2));
+    assert!(left > SignedDuration::from_mins(2));
     assert_eq!(change(&recent, rule, false), Ok(()));
 
     let older = session(AuthLevel::Basic, 6);
     assert_eq!(
-        current_password_required_in(&older, rule, Utc::now()),
-        chrono::Duration::zero()
+        current_password_required_in(&older, rule, Timestamp::now()),
+        SignedDuration::ZERO
     );
     assert_eq!(
         change(&older, rule, false),
@@ -252,8 +258,8 @@ fn relaxed_rule_is_bounded_by_the_freshness_window() {
     let rule = CurrentPasswordRule::AfterMinutes(180);
     let stale = session(AuthLevel::Basic, 70);
     assert_eq!(
-        current_password_required_in(&stale, rule, Utc::now()),
-        chrono::Duration::zero()
+        current_password_required_in(&stale, rule, Timestamp::now()),
+        SignedDuration::ZERO
     );
     assert_eq!(
         change(&stale, rule, false),

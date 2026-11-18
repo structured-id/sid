@@ -189,7 +189,6 @@ pub async fn test_oauth_client_role_assignment(backend: &dyn StorageBackend) {
 /// keeps the revision it was restored at, a repeat writes nothing, and a
 /// different assignment under the same id is a conflict that writes nothing.
 pub async fn test_imported_assignment_keeps_its_connector_revision(backend: &dyn StorageBackend) {
-    use chrono::{DurationRound, TimeDelta};
     use sid_core::models::{OrgId, ProvisioningConnector, ProvisioningDirection};
 
     let role = stored_role(backend).await;
@@ -208,10 +207,8 @@ pub async fn test_imported_assignment_keeps_its_connector_revision(backend: &dyn
         RoleAssignmentPrincipal::ProvisioningConnector(connector.id),
         role.id,
     );
-    assignment.created_at = assignment
-        .created_at
-        .duration_trunc(TimeDelta::milliseconds(1))
-        .unwrap();
+    assignment.created_at =
+        crate::conformance::trunc(assignment.created_at, jiff::Unit::Millisecond);
     assert!(
         backend
             .import_role_assignment(&assignment, test_audit())
@@ -536,7 +533,7 @@ pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) 
 /// The expiry scan returns assignments already expired or expiring within
 /// the window, never one expiring later or one without an expiry.
 pub async fn test_expiring_role_assignments(backend: &dyn StorageBackend) {
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration as Duration, Timestamp};
 
     let role = stored_role(backend).await;
     let profile = super::create_test_profile("expiring");
@@ -546,11 +543,11 @@ pub async fn test_expiring_role_assignments(backend: &dyn StorageBackend) {
         .unwrap();
     let principal = RoleAssignmentPrincipal::Profile(profile.id);
     let expired = RoleAssignment::new(principal.clone(), role.id)
-        .with_expiry(Utc::now() - Duration::hours(1));
+        .with_expiry(Timestamp::now() - Duration::from_hours(1));
     let soon = RoleAssignment::new(principal.clone(), role.id)
-        .with_expiry(Utc::now() + Duration::hours(2));
+        .with_expiry(Timestamp::now() + Duration::from_hours(2));
     let later = RoleAssignment::new(principal.clone(), role.id)
-        .with_expiry(Utc::now() + Duration::hours(48));
+        .with_expiry(Timestamp::now() + Duration::from_hours(48));
     let permanent = RoleAssignment::new(principal, role.id);
     for a in [&expired, &soon, &later, &permanent] {
         backend
@@ -703,7 +700,7 @@ pub async fn test_administrative_assignment(backend: &dyn StorageBackend) {
         depends_on: None,
         ceiling: None,
     })
-    .with_expiry(chrono::Utc::now() + chrono::Duration::hours(1));
+    .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1));
     backend
         .create_role_assignment(&root, test_audit())
         .await
@@ -847,7 +844,7 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
                 depends_on: None,
                 ceiling: Some(["documents:read".to_string()].into()),
             })
-            .with_expiry(chrono::Utc::now() + chrono::Duration::hours(1))
+            .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1))
     };
     let fenced = |err: Error| assert!(matches!(err, Error::Fenced(_)), "{err:?}");
     async fn held(backend: &dyn StorageBackend, worker: sid_core::models::ProfileId) -> usize {
@@ -995,7 +992,7 @@ pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
                 depends_on: None,
                 ceiling: Some(["documents:read".to_string()].into()),
             })
-            .with_expiry(chrono::Utc::now() + chrono::Duration::hours(1))
+            .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1))
     };
     let fence = |group: &Group| AssignmentFence {
         basis: authority(basis.id, 0),
@@ -1172,7 +1169,7 @@ pub async fn test_create_role_assignment_never_replaces(backend: &dyn StorageBac
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
-    let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+    let expiry = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1);
     let assignment = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile.id), role.id)
         .with_expiry(expiry);
     backend
@@ -1196,7 +1193,7 @@ pub async fn test_create_role_assignment_never_replaces(backend: &dyn StorageBac
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].scope, None);
     assert_eq!(
-        stored[0].expires_at.map(|t| t.timestamp_millis()),
-        Some(expiry.timestamp_millis())
+        stored[0].expires_at.map(|t| t.as_millisecond()),
+        Some(expiry.as_millisecond())
     );
 }

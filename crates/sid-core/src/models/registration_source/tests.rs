@@ -105,7 +105,7 @@ fn test_registration_source_serde_roundtrip() {
             content: String::new(),
         },
         client_id: Some("frontend".into()),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let json = serde_json::to_string(&src).unwrap();
     let parsed: RegistrationSource = serde_json::from_str(&json).unwrap();

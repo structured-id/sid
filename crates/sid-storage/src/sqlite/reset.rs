@@ -95,7 +95,7 @@ impl SqliteBackend {
         id: ResetSessionId,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let verified = sqlx::query(
             "UPDATE password_reset_sessions \
@@ -135,7 +135,7 @@ impl SqliteBackend {
                 "a password replacement installs an OPAQUE credential".into(),
             ));
         }
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let mut tx = self.begin_write().await?;
         let completed: Option<ProfileId> = sqlx::query_scalar(
             "UPDATE password_reset_sessions SET status = 'completed', completed_at = ?1 \
@@ -193,7 +193,7 @@ impl SqliteBackend {
              WHERE profile_id = ? AND status IN ('pending', 'verified') AND expires_at > ?",
         )
         .bind(profile_id)
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -208,7 +208,7 @@ impl SqliteBackend {
         let deleted = sqlx::query(
             "DELETE FROM password_reset_sessions WHERE expires_at < ? AND status = 'pending'",
         )
-        .bind(fmt_dt(&chrono::Utc::now()))
+        .bind(fmt_dt(&jiff::Timestamp::now()))
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -218,7 +218,7 @@ impl SqliteBackend {
 
     /// Drop expired proofs; the assignment and its revision stay.
     pub(crate) async fn expire_principal_verifications_impl(&self) -> SidResult<i64> {
-        let now = fmt_dt(&chrono::Utc::now());
+        let now = fmt_dt(&jiff::Timestamp::now());
         let expired = sqlx::query(
             "UPDATE principals SET verified = 0, updated_at = ?1 \
              WHERE verified = 1 AND verification_expires IS NOT NULL AND verification_expires < ?1",

@@ -73,7 +73,7 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<PasswordHistory<Self::Owner>>;
 
     /// The history write cutoff this store records; `None` when none was set.
-    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>>;
+    async fn history_write_cutoff(&self) -> Result<Option<jiff::Timestamp>>;
 
     /// Raise the history write cutoff to `not_before`: from its commit no
     /// history commit writes an entry under an epoch created before it
@@ -81,9 +81,9 @@ pub trait CredentialStore: Send + Sync {
     /// or earlier value changes nothing. Returns the cutoff in force.
     async fn raise_history_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: jiff::Timestamp,
         ctx: MutationContext,
-    ) -> Result<chrono::DateTime<chrono::Utc>>;
+    ) -> Result<jiff::Timestamp>;
 
     /// Replace a credential's data with the same secret sealed differently,
     /// only if its data is still `expected`. Its status and last use are left

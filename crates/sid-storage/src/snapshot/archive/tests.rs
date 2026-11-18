@@ -13,7 +13,7 @@ fn a_sealed_snapshot_opens_under_its_key() {
     let crypto = RustCryptoPrimitives::new();
     let mut snapshot = Snapshot::new("sqlite");
     snapshot.metadata.installation_org = None;
-    snapshot.history_write_cutoff = Some(chrono::Utc::now());
+    snapshot.history_write_cutoff = Some(jiff::Timestamp::now());
     let sealed = seal(&snapshot, &key(1), &crypto).unwrap();
 
     let manifest = manifest(&sealed).unwrap();

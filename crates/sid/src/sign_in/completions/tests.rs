@@ -24,7 +24,7 @@ fn evidence() -> SessionAuthentication {
     SessionAuthentication {
         assurance_level: AuthLevel::Standard,
         elevation: None,
-        authenticated_at: Utc::now(),
+        authenticated_at: Timestamp::now(),
         amr: vec!["pwd".to_string(), "otp".to_string()],
     }
 }
@@ -363,7 +363,7 @@ async fn admitted_sign_in_refuses_an_operation_past_its_deadline() {
             Some("app"),
             Some(AdmittedCompletion {
                 operation,
-                deadline: Utc::now() - chrono::Duration::seconds(1),
+                deadline: Timestamp::now() - jiff::SignedDuration::from_secs(1),
             }),
             Some(CLIENT_IP),
             AttemptContext::default(),

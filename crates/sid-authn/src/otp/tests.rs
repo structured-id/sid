@@ -220,7 +220,7 @@ async fn expire(store: &Arc<SqliteBackend>, session_id: Uuid) {
             .unwrap(),
     )
     .unwrap();
-    session.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    session.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
     store
         .put_ceremony_state(
             SESSIONS,
@@ -471,7 +471,7 @@ async fn requested_code_owes_its_email() {
     assert_eq!(owed[0].expires_at, Some(session.expires_at));
 
     let pending = service
-        .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
+        .pending_delivery(result.session_id, issue_of(&owed[0]), Timestamp::now())
         .await
         .unwrap()
         .expect("the code is waiting for its email");
@@ -496,7 +496,7 @@ async fn code_for_no_account_sends_nothing() {
     assert_eq!(owed[0].payload.len(), 32);
     assert!(
         service
-            .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
+            .pending_delivery(result.session_id, issue_of(&owed[0]), Timestamp::now())
             .await
             .unwrap()
             .is_none()
@@ -524,7 +524,7 @@ async fn used_or_expired_code_sends_nothing() {
     for session in [used.session_id, old.session_id] {
         assert!(
             service
-                .pending_delivery(session, issue(session), Utc::now())
+                .pending_delivery(session, issue(session), Timestamp::now())
                 .await
                 .unwrap()
                 .is_none()
@@ -562,14 +562,14 @@ async fn resent_code_replaces_the_current_one() {
     assert_ne!(second_issue, first_issue);
     assert!(
         service
-            .pending_delivery(result.session_id, first_issue, Utc::now())
+            .pending_delivery(result.session_id, first_issue, Timestamp::now())
             .await
             .unwrap()
             .is_none(),
         "the replaced code's email is superseded"
     );
     let pending = service
-        .pending_delivery(result.session_id, second_issue, Utc::now())
+        .pending_delivery(result.session_id, second_issue, Timestamp::now())
         .await
         .unwrap()
         .unwrap();
@@ -651,7 +651,7 @@ async fn code_sealed_to_another_issue_is_refused() {
 
     assert!(matches!(
         service
-            .pending_delivery(result.session_id, issue, Utc::now())
+            .pending_delivery(result.session_id, issue, Timestamp::now())
             .await,
         Err(OtpError::Sealed(_))
     ));

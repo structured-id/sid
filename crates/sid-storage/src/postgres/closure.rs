@@ -6,6 +6,7 @@ use sid_core::models::ClosureRequest;
 use sid_core::{Error as SidError, Result as SidResult};
 
 use super::insert_error;
+use crate::pg_time::ToPg;
 
 type Tx<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 
@@ -56,8 +57,8 @@ pub(super) async fn insert(
         .bind(req.mode.as_str())
         .bind(&req.closure_reason)
         .bind(req.requested_by)
-        .bind(req.requested_at)
-        .bind(req.grace_period_end)
+        .bind(req.requested_at.pg())
+        .bind(req.grace_period_end.pg())
         .bind(req.export_status.as_str())
         .bind(cancel_count)
         .bind(legal_hold)

@@ -141,7 +141,7 @@ impl Branding {
             operation,
             &req,
         );
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let config = BrandingConfig {
             id: BrandingConfigId::generate(),
             project_id,
@@ -223,7 +223,7 @@ impl Branding {
                 if let Some(text) = &req.text {
                     config.text = text_from_proto(text);
                 }
-                config.updated_at = chrono::Utc::now();
+                config.updated_at = jiff::Timestamp::now();
                 let response = domain_to_proto(&config);
                 let audit = MutationContext::from(AuditEntry::admin(
                     &admin,
@@ -285,7 +285,7 @@ impl Branding {
                 .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .publish_branding_config(config_id, project_id, chrono::Utc::now(), audit)
+                    .publish_branding_config(config_id, project_id, jiff::Timestamp::now(), audit)
                     .await?
                 {
                     // Published or deleted since it was read.

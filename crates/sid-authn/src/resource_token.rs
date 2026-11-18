@@ -53,7 +53,7 @@ impl ResourceTokenVerifier {
             issuer,
             indicator,
             keys: ArcSwap::from_pointee(keys),
-            reloaded_at: AtomicI64::new(chrono::Utc::now().timestamp()),
+            reloaded_at: AtomicI64::new(jiff::Timestamp::now().as_second()),
         })
     }
 
@@ -107,7 +107,7 @@ impl ResourceTokenVerifier {
 
     /// Load the issuer's keys again, at most once per reload interval.
     async fn reload(&self) -> SidResult<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let last = self.reloaded_at.load(Ordering::Acquire);
         if now - last < KEY_RELOAD_INTERVAL_SECS {
             return Ok(());

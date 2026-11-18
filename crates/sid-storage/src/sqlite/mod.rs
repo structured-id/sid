@@ -60,6 +60,7 @@ mod work;
 pub use audit::SqliteAuditLog;
 
 use async_trait::async_trait;
+use jiff::Timestamp;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::storage::StorageBackend;
@@ -95,7 +96,7 @@ async fn check_session_fence(
     tx: &mut WriteTx,
     session: sid_core::models::SessionId,
     profile: sid_core::models::ProfileId,
-    fresh_until: Option<chrono::DateTime<chrono::Utc>>,
+    fresh_until: Option<Timestamp>,
 ) -> SidResult<()> {
     let fenced = |what: &str| SidError::Fenced(format!("the sign-in {what}"));
     let storage = |e: sqlx::Error| SidError::Storage(format!("check sign-in fence: {e}"));
@@ -116,7 +117,7 @@ async fn check_session_fence(
         .fetch_optional(&mut **tx)
         .await
         .map_err(storage)?;
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     match &row {
         Some(row) if dt_col(row, "expires_at")? > now => {}
         _ => return Err(fenced("ended")),
@@ -375,18 +376,12 @@ impl SqliteBackend {
 
 // ─── Helper: parse DateTime from SQLite TEXT ───
 
-pub(crate) fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now())
+pub(crate) fn parse_dt(s: &str) -> Timestamp {
+    s.parse().unwrap_or_else(|_| Timestamp::now())
 }
 
-pub(crate) fn parse_dt_opt(s: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
-    s.and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(&s)
-            .ok()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-    })
+pub(crate) fn parse_dt_opt(s: Option<String>) -> Option<Timestamp> {
+    s.and_then(|s| s.parse().ok())
 }
 
 /// A failed insert: an existing key is a `Conflict`, never an update.
@@ -401,11 +396,12 @@ pub(crate) fn insert_error(what: &str, e: sqlx::Error) -> SidError {
 
 /// Microseconds, the precision PostgreSQL keeps: a record moved between the
 /// backends compares equal to itself.
-pub(crate) fn fmt_dt(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+/// Fixed width (six fraction digits, `Z`), so stored text sorts as time does.
+pub(crate) fn fmt_dt(dt: &Timestamp) -> String {
+    dt.strftime("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
 }
 
-pub(crate) fn fmt_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+pub(crate) fn fmt_dt_opt(dt: Option<Timestamp>) -> Option<String> {
     dt.as_ref().map(fmt_dt)
 }
 
@@ -455,13 +451,9 @@ pub(crate) fn uuid_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u
 
 /// Decode an RFC 3339 timestamp column; a malformed value is an error, never
 /// a substitute time.
-pub(crate) fn dt_col(
-    row: &sqlx::sqlite::SqliteRow,
-    name: &str,
-) -> SidResult<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn dt_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<Timestamp> {
     let raw: String = col(row, name)?;
-    chrono::DateTime::parse_from_rfc3339(&raw)
-        .map(|t| t.with_timezone(&chrono::Utc))
+    raw.parse()
         .map_err(|e| SidError::Storage(format!("column {name}: bad timestamp {raw}: {e}")))
 }
 
@@ -469,11 +461,10 @@ pub(crate) fn dt_col(
 pub(crate) fn dt_col_opt(
     row: &sqlx::sqlite::SqliteRow,
     name: &str,
-) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+) -> SidResult<Option<Timestamp>> {
     let raw: Option<String> = col(row, name)?;
     raw.map(|raw| {
-        chrono::DateTime::parse_from_rfc3339(&raw)
-            .map(|t| t.with_timezone(&chrono::Utc))
+        raw.parse()
             .map_err(|e| SidError::Storage(format!("column {name}: bad timestamp {raw}: {e}")))
     })
     .transpose()
@@ -633,11 +624,7 @@ impl GrantStore for SqliteBackend {
         self.list_sessions_impl(*owner).await
     }
 
-    async fn touch_session(
-        &self,
-        id: sid_core::models::SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
+    async fn touch_session(&self, id: sid_core::models::SessionId, at: Timestamp) -> SidResult<()> {
         self.touch_session_impl(id, at).await
     }
 
@@ -680,7 +667,7 @@ impl GrantStore for SqliteBackend {
         &self,
         old_id: uuid::Uuid,
         new: &sid_core::models::RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        grace_expires_at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.rotate_refresh_token_impl(old_id, new, grace_expires_at, audit)
@@ -771,7 +758,7 @@ impl sid_plugin::SignInHistoryStore for SqliteBackend {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: sid_core::models::ProfileId,
-    ) -> SidResult<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(std::net::IpAddr, Timestamp)>> {
         self.get_most_recent_session_ip_impl(profile_id).await
     }
 
@@ -913,15 +900,15 @@ impl sid_plugin::CredentialStore for SqliteBackend {
         self.get_password_history_impl(owner).await
     }
 
-    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+    async fn history_write_cutoff(&self) -> SidResult<Option<Timestamp>> {
         self.history_write_cutoff_impl().await
     }
 
     async fn raise_history_write_cutoff(
         &self,
-        not_before: chrono::DateTime<chrono::Utc>,
+        not_before: Timestamp,
         audit: MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+    ) -> SidResult<Timestamp> {
         self.raise_history_write_cutoff_impl(not_before, audit)
             .await
     }
@@ -1116,7 +1103,7 @@ impl StorageBackend for SqliteBackend {
         profile_id: sid_core::models::ProfileId,
         id: sid_core::models::ProfilePhoneId,
         settings: &sid_core::models::PhoneSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.update_profile_phone_settings_impl(profile_id, id, settings, at, audit)
@@ -1127,7 +1114,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         profile_id: sid_core::models::ProfileId,
         id: sid_core::models::ProfilePhoneId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.set_primary_profile_phone_impl(profile_id, id, at, audit)
@@ -1177,7 +1164,7 @@ impl StorageBackend for SqliteBackend {
         profile_id: sid_core::models::ProfileId,
         id: sid_core::models::ProfileEmailId,
         settings: &sid_core::models::EmailSettings,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.update_profile_email_settings_impl(profile_id, id, settings, at, audit)
@@ -1188,7 +1175,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         profile_id: sid_core::models::ProfileId,
         id: sid_core::models::ProfileEmailId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.set_primary_profile_email_impl(profile_id, id, at, audit)
@@ -1406,9 +1393,7 @@ impl StorageBackend for SqliteBackend {
     async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> SidResult<()> {
         self.remove_ip_allowlist_entry_impl(cidr, ctx).await
     }
-    async fn list_ip_allowlist_entries(
-        &self,
-    ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+    async fn list_ip_allowlist_entries(&self) -> SidResult<Vec<(String, String, Timestamp)>> {
         self.list_ip_allowlist_entries_impl().await
     }
 
@@ -1416,7 +1401,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         cidr: &str,
         description: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_ip_allowlist_entry_impl(cidr, description, created_at, ctx)
@@ -2743,7 +2728,7 @@ impl StorageBackend for SqliteBackend {
         machine_user_id: sid_core::models::MachineUserId,
         old_kid: &str,
         new: &sid_core::models::MachineUserCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.rotate_machine_credential_impl(machine_user_id, old_kid, new, grace_until, audit)
@@ -2844,7 +2829,7 @@ impl StorageBackend for SqliteBackend {
         connector_id: sid_core::models::ProvisioningConnectorId,
         old: sid_core::models::ProvisioningCredentialId,
         new: &sid_core::models::ProvisioningCredential,
-        grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.connector_rotate_credential(connector_id, old, new, grace_until, ctx)
@@ -2928,7 +2913,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         principal_hash: &str,
         principal_type: &str,
-        quarantine_until: chrono::DateTime<chrono::Utc>,
+        quarantine_until: Timestamp,
         audit: MutationContext,
     ) -> SidResult<()> {
         self.quarantine_principal_impl(principal_hash, principal_type, quarantine_until, audit)
@@ -3046,7 +3031,7 @@ impl StorageBackend for SqliteBackend {
     async fn acknowledge_export_job(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.acknowledge_export_job_impl(id, at, audit).await
@@ -3055,7 +3040,7 @@ impl StorageBackend for SqliteBackend {
     async fn expire_export_job(
         &self,
         id: uuid::Uuid,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.expire_export_job_impl(id, at, audit).await
@@ -3244,7 +3229,12 @@ impl StorageBackend for SqliteBackend {
         let mut tx = self.begin_write().await?;
         sqlx::query("INSERT INTO flow_configs (project_id, flow_type, data, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(project_id, flow_type) DO UPDATE SET data = ?3, updated_at = ?4")
         .bind(config.project_id).bind(config.flow_type.as_str()).bind(&data)
-        .bind(config.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .bind(
+            config
+                .updated_at
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+        )
         .execute(&mut *tx).await.map_err(|e| SidError::Storage(format!("Insert: {e}")))?;
         Self::commit_mutation(
             tx,
@@ -3337,7 +3327,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         id: sid_core::models::BrandingConfigId,
         project_id: sid_core::models::ProjectId,
-        at: chrono::DateTime<chrono::Utc>,
+        at: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.publish_branding_config_impl(id, project_id, at, ctx)
@@ -3445,13 +3435,13 @@ impl StorageBackend for SqliteBackend {
     }
     async fn count_registrations_by_source(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: Timestamp,
     ) -> SidResult<Vec<(sid_core::models::RegistrationSourceType, u64)>> {
         self.count_registrations_by_source_impl(since).await
     }
     async fn top_referrers(
         &self,
-        since: chrono::DateTime<chrono::Utc>,
+        since: Timestamp,
         limit: u64,
     ) -> SidResult<Vec<(sid_core::models::ProfileId, u64)>> {
         self.top_referrers_impl(since, limit).await
@@ -3459,9 +3449,8 @@ impl StorageBackend for SqliteBackend {
     async fn try_job_lock(&self, job: i64) -> SidResult<Option<sid_plugin::storage::JobLock>> {
         self.try_job_lock_impl(job).await
     }
-    async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> SidResult<bool> {
+    async fn ensure_audit_partition(&self, month_start: jiff::civil::Date) -> SidResult<bool> {
         // One audit table holds every month: nothing to prepare.
-        use chrono::Datelike;
         if month_start.day() != 1 {
             return Err(SidError::Validation(format!(
                 "{month_start} is not the first day of a month"
@@ -3471,7 +3460,7 @@ impl StorageBackend for SqliteBackend {
     }
     async fn drop_expired_audit_records(
         &self,
-        cut_before: chrono::DateTime<chrono::Utc>,
+        cut_before: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<u64> {
         self.drop_expired_audit_records_impl(cut_before, ctx).await

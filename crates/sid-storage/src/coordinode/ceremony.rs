@@ -18,7 +18,7 @@ use sid_plugin::{
 use super::{CoordinodeBackend, Decision, Params, Statements, get_bytes, get_int, slot};
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp_micros()
+    jiff::Timestamp::now().as_microsecond()
 }
 
 /// The deadline `ttl` from `now`; a lifetime past the range is a caller
@@ -403,7 +403,7 @@ impl CeremonyStateStore for CoordinodeBackend {
             let mut stored_count = 0u64;
             for entry in &records.states {
                 let slot = slot(&entry.namespace, &entry.key)?;
-                let wanted = (entry.value.clone(), entry.expires_at.timestamp_micros());
+                let wanted = (entry.value.clone(), entry.expires_at.as_microsecond());
                 let held = stored(tx, &slot)?;
                 match &held {
                     Some(live) if live.1 > now => {
@@ -421,7 +421,7 @@ impl CeremonyStateStore for CoordinodeBackend {
                 let value = i64::try_from(count.count).map_err(|_| {
                     SidError::Validation(format!("count of {} is too large", count.key))
                 })?;
-                let wanted = (value, count.window_ends.timestamp_micros());
+                let wanted = (value, count.window_ends.as_microsecond());
                 let held = counted(tx, &slot)?;
                 match &held {
                     Some(live) if live.1 > now => {
@@ -479,7 +479,7 @@ fn whole_ms(micros: i64) -> i64 {
 }
 
 /// The instant of a stored microsecond deadline, at millisecond precision.
-fn instant(micros: i64) -> SidResult<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::from_timestamp_micros(whole_ms(micros))
-        .ok_or_else(|| SidError::Storage(format!("ceremony deadline {micros} is out of range")))
+fn instant(micros: i64) -> SidResult<jiff::Timestamp> {
+    jiff::Timestamp::from_microsecond(whole_ms(micros))
+        .map_err(|_| SidError::Storage(format!("ceremony deadline {micros} is out of range")))
 }

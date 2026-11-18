@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Domain event types following CloudEvents 1.0 specification (CNCF).
 //!
-//! All SID events use CloudEvents envelope for transport-agnostic
-//! serialization over gRPC, NATS JetStream, and HTTP webhooks.
-//!
-//! Hybrid approach: custom `Event` struct for SID-specific fields +
-//! `cloudevents-sdk` interop via `From`/`TryFrom` conversions.
+//! All SID events use the CloudEvents JSON envelope for transport-agnostic
+//! serialization over gRPC, NATS JetStream, and HTTP webhooks; `sequence`
+//! is a SID extension attribute (CloudEvents 1.0 §3.1.1).
 
-use chrono::{DateTime, Utc};
-use cloudevents::EventBuilder;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::durable_work::{NewWork, WorkId, WorkKind};
@@ -228,9 +225,6 @@ pub struct EventDelivery {
     pub event: Event,
 }
 
-/// SID-specific extension attribute name for monotonic sequence.
-const EXT_SEQUENCE: &str = "sequence";
-
 /// Validation errors for CloudEvents envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventValidationError {
@@ -287,7 +281,7 @@ pub struct Event {
     pub subject: Option<String>,
 
     /// When the event occurred.
-    pub time: DateTime<Utc>,
+    pub time: Timestamp,
 
     /// Content type of the data payload.
     #[serde(default = "default_content_type")]
@@ -315,7 +309,7 @@ impl Event {
             source: source.into(),
             event_type: event_type.into(),
             subject: None,
-            time: Utc::now(),
+            time: Timestamp::now(),
             datacontenttype: default_content_type(),
             data: serde_json::Value::Null,
             sequence: 0,
@@ -464,109 +458,6 @@ impl TryFrom<serde_json::Value> for Event {
             .map_err(|e| EventValidationError::InvalidStructure(e.to_string()))?;
         event.validate()?;
         Ok(event)
-    }
-}
-
-// ── cloudevents-sdk interop ─────────────────────────────────────────
-
-/// Convert SID Event → cloudevents::Event for ecosystem interop.
-///
-/// Maps all CloudEvents required + optional attributes.
-/// SID `sequence` extension is stored as CE extension attribute.
-impl From<&Event> for cloudevents::Event {
-    fn from(sid: &Event) -> Self {
-        let mut builder = cloudevents::EventBuilderV10::new()
-            .id(&sid.id)
-            .source(&sid.source)
-            .ty(&sid.event_type)
-            .time(sid.time);
-
-        if let Some(ref subject) = sid.subject {
-            builder = builder.subject(subject);
-        }
-
-        if sid.data != serde_json::Value::Null {
-            builder = builder.data(sid.datacontenttype.clone(), sid.data.clone());
-        }
-
-        let mut ce = builder.build().expect("required CE fields are set");
-
-        if sid.sequence > 0 {
-            ce.set_extension(
-                EXT_SEQUENCE,
-                cloudevents::event::ExtensionValue::Integer(sid.sequence as i64),
-            );
-        }
-
-        ce
-    }
-}
-
-/// Convert cloudevents::Event → SID Event for inbound interop.
-///
-/// Extracts all CloudEvents attributes + SID `sequence` extension.
-impl TryFrom<cloudevents::Event> for Event {
-    type Error = EventValidationError;
-
-    fn try_from(ce: cloudevents::Event) -> Result<Self, Self::Error> {
-        use cloudevents::event::AttributesReader;
-
-        let id = ce.id().to_string();
-        let source = ce.source().to_string();
-        let event_type = ce.ty().to_string();
-        let specversion = match ce.specversion() {
-            cloudevents::event::SpecVersion::V10 => CLOUDEVENTS_SPEC_VERSION.to_string(),
-            other => other.to_string(),
-        };
-
-        if id.is_empty() {
-            return Err(EventValidationError::MissingId);
-        }
-        if source.is_empty() {
-            return Err(EventValidationError::MissingSource);
-        }
-        if event_type.is_empty() {
-            return Err(EventValidationError::MissingType);
-        }
-
-        let subject = ce.subject().map(|s| s.to_string());
-        let time = ce.time().copied().unwrap_or_else(Utc::now);
-        let datacontenttype = ce
-            .datacontenttype()
-            .unwrap_or("application/json")
-            .to_string();
-
-        let data = match ce.data() {
-            Some(cloudevents::Data::Json(v)) => v.clone(),
-            Some(cloudevents::Data::String(s)) => serde_json::Value::String(s.clone()),
-            Some(cloudevents::Data::Binary(b)) => {
-                // Try to parse binary as JSON, fallback to hex-encoded string.
-                serde_json::from_slice(b)
-                    .unwrap_or_else(|_| serde_json::Value::String(hex::encode(b)))
-            }
-            None => serde_json::Value::Null,
-        };
-
-        let sequence = ce
-            .extension(EXT_SEQUENCE)
-            .and_then(|v| match v {
-                cloudevents::event::ExtensionValue::Integer(i) => Some(*i as u64),
-                cloudevents::event::ExtensionValue::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
-
-        Ok(Event {
-            specversion,
-            id,
-            source,
-            event_type,
-            subject,
-            time,
-            datacontenttype,
-            data,
-            sequence,
-        })
     }
 }
 

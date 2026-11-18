@@ -238,7 +238,7 @@ impl FederatedEntryServiceImpl {
         };
         // A resumed admission keeps the original authentication time and
         // evidence bounds: the evidence is the one kept with the entry.
-        let Some(authentication) = returned.evidence.authentication(chrono::Utc::now()) else {
+        let Some(authentication) = returned.evidence.authentication(jiff::Timestamp::now()) else {
             warn!("federated entry evidence is no longer current");
             return Err(Refusal::over("Sign-in was not completed"));
         };

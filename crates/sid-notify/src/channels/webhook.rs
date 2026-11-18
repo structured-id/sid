@@ -10,8 +10,8 @@
 use core::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use sha2::Sha256;
@@ -195,7 +195,7 @@ impl NotificationChannel for WebhookChannel {
         Ok(DeliveryReceipt {
             message_id: delivery_id,
             channel: "webhook".into(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             provider: format!("webhook:{}", active_endpoints.len()),
         })
     }
