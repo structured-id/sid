@@ -198,7 +198,12 @@ async fn totp_enrollment_finish_needs_a_started_enrollment() {
     let sign_in = sign_in(storage.clone());
     let factors = second_factors(storage.clone());
     let alice = stored_profile(storage.as_ref(), "alice").await;
-    let enroller = Enroller::SignIn(Box::new(sign_in.new_session(alice, None)));
+    let session = sign_in.new_session(alice, None);
+    storage
+        .create_session(&session, AuditEntry::system("test", "session").into())
+        .await
+        .unwrap();
+    let enroller = Enroller::Session(signed_in_as(alice, &session.id.to_string()));
     assert!(matches!(
         factors
             .totp_enrollment_finish(&sign_in, &enroller, "12x456")
@@ -211,6 +216,71 @@ async fn totp_enrollment_finish_needs_a_started_enrollment() {
             .await,
         Err(SecondFactorError::Expired("TOTP enrollment"))
     ));
+}
+
+/// `profile` calling with a token of its session `sid`.
+fn signed_in_as(profile: ProfileId, sid: &str) -> sid_authn::caller::Caller {
+    let now = chrono::Utc::now().timestamp();
+    sid_authn::caller::Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
+        sub: profile.to_string(),
+        pid: Some(profile.to_string()),
+        iss: "https://sid.example.com".into(),
+        aud: vec!["https://sid.example.com".into()],
+        client_id: None,
+        exp: now + 300,
+        iat: now,
+        auth_time: now,
+        acr: "standard".into(),
+        scope: "openid".into(),
+        roles: String::new(),
+        sid: sid.to_owned(),
+        amr: vec!["pwd".into()],
+        jti: uuid::Uuid::now_v7().to_string(),
+        cnf: None,
+        act: None,
+        credential_kind: None,
+    })
+    .unwrap()
+}
+
+/// Regression: a finish refused for its caller's authority consumes nothing,
+/// so the started enrollment completes once an authorized caller sends the
+/// code. Before, the enrollment was taken first and lost with the refusal,
+/// and a fresh sign-in had to start the setup again.
+#[tokio::test]
+async fn a_refused_finish_keeps_the_enrollment() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend;
+    let sign_in = sign_in(storage.clone());
+    let factors = second_factors(storage.clone());
+    let alice = stored_profile(storage.as_ref(), "alice").await;
+    let session = sign_in.new_session(alice, None);
+    storage
+        .create_session(&session, AuditEntry::system("test", "session").into())
+        .await
+        .unwrap();
+    let enroller = Enroller::Session(signed_in_as(alice, &session.id.to_string()));
+    let started = factors
+        .totp_enrollment_start(&sign_in, &enroller)
+        .await
+        .unwrap();
+    let code = sid_authn::generate_current_totp(&started.shared_secret);
+
+    // A caller whose session is gone may not enroll.
+    let refused = Enroller::Session(signed_in_as(alice, &SessionId::generate().to_string()));
+    let answer = factors
+        .totp_enrollment_finish(&sign_in, &refused, &code)
+        .await;
+    assert!(
+        answer.is_err() && !matches!(answer, Err(SecondFactorError::Expired(_))),
+        "{answer:?}"
+    );
+
+    let enrolled = factors
+        .totp_enrollment_finish(&sign_in, &enroller, &code)
+        .await
+        .unwrap();
+    assert_eq!(enrolled.recovery_codes.len(), 10);
 }
 
 /// A step-up's passkey ceremony is kept under its session and challenge, so
