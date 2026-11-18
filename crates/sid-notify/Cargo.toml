@@ -80,7 +80,7 @@ async-nats = { workspace = true }
 futures = { workspace = true }
 
 # gRPC
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 tonic-reflection = { workspace = true }
 sid-proto = { workspace = true, features = ["grpc"] }
 prost = { workspace = true }

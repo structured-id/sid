@@ -52,7 +52,9 @@ arc-swap = "1"
 parking_lot = "0.13"
 
 # gRPC
-tonic = "0.14"
+# No default features: a client takes only `channel` and `codegen`, so it
+# compiles no router or server; a server names `router` and `transport`.
+tonic = { version = "0.14", default-features = false }
 prost = "0.14"
 prost-types = "0.14"
 tonic-health = "0.14"
