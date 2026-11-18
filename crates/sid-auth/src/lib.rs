@@ -16,29 +16,11 @@ pub mod config;
 pub mod receiver;
 pub mod server;
 
+#[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
 use sid_authn::issuer_directory as issuers;
-
-/// The shared cache at `url`, or one kept in this process when unset.
-pub async fn shared_cache(
-    url: Option<&str>,
-) -> anyhow::Result<Arc<dyn sid_plugin::cache::CacheBackend>> {
-    Ok(sid_infra::shared_cache(url).await?)
-}
-
-/// A revocation view over `cache` for a verifier that does not know the
-/// issuer's access-token lifetime: it assumes the longest allowed one.
-pub fn revocation_view(
-    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
-) -> Arc<sid_authn::revocation_cache::RevocationCache> {
-    let lifetime = std::time::Duration::try_from(sid_authn::jwt::AccessTokenTtl::MAX.duration())
-        .expect("the longest access-token lifetime is positive");
-    Arc::new(sid_authn::revocation_cache::RevocationCache::new(
-        lifetime, cache,
-    ))
-}
 
 /// Issuers and resources the tests know: fixed sets of records.
 #[cfg(test)]

@@ -18,11 +18,13 @@ use axum::http::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use secrecy::SecretString;
 use sid_auth_proxy::ProxyState;
+use sid_authn::application_session::BrowserSessions;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::client_key::ClientKey;
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::relying_party::Connection;
+use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::issuer_client::RpClient;
 use sid_infra::issuer_registry::GrpcIssuerSource;
 use sid_plugin::cache::{CacheBackend, InMemoryCacheBackend};
@@ -84,23 +86,24 @@ async fn world() -> World {
             connection(&issuer, &kid),
         )
         .unwrap();
-        let state = ProxyState {
-            issuer_url: INSTALLATION.into(),
-            issuers: Arc::new(IssuerDirectory::new(
+        let bff = BrowserSessions::new(
+            Arc::new(account),
+            Arc::new(IssuerDirectory::new(
                 INSTALLATION,
                 Arc::new(GrpcIssuerSource::new(channel.clone())),
             )),
+            sessions.clone(),
+            RevocationCache::receiver_view(cache.clone()),
+            COOKIE.into(),
+        );
+        let state = ProxyState {
             // Health only, which these tests do not ask.
             grpc_channel: tonic::transport::Channel::from_shared(issuer.upstream())
                 .unwrap()
                 .connect_lazy(),
-            revocation: sid_auth::revocation_view(cache.clone()),
-            bff_enabled: true,
-            account: Some(Arc::new(account)),
+            bff: Some(Arc::new(bff)),
             api_upstream: None,
             http: test_crypto::with_tls(sid_auth_proxy::api_client),
-            bff_sessions: sessions.clone(),
-            bff_cookie_name: COOKIE.into(),
             bff_dev_mode: false,
         };
         sid_auth_proxy::bff::routes().with_state(state)
@@ -395,8 +398,10 @@ async fn sign_out_revokes_the_grant_at_the_issuer() {
     let (session, user) = signed_in(&w).await;
     let csrf = user["csrf_token"].as_str().unwrap().to_owned();
     let logout = |csrf: &str| {
+        // The browser sends the page's origin with every POST.
         Request::post("/auth/logout")
             .header("cookie", &session)
+            .header("origin", "https://account.sid.example.com")
             .header("x-csrf-token", csrf)
             .body(Body::empty())
             .unwrap()

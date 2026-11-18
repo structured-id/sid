@@ -140,7 +140,8 @@ ff = { workspace = true }
 pasta_curves = { workspace = true }
 halo2_proofs = { workspace = true }
 rand = { workspace = true }
-tokio = { workspace = true }
+# Refresh claims and their holds are tested on a paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 # The password operation's tests store to a file.
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }

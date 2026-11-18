@@ -65,6 +65,8 @@ issuer-client = [
     "dep:sid-proto",
     "sid-proto/grpc",
     "dep:tonic",
+    "tonic/channel",
+    "tonic/codegen",
     "dep:http",
     "dep:secrecy",
     "dep:base64",
@@ -167,6 +169,6 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 # The Redis tests share one server, so each takes a key of its own.
 uuid = { workspace = true }
 # An empty set of services stands in for the embedder's own.
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 http-body-util = "0.1"
 tower = { workspace = true, features = ["util"] }

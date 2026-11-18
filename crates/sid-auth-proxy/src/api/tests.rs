@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::*;
-use crate::bff::routes;
-use crate::bff::tests::bff_test_state;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use axum::extract::connect_info::MockConnectInfo;
 use axum::http::Request;
-use std::sync::{Arc, Mutex};
+use sid_authn::bff_session::{RefreshClaim, TokenReplacement};
 use tower::ServiceExt;
+
+use super::*;
+use crate::bff::routes;
+use crate::bff::tests::{Bff, COOKIE, ORIGIN, bff, session_claims, signed_in, test_connection};
 
 /// What the fake account API saw of one request.
 #[derive(Debug, Clone)]
@@ -17,8 +21,9 @@ struct Seen {
 }
 
 /// A fake account API on a local port: records each request and answers
-/// with a body, a header of its own and a cookie the BFF must not pass on.
-async fn fake_api() -> (url::Url, Arc<Mutex<Vec<Seen>>>) {
+/// with `grpc_status`, a body, a header of its own and a cookie the BFF must
+/// not pass on.
+async fn fake_api(grpc_status: &'static str) -> (url::Url, Arc<Mutex<Vec<Seen>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = seen.clone();
     let app = axum::Router::new().fallback(move |request: Request<Body>| {
@@ -34,7 +39,7 @@ async fn fake_api() -> (url::Url, Arc<Mutex<Vec<Seen>>>) {
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/grpc-web+proto")
-                .header("grpc-status", "0")
+                .header("grpc-status", grpc_status)
                 .header("set-cookie", "sid_session=idp; Path=/")
                 .body(Body::from("answer"))
                 .unwrap()
@@ -46,49 +51,11 @@ async fn fake_api() -> (url::Url, Arc<Mutex<Vec<Seen>>>) {
     (url::Url::parse(&format!("http://{addr}")).unwrap(), seen)
 }
 
-fn claims(exp: i64) -> sid_authn::bff_session::SessionClaims {
-    sid_authn::bff_session::SessionClaims {
-        sub: "0190f000-0000-7000-8000-000000000001".into(),
-        iss: "https://sid.example.com/i/0123456789abcdef0123456789abcdef".into(),
-        exp,
-        iat: 1_000_000_000,
-        auth_time: 1_000_000_000,
-        acr: "urn:sid:acr:standard".into(),
-        scope: "account".into(),
-        roles: String::new(),
-        sid: "sess-1".into(),
-        jti: "jti-1".into(),
-        email: None,
-        name: None,
-        preferred_username: None,
-        groups: None,
-    }
-}
-
-fn in_an_hour() -> i64 {
-    jiff::Timestamp::now().as_second() + 3600
-}
-
-/// A signed-in state with the fake API behind `/api`, and the session's id
-/// and CSRF token.
-async fn signed_in_state(
-    upstream: Option<url::Url>,
-    exp: i64,
-    refresh_token: Option<&str>,
-) -> (ProxyState, String, String) {
-    let mut state = bff_test_state();
-    state.api_upstream = upstream;
-    let (id, csrf) = state
-        .bff_sessions
-        .create_session(
-            "access-1".into(),
-            refresh_token.map(secrecy::SecretString::from),
-            claims(exp),
-            &crate::bff::tests::test_connection().binding(),
-        )
-        .await
-        .unwrap();
-    (state, id, csrf)
+/// A BFF with the fake API behind `/api`.
+fn with_api(upstream: Option<url::Url>) -> Bff {
+    let mut bff = bff();
+    bff.state.api_upstream = upstream;
+    bff
 }
 
 async fn call(state: ProxyState, request: Request<Body>) -> Response {
@@ -100,9 +67,11 @@ async fn call(state: ProxyState, request: Request<Body>) -> Response {
         .unwrap()
 }
 
+/// A gRPC-Web call of the account page with session `id`.
 fn api_post(id: &str, csrf: Option<&str>) -> Request<Body> {
     let mut request = Request::post("/api/sid.v1.IdentityService/GetCurrentProfile?x=1")
-        .header("cookie", format!("__Host-sid-bff={id}; other=1"))
+        .header("origin", ORIGIN)
+        .header("cookie", format!("{COOKIE}={id}; other=1"))
         .header("content-type", "application/grpc-web+proto")
         .header("x-grpc-web", "1");
     if let Some(csrf) = csrf {
@@ -111,15 +80,34 @@ fn api_post(id: &str, csrf: Option<&str>) -> Request<Body> {
     request.body(Body::from("request-body")).unwrap()
 }
 
+/// Make session `id`'s access token due for a refresh.
+async fn expire(bff: &Bff, id: &str) {
+    let session = bff.sessions.get_session(id).await.unwrap().unwrap();
+    let mut claims = session.claims.clone();
+    claims.exp = 0;
+    let refresh = session.refresh_token.clone().unwrap();
+    bff.sessions
+        .replace_tokens(
+            id,
+            &refresh,
+            session.access_token,
+            Some(refresh.clone()),
+            claims,
+        )
+        .await
+        .unwrap();
+}
+
 /// The API gets the call as the signed-in user: the session's token as
 /// Bearer, the path without `/api`, the query and body as sent. The browser's
 /// cookies and CSRF token stay at the BFF; the API's cookie does not reach
 /// the browser, its own headers and body do.
 #[tokio::test]
 async fn a_call_reaches_the_api_with_the_sessions_token_only() {
-    let (upstream, seen) = fake_api().await;
-    let (state, id, csrf) = signed_in_state(Some(upstream), in_an_hour(), None).await;
-    let response = call(state, api_post(&id, Some(&csrf))).await;
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let (id, csrf) = signed_in(&bff, None).await;
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["grpc-status"], "0");
     assert!(response.headers().get("set-cookie").is_none());
@@ -143,40 +131,45 @@ async fn a_call_reaches_the_api_with_the_sessions_token_only() {
     assert_eq!(call.body, b"request-body");
 }
 
-/// A call without the session's CSRF token, or with another one, is what a
-/// foreign page can make the browser send: refused before the API sees it.
+/// A call without the session's CSRF token, with another one, or from
+/// another origin is what a foreign page can make the browser send: refused
+/// before the API sees it.
 #[tokio::test]
-async fn a_call_without_the_csrf_token_never_reaches_the_api() {
-    let (upstream, seen) = fake_api().await;
-    let (state, id, _) = signed_in_state(Some(upstream), in_an_hour(), None).await;
+async fn a_call_not_from_the_page_never_reaches_the_api() {
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let (id, csrf) = signed_in(&bff, None).await;
     for csrf in [None, Some("forged")] {
-        let response = call(state.clone(), api_post(&id, csrf)).await;
+        let response = call(bff.state.clone(), api_post(&id, csrf)).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{csrf:?}");
     }
+    let mut foreign = api_post(&id, Some(&csrf));
+    foreign
+        .headers_mut()
+        .insert("origin", "https://evil.example.com".parse().unwrap());
+    assert_eq!(
+        call(bff.state, foreign).await.status(),
+        StatusCode::FORBIDDEN
+    );
     assert!(seen.lock().unwrap().is_empty());
 }
 
 /// Without a session there is nobody to call the API as.
 #[tokio::test]
 async fn a_call_without_a_session_is_unauthenticated() {
-    let (upstream, seen) = fake_api().await;
-    let (state, _, _) = signed_in_state(Some(upstream), in_an_hour(), None).await;
-    let unknown = "b".repeat(64);
-    for request in [
-        Request::post("/api/x").body(Body::empty()).unwrap(),
-        api_post(&unknown, Some("x")),
-    ] {
-        let response = call(state.clone(), request).await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let response = call(bff.state, api_post(&"b".repeat(64), Some("x"))).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(seen.lock().unwrap().is_empty());
 }
 
 /// A BFF with no API configured serves no API.
 #[tokio::test]
 async fn no_upstream_no_api() {
-    let (state, id, csrf) = signed_in_state(None, in_an_hour(), None).await;
-    let response = call(state, api_post(&id, Some(&csrf))).await;
+    let bff = with_api(None);
+    let (id, csrf) = signed_in(&bff, None).await;
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
@@ -198,16 +191,46 @@ fn a_path_leaving_the_api_is_refused() {
     }
 }
 
+/// An API answer `UNAUTHENTICATED` marks the token the call carried as
+/// refused: the session refreshes before its next use.
+#[tokio::test]
+async fn an_unauthenticated_answer_marks_the_token_refused() {
+    let (upstream, _) = fake_api("16").await;
+    let bff = with_api(Some(upstream));
+    let (id, csrf) = signed_in(&bff, Some("refresh-1")).await;
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
+    assert_eq!(response.headers()["grpc-status"], "16");
+    assert!(
+        bff.sessions
+            .get_session(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .token_refused
+    );
+}
+
 /// An expired token without a refresh token ends the session: 401, and the
 /// stored session is gone.
 #[tokio::test]
 async fn an_expired_session_without_refresh_signs_out() {
-    let (upstream, seen) = fake_api().await;
-    let (state, id, csrf) = signed_in_state(Some(upstream), 0, None).await;
-    let sessions = state.bff_sessions.clone();
-    let response = call(state, api_post(&id, Some(&csrf))).await;
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let mut claims = session_claims();
+    claims.exp = 0;
+    let (id, csrf) = bff
+        .sessions
+        .create_session(
+            "access-1".into(),
+            None,
+            claims,
+            &test_connection().binding(),
+        )
+        .await
+        .unwrap();
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(sessions.get_session(&id).await.unwrap().is_none());
+    assert!(bff.sessions.get_session(&id).await.unwrap().is_none());
     assert!(seen.lock().unwrap().is_empty());
 }
 
@@ -215,59 +238,34 @@ async fn an_expired_session_without_refresh_signs_out() {
 /// session stays: an outage is not a sign-out.
 #[tokio::test]
 async fn a_refresh_sid_cannot_answer_keeps_the_session() {
-    let (upstream, seen) = fake_api().await;
-    let (state, id, csrf) = signed_in_state(Some(upstream), 0, Some("refresh-1")).await;
-    let sessions = state.bff_sessions.clone();
-    let response = call(state, api_post(&id, Some(&csrf))).await;
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let (id, csrf) = signed_in(&bff, Some("refresh-1")).await;
+    expire(&bff, &id).await;
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(sessions.get_session(&id).await.unwrap().is_some());
+    assert!(bff.sessions.get_session(&id).await.unwrap().is_some());
     assert!(seen.lock().unwrap().is_empty());
 }
 
-/// When another replica holds the refresh, this one waits for its result
-/// and calls the API with the new token instead of refreshing again, which
-/// would replay the rotated refresh token and end the grant.
-/// A session read before the refresh claim may predate a refresh another
-/// replica completed under an earlier, expired claim. The claim winner reads
-/// the store again and uses those tokens instead of presenting the rotated
-/// refresh token, which the issuer would treat as theft. The issuer is
-/// unreachable here, so any refresh attempt would answer 503.
-#[tokio::test]
-async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
-    let (state, id, _) = signed_in_state(None, 0, Some("refresh-0")).await;
-    let stale = state.bff_sessions.get_session(&id).await.unwrap().unwrap();
-    assert!(matches!(
-        state
-            .bff_sessions
-            .replace_tokens(
-                &id,
-                &"refresh-0".into(),
-                "access-1".into(),
-                Some("refresh-1".into()),
-                claims(in_an_hour()),
-            )
-            .await
-            .unwrap(),
-        sid_authn::bff_session::TokenReplacement::Replaced
-    ));
-    let token = current_token(&state, &id, stale).await.unwrap();
-    assert_eq!(token.expose_secret(), "access-1");
-}
-
+/// When another replica holds the refresh, this one waits for its result and
+/// calls the API with the new token instead of refreshing again, which would
+/// replay the rotated refresh token and end the grant.
 #[tokio::test]
 async fn a_refresh_held_elsewhere_is_awaited() {
-    let (upstream, seen) = fake_api().await;
-    let (state, id, csrf) = signed_in_state(Some(upstream), 0, Some("refresh-1")).await;
-    let sessions = state.bff_sessions.clone();
+    let (upstream, seen) = fake_api("0").await;
+    let bff = with_api(Some(upstream));
+    let (id, csrf) = signed_in(&bff, Some("refresh-1")).await;
+    expire(&bff, &id).await;
     assert!(matches!(
-        sessions
+        bff.sessions
             .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15), |_| true)
             .await
             .unwrap(),
         RefreshClaim::Claimed(_)
     ));
     let other_replica = {
-        let sessions = sessions.clone();
+        let sessions = bff.sessions.clone();
         let id = id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -277,59 +275,20 @@ async fn a_refresh_held_elsewhere_is_awaited() {
                     &"refresh-1".into(),
                     "access-2".into(),
                     Some("refresh-2".into()),
-                    claims(in_an_hour()),
+                    session_claims(),
                 )
                 .await
                 .unwrap()
         })
     };
-    let response = call(state, api_post(&id, Some(&csrf))).await;
+    let response = call(bff.state, api_post(&id, Some(&csrf))).await;
     assert!(matches!(
         other_replica.await.unwrap(),
-        sid_authn::bff_session::TokenReplacement::Replaced
+        TokenReplacement::Replaced
     ));
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         seen.lock().unwrap()[0].headers["authorization"],
         "Bearer access-2"
     );
-}
-
-/// The refresh claim goes to exactly one of many concurrent claimants.
-#[tokio::test]
-async fn one_claimant_refreshes() {
-    let (state, id, _) = signed_in_state(None, 0, Some("refresh")).await;
-    let claims: Vec<_> = futures_claims(&state, &id, 8).await;
-    assert_eq!(
-        claims
-            .iter()
-            .filter(|claim| matches!(claim, RefreshClaim::Claimed(_)))
-            .count(),
-        1
-    );
-    assert!(
-        claims
-            .iter()
-            .all(|claim| !matches!(claim, RefreshClaim::Ended)),
-        "{claims:?}"
-    );
-}
-
-async fn futures_claims(state: &ProxyState, id: &str, n: usize) -> Vec<RefreshClaim> {
-    let mut tasks = Vec::new();
-    for _ in 0..n {
-        let sessions = state.bff_sessions.clone();
-        let id = id.to_owned();
-        tasks.push(tokio::spawn(async move {
-            sessions
-                .claim_refresh(&id, &"refresh".into(), Duration::from_secs(15), |_| true)
-                .await
-                .unwrap()
-        }));
-    }
-    let mut won = Vec::new();
-    for task in tasks {
-        won.push(task.await.unwrap());
-    }
-    won
 }

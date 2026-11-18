@@ -128,7 +128,7 @@ pub(crate) fn fixture_with(orders_routes: &str, orders: Option<bool>) -> Fixture
             resources,
         ),
         applications: Arc::new(PolicyEngine::from_yaml(&applications(orders_routes)).unwrap()),
-        revocation: crate::revocation_view(cache),
+        revocation: sid_authn::revocation_cache::RevocationCache::receiver_view(cache),
         authz: crate::test_channel(),
         checker: None,
         token_state: Some(Arc::new(AtIssuer(Some(true)))),

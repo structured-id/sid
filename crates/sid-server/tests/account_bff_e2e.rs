@@ -133,7 +133,8 @@ async fn replica(deployment: &Deployment) -> String {
     let key =
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap();
-    let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
+    let revocation =
+        sid_authn::revocation_cache::RevocationCache::receiver_view(deployment.svc.cache.clone());
     let listening = revocation.listen().await;
     let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(

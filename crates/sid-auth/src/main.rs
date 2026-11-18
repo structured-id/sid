@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         issuer = %config.issuer_url,
         "starting sid-auth"
     );
-    let cache = sid_auth::shared_cache(config.cache_url.as_deref()).await?;
+    let cache = sid_infra::shared_cache(config.cache_url.as_deref()).await?;
     sid_auth::server::AuthServer::new(config, cache)?
         .serve(sid_serve::shutdown::signal())
         .await

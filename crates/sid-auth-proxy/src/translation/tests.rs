@@ -2,67 +2,68 @@
 
 use super::*;
 
-fn test_claims() -> ForwardAuthClaims {
-    ForwardAuthClaims {
-        sub: "up_01HY000000000000000000".into(),
-        iss: "https://sid.example.com".into(),
-        exp: 9999999999,
-        iat: 1000000000,
-        auth_time: 1000000000,
-        acr: "standard".into(),
-        scope: "openid profile email".into(),
-        roles: "admin editor viewer".into(),
-        sid: "sess_01".into(),
-        jti: "tok_01".into(),
+fn identity() -> UpstreamIdentity {
+    UpstreamIdentity {
+        subject: "up_01HY000000000000000000".into(),
         email: Some("user@sid.example.com".into()),
-        name: Some("Test User".into()),
+        display_name: Some("Test User".into()),
         preferred_username: Some("testuser".into()),
-        groups: None,
-        cnf: None,
-        credential_kind: None,
+        groups: vec!["admin".into(), "editor".into(), "viewer".into()],
     }
 }
 
 #[test]
 fn test_render_email() {
-    let claims = test_claims();
     assert_eq!(
-        render_template("{{ .Email }}", &claims),
+        render_template("{{ .Email }}", &identity()),
         "user@sid.example.com"
     );
 }
 
 #[test]
 fn test_render_subject() {
-    let claims = test_claims();
     assert_eq!(
-        render_template("{{ .Subject }}", &claims),
+        render_template("{{ .Subject }}", &identity()),
         "up_01HY000000000000000000"
     );
 }
 
+/// `{{ .User }}` is the forward-auth user template: the same opaque subject.
 #[test]
-fn test_render_user_backwards_compat() {
-    let claims = test_claims();
-    // {{ .User }} is deprecated alias, still works
+fn test_render_user_is_the_subject() {
     assert_eq!(
-        render_template("{{ .User }}", &claims),
+        render_template("{{ .User }}", &identity()),
         "up_01HY000000000000000000"
     );
 }
 
 #[test]
 fn test_render_groups_semicolon() {
-    let claims = test_claims();
     assert_eq!(
-        render_template("{{ .Groups | join ';' }}", &claims),
+        render_template("{{ .Groups | join ';' }}", &identity()),
         "admin;editor;viewer"
+    );
+}
+
+/// A value the request did not prove renders empty: nothing is invented for
+/// an absent email, name, username or group set.
+#[test]
+fn test_an_undisclosed_value_renders_empty() {
+    let bare = UpstreamIdentity {
+        subject: "up_01".into(),
+        ..UpstreamIdentity::default()
+    };
+    assert_eq!(
+        render_template(
+            "[{{ .Email }}][{{ .DisplayName }}][{{ .PreferredUsername }}][{{ .Groups }}]",
+            &bare
+        ),
+        "[][][][]"
     );
 }
 
 #[test]
 fn test_header_translation() {
-    let claims = test_claims();
     let mut templates = std::collections::HashMap::new();
     templates.insert("X-WEBAUTH-USER".into(), "{{ .Email }}".into());
     templates.insert("X-WEBAUTH-ROLE".into(), "{{ .Groups | join ',' }}".into());
@@ -73,7 +74,7 @@ fn test_header_translation() {
         cookie: None,
     };
 
-    let headers = translate(&claims, &config, None);
+    let headers = translate(&identity(), &config, None);
     assert_eq!(
         headers.get("x-webauth-user").unwrap().to_str().unwrap(),
         "user@sid.example.com"
@@ -99,8 +100,7 @@ fn test_cookie_translation() {
         }),
     };
 
-    let claims = test_claims();
-    let headers = translate(&claims, &config, Some("test_jwt_token"));
+    let headers = translate(&identity(), &config, Some("test_jwt_token"));
     let cookie = headers.get("set-cookie").unwrap().to_str().unwrap();
     assert!(cookie.starts_with("_sid_session=test_jwt_token"));
     assert!(cookie.contains("Domain=.example.com"));

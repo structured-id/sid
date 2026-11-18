@@ -32,7 +32,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1.19"
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router", "transport", "codegen"] }
 url = { workspace = true }
 uuid = { workspace = true }
 # The client side of the password ceremonies a test user signs in with.

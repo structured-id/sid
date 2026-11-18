@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use sid_authn::application_session::{ApplicationClient, GrantFailure, IssuedTokens};
 use sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE;
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::client_key::{ClientKey, ClientKeyError};
@@ -243,6 +244,78 @@ impl RpClient {
             .o_auth2_token(request)
             .await?
             .into_inner())
+    }
+}
+
+/// What a failed call at the issuer did, by its gRPC status (RFC 6749 §5.2
+/// refusals arrive as answered codes): a lost or broken answer may have
+/// taken effect, an exhausted issuer did nothing, any other answer refused
+/// the call. A call that never left was not sent.
+impl From<RpClientError> for GrantFailure {
+    fn from(failure: RpClientError) -> Self {
+        use tonic::Code;
+        match failure {
+            RpClientError::Rpc(status) => {
+                let why = status.message().to_owned();
+                match status.code() {
+                    Code::Unavailable
+                    | Code::Cancelled
+                    | Code::DeadlineExceeded
+                    | Code::Unknown
+                    | Code::Internal
+                    | Code::Aborted
+                    | Code::DataLoss => GrantFailure::Uncertain(why),
+                    Code::ResourceExhausted => GrantFailure::Declined(why),
+                    _ => GrantFailure::Refused(why),
+                }
+            }
+            other => GrantFailure::NotSent(other.to_string()),
+        }
+    }
+}
+
+/// The token endpoint's answer in the form the browser sessions keep.
+fn issued(answer: OAuth2TokenResponse) -> IssuedTokens {
+    IssuedTokens {
+        access_token: answer.access_token,
+        refresh_token: answer.refresh_token,
+        id_token: answer.id_token,
+    }
+}
+
+#[async_trait::async_trait]
+impl ApplicationClient for RpClient {
+    async fn connection(&self) -> Result<&Connection, GrantFailure> {
+        Ok(RpClient::connection(self).await?)
+    }
+
+    async fn redeem(
+        &self,
+        connection: &Connection,
+        code: String,
+        code_verifier: String,
+    ) -> Result<IssuedTokens, GrantFailure> {
+        Ok(issued(
+            RpClient::redeem(self, connection, code, code_verifier).await?,
+        ))
+    }
+
+    async fn refresh(
+        &self,
+        connection: &Connection,
+        refresh_token: String,
+    ) -> Result<IssuedTokens, GrantFailure> {
+        Ok(issued(
+            RpClient::refresh(self, connection, refresh_token).await?,
+        ))
+    }
+
+    async fn revoke(
+        &self,
+        connection: &Connection,
+        refresh_token: String,
+    ) -> Result<(), GrantFailure> {
+        Ok(RpClient::revoke(self, connection, refresh_token).await?)
     }
 }
 
