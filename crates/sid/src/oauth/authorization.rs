@@ -620,11 +620,22 @@ impl Authorizations {
     ) -> Result<(String, PendingAuthorization, OAuth2Client, OidcIssuer), AuthorizationError> {
         let refused = || AuthorizationError::NotWaiting;
         let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
-        let handle = url
-            .path()
-            .strip_prefix("/i/")
-            .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
-            .ok_or_else(refused)?;
+        // The authorization endpoint's route: the root for the root-addressed
+        // base issuer, `/i/<handle>` for a scoped one; the request was kept
+        // under the handle of the issuer that route reached.
+        let route = match url.path() {
+            "/oauth2/authorize" => "",
+            path => path
+                .strip_prefix("/i/")
+                .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
+                .ok_or_else(refused)?,
+        };
+        let handle = oauth
+            .routed_issuer(route)
+            .await?
+            .ok_or_else(refused)?
+            .handle
+            .to_string();
         let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
         let (Some(client_id), Some(request_uri)) =
             (query.get("client_id"), query.get("request_uri"))
@@ -638,7 +649,7 @@ impl Authorizations {
             .continuations
             .read(reference)
             .await?
-            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle)
+            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle.as_str())
             .ok_or_else(refused)?;
         let (client, issuer) = oauth
             .authorize_client(&kept.request(), addressed)

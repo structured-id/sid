@@ -2093,6 +2093,37 @@ async fn the_sign_in_page_reads_the_kept_requests_context() {
     assert!(query.contains_key("code"), "{query:?}");
 }
 
+/// At the root-addressed base issuer, a browser without a session is sent to
+/// sign in with a continuation at the root authorization endpoint, and the
+/// sign-in page reads that kept request's context. Bug prevented: the kept
+/// request found only under `/i/<handle>`, refusing every sign-in at a root
+/// issuer.
+#[tokio::test]
+async fn the_root_issuers_sign_in_reads_its_kept_request() {
+    let (svc, _) = root_services().await;
+    common::store_client(&*svc.storage, &common::test_client())
+        .await
+        .unwrap();
+    common::open_userinfo_to_clients(&svc).await;
+    let base = over_http(provider_signing_in_at(&svc, Some(LOGIN_URL))).await;
+    let response = no_redirects()
+        .get(with_query(
+            &format!("{base}/oauth2/authorize"),
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let rd = redirect_query(&response, LOGIN_URL)["rd"].clone();
+    assert!(
+        rd.starts_with("https://sid.example.com/oauth2/authorize?"),
+        "{rd}"
+    );
+    let context = sign_in_context(&svc, &rd, None).await.unwrap();
+    assert_eq!(context.issuer, "https://sid.example.com");
+    assert_eq!(context.client_name, common::test_client().client_name);
+}
+
 /// A request that does not match what the issuer kept is refused before the
 /// page asks for anything, as an invalid `authorization_request`: a forged or
 /// missing reference, another client, another issuer's handle or host, a call
