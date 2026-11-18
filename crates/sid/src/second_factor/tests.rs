@@ -220,7 +220,7 @@ async fn totp_enrollment_finish_needs_a_started_enrollment() {
 
 /// `profile` calling with a token of its session `sid`.
 fn signed_in_as(profile: ProfileId, sid: &str) -> sid_authn::caller::Caller {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sid_authn::caller::Caller::from_claims(&sid_authn::jwt::AccessTokenClaims {
         sub: profile.to_string(),
         pid: Some(profile.to_string()),

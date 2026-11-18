@@ -681,7 +681,7 @@ async fn test_handler_finish_totp_enrollment_no_pending() {
     let session = Session::new(
         profile.id,
         None,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
     );
     svc.storage
         .create_session(&session, AuditEntry::system("test", "setup").into())
