@@ -134,9 +134,9 @@ struct CachedResource {
 /// The cache holds public data read from the registry; every replica reads
 /// the same, so it holds no state a replica must agree on.
 pub struct IssuerDirectory {
-    /// The installation's public URL: its root-addressed base issuer, and
-    /// the base of `{base}/i/{handle}` of its scoped issuers.
-    base: String,
+    /// The installation whose issuers these are: the condition a URL meets
+    /// to be one of them.
+    installation: crate::issuer::InstallationIssuers,
     source: Arc<dyn IssuerSource>,
     cache: DashMap<String, Cached>,
     /// Registered resources by (issuer handle, indicator). Only resources the
@@ -147,26 +147,25 @@ pub struct IssuerDirectory {
 impl std::fmt::Debug for IssuerDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IssuerDirectory")
-            .field("base", &self.base)
+            .field("installation", &self.installation)
             .finish_non_exhaustive()
     }
 }
 
 impl IssuerDirectory {
-    /// The issuers under `base`, the installation's public URL.
+    /// The issuers of the installation at `base`, its public URL.
     pub fn new(base: &str, source: Arc<dyn IssuerSource>) -> Self {
         Self {
-            base: base.trim_end_matches('/').to_owned(),
+            installation: crate::issuer::InstallationIssuers::new(base),
             source,
             cache: DashMap::new(),
             resources: DashMap::new(),
         }
     }
 
-    /// The registry handle of `issuer` when it is one of this installation's
-    /// ([`crate::issuer::installation_issuer_handle`]).
-    fn handle_of<'a>(&self, issuer: &'a str) -> Option<&'a str> {
-        crate::issuer::installation_issuer_handle(&self.base, issuer)
+    /// Which issuer `issuer` selects, when it is one of this installation's.
+    fn selector_of(&self, issuer: &str) -> Option<crate::issuer::IssuerSelector> {
+        self.installation.select(issuer)
     }
 
     /// The resource `resource` registered under the issuer `issuer` (its
@@ -178,9 +177,10 @@ impl IssuerDirectory {
         issuer: &str,
         resource: &str,
     ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
-        let Some(handle) = self.handle_of(issuer) else {
+        let Some(selector) = self.selector_of(issuer) else {
             return Ok(None);
         };
+        let handle = selector.wire();
         let key = (handle.to_owned(), resource.to_owned());
         if let Some(cached) = self.resources.get(&key)
             && cached.fetched.elapsed() < RESOURCE_TTL
@@ -216,16 +216,31 @@ impl IssuerDirectory {
         &self,
         handle: &str,
     ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
-        // Text that cannot be a handle is not asked about.
-        if !handle.is_empty() && sid_core::models::IssuerHandle::parse(handle).is_err() {
-            return Ok(None);
-        }
-        if let Some(cached) = self.cache.get(handle)
+        use crate::issuer::IssuerSelector;
+        // Text that cannot be a handle is not asked about, and never names
+        // the base issuer.
+        let selector = if handle.is_empty() {
+            IssuerSelector::Root
+        } else {
+            match sid_core::models::IssuerHandle::parse(handle) {
+                Ok(handle) => IssuerSelector::Scoped(handle),
+                Err(_) => return Ok(None),
+            }
+        };
+        self.known(&selector).await
+    }
+
+    /// The issuer `selector` names, from the cache while it is fresh.
+    async fn known(
+        &self,
+        selector: &crate::issuer::IssuerSelector,
+    ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
+        if let Some(cached) = self.cache.get(selector.wire())
             && cached.fetched.elapsed() < ANSWER_TTL
         {
             return Ok(Some(cached.issuer.clone()));
         }
-        self.fetch(handle).await
+        self.fetch(selector).await
     }
 
     /// The issuer a token names in `iss`, when it is one of this
@@ -236,12 +251,14 @@ impl IssuerDirectory {
         iss: &str,
         kid: &str,
     ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
-        let Some(handle) = self.handle_of(iss) else {
+        let Some(selector) = self.selector_of(iss) else {
             return Ok(None);
         };
-        let Some(issuer) = self.by_handle(handle).await? else {
+        let Some(issuer) = self.known(&selector).await? else {
             return Ok(None);
         };
+        // The token's `iss` must be exactly the issuer the registry answered
+        // (OpenID Connect Core 1.0 §3.1.3.7, Discovery 1.0 §4.3).
         if issuer.issuer != iss {
             return Ok(None);
         }
@@ -250,13 +267,13 @@ impl IssuerDirectory {
         }
         let recent = self
             .cache
-            .get(handle)
+            .get(selector.wire())
             .is_some_and(|cached| cached.fetched.elapsed() < UNKNOWN_KEY_REFRESH);
         if recent {
             return Ok(Some(issuer));
         }
         Ok(self
-            .fetch(handle)
+            .fetch(&selector)
             .await?
             .filter(|issuer| issuer.issuer == iss))
     }
@@ -329,12 +346,19 @@ impl IssuerDirectory {
             .map_err(|e| IssuedTokenRefusal::Invalid(e.to_string()))
     }
 
-    async fn fetch(&self, handle: &str) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
+    async fn fetch(
+        &self,
+        selector: &crate::issuer::IssuerSelector,
+    ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
+        let handle = selector.wire();
+        // The answer stays bound to what was asked: the issuer the registry
+        // answers must be one of this installation's and select exactly the
+        // requested issuer, or the request named nothing here.
         let issuer = self
             .source
             .issuer(handle)
             .await?
-            .filter(|record| self.handle_of(&record.issuer) == Some(handle))
+            .filter(|record| self.selector_of(&record.issuer).as_ref() == Some(selector))
             .map(|record| Arc::new(KnownIssuer::from_record(record)));
         match &issuer {
             Some(known) => {

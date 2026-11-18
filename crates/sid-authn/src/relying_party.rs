@@ -69,9 +69,9 @@ impl Connection {
         if bundle.token_endpoint_auth_method != "private_key_jwt" {
             return invalid("the client does not authenticate by key");
         }
-        let Some(issuer_handle) =
-            crate::issuer::installation_issuer_handle(installation_url, &bundle.issuer)
-                .map(str::to_owned)
+        let Some(issuer_handle) = crate::issuer::InstallationIssuers::new(installation_url)
+            .select(&bundle.issuer)
+            .map(|selector| selector.wire().to_owned())
         else {
             return invalid("the issuer is not one of this installation's");
         };
