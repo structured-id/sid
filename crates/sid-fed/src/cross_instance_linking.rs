@@ -109,8 +109,10 @@ fn statement(prefix: &str, fields: &[String], text: &str) -> String {
     out
 }
 
-/// The exact text form of a time, every fractional digit included, so two
-/// distinct times never share it.
+/// The exact text form of a time, so two distinct times never share it: RFC
+/// 3339 UTC with the shortest exact fraction (none for a whole second,
+/// trailing zeros dropped). This form is the one signed; it is pinned by a
+/// test.
 fn time(at: &Timestamp) -> String {
     at.to_string()
 }

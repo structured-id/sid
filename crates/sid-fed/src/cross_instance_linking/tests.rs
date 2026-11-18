@@ -34,6 +34,22 @@ fn the_statement_covers_every_field() {
     );
 }
 
+// The signed time is RFC 3339 UTC with the shortest exact fraction: no
+// fraction for a whole second, trailing zeros dropped. These are the bytes
+// both Bindings sign, so a change of this form fails here instead of
+// silently making the stored statements unverifiable.
+#[test]
+fn the_signed_time_has_one_exact_form() {
+    for (nanos, form) in [
+        (0, "2023-11-14T22:13:20Z"),
+        (500_000_000, "2023-11-14T22:13:20.5Z"),
+        (1, "2023-11-14T22:13:20.000000001Z"),
+    ] {
+        let at = Timestamp::new(1_700_000_000, nanos).unwrap();
+        assert_eq!(time(&at), form, "{nanos}");
+    }
+}
+
 // A nonce carrying the separators cannot reproduce another field tuple: the
 // length prefix fixes where it ends.
 #[test]
