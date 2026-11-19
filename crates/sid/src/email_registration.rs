@@ -48,6 +48,10 @@ const CONTEXT_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60)
 /// after its context would have expired.
 const RESULT_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(24);
 
+/// How long a finish holds its registration's context: past it a finish
+/// that stopped no longer keeps another from taking the context.
+const FINISH_HOLD: jiff::SignedDuration = jiff::SignedDuration::from_secs(30);
+
 /// The namespace and method a committed finish records its result under.
 const RESULT_NAMESPACE: &str = "registration:first-passkey";
 const FINISH_METHOD: &str = "sid.v1.AuthService/PasskeyRegistrationFinish";
@@ -83,6 +87,10 @@ pub enum EmailRegistrationError {
     /// A browser context's CSRF token is missing or wrong.
     #[error("the registration's CSRF token is missing or wrong")]
     CsrfInvalid,
+    /// Another finish of the registration is committing; a retry gets its
+    /// result.
+    #[error("the registration is being finished")]
+    FinishInProgress,
     /// The passkey ceremony refused.
     #[error(transparent)]
     Passkey(#[from] PasskeyError),
@@ -115,6 +123,11 @@ struct Context {
     name: String,
     /// The CSRF token of a browser context; a native context has none.
     csrf: Option<[u8; 32]>,
+    /// When the context stops admitting its passkey.
+    expires_at: jiff::Timestamp,
+    /// When a finish took the context: until [`FINISH_HOLD`] after it, a
+    /// concurrent finish answers that finish's result or waits for it.
+    finishing_since: Option<jiff::Timestamp>,
 }
 
 /// The secret a client presents for its registration's context.
@@ -332,18 +345,34 @@ impl EmailRegistrations {
             CeremonyClient::Native => None,
         };
         let secret = BrowserSecret::generate();
-        self.contexts
-            .insert(
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(
+                jiff::SignedDuration::try_from(CONTEXT_TTL)
+                    .map_err(|e| internal("registration context lifetime", e))?,
+            )
+            .map_err(|e| internal("registration context lifetime", e))?;
+        let stored = self
+            .contexts
+            .insert_until(
                 &context_key(&secret),
                 &Context {
                     pending,
                     user_handle: rand::random(),
                     name,
                     csrf: csrf.as_ref().map(|token| *token.as_bytes()),
+                    expires_at,
+                    finishing_since: None,
                 },
+                expires_at,
             )
             .await
             .map_err(|e| internal("store a registration context", e))?;
+        if !stored {
+            return Err(internal(
+                "store a registration context",
+                "its lifetime ended before it was stored",
+            ));
+        }
         info!("passwordless registration address confirmed");
         Ok(Opened {
             secret,
@@ -445,7 +474,75 @@ impl EmailRegistrations {
                 .await?
                 .ok_or(EmailRegistrationError::ContextEnded);
         };
+        let now = jiff::Timestamp::now();
+        let held_by_another = read
+            .value
+            .finishing_since
+            .and_then(|since| since.checked_add(FINISH_HOLD).ok())
+            .is_some_and(|until| now < until);
+        if held_by_another {
+            return self
+                .recorded(&key)
+                .await?
+                .ok_or(EmailRegistrationError::FinishInProgress);
+        }
         registration.readmit(&read.value.pending, enabled).await?;
+        // Take the context for this finish: of concurrent finishes one holds
+        // it, and the others answer its result or wait for it.
+        let mut holding = read.value.clone();
+        holding.finishing_since = Some(now);
+        let Some(held) = self
+            .contexts
+            .replace(&key, &read, &holding, holding.expires_at)
+            .await
+            .map_err(|e| internal("hold a registration context", e))?
+        else {
+            return self
+                .recorded(&key)
+                .await?
+                .ok_or(EmailRegistrationError::FinishInProgress);
+        };
+        let finished = self
+            .finish_held(
+                registration,
+                passkeys,
+                &key,
+                &held,
+                credential,
+                label,
+                enabled,
+            )
+            .await;
+        if finished.is_err() {
+            // A finish that failed releases the context for the next one;
+            // one that cannot is released by the hold's end.
+            let mut released = held.value.clone();
+            released.finishing_since = None;
+            if let Err(e) = self
+                .contexts
+                .replace(&key, &held, &released, released.expires_at)
+                .await
+            {
+                tracing::warn!(error = %e, "release a registration context");
+            }
+        }
+        finished
+    }
+
+    /// Finish the registration whose context `key` this call holds as
+    /// `read`: verify the passkey and commit the account, spending the
+    /// context.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_held(
+        &self,
+        registration: &Registration,
+        passkeys: &Passkeys,
+        key: &str,
+        read: &sid_authn::challenge_store::Versioned<Context>,
+        credential: &[u8],
+        label: Option<String>,
+        enabled: bool,
+    ) -> Result<PasskeyRegistrationFinishResponse, EmailRegistrationError> {
         let PendingRegistration::NewAccount { profile_id, .. } = &read.value.pending else {
             return Err(internal(
                 "finish a registration",
@@ -454,21 +551,9 @@ impl EmailRegistrations {
         };
         let profile_id = *profile_id;
         let user_handle = WebAuthnUserHandle(read.value.user_handle);
-        let passkey = match passkeys
-            .first_passkey_finish(&key, user_handle, credential)
-            .await
-        {
-            Ok(passkey) => passkey,
-            // A concurrent finish took the ceremony: its commit, once
-            // recorded, is this call's answer too.
-            Err(PasskeyError::Expired(ceremony)) => {
-                return self
-                    .recorded(&key)
-                    .await?
-                    .ok_or(PasskeyError::Expired(ceremony).into());
-            }
-            Err(e) => return Err(e.into()),
-        };
+        let passkey = passkeys
+            .first_passkey_finish(key, user_handle, credential)
+            .await?;
         let stored = Credential::new(
             profile_id,
             CredentialType::WebAuthn,
@@ -481,7 +566,7 @@ impl EmailRegistrations {
         };
         let completion = OperationCompletion::new(
             RESULT_NAMESPACE,
-            OperationKey::parse(&key).map_err(|e| internal("registration result key", e))?,
+            OperationKey::parse(key).map_err(|e| internal("registration result key", e))?,
             FINISH_METHOD,
             key.as_bytes(),
             prost::Message::encode_to_vec(&response),
@@ -500,7 +585,7 @@ impl EmailRegistrations {
                     handle: user_handle,
                 },
                 completion,
-                self.contexts.consumption(&key, &read),
+                self.contexts.consumption(key, read),
                 enabled,
             )
             .await
@@ -512,7 +597,7 @@ impl EmailRegistrations {
             // A concurrent finish of the same context committed first: its
             // result is this retry's answer.
             Err(RegistrationError::ContextEnded) => self
-                .recorded(&key)
+                .recorded(key)
                 .await?
                 .ok_or(EmailRegistrationError::ContextEnded),
             Err(e) => Err(e.into()),

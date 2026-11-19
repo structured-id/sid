@@ -139,6 +139,8 @@ pub enum OtpPurpose {
 /// An OTP session as the store holds it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredOtpSession {
+    /// Required: a session stored without it (by a build before purposes)
+    /// is not read, and its code is requested again; a code lives minutes.
     purpose: OtpPurpose,
     code_hash: String,
     target: String,

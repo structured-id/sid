@@ -37,15 +37,51 @@ pub enum EntryCookieUse {
     Return,
 }
 
+/// What a passwordless registration endpoint does with the context cookie
+/// of the registration it continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationCookieUse {
+    /// Sets the context a confirmed address opens; reads none.
+    Open,
+    /// Reads the context it continues; sets nothing.
+    Present,
+}
+
 /// The cookies of its own issuer an endpoint below `/i/{handle}` receives
 /// and sets; an edge in front of the issuer forwards nothing else either way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IssuerCookies {
     pub session: Option<SessionCookieUse>,
     pub entry: Option<EntryCookieUse>,
+    pub registration: Option<RegistrationCookieUse>,
 }
 
+/// The cookie a browser holds its issuer's passwordless registration
+/// context in, named after that issuer's session cookie `session`.
+pub fn registration_cookie(session: &str) -> String {
+    format!("{session}_registration")
+}
+
+/// The registration step whose answer opens the context cookie.
+pub const REGISTRATION_OPENING_METHOD: &str = "/sid.v1.authn.AuthService/VerifyEmailRegistration";
+
+/// The registration steps that present the context cookie.
+pub const REGISTRATION_CONTEXT_METHODS: &[&str] = &[
+    "/sid.v1.authn.AuthService/PasskeyRegistrationStart",
+    "/sid.v1.authn.AuthService/PasskeyRegistrationFinish",
+];
+
 impl IssuerCookies {
+    /// Whether the endpoint is sent the registration context cookie.
+    pub fn receives_registration(&self) -> bool {
+        self.registration == Some(RegistrationCookieUse::Present)
+    }
+
+    /// Whether the endpoint's answer may set the registration context cookie.
+    pub fn sets_registration(&self) -> bool {
+        self.registration == Some(RegistrationCookieUse::Open)
+    }
+
     /// Whether the endpoint is sent the issuer's session cookie.
     pub fn receives_session(&self) -> bool {
         matches!(
@@ -110,18 +146,26 @@ pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
     match endpoint {
         START => {
             return IssuerCookies {
-                session: None,
                 entry: Some(EntryCookieUse::Start),
+                ..IssuerCookies::default()
             };
         }
         CALLBACK => {
             return IssuerCookies {
                 session: Some(SessionCookieUse::Issue),
                 entry: Some(EntryCookieUse::Return),
+                ..IssuerCookies::default()
             };
         }
         _ => {}
     }
+    let registration = match api_method(endpoint) {
+        Some(REGISTRATION_OPENING_METHOD) => Some(RegistrationCookieUse::Open),
+        Some(method) if REGISTRATION_CONTEXT_METHODS.contains(&method) => {
+            Some(RegistrationCookieUse::Present)
+        }
+        _ => None,
+    };
     let session = match endpoint {
         "/oauth2/authorize" => Some(SessionCookieUse::Read),
         "/oauth2/end-session" => Some(SessionCookieUse::ReadAndClear),
@@ -134,6 +178,7 @@ pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
     IssuerCookies {
         session,
         entry: None,
+        registration,
     }
 }
 

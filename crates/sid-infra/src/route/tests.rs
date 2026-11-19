@@ -129,8 +129,8 @@ fn a_federated_entry_gets_its_correlation_cookie() {
     assert_eq!(
         issuer_cookies("/auth/federation/start"),
         IssuerCookies {
-            session: None,
             entry: Some(EntryCookieUse::Start),
+            ..IssuerCookies::default()
         }
     );
     assert_eq!(
@@ -138,7 +138,55 @@ fn a_federated_entry_gets_its_correlation_cookie() {
         IssuerCookies {
             session: Some(SessionCookieUse::Issue),
             entry: Some(EntryCookieUse::Return),
+            ..IssuerCookies::default()
         }
+    );
+}
+
+/// A passwordless registration's verify sets its context cookie and its
+/// passkey steps receive it; nothing else exchanges it, and no registration
+/// step touches the session. Bug prevented: an edge that drops the context
+/// cookie either way, so a registration through a shared host never gets
+/// past its address.
+#[test]
+fn a_registration_gets_its_context_cookie() {
+    assert_eq!(
+        issuer_cookies(&format!("/api{REGISTRATION_OPENING_METHOD}")),
+        IssuerCookies {
+            registration: Some(RegistrationCookieUse::Open),
+            ..IssuerCookies::default()
+        }
+    );
+    for method in REGISTRATION_CONTEXT_METHODS {
+        assert_eq!(
+            issuer_cookies(&format!("/api{method}")),
+            IssuerCookies {
+                registration: Some(RegistrationCookieUse::Present),
+                ..IssuerCookies::default()
+            },
+            "{method}"
+        );
+    }
+    for endpoint in [
+        "/api/sid.v1.authn.AuthService/StartEmailRegistration",
+        "/api/sid.v1.authn.AuthService/ResendEmailRegistration",
+        "/api/sid.v1.authn.AuthService/OpaqueLoginFinish",
+    ] {
+        assert_eq!(issuer_cookies(endpoint).registration, None, "{endpoint}");
+    }
+    let open = IssuerCookies {
+        registration: Some(RegistrationCookieUse::Open),
+        ..IssuerCookies::default()
+    };
+    assert!(open.sets_registration() && !open.receives_registration());
+    let present = IssuerCookies {
+        registration: Some(RegistrationCookieUse::Present),
+        ..IssuerCookies::default()
+    };
+    assert!(present.receives_registration() && !present.sets_registration());
+    assert_eq!(
+        registration_cookie("__Host-sid_session-ab12"),
+        "__Host-sid_session-ab12_registration"
     );
 }
 
@@ -149,7 +197,7 @@ fn a_federated_entry_gets_its_correlation_cookie() {
 fn capabilities_name_their_directions() {
     let with = |session| IssuerCookies {
         session: Some(session),
-        entry: None,
+        ..IssuerCookies::default()
     };
     assert!(with(SessionCookieUse::Read).receives_session());
     assert!(!with(SessionCookieUse::Read).sets_session());
@@ -160,8 +208,8 @@ fn capabilities_name_their_directions() {
     assert!(with(SessionCookieUse::ReadAndClear).receives_session());
     assert!(with(SessionCookieUse::ReadAndClear).sets_session());
     let entry = |entry| IssuerCookies {
-        session: None,
         entry: Some(entry),
+        ..IssuerCookies::default()
     };
     assert!(!entry(EntryCookieUse::Start).receives_entry());
     assert!(entry(EntryCookieUse::Start).sets_entry());

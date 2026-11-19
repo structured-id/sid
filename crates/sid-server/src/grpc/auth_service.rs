@@ -188,6 +188,12 @@ fn email_registration_refusal(e: sid::email_registration::EmailRegistrationError
             "the registration's CSRF token is missing or wrong",
         )
         .into(),
+        E::FinishInProgress => ApiError::new(
+            ErrorReason::ConcurrentModification,
+            "the registration is being finished; retry for its result",
+        )
+        .with_retry_after(std::time::Duration::from_secs(1))
+        .into(),
         E::Passkey(e) => passkey_refusal(e),
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
@@ -581,9 +587,8 @@ impl AuthServiceImpl {
     /// in: named after this authority's session cookie, so authorities
     /// sharing a host keep their registrations apart.
     fn registration_cookie(&self) -> sid_authn::browser_session::BrowserCookie {
-        sid_authn::browser_session::BrowserCookie::new(&format!(
-            "{}_registration",
-            self.sign_ins.cookie().name()
+        sid_authn::browser_session::BrowserCookie::new(&sid_infra::route::registration_cookie(
+            self.sign_ins.cookie().name(),
         ))
         .expect("a session cookie name extended by a token is a cookie name")
     }

@@ -670,7 +670,9 @@ async fn an_address_taken_meanwhile_commits_nothing(i: Installation) {
 }
 
 /// Of two concurrent finishes of one context exactly one account and one
-/// passkey commit; neither answer names another passkey.
+/// passkey commit. Each answer is that passkey, or a retryable refusal
+/// whose retry answers it: never an expired ceremony while the other
+/// finish is committing.
 async fn concurrent_finishes_commit_once(i: Installation) {
     let principal = address("concurrent");
     let context = i.open(Client::Native, &principal).await;
@@ -680,16 +682,25 @@ async fn concurrent_finishes_commit_once(i: Installation) {
 
     let (a, b) = tokio::join!(
         i.passkey_finish(&context, credential.clone()),
-        i.passkey_finish(&context, credential),
+        i.passkey_finish(&context, credential.clone()),
     );
 
-    let committed: Vec<_> = [&a, &b]
-        .iter()
-        .filter_map(|answer| answer.as_ref().ok())
-        .map(|answer| answer.credential_id.clone())
-        .collect();
-    assert!(!committed.is_empty(), "first: {a:?}, second: {b:?}");
-    assert!(committed.windows(2).all(|w| w[0] == w[1]));
+    let mut committed = Vec::new();
+    for answer in [a, b] {
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(refused) => {
+                assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+                assert_eq!(reason(&refused), "CONCURRENT_MODIFICATION");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                i.passkey_finish(&context, credential.clone())
+                    .await
+                    .expect("the retry answers the committed finish")
+            }
+        };
+        committed.push(answer.credential_id);
+    }
+    assert_eq!(committed[0], committed[1]);
     let profile = i.holder(&principal).await.unwrap();
     assert_eq!(
         i.storage
