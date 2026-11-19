@@ -212,6 +212,28 @@ async fn an_interrupted_provisioning_is_completed() {
     assert!(completed.is_ready());
 }
 
+/// An account UI under a mount keeps its pages there, while the UI host's
+/// sign-in endpoints stay at the origin's root, where the adapter's routes
+/// are declared: a callback under the mount would be served the UI's shell.
+#[test]
+fn the_adapter_endpoints_are_at_the_account_origin() {
+    for account in [
+        "https://sid.example.com/account/",
+        "https://sid.example.com/account",
+    ] {
+        let account = settings(account, "k");
+        assert_eq!(account.callback(), "https://sid.example.com/auth/callback");
+        assert_eq!(
+            account.backchannel_logout(),
+            "https://sid.example.com/auth/backchannel-logout"
+        );
+        assert_eq!(
+            account.sign_in_page().as_str(),
+            "https://sid.example.com/account/login"
+        );
+    }
+}
+
 /// The account URL supplies the exact callback: it is https (or http on a
 /// loopback host) and carries nothing a request could vary.
 #[test]
