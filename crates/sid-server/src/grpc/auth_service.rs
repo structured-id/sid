@@ -703,6 +703,15 @@ impl AuthServiceImpl {
     /// Who binds a second factor in `request`: a sign-in's pending context
     /// when it presents one, otherwise the caller's session.
     async fn enroller<T>(&self, request: &Request<T>) -> Result<Enroller, Status> {
+        // Without a token only the sign-in page's pending context can enroll:
+        // its refusal (a missing CSRF token, another origin) is the answer,
+        // not the absent token a session would present.
+        if request.metadata().get("authorization").is_none() {
+            return match self.factor_caller(request).await? {
+                FactorCaller::Pending(pending, _) => Ok(Enroller::SignIn(Box::new(pending))),
+                FactorCaller::Completed(_) | FactorCaller::StepUp(_) => Err(session_ended()),
+            };
+        }
         if let Ok(FactorCaller::Pending(pending, _)) = self.factor_caller(request).await {
             return Ok(Enroller::SignIn(Box::new(pending)));
         }

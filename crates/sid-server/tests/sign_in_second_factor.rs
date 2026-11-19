@@ -1113,6 +1113,155 @@ fn cookie_of<T>(response: &Response<T>) -> String {
         .to_string()
 }
 
+/// `message` from the sign-in page carrying `cookie` and, when given, `csrf`.
+fn from_sign_in_page<T>(message: T, cookie: &str, csrf: Option<&str>) -> Request<T> {
+    let mut request = Request::new(message);
+    let metadata = request.metadata_mut();
+    metadata.insert("origin", SIGN_IN_ORIGIN.parse().unwrap());
+    metadata.insert("cookie", cookie.parse().unwrap());
+    if let Some(csrf) = csrf {
+        metadata.insert("x-csrf-token", csrf.parse().unwrap());
+    }
+    request
+}
+
+/// The sign-in page of a password-only account owing a factor enrolls its
+/// first from the pending context, with the context's cookie, its exact
+/// Origin and its CSRF token, before any application session exists. Without
+/// the token the start and the finish are refused as a missing CSRF token
+/// (the cookie is live), and from another origin nothing is enrolled; the
+/// same cookie opens no other credential binding (a passkey); enrolling
+/// elevates nothing, and a separate verify with the new factor completes the
+/// sign-in with a new session cookie. RPC calls with the page's metadata.
+#[tokio::test]
+async fn the_sign_in_page_enrolls_its_first_factor_with_its_cookie_and_csrf() {
+    let (svc, _policy, profile) = services(None).await;
+    let finish = start_login(&svc, PRINCIPAL, PASSWORD).await;
+    let first = common::opaque_client::finish_with_origins(&svc, finish, &[SIGN_IN_ORIGIN])
+        .await
+        .expect("pending context");
+    let pending_cookie = cookie_of(&first);
+    let body = first.into_inner();
+    assert_eq!(body.enrollable_factors, [StepUpMethod::Totp as i32]);
+    let csrf = body
+        .browser_csrf
+        .expect("the CSRF token of the continuation");
+
+    // Without the token the page is told so, as on its verify, not asked to
+    // sign in again: its cookie is live.
+    let refused = svc
+        .auth
+        .start_totp_enrollment(from_sign_in_page(
+            StartTotpEnrollmentRequest {},
+            &pending_cookie,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused).as_deref(), Some("CSRF_TOKEN_INVALID"));
+    let refused = svc
+        .auth
+        .finish_totp_enrollment(from_sign_in_page(
+            FinishTotpEnrollmentRequest {
+                code: "000000".into(),
+            },
+            &pending_cookie,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused).as_deref(), Some("CSRF_TOKEN_INVALID"));
+    let mut elsewhere =
+        from_sign_in_page(StartTotpEnrollmentRequest {}, &pending_cookie, Some(&csrf));
+    elsewhere
+        .metadata_mut()
+        .insert("origin", "https://evil.example.com".parse().unwrap());
+    assert!(svc.auth.start_totp_enrollment(elsewhere).await.is_err());
+    assert!(
+        svc.auth
+            .web_authn_registration_start(from_sign_in_page(
+                WebAuthnRegistrationStartRequest::default(),
+                &pending_cookie,
+                Some(&csrf),
+            ))
+            .await
+            .is_err(),
+        "the pending cookie binds no passkey"
+    );
+
+    let seed = svc
+        .auth
+        .start_totp_enrollment(from_sign_in_page(
+            StartTotpEnrollmentRequest {},
+            &pending_cookie,
+            Some(&csrf),
+        ))
+        .await
+        .expect("the first enrollment starts from the sign-in page")
+        .into_inner()
+        .shared_secret;
+    let mut foreign_finish = from_sign_in_page(
+        FinishTotpEnrollmentRequest {
+            code: sid_authn::generate_current_totp(&seed),
+        },
+        &pending_cookie,
+        Some(&csrf),
+    );
+    foreign_finish
+        .metadata_mut()
+        .insert("origin", "https://evil.example.com".parse().unwrap());
+    assert!(
+        svc.auth
+            .finish_totp_enrollment(foreign_finish)
+            .await
+            .is_err()
+    );
+    let finished = svc
+        .auth
+        .finish_totp_enrollment(from_sign_in_page(
+            FinishTotpEnrollmentRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+            &pending_cookie,
+            Some(&csrf),
+        ))
+        .await
+        .expect("the first enrollment commits from the sign-in page");
+    assert!(
+        finished.metadata().get("set-cookie").is_none(),
+        "enrolling installs no session"
+    );
+    assert!(!finished.into_inner().recovery_codes.is_empty());
+    assert_eq!(
+        svc.mock_storage.sessions_of(profile),
+        1,
+        "still the pending one"
+    );
+
+    let completed = svc
+        .auth
+        .verify_totp(browser_verify(
+            sid_authn::generate_next_totp(&seed),
+            &pending_cookie,
+            Some(&csrf),
+        ))
+        .await
+        .expect("the new factor completes the sign-in");
+    let session_cookie = cookie_of(&completed);
+    assert_ne!(session_cookie, pending_cookie);
+    let secret = BrowserCookie::default()
+        .secret([session_cookie.as_str()])
+        .unwrap();
+    let session = svc
+        .storage
+        .get_session_by_browser_secret(&secret.hash())
+        .await
+        .unwrap()
+        .expect("the new cookie names the session");
+    assert!(!session.is_provisional);
+    assert!(session.amr.iter().any(|m| m == "otp"), "{:?}", session.amr);
+}
+
 /// The sign-in page completes the pending context with its cookie and the
 /// CSRF token it was given, and gets a new session cookie; without the
 /// token, or from another origin, it completes nothing.

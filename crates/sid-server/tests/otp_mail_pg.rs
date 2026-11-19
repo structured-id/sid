@@ -331,7 +331,9 @@ async fn sign_in_codes_through_the_servers_work() {
                 pool.clone(),
             ))
             .await;
-            resent_code_replaces_the_mail_of_the_first(installation(storage, pool)).await;
+            resent_code_replaces_the_mail_of_the_first(installation(storage.clone(), pool.clone()))
+                .await;
+            the_sign_in_page_resends_a_code_and_signs_in_with_it(installation(storage, pool)).await;
         })
         .await
     };
@@ -369,6 +371,68 @@ async fn requested_code_reaches_the_mailbox_and_signs_in(mut i: Installation) {
     assert!(verified.verified);
     let sessions = i.storage.list_sessions(&holder.id).await.unwrap();
     assert_eq!(sessions.len(), 1, "the holder was not signed in");
+}
+
+/// `message` as the sign-in page sends it: its Origin, no session of its own.
+fn from_sign_in_page<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("origin", common::SIGN_IN_ORIGIN.parse().unwrap());
+    request
+}
+
+/// The sign-in page asks for a code and asks for it again before verifying,
+/// as its code page's resend does with the challenge reference it holds:
+/// one mail is delivered, with the resent code, and nothing is signed in
+/// before the verify; the verify with that code signs in, the session
+/// arriving as a cookie, never as a bearer token in the answer. RPC calls
+/// with the page's metadata.
+async fn the_sign_in_page_resends_a_code_and_signs_in_with_it(mut i: Installation) {
+    let mailbox = "Kim.Park+page@sid.example.com";
+    let holder = i.holder("kimpark@sid.example.com", mailbox).await;
+    let pending = i
+        .auth
+        .request_otp(from_sign_in_page(RequestOtpRequest {
+            principal: "K.I.M.Park@sid.example.com".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    i.auth
+        .resend_otp(from_sign_in_page(ResendOtpRequest {
+            otp_session_id: pending.otp_session_id.clone(),
+        }))
+        .await
+        .expect("the code page resends by its challenge reference");
+    assert!(
+        i.storage
+            .list_sessions(&holder.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing signs in before the verify"
+    );
+
+    let sent = i.run_owed_mail().await;
+    assert_eq!(sent.len(), 1, "only the resent code is mailed");
+    assert_eq!(sent[0].0, mailbox);
+
+    let verified = i
+        .auth
+        .verify_otp(from_sign_in_page(VerifyOtpRequest {
+            code: code_in(&sent[0].1),
+            otp_session_id: pending.otp_session_id.clone(),
+        }))
+        .await
+        .expect("the resent code signs in");
+    assert!(verified.metadata().get("authorization").is_none());
+    assert!(
+        verified.metadata().get("set-cookie").is_some(),
+        "the browser's session is a cookie"
+    );
+    assert!(verified.into_inner().verified);
+    assert_eq!(i.storage.list_sessions(&holder.id).await.unwrap().len(), 1);
 }
 
 /// A resent code replaces the requested one before either mail goes out:
