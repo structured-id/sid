@@ -32,7 +32,7 @@ logging = ["rustls?/logging"]
 [dependencies]
 thiserror = { version = "2", default-features = false }
 aws-lc-rs = { version = "1", optional = true }
-jsonwebtoken = { version = "11", default-features = false, optional = true }
+jsonwebtoken = { version = "12", default-features = false, optional = true }
 aead = { version = "0.6", default-features = false, optional = true }
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
@@ -63,7 +63,7 @@ zeroize = { version = "1", default-features = false, optional = true }
 base64.workspace = true
 rand.workspace = true
 # End-to-end JWT test hosts parse PEM fixtures; provider adapters do not choose input formats.
-jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["use_pem"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rcgen = "0.14"
 # An independent TLS implementation is an oracle, never a product dependency.
