@@ -34,6 +34,22 @@ fn a_first_factor_enrollment_is_published() {
     }
 }
 
+/// A sign-in page registers a passwordless account before it holds a
+/// session: every step of that registration is on the sign-in surface, or an
+/// issuer-addressed page is refused at its first step.
+#[test]
+fn a_passwordless_registration_is_published() {
+    for method in [
+        "/sid.v1.authn.AuthService/StartEmailRegistration",
+        "/sid.v1.authn.AuthService/ResendEmailRegistration",
+        "/sid.v1.authn.AuthService/VerifyEmailRegistration",
+        "/sid.v1.authn.AuthService/PasskeyRegistrationStart",
+        "/sid.v1.authn.AuthService/PasskeyRegistrationFinish",
+    ] {
+        assert!(BROWSER_METHODS.contains(&method), "{method}");
+    }
+}
+
 /// Anything else is no addressed call: no handle, no `api` segment, a longer
 /// segment that only starts with it, the transport-named mount the API path
 /// replaced, another issuer endpoint, a root gRPC path.

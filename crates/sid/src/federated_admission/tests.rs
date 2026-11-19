@@ -531,6 +531,7 @@ async fn own_profiles_resolve_only_through_the_provisioned_authority() {
         history: None,
         enrollment: None,
         source_recording: SourceRecording::AsGiven,
+        webauthn_user_handle: None,
     };
     provisioned
         .storage

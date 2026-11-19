@@ -34,7 +34,7 @@ async fn request(
     target: &str,
 ) -> Result<(OtpRequestResult, String), OtpError> {
     service
-        .request_otp(target, CodeDestination::Email(target))
+        .request_otp(OtpPurpose::SignIn, target, CodeDestination::Email(target))
         .await
 }
 
@@ -103,12 +103,19 @@ async fn test_verify_otp_success_consumes_the_code() {
     let service = service().await;
     let (result, code) = request(&service, "alice@example.com").await.unwrap();
 
-    match service.verify_otp(&result.session_id, &code).await.unwrap() {
+    match service
+        .verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+        .await
+        .unwrap()
+    {
         OtpVerifyResult::Success { target } => assert_eq!(target, "alice@example.com"),
         other => panic!("expected Success, got {other:?}"),
     }
     assert!(matches!(
-        service.verify_otp(&result.session_id, &code).await.unwrap(),
+        service
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+            .await
+            .unwrap(),
         OtpVerifyResult::SessionNotFound
     ));
 }
@@ -120,7 +127,7 @@ async fn test_verify_otp_wrong_code_then_limit() {
 
     for expected in (1..=4).rev() {
         match service
-            .verify_otp(&result.session_id, "00000000")
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, "00000000")
             .await
             .unwrap()
         {
@@ -132,14 +139,17 @@ async fn test_verify_otp_wrong_code_then_limit() {
     }
     assert!(matches!(
         service
-            .verify_otp(&result.session_id, "00000000")
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, "00000000")
             .await
             .unwrap(),
         OtpVerifyResult::MaxAttempts
     ));
     // The session is gone: not even the right code works now.
     assert!(matches!(
-        service.verify_otp(&result.session_id, &code).await.unwrap(),
+        service
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+            .await
+            .unwrap(),
         OtpVerifyResult::SessionNotFound
     ));
 }
@@ -149,7 +159,7 @@ async fn test_verify_otp_session_not_found() {
     assert!(matches!(
         service()
             .await
-            .verify_otp(&Uuid::now_v7(), "12345678")
+            .verify_otp(OtpPurpose::SignIn, &Uuid::now_v7(), "12345678")
             .await
             .unwrap(),
         OtpVerifyResult::SessionNotFound
@@ -165,15 +175,21 @@ async fn attempt_limit_holds_across_replicas() {
     let (a, b) = (replica(&store), replica(&store));
     let (result, code) = request(&a, "x@example.com").await.unwrap();
     for _ in 0..4 {
-        a.verify_otp(&result.session_id, "00000000").await.unwrap();
+        a.verify_otp(OtpPurpose::SignIn, &result.session_id, "00000000")
+            .await
+            .unwrap();
     }
     assert!(matches!(
-        b.verify_otp(&result.session_id, "00000000").await.unwrap(),
+        b.verify_otp(OtpPurpose::SignIn, &result.session_id, "00000000")
+            .await
+            .unwrap(),
         OtpVerifyResult::MaxAttempts
     ));
     assert!(
         !matches!(
-            a.verify_otp(&result.session_id, &code).await.unwrap(),
+            a.verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+                .await
+                .unwrap(),
             OtpVerifyResult::Success { .. }
         ),
         "a sixth guess was accepted after the limit"
@@ -187,7 +203,9 @@ async fn code_verifies_on_another_replica() {
     let (a, b) = (replica(&store), replica(&store));
     let (result, code) = request(&a, "y@example.com").await.unwrap();
     assert!(matches!(
-        b.verify_otp(&result.session_id, &code).await.unwrap(),
+        b.verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+            .await
+            .unwrap(),
         OtpVerifyResult::Success { .. }
     ));
 }
@@ -199,8 +217,8 @@ async fn right_code_signs_in_once_under_concurrency() {
     let (a, b) = (Arc::new(replica(&store)), Arc::new(replica(&store)));
     let (result, code) = request(&a, "z@example.com").await.unwrap();
     let (ra, rb) = tokio::join!(
-        a.verify_otp(&result.session_id, &code),
-        b.verify_otp(&result.session_id, &code)
+        a.verify_otp(OtpPurpose::SignIn, &result.session_id, &code),
+        b.verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
     );
     let successes = [ra.unwrap(), rb.unwrap()]
         .iter()
@@ -241,11 +259,17 @@ async fn expired_code_is_refused() {
     expire(&store, result.session_id).await;
 
     assert!(matches!(
-        service.verify_otp(&result.session_id, &code).await.unwrap(),
+        service
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+            .await
+            .unwrap(),
         OtpVerifyResult::Expired
     ));
     assert!(matches!(
-        service.verify_otp(&result.session_id, &code).await.unwrap(),
+        service
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &code)
+            .await
+            .unwrap(),
         OtpVerifyResult::SessionNotFound
     ));
 }
@@ -265,7 +289,9 @@ async fn unreachable_store_fails_closed() {
         Err(OtpError::Internal(_))
     ));
     assert!(matches!(
-        service.verify_otp(&Uuid::now_v7(), "12345678").await,
+        service
+            .verify_otp(OtpPurpose::SignIn, &Uuid::now_v7(), "12345678")
+            .await,
         Err(OtpError::Internal(_))
     ));
 }
@@ -388,7 +414,11 @@ impl CeremonyStateStore for ResendDuringVerify {
         if n == ATTEMPTS
             && let Some((other, session)) = self.resend.lock().await.take()
         {
-            let (_, code) = other.resend_otp(&session).await.unwrap().unwrap();
+            let (_, code) = other
+                .resend_otp(OtpPurpose::SignIn, &session)
+                .await
+                .unwrap()
+                .unwrap();
             *self.resent.lock().await = Some(code);
         }
         self.inner.count_in_window(n, k, window).await
@@ -425,7 +455,10 @@ async fn code_replaced_during_its_verification_does_not_sign_in() {
     let (result, old) = request(&verifier, "race@example.com").await.unwrap();
     *racing.resend.lock().await = Some((replica(&inner), result.session_id));
 
-    let outcome = verifier.verify_otp(&result.session_id, &old).await.unwrap();
+    let outcome = verifier
+        .verify_otp(OtpPurpose::SignIn, &result.session_id, &old)
+        .await
+        .unwrap();
 
     assert!(
         !matches!(outcome, OtpVerifyResult::Success { .. }),
@@ -434,7 +467,7 @@ async fn code_replaced_during_its_verification_does_not_sign_in() {
     let resent = racing.resent.lock().await.clone().expect("the resend ran");
     assert!(matches!(
         verifier
-            .verify_otp(&result.session_id, &resent)
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &resent)
             .await
             .unwrap(),
         OtpVerifyResult::Success { .. }
@@ -487,7 +520,11 @@ async fn code_for_no_account_sends_nothing() {
     let store = store().await;
     let service = replica(&store);
     let (result, _code) = service
-        .request_otp("nobody@example.com", CodeDestination::None)
+        .request_otp(
+            OtpPurpose::SignIn,
+            "nobody@example.com",
+            CodeDestination::None,
+        )
         .await
         .unwrap();
 
@@ -518,7 +555,10 @@ async fn used_or_expired_code_sends_nothing() {
                 .unwrap(),
         )
     };
-    service.verify_otp(&used.session_id, &code).await.unwrap();
+    service
+        .verify_otp(OtpPurpose::SignIn, &used.session_id, &code)
+        .await
+        .unwrap();
     expire(&store, old.session_id).await;
 
     for session in [used.session_id, old.session_id] {
@@ -545,12 +585,12 @@ async fn resent_code_replaces_the_current_one() {
     let (result, first) = request(&service, "again@example.com").await.unwrap();
     let first_issue = issue_of(&owed_mails(&store).await[0]);
     service
-        .verify_otp(&result.session_id, "00000000")
+        .verify_otp(OtpPurpose::SignIn, &result.session_id, "00000000")
         .await
         .unwrap();
 
     let (resent, second) = service
-        .resend_otp(&result.session_id)
+        .resend_otp(OtpPurpose::SignIn, &result.session_id)
         .await
         .unwrap()
         .expect("the session is live");
@@ -577,7 +617,7 @@ async fn resent_code_replaces_the_current_one() {
     if first != second {
         assert!(matches!(
             service
-                .verify_otp(&result.session_id, &first)
+                .verify_otp(OtpPurpose::SignIn, &result.session_id, &first)
                 .await
                 .unwrap(),
             OtpVerifyResult::InvalidCode {
@@ -587,7 +627,7 @@ async fn resent_code_replaces_the_current_one() {
     }
     assert!(matches!(
         service
-            .verify_otp(&result.session_id, &second)
+            .verify_otp(OtpPurpose::SignIn, &result.session_id, &second)
             .await
             .unwrap(),
         OtpVerifyResult::Success { .. }
@@ -599,20 +639,80 @@ async fn resent_code_replaces_the_current_one() {
 async fn resend_counts_against_the_request_limit() {
     let service = service().await;
     let (result, _) = request(&service, "resend@example.com").await.unwrap();
-    service.resend_otp(&result.session_id).await.unwrap();
-    service.resend_otp(&result.session_id).await.unwrap();
+    service
+        .resend_otp(OtpPurpose::SignIn, &result.session_id)
+        .await
+        .unwrap();
+    service
+        .resend_otp(OtpPurpose::SignIn, &result.session_id)
+        .await
+        .unwrap();
 
     assert!(matches!(
-        service.resend_otp(&result.session_id).await,
+        service
+            .resend_otp(OtpPurpose::SignIn, &result.session_id)
+            .await,
         Err(OtpError::RateLimited { .. })
     ));
+}
+
+/// A code session answers only callers of the purpose it was requested for:
+/// a sign-in code does not confirm a registration's address and is not
+/// resent as one, and the reverse; such a call is unknown to it, counts no
+/// attempt, and the session stays usable for its own purpose.
+#[tokio::test]
+async fn a_code_session_answers_only_its_own_purpose() {
+    let service = service().await;
+    for (own, other) in [
+        (OtpPurpose::SignIn, OtpPurpose::Registration),
+        (OtpPurpose::Registration, OtpPurpose::SignIn),
+    ] {
+        let target = format!("{own:?}@example.com").to_lowercase();
+        let (result, code) = service
+            .request_otp(own, &target, CodeDestination::Email(&target))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .resend_otp(other, &result.session_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{own:?} resent as {other:?}"
+        );
+        for _ in 0..6 {
+            assert!(matches!(
+                service
+                    .verify_otp(other, &result.session_id, &code)
+                    .await
+                    .unwrap(),
+                OtpVerifyResult::SessionNotFound
+            ));
+        }
+        assert!(
+            matches!(
+                service
+                    .verify_otp(own, &result.session_id, &code)
+                    .await
+                    .unwrap(),
+                OtpVerifyResult::Success { .. }
+            ),
+            "{own:?} lost to calls of {other:?}"
+        );
+    }
 }
 
 /// A resend for a session that ended has nothing to replace.
 #[tokio::test]
 async fn resend_of_an_ended_session_is_none() {
     let service = service().await;
-    assert!(service.resend_otp(&Uuid::now_v7()).await.unwrap().is_none());
+    assert!(
+        service
+            .resend_otp(OtpPurpose::SignIn, &Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A code sealed to another issue is never sent as this one: reading it

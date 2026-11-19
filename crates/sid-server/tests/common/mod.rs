@@ -748,7 +748,11 @@ pub async fn issue_code(
             keys: test_key_manager(),
         },
     )
-    .request_otp(address, sid_authn::otp::CodeDestination::Email(address))
+    .request_otp(
+        sid_authn::otp::OtpPurpose::SignIn,
+        address,
+        sid_authn::otp::CodeDestination::Email(address),
+    )
     .await
     .expect("issue a sign-in code")
 }

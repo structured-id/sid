@@ -457,6 +457,7 @@ impl SqliteBackend {
             history,
             enrollment,
             source_recording,
+            webauthn_user_handle,
         } = registration;
         let mut tx = self.begin_write().await?;
 
@@ -598,6 +599,9 @@ impl SqliteBackend {
 
         if let Some(credential) = credential {
             insert_credential(&mut *tx, credential).await?;
+        }
+        if let Some(user_handle) = webauthn_user_handle {
+            super::webauthn::insert_new_in_tx(&mut tx, profile.id, user_handle).await?;
         }
         // The invite this registration spent names the Profile it created and
         // the credential it installed.

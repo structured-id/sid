@@ -411,6 +411,7 @@ macro_rules! __storage_shared_scenarios {
             test_profile_metadata_roundtrip test_delete_profile_grant
             test_profile_lifecycle_scans test_set_primary_profile_email
             test_register_profile_concurrent_single_winner
+            test_register_profile_with_confirmed_email_and_user_handle
         );
     };
     (@tests $setup:path, $finish:tt; $($scenario:ident)*) => {

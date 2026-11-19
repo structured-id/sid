@@ -636,6 +636,26 @@ fn handle_key(rp_id: &str, handle: &WebAuthnUserHandle) -> SidResult<Value> {
     key(&[rp_id.as_bytes(), handle.0.as_slice()])
 }
 
+/// Write a new account's user handle in its registration's transaction.
+pub(super) fn insert_new_handle(
+    tx: &Statements<'_>,
+    owner: ProfileId,
+    new: &sid_core::models::NewUserHandle,
+) -> SidResult<()> {
+    tx.run(
+        "CREATE (w:SidWebAuthnHandle {pair: $pair, handle_key: $handle_key,
+            profile_id: $profile, rp_id: $rp_id, user_handle: $handle, created_at: $now})",
+        Params::default()
+            .with("pair", key(&[owner.as_bytes(), new.rp_id.as_bytes()])?)
+            .with("handle_key", handle_key(&new.rp_id, &new.handle)?)
+            .with("profile", profile_value(owner))
+            .with("rp_id", Value::String(new.rp_id.clone()))
+            .with("handle", Value::Binary(new.handle.0.to_vec()))
+            .with("now", time(Timestamp::now())),
+    )?;
+    Ok(())
+}
+
 const HANDLE: &str = "w.profile_id AS profile_id, w.rp_id AS rp_id, w.user_handle AS user_handle,
     w.created_at AS created_at";
 

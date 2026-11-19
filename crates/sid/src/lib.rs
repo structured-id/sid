@@ -12,6 +12,7 @@ pub mod authorization;
 pub mod branding;
 pub mod devices;
 pub mod email_provider;
+pub mod email_registration;
 pub mod email_sign_in;
 pub mod enrollment;
 pub mod entry_connections;

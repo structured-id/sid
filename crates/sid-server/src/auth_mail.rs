@@ -84,6 +84,15 @@ impl AuthMailDelivery for TemplatedMail {
                     "purpose": "sign in",
                 }),
             ),
+            AuthMessage::RegistrationCode => (
+                "otp",
+                event_types::OTP_REQUESTED,
+                serde_json::json!({
+                    "code": secret,
+                    "expires_minutes": mail.expires_minutes,
+                    "purpose": "confirm your email address and finish creating your account",
+                }),
+            ),
             AuthMessage::PasswordReset => (
                 "password_reset",
                 event_types::PASSWORD_RESET_REQUESTED,

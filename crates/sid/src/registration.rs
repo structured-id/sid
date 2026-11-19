@@ -90,6 +90,10 @@ pub enum RegistrationError {
     /// The password operation the registration installs refused.
     #[error(transparent)]
     Operation(#[from] PasswordOperationError),
+    /// The registration's context is spent or expired: its finish already
+    /// committed, or it starts again.
+    #[error("the registration's context ended")]
+    ContextEnded,
     /// The store failed.
     #[error("store: {0}")]
     Store(#[from] SidError),
@@ -112,6 +116,19 @@ fn requirement(reason: &EnrollmentDenialReason) -> &'static str {
         EnrollmentDenialReason::EmailRequired => "email",
         EnrollmentDenialReason::DomainNotAllowed { .. } => "email_domain",
     }
+}
+
+/// What a registration's commit writes besides the account and its first
+/// credential.
+struct Commit {
+    /// The first password's accepted history.
+    history: Option<HistoryCommit>,
+    /// The first passkey's user handle; the address was confirmed.
+    first_passkey: Option<sid_core::models::NewUserHandle>,
+    /// The result a retry of the installing operation gets.
+    completion: Option<OperationCompletion>,
+    /// The registration context the commit spends.
+    consumption: Option<sid_core::models::CeremonyConsumption>,
 }
 
 /// Self-registration on one installation.
@@ -201,6 +218,69 @@ impl Registration {
         })
     }
 
+    /// Decide again whether `pending`, admitted when it started, may still
+    /// go on, before any later step of it: the instance claim it presented
+    /// is still open, else the registration switch and the enrollment policy
+    /// in force now admit it. The commit decides once more in its own
+    /// transaction.
+    pub async fn readmit(
+        &self,
+        pending: &PendingRegistration,
+        enabled: bool,
+    ) -> Result<(), RegistrationError> {
+        let PendingRegistration::NewAccount {
+            principal_type,
+            value,
+            instance_claim,
+            invite_code,
+            ..
+        } = pending
+        else {
+            return Err(self.refuse_held(pending, enabled).await);
+        };
+        if instance_claim.is_some() {
+            let open = sid_authn::admin_claim::is_open(self.storage.as_ref())
+                .await
+                .map_err(|e| internal("check instance claim", e))?;
+            return if open {
+                Ok(())
+            } else {
+                Err(RegistrationError::Restricted("instance_claim"))
+            };
+        }
+        self.admitted_by_enrollment(*principal_type, value, invite_code.as_deref(), enabled)
+            .await
+    }
+
+    /// Commit `pending` with its confirmed email and `passkey`, its first
+    /// credential, registered under `user_handle`, atomically with
+    /// `completion`, the result a retry gets, and `consumption`, the
+    /// registration's context, spent by this commit. A context already
+    /// spent or expired is [`RegistrationError::ContextEnded`] and nothing
+    /// is written.
+    pub async fn commit_first_passkey(
+        &self,
+        pending: PendingRegistration,
+        passkey: Credential,
+        user_handle: sid_core::models::NewUserHandle,
+        completion: OperationCompletion,
+        consumption: sid_core::models::CeremonyConsumption,
+        enabled: bool,
+    ) -> Result<(ProfileId, CredentialId), RegistrationError> {
+        self.commit_with(
+            pending,
+            passkey,
+            Commit {
+                history: None,
+                first_passkey: Some(user_handle),
+                completion: Some(completion),
+                consumption: Some(consumption),
+            },
+            enabled,
+        )
+        .await
+    }
+
     /// Commit `pending` with its first `credential`, atomically, with
     /// `history`, the first password's accepted history, and `completion`,
     /// the durable result of the operation that installs it. A taken
@@ -209,11 +289,38 @@ impl Registration {
     pub async fn commit(
         &self,
         pending: PendingRegistration,
-        mut credential: Credential,
+        credential: Credential,
         history: Option<HistoryCommit>,
         completion: Option<OperationCompletion>,
         enabled: bool,
     ) -> Result<(ProfileId, CredentialId), RegistrationError> {
+        self.commit_with(
+            pending,
+            credential,
+            Commit {
+                history,
+                first_passkey: None,
+                completion,
+                consumption: None,
+            },
+            enabled,
+        )
+        .await
+    }
+
+    async fn commit_with(
+        &self,
+        pending: PendingRegistration,
+        mut credential: Credential,
+        commit: Commit,
+        enabled: bool,
+    ) -> Result<(ProfileId, CredentialId), RegistrationError> {
+        let Commit {
+            history,
+            first_passkey,
+            completion,
+            consumption,
+        } = commit;
         let PendingRegistration::NewAccount {
             profile_id,
             principal_type,
@@ -259,6 +366,14 @@ impl Registration {
             registration =
                 registration.with_source(sid_core::models::RegistrationSource::self_signup(None));
         }
+        // A passwordless registration confirmed its address before its
+        // passkey: the account signs in with both from its first commit.
+        if let Some(user_handle) = first_passkey {
+            registration = registration
+                .with_confirmed_email()
+                .map_err(|e| RegistrationError::InvalidIdentifier(e.to_string()))?
+                .with_webauthn_user_handle(user_handle.rp_id, user_handle.handle);
+        }
         // The claim registration is admitted by its token whatever the mode;
         // any other one by the policy the storage reads in the account's own
         // transaction, so a policy changed since the start applies to it.
@@ -296,8 +411,17 @@ impl Registration {
         if let Some(completion) = completion {
             ctx = ctx.with_operation(completion);
         }
+        let spends_context = consumption.is_some();
+        if let Some(consumption) = consumption {
+            ctx = ctx.consuming(consumption);
+        }
         match self.storage.register_profile(&registration, ctx).await {
             Ok(()) => {}
+            // The registration's context was spent by a concurrent finish
+            // or ran out meanwhile.
+            Err(SidError::Expired(_) | SidError::OperationCompleted(_)) if spends_context => {
+                return Err(RegistrationError::ContextEnded);
+            }
             // Another registration took the identifier between start and finish.
             Err(SidError::Conflict(_)) => {
                 return Err(RegistrationError::AlreadyRegistered(principal_type));

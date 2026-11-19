@@ -118,14 +118,30 @@ pub struct CodeDelivery {
 /// A code waiting for its email: the mailbox bound at the request, the code
 /// and until when it works.
 pub struct PendingCode {
+    /// What the code is for, which its mail tells the recipient.
+    pub purpose: OtpPurpose,
     pub destination: String,
     pub code: secrecy::SecretString,
     pub expires_at: Timestamp,
 }
 
+/// What a code session is for, fixed at its request: its verify and resend
+/// answer only a caller of the same purpose, so a sign-in code never confirms
+/// a registration's address and a registration's code never signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OtpPurpose {
+    /// Signing in to the account the address routes to.
+    SignIn,
+    /// Confirming the address of a new registration.
+    Registration,
+}
+
 /// An OTP session as the store holds it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredOtpSession {
+    /// Required: a session stored without it (by a build before purposes)
+    /// is not read, and its code is requested again; a code lives minutes.
+    purpose: OtpPurpose,
     code_hash: String,
     target: String,
     expires_at: Timestamp,
@@ -181,13 +197,14 @@ impl OtpService {
         }
     }
 
-    /// Request a new OTP code for `target` (the resolution key), emailed to
-    /// `destination`.
+    /// Request a new OTP code for `purpose` and `target` (the resolution
+    /// key), emailed to `destination`.
     ///
     /// Returns the session ID and the plaintext code; the session keeps its
     /// hash for verification and the code sealed for the email.
     pub async fn request_otp(
         &self,
+        purpose: OtpPurpose,
         target: &str,
         destination: CodeDestination<'_>,
     ) -> Result<(OtpRequestResult, String), OtpError> {
@@ -197,7 +214,7 @@ impl OtpService {
             CodeDestination::Email(address) => Some(address.to_string()),
             CodeDestination::None => None,
         };
-        let (session, code) = self.issue(session_id, target, destination).await?;
+        let (session, code) = self.issue(purpose, session_id, target, destination).await?;
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
         let email = Self::email(session_id, &session);
         // The session and its mail commit together: a code is never stored
@@ -213,6 +230,16 @@ impl OtpService {
             .await
             .map_err(store_error("store the session with its email"))?;
         Ok((Self::requested(session_id), code))
+    }
+
+    /// The live session under `key` requested for `purpose`: `None` when it
+    /// is gone, ended or of another purpose, which a caller of this purpose
+    /// cannot tell from a session that never existed.
+    async fn live_for(&self, key: &str, purpose: OtpPurpose) -> Result<Option<Read>, OtpError> {
+        Ok(self
+            .live(key)
+            .await?
+            .filter(|read| read.session.purpose == purpose))
     }
 
     /// The live session under `key`: `None` when it is gone or ended.
@@ -250,16 +277,22 @@ impl OtpService {
     /// is gone or changed meanwhile.
     pub async fn resend_otp(
         &self,
+        purpose: OtpPurpose,
         session_id: &Uuid,
     ) -> Result<Option<(OtpRequestResult, String)>, OtpError> {
         let key = session_id.to_string();
-        let Some(current) = self.live(&key).await? else {
+        let Some(current) = self.live_for(&key, purpose).await? else {
             return Ok(None);
         };
         let previous = &current.session;
         self.admit_request(&previous.target).await?;
         let (session, code) = self
-            .issue(*session_id, &previous.target, previous.destination.clone())
+            .issue(
+                purpose,
+                *session_id,
+                &previous.target,
+                previous.destination.clone(),
+            )
             .await?;
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
         let email = Self::email(*session_id, &session);
@@ -321,6 +354,7 @@ impl OtpService {
         let code = String::from_utf8(opened.secret.to_vec())
             .map_err(|_| OtpError::Sealed("the sealed code is not text".into()))?;
         Ok(Some(PendingCode {
+            purpose: session.purpose,
             destination,
             code: secrecy::SecretString::from(code),
             expires_at: session.expires_at,
@@ -346,6 +380,7 @@ impl OtpService {
     /// plaintext.
     async fn issue(
         &self,
+        purpose: OtpPurpose,
         session_id: Uuid,
         target: &str,
         destination: Option<String>,
@@ -377,6 +412,7 @@ impl OtpService {
             .ok_or_else(|| OtpError::Internal("the code expiry is out of range".into()))?;
         Ok((
             StoredOtpSession {
+                purpose,
                 code_hash,
                 target: target.to_string(),
                 expires_at,
@@ -419,11 +455,14 @@ impl OtpService {
     /// and on the one successful verification.
     pub async fn verify_otp(
         &self,
+        purpose: OtpPurpose,
         session_id: &Uuid,
         code: &str,
     ) -> Result<OtpVerifyResult, OtpError> {
         let key = session_id.to_string();
-        let Some(read) = self.live(&key).await? else {
+        // A session of another purpose is unknown here: its attempts are not
+        // counted and it stays usable for its own purpose.
+        let Some(read) = self.live_for(&key, purpose).await? else {
             return Ok(OtpVerifyResult::SessionNotFound);
         };
 

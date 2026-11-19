@@ -134,8 +134,9 @@ impl BrowserSecret {
         BrowserSecretHash::from_bytes(Sha256::digest(self.0.as_ref()).into())
     }
 
-    /// The secret as its holder carries it: unpadded base64url.
-    pub(crate) fn encode(&self) -> Zeroizing<String> {
+    /// The secret as its holder carries it: unpadded base64url, the value of
+    /// its cookie or of a native client's bearer.
+    pub fn encode(&self) -> Zeroizing<String> {
         Zeroizing::new(URL_SAFE_NO_PAD.encode(self.0.as_ref()))
     }
 
