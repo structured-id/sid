@@ -52,19 +52,20 @@ pub const PASSWORD_RESET_PATH: &str = "/reset/new";
 /// writer that keeps changing it.
 const UPDATE_ATTEMPTS: usize = 3;
 
-/// The deployment's account integration settings, from trusted configuration.
+/// Where the deployment serves the shared account pages (sign-in, emailed
+/// links), from trusted configuration: the pages alone, with or without an
+/// account cabinet client of the deployment.
 #[derive(Debug, Clone)]
-pub struct AccountSettings {
+pub struct AccountPages {
     account_url: url::Url,
-    keys: ClientKeySet,
 }
 
-impl AccountSettings {
-    /// Settings for an account UI served at `account_url`, whose BFF signs
-    /// with `keys`. The URL is `https` (or `http` on a loopback host, for
-    /// development), with no credentials, query or fragment: it supplies the
-    /// exact callback, never a request's Host.
-    pub fn new(account_url: &str, keys: ClientKeySet) -> Result<Self, String> {
+impl AccountPages {
+    /// The pages of an account UI served at `account_url`. The URL is
+    /// `https` (or `http` on a loopback host, for development), with no
+    /// credentials, query or fragment: pages and callbacks derive from it,
+    /// never from a request's Host.
+    pub fn new(account_url: &str) -> Result<Self, String> {
         let url = url::Url::parse(account_url)
             .map_err(|e| format!("account URL {account_url:?} is not a URL: {e}"))?;
         let loopback = matches!(
@@ -87,27 +88,7 @@ impl AccountSettings {
                 "account URL {account_url:?} must have no credentials, query or fragment"
             ));
         }
-        Ok(Self {
-            account_url: url,
-            keys,
-        })
-    }
-
-    /// The registered redirect URI of the account web client. The UI host
-    /// declares its sign-in endpoints at its origin's root, whatever mount
-    /// the account pages are served under.
-    pub fn callback(&self) -> String {
-        self.endpoint(CALLBACK_PATH)
-    }
-
-    /// The registered back-channel logout URI of the account web client, at
-    /// the origin's root as the callback is.
-    pub fn backchannel_logout(&self) -> String {
-        self.endpoint(BACKCHANNEL_LOGOUT_PATH)
-    }
-
-    fn endpoint(&self, path: &str) -> String {
-        format!("{}{path}", self.account_url.origin().ascii_serialization())
+        Ok(Self { account_url: url })
     }
 
     /// The account UI's sign-in route, where the issuer sends a user who
@@ -134,7 +115,65 @@ impl AccountSettings {
         page
     }
 
-    /// The account BFF's public keys.
+    /// `path` at the root of the pages' origin.
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{path}", self.account_url.origin().ascii_serialization())
+    }
+}
+
+/// The deployment's account integration settings, from trusted configuration:
+/// its pages and the public keys of the account cabinet client its UI host
+/// signs with.
+#[derive(Debug, Clone)]
+pub struct AccountSettings {
+    pages: AccountPages,
+    keys: ClientKeySet,
+}
+
+impl AccountSettings {
+    /// Settings for an account UI served at `account_url` (see
+    /// [`AccountPages::new`]), whose UI host signs with `keys`.
+    pub fn new(account_url: &str, keys: ClientKeySet) -> Result<Self, String> {
+        Ok(Self {
+            pages: AccountPages::new(account_url)?,
+            keys,
+        })
+    }
+
+    /// The account pages.
+    pub fn pages(&self) -> &AccountPages {
+        &self.pages
+    }
+
+    /// The registered redirect URI of the account web client. The UI host
+    /// declares its sign-in endpoints at its origin's root, whatever mount
+    /// the account pages are served under.
+    pub fn callback(&self) -> String {
+        self.pages.endpoint(CALLBACK_PATH)
+    }
+
+    /// The registered back-channel logout URI of the account web client, at
+    /// the origin's root as the callback is.
+    pub fn backchannel_logout(&self) -> String {
+        self.pages.endpoint(BACKCHANNEL_LOGOUT_PATH)
+    }
+
+    /// The account UI's sign-in route (see [`AccountPages::sign_in_page`]).
+    pub fn sign_in_page(&self) -> url::Url {
+        self.pages.sign_in_page()
+    }
+
+    /// The page an emailed sign-in link opens.
+    pub fn magic_link_page(&self) -> url::Url {
+        self.pages.magic_link_page()
+    }
+
+    /// The page an emailed password reset link opens.
+    pub fn password_reset_page(&self) -> url::Url {
+        self.pages.password_reset_page()
+    }
+
+    /// The account UI host's public keys.
     pub fn keys(&self) -> &ClientKeySet {
         &self.keys
     }
