@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::client_key::ClientKey;
@@ -51,6 +51,10 @@ struct World {
     replicas: [ApplicationSessions; 2],
     bearer: String,
     issuer_session: sid_core::models::Session,
+    /// The store both replicas keep their sessions in.
+    sessions: Arc<BffSessionStore>,
+    /// The application's client at the issuer, as a replica holds it.
+    client: Arc<RpClient>,
 }
 
 async fn world() -> World {
@@ -70,19 +74,24 @@ async fn world() -> World {
     let sessions = Arc::new(BffSessionStore::new(store, LONG, LONG, LONG));
     // Revocations recorded anywhere reach both replicas.
     let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let replica = |pem: &SecretString| {
-        let channel =
-            sid_infra::deadline::bounded_channel(&issuer.upstream(), Duration::from_secs(5))
-                .unwrap();
-        let client = RpClient::delivered(
-            ClientKey::ed25519_from_pem(pem).unwrap(),
-            INSTALLATION.into(),
-            channel.clone(),
-            connection(&issuer, &kid),
+    let channel = || {
+        sid_infra::deadline::bounded_channel(&issuer.upstream(), Duration::from_secs(5)).unwrap()
+    };
+    let rp_client = |channel| {
+        Arc::new(
+            RpClient::delivered(
+                ClientKey::ed25519_from_pem(&pem).unwrap(),
+                INSTALLATION.into(),
+                channel,
+                connection(&issuer, &kid),
+            )
+            .unwrap(),
         )
-        .unwrap();
+    };
+    let replica = || {
+        let channel = channel();
         ApplicationSessions::new(
-            Arc::new(client),
+            rp_client(channel.clone()),
             Arc::new(IssuerDirectory::new(
                 INSTALLATION,
                 Arc::new(GrpcIssuerSource::new(channel)),
@@ -92,7 +101,8 @@ async fn world() -> World {
             COOKIE.into(),
         )
     };
-    let replicas = [replica(&pem), replica(&pem)];
+    let replicas = [replica(), replica()];
+    let client = rp_client(channel());
     drop(key);
     let profile = issuer.profile().await;
     let (issuer_session, bearer) = issuer.sign_in(&profile).await;
@@ -101,6 +111,8 @@ async fn world() -> World {
         replicas,
         bearer,
         issuer_session,
+        sessions,
+        client,
     }
 }
 
@@ -367,6 +379,74 @@ async fn a_refused_token_is_refreshed_at_the_issuer() {
         after.token().expose_secret(),
         before.token().expose_secret(),
         "a new access token"
+    );
+    let held = w.replicas[0].bearer(page().metadata()).await.unwrap();
+    assert_eq!(held.token().expose_secret(), after.token().expose_secret());
+}
+
+/// A replica claimed the session's refresh and the issuer committed the
+/// rotation, but its answer was lost before the replica stored it: the
+/// session still holds the replaced refresh token under that replica's
+/// claim. Once the claim has lapsed, the next call on the other replica
+/// takes the refresh over and presents the replaced token, and the issuer's
+/// own retry contract decides: inside its grace window it rotates again, so
+/// the session continues on both replicas with a new access token.
+#[tokio::test]
+async fn a_lost_refresh_is_taken_over_once_its_claim_lapses() {
+    let w = world().await;
+    let (session, read) = signed_in(&w).await;
+    let id = session.split_once('=').expect("name=value").1.to_owned();
+    let page = || from_page((), &session, Some(&read.csrf_token));
+    let before = w.replicas[0].bearer(page().metadata()).await.unwrap();
+    w.replicas[0].refused(&before).await.unwrap();
+    let replaced = w
+        .sessions
+        .get_session(&id)
+        .await
+        .unwrap()
+        .expect("the session")
+        .refresh_token
+        .expect("a refresh token");
+
+    // The first replica's claim and its refresh at the issuer, whose answer
+    // is lost: the rotation commits there, nothing is stored here.
+    const HOLD: Duration = Duration::from_secs(1);
+    let claimed = w
+        .sessions
+        .claim_refresh(&id, &replaced, HOLD, |_| true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(claimed, sid_authn::bff_session::RefreshClaim::Claimed(_)),
+        "the first replica holds the refresh"
+    );
+    let connection = w.client.connection().await.unwrap();
+    w.client
+        .refresh(connection, replaced.expose_secret().to_owned())
+        .await
+        .expect("the issuer commits the rotation");
+    tokio::time::sleep(HOLD + Duration::from_millis(500)).await;
+    let after = w.replicas[1]
+        .bearer(page().metadata())
+        .await
+        .expect("inside the issuer's grace window the replaced token rotates again");
+    assert_ne!(
+        after.token().expose_secret(),
+        before.token().expose_secret()
+    );
+    let stored = w
+        .sessions
+        .get_session(&id)
+        .await
+        .unwrap()
+        .expect("the session");
+    assert_ne!(
+        stored
+            .refresh_token
+            .expect("a refresh token")
+            .expose_secret(),
+        replaced.expose_secret(),
+        "the session holds the rotated refresh token"
     );
     let held = w.replicas[0].bearer(page().metadata()).await.unwrap();
     assert_eq!(held.token().expose_secret(), after.token().expose_secret());
