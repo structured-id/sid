@@ -1127,12 +1127,12 @@ fn from_sign_in_page<T>(message: T, cookie: &str, csrf: Option<&str>) -> Request
 
 /// The sign-in page of a password-only account owing a factor enrolls its
 /// first from the pending context, with the context's cookie, its exact
-/// Origin and its CSRF token, before any application session exists: without
-/// the token or from another origin nothing is enrolled; the same cookie
-/// opens no other credential binding (a passkey); enrolling elevates
-/// nothing, and a separate verify with the new factor completes the sign-in
-/// with a new session cookie (ROADMAP 937b: provisional enrollment through
-/// the narrow authn browser adapter).
+/// Origin and its CSRF token, before any application session exists. Without
+/// the token the start and the finish are refused as a missing CSRF token
+/// (the cookie is live), and from another origin nothing is enrolled; the
+/// same cookie opens no other credential binding (a passkey); enrolling
+/// elevates nothing, and a separate verify with the new factor completes the
+/// sign-in with a new session cookie. RPC calls with the page's metadata.
 #[tokio::test]
 async fn the_sign_in_page_enrolls_its_first_factor_with_its_cookie_and_csrf() {
     let (svc, _policy, profile) = services(None).await;
@@ -1147,17 +1147,30 @@ async fn the_sign_in_page_enrolls_its_first_factor_with_its_cookie_and_csrf() {
         .browser_csrf
         .expect("the CSRF token of the continuation");
 
-    assert!(
-        svc.auth
-            .start_totp_enrollment(from_sign_in_page(
-                StartTotpEnrollmentRequest {},
-                &pending_cookie,
-                None,
-            ))
-            .await
-            .is_err(),
-        "no enrollment without the CSRF token"
-    );
+    // Without the token the page is told so, as on its verify, not asked to
+    // sign in again: its cookie is live.
+    let refused = svc
+        .auth
+        .start_totp_enrollment(from_sign_in_page(
+            StartTotpEnrollmentRequest {},
+            &pending_cookie,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused).as_deref(), Some("CSRF_TOKEN_INVALID"));
+    let refused = svc
+        .auth
+        .finish_totp_enrollment(from_sign_in_page(
+            FinishTotpEnrollmentRequest {
+                code: "000000".into(),
+            },
+            &pending_cookie,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused).as_deref(), Some("CSRF_TOKEN_INVALID"));
     let mut elsewhere =
         from_sign_in_page(StartTotpEnrollmentRequest {}, &pending_cookie, Some(&csrf));
     elsewhere

@@ -382,12 +382,12 @@ fn from_sign_in_page<T>(message: T) -> Request<T> {
     request
 }
 
-/// The sign-in page asks for a code, asks for it again before verifying, as
-/// its code page's resend does with the challenge reference it holds, and
-/// signs in with the resent code: the session arrives as a cookie, never as
-/// a bearer token in the answer, and the replaced code does not sign in. No
-/// session exists before the verify (ROADMAP 937b: email code resend before
-/// any application session, through the browser adapter).
+/// The sign-in page asks for a code and asks for it again before verifying,
+/// as its code page's resend does with the challenge reference it holds:
+/// one mail is delivered, with the resent code, and nothing is signed in
+/// before the verify; the verify with that code signs in, the session
+/// arriving as a cookie, never as a bearer token in the answer. RPC calls
+/// with the page's metadata.
 async fn the_sign_in_page_resends_a_code_and_signs_in_with_it(mut i: Installation) {
     let mailbox = "Kim.Park+page@sid.example.com";
     let holder = i.holder("kimpark@sid.example.com", mailbox).await;
