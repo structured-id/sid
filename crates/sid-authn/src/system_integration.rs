@@ -66,29 +66,9 @@ impl AccountPages {
     /// credentials, query or fragment: pages and callbacks derive from it,
     /// never from a request's Host.
     pub fn new(account_url: &str) -> Result<Self, String> {
-        let url = url::Url::parse(account_url)
-            .map_err(|e| format!("account URL {account_url:?} is not a URL: {e}"))?;
-        let loopback = matches!(
-            url.host(),
-            Some(url::Host::Domain("localhost"))
-                | Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
-                | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
-        );
-        match url.scheme() {
-            "https" => {}
-            "http" if loopback => {}
-            _ => return Err(format!("account URL {account_url:?} must use https")),
-        }
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(format!(
-                "account URL {account_url:?} must have no credentials, query or fragment"
-            ));
-        }
-        Ok(Self { account_url: url })
+        Ok(Self {
+            account_url: trusted_url("account URL", account_url)?,
+        })
     }
 
     /// The account UI's sign-in route, where the issuer sends a user who
@@ -114,28 +94,75 @@ impl AccountPages {
         page.set_path(&path);
         page
     }
+}
 
-    /// `path` at the root of the pages' origin.
-    fn endpoint(&self, path: &str) -> String {
-        format!("{}{path}", self.account_url.origin().ascii_serialization())
+/// `value` as a URL from trusted configuration: `https` (or `http` on a
+/// loopback host, for development), with no credentials, query or fragment,
+/// so pages and endpoints derive from it, never from a request's Host.
+fn trusted_url(what: &str, value: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(value).map_err(|e| format!("{what} {value:?} is not a URL: {e}"))?;
+    let loopback = matches!(
+        url.host(),
+        Some(url::Host::Domain("localhost"))
+            | Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+            | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
+    );
+    match url.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return Err(format!("{what} {value:?} must use https")),
     }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{what} {value:?} must have no credentials, query or fragment"
+        ));
+    }
+    Ok(url)
 }
 
 /// The deployment's account integration settings, from trusted configuration:
-/// its pages and the public keys of the account cabinet client its UI host
-/// signs with.
+/// its pages, where its account cabinet client is served (the application
+/// URL its sign-in endpoints are mounted under) and the public keys that
+/// client's UI host signs with.
 #[derive(Debug, Clone)]
 pub struct AccountSettings {
     pages: AccountPages,
+    application: url::Url,
     keys: ClientKeySet,
 }
 
 impl AccountSettings {
     /// Settings for an account UI served at `account_url` (see
-    /// [`AccountPages::new`]), whose UI host signs with `keys`.
+    /// [`AccountPages::new`]), whose UI host signs with `keys` and serves its
+    /// sign-in endpoints at the root of the pages' origin, whatever mount the
+    /// pages are served under.
     pub fn new(account_url: &str, keys: ClientKeySet) -> Result<Self, String> {
+        let pages = AccountPages::new(account_url)?;
+        let mut application = pages.account_url.clone();
+        application.set_path("/");
+        Ok(Self {
+            pages,
+            application,
+            keys,
+        })
+    }
+
+    /// Settings whose account cabinet client is served apart from the pages
+    /// at `account_url`: by a UI host at `application_url`, under whose path
+    /// its sign-in endpoints are mounted, signing with `keys`. The pages stay
+    /// where they are; only the client's endpoints move.
+    pub fn apart(
+        account_url: &str,
+        application_url: &str,
+        keys: ClientKeySet,
+    ) -> Result<Self, String> {
         Ok(Self {
             pages: AccountPages::new(account_url)?,
+            application: trusted_url("account client URL", application_url)?,
             keys,
         })
     }
@@ -145,17 +172,25 @@ impl AccountSettings {
         &self.pages
     }
 
-    /// The registered redirect URI of the account web client. The UI host
-    /// declares its sign-in endpoints at its origin's root, whatever mount
-    /// the account pages are served under.
+    /// The registered redirect URI of the account web client, under the
+    /// application URL its UI host mounts its sign-in endpoints at.
     pub fn callback(&self) -> String {
-        self.pages.endpoint(CALLBACK_PATH)
+        self.endpoint(CALLBACK_PATH)
     }
 
-    /// The registered back-channel logout URI of the account web client, at
-    /// the origin's root as the callback is.
+    /// The registered back-channel logout URI of the account web client,
+    /// under the same mount as the callback.
     pub fn backchannel_logout(&self) -> String {
-        self.pages.endpoint(BACKCHANNEL_LOGOUT_PATH)
+        self.endpoint(BACKCHANNEL_LOGOUT_PATH)
+    }
+
+    /// `path` under the application URL.
+    fn endpoint(&self, path: &str) -> String {
+        format!(
+            "{}{}{path}",
+            self.application.origin().ascii_serialization(),
+            self.application.path().trim_end_matches('/')
+        )
     }
 
     /// The account UI's sign-in route (see [`AccountPages::sign_in_page`]).

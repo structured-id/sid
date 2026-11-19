@@ -196,26 +196,27 @@ pub fn magic_links_enabled(
 }
 
 /// The mail of requested sign-in links when `links` are enabled. A link
-/// opens the account UI's verification page, so enabling them without an
-/// account UI (`SID_ACCOUNT_URL`) is a configuration error: requested links
-/// would be owed a mail that can never name a page.
+/// opens the verification page of the account pages emailed links open
+/// (`mailed`), so enabling them without those is a configuration error:
+/// requested links would be owed a mail that can never name a page.
 pub fn magic_link_mail(
     links: Option<&Arc<MagicLinkService>>,
-    account: Option<&sid_authn::system_integration::AccountSettings>,
+    mailed: Option<&sid_authn::system_integration::AccountPages>,
     storage: &Arc<dyn StorageBackend>,
     keys: &Arc<dyn sid_keys::KeyManager>,
 ) -> anyhow::Result<Option<Arc<sid::auth_mail::MagicLinkMail>>> {
     let Some(links) = links else {
         return Ok(None);
     };
-    let Some(account) = account else {
+    let Some(mailed) = mailed else {
         anyhow::bail!(
-            "SID_MAGIC_LINKS_ENABLED needs the account UI that opens the links: set SID_ACCOUNT_URL"
+            "SID_MAGIC_LINKS_ENABLED needs account pages that open the links, served beside \
+             the account cabinet: set SID_ACCOUNT_URL"
         );
     };
     Ok(Some(Arc::new(sid::auth_mail::MagicLinkMail::new(
         links.clone(),
-        account.magic_link_page(),
+        mailed.magic_link_page(),
         stored_mail(storage, keys),
     ))))
 }
@@ -231,25 +232,26 @@ pub fn stored_mail(
     )))
 }
 
-/// Password resets and the mail of their links, when an account UI
-/// (`SID_ACCOUNT_URL`) serves the page a link opens; without one a reset
-/// could never be completed, so none is started.
+/// Password resets and the mail of their links, when account pages served
+/// beside the account cabinet (`mailed`) open the page a link opens; without
+/// them none is started: a reset could never be completed, or would let a
+/// public page change an account managed by a closed host.
 pub fn password_resets(
-    account: Option<&sid_authn::system_integration::AccountSettings>,
+    mailed: Option<&sid_authn::system_integration::AccountPages>,
     storage: &Arc<dyn StorageBackend>,
     keys: &Arc<dyn sid_keys::KeyManager>,
 ) -> Option<(
     Arc<sid_authn::password_reset::PasswordResetService>,
     Arc<sid::auth_mail::ResetMail>,
 )> {
-    let account = account?;
+    let mailed = mailed?;
     let resets = Arc::new(sid_authn::password_reset::PasswordResetService::new(
         storage.clone(),
         keys.clone(),
     ));
     let mail = Arc::new(sid::auth_mail::ResetMail::new(
         resets.clone(),
-        account.password_reset_page(),
+        mailed.password_reset_page(),
         stored_mail(storage, keys),
     ));
     Some((resets, mail))
@@ -281,74 +283,106 @@ pub fn sign_in_page(
     Ok(Some(page))
 }
 
-/// Whether the composition delivers an account cabinet client: a UI host
-/// signing users into the account pages as the installation's account web
-/// client. A host serving only the shared ceremony pages delivers none.
+/// Where the composition serves its account cabinet client: the UI host
+/// signing users into account management as the installation's account web
+/// client.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AccountClient {
-    /// `SID_ACCOUNT_URL` and `SID_ACCOUNT_CLIENT_JWKS` go together.
+    /// Beside the account pages: `SID_ACCOUNT_URL` and
+    /// `SID_ACCOUNT_CLIENT_JWKS` go together, and the pages also open the
+    /// emailed sign-in and password reset links.
     #[default]
     Delivered,
-    /// `SID_ACCOUNT_URL` names the pages alone; client keys are refused.
-    NotDelivered,
+    /// Apart from the pages, by a closed host at `SID_ACCOUNT_CLIENT_URL`:
+    /// that URL and `SID_ACCOUNT_CLIENT_JWKS` go together, and
+    /// `SID_ACCOUNT_URL` alone names the shared ceremony pages. The public
+    /// pages open no emailed link: a mailed reset or sign-in link would let a
+    /// public page change an account whose management is the closed host's.
+    Apart,
 }
 
-/// What `SID_ACCOUNT_URL` configures: the shared account pages and, where
-/// the composition delivers an account cabinet client, its integration.
+/// What the account settings configure: the shared account pages, where the
+/// account cabinet client is served, and the pages emailed links open.
 #[derive(Debug, Clone, Default)]
 pub struct Account {
-    /// The pages the issuer sends users and emailed links to.
+    /// The pages the issuer sends users who must sign in to.
     pub pages: Option<sid_authn::system_integration::AccountPages>,
-    /// The account cabinet client's integration, only where delivered.
+    /// The account cabinet client's integration, where one is delivered.
     pub integration: Option<sid_authn::system_integration::AccountSettings>,
+    /// The pages emailed sign-in and password reset links open: only those
+    /// served beside the account cabinet.
+    pub mailed: Option<sid_authn::system_integration::AccountPages>,
 }
 
-/// The account configuration from `SID_ACCOUNT_URL` (the account UI's public
-/// URL, with its mount) and `SID_ACCOUNT_CLIENT_JWKS` (a file holding its UI
-/// host's public JWK Set), as `client` says the composition delivers. With a
-/// delivered client, neither set means no account UI and one without the
-/// other is a configuration error; without one, the URL alone names the pages
-/// and keys are refused. An unreadable key file or an invalid value is a
+/// The account configuration from `SID_ACCOUNT_URL` (the account pages'
+/// public URL, with their mount), `SID_ACCOUNT_CLIENT_URL` (where a closed
+/// host serves the account cabinet client, under that URL's path) and
+/// `SID_ACCOUNT_CLIENT_JWKS` (a file holding that client's UI host's public
+/// JWK Set), as `client` says the composition serves its cabinet. Nothing set
+/// means no account UI; a combination the composition does not serve is a
+/// configuration error. An unreadable key file or an invalid value is a
 /// configuration error, never an integration with invented settings.
 pub fn account_settings(
     url: Option<&str>,
+    client_url: Option<&str>,
     jwks_file: Option<&str>,
     client: AccountClient,
 ) -> anyhow::Result<Account> {
-    let (url, jwks_file) = (
-        url.filter(|v| !v.is_empty()),
-        jwks_file.filter(|v| !v.is_empty()),
-    );
-    let (url, jwks_file) = match (client, url, jwks_file) {
-        (_, None, None) => return Ok(Account::default()),
-        (AccountClient::NotDelivered, Some(url), None) => {
-            let pages = sid_authn::system_integration::AccountPages::new(url)
-                .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?;
-            return Ok(Account {
-                pages: Some(pages),
-                integration: None,
-            });
-        }
-        (AccountClient::NotDelivered, _, Some(_)) => anyhow::bail!(
-            "SID_ACCOUNT_CLIENT_JWKS is set, but this composition delivers no account \
-             cabinet client: SID_ACCOUNT_URL names its pages alone"
+    let some = |value: Option<&str>| value.filter(|v| !v.is_empty()).map(str::to_owned);
+    let (url, client_url, jwks_file) = (some(url), some(client_url), some(jwks_file));
+    let keys = |file: &str| -> anyhow::Result<sid_core::models::ClientKeySet> {
+        let text = std::fs::read_to_string(file)
+            .with_context(|| format!("SID_ACCOUNT_CLIENT_JWKS {file:?} cannot be read"))?;
+        sid_core::models::ClientKeySet::from_json(&text)
+            .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_CLIENT_JWKS {file:?}: {e}"))
+    };
+    match (client, url, client_url, jwks_file) {
+        (_, None, None, None) => Ok(Account::default()),
+        (AccountClient::Delivered, _, Some(_), _) => anyhow::bail!(
+            "SID_ACCOUNT_CLIENT_URL is set, but this composition serves its account cabinet \
+             beside the pages of SID_ACCOUNT_URL"
         ),
-        (AccountClient::Delivered, Some(url), Some(file)) => (url, file),
-        (AccountClient::Delivered, _, _) => anyhow::bail!(
+        (AccountClient::Delivered, Some(url), None, Some(file)) => {
+            let integration =
+                sid_authn::system_integration::AccountSettings::new(&url, keys(&file)?)
+                    .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?;
+            Ok(Account {
+                pages: Some(integration.pages().clone()),
+                mailed: Some(integration.pages().clone()),
+                integration: Some(integration),
+            })
+        }
+        (AccountClient::Delivered, _, None, _) => anyhow::bail!(
             "SID_ACCOUNT_URL and SID_ACCOUNT_CLIENT_JWKS are set together: the account \
              integration needs its URL and its UI host's public keys"
         ),
-    };
-    let text = std::fs::read_to_string(jwks_file)
-        .with_context(|| format!("SID_ACCOUNT_CLIENT_JWKS {jwks_file:?} cannot be read"))?;
-    let keys = sid_core::models::ClientKeySet::from_json(&text)
-        .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_CLIENT_JWKS {jwks_file:?}: {e}"))?;
-    let integration = sid_authn::system_integration::AccountSettings::new(url, keys)
-        .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?;
-    Ok(Account {
-        pages: Some(integration.pages().clone()),
-        integration: Some(integration),
-    })
+        (AccountClient::Apart, Some(url), None, None) => Ok(Account {
+            pages: Some(
+                sid_authn::system_integration::AccountPages::new(&url)
+                    .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?,
+            ),
+            integration: None,
+            mailed: None,
+        }),
+        (AccountClient::Apart, Some(url), Some(client_url), Some(file)) => {
+            let integration = sid_authn::system_integration::AccountSettings::apart(
+                &url,
+                &client_url,
+                keys(&file)?,
+            )
+            .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL / SID_ACCOUNT_CLIENT_URL: {e}"))?;
+            Ok(Account {
+                pages: Some(integration.pages().clone()),
+                integration: Some(integration),
+                mailed: None,
+            })
+        }
+        (AccountClient::Apart, _, _, _) => anyhow::bail!(
+            "SID_ACCOUNT_URL names the shared pages; SID_ACCOUNT_CLIENT_URL and \
+             SID_ACCOUNT_CLIENT_JWKS, set together beside it, name the account cabinet \
+             client its closed host serves"
+        ),
+    }
 }
 
 /// The setting `name` as `read` from the environment: unset is `None`, a
@@ -640,8 +674,10 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let Account {
         pages: account_pages,
         integration: account,
+        mailed: mailed_pages,
     } = account_settings(
         env_setting("SID_ACCOUNT_URL")?.as_deref(),
+        env_setting("SID_ACCOUNT_CLIENT_URL")?.as_deref(),
         env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
         host.account_client,
     )?;
@@ -717,7 +753,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     .then(|| Arc::new(MagicLinkService::new(storage.clone(), key_manager.clone())));
     let magic_link_mail = magic_link_mail(
         magic_link.as_ref(),
-        account.as_ref(),
+        mailed_pages.as_ref(),
         &storage,
         &key_manager,
     )?;
@@ -951,7 +987,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
     };
-    let resets = password_resets(account.as_ref(), &storage, &key_manager);
+    let resets = password_resets(mailed_pages.as_ref(), &storage, &key_manager);
     let (auth_svc, reset_mail) = match resets {
         Some((resets, mail)) => (auth_svc.with_password_resets(resets), Some(mail)),
         None => (auth_svc, None),

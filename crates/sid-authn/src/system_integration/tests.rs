@@ -234,6 +234,48 @@ fn the_adapter_endpoints_are_at_the_account_origin() {
     }
 }
 
+/// An account cabinet client served apart from the shared pages registers its
+/// endpoints under its own application mount, which a host already serving
+/// another application's `/auth/callback` at its root needs; the pages, and
+/// so every page the issuer or a mail links to, stay where they were.
+#[test]
+fn a_client_served_apart_keeps_the_pages_and_mounts_its_endpoints() {
+    for application in [
+        "https://ops.sid.example.com/account/",
+        "https://ops.sid.example.com/account",
+    ] {
+        let account =
+            AccountSettings::apart("https://sid.example.com/account/", application, keys("k"))
+                .unwrap();
+        assert_eq!(
+            account.callback(),
+            "https://ops.sid.example.com/account/auth/callback"
+        );
+        assert_eq!(
+            account.backchannel_logout(),
+            "https://ops.sid.example.com/account/auth/backchannel-logout"
+        );
+        assert_eq!(
+            account.sign_in_page().as_str(),
+            "https://sid.example.com/account/login"
+        );
+        assert_eq!(
+            account.password_reset_page().as_str(),
+            "https://sid.example.com/account/reset/new"
+        );
+    }
+    for bad in [
+        "http://ops.sid.example.com/account/",
+        "https://ops.sid.example.com/account/?x=1",
+        "https://user@ops.sid.example.com/account/",
+    ] {
+        assert!(
+            AccountSettings::apart("https://sid.example.com/account/", bad, keys("k")).is_err(),
+            "{bad}"
+        );
+    }
+}
+
 /// The account URL supplies the exact callback: it is https (or http on a
 /// loopback host) and carries nothing a request could vary.
 #[test]
