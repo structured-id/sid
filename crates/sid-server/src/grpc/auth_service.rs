@@ -1564,9 +1564,14 @@ impl AuthService for AuthServiceImpl {
             .extensions()
             .get::<sid_authn::issuer::AddressedIssuer>()
             .cloned();
-        let context = self
+        let mut context = self
             .sign_in_context(&request.get_ref().authorization_request, addressed.as_ref())
             .await?;
+        // The validated request was kept by the issuer this call reached, so
+        // its ceremonies run on the same route: never derived from `issuer`.
+        let handle = addressed.as_ref().map(|a| a.0.handle.to_string());
+        context.ceremony_api =
+            sid_infra::route::ceremony_api(&self.public_origin, handle.as_deref());
         Ok(Response::new(context))
     }
 

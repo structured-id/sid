@@ -2167,6 +2167,11 @@ async fn the_sign_in_page_reads_the_kept_requests_context() {
         let context = sign_in_context(svc, &rd, Some(&svc.issuer)).await.unwrap();
         assert_eq!(context.issuer, svc.issuer.canonical_url);
         assert_eq!(context.client_name, common::test_client().client_name);
+        // Read through the issuer's path, its ceremonies run on that path.
+        assert_eq!(
+            context.ceremony_api,
+            format!("https://sid.example.com/i/{}/api", svc.issuer.handle)
+        );
     }
 
     let back = browser.continuation(&rd);
@@ -2204,6 +2209,19 @@ async fn the_root_issuers_sign_in_reads_its_kept_request() {
     let context = sign_in_context(&svc, &rd, None).await.unwrap();
     assert_eq!(context.issuer, "https://sid.example.com");
     assert_eq!(context.client_name, common::test_client().client_name);
+    // A single-authority surface serves its ceremonies at its `/api`.
+    assert_eq!(context.ceremony_api, "https://sid.example.com/api");
+
+    // The same root issuer reached addressed on a shared host: its ceremonies
+    // run on its handle's route, which is not `iss + /api`. Bug prevented: a
+    // page deriving the route from `iss` sent them to the shared host's root.
+    let shared = sign_in_context(&svc, &rd, Some(&svc.issuer)).await.unwrap();
+    assert_eq!(shared.issuer, "https://sid.example.com");
+    assert_eq!(
+        shared.ceremony_api,
+        format!("https://sid.example.com/i/{}/api", svc.issuer.handle)
+    );
+    assert_ne!(shared.ceremony_api, format!("{}/api", shared.issuer));
 }
 
 /// A request that does not match what the issuer kept is refused before the

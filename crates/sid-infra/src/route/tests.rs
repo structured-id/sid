@@ -44,6 +44,26 @@ fn the_root_issuer_endpoints_are_its_protocol_routes() {
     }
 }
 
+/// The sign-in surface a page is told to use is the route that serves the
+/// issuer: `/api` on a single-authority origin, `/i/<handle>/api` when the
+/// call reached its issuer addressed on a shared host. A root-addressed base
+/// issuer (`iss` with no path) on a shared host therefore gets its handle's
+/// route, not `iss + /api`.
+#[test]
+fn ceremony_api_is_the_serving_route() {
+    assert_eq!(
+        ceremony_api("https://sid.example.com", None),
+        "https://sid.example.com/api"
+    );
+    let iss = "https://dev.sid.example.com";
+    let route = ceremony_api(iss, Some("0123456789abcdef0123456789abcdef"));
+    assert_eq!(
+        route,
+        "https://dev.sid.example.com/i/0123456789abcdef0123456789abcdef/api"
+    );
+    assert_ne!(route, format!("{iss}{API_MOUNT}"));
+}
+
 /// The gRPC path is split off `/api/...`.
 #[test]
 fn api_method_names_the_grpc_path() {

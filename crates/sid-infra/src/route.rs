@@ -8,6 +8,17 @@
 /// `/api/{package.Service}/{Method}`, the gRPC path under it unchanged.
 pub const API_MOUNT: &str = "/api";
 
+/// The base URL of an issuer's browser sign-in surface on `public_origin`, as
+/// the route serving the call reached it: [`API_MOUNT`] on a single-authority
+/// surface, `/i/<handle>/api` for a call `addressed` to the issuer with that
+/// handle on a shared host, whatever the issuer's own URL.
+pub fn ceremony_api(public_origin: &str, addressed: Option<&str>) -> String {
+    match addressed {
+        Some(handle) => format!("{public_origin}/i/{handle}{API_MOUNT}"),
+        None => format!("{public_origin}{API_MOUNT}"),
+    }
+}
+
 /// The gRPC path of a call under [`API_MOUNT`]; `None` for any other path.
 pub fn api_method(path: &str) -> Option<&str> {
     let method = path.strip_prefix(API_MOUNT)?;

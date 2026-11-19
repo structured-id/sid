@@ -573,9 +573,12 @@ impl Authorizations {
         addressed: Option<&AddressedIssuer>,
     ) -> Result<SignInContext, AuthorizationError> {
         let (_, _, client, issuer) = self.kept(oauth, authorization_request, addressed).await?;
+        // The ceremony route is the serving surface's to name: the transport
+        // that reached this issuer sets it.
         Ok(SignInContext {
             issuer: issuer.canonical_url,
             client_name: client.client_name,
+            ceremony_api: String::new(),
         })
     }
 
