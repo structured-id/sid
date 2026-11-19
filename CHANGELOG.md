@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.32](https://github.com/structured-id/sid/compare/v0.2.31...v0.2.32) - 2026-11-19
+
+### Added
+
+- *(authn)* passwordless registration with a first passkey ([#706](https://github.com/structured-id/sid/pull/706))
+
+### Fixed
+
+- *(authn)* refuse the sign-in page's enrollment by its own reason ([#704](https://github.com/structured-id/sid/pull/704))
+- *(oauth)* ask for the sign-in page at each request ([#702](https://github.com/structured-id/sid/pull/702))
+- *(second-factor)* a refused TOTP finish keeps the enrollment ([#695](https://github.com/structured-id/sid/pull/695))
+
+### Other
+
+- *(transcoder)* a sign-in over annotated HTTP delivers its session cookie ([#698](https://github.com/structured-id/sid/pull/698))
+- *(authn)* one browser session core, proxy off the decision service ([#697](https://github.com/structured-id/sid/pull/697))
+
 ## [0.2.31](https://github.com/structured-id/sid/compare/v0.2.30...v0.2.31) - 2026-11-18
 
 ### Added
