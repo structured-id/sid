@@ -31,10 +31,11 @@ const CLIENT_SCOPES: [&str; 5] = [
     "account.write",
 ];
 
-/// The path under the account URL the BFF receives authorization responses at.
+/// The path on the account URL's origin the UI host receives authorization
+/// responses at.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 
-/// The path under the account URL the UI host receives the issuer's
+/// The path on the account URL's origin the UI host receives the issuer's
 /// back-channel logouts at (Back-Channel Logout 1.0 §2.2).
 pub const BACKCHANNEL_LOGOUT_PATH: &str = "/auth/backchannel-logout";
 
@@ -92,20 +93,21 @@ impl AccountSettings {
         })
     }
 
-    /// The registered redirect URI of the account web client.
+    /// The registered redirect URI of the account web client. The UI host
+    /// declares its sign-in endpoints at its origin's root, whatever mount
+    /// the account pages are served under.
     pub fn callback(&self) -> String {
-        format!(
-            "{}{CALLBACK_PATH}",
-            self.account_url.as_str().trim_end_matches('/')
-        )
+        self.endpoint(CALLBACK_PATH)
     }
 
-    /// The registered back-channel logout URI of the account web client.
+    /// The registered back-channel logout URI of the account web client, at
+    /// the origin's root as the callback is.
     pub fn backchannel_logout(&self) -> String {
-        format!(
-            "{}{BACKCHANNEL_LOGOUT_PATH}",
-            self.account_url.as_str().trim_end_matches('/')
-        )
+        self.endpoint(BACKCHANNEL_LOGOUT_PATH)
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{path}", self.account_url.origin().ascii_serialization())
     }
 
     /// The account UI's sign-in route, where the issuer sends a user who
