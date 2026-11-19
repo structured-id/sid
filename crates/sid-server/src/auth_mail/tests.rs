@@ -90,6 +90,32 @@ async fn each_message_renders_its_secret() {
     assert!(sent[2].1.body.contains(link), "{}", sent[2].1.body);
 }
 
+/// A registration's code and a sign-in code tell the recipient different
+/// purposes, so a registration code is never presented as a sign-in.
+#[tokio::test]
+async fn registration_code_names_its_purpose() {
+    let recorded = Arc::new(Recorded::default());
+    let delivery = TemplatedMail::new(Arc::new(Transport(Some(recorded.clone()))));
+    delivery
+        .deliver(&mail(AuthMessage::RegistrationCode, "654321"))
+        .await
+        .unwrap();
+    delivery
+        .deliver(&mail(AuthMessage::SignInCode, "123456"))
+        .await
+        .unwrap();
+
+    let sent = recorded.sent.lock().unwrap();
+    let registration = &sent[0].1.body;
+    assert!(registration.contains("654321"), "{registration}");
+    assert!(
+        registration.contains("finish creating your account"),
+        "{registration}"
+    );
+    assert!(!registration.contains("sign in"), "{registration}");
+    assert!(sent[1].1.body.contains("sign in"), "{}", sent[1].1.body);
+}
+
 /// Without a usable email provider the mail is unavailable, not failed; a
 /// provider's refusal is passed on for the engine to settle.
 #[tokio::test]

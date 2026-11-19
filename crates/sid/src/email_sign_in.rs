@@ -8,7 +8,7 @@
 
 use sid_authn::login_policy::LoginPolicySource;
 use sid_authn::magic_link::{MagicLinkError, MagicLinkService, MagicLinkVerifyResult};
-use sid_authn::otp::{CodeDestination, OtpError, OtpService, OtpVerifyResult};
+use sid_authn::otp::{CodeDestination, OtpError, OtpPurpose, OtpService, OtpVerifyResult};
 use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn};
 use sid_authn::sign_in_security::AttemptAuthentication;
 use sid_core::Error as SidError;
@@ -137,7 +137,9 @@ impl<'a> EmailSignIn<'a> {
             Some(mailbox) => CodeDestination::Email(mailbox),
             None => CodeDestination::None,
         };
-        let (result, _code) = codes.request_otp(normalized, destination).await?;
+        let (result, _code) = codes
+            .request_otp(OtpPurpose::SignIn, normalized, destination)
+            .await?;
         info!(session_id = %result.session_id, "OTP code requested");
         let otp_session_id = sid_ids::OtpSessionId::from_uuid(result.session_id)
             .map_err(|e| internal("email code session id", e))?;
@@ -158,7 +160,7 @@ impl<'a> EmailSignIn<'a> {
     ) -> Result<ResendOtpResponse, EmailSignInError> {
         let session_id = wire_id(session, "otp_session_id")?.into_uuid();
         let (result, _code) = codes
-            .resend_otp(&session_id)
+            .resend_otp(OtpPurpose::SignIn, &session_id)
             .await?
             .ok_or(EmailSignInError::CodeSessionExpired)?;
         info!(session_id = %result.session_id, "OTP code resent");
@@ -178,7 +180,7 @@ impl<'a> EmailSignIn<'a> {
     ) -> Result<Option<SignedIn>, EmailSignInError> {
         let session_id = wire_id(request.otp_session_id.as_ref(), "otp_session_id")?.into_uuid();
         let verified = codes
-            .verify_otp(&session_id, &request.code)
+            .verify_otp(OtpPurpose::SignIn, &session_id, &request.code)
             .await
             .map_err(|e| internal("verify email code", e))?;
         match verified {

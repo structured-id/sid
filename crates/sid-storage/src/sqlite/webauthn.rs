@@ -22,6 +22,24 @@ fn stored(row: &sqlx::sqlite::SqliteRow) -> SidResult<StoredUserHandle> {
     })
 }
 
+/// Write a new account's user handle in its registration's transaction.
+pub(crate) async fn insert_new_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    profile_id: ProfileId,
+    handle: &sid_core::models::NewUserHandle,
+) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO webauthn_user_handles (profile_id, rp_id, user_handle) VALUES (?, ?, ?)",
+    )
+    .bind(profile_id)
+    .bind(&handle.rp_id)
+    .bind(handle.handle.0.as_slice())
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| insert_error("WebAuthn user handle", e))?;
+    Ok(())
+}
+
 impl SqliteBackend {
     pub(crate) async fn ensure_webauthn_user_handle_impl(
         &self,

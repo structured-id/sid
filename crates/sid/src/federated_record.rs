@@ -82,6 +82,7 @@ pub async fn record_of(
         history: None,
         enrollment: None,
         source_recording: SourceRecording::AsGiven,
+        webauthn_user_handle: None,
     };
     match storage.register_profile(&registration, ctx).await {
         Ok(()) => {}

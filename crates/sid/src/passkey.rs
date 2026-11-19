@@ -12,8 +12,8 @@ use sid_authn::credential_enrollment::EnrollmentError;
 use sid_authn::login_policy::LoginPolicySource;
 use sid_authn::sign_in_delivery::CeremonyClient;
 use sid_authn::webauthn::{
-    AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
-    VerifiedAssertion, WebAuthnServer,
+    AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegisteredPasskey,
+    RegistrationResponse, VerifiedAssertion, WebAuthnServer,
 };
 use sid_core::Error as SidError;
 use sid_core::models::{
@@ -21,9 +21,9 @@ use sid_core::models::{
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::{
-    WebAuthnAuthenticationStartRequest, WebAuthnAuthenticationStartResponse,
-    WebAuthnRegistrationFinishRequest, WebAuthnRegistrationFinishResponse,
-    WebAuthnRegistrationStartResponse,
+    PasskeyRegistrationStartResponse, WebAuthnAuthenticationStartRequest,
+    WebAuthnAuthenticationStartResponse, WebAuthnRegistrationFinishRequest,
+    WebAuthnRegistrationFinishResponse, WebAuthnRegistrationStartResponse,
 };
 use tracing::{info, warn};
 
@@ -140,6 +140,9 @@ pub struct Passkeys {
     /// The profile each started ceremony binds a passkey to or signs in:
     /// only that profile may finish it.
     ceremonies: ChallengeStore<ProfileId>,
+    /// The registration context each started first-passkey ceremony
+    /// belongs to: only that registration may finish it.
+    first_passkeys: ChallengeStore<String>,
 }
 
 /// How long a started ceremony may be finished.
@@ -154,8 +157,94 @@ impl Passkeys {
     ) -> Self {
         Self {
             webauthn,
+            first_passkeys: ChallengeStore::new(
+                ceremonies.clone(),
+                keys.clone(),
+                "webauthn-first-passkey",
+                CEREMONY_TTL,
+            ),
             ceremonies: ChallengeStore::new(ceremonies, keys, "webauthn-binding", CEREMONY_TTL),
         }
+    }
+
+    /// The relying party ID every user handle and passkey is scoped to.
+    pub fn rp_id(&self) -> &str {
+        self.webauthn.rp_id()
+    }
+
+    /// Start the first passkey of the registration whose context is
+    /// `context`, for the account it will commit under `user_handle`, shown
+    /// to the registrant as `name`. The account has no passkeys yet.
+    pub async fn first_passkey_start(
+        &self,
+        context: &str,
+        user_handle: WebAuthnUserHandle,
+        name: &str,
+    ) -> Result<PasskeyRegistrationStartResponse, PasskeyError> {
+        let result = self
+            .webauthn
+            .registration_start::<ProfileId>(user_handle, name, &[])
+            .await
+            .map_err(|e| internal("start a first passkey", e))?;
+        self.first_passkeys
+            .insert(&result.state_key, &context.to_owned())
+            .await
+            .map_err(SignInError::from)?;
+        Ok(PasskeyRegistrationStartResponse {
+            challenge: result.state_key.into_bytes(),
+            options: result.options,
+        })
+    }
+
+    /// Verify the first passkey `credential` registers for the registration
+    /// whose context is `context` and account handle `user_handle`: the
+    /// ceremony must be that registration's own and the passkey must carry
+    /// that handle (WebAuthn Level 3 §7.1). The record is the caller's to
+    /// commit with the account.
+    pub async fn first_passkey_finish(
+        &self,
+        context: &str,
+        user_handle: WebAuthnUserHandle,
+        credential: &[u8],
+    ) -> Result<RegisteredPasskey, PasskeyError> {
+        let credential =
+            RegistrationResponse::parse(credential).map_err(|_| PasskeyError::InvalidField {
+                field: "credential",
+                reason: "not a WebAuthn registration response",
+            })?;
+        // Another registration's ceremony reads as expired.
+        let expired = || PasskeyError::Expired("passkey registration");
+        let state_key = credential.state_key().map_err(|_| expired())?;
+        let started_by = self
+            .first_passkeys
+            .take(&state_key)
+            .await
+            .map_err(SignInError::from)?
+            .ok_or_else(expired)?;
+        if started_by != context {
+            return Err(expired());
+        }
+        let passkey = self
+            .webauthn
+            .registration_finish(&credential)
+            .await
+            .map_err(|e| match e {
+                SidError::AuthenticationFailed(_) => {
+                    warn!("first passkey registration failed: {}", e);
+                    PasskeyError::InvalidField {
+                        field: "credential",
+                        reason: "the passkey registration does not verify",
+                    }
+                }
+                other => internal("finish a first passkey", other),
+            })?;
+        if passkey.user_handle != user_handle {
+            return Err(PasskeyError::InvalidField {
+                field: "credential",
+                reason: "the passkey was created for another account",
+            });
+        }
+        Ok(passkey)
     }
 
     /// Refuse unless `caller`'s own interactive session may bind a passkey

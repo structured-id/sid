@@ -2539,6 +2539,7 @@ impl StorageBackend for PostgresBackend {
             history,
             enrollment,
             source_recording,
+            webauthn_user_handle,
         } = registration;
         let mut tx = self
             .pool
@@ -2694,6 +2695,18 @@ impl StorageBackend for PostgresBackend {
 
         if let Some(credential) = credential {
             Self::insert_credential_in_tx(&mut tx, credential).await?;
+        }
+        if let Some(user_handle) = webauthn_user_handle {
+            sqlx::query(
+                "INSERT INTO webauthn_user_handles (profile_id, rp_id, user_handle)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(profile.id)
+            .bind(&user_handle.rp_id)
+            .bind(user_handle.handle.0.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("WebAuthn user handle", e))?;
         }
         // The invite this registration spent names the Profile it created and
         // the credential it installed.

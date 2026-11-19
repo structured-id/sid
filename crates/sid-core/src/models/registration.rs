@@ -4,6 +4,7 @@
 use super::{
     Credential, EmailLabel, HistoryCommit, PhoneLabel, Principal, PrincipalId, PrincipalType,
     Profile, ProfileEmail, ProfileEmailId, ProfilePhone, ProfilePhoneId, RegistrationSource,
+    WebAuthnUserHandle,
 };
 use super::{EnrollmentMode, EnrollmentPolicy, SecurityPolicy};
 use crate::enrollment::{EnrollmentDecision, EnrollmentDenialReason, evaluate_enrollment};
@@ -137,6 +138,18 @@ pub struct NewRegistration {
     /// policy, read in the account's transaction, tracks sources. A gated
     /// self-registration records the source its admission decides instead.
     pub source_recording: SourceRecording,
+    /// The account's WebAuthn user handle at the relying party its first
+    /// passkey registered with, written with the account so the passkey
+    /// signs in as a discoverable credential from its first use.
+    pub webauthn_user_handle: Option<NewUserHandle>,
+}
+
+/// A new account's WebAuthn user handle at one relying party.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUserHandle {
+    /// The relying party ID the handle is scoped to (WebAuthn §4).
+    pub rp_id: String,
+    pub handle: WebAuthnUserHandle,
 }
 
 /// How a registration's given source is recorded.
@@ -164,7 +177,8 @@ impl NewRegistration {
             && self.email.is_none()
             && self.phone.is_none()
             && self.credential.is_none()
-            && self.history.is_none();
+            && self.history.is_none()
+            && self.webauthn_user_handle.is_none();
         if bare {
             Ok(())
         } else {
@@ -242,6 +256,7 @@ impl NewRegistration {
             history: None,
             enrollment: None,
             source_recording: SourceRecording::AsGiven,
+            webauthn_user_handle: None,
         };
         match identifier {
             SignupIdentifier::Username(_) => {
@@ -278,6 +293,41 @@ impl NewRegistration {
             verified_at: None,
             created_at: now,
             updated_at: now,
+        });
+        self
+    }
+
+    /// The signup email was confirmed before the account is committed (its
+    /// code was delivered to it and returned): the principal and its contact
+    /// are written verified. Only an email signup has an address to confirm.
+    pub fn with_confirmed_email(mut self) -> Result<Self> {
+        let now = self.profile.created_at;
+        let Some(email) = self
+            .email
+            .as_mut()
+            .filter(|_| self.principal.principal_type == super::PrincipalType::Email)
+        else {
+            return Err(Error::Validation(
+                "only an email signup has an address to confirm".into(),
+            ));
+        };
+        email.verified = true;
+        email.verified_at = Some(now);
+        self.principal.verified = true;
+        self.principal.verified_at = Some(now);
+        Ok(self)
+    }
+
+    /// Write the account's WebAuthn user handle at `rp_id` with it, for the
+    /// first passkey the registration commits.
+    pub fn with_webauthn_user_handle(
+        mut self,
+        rp_id: impl Into<String>,
+        handle: WebAuthnUserHandle,
+    ) -> Self {
+        self.webauthn_user_handle = Some(NewUserHandle {
+            rp_id: rp_id.into(),
+            handle,
         });
         self
     }

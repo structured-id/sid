@@ -249,7 +249,7 @@ pub use provisioning_connector::{
 };
 pub use refresh_token::{RefreshToken, RefreshTokenError, ValidatedRefreshToken};
 pub use registration::{
-    Admission, EnrollmentGate, NewRegistration, SignupIdentifier, SourceRecording,
+    Admission, EnrollmentGate, NewRegistration, NewUserHandle, SignupIdentifier, SourceRecording,
 };
 pub use registration_source::{RegistrationSource, RegistrationSourceType, UtmParams};
 pub use revocation::{

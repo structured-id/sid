@@ -184,6 +184,62 @@ fn admission_records_the_source_its_policy_decides() {
     assert!(invited.admit(Some(untracked)).unwrap().source().is_none());
 }
 
+/// A confirmed email signup writes its principal and contact verified; a
+/// username or phone signup has no confirmed address and is refused, so a
+/// confirmation never marks a contact it did not deliver to.
+#[test]
+fn only_an_email_signup_is_written_confirmed() {
+    let confirmed = NewRegistration::new(
+        Profile::new(None::<String>),
+        SignupIdentifier::Email {
+            key: "kim@sid.example.com",
+            address: "Kim@sid.example.com",
+            revision: 1,
+        },
+        None,
+    )
+    .unwrap()
+    .with_confirmed_email()
+    .unwrap();
+    assert!(confirmed.principal.verified && confirmed.principal.verified_at.is_some());
+    let email = confirmed.email.as_ref().unwrap();
+    assert!(email.verified && email.verified_at.is_some());
+
+    for identifier in [
+        SignupIdentifier::Username("kim"),
+        SignupIdentifier::Phone("+380501234567"),
+    ] {
+        assert!(
+            NewRegistration::new(Profile::new(None::<String>), identifier, None)
+                .unwrap()
+                .with_confirmed_email()
+                .is_err()
+        );
+    }
+}
+
+/// The first passkey's user handle is carried for the store to write with
+/// the account; an account registered without one carries none.
+#[test]
+fn a_registration_carries_its_first_passkeys_user_handle() {
+    let plain = NewRegistration::new(
+        Profile::new(Some("kim")),
+        SignupIdentifier::Username("kim"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(plain.webauthn_user_handle, None);
+    let handle = WebAuthnUserHandle([7; 16]);
+    let with = plain.with_webauthn_user_handle("sid.example.com", handle);
+    assert_eq!(
+        with.webauthn_user_handle,
+        Some(NewUserHandle {
+            rp_id: "sid.example.com".into(),
+            handle,
+        })
+    );
+}
+
 /// A malformed phone number is refused instead of being stored as a zero.
 #[test]
 fn invalid_signup_identifier_is_refused() {

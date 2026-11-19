@@ -285,6 +285,7 @@ fn reference(issuer: &str, subject: Uuid) -> sid_core::models::NewRegistration {
         history: None,
         enrollment: None,
         source_recording: sid_core::models::SourceRecording::AsGiven,
+        webauthn_user_handle: None,
     }
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use sid_authn::otp::{CodeDelivery, CodeDestination};
+use sid_authn::otp::{CodeDelivery, CodeDestination, OtpPurpose};
 use sid_plugin::{StorageBackend, WorkStore};
 
 /// What the host's delivery answers.
@@ -95,6 +95,7 @@ async fn code_mail_sends_the_bound_code() {
     let (codes, store) = codes().await;
     let (_, code) = codes
         .request_otp(
+            OtpPurpose::SignIn,
             "key@sid.example.com",
             CodeDestination::Email("Key@sid.example.com"),
         )
@@ -119,6 +120,34 @@ async fn code_mail_sends_the_bound_code() {
     }
 }
 
+/// A registration's code goes out as the registration message, not as a
+/// sign-in code, so the recipient is told what the code does.
+#[tokio::test]
+async fn registration_code_mail_says_it_is_for_registration() {
+    let (codes, store) = codes().await;
+    let (_, code) = codes
+        .request_otp(
+            OtpPurpose::Registration,
+            "new@sid.example.com",
+            CodeDestination::Email("New@sid.example.com"),
+        )
+        .await
+        .unwrap();
+    let work = owed(&store, OTP_EMAIL_KIND).await.remove(0);
+    let recorded = Recorded::answering(Answer::Sent);
+    let mail = CodeMail::new(codes, recorded.clone());
+
+    assert!(matches!(
+        mail.handle(&work).await,
+        WorkOutcome::Done(Some(_))
+    ));
+    let sent = recorded.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, AuthMessage::RegistrationCode);
+    assert_eq!(sent[0].1, "New@sid.example.com");
+    assert_eq!(sent[0].2, code);
+}
+
 /// The mail of a replaced code sends nothing; the replacement's own mail
 /// sends the new code.
 #[tokio::test]
@@ -126,6 +155,7 @@ async fn replaced_code_mail_sends_nothing() {
     let (codes, store) = codes().await;
     let (pending, _) = codes
         .request_otp(
+            OtpPurpose::SignIn,
             "r@sid.example.com",
             CodeDestination::Email("r@sid.example.com"),
         )
@@ -133,7 +163,7 @@ async fn replaced_code_mail_sends_nothing() {
         .unwrap();
     let first = owed(&store, OTP_EMAIL_KIND).await.remove(0);
     let (_, resent) = codes
-        .resend_otp(&pending.session_id)
+        .resend_otp(OtpPurpose::SignIn, &pending.session_id)
         .await
         .unwrap()
         .unwrap();
@@ -157,6 +187,7 @@ async fn code_mail_waits_for_a_provider_and_gives_up_on_rendering() {
     let (codes, store) = codes().await;
     codes
         .request_otp(
+            OtpPurpose::SignIn,
             "w@sid.example.com",
             CodeDestination::Email("w@sid.example.com"),
         )
@@ -180,6 +211,7 @@ async fn ended_mail_records_are_dropped_after_retention() {
     let (codes, store) = codes().await;
     codes
         .request_otp(
+            OtpPurpose::SignIn,
             "p@sid.example.com",
             CodeDestination::Email("p@sid.example.com"),
         )
@@ -192,6 +224,7 @@ async fn ended_mail_records_are_dropped_after_retention() {
         .unwrap();
     codes
         .request_otp(
+            OtpPurpose::SignIn,
             "q@sid.example.com",
             CodeDestination::Email("q@sid.example.com"),
         )

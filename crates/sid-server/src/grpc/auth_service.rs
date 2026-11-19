@@ -156,6 +156,39 @@ fn registration_refusal(e: sid::registration::RegistrationError) -> Status {
         E::InvalidIdentifier(detail) => invalid_field("identifier", detail),
         E::Identity(e) => super::identity_service::refusal(e),
         E::Operation(e) => e.into_status(),
+        E::ContextEnded => ceremony_expired("registration"),
+        E::Store(e) => storage_failure(e),
+        E::Internal => ApiError::internal().into(),
+    }
+}
+
+/// The status a passwordless registration step answers a refusal with.
+fn email_registration_refusal(e: sid::email_registration::EmailRegistrationError) -> Status {
+    use sid::email_registration::EmailRegistrationError as E;
+    match e {
+        E::InvalidField { field, reason } => invalid_field(field, reason),
+        E::Registration(e) => registration_refusal(e),
+        E::Code(e) => otp_refusal(e),
+        E::CodeSessionExpired => ceremony_expired("email code"),
+        E::CodeExpired => ApiError::new(
+            ErrorReason::TokenExpired,
+            "the code has expired; request a new one",
+        )
+        .into(),
+        E::TooManyCodes => ApiError::new(
+            ErrorReason::QuotaExceeded,
+            "too many wrong codes; start the registration again",
+        )
+        .with_quota_violation("email_code_attempts", "attempts per code")
+        .into(),
+        E::WrongCode => authentication_failed(),
+        E::ContextEnded => ceremony_expired("registration"),
+        E::CsrfInvalid => ApiError::new(
+            ErrorReason::CsrfTokenInvalid,
+            "the registration's CSRF token is missing or wrong",
+        )
+        .into(),
+        E::Passkey(e) => passkey_refusal(e),
         E::Store(e) => storage_failure(e),
         E::Internal => ApiError::internal().into(),
     }
@@ -388,6 +421,8 @@ pub struct AuthServiceImpl {
     /// Self-registration: its admission, held identifiers and the commit of
     /// a new account.
     registration: sid::registration::Registration,
+    /// Passwordless self-registrations between their steps.
+    email_registrations: sid::email_registration::EmailRegistrations,
     /// Browser authorization requests kept while the user signs in, by
     /// reference, shared by every replica.
     authorizations: sid::oauth::authorization::Authorizations,
@@ -479,6 +514,11 @@ impl AuthServiceImpl {
         );
         let passkeys =
             sid::passkey::Passkeys::new(webauthn.clone(), ceremonies.clone(), key_manager.clone());
+        let email_registrations = sid::email_registration::EmailRegistrations::new(
+            storage.clone(),
+            ceremonies.clone(),
+            key_manager.clone(),
+        );
         let second_factors = sid::second_factor::SecondFactors::new(
             webauthn,
             issuer.clone(),
@@ -533,6 +573,54 @@ impl AuthServiceImpl {
             sign_ins,
             sign_in_origin: None,
             registration,
+            email_registrations,
+        }
+    }
+
+    /// The cookie a browser holds its passwordless registration's context
+    /// in: named after this authority's session cookie, so authorities
+    /// sharing a host keep their registrations apart.
+    fn registration_cookie(&self) -> sid_authn::browser_session::BrowserCookie {
+        sid_authn::browser_session::BrowserCookie::new(&format!(
+            "{}_registration",
+            self.sign_ins.cookie().name()
+        ))
+        .expect("a session cookie name extended by a token is a cookie name")
+    }
+
+    /// The registration context `request` presents: a browser's cookie with
+    /// its CSRF header from the exact sign-in page, or a native client's
+    /// bearer. The page's other origins and a missing context are refused
+    /// before anything is read.
+    #[allow(clippy::result_large_err)]
+    fn presented_registration<'a, T>(
+        &self,
+        request: &'a Request<T>,
+    ) -> Result<sid::email_registration::Presented<'a>, Status> {
+        let metadata = request.metadata();
+        let values = |name| {
+            metadata
+                .get_all(name)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+        };
+        match self.ceremony_client(metadata)? {
+            CeremonyClient::Browser => {
+                let secret = self
+                    .registration_cookie()
+                    .secret(values("cookie"))
+                    .ok_or_else(|| ceremony_expired("registration"))?;
+                Ok(sid::email_registration::Presented::Cookie {
+                    secret,
+                    csrf: values(sid_authn::browser_session::CSRF_HEADER).collect(),
+                })
+            }
+            CeremonyClient::Native => {
+                let bearer = sid_infra::authn::caller::bearer_token(request)?;
+                let secret = sid_authn::browser_session::BrowserSecret::decode(bearer)
+                    .ok_or_else(|| ceremony_expired("registration"))?;
+                Ok(sid::email_registration::Presented::Bearer(secret))
+            }
         }
     }
 
@@ -1974,6 +2062,127 @@ impl AuthService for AuthServiceImpl {
             .await
             .map(Response::new)
             .map_err(email_sign_in_refusal)
+    }
+
+    async fn start_email_registration(
+        &self,
+        request: Request<StartEmailRegistrationRequest>,
+    ) -> Result<Response<StartEmailRegistrationResponse>, Status> {
+        self.check_maintenance().await?;
+        let req = request.into_inner();
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        self.email_registrations
+            .start(
+                &self.registration,
+                &self.otp,
+                &req.principal,
+                req.claim_token.as_deref(),
+                req.invite_code.as_deref(),
+                enabled,
+            )
+            .await
+            .map(Response::new)
+            .map_err(email_registration_refusal)
+    }
+
+    async fn resend_email_registration(
+        &self,
+        request: Request<ResendEmailRegistrationRequest>,
+    ) -> Result<Response<ResendEmailRegistrationResponse>, Status> {
+        self.check_maintenance().await?;
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        self.email_registrations
+            .resend(
+                &self.registration,
+                &self.otp,
+                request.into_inner().otp_session_id.as_ref(),
+                enabled,
+            )
+            .await
+            .map(Response::new)
+            .map_err(email_registration_refusal)
+    }
+
+    async fn verify_email_registration(
+        &self,
+        request: Request<VerifyEmailRegistrationRequest>,
+    ) -> Result<Response<VerifyEmailRegistrationResponse>, Status> {
+        self.check_maintenance().await?;
+        // Refused before the code is spent.
+        let client = self.ceremony_client(request.metadata())?;
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        let req = request.into_inner();
+        let opened = self
+            .email_registrations
+            .verify(
+                &self.registration,
+                &self.otp,
+                req.otp_session_id.as_ref(),
+                &req.code,
+                client,
+                enabled,
+            )
+            .await
+            .map_err(email_registration_refusal)?;
+        let mut response = Response::new(VerifyEmailRegistrationResponse {
+            expires_in: opened.expires_in,
+            browser_csrf: opened.csrf,
+        });
+        // The context goes where its client keeps credentials, never into
+        // the body: a browser's HttpOnly cookie, a native client's
+        // `authorization` response metadata.
+        let (name, value) = match client {
+            CeremonyClient::Browser => (
+                "set-cookie",
+                self.registration_cookie()
+                    .set(&opened.secret, opened.expires_in),
+            ),
+            CeremonyClient::Native => (
+                "authorization",
+                format!("Bearer {}", opened.secret.encode().as_str()),
+            ),
+        };
+        let value = value
+            .parse()
+            .map_err(|e| internal("deliver the registration context", e))?;
+        response.metadata_mut().insert(name, value);
+        Ok(response)
+    }
+
+    async fn passkey_registration_start(
+        &self,
+        request: Request<PasskeyRegistrationStartRequest>,
+    ) -> Result<Response<PasskeyRegistrationStartResponse>, Status> {
+        self.check_maintenance().await?;
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        let presented = self.presented_registration(&request)?;
+        self.email_registrations
+            .passkey_start(&self.registration, &self.passkeys, &presented, enabled)
+            .await
+            .map(Response::new)
+            .map_err(email_registration_refusal)
+    }
+
+    async fn passkey_registration_finish(
+        &self,
+        request: Request<PasskeyRegistrationFinishRequest>,
+    ) -> Result<Response<PasskeyRegistrationFinishResponse>, Status> {
+        self.check_maintenance().await?;
+        let enabled = self.feature_flags.is_registration_enabled().await;
+        let presented = self.presented_registration(&request)?;
+        let req = request.get_ref();
+        self.email_registrations
+            .passkey_finish(
+                &self.registration,
+                &self.passkeys,
+                &presented,
+                &req.credential,
+                req.label.clone(),
+                enabled,
+            )
+            .await
+            .map(Response::new)
+            .map_err(email_registration_refusal)
     }
 
     // ── Email/Phone verification ──

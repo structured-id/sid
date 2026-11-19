@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
 use secrecy::{ExposeSecret, SecretString};
 use sid_authn::magic_link::{MagicLinkError, MagicLinkService};
-use sid_authn::otp::{OTP_EMAIL_KIND, OtpError, OtpService};
+use sid_authn::otp::{OTP_EMAIL_KIND, OtpError, OtpPurpose, OtpService};
 use sid_authn::password_reset::{PasswordResetError, PasswordResetService};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::{
@@ -43,6 +43,9 @@ pub enum AuthMessage {
     MagicLink,
     /// A sign-in code; the secret is the code.
     SignInCode,
+    /// A code confirming a new registration's address; the secret is the
+    /// code.
+    RegistrationCode,
     /// A password reset link; the secret is the link.
     PasswordReset,
 }
@@ -204,7 +207,8 @@ impl WorkHandler for MagicLinkMail {
     }
 }
 
-/// Emails requested sign-in codes to the mailbox each was bound to.
+/// Emails requested codes (sign-in or registration) to the mailbox each was
+/// bound to.
 pub struct CodeMail {
     kind: WorkKind,
     codes: Arc<OtpService>,
@@ -259,7 +263,10 @@ impl WorkHandler for CodeMail {
         send(
             self.delivery.as_ref(),
             OwedMail {
-                message: AuthMessage::SignInCode,
+                message: match pending.purpose {
+                    OtpPurpose::SignIn => AuthMessage::SignInCode,
+                    OtpPurpose::Registration => AuthMessage::RegistrationCode,
+                },
                 destination: pending.destination,
                 secret: pending.code,
                 expires_minutes: minutes_left(pending.expires_at),

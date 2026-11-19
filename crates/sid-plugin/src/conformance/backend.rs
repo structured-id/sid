@@ -4791,6 +4791,91 @@ pub async fn test_register_profile_commits_all(backend: &dyn StorageBackend) {
     assert_eq!(opaque_credentials(backend, reg.profile.id).await, 1);
 }
 
+/// A passwordless registration commits its confirmed address and its first
+/// passkey's user handle with the account: the address signs in at once and
+/// the passkey resolves its account as a discoverable credential. A second
+/// registration reusing the handle at the relying party writes nothing.
+pub async fn test_register_profile_with_confirmed_email_and_user_handle(
+    backend: &dyn StorageBackend,
+) {
+    use sid_core::models::WebAuthnUserHandle;
+    const RP: &str = "sid.example.com";
+    let email = unique_email("reg_passkey");
+    let handle = WebAuthnUserHandle(*Uuid::new_v4().as_bytes());
+    let mut reg = new_email_registration(&email);
+    reg.credential = None;
+    let reg = reg
+        .with_confirmed_email()
+        .expect("an email signup")
+        .with_webauthn_user_handle(RP, handle);
+
+    backend
+        .register_profile(&reg, test_audit())
+        .await
+        .expect("register");
+
+    let principals = backend
+        .get_principals_by_profile(reg.profile.id)
+        .await
+        .unwrap();
+    assert!(principals[0].verified, "the confirmed address is verified");
+    assert!(
+        backend
+            .get_primary_profile_email(reg.profile.id)
+            .await
+            .unwrap()
+            .expect("contact row")
+            .verified
+    );
+    assert_eq!(
+        backend
+            .resolve_sign_in_principal(
+                PrincipalType::Email,
+                &email,
+                Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION),
+            )
+            .await
+            .unwrap(),
+        Some(reg.profile.id),
+        "the confirmed address signs in"
+    );
+    assert_eq!(
+        backend
+            .get_profile_by_webauthn_user_handle(RP, handle)
+            .await
+            .unwrap(),
+        Some(reg.profile.id)
+    );
+    assert_eq!(
+        backend
+            .ensure_webauthn_user_handle(
+                reg.profile.id,
+                RP,
+                WebAuthnUserHandle(*Uuid::new_v4().as_bytes()),
+                test_audit(),
+            )
+            .await
+            .unwrap(),
+        handle,
+        "later passkeys keep the registered handle"
+    );
+
+    let mut reused = new_email_registration(&unique_email("reg_passkey_reused"));
+    reused.credential = None;
+    let reused = reused.with_webauthn_user_handle(RP, handle);
+    backend
+        .register_profile(&reused, test_audit())
+        .await
+        .expect_err("a handle another account holds");
+    assert!(
+        backend
+            .get_profile(reused.profile.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// An account provisioned without a credential (its owner sets one up later)
 /// is stored whole: profile, principal and contact row, and no credential.
 pub async fn test_register_profile_without_credential(backend: &dyn StorageBackend) {

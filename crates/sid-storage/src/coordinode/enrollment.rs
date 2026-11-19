@@ -376,6 +376,7 @@ fn register(
         history,
         enrollment,
         source_recording,
+        webauthn_user_handle,
     } = registration;
     if principal.profile_id != profile.id {
         return Err(SidError::Validation(
@@ -425,6 +426,9 @@ fn register(
     super::principal::bind(tx, principal)?;
     if let Some(credential) = credential {
         super::credential::insert(tx, credential)?;
+    }
+    if let Some(user_handle) = webauthn_user_handle {
+        super::credential::insert_new_handle(tx, profile.id, user_handle)?;
     }
     // The invite this registration spent names the Profile it created and
     // the credential it installed.
