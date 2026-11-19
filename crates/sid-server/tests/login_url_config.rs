@@ -2,19 +2,13 @@
 //! The sign-in page the authorization endpoint sends users to, derived from
 //! the account UI the deployment serves.
 
-use sid_authn::system_integration::AccountSettings;
-use sid_core::models::ClientKeySet;
+use sid_authn::system_integration::AccountPages;
 use sid_server::init::sign_in_page;
 
 const ISSUER: &str = "https://sid.example.com";
 
-fn account(url: &str) -> AccountSettings {
-    let keys = ClientKeySet::try_from(serde_json::json!({"keys": [{
-        "kty": "OKP", "crv": "Ed25519",
-        "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo", "kid": "k",
-    }]}))
-    .unwrap();
-    AccountSettings::new(url, keys).unwrap()
+fn account(url: &str) -> AccountPages {
+    AccountPages::new(url).unwrap()
 }
 
 /// Without an account UI there is no sign-in page: the client then gets

@@ -714,14 +714,20 @@ fn audit_retention_refuses_bad_settings() {
 /// stops the start instead of provisioning with invented settings.
 #[test]
 fn account_settings_need_the_url_and_the_keys() {
-    assert!(account_settings(None, None).unwrap().is_none());
-    assert!(account_settings(Some(""), Some("")).unwrap().is_none());
-    assert!(account_settings(Some("https://account.sid.example.com"), None).is_err());
-    assert!(account_settings(None, Some("/nonexistent/jwks.json")).is_err());
+    let delivered = AccountClient::Delivered;
+    let none = account_settings(None, None, delivered).unwrap();
+    assert!(none.pages.is_none() && none.integration.is_none());
+    let empty = account_settings(Some(""), Some(""), delivered).unwrap();
+    assert!(empty.pages.is_none() && empty.integration.is_none());
+    // A delivered account cabinet client that lost its keys is not quietly
+    // reduced to pages: the start stops.
+    assert!(account_settings(Some("https://account.sid.example.com"), None, delivered).is_err());
+    assert!(account_settings(None, Some("/nonexistent/jwks.json"), delivered).is_err());
     assert!(
         account_settings(
             Some("https://account.sid.example.com"),
-            Some("/nonexistent/jwks.json")
+            Some("/nonexistent/jwks.json"),
+            delivered
         )
         .is_err()
     );
@@ -740,16 +746,67 @@ fn account_settings_need_the_url_and_the_keys() {
         r#"{"keys":[{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","d":"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A","kid":"bff"}]}"#,
     )
     .unwrap();
-    let settings = account_settings(Some("https://account.sid.example.com"), public.to_str())
-        .unwrap()
-        .unwrap();
+    let account = account_settings(
+        Some("https://account.sid.example.com"),
+        public.to_str(),
+        delivered,
+    )
+    .unwrap();
+    let settings = account.integration.unwrap();
     assert_eq!(
         settings.callback(),
         "https://account.sid.example.com/auth/callback"
     );
+    assert_eq!(
+        account.pages.unwrap().sign_in_page().as_str(),
+        "https://account.sid.example.com/login"
+    );
     // The BFF's private key never belongs in SID's configuration.
-    assert!(account_settings(Some("https://account.sid.example.com"), private.to_str()).is_err());
-    assert!(account_settings(Some("http://account.sid.example.com"), public.to_str()).is_err());
+    assert!(
+        account_settings(
+            Some("https://account.sid.example.com"),
+            private.to_str(),
+            delivered
+        )
+        .is_err()
+    );
+    assert!(
+        account_settings(
+            Some("http://account.sid.example.com"),
+            public.to_str(),
+            delivered
+        )
+        .is_err()
+    );
+
+    // A composition delivering no account cabinet client (the shared ceremony
+    // pages alone) names its pages by the URL: no client integration, and a
+    // key file is refused rather than provisioning a client nobody serves.
+    let not_delivered = AccountClient::NotDelivered;
+    let pages_only = account_settings(
+        Some("https://sid.example.com/account/"),
+        None,
+        not_delivered,
+    )
+    .unwrap();
+    assert!(pages_only.integration.is_none());
+    assert_eq!(
+        pages_only.pages.unwrap().sign_in_page().as_str(),
+        "https://sid.example.com/account/login"
+    );
+    assert!(
+        account_settings(
+            Some("https://sid.example.com/account/"),
+            public.to_str(),
+            not_delivered
+        )
+        .is_err()
+    );
+    let unset = account_settings(None, None, not_delivered).unwrap();
+    assert!(unset.pages.is_none() && unset.integration.is_none());
+    assert!(
+        account_settings(Some("http://sid.example.com/account/"), None, not_delivered).is_err()
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

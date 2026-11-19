@@ -263,13 +263,13 @@ pub fn password_resets(
 /// configuration error: its ceremonies set the IdP session cookie on that
 /// host, which a response to a cross-site request cannot do.
 pub fn sign_in_page(
-    account: Option<&sid_authn::system_integration::AccountSettings>,
+    pages: Option<&sid_authn::system_integration::AccountPages>,
     issuer: &str,
 ) -> anyhow::Result<Option<url::Url>> {
-    let Some(account) = account else {
+    let Some(pages) = pages else {
         return Ok(None);
     };
-    let page = account.sign_in_page();
+    let page = pages.sign_in_page();
     let issuer_url =
         url::Url::parse(issuer).with_context(|| format!("SID_ISSUER {issuer:?} is not a URL"))?;
     if !sid_authn::browser_session::same_site(&page, &issuer_url) {
@@ -281,33 +281,74 @@ pub fn sign_in_page(
     Ok(Some(page))
 }
 
-/// The account integration's settings from `SID_ACCOUNT_URL` (the account
-/// UI's public URL) and `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's
-/// public JWK Set). Neither set means the deployment serves no account UI;
-/// one without the other, an unreadable key file or an invalid value is a
+/// Whether the composition delivers an account cabinet client: a UI host
+/// signing users into the account pages as the installation's account web
+/// client. A host serving only the shared ceremony pages delivers none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AccountClient {
+    /// `SID_ACCOUNT_URL` and `SID_ACCOUNT_CLIENT_JWKS` go together.
+    #[default]
+    Delivered,
+    /// `SID_ACCOUNT_URL` names the pages alone; client keys are refused.
+    NotDelivered,
+}
+
+/// What `SID_ACCOUNT_URL` configures: the shared account pages and, where
+/// the composition delivers an account cabinet client, its integration.
+#[derive(Debug, Clone, Default)]
+pub struct Account {
+    /// The pages the issuer sends users and emailed links to.
+    pub pages: Option<sid_authn::system_integration::AccountPages>,
+    /// The account cabinet client's integration, only where delivered.
+    pub integration: Option<sid_authn::system_integration::AccountSettings>,
+}
+
+/// The account configuration from `SID_ACCOUNT_URL` (the account UI's public
+/// URL, with its mount) and `SID_ACCOUNT_CLIENT_JWKS` (a file holding its UI
+/// host's public JWK Set), as `client` says the composition delivers. With a
+/// delivered client, neither set means no account UI and one without the
+/// other is a configuration error; without one, the URL alone names the pages
+/// and keys are refused. An unreadable key file or an invalid value is a
 /// configuration error, never an integration with invented settings.
 pub fn account_settings(
     url: Option<&str>,
     jwks_file: Option<&str>,
-) -> anyhow::Result<Option<sid_authn::system_integration::AccountSettings>> {
-    let (url, jwks_file) = match (
+    client: AccountClient,
+) -> anyhow::Result<Account> {
+    let (url, jwks_file) = (
         url.filter(|v| !v.is_empty()),
         jwks_file.filter(|v| !v.is_empty()),
-    ) {
-        (None, None) => return Ok(None),
-        (Some(url), Some(file)) => (url, file),
-        _ => anyhow::bail!(
+    );
+    let (url, jwks_file) = match (client, url, jwks_file) {
+        (_, None, None) => return Ok(Account::default()),
+        (AccountClient::NotDelivered, Some(url), None) => {
+            let pages = sid_authn::system_integration::AccountPages::new(url)
+                .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?;
+            return Ok(Account {
+                pages: Some(pages),
+                integration: None,
+            });
+        }
+        (AccountClient::NotDelivered, _, Some(_)) => anyhow::bail!(
+            "SID_ACCOUNT_CLIENT_JWKS is set, but this composition delivers no account \
+             cabinet client: SID_ACCOUNT_URL names its pages alone"
+        ),
+        (AccountClient::Delivered, Some(url), Some(file)) => (url, file),
+        (AccountClient::Delivered, _, _) => anyhow::bail!(
             "SID_ACCOUNT_URL and SID_ACCOUNT_CLIENT_JWKS are set together: the account \
-             integration needs its URL and its BFF's public keys"
+             integration needs its URL and its UI host's public keys"
         ),
     };
     let text = std::fs::read_to_string(jwks_file)
         .with_context(|| format!("SID_ACCOUNT_CLIENT_JWKS {jwks_file:?} cannot be read"))?;
     let keys = sid_core::models::ClientKeySet::from_json(&text)
         .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_CLIENT_JWKS {jwks_file:?}: {e}"))?;
-    sid_authn::system_integration::AccountSettings::new(url, keys)
-        .map(Some)
-        .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))
+    let integration = sid_authn::system_integration::AccountSettings::new(url, keys)
+        .map_err(|e| anyhow::anyhow!("SID_ACCOUNT_URL: {e}"))?;
+    Ok(Account {
+        pages: Some(integration.pages().clone()),
+        integration: Some(integration),
+    })
 }
 
 /// The setting `name` as `read` from the environment: unset is `None`, a
@@ -352,6 +393,8 @@ pub struct CeHost {
     /// Makes the proofs of this installation's own Profiles for sign-ins at
     /// other organizations; none issues the Binding subject without a proof.
     pub own_presentations: Option<Arc<dyn sid::oauth::OwnPresentations>>,
+    /// Whether this composition delivers an account cabinet client.
+    pub account_client: AccountClient,
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -594,9 +637,13 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let scim_issuer = local_issuer.clone();
     // SID's own account UI, when the deployment serves one: its web client,
     // the account API and the access between them.
-    let account = account_settings(
+    let Account {
+        pages: account_pages,
+        integration: account,
+    } = account_settings(
         env_setting("SID_ACCOUNT_URL")?.as_deref(),
         env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
+        host.account_client,
     )?;
     if let Some(account) = &account {
         let integration = sid_authn::system_integration::ensure_account_integration(
@@ -839,7 +886,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // One authorization evaluator for every service of this process.
     let authz_engine = Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
-    let ceremony_page = sign_in_page(account.as_ref(), &issuer)?;
+    let ceremony_page = sign_in_page(account_pages.as_ref(), &issuer)?;
     // Named after the installation's issuer, which shares its host with other
     // issuers: never configured, so a rebuilt installation's issuer names its
     // own.
