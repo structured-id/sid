@@ -58,17 +58,16 @@ impl issuers::IssuerSource for TestIssuers {
     }
 }
 
-/// An issuer directory under `https://sid.example.com` knowing `issuers` and
-/// `resources`.
+/// An issuer directory knowing `issuers` and `resources`.
 #[cfg(test)]
 pub(crate) fn test_issuers_with(
     issuers: Vec<issuers::IssuerRecord>,
     resources: Vec<issuers::ResourceRecord>,
 ) -> Arc<issuers::IssuerDirectory> {
-    Arc::new(issuers::IssuerDirectory::new(
-        "https://sid.example.com",
-        Arc::new(TestIssuers { issuers, resources }),
-    ))
+    Arc::new(issuers::IssuerDirectory::new(Arc::new(TestIssuers {
+        issuers,
+        resources,
+    })))
 }
 
 /// A lazy channel to nowhere, for tests.

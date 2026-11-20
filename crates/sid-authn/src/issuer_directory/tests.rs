@@ -109,7 +109,7 @@ fn orders(issuer: String, active: bool) -> ResourceRecord {
 async fn a_registered_resource_resolves_and_is_reused() {
     let registry = Registry::with(vec![]);
     registry.put_resource(HANDLE, orders(issuer_url(HANDLE), true));
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     let record = directory
         .resource(&issuer_url(HANDLE), ORDERS)
@@ -137,9 +137,9 @@ async fn a_registered_resource_resolves_and_is_reused() {
     assert!(!record.active, "a deactivation was not seen");
 }
 
-/// A resource under an issuer of another installation, or an answer naming
-/// another issuer or indicator than asked, is no resource here; nothing is
-/// kept for it.
+/// An answer naming another issuer or indicator than asked is no resource
+/// here, whichever host the question named; a question that is not an issuer
+/// URL is not asked at all. Nothing is kept for a refused answer.
 #[tokio::test]
 async fn a_resource_answer_must_match_the_question() {
     let registry = Registry::with(vec![]);
@@ -147,7 +147,7 @@ async fn a_resource_answer_must_match_the_question() {
         HANDLE,
         orders(format!("https://other.example.com/i/{HANDLE}"), true),
     );
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     assert!(
         directory
@@ -170,9 +170,9 @@ async fn a_resource_answer_must_match_the_question() {
             .unwrap()
             .is_none()
     );
-    // Only the first question reached the registry: the other two named no
-    // issuer of this installation.
-    assert_eq!(registry.asked(), 1);
+    // The first two questions selected the handle and were refused on the
+    // answer; the third is not an issuer URL and reached nothing.
+    assert_eq!(registry.asked(), 2);
     assert!(directory.resources.is_empty());
 }
 
@@ -185,8 +185,9 @@ fn record(handle: &str, kids: &[&str]) -> IssuerRecord {
 
 /// The installation's root-addressed base issuer is named by the empty
 /// handle: a token whose `iss` is the installation URL itself finds it, and
-/// so does a resource registered under it. A registry answer naming another
-/// URL for the empty handle (a scoped issuer, another host) names nothing.
+/// so does a resource registered under it. A registry answer for the empty
+/// handle naming a scoped issuer names nothing; one naming another URL is
+/// that URL's issuer, which a token for the installation URL is not.
 #[tokio::test]
 async fn the_root_base_issuer_is_the_installation_url() {
     let root = IssuerRecord {
@@ -195,7 +196,7 @@ async fn the_root_base_issuer_is_the_installation_url() {
     };
     let registry = Registry::with(vec![("", root)]);
     registry.put_resource("", orders(BASE.into(), true));
-    let directory = IssuerDirectory::new(&format!("{BASE}/"), registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     let issuer = directory.for_token(BASE, "k1").await.unwrap().unwrap();
     assert_eq!(issuer.issuer, BASE);
@@ -216,7 +217,7 @@ async fn the_root_base_issuer_is_the_installation_url() {
                 keys: vec![("k1".into(), [7; 32])],
             },
         )]);
-        let directory = IssuerDirectory::new(BASE, registry);
+        let directory = IssuerDirectory::new(registry);
         assert!(
             directory.for_token(BASE, "k1").await.unwrap().is_none(),
             "{answered}"
@@ -229,7 +230,7 @@ async fn the_root_base_issuer_is_the_installation_url() {
 #[tokio::test]
 async fn a_known_handle_resolves_and_is_reused() {
     let registry = Registry::with(vec![(HANDLE, record(HANDLE, &["k1"]))]);
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     let issuer = directory.by_handle(HANDLE).await.unwrap().unwrap();
     assert_eq!(issuer.issuer, issuer_url(HANDLE));
@@ -244,7 +245,7 @@ async fn a_known_handle_resolves_and_is_reused() {
 #[tokio::test]
 async fn unknown_and_malformed_handles_resolve_to_nothing() {
     let registry = Registry::with(vec![]);
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     assert!(directory.by_handle("../etc").await.unwrap().is_none());
     assert_eq!(registry.asked(), 0);
@@ -254,16 +255,68 @@ async fn unknown_and_malformed_handles_resolve_to_nothing() {
     assert!(directory.cache.is_empty());
 }
 
-/// A registry answer naming an issuer under another base, or for another
-/// handle, is not this handle's issuer.
+/// A registry answer naming the issuer of another handle, or the base issuer,
+/// is not this handle's issuer; the host of the answer is the registry's to
+/// decide.
 #[tokio::test]
-async fn an_answer_for_another_url_is_not_accepted() {
-    let foreign = IssuerRecord {
-        issuer: format!("https://other.example.com/i/{HANDLE}"),
-        keys: vec![("k1".into(), [7; 32])],
-    };
-    let directory = IssuerDirectory::new(BASE, Registry::with(vec![(HANDLE, foreign)]));
-    assert!(directory.by_handle(HANDLE).await.unwrap().is_none());
+async fn an_answer_for_another_handle_is_not_accepted() {
+    for answered in [issuer_url(OTHER_HANDLE), BASE.to_owned()] {
+        let wrong = IssuerRecord {
+            issuer: answered.clone(),
+            keys: vec![("k1".into(), [7; 32])],
+        };
+        let directory = IssuerDirectory::new(Registry::with(vec![(HANDLE, wrong)]));
+        assert!(
+            directory.by_handle(HANDLE).await.unwrap().is_none(),
+            "{answered}"
+        );
+    }
+    let elsewhere = format!("https://login.acme.example/i/{HANDLE}");
+    let directory = IssuerDirectory::new(Registry::with(vec![(
+        HANDLE,
+        IssuerRecord {
+            issuer: elsewhere.clone(),
+            keys: vec![("k1".into(), [7; 32])],
+        },
+    )]));
+    assert_eq!(
+        directory.by_handle(HANDLE).await.unwrap().unwrap().issuer,
+        elsewhere
+    );
+}
+
+/// The organization segment selects the issuer in the installation's
+/// registry, whatever host the receiver reaches the installation at: an issuer
+/// whose canonical URL lives at another (admitted) host verifies its tokens,
+/// and a token naming the same segment at any other host is refused by the
+/// exact comparison with the registry's answer (oidc-issuer-model, issuer
+/// membership at the receiver).
+#[tokio::test]
+async fn the_segment_selects_the_issuer_whatever_host_carries_the_request() {
+    let canonical = format!("https://id.example.org/i/{HANDLE}");
+    let registry = Registry::with(vec![(
+        HANDLE,
+        IssuerRecord {
+            issuer: canonical.clone(),
+            keys: vec![("k1".into(), [7; 32])],
+        },
+    )]);
+    let directory = IssuerDirectory::new(registry.clone());
+
+    let issuer = directory
+        .for_token(&canonical, "k1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(issuer.issuer, canonical);
+    assert!(
+        directory
+            .for_token(&issuer_url(HANDLE), "k1")
+            .await
+            .unwrap()
+            .is_none(),
+        "the same segment at another host is another issuer"
+    );
 }
 
 /// A token's `iss` is trusted only when it is exactly one of this
@@ -271,7 +324,7 @@ async fn an_answer_for_another_url_is_not_accepted() {
 #[tokio::test]
 async fn only_this_installations_issuers_verify_tokens() {
     let registry = Registry::with(vec![(HANDLE, record(HANDLE, &["k1"]))]);
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
 
     assert!(
         directory
@@ -297,7 +350,7 @@ async fn only_this_installations_issuers_verify_tokens() {
 #[tokio::test]
 async fn an_unknown_key_refreshes_the_issuer_once() {
     let registry = Registry::with(vec![(HANDLE, record(HANDLE, &["k1"]))]);
-    let directory = IssuerDirectory::new(BASE, registry.clone());
+    let directory = IssuerDirectory::new(registry.clone());
     directory.by_handle(HANDLE).await.unwrap();
     // Age the answer past the refresh interval, then rotate a key in.
     directory.cache.get_mut(HANDLE).unwrap().fetched =
@@ -390,7 +443,7 @@ fn two_issuers() -> (IssuerDirectory, Key, Key) {
             },
         ),
     ]);
-    (IssuerDirectory::new(BASE, registry), own, other)
+    (IssuerDirectory::new(registry), own, other)
 }
 
 /// The access token a named issuer issued for a resource is accepted with
@@ -499,7 +552,7 @@ async fn an_unreachable_registry_is_unavailable_not_invalid() {
     let own = key("k1", 1);
     let registry = Registry::with(vec![]);
     registry.down.store(true, Ordering::SeqCst);
-    let directory = IssuerDirectory::new(BASE, registry);
+    let directory = IssuerDirectory::new(registry);
     let iss = issuer_url(HANDLE);
     let token = signed(&own, "at+jwt", &access_claims(&iss, ORDERS));
 

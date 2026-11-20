@@ -5,9 +5,7 @@ use sid_infra::client_credential::ClientAuthentication;
 
 #[test]
 fn minimal_config_takes_defaults() {
-    let config: AuthConfig =
-        serde_saphyr::from_str("upstream: http://sid:50051\nissuer_url: https://sid.example.com\n")
-            .unwrap();
+    let config: AuthConfig = serde_saphyr::from_str("upstream: http://sid:50051\n").unwrap();
     assert_eq!(config.grpc_listen, "0.0.0.0:50061");
     assert!(config.login_url.is_empty());
     assert!(config.route_policy_path.is_none());
@@ -16,21 +14,21 @@ fn minimal_config_takes_defaults() {
     assert!(config.http.is_none());
 }
 
-/// A misspelled key is refused instead of leaving the default in force.
+/// A misspelled key is refused instead of leaving the default in force; so
+/// is the removed installation URL, which nothing reads any more.
 #[test]
 fn unknown_keys_are_refused() {
-    let result: Result<AuthConfig, _> = serde_saphyr::from_str(
-        "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nroute_policies: /x\n",
-    );
-    assert!(result.is_err());
+    for extra in ["route_policies: /x", "issuer_url: https://sid.example.com"] {
+        let result: Result<AuthConfig, _> =
+            serde_saphyr::from_str(&format!("upstream: http://sid:50051\n{extra}\n"));
+        assert!(result.is_err(), "{extra}");
+    }
 }
 
-/// Upstream and issuer have no default: a deployment names them.
+/// The upstream has no default: a deployment names it.
 #[test]
-fn upstream_and_issuer_are_required() {
-    let result: Result<AuthConfig, _> = serde_saphyr::from_str("issuer_url: https://x.example\n");
-    assert!(result.is_err());
-    let result: Result<AuthConfig, _> = serde_saphyr::from_str("upstream: http://sid:50051\n");
+fn upstream_is_required() {
+    let result: Result<AuthConfig, _> = serde_saphyr::from_str("login_url: https://x.example\n");
     assert!(result.is_err());
 }
 
@@ -39,7 +37,7 @@ fn upstream_and_issuer_are_required() {
 #[test]
 fn the_checker_credential_names_one_method() {
     let config: AuthConfig = serde_saphyr::from_str(
-        "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nauthz_checker:\n  \
+        "upstream: http://sid:50051\nauthz_checker:\n  \
          issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef\n  \
          client_id: route-checker\n  \
          authentication: { method: private_key_jwt, key_file: /etc/sid/checker.pem, algorithm: EdDSA }\n",
@@ -53,7 +51,7 @@ fn the_checker_credential_names_one_method() {
     ));
 
     let mixed: Result<AuthConfig, _> = serde_saphyr::from_str(
-        "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nauthz_checker:\n  \
+        "upstream: http://sid:50051\nauthz_checker:\n  \
          issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef\n  \
          client_id: route-checker\n  \
          authentication: { method: client_secret_basic, secret_file: /s, algorithm: EdDSA }\n",
@@ -65,18 +63,17 @@ fn the_checker_credential_names_one_method() {
 #[test]
 fn reference_file_parses() {
     let config: AuthConfig = serde_saphyr::from_str(include_str!("../../sid-auth.yaml")).unwrap();
-    assert_eq!(config.issuer_url, "https://auth.example.com");
+    assert_eq!(config.upstream, "http://sid-server:50051");
     #[cfg(feature = "http")]
     assert!(config.http.is_some());
 }
 
-/// A receiver reads its issuer, resource, origin and own credential from the
-/// environment; every one of them is required, the cache is not.
+/// A receiver reads its upstream, resource, origin and own credential from
+/// the environment; every one of them is required, the cache is not.
 #[test]
 fn a_receiver_needs_its_resource_origin_and_credential() {
     let complete = [
         ("SID_GRPC_UPSTREAM", "http://sid:50051"),
-        ("SID_ISSUER_URL", "https://sid.example.com"),
         ("SID_RECEIVER_RESOURCE", "https://orders.example.com/"),
         ("SID_RECEIVER_ORIGIN", "https://orders.example.com"),
         ("SID_AUTHZ_CHECKER_CLIENT_ID", "orders-receiver"),

@@ -15,7 +15,7 @@ pub struct AttestationConfig {
     pub master_key_file: std::path::PathBuf,
     /// Where calls are admitted: the installation's account API resource,
     /// decided by its issuer (`crate::access`). From `SID_GRPC_UPSTREAM`,
-    /// `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`, `SID_RECEIVER_ORIGIN` and
+    /// `SID_RECEIVER_RESOURCE`, `SID_RECEIVER_ORIGIN` and
     /// `SID_AUTHZ_CHECKER_*`.
     pub api: sid_auth::config::ReceiverConfig,
 }

@@ -92,10 +92,9 @@ async fn world() -> World {
         let channel = channel();
         ApplicationSessions::new(
             rp_client(channel.clone()),
-            Arc::new(IssuerDirectory::new(
-                INSTALLATION,
-                Arc::new(GrpcIssuerSource::new(channel)),
-            )),
+            Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
+                channel,
+            )))),
             sessions.clone(),
             Arc::new(RevocationCache::new(LONG, cache.clone())),
             COOKIE.into(),
@@ -118,18 +117,15 @@ async fn world() -> World {
 
 /// The connection the installation delivers to the application.
 fn connection(issuer: &TestIssuer, kid: &str) -> Connection {
-    Connection::accept(
-        ClientConnection {
-            issuer: issuer.issuer.canonical_url.clone(),
-            client_id: CLIENT.into(),
-            resource: API.into(),
-            scopes: vec!["openid".into()],
-            redirect_uri: CALLBACK.into(),
-            token_endpoint_auth_method: "private_key_jwt".into(),
-            key_ids: vec![kid.to_owned()],
-        },
-        INSTALLATION,
-    )
+    Connection::accept(ClientConnection {
+        issuer: issuer.issuer.canonical_url.clone(),
+        client_id: CLIENT.into(),
+        resource: API.into(),
+        scopes: vec!["openid".into()],
+        redirect_uri: CALLBACK.into(),
+        token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec![kid.to_owned()],
+    })
     .unwrap()
 }
 

@@ -62,7 +62,6 @@ fn fixture_with(registered: bool) -> Fixture {
                 secret_file: secret.0.display().to_string(),
             },
         },
-        "https://sid.example.com",
         sid_infra::deadline::issuer(crate::test_channel()),
     )
     .unwrap();

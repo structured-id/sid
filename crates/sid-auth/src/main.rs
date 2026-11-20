@@ -22,7 +22,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         grpc = %config.grpc_listen,
         upstream = %config.upstream,
-        issuer = %config.issuer_url,
         "starting sid-auth"
     );
     let cache = sid_infra::shared_cache(config.cache_url.as_deref()).await?;

@@ -33,8 +33,8 @@ fn the_account_api_answer_is_the_same_connection() {
         token_endpoint_auth_method: b.token_endpoint_auth_method.clone(),
     };
     assert_eq!(
-        Connection::accept(answered(answer, KID), INSTALLATION).unwrap(),
-        Connection::accept(b, INSTALLATION).unwrap()
+        Connection::accept(answered(answer, KID)).unwrap(),
+        Connection::accept(b).unwrap()
     );
 }
 
@@ -46,11 +46,11 @@ fn a_delivered_bundle_file_is_loaded() {
     let path = dir.path().join("connection.json");
     std::fs::write(&path, serde_json::to_string(&bundle()).unwrap()).unwrap();
     assert_eq!(
-        load_connection(&path, INSTALLATION, KID).unwrap(),
-        Connection::accept(bundle(), INSTALLATION).unwrap()
+        load_connection(&path, KID).unwrap(),
+        Connection::accept(bundle()).unwrap()
     );
     let missing = dir.path().join("missing.json");
-    assert!(load_connection(&missing, INSTALLATION, KID).is_err());
+    assert!(load_connection(&missing, KID).is_err());
 }
 
 /// A lazy channel to nowhere.
@@ -80,7 +80,7 @@ async fn an_unreachable_issuer_is_asked_again() {
 /// one: the unreachable channel is not called.
 #[tokio::test]
 async fn a_delivered_connection_needs_no_discovery() {
-    let connection = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let connection = Connection::accept(bundle()).unwrap();
     let client = RpClient::delivered(
         key(),
         INSTALLATION.into(),

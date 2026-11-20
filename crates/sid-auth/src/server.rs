@@ -63,19 +63,14 @@ impl AuthServer {
             .authz_checker
             .as_ref()
             .map(|checker| {
-                sid_infra::client_credential::ClientCredential::checker(
-                    checker,
-                    &config.issuer_url,
-                    issuer.clone(),
-                )
-                .map(Arc::new)
+                sid_infra::client_credential::ClientCredential::checker(checker, issuer.clone())
+                    .map(Arc::new)
             })
             .transpose()?;
         let pdp = Arc::new(Pdp {
-            issuers: Arc::new(IssuerDirectory::new(
-                &config.issuer_url,
-                Arc::new(GrpcIssuerSource::new(issuer.clone())),
-            )),
+            issuers: Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
+                issuer.clone(),
+            )))),
             applications: Arc::new(applications),
             revocation: sid_authn::revocation_cache::RevocationCache::receiver_view(cache),
             authz: upstream,

@@ -218,11 +218,6 @@ async fn forward_auth_over(
     cache: std::sync::Arc<dyn sid_plugin::cache::CacheBackend>,
 ) -> (Http, Files) {
     let issuer = svc.issuer.canonical_url.clone();
-    let base = issuer
-        .split("/i/")
-        .next()
-        .expect("issuer URL under the installation's base")
-        .to_owned();
     let routes = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         routes.path(),
@@ -247,7 +242,7 @@ applications:
     let secret = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(secret.path(), INSPECTOR_SECRET).unwrap();
     let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
-        "upstream: http://{addr}\nissuer_url: {base}\nroute_policy_path: {}\nhttp:\n  listen: {{ http: \"127.0.0.1:0\" }}\n\
+        "upstream: http://{addr}\nroute_policy_path: {}\nhttp:\n  listen: {{ http: \"127.0.0.1:0\" }}\n\
          authz_checker:\n  issuer: {issuer}\n  client_id: {INSPECTOR}\n  authentication: {{ method: client_secret_basic, secret_file: {} }}\n",
         routes.path().display(),
         secret.path().display(),

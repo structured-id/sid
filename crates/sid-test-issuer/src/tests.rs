@@ -82,7 +82,6 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     std::fs::write(&caller_secret, "orders-caller-secret").unwrap();
     let credential = sid_infra::client_credential::ClientCredential::for_resource(
         &issuer.client_config("orders-caller", &caller_secret),
-        INSTALLATION,
         sid_infra::deadline::issuer(
             tonic::transport::Channel::from_shared(issuer.upstream())
                 .unwrap()

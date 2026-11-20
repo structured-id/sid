@@ -136,14 +136,12 @@ impl Receiver {
         // Issuer calls end within the same bound, their whole answer included.
         let issuer =
             sid_infra::deadline::Deadline::new(upstream.clone(), std::time::Duration::from_secs(5));
-        let checker =
-            ClientCredential::checker(&config.checker, &config.issuer_url, issuer.clone())?;
+        let checker = ClientCredential::checker(&config.checker, issuer.clone())?;
         Ok(Self::new(
             name,
-            Arc::new(IssuerDirectory::new(
-                &config.issuer_url,
-                Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(issuer)),
-            )),
+            Arc::new(IssuerDirectory::new(Arc::new(
+                sid_infra::issuer_registry::GrpcIssuerSource::new(issuer),
+            ))),
             Target {
                 issuer: config.checker.issuer.clone(),
                 resource: config.resource.clone(),
