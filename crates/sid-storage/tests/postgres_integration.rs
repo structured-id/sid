@@ -45,6 +45,52 @@ async fn test_backend_name() {
     assert_eq!(setup().await.name(), "postgres");
 }
 
+// ─── Reviewed values held through a decision ───
+
+/// An authorization decision share-locks the reviewed profile until it
+/// commits (FOR SHARE on its row). A first primary email, which has no row
+/// to lock yet, must still wait for that commit: every primary move locks
+/// the profile row first. While the share lock is held the write cannot
+/// finish; once it is released, it does.
+#[tokio::test]
+async fn a_first_primary_contact_waits_for_a_held_profile() {
+    let backend = setup().await;
+    let audit = || sid_core::models::AuditEntry::system("test", "contact").into();
+    let profile =
+        sid_core::models::Profile::new(Some(&format!("held-{}", uuid::Uuid::now_v7().simple())));
+    backend.create_profile(&profile, audit()).await.unwrap();
+    let now = jiff::Timestamp::now();
+    let email = sid_core::models::ProfileEmail {
+        id: sid_core::models::ProfileEmailId::new(),
+        profile_id: profile.id,
+        email: format!("held-{}@sid.example.com", uuid::Uuid::now_v7().simple()),
+        label: sid_core::models::EmailLabel::Personal,
+        custom_label: None,
+        is_primary: true,
+        verified: false,
+        verified_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut held = backend.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR SHARE")
+        .bind(profile.id)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let write = backend.create_profile_email(&email, audit());
+    tokio::pin!(write);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut write)
+            .await
+            .is_err(),
+        "a first primary email committed past the held profile"
+    );
+    held.commit().await.unwrap();
+    write.await.unwrap();
+}
+
 // ─── The storage contract ───
 
 // Every scenario runs in a migrated schema of its own, dropped afterwards: a

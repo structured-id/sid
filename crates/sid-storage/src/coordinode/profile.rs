@@ -321,12 +321,16 @@ fn primary_of(profile: ProfileId, is_primary: bool) -> Value {
 }
 
 /// Take the primary flag from `profile`'s primary contact of `label` at `at`.
+/// Every move of a primary claims the profile node first, so it conflicts
+/// with a transaction holding the primary contacts as read, a first
+/// primary that had no node yet included ([`held_claim_values`]).
 fn clear_primary(
     tx: &Statements<'_>,
     label: &str,
     profile: ProfileId,
     at: Timestamp,
 ) -> SidResult<()> {
+    touch_profile(tx, profile)?;
     tx.run(
         &format!(
             "MATCH (c:{label}) WHERE c.primary_of = $profile
@@ -459,7 +463,19 @@ pub(super) fn upsert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResu
     )?;
     if updated.is_empty() {
         insert_email(tx, email)?;
+    } else if email.is_primary {
+        touch_profile(tx, email.profile_id)?;
     }
+    Ok(())
+}
+
+/// Write the profile node, when it exists, so this transaction conflicts
+/// with one holding its primary contacts as read ([`held_claim_values`]).
+fn touch_profile(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
+    tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id SET p.turn = coalesce(p.turn, 0) + 1",
+        Params::default().with("id", profile_value(profile)),
+    )?;
     Ok(())
 }
 
@@ -503,6 +519,8 @@ pub(super) fn upsert_phone(tx: &Statements<'_>, phone: &ProfilePhone) -> SidResu
     )?;
     if updated.is_empty() {
         insert_phone(tx, phone)?;
+    } else if phone.is_primary {
+        touch_profile(tx, phone.profile_id)?;
     }
     Ok(())
 }

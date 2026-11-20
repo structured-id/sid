@@ -412,22 +412,27 @@ impl OAuth {
             .storage
             .get_consent_by_client(profile, &client.client_id)
             .await?;
-        Ok(!held.is_some_and(|consent| {
-            let decided = super::consent::review_requests(
-                &client.claim_requests,
-                &admitted.validated.scopes,
-                Some(&consent),
-            )
-            .iter()
-            .all(|request| {
-                // Refused, or shared with its approved value; a grant
-                // re-enabled without one is not yet decided.
-                consent.grants.iter().any(|g| {
-                    g.claim_name == request.claim_name && (!g.is_active() || g.disclosed.is_some())
-                })
-            });
-            decided && consent.covers(admitted.resource, &admitted.validated.scopes, &required)
-        }))
+        let Some(consent) = held else {
+            return Ok(true);
+        };
+        // A claim the Profile has no value for offers no choice, so it needs
+        // no decision until a value exists; its absence is not a refusal.
+        let values = self.current_values(profile).await?;
+        let decided = super::consent::review_requests(
+            &client.claim_requests,
+            &admitted.validated.scopes,
+            Some(&consent),
+        )
+        .iter()
+        .filter(|request| sid_core::models::consent::disclosed_for(request, &values).is_some())
+        .all(|request| {
+            // Refused, or shared with its approved value; a grant re-enabled
+            // without one is not yet decided.
+            consent.grants.iter().any(|g| {
+                g.claim_name == request.claim_name && (!g.is_active() || g.disclosed.is_some())
+            })
+        });
+        Ok(!(decided && consent.covers(admitted.resource, &admitted.validated.scopes, &required)))
     }
 
     /// `request` admitted for `session`: the client's and the request's

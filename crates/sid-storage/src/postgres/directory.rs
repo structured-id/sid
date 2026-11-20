@@ -345,8 +345,23 @@ pub(super) async fn unbind_principal(
     Ok(true)
 }
 
+/// Lock the profile row before writing a primary contact, as every primary
+/// move does, so a reader share-locking the profile to hold its primary
+/// contacts as read waits for this write.
+async fn lock_profile_for_primary(tx: &mut Tx<'_>, profile: ProfileId) -> SidResult<()> {
+    sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(profile)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("lock profile"))?;
+    Ok(())
+}
+
 /// Insert `email` or update the row with its id.
 pub(super) async fn upsert_email(tx: &mut Tx<'_>, email: &ProfileEmail) -> SidResult<()> {
+    if email.is_primary {
+        lock_profile_for_primary(tx, email.profile_id).await?;
+    }
     sqlx::query(
         "INSERT INTO profile_emails (
             id, profile_id, email, label, custom_label,
@@ -396,6 +411,9 @@ pub(super) async fn delete_email(
 
 /// Insert `phone` or update the row with its id.
 pub(super) async fn upsert_phone(tx: &mut Tx<'_>, phone: &ProfilePhone) -> SidResult<()> {
+    if phone.is_primary {
+        lock_profile_for_primary(tx, phone.profile_id).await?;
+    }
     sqlx::query(
         "INSERT INTO profile_phones (
             id, profile_id, e164, extension, label, custom_label,

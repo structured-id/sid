@@ -118,9 +118,8 @@ async fn locked(
 
 /// The claim values of Profile `profile` now, its row and its primary
 /// contacts' rows share-locked for the rest of `tx`, so none of them changes
-/// before the decision commits. A primary contact added where none existed
-/// is not held off, but such a claim had no value in the review, so it
-/// could not be shared and the approval discloses nothing of it.
+/// before the decision commits. Every move of a primary contact, a first
+/// one included, locks the profile row first, so it waits for this commit.
 async fn shared_values(
     tx: &mut Tx<'_>,
     profile: sid_core::models::ProfileId,

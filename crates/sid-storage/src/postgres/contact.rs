@@ -73,9 +73,18 @@ fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
     move |e| SidError::Storage(format!("{what}: {e}"))
 }
 
-/// Lock every contact of the profile in one order, so concurrent primary
-/// moves in a profile run one after the other.
+/// Lock the profile row, then every contact of the profile in one order, so
+/// concurrent primary moves in a profile run one after the other. The
+/// profile row lock also orders a move with a reader that share-locks the
+/// profile to hold its primary contacts as read, including a first primary
+/// that has no row yet (an authorization decision checking its reviewed
+/// values).
 async fn lock(tx: &mut Tx<'_>, contacts: Contacts, profile_id: ProfileId) -> SidResult<()> {
+    sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(profile_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("lock profile"))?;
     sqlx::query(contacts.lock())
         .bind(profile_id)
         .execute(&mut **tx)

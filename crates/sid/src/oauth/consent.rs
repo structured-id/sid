@@ -568,17 +568,19 @@ impl OAuth {
 }
 
 /// Whether `submitted` is the holder's `recorded` decision: both denials, or
-/// approvals with the same sharing for every claim.
+/// approvals with the same sharing for every recorded claim, any other
+/// submitted claim not shared (one without a value records no choice).
 fn same_choices(recorded: &AuthorizationDecision, submitted: &SubmittedDecision) -> bool {
     match (recorded, submitted) {
         (AuthorizationDecision::Deny, SubmittedDecision::Deny) => true,
         (AuthorizationDecision::Approve { choices }, SubmittedDecision::Approve(submitted)) => {
-            choices.len() == submitted.len()
-                && choices.iter().all(|choice| {
-                    submitted
-                        .iter()
-                        .any(|(name, sharing)| *name == choice.name && *sharing == choice.sharing)
-                })
+            choices.iter().all(|choice| {
+                submitted
+                    .iter()
+                    .any(|(name, sharing)| *name == choice.name && *sharing == choice.sharing)
+            }) && submitted.iter().all(|(name, sharing)| {
+                *sharing == ClaimSharing::None || choices.iter().any(|c| c.name == *name)
+            })
         }
         _ => false,
     }
@@ -602,6 +604,12 @@ fn reviewed_choices(
         let (name, sharing) = submitted.swap_remove(at);
         if !allowed_sharing(request, value.is_some()).contains(&sharing) {
             return Err(ConsentError::Choice(name));
+        }
+        // A claim the Profile has no value for offered no choice: not
+        // sharing it is no refusal, so it records nothing and is reviewed
+        // once a value exists (consent-flow.md, OIDC scope requests).
+        if value.is_none() {
+            continue;
         }
         choices.push(ClaimChoice {
             name,

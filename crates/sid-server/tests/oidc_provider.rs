@@ -2642,6 +2642,92 @@ async fn a_refused_claim_is_not_asked_again_but_a_new_one_is() {
     );
 }
 
+/// A claim the Profile has no value for is no refusal: the approval records
+/// nothing for it, and once a value exists the same request needs the
+/// holder's decision on it (consent-flow.md, OIDC scope requests).
+#[tokio::test]
+async fn an_absent_value_is_not_recorded_as_a_refusal() {
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::authn::{ConsentDecision, GetConsentRequest, SubmitConsentRequest};
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let storage = browser.user.svc.storage.clone();
+    let audit = || sid_core::models::AuditEntry::system("test", "email").into();
+    for email in storage
+        .list_profile_emails(browser.user.profile.id)
+        .await
+        .unwrap()
+    {
+        storage
+            .delete_profile_email(email.id, audit())
+            .await
+            .unwrap();
+    }
+    let mut query = authorize_query(REDIRECT_URI);
+    for (name, value) in &mut query {
+        if *name == "scope" {
+            *value = "openid email".into();
+        }
+    }
+    let request = with_query(&browser.authorize, &query);
+    let (operation, continuation) = consent_redirect(&browser, &browser.get(&request).await);
+    let service = consent_service(&browser);
+    let review = service
+        .get_consent(from_sign_in_page(
+            &browser,
+            GetConsentRequest {
+                operation_id: Some(wire(operation)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    service
+        .submit_consent(from_sign_in_page(
+            &browser,
+            SubmitConsentRequest {
+                operation_id: Some(wire(operation)),
+                revision: review.revision,
+                csrf_token: review.csrf_token.clone(),
+                decision: ConsentDecision::Approve as i32,
+                choices: choices_sharing(&review, &[]),
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(redirect_query(&browser.get(&continuation).await, REDIRECT_URI).contains_key("code"));
+    let consent = storage
+        .get_consent_by_client(browser.user.profile.id, "test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        consent.grants.iter().all(|g| g.claim_name != "email"),
+        "an absent email recorded as a refusal: {:?}",
+        consent.grants
+    );
+
+    let now = jiff::Timestamp::now();
+    storage
+        .create_profile_email(
+            &sid_core::models::ProfileEmail {
+                id: sid_core::models::ProfileEmailId::new(),
+                profile_id: browser.user.profile.id,
+                email: "alice@sid.example.com".into(),
+                label: sid_core::models::EmailLabel::Personal,
+                custom_label: None,
+                is_primary: true,
+                verified: true,
+                verified_at: Some(now),
+                created_at: now,
+                updated_at: now,
+            },
+            audit(),
+        )
+        .await
+        .unwrap();
+    consent_redirect(&browser, &browser.get(&request).await);
+}
+
 /// A decision submitted again after a lost reply answers the committed
 /// approval, even when the Profile changed after it was recorded: the
 /// recorded values stand and the retry is not made stale.
