@@ -12,8 +12,9 @@ use sid_authn::browser_session::BrowserCsrf;
 use sid_core::Error as SidError;
 use sid_core::models::{
     AuditEntry, AuthorizationDecision, AuthorizationOperation, AuthorizationOperationId,
-    AuthorizationStatus, ClaimChoice, ClaimLevel, ClaimRequest, ClaimSharing, ClaimSubscription,
-    ClaimType, DecisionOutcome, DisclosedValue, MutationContext, OAuth2Client, OidcIssuer, Session,
+    AuthorizationStatus, BrowserCsrfToken, ClaimChoice, ClaimLevel, ClaimRequest, ClaimSharing,
+    ClaimSubscription, ClaimType, DecisionOutcome, DisclosedValue, MutationContext, OAuth2Client,
+    OidcIssuer, Session,
 };
 use sid_proto::sid::v1::common;
 
@@ -40,6 +41,38 @@ pub enum ConsentError {
     Choice(String),
     #[error(transparent)]
     Store(#[from] SidError),
+}
+
+/// Who presents the review and carries the decision (authz/consent-flow.md,
+/// narrow interaction API authority).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interaction {
+    /// The authority's sign-in page over the browser's IdP cookie: every
+    /// value is bound to the session's CSRF token, and a session without one
+    /// reviews nothing.
+    Browser,
+    /// The embedding host in the same process, with the session it
+    /// authenticated itself ("native/embedded callers use their explicitly
+    /// authenticated ceremony context"). No cookie and no request reaches it
+    /// from another site, so there is no request to forge; the review still
+    /// binds the revision and the values it showed, keyed by the session.
+    InProcess,
+}
+
+impl Interaction {
+    /// The key the review's values are bound with for `session`.
+    fn key(self, session: &Session) -> Option<BrowserCsrfToken> {
+        match self {
+            Self::Browser => session.browser_csrf,
+            Self::InProcess => {
+                use sha2::Digest as _;
+                let mut hash = sha2::Sha256::new();
+                hash.update(b"sid in-process consent binding\0");
+                hash.update(session.id.into_uuid().as_bytes());
+                Some(BrowserCsrfToken::from_bytes(hash.finalize().into()))
+            }
+        }
+    }
 }
 
 /// What the user reviews for one operation.
@@ -342,6 +375,7 @@ impl OAuth {
         sign_in: &SignIn,
         issuer: &OidcIssuer,
         session: Option<&Session>,
+        interaction: Interaction,
         id: AuthorizationOperationId,
     ) -> Result<ConsentReview, ConsentError> {
         let now = Timestamp::now();
@@ -352,7 +386,7 @@ impl OAuth {
         {
             return Err(ConsentError::NotFound);
         }
-        let token = session.browser_csrf.ok_or(ConsentError::NotFound)?;
+        let token = interaction.key(&session).ok_or(ConsentError::NotFound)?;
         let client = self
             .storage
             .get_oauth2_client(&operation.client_id)
@@ -405,6 +439,7 @@ impl OAuth {
         sign_in: &SignIn,
         issuer: &OidcIssuer,
         session: Option<&Session>,
+        interaction: Interaction,
         submission: Submission,
     ) -> Result<FlowView, ConsentError> {
         let Submission {
@@ -417,7 +452,7 @@ impl OAuth {
         let (operation, session) = self
             .session_operation(sign_in, issuer, session, id, now)
             .await?;
-        let token = session.browser_csrf.ok_or(ConsentError::Csrf)?;
+        let token = interaction.key(&session).ok_or(ConsentError::Csrf)?;
         let (authentic, content) = csrf.split_at(csrf.len().min(32));
         if !BrowserCsrf::bound_matches(authentic, &token, &csrf_context(id, revision)) {
             return Err(ConsentError::Csrf);

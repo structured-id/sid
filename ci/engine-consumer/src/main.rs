@@ -751,10 +751,61 @@ impl Served {
             .get_session(sid_core::models::SessionId::parse(&caller.session_id)?)
             .await?
             .ok_or("the caller's session")?;
-        let answer = self
+        use sid::oauth::authorization::{Authorized, BrowserAuthorization};
+        use sid::oauth::consent::{Interaction, Submission, SubmittedDecision};
+        let answer = match self
             .oauth
-            .authorize_with(&client, &issuer, &session, request)
-            .await?;
+            .authorize_with(&client, &issuer, &session, request, false)
+            .await?
+        {
+            Authorized::Code(answer) => answer,
+            // The user's first authorization of the client: the host shows
+            // the review itself and records their decision in process, then
+            // the issuer continues the operation (authz/consent-flow.md,
+            // holder consent authority).
+            Authorized::ConsentOwed(operation) => {
+                let id = self.oauth.hold_for_consent(&operation).await?;
+                let review = self
+                    .oauth
+                    .review_consent(
+                        &self.sign_in,
+                        &issuer,
+                        Some(&session),
+                        Interaction::InProcess,
+                        id,
+                    )
+                    .await?;
+                let choices = review
+                    .shown
+                    .iter()
+                    .filter(|(_, value)| value.is_some())
+                    .map(|(name, _)| (name.clone(), sid_core::models::ClaimSharing::Static))
+                    .collect();
+                self.oauth
+                    .submit_consent(
+                        &self.sign_in,
+                        &issuer,
+                        Some(&session),
+                        Interaction::InProcess,
+                        Submission {
+                            operation: id,
+                            revision: review.operation.revision,
+                            csrf: review.csrf.to_vec(),
+                            decision: SubmittedDecision::Approve(choices),
+                        },
+                    )
+                    .await?;
+                match self
+                    .oauth
+                    .continue_operation(&self.sign_in, &issuer, Some(session), id)
+                    .await?
+                    .outcome
+                {
+                    BrowserAuthorization::Answer(answer) => answer,
+                    _ => return Err("the approved authorization issued no answer".into()),
+                }
+            }
+        };
         match answer.result {
             Some(sid_proto::sid::v1::o_auth2_authorize_response::Result::AuthorizationCode(
                 code,

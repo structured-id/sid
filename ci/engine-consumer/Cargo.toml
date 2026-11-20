@@ -33,7 +33,7 @@ sid-crypto = { version = "0.1", default-features = false, features = ["std", "pr
 sid-opaque-ke = "4.2"
 sid-pake-core = "0.1"
 # Typed identifiers of the wire messages the host reads.
-sid-ids = "0.8"
+sid-ids = "0.9"
 sid-ids-proto = "0.1"
 # The field and curve encodings of the history evaluation and the proof.
 ff = "0.14"

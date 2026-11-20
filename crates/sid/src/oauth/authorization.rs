@@ -643,6 +643,26 @@ impl OAuth {
         }
     }
 
+    /// Store `operation`, owed the holder's decision, for its review: the
+    /// browser's consent page or an embedding host in the same process then
+    /// reviews and decides it, and [`Self::continue_operation`] issues its
+    /// code.
+    pub async fn hold_for_consent(
+        &self,
+        operation: &AuthorizationOperation,
+    ) -> Result<AuthorizationOperationId, AuthorizationError> {
+        let ctx: MutationContext = AuditEntry::user(
+            operation.profile_id.to_string(),
+            "authorization_operation.create",
+            operation.client_id.clone(),
+        )
+        .into();
+        self.storage
+            .create_authorization_operation(operation, ctx)
+            .await?;
+        Ok(operation.id)
+    }
+
     /// Continue the decided operation `id` at `issuer`, the issuer whose
     /// endpoint the browser returned to, with `session`, the browser's IdP
     /// session (authz/consent-flow.md, resume at the issuer). Only the
@@ -831,21 +851,9 @@ impl Authorizations {
                     Ok(Authorized::ConsentOwed(_)) if prompt.none() => {
                         Ok(BrowserAuthorization::NoInteraction("consent_required"))
                     }
-                    Ok(Authorized::ConsentOwed(operation)) => {
-                        let ctx: MutationContext = AuditEntry::user(
-                            session.profile_id.to_string(),
-                            "authorization_operation.create",
-                            operation.client_id.clone(),
-                        )
-                        .into();
-                        oauth
-                            .storage
-                            .create_authorization_operation(&operation, ctx)
-                            .await?;
-                        Ok(BrowserAuthorization::Consent {
-                            operation: operation.id,
-                        })
-                    }
+                    Ok(Authorized::ConsentOwed(operation)) => Ok(BrowserAuthorization::Consent {
+                        operation: oauth.hold_for_consent(&operation).await?,
+                    }),
                     // Below the level or methods the client requires: the
                     // user authenticates further (OIDC Core 1.0 §3.1.2.3).
                     Err(AuthorizationError::StepUp(_)) => self.sign_in_first(prompt, pending).await,

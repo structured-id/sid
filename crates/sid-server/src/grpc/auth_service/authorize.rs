@@ -173,7 +173,13 @@ impl AuthServiceImpl {
     ) -> Result<sid::oauth::consent::ConsentReview, Status> {
         let (session, issuer) = self.consent_caller(metadata, addressed).await?;
         self.oauth
-            .review_consent(&self.sign_ins, &issuer, session.as_ref(), operation)
+            .review_consent(
+                &self.sign_ins,
+                &issuer,
+                session.as_ref(),
+                sid::oauth::consent::Interaction::Browser,
+                operation,
+            )
             .await
             .map_err(consent_refusal)
     }
@@ -187,7 +193,13 @@ impl AuthServiceImpl {
     ) -> Result<sid::oauth::consent::FlowView, Status> {
         let (session, issuer) = self.consent_caller(metadata, addressed).await?;
         self.oauth
-            .submit_consent(&self.sign_ins, &issuer, session.as_ref(), submission)
+            .submit_consent(
+                &self.sign_ins,
+                &issuer,
+                session.as_ref(),
+                sid::oauth::consent::Interaction::Browser,
+                submission,
+            )
             .await
             .map_err(consent_refusal)
     }
