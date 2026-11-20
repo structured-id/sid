@@ -36,7 +36,6 @@ the actions it needs by a role assigned on the account API resource.
 | Variable | Meaning |
 |---|---|
 | `SID_GRPC_UPSTREAM` | The installation's gRPC address (issuer registry and authorization API) |
-| `SID_ISSUER_URL` | The installation's public URL |
 | `SID_RECEIVER_RESOURCE` | The account API resource indicator |
 | `SID_RECEIVER_ORIGIN` | The scheme and authority callers address this service at |
 | `SID_AUTHZ_CHECKER_CLIENT_ID`, `SID_AUTHZ_CHECKER_ISSUER`, `SID_AUTHZ_CHECKER_METHOD`, `SID_AUTHZ_CHECKER_SECRET_FILE` | The machine client above: its issuer (the installation's `/i/<handle>` issuer), `client_secret_basic` and the file holding its secret |

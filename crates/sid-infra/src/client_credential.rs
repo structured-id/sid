@@ -211,48 +211,37 @@ impl ClientCredential {
     /// holds.
     pub fn checker(
         config: &ClientCredentialConfig,
-        base: &str,
         channel: crate::deadline::IssuerChannel,
     ) -> Result<Self, CredentialError> {
         let api = sid_authn::issuer::authorization_api_endpoint(&config.issuer);
-        Self::load(
-            config,
-            base,
-            channel,
-            api,
-            Some(sid_core::models::AUTHZ_CHECK),
-        )
+        Self::load(config, channel, api, Some(sid_core::models::AUTHZ_CHECK))
     }
 
     /// The credential `config` names for the protected resource `resource`:
     /// what a service presents to the service it calls.
     pub fn for_resource(
         config: &ClientCredentialConfig,
-        base: &str,
         channel: crate::deadline::IssuerChannel,
         resource: &str,
     ) -> Result<Self, CredentialError> {
-        Self::load(config, base, channel, resource.to_owned(), None)
+        Self::load(config, channel, resource.to_owned(), None)
     }
 
-    /// The credential `config` names, for an issuer under `base` (the
-    /// installation's public URL), asking the issuer over `channel`. The
+    /// The credential `config` names, asking its issuer over `channel`. The
     /// credential file is read now: a deployment that cannot authenticate
     /// fails at start-up, not at its first call.
     fn load(
         config: &ClientCredentialConfig,
-        base: &str,
         channel: crate::deadline::IssuerChannel,
         resource: String,
         scope: Option<&'static str>,
     ) -> Result<Self, CredentialError> {
         let invalid = |why: String| CredentialError::Config(why);
-        // The configured issuer is read as written; whether it is one of the
-        // installation this credential's channel reaches is the
-        // installation's condition, decided apart from the reading.
-        let handle = sid_authn::issuer::InstallationIssuers::new(base)
-            .select(&config.issuer)
-            .ok_or_else(|| invalid("the issuer is not one of this installation".into()))?
+        // The configured issuer selects its issuer in the installation the
+        // channel reaches by its organization segment; the channel's address
+        // and the issuer's host need not agree.
+        let handle = sid_authn::issuer::select_issuer(&config.issuer)
+            .ok_or_else(|| invalid("the issuer is not an issuer URL".into()))?
             .wire()
             .to_owned();
         if config.client_id.is_empty() {

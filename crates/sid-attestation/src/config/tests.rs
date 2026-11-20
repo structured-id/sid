@@ -4,7 +4,6 @@ use super::*;
 fn test_api() -> sid_auth::config::ReceiverConfig {
     sid_auth::config::ReceiverConfig {
         upstream: "http://127.0.0.1:1".into(),
-        issuer_url: "https://sid.example.com".into(),
         resource: "https://sid.example.com/api".into(),
         origin: "https://sid.example.com".into(),
         checker: sid_infra::client_credential::ClientCredentialConfig {

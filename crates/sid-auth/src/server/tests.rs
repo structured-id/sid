@@ -3,10 +3,7 @@
 use super::*;
 
 fn config(extra: &str) -> AuthConfig {
-    serde_saphyr::from_str(&format!(
-        "upstream: http://127.0.0.1:1\nissuer_url: https://sid.example.com\n{extra}"
-    ))
-    .unwrap()
+    serde_saphyr::from_str(&format!("upstream: http://127.0.0.1:1\n{extra}")).unwrap()
 }
 
 fn cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {

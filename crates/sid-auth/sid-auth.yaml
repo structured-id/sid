@@ -7,16 +7,15 @@
 # Usage:
 #   sid-auth --config sid-auth.yaml
 #
-# Required: `upstream` and `issuer_url`.
+# Required: `upstream`. An issuer is selected in the installation's registry
+# by its organization segment (`/i/<handle>`, none for the base issuer), so no
+# installation URL is configured here.
 
 # gRPC listener.
 grpc_listen: "0.0.0.0:50061"
 
 # The SID server's gRPC address: issuer registry and sid-authz.
-upstream: "http://127.0.0.1:50051"
-
-# The installation's public URL, the base of its issuers' URLs.
-issuer_url: "https://auth.example.com"
+upstream: "http://sid-server:50051"
 
 # Where a 401 sends a browser to sign in (with the original path as `rd`).
 # login_url: "https://app.example.com/auth/login"

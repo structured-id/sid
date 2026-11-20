@@ -65,12 +65,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Issuer calls end within a bound, their whole answer included.
     let issuer_channel = sid_infra::deadline::issuer(grpc_channel.clone());
-    let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
-        config.issuer_url(),
-        Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
-            issuer_channel.clone(),
-        )),
-    ));
+    let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(Arc::new(
+        sid_infra::issuer_registry::GrpcIssuerSource::new(issuer_channel.clone()),
+    )));
     // A configured key that cannot be read is a broken deployment, not a
     // BFF quietly switched off.
     let account = match config.bff_client_key() {
@@ -92,7 +89,6 @@ async fn main() -> anyhow::Result<()> {
                         .to_owned();
                     let connection = sid_infra::issuer_client::load_connection(
                         std::path::Path::new(path),
-                        &installation_url,
                         &kid,
                     )?;
                     tracing::info!(

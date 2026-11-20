@@ -88,10 +88,9 @@ async fn world() -> World {
         .unwrap();
         let bff = BrowserSessions::new(
             Arc::new(account),
-            Arc::new(IssuerDirectory::new(
-                INSTALLATION,
-                Arc::new(GrpcIssuerSource::new(channel.clone())),
-            )),
+            Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
+                channel.clone(),
+            )))),
             sessions.clone(),
             RevocationCache::receiver_view(cache.clone()),
             COOKIE.into(),
@@ -120,18 +119,15 @@ async fn world() -> World {
 
 /// The connection the installation delivers to the BFF.
 fn connection(issuer: &TestIssuer, kid: &str) -> Connection {
-    Connection::accept(
-        ClientConnection {
-            issuer: issuer.issuer.canonical_url.clone(),
-            client_id: CLIENT.into(),
-            resource: API.into(),
-            scopes: vec!["openid".into()],
-            redirect_uri: CALLBACK.into(),
-            token_endpoint_auth_method: "private_key_jwt".into(),
-            key_ids: vec![kid.to_owned()],
-        },
-        INSTALLATION,
-    )
+    Connection::accept(ClientConnection {
+        issuer: issuer.issuer.canonical_url.clone(),
+        client_id: CLIENT.into(),
+        resource: API.into(),
+        scopes: vec!["openid".into()],
+        redirect_uri: CALLBACK.into(),
+        token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec![kid.to_owned()],
+    })
     .unwrap()
 }
 

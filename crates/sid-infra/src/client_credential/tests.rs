@@ -2,7 +2,6 @@
 
 use super::*;
 
-const BASE: &str = "https://sid.example.com";
 const ISSUER: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef";
 const ED_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIGnMIVUgwI0tTO1AANoNzICml1zLy8M4WqrJlomrTGlU\n-----END PRIVATE KEY-----";
 
@@ -49,7 +48,7 @@ fn basic(file: &File) -> ClientAuthentication {
 }
 
 fn load(config: &ClientCredentialConfig) -> Result<ClientCredential, CredentialError> {
-    ClientCredential::checker(config, BASE, test_channel())
+    ClientCredential::checker(config, test_channel())
 }
 
 /// A checker's tokens are for its issuer's authorization API with the
@@ -66,7 +65,6 @@ async fn a_credential_names_the_resource_its_tokens_are_for() {
     assert_eq!(checker.scope, Some(sid_core::models::AUTHZ_CHECK));
     let caller = ClientCredential::for_resource(
         &config(ISSUER, basic(&secret)),
-        BASE,
         test_channel(),
         "https://tenants.sid.example.com/",
     )
@@ -75,10 +73,10 @@ async fn a_credential_names_the_resource_its_tokens_are_for() {
     assert_eq!(caller.scope, None);
 }
 
-/// Each supported method loads from its file, for an issuer of this
-/// installation, keeping that issuer.
+/// Each supported method loads from its file, keeping its issuer and the
+/// handle its organization segment names.
 #[tokio::test]
-async fn a_credential_loads_for_an_issuer_of_the_installation() {
+async fn a_credential_loads_for_its_issuer() {
     let secret = File::with("s3cret\n");
     let key = File::with(ED_PRIVATE_PEM);
     for authentication in [
@@ -98,9 +96,24 @@ async fn a_credential_loads_for_an_issuer_of_the_installation() {
     }
 }
 
-/// A credential that cannot authenticate stops start-up: an issuer of
-/// another installation or no issuer handle, an empty or missing secret, a
-/// key that does not parse for its algorithm, an unsupported algorithm.
+/// The issuer is selected by its organization segment, not by the address
+/// the channel reaches the installation at: an issuer whose canonical URL
+/// lives at another admitted host loads with its handle, and the
+/// root-addressed base issuer with the empty one.
+#[tokio::test]
+async fn the_issuer_host_need_not_be_the_channels() {
+    let secret = File::with("s3cret");
+    let elsewhere = "https://login.acme.example/i/0123456789abcdef0123456789abcdef";
+    let credential = load(&config(elsewhere, basic(&secret))).unwrap();
+    assert_eq!(credential.issuer(), elsewhere);
+    assert_eq!(credential.handle, "0123456789abcdef0123456789abcdef");
+    let base = load(&config("https://login.acme.example", basic(&secret))).unwrap();
+    assert_eq!(base.handle, "");
+}
+
+/// A credential that cannot authenticate stops start-up: no issuer URL or
+/// no issuer handle, an empty or missing secret, a key that does not parse
+/// for its algorithm, an unsupported algorithm.
 #[tokio::test]
 async fn a_credential_that_cannot_authenticate_does_not_load() {
     let secret = File::with("s3cret");
@@ -113,11 +126,8 @@ async fn a_credential_that_cannot_authenticate_does_not_load() {
     };
     let cases = [
         (
-            "another installation",
-            config(
-                "https://other.example.com/i/0123456789abcdef0123456789abcdef",
-                basic(&secret),
-            ),
+            "not an issuer URL",
+            config("sid.example.com", basic(&secret)),
         ),
         (
             "not an issuer handle",
