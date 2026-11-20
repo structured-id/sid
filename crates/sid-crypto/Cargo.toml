@@ -23,7 +23,7 @@ aws-lc = ["std", "dep:aws-lc-rs"]
 fips = ["aws-lc", "aws-lc-rs/fips", "rustls?/fips"]
 # The host explicitly installs the aws-lc JWT provider through this capability.
 jwt = ["std", "dep:jsonwebtoken", "jsonwebtoken/aws_lc_rs"]
-jwt-rustcrypto = ["std", "dep:jsonwebtoken", "dep:hmac", "dep:sha2", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:rsa", "dep:der", "dep:crypto-bigint", "dep:signature-v2", "dep:signature", "dep:pkcs8"]
+jwt-rustcrypto = ["std", "dep:jsonwebtoken", "dep:hmac", "dep:sha2", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:rsa", "dep:der", "dep:crypto-bigint", "dep:signature", "dep:pkcs8"]
 tls-aws-lc = ["std", "dep:rustls", "rustls/aws_lc_rs"]
 tls-rustcrypto = ["alloc", "dep:rustls", "dep:pki-types", "dep:aead", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crypto-common", "dep:crypto-bigint", "dep:der", "dep:digest", "dep:ed25519-dalek", "dep:getrandom", "dep:hmac", "dep:p256", "dep:p384", "dep:pkcs8", "dep:rsa", "dep:sec1", "dep:sha2", "dep:signature", "dep:x25519-dalek", "dep:zeroize"]
 tls12 = ["rustls?/tls12"]
@@ -54,8 +54,6 @@ rustls = { version = "0.23", default-features = false, optional = true }
 sec1 = { version = "0.8", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
 signature = { version = "3", default-features = false, optional = true }
-# jsonwebtoken's extension traits use signature 2; primitive backends use 3.
-signature-v2 = { package = "signature", version = "2", default-features = false, optional = true }
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
 zeroize = { version = "1", default-features = false, optional = true }
 

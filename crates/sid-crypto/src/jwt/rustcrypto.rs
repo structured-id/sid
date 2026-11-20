@@ -6,7 +6,7 @@
 
 use core::marker::PhantomData;
 
-use ::signature::{self as signature_v3, SignatureEncoding};
+use ::signature::{self, SignatureEncoding};
 use hmac::{KeyInit, Mac};
 use jsonwebtoken::crypto::{CryptoProvider, JwtSigner, JwtVerifier, KeyUtils};
 use jsonwebtoken::errors::{ErrorKind, Result};
@@ -14,7 +14,6 @@ use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, DecodingKeyKind, Enc
 use p256::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use sha2::{Sha256, Sha384, Sha512};
-use signature_v2 as signature;
 
 mod keys;
 
@@ -46,7 +45,7 @@ struct Signing<K, S> {
 
 impl<K, S> signature::Signer<Vec<u8>> for Signing<K, S>
 where
-    K: signature_v3::Signer<S>,
+    K: signature::Signer<S>,
     S: SignatureEncoding,
 {
     fn try_sign(&self, message: &[u8]) -> core::result::Result<Vec<u8>, signature::Error> {
@@ -60,7 +59,7 @@ where
 
 impl<K, S> JwtSigner for Signing<K, S>
 where
-    K: signature_v3::Signer<S>,
+    K: signature::Signer<S>,
     S: SignatureEncoding,
 {
     fn algorithm(&self) -> Algorithm {
@@ -77,7 +76,7 @@ struct Verification<K, S> {
 
 impl<K, S> signature::Verifier<Vec<u8>> for Verification<K, S>
 where
-    K: signature_v3::Verifier<S>,
+    K: signature::Verifier<S>,
     S: SignatureEncoding,
 {
     fn verify(
@@ -98,7 +97,7 @@ where
 
 impl<K, S> JwtVerifier for Verification<K, S>
 where
-    K: signature_v3::Verifier<S>,
+    K: signature::Verifier<S>,
     S: SignatureEncoding,
 {
     fn algorithm(&self) -> Algorithm {
