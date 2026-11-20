@@ -13,7 +13,7 @@ use sid_core::Error as SidError;
 use sid_core::models::{
     AuditEntry, AuthorizationDecision, AuthorizationOperation, AuthorizationOperationId,
     AuthorizationStatus, ClaimChoice, ClaimLevel, ClaimRequest, ClaimSharing, ClaimSubscription,
-    ClaimType, DecisionOutcome, MutationContext, OAuth2Client, OidcIssuer, Session,
+    ClaimType, DecisionOutcome, DisclosedValue, MutationContext, OAuth2Client, OidcIssuer, Session,
 };
 use sid_proto::sid::v1::common;
 
@@ -51,8 +51,11 @@ pub struct ConsentReview {
     pub resource: String,
     /// How the selected identity is shown to the user.
     pub identity: String,
-    /// The value a decision on this revision carries.
-    pub csrf: [u8; 32],
+    /// Each reviewed claim, in the operation's order, with the value
+    /// approving discloses; none when the Profile holds no value.
+    pub shown: Vec<(String, Option<DisclosedValue>)>,
+    /// The value a decision on this revision and these shown values carries.
+    pub csrf: [u8; 64],
 }
 
 /// An operation's durable state, with the issuer continuation while its
@@ -161,8 +164,116 @@ fn csrf_context(id: AuthorizationOperationId, revision: u64) -> Vec<u8> {
     format!("authorization-operation:{id}:{revision}").into_bytes()
 }
 
-/// The sharing choices a claim request admits, in the order shown.
-pub fn allowed_sharing(request: &ClaimRequest) -> Vec<ClaimSharing> {
+/// The context binding a review's CSRF value to the values it showed: the
+/// operation and revision, then each reviewed claim with its value, in the
+/// operation's order. A value changed after the review no longer matches.
+fn shown_context(
+    id: AuthorizationOperationId,
+    revision: u64,
+    shown: &[(String, Option<DisclosedValue>)],
+) -> Vec<u8> {
+    let mut context = csrf_context(id, revision);
+    for (name, value) in shown {
+        context.push(0);
+        context.extend_from_slice(name.as_bytes());
+        context.push(0);
+        match value {
+            None => context.push(0),
+            Some(value) => {
+                context.push(1);
+                context.extend_from_slice(value.value.as_bytes());
+                context.push(0);
+                context.push(match value.verified {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                });
+            }
+        }
+    }
+    context
+}
+
+/// The claims an OIDC request asks for through its scopes, OIDC Core 1.0
+/// §5.4: the ones of the admitted `profile`, `email` and `phone` scopes this
+/// issuer holds values for. `openid` alone asks for none.
+pub fn scope_claims(scopes: &[String]) -> Vec<&'static str> {
+    let mut claims = Vec::new();
+    for scope in scopes {
+        claims.extend_from_slice(match scope.as_str() {
+            "profile" => &[
+                "name",
+                "given_name",
+                "family_name",
+                "middle_name",
+                "preferred_username",
+            ][..],
+            "email" => &["email"][..],
+            "phone" => &["phone_number"][..],
+            _ => &[][..],
+        });
+    }
+    claims
+}
+
+/// The claims a review covers for a client that registered `registered` and
+/// asks for `scopes`, with `held`, the holder's current consent: the
+/// registered requests, then each
+/// claim the scopes ask for that it did not register, as voluntary and
+/// without updates (consent-flow.md, OIDC scope requests), then every claim
+/// disclosed before, so the whole disclosure is reviewed (identity-model.md,
+/// recipient disclosure). Each claim once.
+pub fn review_requests(
+    registered: &[ClaimRequest],
+    scopes: &[String],
+    held: Option<&sid_core::models::ConsentRecord>,
+) -> Vec<ClaimRequest> {
+    let mut requests = registered.to_vec();
+    let mut add = |request: ClaimRequest| {
+        if !requests.iter().any(|r| r.claim_name == request.claim_name) {
+            requests.push(request);
+        }
+    };
+    for name in scope_claims(scopes) {
+        add(ClaimRequest::optional(name, ClaimType::Data));
+    }
+    for grant in held
+        .filter(|c| c.status.is_active())
+        .map(|c| c.grants.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|g| g.is_active())
+    {
+        add(ClaimRequest::optional(
+            grant.claim_name.clone(),
+            grant.claim_type,
+        ));
+    }
+    requests
+}
+
+/// The value `request` discloses from `values`, the selected Profile's
+/// current claim values: the value itself for a data request, only its
+/// verification for an attestation request.
+fn disclosed_for(
+    request: &ClaimRequest,
+    values: &[(&'static str, DisclosedValue)],
+) -> Option<DisclosedValue> {
+    let (_, value) = values
+        .iter()
+        .find(|(name, _)| *name == request.claim_name)?;
+    Some(match request.claim_type {
+        ClaimType::Data => value.clone(),
+        ClaimType::Attestation => DisclosedValue {
+            value: String::new(),
+            verified: value.verified,
+        },
+    })
+}
+
+/// The sharing choices a claim request admits, in the order shown, when the
+/// Profile holds a value for it; without one, only not sharing.
+pub fn allowed_sharing(request: &ClaimRequest, has_value: bool) -> Vec<ClaimSharing> {
     [
         ClaimSharing::None,
         ClaimSharing::Static,
@@ -170,10 +281,71 @@ pub fn allowed_sharing(request: &ClaimRequest) -> Vec<ClaimSharing> {
     ]
     .into_iter()
     .filter(|sharing| request.admits(*sharing))
+    .filter(|sharing| has_value || *sharing == ClaimSharing::None)
     .collect()
 }
 
 impl OAuth {
+    /// The value each claim this issuer discloses has in Profile `profile`
+    /// now: its names, its username and its primary contacts.
+    pub(crate) async fn current_values(
+        &self,
+        profile: sid_core::models::ProfileId,
+    ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
+        let Some(found) = self.storage.get_profile(profile).await? else {
+            return Ok(Vec::new());
+        };
+        let text = |value: Option<String>| {
+            value.map(|value| DisclosedValue {
+                value,
+                verified: None,
+            })
+        };
+        let mut values: Vec<(&'static str, DisclosedValue)> = [
+            ("name", text(found.formatted_name())),
+            ("given_name", text(found.given_name.clone())),
+            ("family_name", text(found.family_name.clone())),
+            ("middle_name", text(found.middle_name.clone())),
+            ("preferred_username", text(found.username.clone())),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect();
+        if let Some(email) = self.storage.get_primary_profile_email(profile).await? {
+            values.push((
+                "email",
+                DisclosedValue {
+                    value: email.email,
+                    verified: Some(email.verified),
+                },
+            ));
+        }
+        if let Some(phone) = self.storage.get_primary_profile_phone(profile).await? {
+            values.push((
+                "phone_number",
+                DisclosedValue {
+                    value: phone.formatted_e164(),
+                    verified: Some(phone.verified),
+                },
+            ));
+        }
+        Ok(values)
+    }
+
+    /// What `operation`'s review shows: each reviewed claim with the value
+    /// it discloses from the Profile now.
+    async fn shown(
+        &self,
+        operation: &AuthorizationOperation,
+    ) -> Result<Vec<(String, Option<DisclosedValue>)>, SidError> {
+        let values = self.current_values(operation.profile_id).await?;
+        Ok(operation
+            .claim_requests
+            .iter()
+            .map(|request| (request.claim_name.clone(), disclosed_for(request, &values)))
+            .collect())
+    }
+
     /// The operation `id` at `issuer`, for `session`, the browser's IdP
     /// session: live, and the one the operation is bound to.
     async fn session_operation(
@@ -234,12 +406,27 @@ impl OAuth {
             .await?
             .and_then(|p| p.formatted_name().or(p.username.clone()))
             .unwrap_or_default();
+        let shown = self.shown(&operation).await?;
+        // Two values: one authenticates this session, operation and
+        // revision; the other also binds what this review showed, so a value
+        // changed before the decision makes it stale rather than approve
+        // another disclosure.
+        let mut csrf = [0u8; 64];
+        csrf[..32].copy_from_slice(&BrowserCsrf::bound(
+            &token,
+            &csrf_context(operation.id, operation.revision),
+        ));
+        csrf[32..].copy_from_slice(&BrowserCsrf::bound(
+            &token,
+            &shown_context(operation.id, operation.revision, &shown),
+        ));
         Ok(ConsentReview {
-            csrf: BrowserCsrf::bound(&token, &csrf_context(operation.id, operation.revision)),
+            csrf,
             issuer: issuer.canonical_url.clone(),
             client,
             resource: resource.indicator.to_string(),
             identity,
+            shown,
             operation,
         })
     }
@@ -267,17 +454,28 @@ impl OAuth {
             .session_operation(sign_in, issuer, session, id, now)
             .await?;
         let token = session.browser_csrf.ok_or(ConsentError::Csrf)?;
-        if !BrowserCsrf::bound_matches(&csrf, &token, &csrf_context(id, revision)) {
+        let (authentic, content) = csrf.split_at(csrf.len().min(32));
+        if !BrowserCsrf::bound_matches(authentic, &token, &csrf_context(id, revision)) {
             return Err(ConsentError::Csrf);
         }
         let decision = match decision {
             SubmittedDecision::Deny => AuthorizationDecision::Deny,
-            // Read against the claim requests pinned on the operation, the
-            // ones the review showed: a registration changed meanwhile never
-            // turns this approval into a grant of another disclosure.
-            SubmittedDecision::Approve(choices) => AuthorizationDecision::Approve {
-                choices: reviewed_choices(&operation.claim_requests, choices)?,
-            },
+            // Read against the claim requests pinned on the operation and the
+            // values the review showed: a registration or a value changed
+            // meanwhile never turns this approval into another disclosure.
+            SubmittedDecision::Approve(choices) => {
+                let shown = self.shown(&operation).await?;
+                if !BrowserCsrf::bound_matches(
+                    content,
+                    &token,
+                    &shown_context(id, revision, &shown),
+                ) {
+                    return Err(ConsentError::Stale);
+                }
+                AuthorizationDecision::Approve {
+                    choices: reviewed_choices(&operation.claim_requests, &shown, choices)?,
+                }
+            }
         };
         let ctx: MutationContext = AuditEntry::user(
             session.profile_id.to_string(),
@@ -333,27 +531,32 @@ impl OAuth {
     }
 }
 
-/// The approval's choices against `requests`, the client's registered claim
-/// requests: one choice per request, each one the request admits; nothing
-/// else.
+/// The approval's choices against `requests`, the reviewed claim requests,
+/// and `shown`, the values the review showed for them in the same order: one
+/// choice per request, each one the request admits, sharing only a claim
+/// with a value; nothing else. Each shared choice carries its shown value.
 fn reviewed_choices(
     requests: &[ClaimRequest],
+    shown: &[(String, Option<DisclosedValue>)],
     mut submitted: Vec<(String, ClaimSharing)>,
 ) -> Result<Vec<ClaimChoice>, ConsentError> {
     let mut choices = Vec::with_capacity(requests.len());
-    for request in requests {
+    for (request, (_, value)) in requests.iter().zip(shown) {
         let at = submitted
             .iter()
             .position(|(name, _)| *name == request.claim_name)
             .ok_or_else(|| ConsentError::Choice(request.claim_name.clone()))?;
         let (name, sharing) = submitted.swap_remove(at);
-        if !request.admits(sharing) {
+        if !allowed_sharing(request, value.is_some()).contains(&sharing) {
             return Err(ConsentError::Choice(name));
         }
         choices.push(ClaimChoice {
             name,
             claim_type: request.claim_type,
             sharing,
+            disclosed: (sharing != ClaimSharing::None)
+                .then(|| value.clone())
+                .flatten(),
         });
     }
     if let Some((name, _)) = submitted.into_iter().next() {

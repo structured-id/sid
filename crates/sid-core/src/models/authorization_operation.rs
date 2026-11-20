@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 pub use sid_ids::AuthorizationOperationId;
 
-use super::consent::{ClaimRequest, ClaimType, ConsentMode, ConsentRecord};
+use super::consent::{
+    ClaimGrant, ClaimRequest, ClaimType, ConsentMode, ConsentRecord, DisclosedValue,
+};
 use super::{IssuerId, ProfileId, ResourceId, SessionId};
 
 /// How long an operation waits for a decision and, once decided, for the
@@ -94,6 +96,10 @@ pub struct ClaimChoice {
     /// the issuer from the registration, never taken from the browser.
     pub claim_type: ClaimType,
     pub sharing: ClaimSharing,
+    /// The value this choice discloses, as the holder reviewed it: resolved
+    /// by the issuer from the selected Profile, never taken from the browser.
+    #[serde(default)]
+    pub disclosed: Option<DisclosedValue>,
 }
 
 impl ClaimChoice {
@@ -220,10 +226,10 @@ impl AuthorizationOperation {
 
     /// The consent an approval with `choices` leaves for this operation's
     /// Profile and client, from `held`, the consent stored for that pair if
-    /// any: active, with the operation's scopes for its resource and every
-    /// shared claim granted in its chosen mode. Earlier grants of an active
-    /// consent stay; their revocation is a separate account operation
-    /// (consent-flow.md, commit the decision).
+    /// any: active, with the operation's scopes for its resource added, and
+    /// its disclosure replaced as a whole by the reviewed one: every shared
+    /// claim with its reviewed value in its chosen mode, an omitted one no
+    /// longer disclosed (identity-model.md, recipient disclosure).
     pub fn approved_consent(
         &self,
         held: Option<ConsentRecord>,
@@ -239,11 +245,17 @@ impl AuthorizationOperation {
             consent.revoked_at = None;
         }
         consent.grant_scopes(self.resource_id, &self.scopes);
-        for choice in choices {
-            if let Some(mode) = choice.mode() {
-                consent.grant_claim(choice.name.clone(), choice.claim_type, mode);
-            }
-        }
+        let id = consent.id;
+        consent.grants = choices
+            .iter()
+            .filter_map(|choice| {
+                let mode = choice.mode()?;
+                let mut grant = ClaimGrant::new(id, choice.name.clone(), choice.claim_type, mode);
+                grant.disclosed = choice.disclosed.clone();
+                Some(grant)
+            })
+            .collect();
+        consent.updated_at = jiff::Timestamp::now();
         consent
     }
 }

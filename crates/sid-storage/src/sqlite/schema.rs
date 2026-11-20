@@ -1624,6 +1624,8 @@ CREATE TABLE IF NOT EXISTS claim_grants (
     mode            TEXT NOT NULL DEFAULT 'static' CHECK (mode IN ('static', 'subscribed')),
     granted_at      TEXT NOT NULL,
     revoked_at      TEXT,
+    disclosed_value TEXT,
+    disclosed_verified INTEGER CHECK (disclosed_verified IN (0, 1)),
     UNIQUE (consent_id, claim_name)
 ) STRICT;
 

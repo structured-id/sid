@@ -17,8 +17,8 @@ use sid_core::models::dpop::DPopBinding;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        AuthorizationCode, ExchangedCode, OAuth2Client, Profile, ProfileEmail, ProfilePhone,
-        RefreshToken, RefreshTokenError, Session, ValidatedRefreshToken,
+        AuthorizationCode, ExchangedCode, OAuth2Client, RefreshToken, RefreshTokenError, Session,
+        ValidatedRefreshToken,
     },
 };
 use std::fmt;
@@ -274,13 +274,11 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
-/// What an ID token is built from: the authenticated account's Profile and
-/// its primary contacts, disclosed by scope.
+/// What an ID token carries beyond the authentication and the subject. No
+/// Profile claim: those reach UserInfo from the holder's approved
+/// disclosure.
 #[derive(Debug, Clone, Copy)]
 pub struct IdTokenSource<'a> {
-    pub profile: &'a Profile,
-    pub email: Option<&'a ProfileEmail>,
-    pub phone: Option<&'a ProfilePhone>,
     /// The Binding presentation of a SID installation's federation return:
     /// in the ID token only, never in the access token.
     pub presentation: Option<&'a serde_json::Value>,
@@ -512,18 +510,14 @@ impl OAuth2Server {
 
         // Issue ID token if "openid" scope is present
         let id_token = if scopes.iter().any(|s| s == "openid") {
-            let source = id_token.ok_or_else(|| {
-                sid_core::Error::Internal("an ID token needs the account's profile".into())
-            })?;
+            let source = id_token
+                .ok_or_else(|| sid_core::Error::Internal("an ID token needs its account".into()))?;
             Some(self.jwt.id_token_signed_by(
                 issuer,
                 sub,
-                source.profile,
                 session,
                 &client.client_id,
                 nonce,
-                source.email,
-                source.phone,
                 source.presentation,
             )?)
         } else {

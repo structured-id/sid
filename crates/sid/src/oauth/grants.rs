@@ -166,9 +166,10 @@ impl GrantHost for ProfileGrant<'_> {
         Ok(self.oauth.storage.get_profile(*owner).await?)
     }
 
-    /// The Profile's primary contacts for the OIDC claims and its client's
-    /// claim mappings; a failed read fails the grant rather than issue
-    /// tokens missing the claims.
+    /// The subject, roles and the client's claim mappings for the tokens;
+    /// a failed read fails the grant rather than issue tokens missing the
+    /// claims. Profile claims are not here: UserInfo delivers the holder's
+    /// approved disclosure.
     async fn claims(
         &self,
         profile: &Profile,
@@ -176,10 +177,10 @@ impl GrantHost for ProfileGrant<'_> {
         client: &OAuth2Client,
         scopes: &[String],
     ) -> Result<AccountClaims, OAuthError> {
-        let (email, phone) = self.oauth.primary_contacts(profile.id).await?;
         let custom_claims = if client.claim_mappings.is_empty() {
             None
         } else {
+            let (email, phone) = self.oauth.primary_contacts(profile.id).await?;
             let metadata = self
                 .oauth
                 .storage
@@ -203,12 +204,7 @@ impl GrantHost for ProfileGrant<'_> {
         Ok(AccountClaims {
             sub,
             roles,
-            id_token: Some(IdTokenAccount {
-                profile: profile.clone(),
-                email,
-                phone,
-                presentation: None,
-            }),
+            id_token: Some(IdTokenAccount { presentation: None }),
             custom_claims,
         })
     }
@@ -719,7 +715,6 @@ impl OAuth {
             .collect();
         let fence = self.admitted_grant(&client, &session).await?;
         let sub = self.subject_for(&issuer, profile.id, &client).await?;
-        let (primary_email, primary_phone) = self.primary_contacts(profile.id).await?;
         let signer = self.issuer_signer(&issuer).await?;
         let roles =
             sid_authn::account_roles::account_roles(self.storage.as_ref(), &profile).await?;
@@ -736,12 +731,7 @@ impl OAuth {
                 None,
                 None,
                 None,
-                Some(IdTokenSource {
-                    profile: &profile,
-                    email: primary_email.as_ref(),
-                    phone: primary_phone.as_ref(),
-                    presentation: None,
-                }),
+                Some(IdTokenSource { presentation: None }),
             )
             .map_err(|e| internal("issue tokens", e))?;
         // The code, the session and the refresh token are committed

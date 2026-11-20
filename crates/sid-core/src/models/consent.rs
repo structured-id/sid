@@ -343,6 +343,26 @@ pub struct ClaimGrant {
 
     /// When this grant was revoked (if revoked).
     pub revoked_at: Option<Timestamp>,
+
+    /// What the recipient receives for this claim: the value the holder
+    /// reviewed and approved, from one version of the selected Profile
+    /// (identity-model.md, recipient disclosure). Delivery reads it, never
+    /// the current Profile. Absent for a grant recorded without a reviewed
+    /// value, which then discloses nothing.
+    #[serde(default)]
+    pub disclosed: Option<DisclosedValue>,
+}
+
+/// A claim value as disclosed to a recipient.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DisclosedValue {
+    /// The value itself; for an attestation grant, empty: only the
+    /// verification is disclosed.
+    pub value: String,
+    /// Whether the value was verified when it was approved, for a claim the
+    /// protocol pairs with a verification flag (`email_verified`,
+    /// `phone_number_verified`, OIDC Core 1.0 §5.1).
+    pub verified: Option<bool>,
 }
 
 impl ClaimGrant {
@@ -360,6 +380,7 @@ impl ClaimGrant {
             mode,
             granted_at: Timestamp::now(),
             revoked_at: None,
+            disclosed: None,
         }
     }
 

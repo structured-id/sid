@@ -164,10 +164,11 @@ async fn locked_consent(
     .fetch_one(&mut **tx)
     .await
     .map_err(storage("lock a consent"))?;
-    let grants = sqlx::query_as::<_, ClaimGrantRow>(
-        "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at
-         FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at",
-    )
+    let grants = sqlx::query_as::<_, ClaimGrantRow>(concat!(
+        "SELECT ",
+        claim_grant_columns!(),
+        " FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at"
+    ))
     .bind(row.id)
     .fetch_all(&mut **tx)
     .await
@@ -222,8 +223,9 @@ async fn store_consent(tx: &mut Tx<'_>, consent: &ConsentRecord) -> SidResult<()
         .map_err(storage("replace scope grants"))?;
     for grant in &consent.grants {
         sqlx::query(
-            "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at,
+                revoked_at, disclosed_value, disclosed_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(grant.id.0)
         .bind(id.0)
@@ -232,6 +234,8 @@ async fn store_consent(tx: &mut Tx<'_>, consent: &ConsentRecord) -> SidResult<()
         .bind(grant.mode.as_str())
         .bind(grant.granted_at.pg())
         .bind(grant.revoked_at.pg())
+        .bind(grant.disclosed.as_ref().map(|d| d.value.as_str()))
+        .bind(grant.disclosed.as_ref().and_then(|d| d.verified))
         .execute(&mut **tx)
         .await
         .map_err(storage("store a claim grant"))?;

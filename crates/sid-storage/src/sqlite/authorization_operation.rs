@@ -112,10 +112,11 @@ async fn held_consent(
         return Ok(None);
     };
     let id: uuid::Uuid = super::uuid_col(&row, "id")?;
-    let grants = sqlx::query(
-        "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at
-         FROM claim_grants WHERE consent_id = ? ORDER BY granted_at",
-    )
+    let grants = sqlx::query(concat!(
+        "SELECT ",
+        super::consent::claim_grant_columns!(),
+        " FROM claim_grants WHERE consent_id = ? ORDER BY granted_at"
+    ))
     .bind(id)
     .fetch_all(&mut **tx)
     .await
@@ -191,8 +192,9 @@ async fn store_consent(tx: &mut Tx, consent: &ConsentRecord) -> SidResult<()> {
         .map_err(storage("replace scope grants"))?;
     for grant in &consent.grants {
         sqlx::query(
-            "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at,
+                revoked_at, disclosed_value, disclosed_verified)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(grant.id.0)
         .bind(consent.id.0)
@@ -201,6 +203,8 @@ async fn store_consent(tx: &mut Tx, consent: &ConsentRecord) -> SidResult<()> {
         .bind(grant.mode.as_str())
         .bind(fmt_dt(&grant.granted_at))
         .bind(fmt_dt_opt(grant.revoked_at))
+        .bind(grant.disclosed.as_ref().map(|d| d.value.as_str()))
+        .bind(grant.disclosed.as_ref().and_then(|d| d.verified))
         .execute(&mut **tx)
         .await
         .map_err(storage("store a claim grant"))?;

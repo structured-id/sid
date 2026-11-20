@@ -587,6 +587,16 @@ pub(super) fn get_bool(row: &Row, name: &str) -> SidResult<bool> {
     }
 }
 
+pub(super) fn get_opt_bool(row: &Row, name: &str) -> SidResult<Option<bool>> {
+    match row.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(v)) => Ok(Some(*v)),
+        Some(other) => Err(SidError::Storage(format!(
+            "{name} is not a boolean: {other:?}"
+        ))),
+    }
+}
+
 pub(super) fn get_text(row: &Row, name: &str) -> SidResult<String> {
     match field(row, name)? {
         Value::String(v) => Ok(v.clone()),

@@ -34,7 +34,8 @@ const CONSENT: &str = "c.id AS id, c.profile_id AS profile_id, c.client_id AS cl
 
 const CLAIM: &str = "g.id AS id, g.consent_id AS consent_id, g.claim_name AS claim_name,
     g.claim_type AS claim_type, g.mode AS mode, g.granted_at AS granted_at,
-    g.revoked_at AS revoked_at";
+    g.revoked_at AS revoked_at, g.disclosed_value AS disclosed_value,
+    g.disclosed_verified AS disclosed_verified";
 
 const SCOPE: &str = "s.resource_id AS resource_id, s.scopes AS scopes, s.granted_at AS granted_at";
 
@@ -89,6 +90,14 @@ fn claim(row: &Row) -> SidResult<ClaimGrant> {
         mode: get_parsed(row, "mode")?,
         granted_at: get_time(row, "granted_at")?,
         revoked_at: get_opt_time(row, "revoked_at")?,
+        disclosed: get_opt_text(row, "disclosed_value")?
+            .map(|value| -> SidResult<sid_core::models::DisclosedValue> {
+                Ok(sid_core::models::DisclosedValue {
+                    value,
+                    verified: super::get_opt_bool(row, "disclosed_verified")?,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -151,7 +160,8 @@ fn insert_claim(tx: &Statements<'_>, consent_id: ConsentId, g: &ClaimGrant) -> S
     tx.run(
         "CREATE (g:SidClaimGrant {id: $id, pair: $pair, consent_id: $consent_id,
             claim_name: $claim_name, claim_type: $claim_type, mode: $mode,
-            granted_at: $granted_at, revoked_at: $revoked_at})",
+            granted_at: $granted_at, revoked_at: $revoked_at,
+            disclosed_value: $disclosed_value, disclosed_verified: $disclosed_verified})",
         Params::default()
             .with("id", uuid(&g.id.0))
             .with("pair", claim_pair(consent_id, &g.claim_name)?)
@@ -160,7 +170,18 @@ fn insert_claim(tx: &Statements<'_>, consent_id: ConsentId, g: &ClaimGrant) -> S
             .with("claim_type", Value::String(g.claim_type.as_str().into()))
             .with("mode", Value::String(g.mode.as_str().into()))
             .with("granted_at", time(g.granted_at))
-            .with("revoked_at", opt_time(g.revoked_at)),
+            .with("revoked_at", opt_time(g.revoked_at))
+            .with(
+                "disclosed_value",
+                opt_text(g.disclosed.as_ref().map(|d| d.value.as_str())),
+            )
+            .with(
+                "disclosed_verified",
+                g.disclosed
+                    .as_ref()
+                    .and_then(|d| d.verified)
+                    .map_or(Value::Null, Value::Bool),
+            ),
     )?;
     Ok(())
 }
@@ -496,6 +517,9 @@ impl CoordinodeBackend {
                         mode: ConsentMode::Static,
                         granted_at: now,
                         revoked_at: None,
+                        // No reviewed value: it discloses nothing until a
+                        // consent review records one.
+                        disclosed: None,
                     };
                     insert_claim(tx, id, &g)?;
                     true
@@ -503,7 +527,8 @@ impl CoordinodeBackend {
                 (ClaimDecision::Grant(claim_type), Some(g)) if g.revoked_at.is_some() => {
                     tx.run(
                         "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
-                         SET g.claim_type = $claim_type, g.granted_at = $now, g.revoked_at = null",
+                         SET g.claim_type = $claim_type, g.granted_at = $now, g.revoked_at = null,
+                             g.disclosed_value = null, g.disclosed_verified = null",
                         Params::default()
                             .with("pair", pair)
                             .with("claim_type", Value::String(claim_type.as_str().into()))

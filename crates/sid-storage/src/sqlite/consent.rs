@@ -7,7 +7,7 @@ use sid_core::{
         MutationContext, ProfileId,
         consent::{
             ClaimDecision, ClaimGrant, ClaimGrantChange, ClaimGrantId, ConsentId, ConsentRecord,
-            ScopeGrant,
+            DisclosedValue, ScopeGrant,
         },
     },
 };
@@ -38,15 +38,33 @@ pub(super) fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> SidResult<ClaimGran
             .map_err(SidError::Storage)?,
         granted_at: dt_col(row, "granted_at")?,
         revoked_at: dt_col_opt(row, "revoked_at")?,
+        disclosed: col::<Option<String>>(row, "disclosed_value")?
+            .map(|value| -> SidResult<DisclosedValue> {
+                Ok(DisclosedValue {
+                    value,
+                    verified: col(row, "disclosed_verified")?,
+                })
+            })
+            .transpose()?,
     })
 }
 
+/// The columns [`row_to_grant`] reads, as a literal for `concat!`.
+macro_rules! claim_grant_columns {
+    () => {
+        "id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at, \
+         disclosed_value, disclosed_verified"
+    };
+}
+pub(super) use claim_grant_columns;
+
 impl SqliteBackend {
     async fn claim_grants(&self, consent_id: Uuid) -> SidResult<Vec<ClaimGrant>> {
-        let rows = sqlx::query(
-            "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at \
-             FROM claim_grants WHERE consent_id = ? ORDER BY granted_at",
-        )
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            claim_grant_columns!(),
+            " FROM claim_grants WHERE consent_id = ? ORDER BY granted_at"
+        ))
         .bind(consent_id)
         .fetch_all(&self.pool)
         .await
@@ -116,8 +134,9 @@ impl SqliteBackend {
         .map_err(|e| insert_error("consent", e))?;
         for grant in &consent.grants {
             sqlx::query(
-                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, \
+                 revoked_at, disclosed_value, disclosed_verified) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(grant.id.0)
             .bind(consent.id.0)
@@ -126,6 +145,8 @@ impl SqliteBackend {
             .bind(grant.mode.as_str())
             .bind(fmt_dt(&grant.granted_at))
             .bind(fmt_dt_opt(grant.revoked_at))
+            .bind(grant.disclosed.as_ref().map(|d| d.value.as_str()))
+            .bind(grant.disclosed.as_ref().and_then(|d| d.verified))
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("claim grant", e))?;
@@ -173,7 +194,8 @@ impl SqliteBackend {
                 "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT (consent_id, claim_name) DO UPDATE SET \
-                   claim_type = excluded.claim_type, granted_at = ?5, revoked_at = NULL \
+                   claim_type = excluded.claim_type, granted_at = ?5, revoked_at = NULL, \
+                   disclosed_value = NULL, disclosed_verified = NULL \
                  WHERE claim_grants.revoked_at IS NOT NULL",
             )
             .bind(Uuid::now_v7())

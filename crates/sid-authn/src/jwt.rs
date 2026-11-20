@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sid_core::{
     Error as SidError, Result as SidResult,
-    models::{Profile, ProfileEmail, ProfilePhone, Session, dpop::DPopBinding},
+    models::{Session, dpop::DPopBinding},
 };
 
 /// Lifetime of a back-channel logout token. It covers the delivery retries
@@ -383,11 +383,9 @@ pub struct ActClaim {
     pub sub: String,
 }
 
-/// ID token claims (OIDC §5.1 Standard Claims).
-///
-/// Claims are populated from **Profile Fields** (not Principal directly).
-/// Principal(Email).verified → email_verified claim.
-/// Principal(Phone).verified → phone_number_verified claim.
+/// ID token claims (OIDC Core 1.0 §2): the authentication and the subject.
+/// Profile claims are never here: they reach the recipient through
+/// UserInfo, from the holder's approved disclosure.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
     pub sub: String,
@@ -407,38 +405,6 @@ pub struct IdTokenClaims {
     pub sid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
-
-    // ── OIDC §5.1 Standard Claims (from Profile Fields) ──
-    /// Full name in displayable form (computed from structured name fields).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Given name(s) or first name(s).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub given_name: Option<String>,
-    /// Surname(s) or last name(s). Optional for mononyms.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub family_name: Option<String>,
-    /// Middle name(s), patronymic, or secondary given name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub middle_name: Option<String>,
-    /// Shorthand name by which the user wishes to be referred to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preferred_username: Option<String>,
-    /// User's email address (from Profile Field, NOT Principal directly).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-    /// True if a verified Principal(Email) exists for this profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email_verified: Option<bool>,
-    /// User's phone number in E.164 format (from Profile Field).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phone_number: Option<String>,
-    /// True if a verified Principal(Phone) exists for this profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phone_number_verified: Option<bool>,
-    /// Time the user's information was last updated (Unix timestamp).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<i64>,
 
     /// The Binding presentation a SID installation's federation return
     /// carries (`crate::federated_entry::PRESENTATION_CLAIM`): the holder's
@@ -807,45 +773,30 @@ impl JwtService {
     }
 
     /// Issue an OIDC ID token.
-    #[allow(clippy::too_many_arguments)]
     pub fn issue_id_token(
         &self,
         sub: &str,
-        profile: &Profile,
         session: &Session,
         client_id: &str,
         nonce: Option<&str>,
-        primary_email: Option<&ProfileEmail>,
-        primary_phone: Option<&ProfilePhone>,
     ) -> SidResult<String> {
-        self.id_token_signed_by(
-            self,
-            sub,
-            profile,
-            session,
-            client_id,
-            nonce,
-            primary_email,
-            primary_phone,
-            None,
-        )
+        self.id_token_signed_by(self, sub, session, client_id, nonce, None)
     }
 
     /// An ID token issued by `signer` with this service's lifetime;
     /// otherwise as [`Self::issue_id_token`]. `presentation` is the Binding
     /// presentation of a SID installation's federation return, carried as
-    /// given.
-    #[allow(clippy::too_many_arguments)]
+    /// given. It carries the authentication and the subject only: every
+    /// flow issuing it also issues an access token, so the claims the scopes
+    /// ask for go to UserInfo, from the holder's approved disclosure
+    /// (consent-flow.md, OIDC scope requests; OIDC Core 1.0 §5.4).
     pub fn id_token_signed_by<S: TokenSigner, O>(
         &self,
         signer: &S,
         sub: &str,
-        profile: &Profile,
         session: &Session<O>,
         client_id: &str,
         nonce: Option<&str>,
-        primary_email: Option<&ProfileEmail>,
-        primary_phone: Option<&ProfilePhone>,
         presentation: Option<&serde_json::Value>,
     ) -> SidResult<String> {
         let now = Timestamp::now();
@@ -862,17 +813,6 @@ impl JwtService {
             amr: session.amr.clone(),
             sid: Some(session.id.to_string()),
             nonce: nonce.map(String::from),
-            // OIDC §5.1 Standard Claims — populated from Profile Fields
-            name: profile.formatted_name(),
-            given_name: profile.given_name.clone(),
-            family_name: profile.family_name.clone(),
-            middle_name: profile.middle_name.clone(),
-            preferred_username: profile.username.clone(),
-            email: primary_email.map(|e| e.email.clone()),
-            email_verified: primary_email.map(|e| e.verified),
-            phone_number: primary_phone.map(|p| p.formatted_e164()),
-            phone_number_verified: primary_phone.map(|p| p.verified),
-            updated_at: Some(profile.updated_at.as_second()),
             binding_presentation: presentation.cloned(),
         };
 

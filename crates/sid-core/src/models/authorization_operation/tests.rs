@@ -74,6 +74,10 @@ fn choice(name: &str, sharing: ClaimSharing) -> ClaimChoice {
         name: name.into(),
         claim_type: ClaimType::Data,
         sharing,
+        disclosed: (sharing != ClaimSharing::None).then(|| DisclosedValue {
+            value: format!("{name}-value"),
+            verified: None,
+        }),
     }
 }
 
@@ -206,22 +210,41 @@ fn an_approval_creates_the_consent_it_grants() {
     assert_eq!(consent.grants[0].mode, ConsentMode::Subscribed);
 }
 
-/// An approval adds to an active consent: an earlier grant stays (revoking
-/// it is a separate account operation).
+/// An approval replaces an active consent's disclosure as a whole, under the
+/// same consent: the claims shared now with their reviewed values; a claim
+/// shared before and left out of this review is no longer disclosed
+/// (identity-model.md, recipient disclosure). Its scopes only add.
 #[test]
-fn an_approval_adds_to_an_active_consent() {
+fn an_approval_replaces_the_disclosure() {
     let now = Timestamp::now();
     let op = operation(now);
     let mut held = ConsentRecord::new(op.profile_id, op.client_id.clone());
     held.grant_claim("name", ClaimType::Data, ConsentMode::Static);
+    held.grant_scopes(op.resource_id, &["other".into()]);
     held.as_requested().unwrap().grant();
     let id = held.id;
 
-    let consent = op.approved_consent(Some(held), &[choice("email", ClaimSharing::Static)]);
+    let consent = op.approved_consent(
+        Some(held),
+        &[
+            choice("email", ClaimSharing::Static),
+            choice("name", ClaimSharing::None),
+        ],
+    );
     assert_eq!(consent.id, id);
     let email = ClaimRequest::required("email", ClaimType::Data);
     let name = ClaimRequest::required("name", ClaimType::Data);
-    assert!(consent.covers(op.resource_id, &op.scopes, &[&email, &name]));
+    assert!(consent.covers(op.resource_id, &op.scopes, &[&email]));
+    assert!(!consent.covers(op.resource_id, &[], &[&name]));
+    assert!(consent.covers(op.resource_id, &["other".into()], &[]));
+    assert_eq!(consent.grants.len(), 1);
+    assert_eq!(
+        consent.grants[0]
+            .disclosed
+            .as_ref()
+            .map(|d| d.value.as_str()),
+        Some("email-value")
+    );
 }
 
 /// A revoked consent approved again grants what this approval grants and

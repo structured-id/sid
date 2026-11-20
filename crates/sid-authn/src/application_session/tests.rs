@@ -393,10 +393,9 @@ async fn a_sign_in_completes_across_replicas() {
         .unwrap()
         .unwrap();
     assert_eq!(session.claims.sub, "subject-1");
-    assert_eq!(
-        session.claims.email.as_deref(),
-        Some("user@sid.example.com")
-    );
+    // The ID token names the user only; Profile claims reach a recipient
+    // through UserInfo, never copied from the ID token into the session.
+    assert!(session.claims.email.is_none());
     let read = first
         .read(&page_call(&signed_in.session_id, ""))
         .await

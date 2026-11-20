@@ -11,12 +11,34 @@ fn requests() -> Vec<ClaimRequest> {
     vec![email, phone]
 }
 
+/// What the review of [`requests`] showed: both claims with a value.
+fn shown() -> Vec<(String, Option<DisclosedValue>)> {
+    vec![
+        (
+            "email".into(),
+            Some(DisclosedValue {
+                value: "alice@sid.example.com".into(),
+                verified: Some(true),
+            }),
+        ),
+        (
+            "phone".into(),
+            Some(DisclosedValue {
+                value: "+380501234567".into(),
+                verified: Some(false),
+            }),
+        ),
+    ]
+}
+
 /// An approval names each requested claim once, with a sharing it admits;
-/// the claim's type comes from the registration, never from the browser.
+/// the claim's type comes from the registration and its value from the
+/// review, never from the browser. A claim not shared carries no value.
 #[test]
 fn choices_follow_the_registered_requests() {
     let choices = reviewed_choices(
         &requests(),
+        &shown(),
         vec![
             ("phone".into(), ClaimSharing::None),
             ("email".into(), ClaimSharing::Subscribed),
@@ -27,7 +49,73 @@ fn choices_follow_the_registered_requests() {
     assert_eq!(choices[0].name, "email");
     assert_eq!(choices[0].sharing, ClaimSharing::Subscribed);
     assert_eq!(choices[0].claim_type, ClaimType::Data);
+    assert_eq!(
+        choices[0].disclosed.as_ref().map(|d| d.value.as_str()),
+        Some("alice@sid.example.com")
+    );
     assert_eq!(choices[1].sharing, ClaimSharing::None);
+    assert!(choices[1].disclosed.is_none());
+}
+
+/// A claim the Profile holds no value for can only be left unshared: an
+/// approval sharing it is refused, naming it.
+#[test]
+fn a_claim_without_a_value_cannot_be_shared() {
+    let mut shown = shown();
+    shown[1].1 = None;
+    let refused = reviewed_choices(
+        &requests(),
+        &shown,
+        vec![
+            ("email".into(), ClaimSharing::Subscribed),
+            ("phone".into(), ClaimSharing::Static),
+        ],
+    )
+    .err()
+    .map(|e| e.to_string());
+    assert!(refused.unwrap().contains("phone"));
+}
+
+/// Claims the scopes ask for (OIDC Core 1.0 §5.4) join the review as
+/// voluntary without updates, after the client's registered requests, which
+/// keep their own terms; `openid` alone asks for none, and a claim disclosed
+/// before is reviewed again (consent-flow.md, OIDC scope requests).
+#[test]
+fn the_review_covers_registered_scope_and_earlier_claims() {
+    let registered = requests();
+    let scopes: Vec<String> = ["openid", "profile", "email"].map(String::from).into();
+    let mut held =
+        sid_core::models::ConsentRecord::new(sid_core::models::ProfileId::generate(), "rp");
+    held.grant_claim(
+        "nickname",
+        ClaimType::Data,
+        sid_core::models::ConsentMode::Static,
+    );
+    held.as_requested().unwrap().grant();
+
+    let requests = review_requests(&registered, &scopes, Some(&held));
+    let names: Vec<&str> = requests.iter().map(|r| r.claim_name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "email",
+            "phone",
+            "name",
+            "given_name",
+            "family_name",
+            "middle_name",
+            "preferred_username",
+            "nickname"
+        ]
+    );
+    // The registered email keeps its terms.
+    assert_eq!(requests[0].level, ClaimLevel::Required);
+    assert_eq!(requests[2].level, ClaimLevel::Optional);
+    assert_eq!(requests[2].subscription, ClaimSubscription::None);
+    assert_eq!(
+        review_requests(&registered, &["openid".into()], None).len(),
+        2
+    );
 }
 
 /// A choice the review did not offer, a missing claim, a repeated one and a
@@ -39,6 +127,7 @@ fn choices_outside_the_review_are_refused() {
     let refused = |submitted: Vec<(&str, ClaimSharing)>| {
         reviewed_choices(
             &requests(),
+            &shown(),
             submitted
                 .into_iter()
                 .map(|(n, s)| (n.to_owned(), s))
@@ -95,13 +184,16 @@ fn choices_outside_the_review_are_refused() {
 #[test]
 fn allowed_sharing_is_what_the_request_admits() {
     let r = requests();
-    assert_eq!(allowed_sharing(&r[0]), vec![ClaimSharing::Subscribed]);
+    assert_eq!(allowed_sharing(&r[0], true), vec![ClaimSharing::Subscribed]);
     assert_eq!(
-        allowed_sharing(&r[1]),
+        allowed_sharing(&r[1], true),
         vec![
             ClaimSharing::None,
             ClaimSharing::Static,
             ClaimSharing::Subscribed
         ]
     );
+    // Without a value: only not sharing, and nothing for a required claim.
+    assert_eq!(allowed_sharing(&r[1], false), vec![ClaimSharing::None]);
+    assert!(allowed_sharing(&r[0], false).is_empty());
 }

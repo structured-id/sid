@@ -7,7 +7,7 @@
 use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
 use sid_core::models::consent::{
-    ClaimRequest, ClaimType, ConsentMode, ConsentRecord, ConsentStatus,
+    ClaimRequest, ClaimType, ConsentMode, ConsentRecord, ConsentStatus, DisclosedValue,
 };
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
@@ -77,11 +77,16 @@ fn approve() -> AuthorizationDecision {
                 name: "email".into(),
                 claim_type: ClaimType::Data,
                 sharing: ClaimSharing::Subscribed,
+                disclosed: Some(DisclosedValue {
+                    value: "alice@sid.example.com".into(),
+                    verified: Some(true),
+                }),
             },
             ClaimChoice {
                 name: "phone".into(),
                 claim_type: ClaimType::Data,
                 sharing: ClaimSharing::None,
+                disclosed: None,
             },
         ],
     }
@@ -185,6 +190,15 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
     let phone = ClaimRequest::required("phone", ClaimType::Data);
     assert!(consent.covers(operation.resource_id, &operation.scopes, &[&email]));
     assert!(!consent.covers(operation.resource_id, &operation.scopes, &[&phone]));
+    // The disclosure is the reviewed value, read back exactly as approved.
+    assert_eq!(consent.grants.len(), 1);
+    assert_eq!(
+        consent.grants[0].disclosed,
+        Some(DisclosedValue {
+            value: "alice@sid.example.com".into(),
+            verified: Some(true),
+        })
+    );
 
     let replay = backend
         .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())

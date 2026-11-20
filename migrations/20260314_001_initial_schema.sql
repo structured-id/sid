@@ -1186,6 +1186,8 @@ CREATE TABLE claim_grants (
     mode text DEFAULT 'static'::text NOT NULL,
     granted_at timestamp with time zone DEFAULT now() NOT NULL,
     revoked_at timestamp with time zone,
+    disclosed_value text,
+    disclosed_verified boolean,
     CONSTRAINT claim_grants_claim_type_check CHECK ((claim_type = ANY (ARRAY['data'::text, 'attestation'::text]))),
     CONSTRAINT claim_grants_mode_check CHECK ((mode = ANY (ARRAY['static'::text, 'subscribed'::text]))),
     CONSTRAINT claim_grants_consent_id_claim_name_key UNIQUE (consent_id, claim_name),

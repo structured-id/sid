@@ -1594,10 +1594,11 @@ impl PostgresBackend {
         &self,
         consent_id: uuid::Uuid,
     ) -> SidResult<Vec<sid_core::models::consent::ClaimGrant>> {
-        let rows = sqlx::query_as::<_, ClaimGrantRow>(
-            "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at \
-             FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at",
-        )
+        let rows = sqlx::query_as::<_, ClaimGrantRow>(concat!(
+            "SELECT ",
+            claim_grant_columns!(),
+            " FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at"
+        ))
         .bind(consent_id)
         .fetch_all(&self.pool)
         .await
@@ -1815,7 +1816,18 @@ struct ClaimGrantRow {
     mode: String,
     granted_at: PgTime,
     revoked_at: Option<PgTime>,
+    disclosed_value: Option<String>,
+    disclosed_verified: Option<bool>,
 }
+
+/// The columns [`ClaimGrantRow`] reads, as a literal for `concat!`.
+macro_rules! claim_grant_columns {
+    () => {
+        "id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at, \
+         disclosed_value, disclosed_verified"
+    };
+}
+pub(crate) use claim_grant_columns;
 
 impl ClaimGrantRow {
     fn into_claim_grant(self) -> SidResult<sid_core::models::consent::ClaimGrant> {
@@ -1827,6 +1839,12 @@ impl ClaimGrantRow {
             mode: self.mode.parse().map_err(SidError::Storage)?,
             granted_at: self.granted_at.jiff(),
             revoked_at: self.revoked_at.jiff(),
+            disclosed: self.disclosed_value.map(|value| {
+                sid_core::models::consent::DisclosedValue {
+                    value,
+                    verified: self.disclosed_verified,
+                }
+            }),
         })
     }
 }
@@ -7201,8 +7219,9 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| insert_error("consent", e))?;
         for grant in &consent.grants {
             sqlx::query(
-                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, \
+                 revoked_at, disclosed_value, disclosed_verified) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             )
             .bind(grant.id.0).bind(consent.id.0)
             .bind(&grant.claim_name)
@@ -7210,6 +7229,8 @@ impl StorageBackend for PostgresBackend {
             .bind(grant.mode.as_str())
             .bind(grant.granted_at.pg())
             .bind(grant.revoked_at.pg())
+            .bind(grant.disclosed.as_ref().map(|d| d.value.as_str()))
+            .bind(grant.disclosed.as_ref().and_then(|d| d.verified))
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("claim grant", e))?;
@@ -7261,7 +7282,8 @@ impl StorageBackend for PostgresBackend {
                 "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at) \
                  VALUES ($1, $2, $3, $4, NOW()) \
                  ON CONFLICT (consent_id, claim_name) DO UPDATE SET \
-                   claim_type = EXCLUDED.claim_type, granted_at = NOW(), revoked_at = NULL \
+                   claim_type = EXCLUDED.claim_type, granted_at = NOW(), revoked_at = NULL, \
+                   disclosed_value = NULL, disclosed_verified = NULL \
                  WHERE claim_grants.revoked_at IS NOT NULL",
             )
             .bind(Uuid::now_v7())

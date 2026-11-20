@@ -688,37 +688,78 @@ fn challenges(status: &tonic::Status) -> Vec<String> {
         .collect()
 }
 
-/// The claims the scopes grant, about the token's subject; the others are
-/// absent rather than empty (OIDC Core 1.0 §5.3.2, §5.4).
+/// UserInfo answers the holder's approved disclosure to the token's client
+/// for the claims the scopes ask for, never the live Profile (consent-flow.md,
+/// OIDC scope requests; OIDC Core 1.0 §5.3.2, §5.4). On a filled Profile:
+/// without consent, or with `openid` alone, only `sub`; with consent, the
+/// approved values, a claim not shared absent; and a later Profile edit
+/// does not change what was approved. Before, UserInfo filled every scope's
+/// claims from the current Profile whatever the holder chose.
 #[tokio::test]
-async fn user_info_answers_the_granted_claims() {
+async fn user_info_answers_the_approved_disclosure_only() {
+    use sid_core::models::{ClaimType, ConsentMode, ConsentRecord, DisclosedValue};
     let user = signed_in().await;
     let token = user.token(&["openid", "profile", "email"], None).await;
-    let info = user
-        .provider
-        .get_user_info(user.request(Some(&format!("Bearer {token}")), None))
-        .await
-        .unwrap()
-        .into_inner();
+    let read = |token: String| {
+        let request = user.request(Some(&format!("Bearer {token}")), None);
+        async {
+            user.provider
+                .get_user_info(request)
+                .await
+                .unwrap()
+                .into_inner()
+        }
+    };
 
-    assert_eq!(info.sub, user.profile.id.to_string());
-    assert_eq!(info.given_name.as_deref(), Some("Alice"));
-    assert_eq!(info.family_name.as_deref(), Some("Smith"));
-    assert_eq!(info.preferred_username.as_deref(), Some("alice"));
-    assert_eq!(info.email.as_deref(), Some("alice@sid.example.com"));
-    assert_eq!(info.email_verified, Some(true));
-    assert!(info.phone_number.is_none());
+    let before = read(token.clone()).await;
+    assert_eq!(before.sub, user.profile.id.to_string());
+    assert!(before.given_name.is_none() && before.email.is_none());
+    assert!(before.preferred_username.is_none() && before.name.is_none());
 
-    let openid_only = user.token(&["openid"], None).await;
-    let info = user
-        .provider
-        .post_user_info(user.request(Some(&format!("Bearer {openid_only}")), None))
+    let mut consent = ConsentRecord::new(user.profile.id, "test-client");
+    consent.grant_claim("given_name", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grants[0].disclosed = Some(DisclosedValue {
+        value: "Alice".into(),
+        verified: None,
+    });
+    consent.grants[1].disclosed = Some(DisclosedValue {
+        value: "alice@sid.example.com".into(),
+        verified: Some(true),
+    });
+    consent.as_requested().unwrap().grant();
+    user.svc
+        .storage
+        .create_consent(
+            &consent,
+            sid_core::models::AuditEntry::system("test", "consent").into(),
+        )
         .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(info.sub, user.profile.id.to_string());
-    assert!(info.given_name.is_none());
-    assert!(info.email.is_none());
+        .unwrap();
+    let mut renamed = user.profile.clone();
+    renamed.given_name = Some("Alicia".into());
+    user.svc
+        .storage
+        .update_profile(
+            &renamed,
+            sid_core::models::AuditEntry::system("test", "rename").into(),
+        )
+        .await
+        .unwrap();
+
+    let after = read(token).await;
+    assert_eq!(
+        after.given_name.as_deref(),
+        Some("Alice"),
+        "the approved value"
+    );
+    assert_eq!(after.email.as_deref(), Some("alice@sid.example.com"));
+    assert_eq!(after.email_verified, Some(true));
+    assert!(after.family_name.is_none(), "not shared");
+    assert!(after.preferred_username.is_none() && after.phone_number.is_none());
+
+    let openid_only = read(user.token(&["openid"], None).await).await;
+    assert!(openid_only.given_name.is_none() && openid_only.email.is_none());
 }
 
 /// Without a token both schemes are offered, without an error code
@@ -941,7 +982,24 @@ async fn user_info_key_binding_over_http() {
 /// and a refusal is a 401 carrying the challenge (RFC 6750 §3).
 #[tokio::test]
 async fn user_info_over_http() {
+    use sid_core::models::{ClaimType, ConsentMode, ConsentRecord, DisclosedValue};
     let user = signed_in().await;
+    // The holder shared the email with the test client.
+    let mut consent = ConsentRecord::new(user.profile.id, "test-client");
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grants[0].disclosed = Some(DisclosedValue {
+        value: "alice@sid.example.com".into(),
+        verified: Some(true),
+    });
+    consent.as_requested().unwrap().grant();
+    user.svc
+        .storage
+        .create_consent(
+            &consent,
+            sid_core::models::AuditEntry::system("test", "consent").into(),
+        )
+        .await
+        .unwrap();
     let token = user.token(&["openid", "email"], None).await;
     let url = format!(
         "{}/i/{}/userinfo",
@@ -2277,7 +2335,8 @@ async fn the_consent_service_records_the_reviewed_decision() {
     assert_eq!(review.client_id, "test-client");
     assert_eq!(review.revision, 0);
     assert_eq!(review.identity_display_name, "Alice Smith");
-    assert_eq!(review.csrf_token.len(), 32);
+    // Two MACs: the session, operation and revision; and the values shown.
+    assert_eq!(review.csrf_token.len(), 64);
 
     let approve = SubmitConsentRequest {
         operation_id: Some(wire(operation)),
@@ -2362,6 +2421,119 @@ async fn the_review_names_the_requested_claim_type() {
             ("email".to_owned(), WireType::Data as i32),
             ("passport".to_owned(), WireType::Attestation as i32),
         ]
+    );
+}
+
+/// The choices approving `review` sharing the claims named in `shared` once
+/// (STATIC) and leaving every other claim unshared.
+fn choices_sharing(
+    review: &sid_proto::sid::v1::authn::ConsentDetails,
+    shared: &[&str],
+) -> Vec<sid_proto::sid::v1::authn::ClaimChoice> {
+    use sid_proto::sid::v1::authn::{ClaimChoice, ClaimSharing};
+    review
+        .claims
+        .iter()
+        .map(|claim| ClaimChoice {
+            name: claim.name.clone(),
+            sharing: if shared.contains(&claim.name.as_str()) {
+                ClaimSharing::Static as i32
+            } else {
+                ClaimSharing::None as i32
+            },
+        })
+        .collect()
+}
+
+/// A Profile value changed after the review makes its decision stale: the
+/// approval is refused as a concurrent change and records nothing; the
+/// review read again shows the new value with a new CSRF value, and its
+/// approval discloses exactly that value (identity-model.md, recipient
+/// disclosure: a changed reviewed value requires a fresh review).
+#[tokio::test]
+async fn a_value_changed_after_the_review_makes_the_decision_stale() {
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::authn::{ConsentDecision, GetConsentRequest, SubmitConsentRequest};
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let mut query = authorize_query(REDIRECT_URI);
+    for (name, value) in &mut query {
+        if *name == "scope" {
+            *value = "openid profile".into();
+        }
+    }
+    let got = browser.get(&with_query(&browser.authorize, &query)).await;
+    let (operation, _) = consent_redirect(&browser, &got);
+    let service = consent_service(&browser);
+    let review = || async {
+        service
+            .get_consent(from_sign_in_page(
+                &browser,
+                GetConsentRequest {
+                    operation_id: Some(wire(operation)),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let shown = review().await;
+    let given = |r: &sid_proto::sid::v1::authn::ConsentDetails| {
+        r.claims
+            .iter()
+            .find(|c| c.name == "given_name")
+            .and_then(|c| c.value.clone())
+    };
+    assert_eq!(given(&shown).as_deref(), Some("Alice"));
+
+    let storage = &browser.user.svc.storage;
+    let mut renamed = browser.user.profile.clone();
+    renamed.given_name = Some("Alicia".into());
+    storage
+        .update_profile(
+            &renamed,
+            sid_core::models::AuditEntry::system("test", "rename").into(),
+        )
+        .await
+        .unwrap();
+    let submit = |r: &sid_proto::sid::v1::authn::ConsentDetails| SubmitConsentRequest {
+        operation_id: Some(wire(operation)),
+        revision: r.revision,
+        csrf_token: r.csrf_token.clone(),
+        decision: ConsentDecision::Approve as i32,
+        choices: choices_sharing(r, &["given_name"]),
+    };
+    let stale = service
+        .submit_consent(from_sign_in_page(&browser, submit(&shown)))
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code(), tonic::Code::Aborted, "{stale:?}");
+    assert!(
+        storage
+            .get_consent_by_client(browser.user.profile.id, "test-client")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let fresh = review().await;
+    assert_eq!(given(&fresh).as_deref(), Some("Alicia"));
+    assert_ne!(fresh.csrf_token, shown.csrf_token);
+    service
+        .submit_consent(from_sign_in_page(&browser, submit(&fresh)))
+        .await
+        .unwrap();
+    let consent = storage
+        .get_consent_by_client(browser.user.profile.id, "test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(consent.grants.len(), 1);
+    assert_eq!(
+        consent.grants[0]
+            .disclosed
+            .as_ref()
+            .map(|d| d.value.as_str()),
+        Some("Alicia")
     );
 }
 
@@ -2477,7 +2649,7 @@ async fn an_approval_grants_the_disclosure_the_review_showed() {
     };
     let page = Arc::new(Some(url::Url::parse(LOGIN_URL).unwrap()));
     let client = sid_core::models::OAuth2Client {
-        claim_requests: vec![ClaimRequest::optional("passport", ClaimType::Attestation)],
+        claim_requests: vec![ClaimRequest::optional("email", ClaimType::Attestation)],
         ..common::test_client()
     };
     let browser = browser_from(signed_in().await, page, client).await;
@@ -2506,7 +2678,7 @@ async fn an_approval_grants_the_disclosure_the_review_showed() {
         .await
         .unwrap()
         .unwrap();
-    changed.claim_requests = vec![ClaimRequest::optional("passport", ClaimType::Data)];
+    changed.claim_requests = vec![ClaimRequest::optional("email", ClaimType::Data)];
     assert!(
         storage
             .update_oauth2_client(
@@ -2526,7 +2698,7 @@ async fn an_approval_grants_the_disclosure_the_review_showed() {
                 csrf_token: review.csrf_token,
                 decision: ConsentDecision::Approve as i32,
                 choices: vec![ClaimChoice {
-                    name: "passport".into(),
+                    name: "email".into(),
                     sharing: ClaimSharing::Static as i32,
                 }],
             },
@@ -2540,6 +2712,14 @@ async fn an_approval_grants_the_disclosure_the_review_showed() {
         .unwrap();
     assert_eq!(consent.grants.len(), 1);
     assert_eq!(consent.grants[0].claim_type, ClaimType::Attestation);
+    // The attestation discloses the verification, never the address.
+    assert_eq!(
+        consent.grants[0].disclosed,
+        Some(sid_core::models::DisclosedValue {
+            value: String::new(),
+            verified: Some(true),
+        })
+    );
 }
 
 /// The assurance the relying party asked for is judged again when the issuer
@@ -3620,11 +3800,8 @@ impl Browser {
             .id_token_signed_by(
                 signer.as_ref(),
                 &self.user.profile.id.to_string(),
-                &self.user.profile,
                 &session,
                 "test-client",
-                None,
-                None,
                 None,
                 None,
             )

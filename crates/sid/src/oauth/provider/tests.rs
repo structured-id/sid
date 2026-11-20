@@ -48,49 +48,54 @@ fn test_metadata_advertises_what_is_served() {
     assert!(m.backchannel_logout_session_supported);
 }
 
-fn profile() -> Profile {
-    let mut profile = Profile::new(Some("alice"));
-    profile.given_name = Some("Alice".into());
-    profile
+/// The holder's consent sharing `given_name` and `email` with their
+/// reviewed values, `phone_number` not shared, and a `family_name` grant
+/// recorded without a reviewed value.
+fn consent() -> sid_core::models::ConsentRecord {
+    use sid_core::models::{ClaimType, ConsentMode, DisclosedValue};
+    let mut consent =
+        sid_core::models::ConsentRecord::new(sid_core::models::ProfileId::generate(), "rp");
+    consent.grant_claim("given_name", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("family_name", ClaimType::Data, ConsentMode::Static);
+    consent.grants[0].disclosed = Some(DisclosedValue {
+        value: "Alice".into(),
+        verified: None,
+    });
+    consent.grants[1].disclosed = Some(DisclosedValue {
+        value: "alice@sid.example.com".into(),
+        verified: Some(false),
+    });
+    consent.as_requested().unwrap().grant();
+    consent
 }
 
-/// Each scope grants its own claims only; `sub` is always there
-/// (OIDC Core 1.0 §5.4).
+/// UserInfo delivers only what the holder approved for this client, for the
+/// claims the token's scopes ask for (OIDC Core 1.0 §5.4): `openid` alone
+/// asks for none, a shared value comes as approved, a claim not shared or
+/// granted without a reviewed value is left out, and without consent
+/// nothing but `sub` (consent-flow.md, OIDC scope requests).
 #[test]
-fn test_granted_claims_follow_the_scopes() {
-    let profile = profile();
-    let now = jiff::Timestamp::now();
-    let email = ProfileEmail {
-        id: sid_core::models::ProfileEmailId::new(),
-        profile_id: profile.id,
-        email: "alice@sid.example.com".into(),
-        label: sid_core::models::EmailLabel::Personal,
-        custom_label: None,
-        is_primary: true,
-        verified: false,
-        verified_at: None,
-        created_at: now,
-        updated_at: now,
-    };
+fn test_userinfo_discloses_the_approved_values_only() {
+    let held = consent();
 
-    let none = granted_claims("s".into(), "openid", &profile, Some(&email), None);
+    let none = disclosed_claims("s".into(), "openid", &[], Some(&held));
     assert_eq!(none.sub, "s");
-    assert!(none.given_name.is_none() && none.email.is_none() && none.updated_at.is_none());
+    assert!(none.given_name.is_none() && none.email.is_none());
 
-    let all = granted_claims(
-        "s".into(),
-        "openid profile email phone",
-        &profile,
-        Some(&email),
-        None,
-    );
+    let all = disclosed_claims("s".into(), "openid profile email phone", &[], Some(&held));
     assert_eq!(all.given_name.as_deref(), Some("Alice"));
-    assert_eq!(all.preferred_username.as_deref(), Some("alice"));
-    assert!(all.updated_at.is_some());
     assert_eq!(all.email.as_deref(), Some("alice@sid.example.com"));
     assert_eq!(all.email_verified, Some(false));
-    // Granted but not set: absent, not empty.
-    assert!(all.phone_number.is_none() && all.phone_number_verified.is_none());
+    assert!(
+        all.family_name.is_none(),
+        "granted without a reviewed value"
+    );
+    assert!(all.preferred_username.is_none() && all.phone_number.is_none());
+    assert!(all.updated_at.is_none());
+
+    let without_consent = disclosed_claims("s".into(), "openid profile email", &[], None);
+    assert!(without_consent.given_name.is_none() && without_consent.email.is_none());
 }
 
 #[test]

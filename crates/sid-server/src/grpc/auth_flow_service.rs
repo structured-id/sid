@@ -10,7 +10,9 @@ use sid::oauth::consent::{
     ConsentReview, FlowView, Submission, SubmittedDecision, allowed_sharing, claim_request_to_wire,
     level_to_wire,
 };
-use sid_core::models::{AuthorizationOperationId, AuthorizationStatus, ClaimSharing as Sharing};
+use sid_core::models::{
+    AuthorizationOperationId, AuthorizationStatus, ClaimSharing as Sharing, ClaimType,
+};
 use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
 use sid_proto::sid::v1::authn::{
     AuthorizationStep, ClaimSharing, ConsentClaim, ConsentDecision, ConsentDetails, FlowState,
@@ -74,15 +76,22 @@ fn details(review: ConsentReview) -> ConsentDetails {
             .operation
             .claim_requests
             .iter()
-            .map(|request| ConsentClaim {
+            .zip(&review.shown)
+            .map(|(request, (_, shown))| ConsentClaim {
                 name: request.claim_name.clone(),
                 level: level_to_wire(request.level) as i32,
                 r#type: claim_request_to_wire(request).r#type,
                 justification: request.justification.clone(),
-                allowed: allowed_sharing(request)
+                allowed: allowed_sharing(request, shown.is_some())
                     .into_iter()
                     .map(|s| wire_sharing(s) as i32)
                     .collect(),
+                // An attestation discloses only whether the value was
+                // verified: `true` or `false`.
+                value: shown.as_ref().map(|shown| match request.claim_type {
+                    ClaimType::Data => shown.value.clone(),
+                    ClaimType::Attestation => shown.verified.unwrap_or(false).to_string(),
+                }),
             })
             .collect(),
         identity_display_name: review.identity,

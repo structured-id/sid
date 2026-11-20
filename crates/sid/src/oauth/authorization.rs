@@ -348,6 +348,15 @@ impl OAuth {
                 .await?
         {
             let now = Timestamp::now();
+            let held = self
+                .storage
+                .get_consent_by_client(session.profile_id, &client.client_id)
+                .await?;
+            let claim_requests = super::consent::review_requests(
+                &client.claim_requests,
+                &admitted.validated.scopes,
+                held.as_ref(),
+            );
             return Ok(Authorized::ConsentOwed(Box::new(AuthorizationOperation {
                 id: AuthorizationOperationId::generate(),
                 issuer_id: issuer.id,
@@ -362,7 +371,7 @@ impl OAuth {
                 resource_id: admitted.resource,
                 scopes: admitted.validated.scopes.clone(),
                 acr_values,
-                claim_requests: client.claim_requests.clone(),
+                claim_requests,
                 session_id: session.id,
                 profile_id: session.profile_id,
                 status: AuthorizationStatus::AwaitingConsent,

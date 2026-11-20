@@ -131,7 +131,7 @@ pub use certificate::{Certificate, CertificateId, CertificateType};
 pub use claim_mapping::{ClaimMapping, ClaimTransform};
 pub use consent::{
     ClaimGrant, ClaimGrantId, ClaimLevel, ClaimRequest, ClaimSubscription, ClaimType, ConsentId,
-    ConsentMode, ConsentRecord, ConsentStatus, ScopeGrant,
+    ConsentMode, ConsentRecord, ConsentStatus, DisclosedValue, ScopeGrant,
 };
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialFence, CredentialId,

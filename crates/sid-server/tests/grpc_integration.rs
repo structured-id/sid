@@ -1830,10 +1830,13 @@ async fn test_refresh_rotation_storage_failure_is_reported() {
     assert_eq!(err.code(), tonic::Code::Internal);
 }
 
-/// A refresh whose contact claims cannot be read fails: it must not issue
-/// tokens that silently lack the email and phone claims the scopes promised.
+/// A refresh reads no current Profile contact: its tokens carry none, the
+/// claims the scopes ask for reach the client through UserInfo from the
+/// holder's approved disclosure, so unreadable contacts do not fail it
+/// (consent-flow.md, OIDC scope requests: issuance and refresh cannot fill a
+/// value from the current source Profile).
 #[tokio::test]
-async fn test_refresh_with_unreadable_contacts_is_reported() {
+async fn test_refresh_does_not_read_profile_contacts() {
     let profile = test_profile();
     let svc = TestServices::new(
         MockStorage::new()
@@ -1849,7 +1852,7 @@ async fn test_refresh_with_unreadable_contacts_is_reported() {
         .into_inner();
 
     svc.mock_storage.fail_contact_reads();
-    let err = svc
+    let renewed = svc
         .auth
         .o_auth2_token(Request::new(OAuth2TokenRequest {
             grant_type: "refresh_token".to_string(),
@@ -1859,9 +1862,9 @@ async fn test_refresh_with_unreadable_contacts_is_reported() {
             ..Default::default()
         }))
         .await
-        .expect_err("tokens were issued without their contact claims");
-
-    assert_eq!(err.code(), tonic::Code::Internal);
+        .expect("a refresh reading no contact")
+        .into_inner();
+    assert!(!renewed.access_token.is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2506,12 +2509,9 @@ async fn test_id_token_contains_sid_claim() {
     let id_token = jwt
         .issue_id_token(
             &profile.id.to_string(),
-            &profile,
             &session,
             "test-client",
             Some("nonce-123"),
-            None,
-            None,
         )
         .unwrap();
 
@@ -2519,87 +2519,6 @@ async fn test_id_token_contains_sid_claim() {
     assert_eq!(claims.sid.as_deref(), Some(session.id.to_string().as_str()));
     assert_eq!(claims.sub, profile.id.to_string());
     assert_eq!(claims.nonce.as_deref(), Some("nonce-123"));
-}
-
-#[tokio::test]
-async fn test_id_token_oidc_standard_claims_from_profile_fields() {
-    let jwt = test_jwt();
-    let mut profile = Profile::new(Some("oidc_claims_test"));
-    profile.given_name = Some("Alice".to_string());
-    profile.family_name = Some("Smith".to_string());
-    profile.middle_name = Some("Marie".to_string());
-    let session = Session::new(
-        profile.id,
-        None,
-        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
-    );
-
-    let id_token = jwt
-        .issue_id_token(
-            &profile.id.to_string(),
-            &profile,
-            &session,
-            "test-client",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-    let claims = jwt.decode_id_token_unverified(&id_token).unwrap();
-
-    // OIDC §5.1 name claims from Profile Fields
-    assert_eq!(claims.given_name.as_deref(), Some("Alice"));
-    assert_eq!(claims.family_name.as_deref(), Some("Smith"));
-    assert_eq!(claims.middle_name.as_deref(), Some("Marie"));
-    assert_eq!(claims.name.as_deref(), Some("Alice Marie Smith"));
-    assert_eq!(
-        claims.preferred_username.as_deref(),
-        Some("oidc_claims_test")
-    );
-
-    // Email/phone claims absent (no primary_email/primary_phone passed to issue_id_token)
-    assert!(claims.email.is_none());
-    assert!(claims.email_verified.is_none());
-    assert!(claims.phone_number.is_none());
-    assert!(claims.phone_number_verified.is_none());
-
-    // updated_at from Profile.updated_at
-    assert_eq!(claims.updated_at, Some(profile.updated_at.as_second()));
-}
-
-#[tokio::test]
-async fn test_id_token_no_email_omits_email_verified() {
-    let jwt = test_jwt();
-    let mut profile = Profile::new(Some("no_email_test"));
-    profile.given_name = Some("Bob".to_string());
-    let session = Session::new(
-        profile.id,
-        None,
-        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
-    );
-
-    let id_token = jwt
-        .issue_id_token(
-            &profile.id.to_string(),
-            &profile,
-            &session,
-            "test-client",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-    let claims = jwt.decode_id_token_unverified(&id_token).unwrap();
-
-    // No email → email_verified must be absent (not false)
-    assert!(claims.email.is_none());
-    assert!(claims.email_verified.is_none());
-
-    // Name claims still present
-    assert_eq!(claims.given_name.as_deref(), Some("Bob"));
-    assert!(claims.family_name.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════
