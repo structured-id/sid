@@ -259,3 +259,26 @@ fn allowed_sharing_is_what_the_request_admits() {
     assert_eq!(allowed_sharing(&r[1], false), vec![ClaimSharing::None]);
     assert!(allowed_sharing(&r[0], false).is_empty());
 }
+
+/// The browser's page binds a review to the session's CSRF token, and a
+/// session without one (not signed in through the browser) reviews nothing
+/// there; an embedding host in the same process reviews with a key of its
+/// own session, never another session's and never the browser's token.
+#[test]
+fn the_review_key_follows_who_presents_it() {
+    let expires = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1);
+    let mut session: Session = Session::new(sid_core::models::ProfileId::generate(), None, expires);
+    assert!(Interaction::Browser.key(&session).is_none());
+
+    let in_process = Interaction::InProcess
+        .key(&session)
+        .expect("an in-process key");
+    assert!(Interaction::InProcess.key(&session) == Some(in_process));
+    let other: Session = Session::new(session.profile_id, None, expires);
+    assert!(Interaction::InProcess.key(&other) != Some(in_process));
+
+    let token = BrowserCsrfToken::from_bytes([7; 32]);
+    session.browser_csrf = Some(token);
+    assert!(Interaction::Browser.key(&session) == Some(token));
+    assert!(Interaction::InProcess.key(&session) == Some(in_process));
+}
