@@ -23,10 +23,13 @@ fn main() {
         let provider = sid_crypto::jwt::rustcrypto::provider();
         let key = [7; 64];
         let signer =
-            (provider.signer_factory)(&Algorithm::HS256, &EncodingKey::from_secret(&key)).unwrap();
-        let verifier =
-            (provider.verifier_factory)(&Algorithm::HS256, &DecodingKey::from_secret(&key))
+            (provider.signer_factory)(&Algorithm::HS256, &EncodingKey::from_secret(&key).unwrap())
                 .unwrap();
+        let verifier = (provider.verifier_factory)(
+            &Algorithm::HS256,
+            &DecodingKey::from_secret(&key).unwrap(),
+        )
+        .unwrap();
         let message = b"external consumer";
         let signature = signer.try_sign(message).unwrap();
         verifier.verify(message, &signature).unwrap();

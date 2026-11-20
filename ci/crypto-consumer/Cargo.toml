@@ -13,4 +13,4 @@ primitives = ["sid-crypto/primitives"]
 
 [dependencies]
 sid-crypto = { path = "@PACKAGE@", default-features = false, features = ["std"] }
-jsonwebtoken = { version = "11", default-features = false, optional = true }
+jsonwebtoken = { version = "12", default-features = false, optional = true }
