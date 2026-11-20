@@ -287,8 +287,29 @@ pub fn allowed_sharing(request: &ClaimRequest, has_value: bool) -> Vec<ClaimShar
 
 impl OAuth {
     /// The value each claim this issuer discloses has in Profile `profile`
-    /// now: its names, its username and its primary contacts.
+    /// now, from one version of it: its names, username and primary
+    /// contacts live in separate records, so they are read until two reads
+    /// agree; an edit racing every read is a conflict for the caller to
+    /// retry, never a mixed set shown or approved.
     pub(crate) async fn current_values(
+        &self,
+        profile: sid_core::models::ProfileId,
+    ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
+        let mut last = self.read_values(profile).await?;
+        for _ in 0..3 {
+            let again = self.read_values(profile).await?;
+            if again == last {
+                return Ok(again);
+            }
+            last = again;
+        }
+        Err(SidError::Conflict(
+            "the Profile kept changing while its values were read".into(),
+        ))
+    }
+
+    /// One read of `profile`'s claim values (see [`Self::current_values`]).
+    async fn read_values(
         &self,
         profile: sid_core::models::ProfileId,
     ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
@@ -330,6 +351,62 @@ impl OAuth {
             ));
         }
         Ok(values)
+    }
+
+    /// The disclosure Profile `profile` holds for client `client_id` now:
+    /// its consent, with the subscriptions' delivery of a later Profile edit
+    /// committed first when every changed value is subscribed, so UserInfo
+    /// and the tokens read the committed snapshot and never the live Profile
+    /// (consent-flow.md, claim update propagation). A delivery that lost a
+    /// race with a newer edit or decision leaves what that one committed.
+    pub(crate) async fn held_disclosure(
+        &self,
+        profile: sid_core::models::ProfileId,
+        client_id: &str,
+    ) -> Result<Option<sid_core::models::ConsentRecord>, SidError> {
+        let Some(mut held) = self
+            .storage
+            .get_consent_by_client(profile, client_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let subscribed = held.status.is_active()
+            && held
+                .grants
+                .iter()
+                .any(|g| g.is_active() && g.mode == sid_core::models::ConsentMode::Subscribed);
+        if !subscribed {
+            return Ok(Some(held));
+        }
+        let values = self.current_values(profile).await?;
+        let Some(updates) = held.subscribed_delivery(|grant| {
+            disclosed_for(
+                &ClaimRequest::optional(grant.claim_name.clone(), grant.claim_type),
+                &values,
+            )
+        }) else {
+            return Ok(Some(held));
+        };
+        let ctx: MutationContext =
+            AuditEntry::system("consent.deliver", held.id.0.to_string()).into();
+        if self
+            .storage
+            .deliver_subscribed(held.id, &updates, ctx)
+            .await?
+        {
+            for update in updates {
+                if let Some(grant) = held
+                    .grants
+                    .iter_mut()
+                    .find(|g| g.is_active() && g.claim_name == update.claim_name)
+                {
+                    grant.disclosed = update.next;
+                }
+            }
+            return Ok(Some(held));
+        }
+        self.storage.get_consent_by_client(profile, client_id).await
     }
 
     /// What `operation`'s review shows: each reviewed claim with the value
@@ -458,6 +535,15 @@ impl OAuth {
         if !BrowserCsrf::bound_matches(authentic, &token, &csrf_context(id, revision)) {
             return Err(ConsentError::Csrf);
         }
+        // A decision already recorded for this revision, submitted again
+        // after a lost reply, answers the committed outcome, even if the
+        // Profile changed since: the recorded values stand.
+        if operation.revision == revision + 1
+            && let Some(recorded) = &operation.decision
+            && same_choices(recorded, &decision)
+        {
+            return Ok(self.view(issuer, operation, now));
+        }
         let decision = match decision {
             SubmittedDecision::Deny => AuthorizationDecision::Deny,
             // Read against the claim requests pinned on the operation and the
@@ -528,6 +614,23 @@ impl OAuth {
             operation,
             continuation,
         }
+    }
+}
+
+/// Whether `submitted` is the holder's `recorded` decision: both denials, or
+/// approvals with the same sharing for every claim.
+fn same_choices(recorded: &AuthorizationDecision, submitted: &SubmittedDecision) -> bool {
+    match (recorded, submitted) {
+        (AuthorizationDecision::Deny, SubmittedDecision::Deny) => true,
+        (AuthorizationDecision::Approve { choices }, SubmittedDecision::Approve(submitted)) => {
+            choices.len() == submitted.len()
+                && choices.iter().all(|choice| {
+                    submitted
+                        .iter()
+                        .any(|(name, sharing)| *name == choice.name && *sharing == choice.sharing)
+                })
+        }
+        _ => false,
     }
 }
 

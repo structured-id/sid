@@ -180,20 +180,28 @@ impl GrantHost for ProfileGrant<'_> {
         let custom_claims = if client.claim_mappings.is_empty() {
             None
         } else {
-            let (email, phone) = self.oauth.primary_contacts(profile.id).await?;
             let metadata = self
                 .oauth
                 .storage
                 .list_profile_metadata(profile.id)
                 .await
                 .map_err(|e| internal("token claims", e))?;
+            // The holder's approved disclosure to this client: a mapping
+            // takes a holder field from here only, never the current Profile.
+            let disclosed = self
+                .oauth
+                .held_disclosure(profile.id, &client.client_id)
+                .await
+                .map_err(|e| internal("token claims", e))?
+                .filter(|c| c.status.is_active())
+                .map(|c| c.grants)
+                .unwrap_or_default();
             let resolved = sid_authn::claim_mapping::resolve_claims(
                 &client.claim_mappings,
                 profile,
                 &metadata,
                 scopes,
-                email.as_ref(),
-                phone.as_ref(),
+                &disclosed,
             );
             (!resolved.is_empty()).then_some(resolved)
         };

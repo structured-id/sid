@@ -388,10 +388,12 @@ impl OAuth {
     }
 
     /// Whether the holder's recorded consent of `profile` to `client` leaves
-    /// the admitted request uncovered: its scopes for its resource and every
-    /// required claim the client asks for. Only the holder's own grant
-    /// covers it; the client's registration, an integration or an empty
-    /// claim list never does (authz/consent-flow.md, holder consent
+    /// the admitted request uncovered: its scopes for its resource, every
+    /// required claim the client asks for, and a decision on every claim it
+    /// asks for, shared or refused (a claim asked for the first time needs
+    /// one; one refused before is not asked again). Only the holder's own
+    /// grant covers it; the client's registration, an integration or an
+    /// empty claim list never does (authz/consent-flow.md, holder consent
     /// authority).
     async fn consent_owed(
         &self,
@@ -411,7 +413,20 @@ impl OAuth {
             .get_consent_by_client(profile, &client.client_id)
             .await?;
         Ok(!held.is_some_and(|consent| {
-            consent.covers(admitted.resource, &admitted.validated.scopes, &required)
+            let decided = super::consent::review_requests(
+                &client.claim_requests,
+                &admitted.validated.scopes,
+                Some(&consent),
+            )
+            .iter()
+            .all(|request| {
+                // Refused, or shared with its approved value; a grant
+                // re-enabled without one is not yet decided.
+                consent.grants.iter().any(|g| {
+                    g.claim_name == request.claim_name && (!g.is_active() || g.disclosed.is_some())
+                })
+            });
+            decided && consent.covers(admitted.resource, &admitted.validated.scopes, &required)
         }))
     }
 

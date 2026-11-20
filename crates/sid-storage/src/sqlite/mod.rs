@@ -1316,6 +1316,15 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
+    async fn deliver_subscribed(
+        &self,
+        id: sid_core::models::consent::ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.deliver_subscribed_impl(id, updates, audit).await
+    }
+
     async fn get_consent(
         &self,
         id: sid_core::models::consent::ConsentId,

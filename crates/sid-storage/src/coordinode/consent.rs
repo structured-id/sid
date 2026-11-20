@@ -568,6 +568,73 @@ impl CoordinodeBackend {
         .await
     }
 
+    /// Deliver a subscription's replacement of the active consent `id`'s
+    /// disclosure, all or nothing: every grant is read and written in one
+    /// transaction, so a concurrent decision on any of them conflicts.
+    pub(super) async fn deliver_subscribed(
+        &self,
+        id: ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let updates = updates.to_vec();
+        self.transaction(move |tx| {
+            let active =
+                consents_where(tx, "c.id = $id", Params::default().with("id", uuid(&id.0)))?
+                    .pop()
+                    .is_some_and(|c| c.status.as_str() == "active");
+            if !active {
+                return Ok(Decision::Abandon(false));
+            }
+            for update in &updates {
+                let pair = claim_pair(id, &update.claim_name)?;
+                let holds_prior = tx
+                    .run(
+                        &format!("MATCH (g:SidClaimGrant) WHERE g.pair = $pair RETURN {CLAIM}"),
+                        Params::default().with("pair", pair.clone()),
+                    )?
+                    .first()
+                    .map(claim)
+                    .transpose()?
+                    .is_some_and(|g| {
+                        g.is_active()
+                            && g.mode == ConsentMode::Subscribed
+                            && g.disclosed == update.prior
+                    });
+                if !holds_prior {
+                    return Ok(Decision::Abandon(false));
+                }
+                tx.run(
+                    "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
+                     SET g.disclosed_value = $value, g.disclosed_verified = $verified",
+                    Params::default()
+                        .with("pair", pair)
+                        .with(
+                            "value",
+                            opt_text(update.next.as_ref().map(|d| d.value.as_str())),
+                        )
+                        .with(
+                            "verified",
+                            update
+                                .next
+                                .as_ref()
+                                .and_then(|d| d.verified)
+                                .map_or(Value::Null, Value::Bool),
+                        ),
+                )?;
+            }
+            tx.run(
+                "MATCH (c:SidConsent) WHERE c.id = $id SET c.updated_at = $now",
+                Params::default()
+                    .with("id", uuid(&id.0))
+                    .with("now", time(Timestamp::now())),
+            )?;
+            finalize(tx, &format!("consent:{}", id.0), ctx.clone())?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
     pub(super) async fn get_consent(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {
         self.read(move |tx| {
             Ok(consents_where(tx, "c.id = $id", Params::default().with("id", uuid(&id.0)))?.pop())

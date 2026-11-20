@@ -237,14 +237,19 @@ fn an_approval_replaces_the_disclosure() {
     assert!(consent.covers(op.resource_id, &op.scopes, &[&email]));
     assert!(!consent.covers(op.resource_id, &[], &[&name]));
     assert!(consent.covers(op.resource_id, &["other".into()], &[]));
-    assert_eq!(consent.grants.len(), 1);
+    let shared: Vec<_> = consent.grants.iter().filter(|g| g.is_active()).collect();
+    assert_eq!(shared.len(), 1);
     assert_eq!(
-        consent.grants[0]
-            .disclosed
-            .as_ref()
-            .map(|d| d.value.as_str()),
+        shared[0].disclosed.as_ref().map(|d| d.value.as_str()),
         Some("email-value")
     );
+    // The omitted claim is recorded as refused, without a value.
+    let refused = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "name")
+        .unwrap();
+    assert!(!refused.is_active() && refused.disclosed.is_none());
 }
 
 /// A revoked consent approved again grants what this approval grants and

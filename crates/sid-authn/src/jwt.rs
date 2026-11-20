@@ -406,6 +406,17 @@ pub struct IdTokenClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
 
+    /// Profile claims an issuer disclosed to this client in its ID token
+    /// (OIDC Core 1.0 §5.1), read by a consumer from a verified token. This
+    /// issuer never sets them: its Profile claims reach UserInfo from the
+    /// holder's approved disclosure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_username: Option<String>,
+
     /// The Binding presentation a SID installation's federation return
     /// carries (`crate::federated_entry::PRESENTATION_CLAIM`): the holder's
     /// proof for this one sign-in, a JWS in General JSON Serialization. It
@@ -813,6 +824,9 @@ impl JwtService {
             amr: session.amr.clone(),
             sid: Some(session.id.to_string()),
             nonce: nonce.map(String::from),
+            email: None,
+            name: None,
+            preferred_username: None,
             binding_presentation: presentation.cloned(),
         };
 

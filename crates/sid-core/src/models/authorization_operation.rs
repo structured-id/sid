@@ -227,9 +227,9 @@ impl AuthorizationOperation {
     /// The consent an approval with `choices` leaves for this operation's
     /// Profile and client, from `held`, the consent stored for that pair if
     /// any: active, with the operation's scopes for its resource added, and
-    /// its disclosure replaced as a whole by the reviewed one: every shared
-    /// claim with its reviewed value in its chosen mode, an omitted one no
-    /// longer disclosed (identity-model.md, recipient disclosure).
+    /// its disclosure to this client replaced as a whole by the reviewed one:
+    /// every shared claim with its reviewed value in its chosen mode, an
+    /// omitted one recorded as refused and no longer disclosed.
     pub fn approved_consent(
         &self,
         held: Option<ConsentRecord>,
@@ -246,16 +246,27 @@ impl AuthorizationOperation {
         }
         consent.grant_scopes(self.resource_id, &self.scopes);
         let id = consent.id;
+        let now = jiff::Timestamp::now();
         consent.grants = choices
             .iter()
-            .filter_map(|choice| {
-                let mode = choice.mode()?;
-                let mut grant = ClaimGrant::new(id, choice.name.clone(), choice.claim_type, mode);
-                grant.disclosed = choice.disclosed.clone();
-                Some(grant)
+            .map(|choice| {
+                let mut grant = ClaimGrant::new(
+                    id,
+                    choice.name.clone(),
+                    choice.claim_type,
+                    choice.mode().unwrap_or_default(),
+                );
+                match choice.mode() {
+                    Some(_) => grant.disclosed = choice.disclosed.clone(),
+                    // A refusal is recorded as a withdrawn grant without a
+                    // value: it discloses nothing, and the same request is
+                    // not asked again.
+                    None => grant.revoked_at = Some(now),
+                }
+                grant
             })
             .collect();
-        consent.updated_at = jiff::Timestamp::now();
+        consent.updated_at = now;
         consent
     }
 }

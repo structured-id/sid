@@ -297,10 +297,7 @@ impl OAuth {
             .await?
             .map(|c| c.claim_requests)
             .unwrap_or_default();
-        let held = self
-            .storage
-            .get_consent_by_client(profile.id, client_id)
-            .await?;
+        let held = self.held_disclosure(profile.id, client_id).await?;
         // `sub` as the token carries it: the ID token of this client under
         // the same hop carried the same value (OIDC Core 1.0 §5.3.2).
         Ok(disclosed_claims(

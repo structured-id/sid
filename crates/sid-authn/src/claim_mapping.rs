@@ -5,13 +5,19 @@
 //! applying built-in transforms and scope-based conditions.
 
 use sid_core::models::claim_mapping::{ClaimMapping, ClaimTransform};
+use sid_core::models::consent::{ClaimGrant, ClaimType};
 use sid_core::models::profile::Profile;
-use sid_core::models::profile_email::ProfileEmail;
 use sid_core::models::profile_metadata::ProfileMetadata;
-use sid_core::models::profile_phone::ProfilePhone;
 use std::collections::HashMap;
 
 /// Resolve all claim mappings into a map of claim name → JSON value.
+///
+/// A holder-disclosed field (names, username, email, phone) comes only from
+/// `disclosed`, the active grants of the holder's consent to this client
+/// with their approved values: a mapping, whatever its target name or
+/// transform, cannot take it from the current Profile after a refusal or an
+/// edit (token-claims-hooks.md, additive enrichment and protected token
+/// fields). Organization attributes and literals map as configured.
 ///
 /// Mappings that fail to resolve (unknown source, transform error) are
 /// silently skipped — never fail token issuance due to mapping config.
@@ -20,8 +26,7 @@ pub fn resolve_claims(
     profile: &Profile,
     metadata: &[ProfileMetadata],
     scopes: &[String],
-    primary_email: Option<&ProfileEmail>,
-    primary_phone: Option<&ProfilePhone>,
+    disclosed: &[ClaimGrant],
 ) -> HashMap<String, serde_json::Value> {
     let mut claims = HashMap::new();
 
@@ -34,13 +39,7 @@ pub fn resolve_claims(
         }
 
         // Resolve source value
-        if let Some(value) = resolve_source(
-            &mapping.source,
-            profile,
-            metadata,
-            primary_email,
-            primary_phone,
-        ) {
+        if let Some(value) = resolve_source(&mapping.source, profile, metadata, disclosed) {
             // Apply transform
             let transformed = match &mapping.transform {
                 Some(t) => apply_transform(t, value),
@@ -80,9 +79,23 @@ fn resolve_source(
     source: &str,
     profile: &Profile,
     metadata: &[ProfileMetadata],
-    primary_email: Option<&ProfileEmail>,
-    primary_phone: Option<&ProfilePhone>,
+    disclosed: &[ClaimGrant],
 ) -> Option<serde_json::Value> {
+    // The approved disclosure of claim `name`: its value only for a data
+    // grant, its verification for any.
+    let grant = |name: &str| {
+        disclosed
+            .iter()
+            .find(|g| g.is_active() && g.claim_name == name)
+            .and_then(|g| g.disclosed.as_ref().map(|d| (g.claim_type, d)))
+    };
+    let value = |name: &str| {
+        grant(name)
+            .filter(|(kind, _)| *kind == ClaimType::Data)
+            .map(|(_, d)| serde_json::json!(&d.value))
+    };
+    let verified =
+        |name: &str| grant(name).and_then(|(_, d)| d.verified.map(|v| serde_json::json!(v)));
     // literal(VALUE)
     if let Some(value) = source
         .strip_prefix("literal(")
@@ -102,26 +115,19 @@ fn resolve_source(
     // profile.FIELD
     if let Some(field) = source.strip_prefix("profile.") {
         return match field {
-            // Contact fields (from profile_emails / profile_phones)
-            "email" => primary_email.map(|e| serde_json::json!(&e.email)),
-            "email_verified" => primary_email.map(|e| serde_json::json!(e.verified)),
-            "phone" | "phone_number" => {
-                primary_phone.map(|p| serde_json::json!(p.formatted_e164()))
-            }
-            "phone_verified" | "phone_number_verified" => {
-                primary_phone.map(|p| serde_json::json!(p.verified))
-            }
-            // Identity fields
-            "username" => Some(serde_json::json!(&profile.username)),
-            "display_name" | "name" => profile.formatted_name().map(|d| serde_json::json!(d)),
-            "given_name" => profile.given_name.as_ref().map(|v| serde_json::json!(v)),
-            "family_name" => profile.family_name.as_ref().map(|v| serde_json::json!(v)),
-            "middle_name" => profile.middle_name.as_ref().map(|v| serde_json::json!(v)),
-            // Authorization fields
+            // Holder-disclosed fields: the approved values only.
+            "email" => value("email"),
+            "email_verified" => verified("email"),
+            "phone" | "phone_number" => value("phone_number"),
+            "phone_verified" | "phone_number_verified" => verified("phone_number"),
+            "username" => value("preferred_username"),
+            "display_name" | "name" => value("name"),
+            "given_name" => value("given_name"),
+            "family_name" => value("family_name"),
+            "middle_name" => value("middle_name"),
+            // Authorization fields of this installation.
             "roles" => Some(serde_json::json!(&profile.roles)),
             "status" => Some(serde_json::json!(profile.status.as_str())),
-            // Temporal fields
-            "updated_at" => Some(serde_json::json!(profile.updated_at.as_second())),
             _ => None, // Unknown field → skip
         };
     }
@@ -200,30 +206,69 @@ mod tests {
         p
     }
 
-    /// Test helper — wraps resolve_claims with default primary contacts
+    /// Test helper: resolve_claims with the holder's approved disclosure of
+    /// [`approved`].
     fn resolve_test(
         mappings: &[ClaimMapping],
         profile: &Profile,
         metadata: &[ProfileMetadata],
         scopes: &[String],
     ) -> std::collections::HashMap<String, serde_json::Value> {
-        let email = test_primary_email();
-        resolve_claims(mappings, profile, metadata, scopes, Some(&email), None)
+        resolve_claims(mappings, profile, metadata, scopes, &approved())
     }
 
-    fn test_primary_email() -> ProfileEmail {
-        ProfileEmail {
-            id: sid_core::models::ProfileEmailId::new(),
-            profile_id: ProfileId::generate(),
-            email: "alice@sid.example.com".to_string(),
-            label: sid_core::models::EmailLabel::Personal,
-            custom_label: None,
-            is_primary: true,
-            verified: true,
-            verified_at: None,
-            created_at: jiff::Timestamp::now(),
-            updated_at: jiff::Timestamp::now(),
-        }
+    /// A grant of `name` with its approved `value`.
+    fn grant(name: &str, value: &str, verified: Option<bool>) -> ClaimGrant {
+        let mut grant = ClaimGrant::new(
+            sid_core::models::ConsentId::new(),
+            name,
+            ClaimType::Data,
+            sid_core::models::ConsentMode::Static,
+        );
+        grant.disclosed = Some(sid_core::models::DisclosedValue {
+            value: value.into(),
+            verified,
+        });
+        grant
+    }
+
+    /// The holder shared these values with the client: a verified email,
+    /// the username and the names.
+    fn approved() -> Vec<ClaimGrant> {
+        vec![
+            grant("email", "alice@sid.example.com", Some(true)),
+            grant("preferred_username", "alice@sid.example.com", None),
+            grant("name", "Alice Smith", None),
+            grant("given_name", "Alice", None),
+            grant("family_name", "Smith", None),
+        ]
+    }
+
+    /// A holder-disclosed field mapped under any name or transform comes
+    /// only from the approved disclosure: not shared, or shared with an
+    /// older value, the mapping yields nothing or the approved value, never
+    /// the current Profile (token-claims-hooks.md, additive enrichment).
+    #[test]
+    fn a_mapping_cannot_take_a_holder_field_from_the_profile() {
+        let mapping = |source: &str, target: &str| ClaimMapping {
+            source: source.to_string(),
+            target: target.to_string(),
+            transform: Some(ClaimTransform::Uppercase),
+            condition: None,
+        };
+        let mappings = [
+            mapping("profile.email", "mail"),
+            mapping("profile.given_name", "first"),
+        ];
+        let mut profile = test_profile();
+        profile.given_name = Some("Alicia".into());
+
+        let refused = resolve_claims(&mappings, &profile, &[], &[], &[]);
+        assert!(refused.is_empty(), "{refused:?}");
+
+        let approved = resolve_claims(&mappings, &profile, &[], &[], &approved());
+        assert_eq!(approved.get("mail").unwrap(), "ALICE@SID.EXAMPLE.COM");
+        assert_eq!(approved.get("first").unwrap(), "ALICE");
     }
 
     fn test_metadata() -> Vec<ProfileMetadata> {
@@ -608,8 +653,7 @@ mod tests {
 
     #[test]
     fn test_resolve_profile_email_verified() {
-        let email = test_primary_email(); // verified = true
-        let claims = resolve_claims(
+        let claims = resolve_test(
             &[ClaimMapping {
                 source: "profile.email_verified".to_string(),
                 target: "email_verified".to_string(),
@@ -619,15 +663,13 @@ mod tests {
             &test_profile(),
             &[],
             &[],
-            Some(&email),
-            None,
         );
         assert_eq!(claims.get("email_verified").unwrap(), true);
     }
 
     #[test]
     fn test_resolve_profile_email_verified_absent_without_email() {
-        // No primary email → email_verified absent
+        // The email not shared → email_verified absent
         let claims = resolve_claims(
             &[ClaimMapping {
                 source: "profile.email_verified".to_string(),
@@ -638,31 +680,13 @@ mod tests {
             &test_profile(),
             &[],
             &[],
-            None,
-            None,
+            &[],
         );
         assert!(claims.is_empty());
     }
 
     #[test]
     fn test_resolve_profile_phone() {
-        use sid_core::models::{PhoneLabel, ProfilePhoneId};
-        let phone = ProfilePhone {
-            id: ProfilePhoneId::new(),
-            profile_id: ProfileId::generate(),
-            e164: 380501234567,
-            extension: None,
-            label: PhoneLabel::Mobile,
-            custom_label: None,
-            is_primary: true,
-            can_receive_sms: true,
-            can_receive_fax: false,
-            can_receive_voice: true,
-            verified: true,
-            verified_at: None,
-            created_at: jiff::Timestamp::now(),
-            updated_at: jiff::Timestamp::now(),
-        };
         let claims = resolve_claims(
             &[
                 ClaimMapping {
@@ -681,8 +705,7 @@ mod tests {
             &test_profile(),
             &[],
             &[],
-            None,
-            Some(&phone),
+            &[grant("phone_number", "+380501234567", Some(true))],
         );
         assert_eq!(claims.get("phone_number").unwrap(), "+380501234567");
         assert_eq!(claims.get("phone_number_verified").unwrap(), true);
@@ -690,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_resolve_profile_phone_verified_absent_without_phone() {
-        // No primary phone → phone_number_verified absent
+        // The phone not shared → phone_number_verified absent
         let claims = resolve_claims(
             &[ClaimMapping {
                 source: "profile.phone_verified".to_string(),
@@ -701,8 +724,7 @@ mod tests {
             &test_profile(),
             &[],
             &[],
-            None,
-            None,
+            &[],
         );
         assert!(claims.is_empty());
     }
@@ -724,10 +746,10 @@ mod tests {
         assert_eq!(claims.get("name").unwrap(), "Alice Smith");
     }
 
+    /// The live Profile's update time is not mapped: it is no approved value
+    /// and would reveal an edit the holder did not disclose.
     #[test]
-    fn test_resolve_profile_updated_at() {
-        let profile = test_profile();
-        let expected = profile.updated_at.as_second();
+    fn test_resolve_profile_updated_at_is_not_mapped() {
         let claims = resolve_test(
             &[ClaimMapping {
                 source: "profile.updated_at".to_string(),
@@ -735,10 +757,10 @@ mod tests {
                 transform: None,
                 condition: None,
             }],
-            &profile,
+            &test_profile(),
             &[],
             &[],
         );
-        assert_eq!(claims.get("updated_at").unwrap(), expected);
+        assert!(claims.is_empty());
     }
 }

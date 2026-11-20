@@ -3432,6 +3432,37 @@ impl StorageBackend for MockStorage {
         Ok(ClaimGrantChange::Changed)
     }
 
+    async fn deliver_subscribed(
+        &self,
+        id: sid_core::models::consent::ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(mut consent) = inner
+            .consents
+            .get(&id.0)
+            .filter(|c| c.status.is_active())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        for update in updates {
+            let Some(grant) = consent.grants.iter_mut().find(|g| {
+                g.claim_name == update.claim_name
+                    && g.is_active()
+                    && g.mode == sid_core::models::ConsentMode::Subscribed
+                    && g.disclosed == update.prior
+            }) else {
+                return Ok(false);
+            };
+            grant.disclosed = update.next.clone();
+        }
+        inner.owe(&ctx)?;
+        inner.consents.insert(id.0, consent);
+        Ok(true)
+    }
+
     async fn get_consent(
         &self,
         id: sid_core::models::consent::ConsentId,

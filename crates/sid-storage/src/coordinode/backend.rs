@@ -727,6 +727,15 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::change_claim_grant(self, id, claim_name, decision, ctx).await
     }
 
+    async fn deliver_subscribed(
+        &self,
+        id: ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::deliver_subscribed(self, id, updates, ctx).await
+    }
+
     async fn get_consent(&self, id: ConsentId) -> Result<Option<ConsentRecord>> {
         CoordinodeBackend::get_consent(self, id).await
     }

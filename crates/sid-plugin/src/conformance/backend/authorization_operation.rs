@@ -190,15 +190,26 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
     let phone = ClaimRequest::required("phone", ClaimType::Data);
     assert!(consent.covers(operation.resource_id, &operation.scopes, &[&email]));
     assert!(!consent.covers(operation.resource_id, &operation.scopes, &[&phone]));
-    // The disclosure is the reviewed value, read back exactly as approved.
-    assert_eq!(consent.grants.len(), 1);
+    // The disclosure is the reviewed value, read back exactly as approved;
+    // the refused phone is recorded without a value.
+    let email = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "email")
+        .unwrap();
     assert_eq!(
-        consent.grants[0].disclosed,
+        email.disclosed,
         Some(DisclosedValue {
             value: "alice@sid.example.com".into(),
             verified: Some(true),
         })
     );
+    let phone = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "phone")
+        .unwrap();
+    assert!(!phone.is_active() && phone.disclosed.is_none());
 
     let replay = backend
         .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
@@ -280,7 +291,13 @@ pub async fn test_reapproval_after_revocation_grants_only_the_approval(
     assert!(!consent.covers(operation.resource_id, &["write".into()], &[]));
     let name = ClaimRequest::required("name", ClaimType::Data);
     assert!(!consent.covers(operation.resource_id, &[], &[&name]));
-    assert!(consent.grants.iter().all(|g| g.claim_name == "email"));
+    assert!(
+        consent
+            .grants
+            .iter()
+            .filter(|g| g.is_active())
+            .all(|g| g.claim_name == "email")
+    );
 }
 
 /// A denial grants nothing: no consent appears for the pair.
@@ -417,7 +434,9 @@ pub async fn test_concurrent_decisions_record_one(backend: &dyn StorageBackend) 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(consent.grants.len(), 1);
+    // One decision recorded: the shared email and the refused phone, once.
+    assert_eq!(consent.grants.len(), 2);
+    assert_eq!(consent.grants.iter().filter(|g| g.is_active()).count(), 1);
 }
 
 /// The issuer completes an approval once, storing its code in the same

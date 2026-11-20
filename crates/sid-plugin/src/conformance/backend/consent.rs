@@ -6,6 +6,7 @@
 use sid_core::Error;
 use sid_core::models::consent::{
     ClaimDecision, ClaimGrantChange, ClaimType, ConsentMode, ConsentRecord, ConsentStatus,
+    DisclosedValue, DisclosureUpdate,
 };
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -22,6 +23,7 @@ async fn active_consent(backend: &dyn StorageBackend) -> ConsentRecord {
         .unwrap();
     let mut consent = ConsentRecord::new(profile.id, format!("rp-{}", Uuid::now_v7().simple()));
     consent.grant_claim("email", ClaimType::Data, ConsentMode::Subscribed);
+    consent.grants[0].disclosed = Some(value("a@sid.example.com", Some(true)));
     consent.grant_scopes(
         grant_resource(backend).await,
         &["openid".to_owned(), "read".to_owned()],
@@ -32,6 +34,172 @@ async fn active_consent(backend: &dyn StorageBackend) -> ConsentRecord {
         .await
         .unwrap();
     consent
+}
+
+/// `value` as disclosed.
+fn value(value: &str, verified: Option<bool>) -> DisclosedValue {
+    DisclosedValue {
+        value: value.into(),
+        verified,
+    }
+}
+
+/// A stored active consent sharing a verified email and the name with
+/// updates, and the phone as a snapshot.
+async fn disclosing_consent(backend: &dyn StorageBackend) -> ConsentRecord {
+    let profile = create_test_profile("disclosure");
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let mut consent = ConsentRecord::new(profile.id, format!("rp-{}", Uuid::now_v7().simple()));
+    for (name, mode, disclosed) in [
+        (
+            "email",
+            ConsentMode::Subscribed,
+            value("a@sid.example.com", Some(true)),
+        ),
+        ("name", ConsentMode::Subscribed, value("Alice", None)),
+        (
+            "phone_number",
+            ConsentMode::Static,
+            value("+380501234567", Some(false)),
+        ),
+    ] {
+        consent.grant_claim(name, ClaimType::Data, mode);
+        if let Some(grant) = consent.grants.last_mut() {
+            grant.disclosed = Some(disclosed);
+        }
+    }
+    consent.as_requested().unwrap().grant();
+    backend
+        .create_consent(&consent, test_audit())
+        .await
+        .unwrap();
+    consent
+}
+
+/// The value claim `name` of the stored consent `id` discloses.
+async fn disclosed(
+    backend: &dyn StorageBackend,
+    id: sid_core::models::consent::ConsentId,
+    name: &str,
+) -> Option<DisclosedValue> {
+    backend
+        .get_consent(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .grants
+        .into_iter()
+        .find(|g| g.claim_name == name)
+        .and_then(|g| g.disclosed)
+}
+
+fn update(
+    name: &str,
+    prior: Option<DisclosedValue>,
+    next: Option<DisclosedValue>,
+) -> DisclosureUpdate {
+    DisclosureUpdate {
+        claim_name: name.into(),
+        prior,
+        next,
+    }
+}
+
+/// A subscription delivers a replacement whole or not at all: every
+/// subscribed grant still holding its prior value takes its new one; a grant
+/// changed meanwhile, a snapshot grant or an ended consent leaves the whole
+/// disclosure as it was. A cleared field is no longer disclosed.
+pub async fn test_subscribed_delivery_is_all_or_nothing(backend: &dyn StorageBackend) {
+    let consent = disclosing_consent(backend).await;
+    let email_a = Some(value("a@sid.example.com", Some(true)));
+    let email_b = Some(value("b@sid.example.com", Some(false)));
+    let alice = Some(value("Alice", None));
+
+    assert!(
+        backend
+            .deliver_subscribed(
+                consent.id,
+                &[
+                    update("email", email_a.clone(), email_b.clone()),
+                    update("name", alice.clone(), None),
+                ],
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(disclosed(backend, consent.id, "email").await, email_b);
+    assert_eq!(disclosed(backend, consent.id, "name").await, None);
+
+    // The name no longer holds Alice: nothing is written, the email included.
+    assert!(
+        !backend
+            .deliver_subscribed(
+                consent.id,
+                &[
+                    update("email", email_b.clone(), email_a.clone()),
+                    update("name", alice.clone(), Some(value("Alicia", None))),
+                ],
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(disclosed(backend, consent.id, "email").await, email_b);
+
+    // A snapshot grant is never delivered to.
+    let phone = Some(value("+380501234567", Some(false)));
+    assert!(
+        !backend
+            .deliver_subscribed(
+                consent.id,
+                &[update(
+                    "phone_number",
+                    phone.clone(),
+                    Some(value("+380501234568", Some(false))),
+                )],
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(disclosed(backend, consent.id, "phone_number").await, phone);
+
+    backend
+        .revoke_consents_by_profile(consent.profile_id, test_audit())
+        .await
+        .unwrap();
+    assert!(
+        !backend
+            .deliver_subscribed(
+                consent.id,
+                &[update("email", email_b.clone(), email_a)],
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+}
+
+/// Two deliveries computed from the same disclosure race: one commits and
+/// the other, finding its prior value gone, writes nothing, so a delivery
+/// from an older Profile version never overwrites a newer one.
+pub async fn test_subscribed_delivery_under_concurrency(backend: &dyn StorageBackend) {
+    let consent = disclosing_consent(backend).await;
+    let prior = Some(value("Alice", None));
+    let first = [update("name", prior.clone(), Some(value("Alicia", None)))];
+    let second = [update("name", prior, Some(value("Alison", None)))];
+    let (a, b) = tokio::join!(
+        backend.deliver_subscribed(consent.id, &first, test_audit()),
+        backend.deliver_subscribed(consent.id, &second, test_audit()),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert!(a != b, "exactly one delivery commits: {a} {b}");
+    let winner = if a { &first[0] } else { &second[0] };
+    assert_eq!(disclosed(backend, consent.id, "name").await, winner.next);
 }
 
 fn active_claims(consent: &ConsentRecord, claim: &str) -> usize {

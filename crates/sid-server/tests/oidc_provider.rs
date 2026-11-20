@@ -762,6 +762,72 @@ async fn user_info_answers_the_approved_disclosure_only() {
     assert!(openid_only.given_name.is_none() && openid_only.email.is_none());
 }
 
+/// A Profile edit reaches UserInfo only through a subscription, as a whole
+/// replacement: a subscribed name changed alone is delivered; beside a
+/// changed snapshot field nothing is, and the recipient keeps the approved
+/// snapshot until the holder reviews it (identity-model.md, recipient
+/// disclosure; consent-flow.md, claim update propagation).
+#[tokio::test]
+async fn user_info_delivers_subscribed_changes_only_whole() {
+    use sid_core::models::{ClaimType, ConsentMode, ConsentRecord, DisclosedValue};
+    let name_after_rename = |shares: &'static [(&'static str, ConsentMode, &'static str)]| async move {
+        let user = signed_in().await;
+        let token = user.token(&["openid", "profile"], None).await;
+        let mut consent = ConsentRecord::new(user.profile.id, "test-client");
+        for (name, mode, value) in shares {
+            consent.grant_claim(*name, ClaimType::Data, *mode);
+            if let Some(grant) = consent.grants.last_mut() {
+                grant.disclosed = Some(DisclosedValue {
+                    value: (*value).into(),
+                    verified: None,
+                });
+            }
+        }
+        consent.as_requested().unwrap().grant();
+        user.svc
+            .storage
+            .create_consent(
+                &consent,
+                sid_core::models::AuditEntry::system("test", "consent").into(),
+            )
+            .await
+            .unwrap();
+        let mut renamed = user.profile.clone();
+        renamed.given_name = Some("Alicia".into());
+        user.svc
+            .storage
+            .update_profile(
+                &renamed,
+                sid_core::models::AuditEntry::system("test", "rename").into(),
+            )
+            .await
+            .unwrap();
+        let request = user.request(Some(&format!("Bearer {token}")), None);
+        user.provider
+            .get_user_info(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .given_name
+    };
+
+    assert_eq!(
+        name_after_rename(&[("given_name", ConsentMode::Subscribed, "Alice")])
+            .await
+            .as_deref(),
+        Some("Alicia")
+    );
+    assert_eq!(
+        name_after_rename(&[
+            ("given_name", ConsentMode::Subscribed, "Alice"),
+            ("family_name", ConsentMode::Static, "Before"),
+        ])
+        .await
+        .as_deref(),
+        Some("Alice")
+    );
+}
+
 /// Without a token both schemes are offered, without an error code
 /// (RFC 6750 §3, RFC 9449 §7.1).
 #[tokio::test]
@@ -2445,6 +2511,150 @@ fn choices_sharing(
         .collect()
 }
 
+/// A refused optional claim is the holder's decision: the same request then
+/// completes without a review and discloses nothing for it, while a claim
+/// asked for the first time needs the holder's decision again
+/// (consent-flow.md, OIDC scope requests: the holder may omit a voluntary
+/// field and complete sign-in).
+#[tokio::test]
+async fn a_refused_claim_is_not_asked_again_but_a_new_one_is() {
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::authn::{ConsentDecision, GetConsentRequest, SubmitConsentRequest};
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let scoped = |scope: &str| {
+        let mut query = authorize_query(REDIRECT_URI);
+        for (name, value) in &mut query {
+            if *name == "scope" {
+                *value = scope.into();
+            }
+        }
+        with_query(&browser.authorize, &query)
+    };
+    let email_request = scoped("openid email");
+    let (operation, continuation) = consent_redirect(&browser, &browser.get(&email_request).await);
+    let service = consent_service(&browser);
+    let review = service
+        .get_consent(from_sign_in_page(
+            &browser,
+            GetConsentRequest {
+                operation_id: Some(wire(operation)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(review.claims.iter().any(|c| c.name == "email"));
+    service
+        .submit_consent(from_sign_in_page(
+            &browser,
+            SubmitConsentRequest {
+                operation_id: Some(wire(operation)),
+                revision: review.revision,
+                csrf_token: review.csrf_token.clone(),
+                decision: ConsentDecision::Approve as i32,
+                choices: choices_sharing(&review, &[]),
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(redirect_query(&browser.get(&continuation).await, REDIRECT_URI).contains_key("code"));
+
+    // The same request: no review, and the refused email is not disclosed.
+    assert!(redirect_query(&browser.get(&email_request).await, REDIRECT_URI).contains_key("code"));
+    let consent = browser
+        .user
+        .svc
+        .storage
+        .get_consent_by_client(browser.user.profile.id, "test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(consent.grants.iter().all(|g| !g.is_active()));
+
+    // A claim asked for the first time needs a decision.
+    consent_redirect(
+        &browser,
+        &browser.get(&scoped("openid email profile")).await,
+    );
+}
+
+/// A decision submitted again after a lost reply answers the committed
+/// approval, even when the Profile changed after it was recorded: the
+/// recorded values stand and the retry is not made stale.
+#[tokio::test]
+async fn a_lost_reply_retry_answers_the_recorded_approval() {
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::authn::{
+        AuthorizationStep, ConsentDecision, GetConsentRequest, SubmitConsentRequest,
+    };
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let mut query = authorize_query(REDIRECT_URI);
+    for (name, value) in &mut query {
+        if *name == "scope" {
+            *value = "openid profile".into();
+        }
+    }
+    let (operation, _) = consent_redirect(
+        &browser,
+        &browser.get(&with_query(&browser.authorize, &query)).await,
+    );
+    let service = consent_service(&browser);
+    let review = service
+        .get_consent(from_sign_in_page(
+            &browser,
+            GetConsentRequest {
+                operation_id: Some(wire(operation)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let approve = SubmitConsentRequest {
+        operation_id: Some(wire(operation)),
+        revision: review.revision,
+        csrf_token: review.csrf_token.clone(),
+        decision: ConsentDecision::Approve as i32,
+        choices: choices_sharing(&review, &["given_name"]),
+    };
+    service
+        .submit_consent(from_sign_in_page(&browser, approve.clone()))
+        .await
+        .unwrap();
+
+    let mut renamed = browser.user.profile.clone();
+    renamed.given_name = Some("Alicia".into());
+    browser
+        .user
+        .svc
+        .storage
+        .update_profile(
+            &renamed,
+            sid_core::models::AuditEntry::system("test", "rename").into(),
+        )
+        .await
+        .unwrap();
+    let again = service
+        .submit_consent(from_sign_in_page(&browser, approve))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(again.step, AuthorizationStep::Approved as i32);
+    let consent = browser
+        .user
+        .svc
+        .storage
+        .get_consent_by_client(browser.user.profile.id, "test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    let given = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "given_name")
+        .unwrap();
+    assert_eq!(given.disclosed.as_ref().unwrap().value, "Alice");
+}
+
 /// A Profile value changed after the review makes its decision stale: the
 /// approval is refused as a concurrent change and records nothing; the
 /// review read again shows the new value with a new CSRF value, and its
@@ -2527,12 +2737,10 @@ async fn a_value_changed_after_the_review_makes_the_decision_stale() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(consent.grants.len(), 1);
+    let shared: Vec<_> = consent.grants.iter().filter(|g| g.is_active()).collect();
+    assert_eq!(shared.len(), 1);
     assert_eq!(
-        consent.grants[0]
-            .disclosed
-            .as_ref()
-            .map(|d| d.value.as_str()),
+        shared[0].disclosed.as_ref().map(|d| d.value.as_str()),
         Some("Alicia")
     );
 }
@@ -2710,11 +2918,16 @@ async fn an_approval_grants_the_disclosure_the_review_showed() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(consent.grants.len(), 1);
-    assert_eq!(consent.grants[0].claim_type, ClaimType::Attestation);
+    let email = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "email")
+        .unwrap();
+    assert!(email.is_active());
+    assert_eq!(email.claim_type, ClaimType::Attestation);
     // The attestation discloses the verification, never the address.
     assert_eq!(
-        consent.grants[0].disclosed,
+        email.disclosed,
         Some(sid_core::models::DisclosedValue {
             value: String::new(),
             verified: Some(true),

@@ -911,6 +911,14 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::consent::ClaimGrantChange> {
         unimplemented!()
     }
+    async fn deliver_subscribed(
+        &self,
+        _: sid_core::models::consent::ConsentId,
+        _: &[sid_core::models::consent::DisclosureUpdate],
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
     async fn get_consent(
         &self,
         _: sid_core::models::consent::ConsentId,

@@ -420,6 +420,18 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<sid_core::models::consent::ClaimGrantChange>;
 
+    /// Deliver `updates`, a subscription's replacement of the active consent
+    /// `id`'s disclosure, in one step: every update applies to its active
+    /// subscribed grant still holding its `prior` value, or none applies.
+    /// True when delivered; false, with nothing written and `ctx` dropped,
+    /// when the consent is not active or a grant changed meanwhile.
+    async fn deliver_subscribed(
+        &self,
+        id: ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// Get a consent record by ID.
     async fn get_consent(&self, id: ConsentId) -> Result<Option<ConsentRecord>>;
 

@@ -156,6 +156,8 @@ macro_rules! __storage_conformance {
                 test_change_claim_grant
                 test_claim_grant_keeps_ended_consent_ended
                 test_claim_grants_under_concurrency
+                test_subscribed_delivery_is_all_or_nothing
+                test_subscribed_delivery_under_concurrency
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],device:
                 test_create_device_never_replaces

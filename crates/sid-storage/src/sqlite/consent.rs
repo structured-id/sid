@@ -230,6 +230,59 @@ impl SqliteBackend {
         Ok(ClaimGrantChange::Changed)
     }
 
+    /// Deliver a subscription's replacement of the active consent `id`'s
+    /// disclosure, all or nothing, under the write lock of `BEGIN IMMEDIATE`.
+    pub(crate) async fn deliver_subscribed_impl(
+        &self,
+        id: ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("deliver subscribed: {e}"));
+        let mut tx = self.begin_write().await?;
+        let active = sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = ?")
+            .bind(id.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .is_some_and(|status| status == "active");
+        if !active {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(false);
+        }
+        for update in updates {
+            let delivered = sqlx::query(
+                "UPDATE claim_grants SET disclosed_value = ?3, disclosed_verified = ?4 \
+                 WHERE consent_id = ?1 AND claim_name = ?2 AND revoked_at IS NULL \
+                   AND mode = 'subscribed' \
+                   AND disclosed_value IS ?5 AND disclosed_verified IS ?6",
+            )
+            .bind(id.0)
+            .bind(&update.claim_name)
+            .bind(update.next.as_ref().map(|v| v.value.as_str()))
+            .bind(update.next.as_ref().and_then(|v| v.verified))
+            .bind(update.prior.as_ref().map(|v| v.value.as_str()))
+            .bind(update.prior.as_ref().and_then(|v| v.verified))
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?
+            .rows_affected()
+                == 1;
+            if !delivered {
+                tx.rollback().await.map_err(storage)?;
+                return Ok(false);
+            }
+        }
+        sqlx::query("UPDATE consents SET updated_at = ? WHERE id = ?")
+            .bind(fmt_dt(&jiff::Timestamp::now()))
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        Self::commit_mutation(tx, &format!("consent:{}", id.0), audit).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn get_consent_impl(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {
         let row = sqlx::query(select_consents!("id = ?"))
             .bind(id.0)

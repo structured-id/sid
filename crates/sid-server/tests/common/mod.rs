@@ -374,6 +374,18 @@ pub async fn consented(
     let resource = client.default_resource.expect("the client's resource");
     let mut consent = sid_core::models::ConsentRecord::new(profile, client_id);
     consent.grant_scopes(resource, &client.allowed_scopes);
+    // The holder decided on every claim those scopes ask for: none shared,
+    // so the review is not owed and nothing is disclosed.
+    for name in sid::oauth::consent::scope_claims(&client.allowed_scopes) {
+        consent.grant_claim(
+            name,
+            sid_core::models::ClaimType::Data,
+            sid_core::models::ConsentMode::Static,
+        );
+        if let Some(grant) = consent.grants.last_mut() {
+            grant.revoke();
+        }
+    }
     consent.as_requested().unwrap().grant();
     storage
         .create_consent(

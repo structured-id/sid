@@ -16,6 +16,100 @@ fn scopes(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// A value of `value`, as an approval records it.
+fn value(value: &str) -> DisclosedValue {
+    DisclosedValue {
+        value: value.into(),
+        verified: None,
+    }
+}
+
+/// Grant `name` in `mode` with the approved `disclosed` value, as an
+/// approval leaves it.
+fn share(c: &mut ConsentRecord, name: &str, kind: ClaimType, mode: ConsentMode, disclosed: &str) {
+    c.grant_claim(name, kind, mode);
+    if let Some(grant) = c.grants.iter_mut().find(|g| g.claim_name == name) {
+        grant.disclosed = Some(value(disclosed));
+    }
+}
+
+/// A grant re-enabled from account management carries no approved value:
+/// it does not cover a required claim, so the next authorization reviews it
+/// rather than issue a code whose UserInfo lacks the required claim.
+#[test]
+fn test_covers_requires_an_approved_value() {
+    let mut c = make_consent();
+    let api = ResourceId::generate();
+    c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    let email = ClaimRequest::required("email", ClaimType::Data);
+    assert!(!c.covers(api, &[], &[&email]));
+
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
+    assert!(c.covers(api, &[], &[&email]));
+}
+
+/// A Profile edit is delivered only through subscriptions, as one complete
+/// replacement: every changed field subscribed gives the new values; one
+/// changed static field keeps the whole snapshot for the holder's review;
+/// nothing changed delivers nothing (identity-model.md, recipient
+/// disclosure).
+#[test]
+fn test_subscribed_delivery_replaces_the_snapshot_or_nothing() {
+    let mut c = make_consent();
+    share(
+        &mut c,
+        "name",
+        ClaimType::Data,
+        ConsentMode::Subscribed,
+        "Alice",
+    );
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
+    c.grant_claim("phone_number", ClaimType::Data, ConsentMode::Static);
+    c.as_active().unwrap().revoke_claim("phone_number");
+    let now = |name: &str, email: &str| {
+        let (name, email) = (value(name), value(email));
+        move |g: &ClaimGrant| match g.claim_name.as_str() {
+            "name" => Some(name.clone()),
+            "email" => Some(email.clone()),
+            _ => Some(value("+380501234567")),
+        }
+    };
+
+    assert_eq!(
+        c.subscribed_delivery(now("Alice", "a@sid.example.com")),
+        None
+    );
+
+    let delivered = c
+        .subscribed_delivery(now("Alicia", "a@sid.example.com"))
+        .unwrap();
+    assert_eq!(
+        delivered,
+        vec![DisclosureUpdate {
+            claim_name: "name".into(),
+            prior: Some(value("Alice")),
+            next: Some(value("Alicia")),
+        }]
+    );
+
+    assert_eq!(
+        c.subscribed_delivery(now("Alicia", "b@sid.example.com")),
+        None
+    );
+}
+
 #[test]
 fn test_consent_new_is_requested() {
     let c = make_consent_requested();
@@ -125,7 +219,13 @@ fn test_covers_requires_every_scope_and_claim() {
     let mut c = make_consent();
     let api = ResourceId::generate();
     c.grant_scopes(api, &scopes(&["openid", "read"]));
-    c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
     let email = ClaimRequest::required("email", ClaimType::Data);
     let phone = ClaimRequest::required("phone", ClaimType::Data);
 
@@ -143,8 +243,20 @@ fn test_covers_requires_every_scope_and_claim() {
 fn test_covers_requires_the_requested_type_and_sharing() {
     let mut c = make_consent();
     let api = ResourceId::generate();
-    c.grant_claim("passport", ClaimType::Attestation, ConsentMode::Static);
-    c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    share(
+        &mut c,
+        "passport",
+        ClaimType::Attestation,
+        ConsentMode::Static,
+        "",
+    );
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
 
     let passport_value = ClaimRequest::required("passport", ClaimType::Data);
     let passport_check = ClaimRequest::required("passport", ClaimType::Attestation);
@@ -179,7 +291,13 @@ fn test_covers_nothing_after_revocation() {
     let mut c = make_consent();
     let api = ResourceId::generate();
     c.grant_scopes(api, &scopes(&["openid"]));
-    c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
 
     c.as_active().unwrap().revoke_claim("email");
     let email = ClaimRequest::required("email", ClaimType::Data);

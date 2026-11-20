@@ -7316,6 +7316,61 @@ impl StorageBackend for PostgresBackend {
         Ok(ClaimGrantChange::Changed)
     }
 
+    async fn deliver_subscribed(
+        &self,
+        id: sid_core::models::consent::ConsentId,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("deliver subscribed: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The consent row lock orders the delivery with every decision and
+        // with the consent's revocation or deletion.
+        let active =
+            sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = $1 FOR UPDATE")
+                .bind(id.0)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .is_some_and(|status| status == "active");
+        if !active {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(false);
+        }
+        for update in updates {
+            let delivered = sqlx::query(
+                "UPDATE claim_grants SET disclosed_value = $3, disclosed_verified = $4 \
+                 WHERE consent_id = $1 AND claim_name = $2 AND revoked_at IS NULL \
+                   AND mode = 'subscribed' \
+                   AND disclosed_value IS NOT DISTINCT FROM $5 \
+                   AND disclosed_verified IS NOT DISTINCT FROM $6",
+            )
+            .bind(id.0)
+            .bind(&update.claim_name)
+            .bind(update.next.as_ref().map(|v| v.value.as_str()))
+            .bind(update.next.as_ref().and_then(|v| v.verified))
+            .bind(update.prior.as_ref().map(|v| v.value.as_str()))
+            .bind(update.prior.as_ref().and_then(|v| v.verified))
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?
+            .rows_affected()
+                == 1;
+            if !delivered {
+                tx.rollback().await.map_err(storage)?;
+                return Ok(false);
+            }
+        }
+        sqlx::query("UPDATE consents SET updated_at = NOW() WHERE id = $1")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        Self::audit_in_tx(&mut tx, &format!("consent:{}", id.0), audit).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(true)
+    }
+
     async fn get_consent(
         &self,
         id: sid_core::models::consent::ConsentId,

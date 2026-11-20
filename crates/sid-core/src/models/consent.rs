@@ -365,6 +365,17 @@ pub struct DisclosedValue {
     pub verified: Option<bool>,
 }
 
+/// One subscribed claim's delivered value: `next` replaces `prior` only
+/// while the grant still holds `prior`, so a delivery computed from an older
+/// Profile version never overwrites a newer one. `next` absent: the field
+/// was cleared and is no longer disclosed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisclosureUpdate {
+    pub claim_name: String,
+    pub prior: Option<DisclosedValue>,
+    pub next: Option<DisclosedValue>,
+}
+
 impl ClaimGrant {
     pub fn new(
         consent_id: ConsentId,
@@ -526,15 +537,51 @@ impl ConsentRecord {
         scopes.iter().all(|s| granted.scopes.contains(s)) && self.covers_claims(claims)
     }
 
+    /// A grant covers a request only with the value the holder approved: one
+    /// re-enabled without a reviewed value discloses nothing yet.
     fn covers_claims(&self, claims: &[&ClaimRequest]) -> bool {
         claims.iter().all(|request| {
             self.grants.iter().any(|g| {
                 g.is_active()
+                    && g.disclosed.is_some()
                     && g.claim_name == request.claim_name
                     && g.claim_type == request.claim_type
                     && request.admits(g.mode.sharing())
             })
         })
+    }
+
+    /// What this consent's subscriptions deliver after a Profile edit, with
+    /// `next` the value each active grant would disclose from the current
+    /// Profile version: the changed grants with their new values, when every
+    /// one of them is subscribed; nothing when no value changed or a changed
+    /// field is static, whose new value awaits the holder's review, so the
+    /// whole snapshot stays and old and new values are never combined
+    /// (identity-model.md, recipient disclosure; consent-flow.md, claim
+    /// update propagation).
+    pub fn subscribed_delivery(
+        &self,
+        next: impl Fn(&ClaimGrant) -> Option<DisclosedValue>,
+    ) -> Option<Vec<DisclosureUpdate>> {
+        if !self.status.is_active() {
+            return None;
+        }
+        let mut updates = Vec::new();
+        for grant in self.grants.iter().filter(|g| g.is_active()) {
+            let value = next(grant);
+            if value == grant.disclosed {
+                continue;
+            }
+            if grant.mode != ConsentMode::Subscribed {
+                return None;
+            }
+            updates.push(DisclosureUpdate {
+                claim_name: grant.claim_name.clone(),
+                prior: grant.disclosed.clone(),
+                next: value,
+            });
+        }
+        (!updates.is_empty()).then_some(updates)
     }
 
     /// Withdraw every grant: a consent approved again after its revocation
