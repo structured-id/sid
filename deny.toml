@@ -58,5 +58,9 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# sqlx main until a release admits the fixed SQLite (see [patch] in Cargo.toml).
-allow-git = ["https://github.com/launchbadge/sqlx"]
+# sqlx main until a release admits the fixed SQLite, and the SDK's main until
+# its release publishes the identifiers SID uses (see [patch] in Cargo.toml).
+allow-git = [
+  "https://github.com/launchbadge/sqlx",
+  "https://github.com/structured-id/sdk",
+]
