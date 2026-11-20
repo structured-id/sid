@@ -6304,8 +6304,9 @@ dependencies = [
 
 [[package]]
 name = "sid-ids"
-version = "0.8.0"
-source = "git+https://github.com/structured-id/sdk?branch=main#4dd195d84d10f3e3e56979661c90a830693807bd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a81e99942665bab32277030f4d67e98985a7bc988cca295393c000e05456d16"
 dependencies = [
  "serde",
  "sqlx",
@@ -6314,8 +6315,9 @@ dependencies = [
 
 [[package]]
 name = "sid-ids-proto"
-version = "0.1.9"
-source = "git+https://github.com/structured-id/sdk?branch=main#4dd195d84d10f3e3e56979661c90a830693807bd"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c2b4b427f31ccba638dc1ec4f3bdc46934214b7805e82af52c510d8143d324f"
 dependencies = [
  "prost",
  "prost-build",
