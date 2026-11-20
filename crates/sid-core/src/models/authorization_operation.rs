@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub use sid_ids::AuthorizationOperationId;
 
-use super::consent::{ClaimType, ConsentMode, ConsentRecord};
+use super::consent::{ClaimRequest, ClaimType, ConsentMode, ConsentRecord};
 use super::{IssuerId, ProfileId, ResourceId, SessionId};
 
 /// How long an operation waits for a decision and, once decided, for the
@@ -135,6 +135,15 @@ pub struct AuthorizationOperation {
     pub resource_id: ResourceId,
     /// The scopes granted on approval, in the requested order.
     pub scopes: Vec<String>,
+    /// The assurance the relying party asked for (OIDC Core 1.0 §3.1.2.1
+    /// `acr_values`), judged again when the issuer continues: a session whose
+    /// elevation lapsed during the review gets no code below it.
+    pub acr_values: Option<String>,
+    /// The client's claim requests as the user reviews them, pinned when the
+    /// operation is created: a decision is read against exactly these, so a
+    /// registration changed during the review never turns an approval of
+    /// one disclosure into a grant of another.
+    pub claim_requests: Vec<ClaimRequest>,
     /// The IdP session that authenticated the review; only it reads and
     /// decides the operation.
     pub session_id: SessionId,
@@ -212,9 +221,9 @@ impl AuthorizationOperation {
     /// The consent an approval with `choices` leaves for this operation's
     /// Profile and client, from `held`, the consent stored for that pair if
     /// any: active, with the operation's scopes for its resource and every
-    /// shared claim granted in its chosen mode. Earlier grants stay; their
-    /// revocation is a separate account operation (consent-flow.md, commit
-    /// the decision).
+    /// shared claim granted in its chosen mode. Earlier grants of an active
+    /// consent stay; their revocation is a separate account operation
+    /// (consent-flow.md, commit the decision).
     pub fn approved_consent(
         &self,
         held: Option<ConsentRecord>,
@@ -222,7 +231,10 @@ impl AuthorizationOperation {
     ) -> ConsentRecord {
         let mut consent =
             held.unwrap_or_else(|| ConsentRecord::new(self.profile_id, self.client_id.clone()));
+        // A revoked consent approved again grants what this approval grants,
+        // nothing it held before its revocation.
         if !consent.status.is_active() {
+            consent.clear_grants();
             consent.status = super::consent::ConsentStatus::Active;
             consent.revoked_at = None;
         }

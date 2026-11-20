@@ -71,7 +71,7 @@ fn details(review: ConsentReview) -> ConsentDetails {
         resource: review.resource,
         scopes: review.operation.scopes.clone(),
         claims: review
-            .client
+            .operation
             .claim_requests
             .iter()
             .map(|request| ConsentClaim {

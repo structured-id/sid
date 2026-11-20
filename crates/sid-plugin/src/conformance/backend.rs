@@ -158,7 +158,6 @@ pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         claim_requests: vec![],
-        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,
@@ -2649,7 +2648,6 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
                 "Age-restricted content, by law.",
             ),
         ],
-        consent_exempt: true,
         login_strategy: LoginStrategy::FederationFirst,
         show_federation_button: false,
         federation_timeout_ms: 1500,
@@ -2712,10 +2710,8 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
         got.post_logout_redirect_uris,
         client.post_logout_redirect_uris
     );
-    // The consent review offers exactly the stored claim requests, and only
-    // a stored exemption skips it.
+    // The consent review offers exactly the stored claim requests.
     assert_eq!(got.claim_requests, client.claim_requests);
-    assert_eq!(got.consent_exempt, client.consent_exempt);
     assert_eq!(got.claim_mappings.len(), 1);
     assert_eq!(got.claim_mappings[0].target, "mail");
     assert_eq!(got.login_strategy, client.login_strategy);

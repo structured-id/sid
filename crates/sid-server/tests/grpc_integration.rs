@@ -1362,6 +1362,7 @@ async fn test_code_tokens_report_the_authorizing_authentication() {
         .with_client(test_client())
         .with_profile(profile.clone());
     let svc = TestServices::new(storage);
+    common::consented(&*svc.storage, profile.id, "test-client").await;
     let mut session =
         common::authenticated_session(&profile, sid_core::models::AuthLevel::Standard, 40);
     session.amr = vec!["pwd".into(), "otp".into(), "mfa".into()];
@@ -1424,6 +1425,7 @@ async fn test_e2e_authorization_code_flow() {
         .with_client(test_client())
         .with_profile(profile.clone());
     let svc = TestServices::new(storage);
+    common::consented(&*svc.storage, profile.id, "test-client").await;
 
     let bearer = common::fresh_token(&svc, &profile).await;
 
@@ -2024,6 +2026,7 @@ async fn test_authorize_acr_values_satisfied() {
         .with_client(test_client())
         .with_profile(profile.clone());
     let svc = TestServices::new(storage);
+    common::consented(&*svc.storage, profile.id, "test-client").await;
 
     // Create a session with Standard assurance level.
     let mut session = Session::new(
@@ -2223,6 +2226,7 @@ async fn test_authorize_client_amr_satisfied() {
         .with_client(client)
         .with_profile(profile.clone());
     let svc = TestServices::new(storage);
+    common::consented(&*svc.storage, profile.id, "test-client").await;
 
     // Session with amr=["pwd", "hwk"] — satisfies "pwd" requirement.
     let mut session = Session::new(
@@ -2901,7 +2905,6 @@ fn client_settings(kind: ApplicationType) -> ClientRoleSettings {
         post_logout_redirect_uris: vec![],
         participant_admission: None,
         claim_requests: vec![],
-        consent_exempt: false,
     }
 }
 
@@ -3894,7 +3897,6 @@ async fn test_admin_update_client_role() {
             claim_requests: Some(sid_proto::sid::v1::ClaimRequestList {
                 requests: vec![email_request()],
             }),
-            consent_exempt: Some(true),
         },
     );
 
@@ -3916,7 +3918,6 @@ async fn test_admin_update_client_role() {
         vec!["https://new.sid.example.com/signed-out"]
     );
     assert_eq!(client.claim_requests, vec![email_request()]);
-    assert!(client.consent_exempt);
 }
 
 /// A demanded email claim request with its reason, as an administrator
@@ -4600,7 +4601,6 @@ async fn test_e2e_admin_project_and_application_flow() {
                     post_logout_redirect_uris: vec![],
                     participant_admission: None,
                     claim_requests: vec![],
-                    consent_exempt: false,
                 }),
                 resource: None,
                 org_id: None,
@@ -4716,6 +4716,7 @@ async fn test_authorize_with_valid_token_redirects() {
         .with_client(test_client())
         .with_profile(profile.clone());
     let svc = TestServices::new(storage);
+    common::consented(&*svc.storage, profile.id, "test-client").await;
 
     let bearer = common::fresh_token(&svc, &profile).await;
 

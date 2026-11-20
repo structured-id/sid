@@ -272,16 +272,12 @@ impl OAuth {
         }
         let decision = match decision {
             SubmittedDecision::Deny => AuthorizationDecision::Deny,
-            SubmittedDecision::Approve(choices) => {
-                let client = self
-                    .storage
-                    .get_oauth2_client(&operation.client_id)
-                    .await?
-                    .ok_or(ConsentError::NotFound)?;
-                AuthorizationDecision::Approve {
-                    choices: reviewed_choices(&client.claim_requests, choices)?,
-                }
-            }
+            // Read against the claim requests pinned on the operation, the
+            // ones the review showed: a registration changed meanwhile never
+            // turns this approval into a grant of another disclosure.
+            SubmittedDecision::Approve(choices) => AuthorizationDecision::Approve {
+                choices: reviewed_choices(&operation.claim_requests, choices)?,
+            },
         };
         let ctx: MutationContext = AuditEntry::user(
             session.profile_id.to_string(),

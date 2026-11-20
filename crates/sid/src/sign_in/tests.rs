@@ -708,7 +708,6 @@ fn test_client_with_acr(
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         claim_requests: vec![],
-        consent_exempt: false,
         login_strategy: sid_core::models::LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

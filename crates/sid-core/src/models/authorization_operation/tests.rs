@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::models::consent::{ClaimType, ConsentMode, ConsentRecord, ConsentStatus};
+use crate::models::consent::{ClaimRequest, ClaimType, ConsentMode, ConsentRecord, ConsentStatus};
 
 /// A stored status reads back as itself; anything else is refused, never a
 /// default state.
@@ -56,6 +56,8 @@ fn operation(now: Timestamp) -> AuthorizationOperation {
         nonce: None,
         resource_id: ResourceId::generate(),
         scopes: vec!["openid".into(), "read".into()],
+        acr_values: None,
+        claim_requests: vec![],
         session_id: SessionId::generate(),
         profile_id: ProfileId::generate(),
         status: AuthorizationStatus::AwaitingConsent,
@@ -194,19 +196,47 @@ fn an_approval_creates_the_consent_it_grants() {
     assert_eq!(consent.profile_id, op.profile_id);
     assert_eq!(consent.client_id, op.client_id);
     assert_eq!(consent.status, ConsentStatus::Active);
-    assert!(consent.covers(op.resource_id, &op.scopes, &["email"]));
-    assert!(!consent.covers(op.resource_id, &op.scopes, &["phone"]));
+    let email = ClaimRequest {
+        subscription: crate::models::consent::ClaimSubscription::Preferred,
+        ..ClaimRequest::required("email", ClaimType::Data)
+    };
+    let phone = ClaimRequest::required("phone", ClaimType::Data);
+    assert!(consent.covers(op.resource_id, &op.scopes, &[&email]));
+    assert!(!consent.covers(op.resource_id, &op.scopes, &[&phone]));
     assert_eq!(consent.grants[0].mode, ConsentMode::Subscribed);
 }
 
-/// An approval adds to the stored consent and reactivates a revoked one; it
-/// never drops an earlier grant (revocation is a separate operation).
+/// An approval adds to an active consent: an earlier grant stays (revoking
+/// it is a separate account operation).
 #[test]
-fn an_approval_adds_to_the_stored_consent() {
+fn an_approval_adds_to_an_active_consent() {
     let now = Timestamp::now();
     let op = operation(now);
     let mut held = ConsentRecord::new(op.profile_id, op.client_id.clone());
     held.grant_claim("name", ClaimType::Data, ConsentMode::Static);
+    held.as_requested().unwrap().grant();
+    let id = held.id;
+
+    let consent = op.approved_consent(Some(held), &[choice("email", ClaimSharing::Static)]);
+    assert_eq!(consent.id, id);
+    let email = ClaimRequest::required("email", ClaimType::Data);
+    let name = ClaimRequest::required("name", ClaimType::Data);
+    assert!(consent.covers(op.resource_id, &op.scopes, &[&email, &name]));
+}
+
+/// A revoked consent approved again grants what this approval grants and
+/// nothing it held before: approving `read` after revoking `read write`
+/// does not bring `write` back, nor a revoked claim.
+#[test]
+fn a_revoked_consent_approved_again_starts_from_the_approval() {
+    let now = Timestamp::now();
+    let op = operation(now);
+    let mut held = ConsentRecord::new(op.profile_id, op.client_id.clone());
+    held.grant_claim("name", ClaimType::Data, ConsentMode::Static);
+    held.grant_scopes(
+        op.resource_id,
+        &["openid".into(), "read".into(), "write".into()],
+    );
     held.as_requested().unwrap().grant();
     held.as_active().unwrap().revoke_all();
     let id = held.id;
@@ -215,6 +245,9 @@ fn an_approval_adds_to_the_stored_consent() {
     assert_eq!(consent.id, id);
     assert_eq!(consent.status, ConsentStatus::Active);
     assert!(consent.revoked_at.is_none());
-    assert!(consent.covers(op.resource_id, &op.scopes, &["email"]));
-    assert_eq!(consent.grants.len(), 2);
+    assert!(consent.covers(op.resource_id, &op.scopes, &[]));
+    assert!(!consent.covers(op.resource_id, &["write".into()], &[]));
+    let name = ClaimRequest::required("name", ClaimType::Data);
+    assert!(!consent.covers(op.resource_id, &[], &[&name]));
+    assert_eq!(consent.grants.len(), 1);
 }

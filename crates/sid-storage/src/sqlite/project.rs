@@ -22,10 +22,10 @@ pub(super) const OAUTH2_CLIENT_CREATE: &str =
         registration_iat, registration_access_token_hash, login_strategy,
         show_federation_button, federation_timeout_ms, unified_input,
         org_id, revision, application_id, default_resource, jwks, post_logout_redirect_uris,
-        participant_admission, claim_requests, consent_exempt)
+        participant_admission, claim_requests)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
         ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35,
-        ?36, ?37, ?38, ?39, ?40, ?41, ?42)
+        ?36, ?37, ?38, ?39, ?40, ?41)
      ON CONFLICT DO NOTHING";
 
 /// Update of a stored client at revision `?35`, with the parameters of
@@ -44,7 +44,7 @@ const OAUTH2_CLIENT_UPDATE: &str = "UPDATE oauth2_clients SET
         login_strategy = ?30, show_federation_button = ?31, federation_timeout_ms = ?32,
         unified_input = ?33, org_id = ?34, default_resource = ?37, jwks = ?38,
         post_logout_redirect_uris = ?39, participant_admission = ?40,
-        claim_requests = ?41, consent_exempt = ?42,
+        claim_requests = ?41,
         revision = revision + 1
      WHERE client_id = ?1 AND revision = ?35
        AND created_at = ?19 AND client_id_issued_at = ?26 AND registration_iat IS ?28
@@ -147,7 +147,6 @@ pub(super) fn row_to_oauth2_client(row: &sqlx::sqlite::SqliteRow) -> SidResult<O
         post_logout_redirect_uris: json_list("post_logout_redirect_uris")?,
         claim_mappings,
         claim_requests,
-        consent_exempt: col(row, "consent_exempt")?,
         login_strategy: parsed_col(row, "login_strategy")?,
         show_federation_button: col(row, "show_federation_button")?,
         federation_timeout_ms: u32::try_from(federation_timeout_ms)
@@ -432,7 +431,6 @@ pub(super) async fn insert_oauth2_client<'e, E: sqlx::SqliteExecutor<'e>>(
         .bind(json_text(&client.post_logout_redirect_uris)?)
         .bind(client.participant_admission.as_deref())
         .bind(&claim_requests_str)
-        .bind(client.consent_exempt)
         .execute(exec)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?

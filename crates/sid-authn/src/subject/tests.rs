@@ -75,7 +75,6 @@ fn make_client(subject_type: SubjectType) -> OAuth2Client {
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         claim_requests: vec![],
-        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

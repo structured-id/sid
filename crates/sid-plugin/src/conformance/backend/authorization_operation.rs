@@ -6,7 +6,9 @@
 
 use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::Error;
-use sid_core::models::consent::{ClaimType, ConsentStatus};
+use sid_core::models::consent::{
+    ClaimRequest, ClaimType, ConsentMode, ConsentRecord, ConsentStatus,
+};
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
     AuthorizationCode, AuthorizationDecision, AuthorizationOperation, AuthorizationOperationId,
@@ -47,6 +49,11 @@ async fn awaiting(backend: &dyn StorageBackend) -> (AuthorizationOperation, Sess
         nonce: Some("nonce-1".into()),
         resource_id: grant_resource(backend).await,
         scopes: vec!["openid".into(), "read".into()],
+        acr_values: Some("urn:sid:acr:mfa".into()),
+        claim_requests: vec![
+            ClaimRequest::demanded("email", ClaimType::Data, "Receipts are sent there."),
+            ClaimRequest::optional("phone", ClaimType::Data),
+        ],
         session_id: session.id,
         profile_id: profile.id,
         status: AuthorizationStatus::AwaitingConsent,
@@ -121,6 +128,8 @@ pub async fn test_authorization_operation_roundtrip(backend: &dyn StorageBackend
     assert_eq!(stored.nonce, operation.nonce);
     assert_eq!(stored.resource_id, operation.resource_id);
     assert_eq!(stored.scopes, operation.scopes);
+    assert_eq!(stored.acr_values, operation.acr_values);
+    assert_eq!(stored.claim_requests, operation.claim_requests);
     assert_eq!(stored.session_id, operation.session_id);
     assert_eq!(stored.profile_id, operation.profile_id);
     assert_eq!(stored.status, AuthorizationStatus::AwaitingConsent);
@@ -167,8 +176,15 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("the approval's consent");
     assert_eq!(consent.status, ConsentStatus::Active);
-    assert!(consent.covers(operation.resource_id, &operation.scopes, &["email"]));
-    assert!(!consent.covers(operation.resource_id, &operation.scopes, &["phone"]));
+    // The approval shares email with its updates, which a request preferring
+    // updates admits.
+    let email = ClaimRequest {
+        subscription: sid_core::models::ClaimSubscription::Preferred,
+        ..ClaimRequest::required("email", ClaimType::Data)
+    };
+    let phone = ClaimRequest::required("phone", ClaimType::Data);
+    assert!(consent.covers(operation.resource_id, &operation.scopes, &[&email]));
+    assert!(!consent.covers(operation.resource_id, &operation.scopes, &[&phone]));
 
     let replay = backend
         .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
@@ -202,6 +218,55 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
             DecisionOutcome::Conflict
         );
     }
+}
+
+/// A consent revoked and then approved again holds only what the new
+/// approval grants, as stored: a scope and a claim revoked with it are not
+/// restored by approving a narrower request.
+pub async fn test_reapproval_after_revocation_grants_only_the_approval(
+    backend: &dyn StorageBackend,
+) {
+    let (operation, session) = awaiting(backend).await;
+    let mut revoked = ConsentRecord::new(operation.profile_id, operation.client_id.clone());
+    revoked.grant_scopes(
+        operation.resource_id,
+        &["openid".into(), "read".into(), "write".into()],
+    );
+    revoked.grant_claim("name", ClaimType::Data, ConsentMode::Static);
+    revoked.as_requested().unwrap().grant();
+    revoked.as_active().unwrap().revoke_all();
+    backend
+        .create_consent(&revoked, test_audit())
+        .await
+        .unwrap();
+
+    let recorded = backend
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            Timestamp::now(),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(recorded, DecisionOutcome::Recorded(_)),
+        "{recorded:?}"
+    );
+    let consent = backend
+        .get_consent_by_client(operation.profile_id, &operation.client_id)
+        .await
+        .unwrap()
+        .expect("the approval's consent");
+    assert_eq!(consent.id, revoked.id);
+    assert_eq!(consent.status, ConsentStatus::Active);
+    assert!(consent.covers(operation.resource_id, &operation.scopes, &[]));
+    assert!(!consent.covers(operation.resource_id, &["write".into()], &[]));
+    let name = ClaimRequest::required("name", ClaimType::Data);
+    assert!(!consent.covers(operation.resource_id, &[], &[&name]));
+    assert!(consent.grants.iter().all(|g| g.claim_name == "email"));
 }
 
 /// A denial grants nothing: no consent appears for the pair.

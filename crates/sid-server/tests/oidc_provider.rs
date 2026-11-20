@@ -1768,41 +1768,42 @@ async fn browser_with(login_url: Option<&str>, client: sid_core::models::OAuth2C
     browser_of(signed_in().await, login_url, client).await
 }
 
-/// `client` as its administrator exempted it from the consent screen: the
-/// tests of sign-in, cookies, resources and replicas reach the code without
-/// a review. The consent tests use [`browser_reviewing`].
-fn exempt(client: sid_core::models::OAuth2Client) -> sid_core::models::OAuth2Client {
-    sid_core::models::OAuth2Client {
-        consent_exempt: true,
-        ..client
-    }
-}
-
-/// A browser of `user`, whose test client is `client`.
+/// A browser of `user`, whose test client is `client` and who already
+/// approved it: the tests of sign-in, cookies, resources and replicas reach
+/// the code without a review. The consent tests use [`browser_reviewing`].
 async fn browser_of(
     user: SignedIn,
     login_url: Option<&str>,
     client: sid_core::models::OAuth2Client,
 ) -> Browser {
     let page = Arc::new(login_url.map(|url| url::Url::parse(url).unwrap()));
-    browser_from(user, page, exempt(client)).await
+    approved(browser_from(user, page, client).await).await
 }
 
-/// A browser whose provider asks `page` where a user who must sign in goes.
+/// A browser whose provider asks `page` where a user who must sign in goes;
+/// its user already approved the test client.
 async fn browser_asking(page: Arc<dyn SignInPage>) -> Browser {
-    browser_from(signed_in().await, page, exempt(common::test_client())).await
+    approved(browser_from(signed_in().await, page, common::test_client()).await).await
 }
 
-/// A browser of a signed-in user whose test client has no exemption: an
+/// `browser` once its user recorded consent to the test client, as the
+/// consent review leaves it.
+async fn approved(browser: Browser) -> Browser {
+    common::consented(
+        &*browser.user.svc.storage,
+        browser.user.profile.id,
+        "test-client",
+    )
+    .await;
+    browser
+}
+
+/// A browser of a signed-in user who never approved the test client: an
 /// authorization no stored consent covers goes to the consent page at
 /// `login_url`'s `consent` sibling.
 async fn browser_reviewing(login_url: &str) -> Browser {
     let page = Arc::new(Some(url::Url::parse(login_url).unwrap()));
-    let client = sid_core::models::OAuth2Client {
-        consent_exempt: false,
-        ..common::test_client()
-    };
-    browser_from(signed_in().await, page, client).await
+    browser_from(signed_in().await, page, common::test_client()).await
 }
 
 async fn browser_from(
@@ -2326,7 +2327,6 @@ async fn the_review_names_the_requested_claim_type() {
     use sid_proto::sid::v1::common::ClaimType as WireType;
     let page = Arc::new(Some(url::Url::parse(LOGIN_URL).unwrap()));
     let client = sid_core::models::OAuth2Client {
-        consent_exempt: false,
         claim_requests: vec![
             ClaimRequest::optional("email", ClaimType::Data),
             ClaimRequest::optional("passport", ClaimType::Attestation),
@@ -2363,6 +2363,234 @@ async fn the_review_names_the_requested_claim_type() {
             ("passport".to_owned(), WireType::Attestation as i32),
         ]
     );
+}
+
+/// Only the holder's own decision lets a client with access to its resource
+/// and no claim requests at all obtain a code: before it the request goes to
+/// the review and `prompt=none` answers `consent_required`; after it the same
+/// request completes without a review; after the holder revokes it, consent
+/// is asked again (consent-flow.md, holder consent authority).
+#[tokio::test]
+async fn only_the_holders_decision_lets_a_client_without_claims_in() {
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let request = with_query(&browser.authorize, &authorize_query(REDIRECT_URI));
+    let mut silent_query = authorize_query(REDIRECT_URI);
+    silent_query.push(("prompt", "none".into()));
+    let silent = with_query(&browser.authorize, &silent_query);
+
+    let (operation, continuation) = consent_redirect(&browser, &browser.get(&request).await);
+    let refused = redirect_query(&browser.get(&silent).await, REDIRECT_URI);
+    assert_eq!(refused["error"], "consent_required");
+    assert!(!refused.contains_key("code"));
+
+    decide(
+        &browser,
+        operation,
+        sid_core::models::AuthorizationDecision::Approve { choices: vec![] },
+    )
+    .await;
+    assert!(redirect_query(&browser.get(&continuation).await, REDIRECT_URI).contains_key("code"));
+    assert!(redirect_query(&browser.get(&request).await, REDIRECT_URI).contains_key("code"));
+    assert!(redirect_query(&browser.get(&silent).await, REDIRECT_URI).contains_key("code"));
+
+    browser
+        .user
+        .svc
+        .storage
+        .revoke_consents_by_profile(
+            browser.user.profile.id,
+            sid_core::models::AuditEntry::system("test", "revoke").into(),
+        )
+        .await
+        .unwrap();
+    consent_redirect(&browser, &browser.get(&request).await);
+    let refused = redirect_query(&browser.get(&silent).await, REDIRECT_URI);
+    assert_eq!(refused["error"], "consent_required");
+}
+
+/// A recorded consent covers only the scopes it granted: a request adding a
+/// scope the client may ask for but the holder never approved goes to the
+/// review, and `prompt=none` answers `consent_required`.
+#[tokio::test]
+async fn a_new_scope_needs_the_holders_decision() {
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let storage = &browser.user.svc.storage;
+    let client = storage
+        .get_oauth2_client("test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut consent = sid_core::models::ConsentRecord::new(browser.user.profile.id, "test-client");
+    consent.grant_scopes(
+        client.default_resource.expect("the client's resource"),
+        &["openid".into()],
+    );
+    consent.as_requested().unwrap().grant();
+    storage
+        .create_consent(
+            &consent,
+            sid_core::models::AuditEntry::system("test", "consent").into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        redirect_query(
+            &browser
+                .get(&with_query(
+                    &browser.authorize,
+                    &authorize_query(REDIRECT_URI)
+                ))
+                .await,
+            REDIRECT_URI
+        )
+        .contains_key("code")
+    );
+
+    let mut wider = authorize_query(REDIRECT_URI);
+    for (name, value) in &mut wider {
+        if *name == "scope" {
+            *value = "openid profile".into();
+        }
+    }
+    consent_redirect(
+        &browser,
+        &browser.get(&with_query(&browser.authorize, &wider)).await,
+    );
+    wider.push(("prompt", "none".into()));
+    let refused = redirect_query(
+        &browser.get(&with_query(&browser.authorize, &wider)).await,
+        REDIRECT_URI,
+    );
+    assert_eq!(refused["error"], "consent_required");
+}
+
+/// An approval is read against the claim requests the review showed: an
+/// administrator changing a request from the attestation to the value while
+/// the review is open does not turn the approval of the attestation into a
+/// grant of the value.
+#[tokio::test]
+async fn an_approval_grants_the_disclosure_the_review_showed() {
+    use sid_core::models::{ClaimRequest, ClaimType};
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::authn::{
+        ClaimChoice, ClaimSharing, ConsentDecision, GetConsentRequest, SubmitConsentRequest,
+    };
+    let page = Arc::new(Some(url::Url::parse(LOGIN_URL).unwrap()));
+    let client = sid_core::models::OAuth2Client {
+        claim_requests: vec![ClaimRequest::optional("passport", ClaimType::Attestation)],
+        ..common::test_client()
+    };
+    let browser = browser_from(signed_in().await, page, client).await;
+    let got = browser
+        .get(&with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .await;
+    let (operation, _) = consent_redirect(&browser, &got);
+    let service = consent_service(&browser);
+    let review = service
+        .get_consent(from_sign_in_page(
+            &browser,
+            GetConsentRequest {
+                operation_id: Some(wire(operation)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let storage = &browser.user.svc.storage;
+    let mut changed = storage
+        .get_oauth2_client("test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    changed.claim_requests = vec![ClaimRequest::optional("passport", ClaimType::Data)];
+    assert!(
+        storage
+            .update_oauth2_client(
+                &changed,
+                sid_core::models::AuditEntry::system("test", "client").into()
+            )
+            .await
+            .unwrap()
+    );
+
+    service
+        .submit_consent(from_sign_in_page(
+            &browser,
+            SubmitConsentRequest {
+                operation_id: Some(wire(operation)),
+                revision: review.revision,
+                csrf_token: review.csrf_token,
+                decision: ConsentDecision::Approve as i32,
+                choices: vec![ClaimChoice {
+                    name: "passport".into(),
+                    sharing: ClaimSharing::Static as i32,
+                }],
+            },
+        ))
+        .await
+        .unwrap();
+    let consent = storage
+        .get_consent_by_client(browser.user.profile.id, "test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(consent.grants.len(), 1);
+    assert_eq!(consent.grants[0].claim_type, ClaimType::Attestation);
+}
+
+/// The assurance the relying party asked for is judged again when the issuer
+/// continues: the operation keeps the request's `acr_values`, and a session
+/// below it gets no code from an approval saved earlier.
+#[tokio::test]
+async fn the_continuation_keeps_the_requested_assurance() {
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let mut query = authorize_query(REDIRECT_URI);
+    query.push(("acr_values", "urn:sid:acr:basic".into()));
+    let got = browser.get(&with_query(&browser.authorize, &query)).await;
+    let (admitted, _) = consent_redirect(&browser, &got);
+    let storage = &browser.user.svc.storage;
+    let kept = storage
+        .authorization_operation(admitted)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.acr_values.as_deref(), Some("urn:sid:acr:basic"));
+
+    // The same operation asking a level this Basic session does not hold, as
+    // when an elevation lapsed during the review.
+    let raised = sid_core::models::AuthorizationOperation {
+        id: sid_core::models::AuthorizationOperationId::generate(),
+        acr_values: Some("urn:sid:acr:standard".into()),
+        ..kept
+    };
+    storage
+        .create_authorization_operation(
+            &raised,
+            sid_core::models::AuditEntry::system("test", "operation").into(),
+        )
+        .await
+        .unwrap();
+    decide(
+        &browser,
+        raised.id,
+        sid_core::models::AuthorizationDecision::Approve { choices: vec![] },
+    )
+    .await;
+    let issuer = browser.authorize.trim_end_matches("/oauth2/authorize");
+    let continuation =
+        sid::oauth::authorization::operation_continuation(issuer, "test-client", raised.id)
+            .unwrap();
+    let answered = browser.get(continuation.as_str()).await;
+    let location = answered
+        .headers()
+        .get("location")
+        .map(|l| l.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    assert!(!location.contains("code="), "{location}");
 }
 
 /// A submission without this review's CSRF value, one for another revision,
@@ -3192,7 +3420,7 @@ async fn authorize_records_activity_only_on_accepted_use() {
 #[tokio::test]
 async fn authorize_continues_on_another_replica() {
     let (a, b) = TestServices::replicas(MockStorage::new()).await;
-    common::store_client(&*a.storage, &exempt(common::test_client()))
+    common::store_client(&*a.storage, &common::test_client())
         .await
         .unwrap();
     common::open_userinfo_to_clients(&a).await;
@@ -3204,6 +3432,7 @@ async fn authorize_continues_on_another_replica() {
         )
         .await
         .unwrap();
+    common::consented(&*a.storage, profile.id, "test-client").await;
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     let mut session = sid_core::models::Session::new(
         profile.id,
@@ -3261,10 +3490,7 @@ async fn a_consent_decided_on_one_replica_issues_one_code_across_both() {
     use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
     use sid_proto::sid::v1::authn::{ConsentDecision, GetConsentRequest, SubmitConsentRequest};
     let (a, b) = TestServices::replicas(MockStorage::new()).await;
-    let client = sid_core::models::OAuth2Client {
-        consent_exempt: false,
-        ..common::test_client()
-    };
+    let client = common::test_client();
     common::store_client(&*a.storage, &client).await.unwrap();
     common::open_userinfo_to_clients(&a).await;
     let profile = sid_core::models::Profile::new(Some("replica"));

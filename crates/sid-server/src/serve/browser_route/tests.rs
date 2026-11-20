@@ -50,6 +50,20 @@ fn a_passwordless_registration_is_published() {
     }
 }
 
+/// The consent review of an operation is called under the issuer the
+/// authorization is for: every step of it is on that issuer's surface, or a
+/// user of an issuer-addressed page cannot complete the authorization.
+#[test]
+fn the_consent_review_is_published() {
+    for method in [
+        "/sid.v1.authn.AuthFlowService/GetConsent",
+        "/sid.v1.authn.AuthFlowService/SubmitConsent",
+        "/sid.v1.authn.AuthFlowService/GetFlowState",
+    ] {
+        assert!(BROWSER_METHODS.contains(&method), "{method}");
+    }
+}
+
 /// Anything else is no addressed call: no handle, no `api` segment, a longer
 /// segment that only starts with it, the transport-named mount the API path
 /// replaced, another issuer endpoint, a root gRPC path.

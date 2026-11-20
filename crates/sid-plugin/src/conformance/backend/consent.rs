@@ -54,7 +54,11 @@ pub async fn test_consent_reads_back_grants_and_scopes(backend: &dyn StorageBack
     let granted = &consent.scope_grants[0];
     assert_eq!(stored.scope_grants[0].resource_id, granted.resource_id);
     assert_eq!(stored.scope_grants[0].scopes, granted.scopes);
-    assert!(stored.covers(granted.resource_id, &granted.scopes, &["email"]));
+    let email = sid_core::models::ClaimRequest {
+        subscription: sid_core::models::ClaimSubscription::Preferred,
+        ..sid_core::models::ClaimRequest::required("email", stored.grants[0].claim_type)
+    };
+    assert!(stored.covers(granted.resource_id, &granted.scopes, &[&email]));
 
     let by_client = backend
         .get_consent_by_client(consent.profile_id, &consent.client_id)

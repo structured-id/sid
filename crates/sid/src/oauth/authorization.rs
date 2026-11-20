@@ -20,8 +20,8 @@ use sid_core::Error as SidError;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
     AuditEntry, AuthorizationOperation, AuthorizationOperationId, AuthorizationStatus, ClaimLevel,
-    CompletionOutcome, MutationContext, OAuth2Client, OidcIssuer, ProfileId, ResourceId, Session,
-    SessionId,
+    ClaimRequest, CompletionOutcome, MutationContext, OAuth2Client, OidcIssuer, ProfileId,
+    ResourceId, Session, SessionId,
 };
 use sid_proto::sid::v1::{
     OAuth2AuthorizeRequest, OAuth2AuthorizeResponse, SignInContext, o_auth2_authorize_response,
@@ -340,6 +340,7 @@ impl OAuth {
         request: OAuth2AuthorizeRequest,
         consent_asked: bool,
     ) -> Result<Authorized, AuthorizationError> {
+        let acr_values = request.acr_values.clone();
         let admitted = self.admit(client, issuer, session, request).await?;
         if consent_asked
             || self
@@ -360,6 +361,8 @@ impl OAuth {
                 nonce: admitted.validated.nonce.clone(),
                 resource_id: admitted.resource,
                 scopes: admitted.validated.scopes.clone(),
+                acr_values,
+                claim_requests: client.claim_requests.clone(),
                 session_id: session.id,
                 profile_id: session.profile_id,
                 status: AuthorizationStatus::AwaitingConsent,
@@ -375,36 +378,32 @@ impl OAuth {
             .map(Authorized::Code)
     }
 
-    /// Whether the stored consent of `profile` to `client` leaves the
-    /// admitted request uncovered: its scopes for its resource and every
-    /// required claim the client asks for. An administrator's exemption
-    /// covers the scopes, never a required disclosure (authz/consent-flow.md,
-    /// administrative exemptions).
+    /// Whether the holder's recorded consent of `profile` to `client` leaves
+    /// the admitted request uncovered: its scopes for its resource and every
+    /// required claim the client asks for. Only the holder's own grant
+    /// covers it; the client's registration, an integration or an empty
+    /// claim list never does (authz/consent-flow.md, holder consent
+    /// authority).
     async fn consent_owed(
         &self,
         client: &OAuth2Client,
         profile: ProfileId,
         admitted: &Admitted,
     ) -> Result<bool, AuthorizationError> {
-        let required: Vec<&str> = client
+        // The whole request, not only its name: a grant of another claim type
+        // or a sharing mode the request no longer admits does not cover it.
+        let required: Vec<&ClaimRequest> = client
             .claim_requests
             .iter()
             .filter(|r| r.level == ClaimLevel::Required)
-            .map(|r| r.claim_name.as_str())
             .collect();
-        if client.consent_exempt && required.is_empty() {
-            return Ok(false);
-        }
-        let scopes: &[String] = if client.consent_exempt {
-            &[]
-        } else {
-            &admitted.validated.scopes
-        };
         let held = self
             .storage
             .get_consent_by_client(profile, &client.client_id)
             .await?;
-        Ok(!held.is_some_and(|consent| consent.covers(admitted.resource, scopes, &required)))
+        Ok(!held.is_some_and(|consent| {
+            consent.covers(admitted.resource, &admitted.validated.scopes, &required)
+        }))
     }
 
     /// `request` admitted for `session`: the client's and the request's
@@ -647,7 +646,9 @@ impl OAuth {
             code_challenge: operation.code_challenge.clone(),
             code_challenge_method: operation.code_challenge_method.clone(),
             nonce: operation.nonce.clone(),
-            acr_values: None,
+            // The level the relying party asked for is judged again: an
+            // elevation that lapsed during the review issues no code.
+            acr_values: operation.acr_values.clone(),
             issuer_handle: issuer.handle.to_string(),
             resource: vec![resource.indicator.to_string()],
             prompt: None,

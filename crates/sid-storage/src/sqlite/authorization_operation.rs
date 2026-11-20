@@ -51,6 +51,9 @@ fn operation_of(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationOperati
             .split_whitespace()
             .map(str::to_owned)
             .collect(),
+        acr_values: col(row, "acr_values")?,
+        claim_requests: serde_json::from_str(&col::<String>(row, "claim_requests")?)
+            .map_err(|e| SidError::Storage(format!("operation claim requests: {e}")))?,
         session_id: col(row, "session_id")?,
         profile_id: col(row, "profile_id")?,
         status: col::<String>(row, "status")?
@@ -173,12 +176,23 @@ async fn store_consent(tx: &mut Tx, consent: &ConsentRecord) -> SidResult<()> {
     .execute(&mut **tx)
     .await
     .map_err(|e| insert_error("consent", e))?;
+    // The grants as they now stand replace the stored ones: a grant the
+    // record no longer holds (cleared by a re-approval after revocation)
+    // must not survive in the store.
+    sqlx::query("DELETE FROM claim_grants WHERE consent_id = ?1")
+        .bind(consent.id.0)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("replace claim grants"))?;
+    sqlx::query("DELETE FROM consent_scope_grants WHERE consent_id = ?1")
+        .bind(consent.id.0)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("replace scope grants"))?;
     for grant in &consent.grants {
         sqlx::query(
             "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (consent_id, claim_name) DO UPDATE SET
-               claim_type = ?4, mode = ?5, granted_at = ?6, revoked_at = ?7",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(grant.id.0)
         .bind(consent.id.0)
@@ -194,8 +208,7 @@ async fn store_consent(tx: &mut Tx, consent: &ConsentRecord) -> SidResult<()> {
     for grant in &consent.scope_grants {
         sqlx::query(
             "INSERT INTO consent_scope_grants (consent_id, resource_id, scopes, granted_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (consent_id, resource_id) DO UPDATE SET scopes = ?3, granted_at = ?4",
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .bind(consent.id.0)
         .bind(grant.resource_id)
@@ -220,8 +233,8 @@ impl AuthorizationOperationStore for SqliteBackend {
             "INSERT INTO authorization_operations (id, issuer_id, client_id, redirect_uri,
                 response_type, state, code_challenge, code_challenge_method, nonce, resource_id,
                 scopes, session_id, profile_id, status, revision, decision,
-                created_at, expires_at, decided_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                created_at, expires_at, decided_at, acr_values, claim_requests)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(operation.id)
         .bind(operation.issuer_id)
@@ -242,6 +255,11 @@ impl AuthorizationOperationStore for SqliteBackend {
         .bind(fmt_dt(&operation.created_at))
         .bind(fmt_dt(&operation.expires_at))
         .bind(fmt_dt_opt(operation.decided_at))
+        .bind(&operation.acr_values)
+        .bind(
+            serde_json::to_string(&operation.claim_requests)
+                .map_err(|e| SidError::Validation(format!("operation claim requests: {e}")))?,
+        )
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("authorization operation", e))?;

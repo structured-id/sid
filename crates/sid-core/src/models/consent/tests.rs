@@ -126,11 +126,50 @@ fn test_covers_requires_every_scope_and_claim() {
     let api = ResourceId::generate();
     c.grant_scopes(api, &scopes(&["openid", "read"]));
     c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    let email = ClaimRequest::required("email", ClaimType::Data);
+    let phone = ClaimRequest::required("phone", ClaimType::Data);
 
-    assert!(c.covers(api, &scopes(&["openid"]), &["email"]));
-    assert!(!c.covers(api, &scopes(&["openid", "write"]), &["email"]));
-    assert!(!c.covers(api, &scopes(&["openid"]), &["email", "phone"]));
+    assert!(c.covers(api, &scopes(&["openid"]), &[&email]));
+    assert!(!c.covers(api, &scopes(&["openid", "write"]), &[&email]));
+    assert!(!c.covers(api, &scopes(&["openid"]), &[&email, &phone]));
     assert!(!c.covers(ResourceId::generate(), &scopes(&["openid"]), &[]));
+}
+
+/// A grant covers a required claim only as it is requested now: a grant of
+/// the attestation does not cover a request for the value, and a grant of
+/// the current value alone does not cover a request that needs its later
+/// changes.
+#[test]
+fn test_covers_requires_the_requested_type_and_sharing() {
+    let mut c = make_consent();
+    let api = ResourceId::generate();
+    c.grant_claim("passport", ClaimType::Attestation, ConsentMode::Static);
+    c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+
+    let passport_value = ClaimRequest::required("passport", ClaimType::Data);
+    let passport_check = ClaimRequest::required("passport", ClaimType::Attestation);
+    assert!(!c.covers(api, &[], &[&passport_value]));
+    assert!(c.covers(api, &[], &[&passport_check]));
+
+    let email_subscribed = ClaimRequest {
+        subscription: ClaimSubscription::Required,
+        ..ClaimRequest::required("email", ClaimType::Data)
+    };
+    assert!(!c.covers(api, &[], &[&email_subscribed]));
+    c.grant_claim("email", ClaimType::Data, ConsentMode::Subscribed);
+    assert!(c.covers(api, &[], &[&email_subscribed]));
+}
+
+/// Granting an active claim again takes the type now approved, not only the
+/// mode: a re-approval after the client changed a request to the value
+/// records the value.
+#[test]
+fn test_grant_again_takes_the_approved_type() {
+    let mut c = make_consent();
+    c.grant_claim("passport", ClaimType::Attestation, ConsentMode::Static);
+    c.grant_claim("passport", ClaimType::Data, ConsentMode::Static);
+    assert_eq!(c.grants.len(), 1);
+    assert_eq!(c.grants[0].claim_type, ClaimType::Data);
 }
 
 /// A revoked claim, or a consent that is not active, covers nothing: an old
@@ -143,7 +182,8 @@ fn test_covers_nothing_after_revocation() {
     c.grant_claim("email", ClaimType::Data, ConsentMode::Static);
 
     c.as_active().unwrap().revoke_claim("email");
-    assert!(!c.covers(api, &scopes(&["openid"]), &["email"]));
+    let email = ClaimRequest::required("email", ClaimType::Data);
+    assert!(!c.covers(api, &scopes(&["openid"]), &[&email]));
     assert!(c.covers(api, &scopes(&["openid"]), &[]));
 
     c.as_active().unwrap().revoke_all();

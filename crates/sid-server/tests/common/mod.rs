@@ -384,9 +384,8 @@ pub async fn consented(
         .unwrap();
 }
 
-/// The test client, exempted from the consent screen by its administrator:
-/// the token, session and resource tests get their code without a review.
-/// The consent tests clear the exemption.
+/// The test client. A test that needs a code without the consent review
+/// records the holder's consent first ([`consented`]).
 pub fn test_client() -> sid_core::models::OAuth2Client {
     sid_core::models::OAuth2Client {
         client_id: "test-client".to_string(),
@@ -423,7 +422,6 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         claim_requests: vec![],
-        consent_exempt: true,
         login_strategy: sid_core::models::LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

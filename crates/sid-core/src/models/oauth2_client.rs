@@ -382,13 +382,6 @@ pub struct OAuth2Client {
     #[serde(default)]
     pub claim_requests: Vec<crate::models::consent::ClaimRequest>,
 
-    /// An administrator's exemption of this managed client from the
-    /// authorization consent screen: explicit, off by default, never set by
-    /// dynamic registration or an unprivileged update. It does not waive
-    /// required disclosure, identity selection or a requested interaction.
-    #[serde(default)]
-    pub consent_exempt: bool,
-
     // ─── Site Login Policy ─────────────────────────────────────
     /// Login strategy for this site's login page.
     /// Determines routing: local-first, show both, federation-first, federation-only.

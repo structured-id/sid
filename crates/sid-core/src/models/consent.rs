@@ -169,6 +169,14 @@ impl ConsentMode {
             Self::Subscribed => "subscribed",
         }
     }
+
+    /// The sharing choice this mode was granted as.
+    pub fn sharing(self) -> ClaimSharing {
+        match self {
+            Self::Static => ClaimSharing::Static,
+            Self::Subscribed => ClaimSharing::Subscribed,
+        }
+    }
 }
 
 parse_stored!(ConsentMode, "consent mode", [Static, Subscribed]);
@@ -412,7 +420,8 @@ impl ConsentRecord {
     }
 
     /// Grant a claim. A claim has one grant: granting a revoked claim again
-    /// renews that grant, granting an active one only takes the new mode.
+    /// renews that grant, granting an active one takes the type and mode now
+    /// approved.
     pub fn grant_claim(
         &mut self,
         claim_name: impl Into<String>,
@@ -422,8 +431,15 @@ impl ConsentRecord {
         let claim_name = claim_name.into();
         let now = Timestamp::now();
         match self.grants.iter_mut().find(|g| g.claim_name == claim_name) {
-            Some(grant) if grant.is_active() && grant.mode == mode => return,
-            Some(grant) if grant.is_active() => grant.mode = mode,
+            Some(grant)
+                if grant.is_active() && grant.mode == mode && grant.claim_type == claim_type =>
+            {
+                return;
+            }
+            Some(grant) if grant.is_active() => {
+                grant.claim_type = claim_type;
+                grant.mode = mode;
+            }
             Some(grant) => {
                 grant.claim_type = claim_type;
                 grant.mode = mode;
@@ -471,9 +487,15 @@ impl ConsentRecord {
     }
 
     /// Whether this consent, active, already grants every one of `scopes`
-    /// for `resource` and every one of `claims` (consent-flow.md: skip the
-    /// screen only when current consent covers the request).
-    pub fn covers(&self, resource: ResourceId, scopes: &[String], claims: &[&str]) -> bool {
+    /// for `resource` and every one of `claims` as requested now: the same
+    /// claim type, in a sharing mode the request admits (consent-flow.md:
+    /// skip the screen only when current consent covers the request).
+    pub fn covers(
+        &self,
+        resource: ResourceId,
+        scopes: &[String],
+        claims: &[&ClaimRequest],
+    ) -> bool {
         if !self.status.is_active() {
             return false;
         }
@@ -483,12 +505,23 @@ impl ConsentRecord {
         scopes.iter().all(|s| granted.scopes.contains(s)) && self.covers_claims(claims)
     }
 
-    fn covers_claims(&self, claims: &[&str]) -> bool {
-        claims.iter().all(|c| {
-            self.grants
-                .iter()
-                .any(|g| g.is_active() && g.claim_name == *c)
+    fn covers_claims(&self, claims: &[&ClaimRequest]) -> bool {
+        claims.iter().all(|request| {
+            self.grants.iter().any(|g| {
+                g.is_active()
+                    && g.claim_name == request.claim_name
+                    && g.claim_type == request.claim_type
+                    && request.admits(g.mode.sharing())
+            })
         })
+    }
+
+    /// Withdraw every grant: a consent approved again after its revocation
+    /// starts from what the new approval grants, never from what was revoked.
+    pub fn clear_grants(&mut self) {
+        self.grants.clear();
+        self.scope_grants.clear();
+        self.updated_at = Timestamp::now();
     }
 
     /// Gateway: obtain typed wrapper if consent is Requested (awaiting user decision).

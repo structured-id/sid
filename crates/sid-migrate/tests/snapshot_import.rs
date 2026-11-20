@@ -2218,7 +2218,6 @@ fn client_for(app: &sid_core::models::Application) -> sid_core::models::OAuth2Cl
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         claim_requests: vec![],
-        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

@@ -531,7 +531,6 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     claim_mappings                      TEXT,
     -- The claims the client asks for: a JSON array of claim requests.
     claim_requests                      TEXT,
-    consent_exempt                      INTEGER NOT NULL DEFAULT 0 CHECK (consent_exempt IN (0, 1)),
     logo_uri                            TEXT,
     token_endpoint_auth_method          TEXT NOT NULL DEFAULT 'client_secret_basic',
     response_types                      TEXT NOT NULL DEFAULT 'code',
@@ -1643,6 +1642,8 @@ CREATE TABLE IF NOT EXISTS authorization_operations (
     nonce                   TEXT,
     resource_id             BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
     scopes                  TEXT NOT NULL,
+    acr_values              TEXT,
+    claim_requests          TEXT NOT NULL,
     session_id              BLOB NOT NULL CHECK (length(session_id) = 16) REFERENCES sessions(id) ON DELETE CASCADE,
     profile_id              BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     status                  TEXT NOT NULL

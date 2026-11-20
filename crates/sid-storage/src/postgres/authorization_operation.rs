@@ -42,6 +42,9 @@ fn operation_of(row: &sqlx::postgres::PgRow) -> SidResult<AuthorizationOperation
     let decision: Option<serde_json::Value> =
         row.try_get("decision").map_err(column("decision"))?;
     let scopes: String = row.try_get("scopes").map_err(column("scopes"))?;
+    let claim_requests: serde_json::Value = row
+        .try_get("claim_requests")
+        .map_err(column("claim_requests"))?;
     let status: String = row.try_get("status").map_err(column("status"))?;
     Ok(AuthorizationOperation {
         id: row.try_get("id").map_err(column("id"))?,
@@ -63,6 +66,9 @@ fn operation_of(row: &sqlx::postgres::PgRow) -> SidResult<AuthorizationOperation
         nonce: row.try_get("nonce").map_err(column("nonce"))?,
         resource_id: row.try_get("resource_id").map_err(column("resource_id"))?,
         scopes: scopes.split_whitespace().map(str::to_owned).collect(),
+        acr_values: row.try_get("acr_values").map_err(column("acr_values"))?,
+        claim_requests: serde_json::from_value(claim_requests)
+            .map_err(|e| SidError::Storage(format!("operation claim requests: {e}")))?,
         session_id: row.try_get("session_id").map_err(column("session_id"))?,
         profile_id: row.try_get("profile_id").map_err(column("profile_id"))?,
         status: status.parse().map_err(SidError::Storage)?,
@@ -201,13 +207,23 @@ async fn store_consent(tx: &mut Tx<'_>, consent: &ConsentRecord) -> SidResult<()
         .execute(&mut **tx)
         .await
         .map_err(storage("store a consent"))?;
+    // The grants as they now stand replace the stored ones: a grant the
+    // record no longer holds (cleared by a re-approval after revocation)
+    // must not survive in the store.
+    sqlx::query("DELETE FROM claim_grants WHERE consent_id = $1")
+        .bind(id.0)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("replace claim grants"))?;
+    sqlx::query("DELETE FROM consent_scope_grants WHERE consent_id = $1")
+        .bind(id.0)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("replace scope grants"))?;
     for grant in &consent.grants {
         sqlx::query(
             "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (consent_id, claim_name) DO UPDATE SET
-               claim_type = EXCLUDED.claim_type, mode = EXCLUDED.mode,
-               granted_at = EXCLUDED.granted_at, revoked_at = EXCLUDED.revoked_at",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(grant.id.0)
         .bind(id.0)
@@ -223,9 +239,7 @@ async fn store_consent(tx: &mut Tx<'_>, consent: &ConsentRecord) -> SidResult<()
     for grant in &consent.scope_grants {
         sqlx::query(
             "INSERT INTO consent_scope_grants (consent_id, resource_id, scopes, granted_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (consent_id, resource_id) DO UPDATE SET
-               scopes = EXCLUDED.scopes, granted_at = EXCLUDED.granted_at",
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(id.0)
         .bind(grant.resource_id)
@@ -254,9 +268,9 @@ impl AuthorizationOperationStore for PostgresBackend {
             "INSERT INTO authorization_operations (id, issuer_id, client_id, redirect_uri,
                 response_type, state, code_challenge, code_challenge_method, nonce, resource_id,
                 scopes, session_id, profile_id, status, revision, decision,
-                created_at, expires_at, decided_at)
+                created_at, expires_at, decided_at, acr_values, claim_requests)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                $18, $19)",
+                $18, $19, $20, $21)",
         )
         .bind(operation.id)
         .bind(operation.issuer_id)
@@ -277,6 +291,11 @@ impl AuthorizationOperationStore for PostgresBackend {
         .bind(operation.created_at.pg())
         .bind(operation.expires_at.pg())
         .bind(operation.decided_at.pg())
+        .bind(&operation.acr_values)
+        .bind(
+            serde_json::to_value(&operation.claim_requests)
+                .map_err(|e| SidError::Validation(format!("operation claim requests: {e}")))?,
+        )
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("authorization operation", e))?;

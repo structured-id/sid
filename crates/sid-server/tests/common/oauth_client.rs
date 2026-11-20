@@ -24,8 +24,9 @@ pub const CODE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 pub const REDIRECT_URI: &str = "https://app.sid.example.com/callback";
 
 /// An authorization code for `profile` from the test client, authorized by a
-/// fresh stored session.
+/// fresh stored session of a holder who already approved the client.
 pub async fn authorize_code(svc: &TestServices, profile: &Profile) -> String {
+    super::consented(&*svc.storage, profile.id, "test-client").await;
     let bearer = fresh_token(svc, profile).await;
     let req = authed_request(
         OAuth2AuthorizeRequest {

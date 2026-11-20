@@ -28,6 +28,7 @@ const FIELDS: &str = "o.id AS id, o.issuer_id AS issuer_id, o.client_id AS clien
     o.redirect_uri AS redirect_uri, o.response_type AS response_type, o.state AS state,
     o.code_challenge AS code_challenge, o.code_challenge_method AS code_challenge_method,
     o.nonce AS nonce, o.resource_id AS resource_id, o.scopes AS scopes,
+    o.acr_values AS acr_values, o.claim_requests AS claim_requests,
     o.session_id AS session_id, o.profile_id AS profile_id, o.status AS status,
     o.revision AS revision, o.decision AS decision,
     o.created_at AS created_at, o.expires_at AS expires_at, o.decided_at AS decided_at";
@@ -65,6 +66,8 @@ fn operation_of(row: &Row) -> SidResult<AuthorizationOperation> {
         nonce: get_opt_text(row, "nonce")?,
         resource_id: get_id(row, "resource_id")?,
         scopes: get_texts(row, "scopes")?,
+        acr_values: get_opt_text(row, "acr_values")?,
+        claim_requests: super::get_document(row, "claim_requests")?,
         session_id: get_id(row, "session_id")?,
         profile_id: sid_core::models::ProfileId::from_slice(&profile)
             .map_err(|e| SidError::Storage(format!("profile_id: {e}")))?,
@@ -168,7 +171,8 @@ impl AuthorizationOperationStore for CoordinodeBackend {
                     response_type: $response_type, state: $state,
                     code_challenge: $code_challenge,
                     code_challenge_method: $code_challenge_method, nonce: $nonce,
-                    resource_id: $resource_id, scopes: $scopes, session_id: $session_id,
+                    resource_id: $resource_id, scopes: $scopes, acr_values: $acr_values,
+                    claim_requests: $claim_requests, session_id: $session_id,
                     profile_id: $profile_id, status: $status, revision: $revision,
                     decision: $decision, created_at: $created_at,
                     expires_at: $expires_at, decided_at: $decided_at})",
@@ -187,6 +191,11 @@ impl AuthorizationOperationStore for CoordinodeBackend {
                     .with("nonce", opt_text(o.nonce.as_deref()))
                     .with("resource_id", uuid(o.resource_id.as_uuid()))
                     .with("scopes", texts(&o.scopes))
+                    .with("acr_values", opt_text(o.acr_values.as_deref()))
+                    .with(
+                        "claim_requests",
+                        super::document(&o.claim_requests, "operation claim requests")?,
+                    )
                     .with("session_id", uuid(o.session_id.as_uuid()))
                     .with("profile_id", profile_value(o.profile_id))
                     .with("status", Value::String(o.status.as_str().into()))

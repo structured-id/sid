@@ -77,7 +77,6 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
             .iter()
             .map(crate::oauth::consent::claim_request_to_wire)
             .collect(),
-        consent_exempt: c.consent_exempt,
     }
 }
 

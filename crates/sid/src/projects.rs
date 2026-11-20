@@ -691,13 +691,12 @@ impl Projects {
             backchannel_logout_session_required: false,
             post_logout_redirect_uris: settings.post_logout_redirect_uris,
             claim_mappings: vec![],
-            // Set by the administrator creating the client role; dynamic
-            // registration never sets either.
+            // What the client asks for, as the administrator registered it;
+            // the holder decides on each in the consent review.
             claim_requests: crate::oauth::consent::claim_requests_from_wire(
                 settings.claim_requests,
             )
             .map_err(|e| invalid_field("client.claim_requests", e))?,
-            consent_exempt: settings.consent_exempt,
             login_strategy: LoginStrategy::LocalFirst,
             show_federation_button: true,
             federation_timeout_ms: 500,
@@ -1591,9 +1590,6 @@ impl Projects {
             post_logout_redirect_uris: req.post_logout_redirect_uris,
             claim_mappings: vec![],
             claim_requests: vec![],
-            // Dynamic registration never exempts a client from the consent
-            // screen: only an administrator does (authz/consent-flow.md).
-            consent_exempt: false,
             login_strategy: LoginStrategy::LocalFirst,
             show_federation_button: true,
             federation_timeout_ms: 500,
@@ -2008,9 +2004,6 @@ impl Projects {
             || req.subject_type.is_some()
             || req.post_logout_redirect_uris.is_some()
             || req.claim_requests.is_some();
-        // The consent exemption is the administrator's for any client, an
-        // integration's included (authz/consent-flow.md, administrative
-        // exemptions); it is not a setting the integration manages.
         if edits_settings && self.is_system(client.application_id).await? {
             return Err(ProjectError::SystemManaged {
                 application: client.application_id,
@@ -2077,9 +2070,6 @@ impl Projects {
         if let Some(list) = req.claim_requests {
             client.claim_requests = crate::oauth::consent::claim_requests_from_wire(list.requests)
                 .map_err(|e| invalid_field("claim_requests", e))?;
-        }
-        if let Some(exempt) = req.consent_exempt {
-            client.consent_exempt = exempt;
         }
         // Registration metadata A: only `public` is a supported value, and a
         // settings edit never changes an application's subjects; that is an
