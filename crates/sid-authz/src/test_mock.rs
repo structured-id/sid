@@ -773,6 +773,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn get_profile(&self, _: ProfileId) -> Result<Option<Profile>> {
         unimplemented!()
     }
+    async fn get_profile_with_primary_contacts(
+        &self,
+        _: ProfileId,
+    ) -> Result<Option<sid_plugin::storage::ProfileContacts>> {
+        unimplemented!()
+    }
     async fn get_profile_by_username(&self, _: &str) -> Result<Option<Profile>> {
         unimplemented!()
     }
@@ -913,10 +919,10 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
     async fn deliver_subscribed(
         &self,
-        _: sid_core::models::consent::ConsentId,
+        _: &sid_core::models::consent::ConsentRecord,
         _: &[sid_core::models::consent::DisclosureUpdate],
         _: MutationContext,
-    ) -> Result<bool> {
+    ) -> Result<Option<sid_core::models::consent::ConsentRecord>> {
         unimplemented!()
     }
     async fn get_consent(

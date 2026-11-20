@@ -636,6 +636,25 @@ impl CoordinodeBackend {
         self.read(move |tx| get(tx, id)).await
     }
 
+    /// Profile `id` with its primary contacts, read in one transaction and
+    /// so from one snapshot.
+    pub(super) async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        self.read(move |tx| {
+            let Some(profile) = get(tx, id)? else {
+                return Ok(None);
+            };
+            Ok(Some(sid_plugin::storage::ProfileContacts {
+                profile,
+                email: primary(tx, "SidEmail", EMAIL, id, email)?,
+                phone: primary(tx, "SidPhone", PHONE, id, phone)?,
+            }))
+        })
+        .await
+    }
+
     pub(super) async fn get_profile_by_username(
         &self,
         username: &str,

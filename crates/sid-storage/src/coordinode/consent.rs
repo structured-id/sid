@@ -573,22 +573,27 @@ impl CoordinodeBackend {
     /// transaction, so a concurrent decision on any of them conflicts.
     pub(super) async fn deliver_subscribed(
         &self,
-        id: ConsentId,
+        held: &ConsentRecord,
         updates: &[sid_core::models::consent::DisclosureUpdate],
         ctx: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<Option<ConsentRecord>> {
+        let id = held.id;
         let updates = updates.to_vec();
+        let delivered = held.with_delivery(&updates);
+        let revision = held.updated_at;
         self.transaction(move |tx| {
-            let active =
+            // Every decision, revocation or deletion moves the revision and
+            // writes the consent node, which this commit writes too.
+            let unchanged =
                 consents_where(tx, "c.id = $id", Params::default().with("id", uuid(&id.0)))?
                     .pop()
-                    .is_some_and(|c| c.status.as_str() == "active");
-            if !active {
-                return Ok(Decision::Abandon(false));
+                    .is_some_and(|c| c.status.as_str() == "active" && c.updated_at == revision);
+            if !unchanged {
+                return Ok(Decision::Abandon(None));
             }
             for update in &updates {
                 let pair = claim_pair(id, &update.claim_name)?;
-                let holds_prior = tx
+                let active = tx
                     .run(
                         &format!("MATCH (g:SidClaimGrant) WHERE g.pair = $pair RETURN {CLAIM}"),
                         Params::default().with("pair", pair.clone()),
@@ -596,13 +601,12 @@ impl CoordinodeBackend {
                     .first()
                     .map(claim)
                     .transpose()?
-                    .is_some_and(|g| {
-                        g.is_active()
-                            && g.mode == ConsentMode::Subscribed
-                            && g.disclosed == update.prior
-                    });
-                if !holds_prior {
-                    return Ok(Decision::Abandon(false));
+                    .is_some_and(|g| g.is_active());
+                if !active {
+                    return Err(SidError::Storage(format!(
+                        "deliver subscribed: claim {} is not active in the consent read",
+                        update.claim_name
+                    )));
                 }
                 tx.run(
                     "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
@@ -627,10 +631,10 @@ impl CoordinodeBackend {
                 "MATCH (c:SidConsent) WHERE c.id = $id SET c.updated_at = $now",
                 Params::default()
                     .with("id", uuid(&id.0))
-                    .with("now", time(Timestamp::now())),
+                    .with("now", time(delivered.updated_at)),
             )?;
             finalize(tx, &format!("consent:{}", id.0), ctx.clone())?;
-            Ok(Decision::Commit(true))
+            Ok(Decision::Commit(Some(delivered.clone())))
         })
         .await
     }

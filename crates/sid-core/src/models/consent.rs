@@ -584,6 +584,29 @@ impl ConsentRecord {
         (!updates.is_empty()).then_some(updates)
     }
 
+    /// This consent with `updates` delivered: their values on the active
+    /// grants, and a revision (`updated_at`) later than this one, in whole
+    /// microseconds as every store keeps it, so a store can tell the
+    /// delivered record from the one delivered over.
+    pub fn with_delivery(&self, updates: &[DisclosureUpdate]) -> ConsentRecord {
+        let mut next = self.clone();
+        for update in updates {
+            if let Some(grant) = next
+                .grants
+                .iter_mut()
+                .find(|g| g.is_active() && g.claim_name == update.claim_name)
+            {
+                grant.disclosed = update.next.clone();
+            }
+        }
+        let latest = Timestamp::now().max(self.updated_at);
+        // Truncation to whole microseconds plus one is always later than
+        // `latest`.
+        let micros = latest.as_microsecond() + 1;
+        next.updated_at = Timestamp::from_microsecond(micros).unwrap_or(latest);
+        next
+    }
+
     /// Withdraw every grant: a consent approved again after its revocation
     /// starts from what the new approval grants, never from what was revoked.
     pub fn clear_grants(&mut self) {

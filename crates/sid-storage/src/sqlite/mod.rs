@@ -1016,6 +1016,13 @@ impl StorageBackend for SqliteBackend {
     }
 
     // Profile operations — see profile.rs
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: sid_core::models::ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        self.get_profile_with_primary_contacts_impl(id).await
+    }
+
     async fn get_profile(
         &self,
         id: sid_core::models::ProfileId,
@@ -1318,11 +1325,11 @@ impl StorageBackend for SqliteBackend {
 
     async fn deliver_subscribed(
         &self,
-        id: sid_core::models::consent::ConsentId,
+        held: &sid_core::models::consent::ConsentRecord,
         updates: &[sid_core::models::consent::DisclosureUpdate],
         audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.deliver_subscribed_impl(id, updates, audit).await
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
+        self.deliver_subscribed_impl(held, updates, audit).await
     }
 
     async fn get_consent(

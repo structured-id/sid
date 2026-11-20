@@ -288,32 +288,21 @@ pub fn allowed_sharing(request: &ClaimRequest, has_value: bool) -> Vec<ClaimShar
 impl OAuth {
     /// The value each claim this issuer discloses has in Profile `profile`
     /// now, from one version of it: its names, username and primary
-    /// contacts live in separate records, so they are read until two reads
-    /// agree; an edit racing every read is a conflict for the caller to
-    /// retry, never a mixed set shown or approved.
+    /// contacts are read from one consistent state of the store, so a review
+    /// and its commit each see a whole version, never a mix.
     pub(crate) async fn current_values(
         &self,
         profile: sid_core::models::ProfileId,
     ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
-        let mut last = self.read_values(profile).await?;
-        for _ in 0..3 {
-            let again = self.read_values(profile).await?;
-            if again == last {
-                return Ok(again);
-            }
-            last = again;
-        }
-        Err(SidError::Conflict(
-            "the Profile kept changing while its values were read".into(),
-        ))
-    }
-
-    /// One read of `profile`'s claim values (see [`Self::current_values`]).
-    async fn read_values(
-        &self,
-        profile: sid_core::models::ProfileId,
-    ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
-        let Some(found) = self.storage.get_profile(profile).await? else {
+        let Some(sid_plugin::storage::ProfileContacts {
+            profile: found,
+            email,
+            phone,
+        }) = self
+            .storage
+            .get_profile_with_primary_contacts(profile)
+            .await?
+        else {
             return Ok(Vec::new());
         };
         let text = |value: Option<String>| {
@@ -332,7 +321,7 @@ impl OAuth {
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
         .collect();
-        if let Some(email) = self.storage.get_primary_profile_email(profile).await? {
+        if let Some(email) = email {
             values.push((
                 "email",
                 DisclosedValue {
@@ -341,7 +330,7 @@ impl OAuth {
                 },
             ));
         }
-        if let Some(phone) = self.storage.get_primary_profile_phone(profile).await? {
+        if let Some(phone) = phone {
             values.push((
                 "phone_number",
                 DisclosedValue {
@@ -353,60 +342,73 @@ impl OAuth {
         Ok(values)
     }
 
-    /// The disclosure Profile `profile` holds for client `client_id` now:
-    /// its consent, with the subscriptions' delivery of a later Profile edit
-    /// committed first when every changed value is subscribed, so UserInfo
-    /// and the tokens read the committed snapshot and never the live Profile
-    /// (consent-flow.md, claim update propagation). A delivery that lost a
-    /// race with a newer edit or decision leaves what that one committed.
+    /// The disclosure Profile `profile` holds for client `client_id` now, as
+    /// committed: its consent, with the subscriptions' pull delivery of a
+    /// later Profile edit committed first when every changed value is
+    /// subscribed, so UserInfo and the tokens read a committed snapshot and
+    /// never the live Profile (consent-flow.md, claim update propagation).
+    /// A delivery lost to a decision committed meanwhile is retried from
+    /// what that one committed. Delivery is not a condition of the answer:
+    /// when it cannot be read or written (a store refusing mutations under a
+    /// backup barrier, say), the snapshot already approved is answered
+    /// (backup-restore.md: reads and authentication continue at BACKUP).
     pub(crate) async fn held_disclosure(
         &self,
         profile: sid_core::models::ProfileId,
         client_id: &str,
     ) -> Result<Option<sid_core::models::ConsentRecord>, SidError> {
-        let Some(mut held) = self
+        let mut held = self
             .storage
             .get_consent_by_client(profile, client_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let subscribed = held.status.is_active()
-            && held
-                .grants
-                .iter()
-                .any(|g| g.is_active() && g.mode == sid_core::models::ConsentMode::Subscribed);
-        if !subscribed {
-            return Ok(Some(held));
-        }
-        let values = self.current_values(profile).await?;
-        let Some(updates) = held.subscribed_delivery(|grant| {
-            disclosed_for(
-                &ClaimRequest::optional(grant.claim_name.clone(), grant.claim_type),
-                &values,
-            )
-        }) else {
-            return Ok(Some(held));
-        };
-        let ctx: MutationContext =
-            AuditEntry::system("consent.deliver", held.id.0.to_string()).into();
-        if self
-            .storage
-            .deliver_subscribed(held.id, &updates, ctx)
-            .await?
-        {
-            for update in updates {
-                if let Some(grant) = held
+            .await?;
+        for _ in 0..3 {
+            let Some(current) = held.as_ref() else {
+                return Ok(None);
+            };
+            let subscribed = current.status.is_active()
+                && current
                     .grants
-                    .iter_mut()
-                    .find(|g| g.is_active() && g.claim_name == update.claim_name)
-                {
-                    grant.disclosed = update.next;
+                    .iter()
+                    .any(|g| g.is_active() && g.mode == sid_core::models::ConsentMode::Subscribed);
+            if !subscribed {
+                return Ok(held);
+            }
+            let values = match self.current_values(profile).await {
+                Ok(values) => values,
+                Err(e) => {
+                    tracing::warn!(error = %e, "subscribed delivery: Profile values unreadable");
+                    return Ok(held);
+                }
+            };
+            let Some(updates) = current.subscribed_delivery(|grant| {
+                disclosed_for(
+                    &ClaimRequest::optional(grant.claim_name.clone(), grant.claim_type),
+                    &values,
+                )
+            }) else {
+                return Ok(held);
+            };
+            let ctx: MutationContext =
+                AuditEntry::system("consent.deliver", current.id.0.to_string()).into();
+            match self
+                .storage
+                .deliver_subscribed(current, &updates, ctx)
+                .await
+            {
+                Ok(Some(delivered)) => return Ok(Some(delivered)),
+                Ok(None) => {
+                    held = self
+                        .storage
+                        .get_consent_by_client(profile, client_id)
+                        .await?;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "subscribed delivery not committed");
+                    return Ok(held);
                 }
             }
-            return Ok(Some(held));
         }
-        self.storage.get_consent_by_client(profile, client_id).await
+        Ok(held)
     }
 
     /// What `operation`'s review shows: each reviewed claim with the value

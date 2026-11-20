@@ -2700,6 +2700,34 @@ impl StorageBackend for MockStorage {
         Ok(inner.profiles.get(&id).cloned())
     }
 
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        // One lock: the read sees one state, as the stores' snapshots do.
+        let inner = self.inner.lock().unwrap();
+        if inner.profile_reads_fail || inner.contact_reads_fail {
+            return Err(sid_core::Error::Storage("read profile".into()));
+        }
+        Ok(inner
+            .profiles
+            .get(&id)
+            .cloned()
+            .map(|profile| sid_plugin::storage::ProfileContacts {
+                profile,
+                email: inner
+                    .profile_emails
+                    .values()
+                    .find(|e| e.profile_id == id && e.is_primary)
+                    .cloned(),
+                phone: inner
+                    .profile_phones
+                    .values()
+                    .find(|p| p.profile_id == id && p.is_primary)
+                    .cloned(),
+            }))
+    }
+
     async fn get_profile_by_username(&self, username: &str) -> SidResult<Option<Profile>> {
         let inner = self.inner.lock().unwrap();
         let profile = inner
@@ -3434,33 +3462,19 @@ impl StorageBackend for MockStorage {
 
     async fn deliver_subscribed(
         &self,
-        id: sid_core::models::consent::ConsentId,
+        held: &sid_core::models::consent::ConsentRecord,
         updates: &[sid_core::models::consent::DisclosureUpdate],
         ctx: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(mut consent) = inner
-            .consents
-            .get(&id.0)
-            .filter(|c| c.status.is_active())
-            .cloned()
-        else {
-            return Ok(false);
-        };
-        for update in updates {
-            let Some(grant) = consent.grants.iter_mut().find(|g| {
-                g.claim_name == update.claim_name
-                    && g.is_active()
-                    && g.mode == sid_core::models::ConsentMode::Subscribed
-                    && g.disclosed == update.prior
-            }) else {
-                return Ok(false);
-            };
-            grant.disclosed = update.next.clone();
+        // As the stores: only over the consent exactly as it was read.
+        if inner.consents.get(&held.id.0) != Some(held) || !held.status.is_active() {
+            return Ok(None);
         }
+        let delivered = held.with_delivery(updates);
         inner.owe(&ctx)?;
-        inner.consents.insert(id.0, consent);
-        Ok(true)
+        inner.consents.insert(held.id.0, delivered.clone());
+        Ok(Some(delivered))
     }
 
     async fn get_consent(

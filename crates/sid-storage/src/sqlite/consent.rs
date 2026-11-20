@@ -234,53 +234,61 @@ impl SqliteBackend {
     /// disclosure, all or nothing, under the write lock of `BEGIN IMMEDIATE`.
     pub(crate) async fn deliver_subscribed_impl(
         &self,
-        id: ConsentId,
+        held: &ConsentRecord,
         updates: &[sid_core::models::consent::DisclosureUpdate],
         audit: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<Option<ConsentRecord>> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("deliver subscribed: {e}"));
+        let id = held.id;
         let mut tx = self.begin_write().await?;
-        let active = sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = ?")
+        // Every decision, revocation or deletion moves the revision, so an
+        // unchanged one under the write lock means the consent is `held`.
+        let unchanged = match sqlx::query("SELECT status, updated_at FROM consents WHERE id = ?")
             .bind(id.0)
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
-            .is_some_and(|status| status == "active");
-        if !active {
+        {
+            Some(row) => {
+                col::<String>(&row, "status")? == "active"
+                    && dt_col(&row, "updated_at")? == held.updated_at
+            }
+            None => false,
+        };
+        if !unchanged {
             tx.rollback().await.map_err(storage)?;
-            return Ok(false);
+            return Ok(None);
         }
+        let delivered = held.with_delivery(updates);
         for update in updates {
-            let delivered = sqlx::query(
+            let written = sqlx::query(
                 "UPDATE claim_grants SET disclosed_value = ?3, disclosed_verified = ?4 \
-                 WHERE consent_id = ?1 AND claim_name = ?2 AND revoked_at IS NULL \
-                   AND mode = 'subscribed' \
-                   AND disclosed_value IS ?5 AND disclosed_verified IS ?6",
+                 WHERE consent_id = ?1 AND claim_name = ?2 AND revoked_at IS NULL",
             )
             .bind(id.0)
             .bind(&update.claim_name)
             .bind(update.next.as_ref().map(|v| v.value.as_str()))
             .bind(update.next.as_ref().and_then(|v| v.verified))
-            .bind(update.prior.as_ref().map(|v| v.value.as_str()))
-            .bind(update.prior.as_ref().and_then(|v| v.verified))
             .execute(&mut *tx)
             .await
             .map_err(storage)?
-            .rows_affected()
-                == 1;
-            if !delivered {
+            .rows_affected();
+            if written != 1 {
                 tx.rollback().await.map_err(storage)?;
-                return Ok(false);
+                return Err(SidError::Storage(format!(
+                    "deliver subscribed: claim {} is not active in the consent read",
+                    update.claim_name
+                )));
             }
         }
         sqlx::query("UPDATE consents SET updated_at = ? WHERE id = ?")
-            .bind(fmt_dt(&jiff::Timestamp::now()))
+            .bind(fmt_dt(&delivered.updated_at))
             .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
         Self::commit_mutation(tx, &format!("consent:{}", id.0), audit).await?;
-        Ok(true)
+        Ok(Some(delivered))
     }
 
     pub(crate) async fn get_consent_impl(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {

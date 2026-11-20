@@ -2517,6 +2517,50 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("profile with contacts: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // One snapshot for every read below (PostgreSQL 13.2.2, Repeatable
+        // Read Isolation Level).
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        let Some(profile) =
+            sqlx::query_as::<_, crate::pg_row::ProfileRow>("SELECT * FROM profiles WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+        else {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(None);
+        };
+        let email = sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+            "SELECT * FROM profile_emails WHERE profile_id = $1 AND is_primary = true",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let phone = sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE profile_id = $1 AND is_primary = true",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        tx.rollback().await.map_err(storage)?;
+        Ok(Some(sid_plugin::storage::ProfileContacts {
+            profile: profile.into_domain()?,
+            email: email.map(|r| r.into_domain()),
+            phone: phone.map(|r| r.into_domain()),
+        }))
+    }
+
     async fn get_profile_by_username(&self, username: &str) -> SidResult<Option<Profile>> {
         let row = sqlx::query_as::<_, crate::pg_row::ProfileRow>(
             "SELECT * FROM profiles WHERE username = $1",
@@ -7318,57 +7362,59 @@ impl StorageBackend for PostgresBackend {
 
     async fn deliver_subscribed(
         &self,
-        id: sid_core::models::consent::ConsentId,
+        held: &sid_core::models::consent::ConsentRecord,
         updates: &[sid_core::models::consent::DisclosureUpdate],
         audit: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("deliver subscribed: {e}"));
+        let id = held.id;
         let mut tx = self.pool.begin().await.map_err(storage)?;
         // The consent row lock orders the delivery with every decision and
-        // with the consent's revocation or deletion.
-        let active =
-            sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = $1 FOR UPDATE")
-                .bind(id.0)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?
-                .is_some_and(|status| status == "active");
-        if !active {
+        // with the consent's revocation or deletion; each of them moves its
+        // revision, so an unchanged revision means the consent is `held`.
+        let unchanged = sqlx::query_as::<_, (String, PgTime)>(
+            "SELECT status, updated_at FROM consents WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .is_some_and(|(status, at)| status == "active" && at.jiff() == held.updated_at);
+        if !unchanged {
             tx.rollback().await.map_err(storage)?;
-            return Ok(false);
+            return Ok(None);
         }
+        let delivered = held.with_delivery(updates);
         for update in updates {
-            let delivered = sqlx::query(
+            let written = sqlx::query(
                 "UPDATE claim_grants SET disclosed_value = $3, disclosed_verified = $4 \
-                 WHERE consent_id = $1 AND claim_name = $2 AND revoked_at IS NULL \
-                   AND mode = 'subscribed' \
-                   AND disclosed_value IS NOT DISTINCT FROM $5 \
-                   AND disclosed_verified IS NOT DISTINCT FROM $6",
+                 WHERE consent_id = $1 AND claim_name = $2 AND revoked_at IS NULL",
             )
             .bind(id.0)
             .bind(&update.claim_name)
             .bind(update.next.as_ref().map(|v| v.value.as_str()))
             .bind(update.next.as_ref().and_then(|v| v.verified))
-            .bind(update.prior.as_ref().map(|v| v.value.as_str()))
-            .bind(update.prior.as_ref().and_then(|v| v.verified))
             .execute(&mut *tx)
             .await
             .map_err(storage)?
-            .rows_affected()
-                == 1;
-            if !delivered {
+            .rows_affected();
+            if written != 1 {
                 tx.rollback().await.map_err(storage)?;
-                return Ok(false);
+                return Err(SidError::Storage(format!(
+                    "deliver subscribed: claim {} is not active in the consent read",
+                    update.claim_name
+                )));
             }
         }
-        sqlx::query("UPDATE consents SET updated_at = NOW() WHERE id = $1")
+        sqlx::query("UPDATE consents SET updated_at = $2 WHERE id = $1")
             .bind(id.0)
+            .bind(delivered.updated_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
         Self::audit_in_tx(&mut tx, &format!("consent:{}", id.0), audit).await?;
         tx.commit().await.map_err(storage)?;
-        Ok(true)
+        Ok(Some(delivered))
     }
 
     async fn get_consent(
