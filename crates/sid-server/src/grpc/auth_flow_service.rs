@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use sid::oauth::consent::{
-    ConsentReview, FlowView, Submission, SubmittedDecision, allowed_sharing, level_to_wire,
+    ConsentReview, FlowView, Submission, SubmittedDecision, allowed_sharing, claim_request_to_wire,
+    level_to_wire,
 };
 use sid_core::models::{AuthorizationOperationId, AuthorizationStatus, ClaimSharing as Sharing};
 use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
@@ -76,6 +77,7 @@ fn details(review: ConsentReview) -> ConsentDetails {
             .map(|request| ConsentClaim {
                 name: request.claim_name.clone(),
                 level: level_to_wire(request.level) as i32,
+                r#type: claim_request_to_wire(request).r#type,
                 justification: request.justification.clone(),
                 allowed: allowed_sharing(request)
                     .into_iter()

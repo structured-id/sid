@@ -2315,6 +2315,56 @@ async fn the_consent_service_records_the_reviewed_decision() {
     assert!(done.continuation_uri.is_none());
 }
 
+/// The review shows what each claim request discloses: a request for an
+/// attestation reads as one, so the user is never shown a value request and
+/// asked to approve a different disclosure.
+#[tokio::test]
+async fn the_review_names_the_requested_claim_type() {
+    use sid_core::models::{ClaimRequest, ClaimType};
+    use sid_proto::sid::v1::authn::GetConsentRequest;
+    use sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowService;
+    use sid_proto::sid::v1::common::ClaimType as WireType;
+    let page = Arc::new(Some(url::Url::parse(LOGIN_URL).unwrap()));
+    let client = sid_core::models::OAuth2Client {
+        consent_exempt: false,
+        claim_requests: vec![
+            ClaimRequest::optional("email", ClaimType::Data),
+            ClaimRequest::optional("passport", ClaimType::Attestation),
+        ],
+        ..common::test_client()
+    };
+    let browser = browser_from(signed_in().await, page, client).await;
+    let got = browser
+        .get(&with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .await;
+    let (operation, _) = consent_redirect(&browser, &got);
+    let review = consent_service(&browser)
+        .get_consent(from_sign_in_page(
+            &browser,
+            GetConsentRequest {
+                operation_id: Some(wire(operation)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let types: Vec<(String, i32)> = review
+        .claims
+        .iter()
+        .map(|c| (c.name.clone(), c.r#type))
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            ("email".to_owned(), WireType::Data as i32),
+            ("passport".to_owned(), WireType::Attestation as i32),
+        ]
+    );
+}
+
 /// A submission without this review's CSRF value, one for another revision,
 /// a call from another origin or without one, another session's call and an
 /// approval naming a claim the review did not offer are refused, and none

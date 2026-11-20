@@ -739,6 +739,20 @@ impl TestIssuer {
         client
     }
 
+    /// `profile`'s recorded approval of `client` for the scopes it may ask at
+    /// its default resource, as the consent review leaves it; without it the
+    /// authorization endpoint asks for consent first.
+    pub async fn consent(&self, profile: &Profile, client: &sid_core::models::OAuth2Client) {
+        let resource = client.default_resource.expect("the client's resource");
+        let mut consent = sid_core::models::ConsentRecord::new(profile.id, &client.client_id);
+        consent.grant_scopes(resource, &client.allowed_scopes);
+        consent.as_requested().expect("a new consent").grant();
+        self.storage
+            .create_consent(&consent, audit("consent.grant"))
+            .await
+            .expect("consent");
+    }
+
     /// `profile` signed in at this issuer now, as its sign-in page leaves a
     /// browser: the stored session and the bearer token its pages present.
     pub async fn sign_in(&self, profile: &Profile) -> (Session, String) {
