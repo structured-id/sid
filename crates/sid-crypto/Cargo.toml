@@ -23,7 +23,7 @@ aws-lc = ["std", "dep:aws-lc-rs"]
 fips = ["aws-lc", "aws-lc-rs/fips", "rustls?/fips"]
 # The host explicitly installs the aws-lc JWT provider through this capability.
 jwt = ["std", "dep:jsonwebtoken", "jsonwebtoken/aws_lc_rs"]
-jwt-rustcrypto = ["std", "dep:jsonwebtoken", "dep:hmac", "dep:sha2", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:rsa", "dep:der", "dep:crypto-bigint", "dep:signature-v2", "dep:signature", "dep:pkcs8"]
+jwt-rustcrypto = ["std", "dep:jsonwebtoken", "dep:hmac", "dep:sha2", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:rsa", "dep:der", "dep:crypto-bigint", "dep:signature", "dep:pkcs8"]
 tls-aws-lc = ["std", "dep:rustls", "rustls/aws_lc_rs"]
 tls-rustcrypto = ["alloc", "dep:rustls", "dep:pki-types", "dep:aead", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crypto-common", "dep:crypto-bigint", "dep:der", "dep:digest", "dep:ed25519-dalek", "dep:getrandom", "dep:hmac", "dep:p256", "dep:p384", "dep:pkcs8", "dep:rsa", "dep:sec1", "dep:sha2", "dep:signature", "dep:x25519-dalek", "dep:zeroize"]
 tls12 = ["rustls?/tls12"]
@@ -32,7 +32,7 @@ logging = ["rustls?/logging"]
 [dependencies]
 thiserror = { version = "2", default-features = false }
 aws-lc-rs = { version = "1", optional = true }
-jsonwebtoken = { version = "11", default-features = false, optional = true }
+jsonwebtoken = { version = "12", default-features = false, optional = true }
 aead = { version = "0.6", default-features = false, optional = true }
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
@@ -54,8 +54,6 @@ rustls = { version = "0.23", default-features = false, optional = true }
 sec1 = { version = "0.8", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
 signature = { version = "3", default-features = false, optional = true }
-# jsonwebtoken's extension traits use signature 2; primitive backends use 3.
-signature-v2 = { package = "signature", version = "2", default-features = false, optional = true }
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
 zeroize = { version = "1", default-features = false, optional = true }
 
@@ -63,7 +61,7 @@ zeroize = { version = "1", default-features = false, optional = true }
 base64.workspace = true
 rand.workspace = true
 # End-to-end JWT test hosts parse PEM fixtures; provider adapters do not choose input formats.
-jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["use_pem"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rcgen = "0.14"
 # An independent TLS implementation is an oracle, never a product dependency.

@@ -137,7 +137,7 @@ fn symmetric_and_unadvertised_algorithms_are_refused() {
     let hmac = jsonwebtoken::encode(
         &header,
         &claims(),
-        &EncodingKey::from_secret(b"client secret"),
+        &EncodingKey::from_secret(b"client secret").unwrap(),
     )
     .unwrap();
     refused(validate_id_token(&hmac, &keys(&[&s]), &expected(&[])));

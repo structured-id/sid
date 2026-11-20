@@ -29,18 +29,18 @@ fn allowed_signatures_round_trip_through_jsonwebtoken() {
     let cases = [
         (
             Algorithm::HS256,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::HS384,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::HS512,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::ES256,
@@ -75,7 +75,7 @@ fn allowed_signatures_round_trip_through_jsonwebtoken() {
 }
 
 fn rsa_signature(key: rsa::RsaPrivateKey, algorithm: Algorithm, input: &[u8]) -> Vec<u8> {
-    use signature_v3::{RandomizedSigner, Signer};
+    use signature::{RandomizedSigner, Signer};
     // Generated test keys are an oracle only; the product factory never accepts RSA signing.
     match algorithm {
         Algorithm::RS256 => rsa::pkcs1v15::SigningKey::<Sha256>::new(key)
@@ -180,12 +180,18 @@ fn malformed_public_keys_and_family_confusion_are_errors() {
             .is_err()
     );
     assert!(
-        (DEFAULT_PROVIDER.verifier_factory)(&Algorithm::ES256, &DecodingKey::from_secret(&[0; 64]))
-            .is_err()
+        (DEFAULT_PROVIDER.verifier_factory)(
+            &Algorithm::ES256,
+            &DecodingKey::from_secret(&[0; 64]).unwrap()
+        )
+        .is_err()
     );
     assert!(
-        (DEFAULT_PROVIDER.signer_factory)(&Algorithm::ES256, &EncodingKey::from_secret(&[0; 64]))
-            .is_err()
+        (DEFAULT_PROVIDER.signer_factory)(
+            &Algorithm::ES256,
+            &EncodingKey::from_secret(&[0; 64]).unwrap()
+        )
+        .is_err()
     );
     assert!(
         (DEFAULT_PROVIDER.verifier_factory)(

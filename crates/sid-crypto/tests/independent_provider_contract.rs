@@ -22,7 +22,7 @@ fn provider_factories_leave_process_slots_unclaimed() {
     assert!(!tls.cipher_suites.is_empty());
     assert!(!aws_tls.cipher_suites.is_empty());
     let jwt = sid_crypto::jwt::rustcrypto::provider();
-    let key = EncodingKey::from_secret(&[4; 64]);
+    let key = EncodingKey::from_secret(&[4; 64]).unwrap();
     let signer = (jwt.signer_factory)(&Algorithm::HS256, &key).unwrap();
     assert_eq!(signer.try_sign(b"test").unwrap().len(), 32);
     assert!(rustls::crypto::CryptoProvider::get_default().is_none());
@@ -48,18 +48,18 @@ fn jwt_signatures_interoperate_with_independent_backend() {
     let mut cases = vec![
         (
             Algorithm::HS256,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::HS384,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::HS512,
-            EncodingKey::from_secret(&[4; 64]),
-            DecodingKey::from_secret(&[4; 64]),
+            EncodingKey::from_secret(&[4; 64]).unwrap(),
+            DecodingKey::from_secret(&[4; 64]).unwrap(),
         ),
         (
             Algorithm::ES256,

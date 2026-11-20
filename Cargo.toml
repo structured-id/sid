@@ -187,7 +187,7 @@ reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider"],
 lettre = { version = "0.11", features = ["tokio1", "smtp-transport", "tokio1-rustls-tls", "pool", "hostname", "builder"], default-features = false }
 
 # MaxMind GeoIP2 MMDB reader (GeoIP resolution)
-maxminddb = "0.32"
+maxminddb = "0.33"
 
 # CIDR range matching (IP intelligence providers)
 ipnet = "2"
@@ -196,7 +196,7 @@ ipnet = "2"
 # No provider here: each binary installs aws-lc at startup through sid-crypto
 # (`jwt`), an embedding host the provider it selects, so no library closure
 # carries a native backend. Tests name aws-lc in their dev-dependencies.
-jsonwebtoken = "11"
+jsonwebtoken = "12"
 globset = "0.4"
 base64 = "0.23"
 # WebAuthn relying party, pure Rust. `serde` parses client responses as the
