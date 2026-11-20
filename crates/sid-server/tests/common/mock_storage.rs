@@ -3467,14 +3467,20 @@ impl StorageBackend for MockStorage {
         let mut changed = consent.clone();
         match decision {
             ClaimDecision::Grant(claim_type) => {
-                // As the stores: a renewed claim keeps its mode, a new one
-                // is a snapshot.
-                let mode = consent
+                // As the stores: a claim granted from account management is
+                // a snapshot without a reviewed value, renewed or new.
+                changed.grant_claim(
+                    claim_name,
+                    claim_type,
+                    sid_core::models::ConsentMode::Static,
+                );
+                if let Some(grant) = changed
                     .grants
-                    .iter()
-                    .find(|g| g.claim_name == claim_name)
-                    .map_or(sid_core::models::ConsentMode::Static, |g| g.mode);
-                changed.grant_claim(claim_name, claim_type, mode);
+                    .iter_mut()
+                    .find(|g| g.claim_name == claim_name && g.is_active())
+                {
+                    grant.disclosed = None;
+                }
             }
             ClaimDecision::Revoke => {
                 if let Some(mut active) = changed.as_active() {

@@ -196,11 +196,12 @@ async fn test_get_consent_detail_success() {
         .await
         .unwrap();
 
-    // Add email Principal so consent detail can resolve email claim preview
+    // The holder now uses another address; the client was given the
+    // approved one, which is what the detail previews.
     let mut email_principal = sid_core::models::Principal::new(
         profile.id,
         sid_core::models::PrincipalType::Email,
-        "alice@sid.example.com".to_string(),
+        "bob@sid.example.com".to_string(),
     );
     email_principal.is_primary = true;
     svc.storage
@@ -210,6 +211,10 @@ async fn test_get_consent_detail_success() {
 
     let mut consent = ConsentRecord::new(profile.id, "detail-app");
     consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grants[0].disclosed = Some(sid_core::models::DisclosedValue {
+        value: "alice@sid.example.com".into(),
+        verified: Some(true),
+    });
     consent.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
@@ -233,7 +238,7 @@ async fn test_get_consent_detail_success() {
     assert_eq!(detail.site_info.as_ref().unwrap().site_id, "detail-app");
     assert_eq!(detail.claims.len(), 2);
 
-    // value_preview: email claim should be masked (Profile has alice@sid.example.com).
+    // The approved value masked, not the address the Profile holds now.
     let email_claim = detail.claims.iter().find(|c| c.claim_name == "email");
     assert!(email_claim.is_some(), "email claim should exist");
     assert_eq!(
@@ -241,6 +246,9 @@ async fn test_get_consent_detail_success() {
         "a***@sid.example.com",
         "email should be masked: first char + *** + @domain"
     );
+    // A claim with no approved value previews nothing.
+    let phone_claim = detail.claims.iter().find(|c| c.claim_name == "phone");
+    assert_eq!(phone_claim.unwrap().value_preview, "");
 }
 
 #[tokio::test]
@@ -320,6 +328,10 @@ async fn test_get_consent_detail_phone_masking() {
 
     let mut consent = ConsentRecord::new(profile.id, "phone-app");
     consent.grant_claim("phone_number", ClaimType::Data, ConsentMode::Static);
+    consent.grants[0].disclosed = Some(sid_core::models::DisclosedValue {
+        value: "+380501234567".into(),
+        verified: Some(true),
+    });
     consent.grant_claim("name", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
@@ -349,7 +361,7 @@ async fn test_get_consent_detail_phone_masking() {
     assert!(phone_claim.is_some());
     assert_eq!(phone_claim.unwrap().value_preview, "+38***4567");
 
-    // Name claim: profile has no display_name → empty preview.
+    // Name claim: no approved value → empty preview.
     let name_claim = detail.claims.iter().find(|c| c.claim_name == "name");
     assert!(name_claim.is_some());
     assert_eq!(name_claim.unwrap().value_preview, "");
@@ -432,10 +444,10 @@ async fn test_get_consent_detail_unreadable_client_is_reported() {
     assert_eq!(err.code(), tonic::Code::Internal);
 }
 
-/// Consent detail fails when the values it previews cannot be read, instead
-/// of showing every claim with an empty preview.
+/// Consent detail previews the values the consent holds: it reads nothing of
+/// the live Profile, so its principals being unreadable does not matter.
 #[tokio::test]
-async fn test_get_consent_detail_unreadable_principals_is_reported() {
+async fn test_get_consent_detail_previews_from_the_consent_alone() {
     let (svc, token) = one_consent("some-app").await;
     svc.mock_storage.fail_principal_reads();
     let req = authed_request(
@@ -444,8 +456,7 @@ async fn test_get_consent_detail_unreadable_principals_is_reported() {
         },
         &token,
     );
-    let err = svc.account.get_consent_detail(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Internal);
+    assert!(svc.account.get_consent_detail(req).await.is_ok());
 }
 
 #[tokio::test]

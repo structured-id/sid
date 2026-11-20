@@ -528,6 +528,7 @@ impl CoordinodeBackend {
                     tx.run(
                         "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
                          SET g.claim_type = $claim_type, g.granted_at = $now, g.revoked_at = null,
+                             g.mode = 'static',
                              g.disclosed_value = null, g.disclosed_verified = null",
                         Params::default()
                             .with("pair", pair)

@@ -157,6 +157,7 @@ macro_rules! __storage_conformance {
                 test_change_claim_grant
                 test_claim_grant_keeps_ended_consent_ended
                 test_claim_grants_under_concurrency
+                test_regranted_claim_is_an_unreviewed_snapshot
                 test_profile_with_contacts_reads_one_state
                 test_subscribed_delivery_commits_over_the_consent_read
                 test_subscribed_delivery_yields_to_a_later_decision

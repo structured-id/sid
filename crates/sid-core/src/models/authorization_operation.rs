@@ -265,6 +265,14 @@ impl AuthorizationOperation {
         consent.grant_scopes(self.resource_id, &self.scopes);
         let id = consent.id;
         let now = jiff::Timestamp::now();
+        // A refusal of a claim this review did not ask about stands: an
+        // unrelated approval does not erase the holder's earlier decision.
+        let kept: Vec<ClaimGrant> = consent
+            .grants
+            .iter()
+            .filter(|g| !g.is_active() && !choices.iter().any(|c| c.name == g.claim_name))
+            .cloned()
+            .collect();
         consent.grants = choices
             .iter()
             .map(|choice| {
@@ -283,6 +291,7 @@ impl AuthorizationOperation {
                 }
                 grant
             })
+            .chain(kept)
             .collect();
         consent.updated_at = now;
         consent

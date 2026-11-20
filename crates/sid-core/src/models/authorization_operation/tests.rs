@@ -252,6 +252,33 @@ fn an_approval_replaces_the_disclosure() {
     assert!(!refused.is_active() && refused.disclosed.is_none());
 }
 
+/// A refusal recorded before stands through a later approval that did not
+/// review that claim: approving `profile` claims after refusing the email
+/// keeps the email refusal, so a later email request is not asked again.
+#[test]
+fn an_approval_keeps_refusals_outside_its_review() {
+    let now = Timestamp::now();
+    let op = operation(now);
+    let mut held = ConsentRecord::new(op.profile_id, op.client_id.clone());
+    held.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
+    held.as_requested().unwrap().grant();
+    held.as_active().unwrap().revoke_claim("phone");
+
+    let consent = op.approved_consent(Some(held), &[choice("email", ClaimSharing::Static)]);
+    let phone = consent
+        .grants
+        .iter()
+        .find(|g| g.claim_name == "phone")
+        .expect("the earlier refusal");
+    assert!(!phone.is_active() && phone.disclosed.is_none());
+    assert!(
+        consent
+            .grants
+            .iter()
+            .any(|g| g.claim_name == "email" && g.is_active())
+    );
+}
+
 /// A revoked consent approved again grants what this approval grants and
 /// nothing it held before: approving `read` after revoking `read write`
 /// does not bring `write` back, nor a revoked claim.

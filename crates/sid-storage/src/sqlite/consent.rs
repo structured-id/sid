@@ -206,7 +206,7 @@ impl SqliteBackend {
                  VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT (consent_id, claim_name) DO UPDATE SET \
                    claim_type = excluded.claim_type, granted_at = ?5, revoked_at = NULL, \
-                   disclosed_value = NULL, disclosed_verified = NULL \
+                   mode = 'static', disclosed_value = NULL, disclosed_verified = NULL \
                  WHERE claim_grants.revoked_at IS NOT NULL",
             )
             .bind(Uuid::now_v7())

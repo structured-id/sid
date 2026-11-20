@@ -108,6 +108,32 @@ fn update(
     }
 }
 
+/// A claim revoked and granted again from account management carries no
+/// reviewed value, so it returns as a snapshot grant without a value: a
+/// subscription it held before cannot fill it from the live Profile without
+/// the holder's review.
+pub async fn test_regranted_claim_is_an_unreviewed_snapshot(backend: &dyn StorageBackend) {
+    let consent = disclosing_consent(backend).await;
+    for decision in [ClaimDecision::Revoke, ClaimDecision::Grant(ClaimType::Data)] {
+        assert_eq!(
+            backend
+                .change_claim_grant(consent.id, "email", decision, test_audit())
+                .await
+                .unwrap(),
+            ClaimGrantChange::Changed
+        );
+    }
+    let email = stored(backend, consent.id)
+        .await
+        .grants
+        .into_iter()
+        .find(|g| g.claim_name == "email")
+        .unwrap();
+    assert!(email.is_active());
+    assert_eq!(email.mode, ConsentMode::Static);
+    assert!(email.disclosed.is_none());
+}
+
 /// A Profile read with its primary contacts is one state of the store: a
 /// writer renames the Profile to `i` and then makes `i@…` its primary email,
 /// round after round, and every read sees an email no newer than the name
@@ -413,8 +439,9 @@ pub async fn test_change_claim_grant(backend: &dyn StorageBackend) {
             .count(),
         1
     );
-    // A claim granted from account management is a snapshot until the user
-    // chooses updates; the renewed claim keeps its earlier mode.
+    // A claim granted from account management is a snapshot without a
+    // reviewed value until the user reviews it, renewed or new: an earlier
+    // subscription does not survive its revocation.
     let mode = |name: &str| {
         stored
             .grants
@@ -424,7 +451,7 @@ pub async fn test_change_claim_grant(backend: &dyn StorageBackend) {
             .mode
     };
     assert_eq!(mode("age_over_18"), ConsentMode::Static);
-    assert_eq!(mode("email"), ConsentMode::Subscribed);
+    assert_eq!(mode("email"), ConsentMode::Static);
 }
 
 /// A decision on a disconnected consent does not bring it back, and one on
