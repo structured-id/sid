@@ -349,6 +349,44 @@ pub async fn routes_to(svc: &TestServices, principal: &str, profile: ProfileId) 
     }
 }
 
+/// The stored consent of `profile` to `client_id`: every scope the client may
+/// be granted, for its default resource, as an approval on the consent page
+/// records it, so any request of that client is covered; a consent already
+/// held is kept.
+pub async fn consented(
+    storage: &dyn sid_plugin::StorageBackend,
+    profile: sid_core::models::ProfileId,
+    client_id: &str,
+) {
+    if storage
+        .get_consent_by_client(profile, client_id)
+        .await
+        .unwrap()
+        .is_some()
+    {
+        return;
+    }
+    let client = storage
+        .get_oauth2_client(client_id)
+        .await
+        .unwrap()
+        .expect("the client");
+    let resource = client.default_resource.expect("the client's resource");
+    let mut consent = sid_core::models::ConsentRecord::new(profile, client_id);
+    consent.grant_scopes(resource, &client.allowed_scopes);
+    consent.as_requested().unwrap().grant();
+    storage
+        .create_consent(
+            &consent,
+            sid_core::models::AuditEntry::system("test", "consent").into(),
+        )
+        .await
+        .unwrap();
+}
+
+/// The test client, exempted from the consent screen by its administrator:
+/// the token, session and resource tests get their code without a review.
+/// The consent tests clear the exemption.
 pub fn test_client() -> sid_core::models::OAuth2Client {
     sid_core::models::OAuth2Client {
         client_id: "test-client".to_string(),
@@ -384,6 +422,8 @@ pub fn test_client() -> sid_core::models::OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
+        consent_exempt: true,
         login_strategy: sid_core::models::LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

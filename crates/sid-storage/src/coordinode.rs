@@ -21,6 +21,7 @@ use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
+mod authorization_operation;
 mod backend;
 mod binding;
 mod branding;

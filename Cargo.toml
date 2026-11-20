@@ -272,6 +272,10 @@ sqlx-macros = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
 sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
 sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
 sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", branch = "main" }
+# AuthorizationOperationId is on SDK main and not yet in a published sid-ids;
+# removed when the SDK release publishes it.
+sid-ids = { git = "https://github.com/structured-id/sdk", branch = "main" }
+sid-ids-proto = { git = "https://github.com/structured-id/sdk", branch = "main" }
 
 # Line tables keep file:line in panics and backtraces at a fraction of full
 # debuginfo. Build scripts and proc-macros get the same setting, so a crate

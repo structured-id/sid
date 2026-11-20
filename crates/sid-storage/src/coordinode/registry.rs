@@ -63,7 +63,8 @@ const CLIENT: &str = "c.client_id AS client_id, c.project_id AS project_id,
     c.backchannel_logout_uri AS backchannel_logout_uri,
     c.backchannel_logout_session_required AS backchannel_logout_session_required,
     c.post_logout_redirect_uris AS post_logout_redirect_uris,
-    c.claim_mappings AS claim_mappings, c.login_strategy AS login_strategy,
+    c.claim_mappings AS claim_mappings, c.claim_requests AS claim_requests,
+    c.consent_exempt AS consent_exempt, c.login_strategy AS login_strategy,
     c.show_federation_button AS show_federation_button,
     c.federation_timeout_ms AS federation_timeout_ms, c.unified_input AS unified_input,
     c.org_id AS org_id, c.revision AS revision, c.created_at AS created_at";
@@ -428,6 +429,10 @@ fn client(row: &Row) -> SidResult<OAuth2Client> {
         None | Some(Value::Null) => Default::default(),
         Some(_) => super::get_document(row, "claim_mappings")?,
     };
+    let claim_requests = match row.get("claim_requests") {
+        None | Some(Value::Null) => Default::default(),
+        Some(_) => super::get_document(row, "claim_requests")?,
+    };
     let opt_bool = |name: &str| -> SidResult<Option<bool>> {
         match row.get(name) {
             None | Some(Value::Null) => Ok(None),
@@ -478,6 +483,8 @@ fn client(row: &Row) -> SidResult<OAuth2Client> {
         backchannel_logout_session_required: get_bool(row, "backchannel_logout_session_required")?,
         post_logout_redirect_uris: get_texts(row, "post_logout_redirect_uris")?,
         claim_mappings,
+        claim_requests,
+        consent_exempt: get_bool(row, "consent_exempt")?,
         login_strategy: get_parsed(row, "login_strategy")?,
         show_federation_button: get_bool(row, "show_federation_button")?,
         federation_timeout_ms: u32::try_from(federation_timeout_ms).map_err(|_| {
@@ -499,6 +506,11 @@ fn client_params(client: &OAuth2Client) -> SidResult<Params> {
         Value::Null
     } else {
         super::document(&client.claim_mappings, "claim mappings")?
+    };
+    let claim_requests = if client.claim_requests.is_empty() {
+        Value::Null
+    } else {
+        super::document(&client.claim_requests, "claim requests")?
     };
     let opt_bool = |v: Option<bool>| v.map_or(Value::Null, Value::Bool);
     Ok(Params::default()
@@ -595,6 +607,8 @@ fn client_params(client: &OAuth2Client) -> SidResult<Params> {
             texts(&client.post_logout_redirect_uris),
         )
         .with("claim_mappings", claim_mappings)
+        .with("claim_requests", claim_requests)
+        .with("consent_exempt", Value::Bool(client.consent_exempt))
         .with("login_strategy", text(client.login_strategy.as_str()))
         .with(
             "show_federation_button",
@@ -623,7 +637,8 @@ const CLIENT_SET: &str = "c.client_secret_hash = $client_secret_hash,
     c.require_verified_phone = $require_verified_phone,
     c.backchannel_logout_uri = $backchannel_logout_uri,
     c.backchannel_logout_session_required = $backchannel_logout_session_required,
-    c.claim_mappings = $claim_mappings, c.logo_uri = $logo_uri,
+    c.claim_mappings = $claim_mappings, c.claim_requests = $claim_requests,
+    c.consent_exempt = $consent_exempt, c.logo_uri = $logo_uri,
     c.token_endpoint_auth_method = $token_endpoint_auth_method,
     c.response_types = $response_types, c.subject_type = $subject_type,
     c.sector_identifier_uri = $sector_identifier_uri, c.contacts = $contacts,
@@ -716,7 +731,8 @@ pub(super) fn insert_client(
             backchannel_logout_uri: $backchannel_logout_uri,
             backchannel_logout_session_required: $backchannel_logout_session_required,
             post_logout_redirect_uris: $post_logout_redirect_uris,
-            claim_mappings: $claim_mappings, login_strategy: $login_strategy,
+            claim_mappings: $claim_mappings, claim_requests: $claim_requests,
+            consent_exempt: $consent_exempt, login_strategy: $login_strategy,
             show_federation_button: $show_federation_button,
             federation_timeout_ms: $federation_timeout_ms, unified_input: $unified_input,
             org_id: $org_id, revision: $revision, created_at: $created_at})",

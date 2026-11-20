@@ -34,6 +34,11 @@ pub struct MockStorageInner {
     principal_unique: HashSet<(String, String)>,
     /// Consent records: consent_id → ConsentRecord.
     consents: HashMap<Uuid, consent::ConsentRecord>,
+    /// Browser authorization operations by id.
+    authorization_operations: HashMap<
+        sid_core::models::AuthorizationOperationId,
+        sid_core::models::AuthorizationOperation,
+    >,
     /// Anomaly event records.
     anomaly_events: Vec<AnomalyEventRecord>,
     /// Profile emails: email_id → ProfileEmail.
@@ -1665,6 +1670,110 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
 /// The double registers no entry connection: none is found, and a write is
 /// refused, so a test that needs one uses a real store.
 #[async_trait]
+impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockStorage {
+    async fn create_authorization_operation(
+        &self,
+        operation: &sid_core::models::AuthorizationOperation,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.authorization_operations.contains_key(&operation.id) {
+            return Err(sid_core::Error::Conflict(
+                "authorization operation exists".into(),
+            ));
+        }
+        inner
+            .authorization_operations
+            .insert(operation.id, operation.clone());
+        Ok(())
+    }
+
+    async fn authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+    ) -> SidResult<Option<sid_core::models::AuthorizationOperation>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .authorization_operations
+            .get(&id)
+            .cloned())
+    }
+
+    async fn decide_authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+        session: SessionId,
+        revision: u64,
+        decision: &sid_core::models::AuthorizationDecision,
+        now: jiff::Timestamp,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::DecisionOutcome> {
+        use sid_core::models::{AuthorizationDecision, DecisionOutcome, DecisionStep};
+        // The one lock orders it as the stores' row lock does.
+        let mut inner = self.inner.lock().unwrap();
+        let Some(held) = inner.authorization_operations.get(&id).cloned() else {
+            return Ok(DecisionOutcome::NotFound);
+        };
+        let decided = match held.decide(session, revision, decision, now) {
+            DecisionStep::Apply(decided) => *decided,
+            DecisionStep::Replayed => {
+                inner.complete(&ctx)?;
+                return Ok(DecisionOutcome::Replayed(held));
+            }
+            DecisionStep::Conflict => return Ok(DecisionOutcome::Conflict),
+            DecisionStep::NotFound => return Ok(DecisionOutcome::NotFound),
+        };
+        if let AuthorizationDecision::Approve { choices } = decision {
+            let held_consent = inner
+                .consents
+                .values()
+                .find(|c| c.profile_id == decided.profile_id && c.client_id == decided.client_id)
+                .cloned();
+            let consent = decided.approved_consent(held_consent, choices);
+            inner.consents.insert(consent.id.0, consent);
+        }
+        inner.complete(&ctx)?;
+        inner.authorization_operations.insert(id, decided.clone());
+        Ok(DecisionOutcome::Recorded(decided))
+    }
+
+    async fn complete_authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+        code: Option<&AuthorizationCode>,
+        now: jiff::Timestamp,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::CompletionOutcome> {
+        use sid_core::models::{AuthorizationStatus, CompletionOutcome};
+        let mut inner = self.inner.lock().unwrap();
+        let completable = inner
+            .authorization_operations
+            .get(&id)
+            .is_some_and(|held| held.completable_at(now));
+        if !completable {
+            return Ok(CompletionOutcome::NotDecided);
+        }
+        if let Some(code) = code {
+            if inner.auth_codes_by_hash.contains_key(&code.code_hash) {
+                return Err(sid_core::Error::Conflict(
+                    "authorization code exists".into(),
+                ));
+            }
+            inner
+                .auth_codes_by_hash
+                .insert(code.code_hash.clone(), code.clone());
+        }
+        inner.complete(&ctx)?;
+        if let Some(held) = inner.authorization_operations.get_mut(&id) {
+            held.status = AuthorizationStatus::Completed;
+        }
+        Ok(CompletionOutcome::Completed)
+    }
+}
+
+#[async_trait]
 impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
     async fn entry_connection(
         &self,
@@ -3293,7 +3402,16 @@ impl StorageBackend for MockStorage {
         }
         let mut changed = consent.clone();
         match decision {
-            ClaimDecision::Grant(claim_type) => changed.grant_claim(claim_name, claim_type),
+            ClaimDecision::Grant(claim_type) => {
+                // As the stores: a renewed claim keeps its mode, a new one
+                // is a snapshot.
+                let mode = consent
+                    .grants
+                    .iter()
+                    .find(|g| g.claim_name == claim_name)
+                    .map_or(sid_core::models::ConsentMode::Static, |g| g.mode);
+                changed.grant_claim(claim_name, claim_type, mode);
+            }
             ClaimDecision::Revoke => {
                 if let Some(mut active) = changed.as_active() {
                     active.revoke_claim(claim_name);

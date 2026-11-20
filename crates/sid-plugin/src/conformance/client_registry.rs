@@ -95,6 +95,8 @@ pub fn client() -> OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
+        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,
@@ -148,6 +150,12 @@ pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
         backchannel_logout_uri: Some("https://app.sid.example.com/logout".into()),
         backchannel_logout_session_required: true,
         post_logout_redirect_uris: vec!["https://app.sid.example.com/signed-out".into()],
+        // What the consent review offers, and an administrator's exemption.
+        claim_requests: vec![sid_core::models::ClaimRequest::optional(
+            "phone",
+            sid_core::models::ClaimType::Data,
+        )],
+        consent_exempt: true,
         ..client()
     };
     h.register_client(&registered).await;

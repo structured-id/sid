@@ -8,7 +8,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::ProfileId;
+use super::{ClaimSharing, ProfileId, ResourceId};
 
 /// Unique identifier for a consent record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,27 +54,58 @@ impl Default for ClaimGrantId {
     }
 }
 
-/// Claim requirement level — how important this claim is to the site.
+/// How critical a claim is for login (authz/consent-flow.md, request level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimLevel {
-    /// Login impossible without this claim.
-    Mandatory,
-    /// Site strongly wants this claim with justification.
-    HighlyDemanded,
-    /// User may freely skip.
+    /// Login fails without this claim.
+    Required,
+    /// The site justifies it; the user may deny it and still log in.
+    Demanded,
+    /// The user may skip it freely.
     Optional,
 }
 
 impl ClaimLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Mandatory => "mandatory",
-            Self::HighlyDemanded => "highly_demanded",
+            Self::Required => "required",
+            Self::Demanded => "demanded",
             Self::Optional => "optional",
         }
     }
 }
+
+parse_stored!(ClaimLevel, "claim level", [Required, Demanded, Optional]);
+
+/// Whether the site needs a claim's later changes (authz/consent-flow.md,
+/// subscription).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimSubscription {
+    /// Shared only with updates, or not at all.
+    Required,
+    /// Updates recommended; a snapshot is accepted.
+    Preferred,
+    /// The current value only.
+    None,
+}
+
+impl ClaimSubscription {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Preferred => "preferred",
+            Self::None => "none",
+        }
+    }
+}
+
+parse_stored!(
+    ClaimSubscription,
+    "claim subscription",
+    [Required, Preferred, None]
+);
 
 impl std::fmt::Display for ClaimLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +148,47 @@ impl std::fmt::Display for ClaimType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// How a granted claim reaches the client (authz/consent-flow.md, claim
+/// update propagation): the user's choice within the site's subscription.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentMode {
+    /// The value at grant time; a later edit shows as stale.
+    #[default]
+    Static,
+    /// The value and its later changes.
+    Subscribed,
+}
+
+impl ConsentMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Subscribed => "subscribed",
+        }
+    }
+}
+
+parse_stored!(ConsentMode, "consent mode", [Static, Subscribed]);
+
+impl std::fmt::Display for ConsentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The scopes a consent grants its client for one protected resource
+/// (authz/consent-flow.md: authorization of the exact client for its
+/// resource/scopes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeGrant {
+    pub resource_id: ResourceId,
+    /// Granted scope values, each once.
+    pub scopes: Vec<String>,
+    /// When a scope was last added.
+    pub granted_at: Timestamp,
 }
 
 /// Consent status.
@@ -173,27 +245,32 @@ impl std::fmt::Display for ConsentStatus {
     }
 }
 
-/// Claim request — what a site asks for during OIDC client registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Claim request: what a site asks for at client registration, along the two
+/// orthogonal dimensions of authz/consent-flow.md (structured claim requests).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRequest {
     /// Claim name (e.g., "email", "phone", "passport_verified").
     pub claim_name: String,
 
-    /// How important this claim is.
+    /// How critical the claim is for login.
     pub level: ClaimLevel,
+
+    /// Whether the site needs the claim's later changes.
+    pub subscription: ClaimSubscription,
 
     /// Whether this is a data request or attestation request.
     pub claim_type: ClaimType,
 
-    /// Site-provided justification (required for HighlyDemanded).
+    /// The site's reason, shown to the user; required for a demanded claim.
     pub justification: Option<String>,
 }
 
 impl ClaimRequest {
-    pub fn mandatory(name: impl Into<String>, claim_type: ClaimType) -> Self {
+    pub fn required(name: impl Into<String>, claim_type: ClaimType) -> Self {
         Self {
             claim_name: name.into(),
-            level: ClaimLevel::Mandatory,
+            level: ClaimLevel::Required,
+            subscription: ClaimSubscription::None,
             claim_type,
             justification: None,
         }
@@ -203,21 +280,35 @@ impl ClaimRequest {
         Self {
             claim_name: name.into(),
             level: ClaimLevel::Optional,
+            subscription: ClaimSubscription::None,
             claim_type,
             justification: None,
         }
     }
 
-    pub fn highly_demanded(
+    pub fn demanded(
         name: impl Into<String>,
         claim_type: ClaimType,
         justification: impl Into<String>,
     ) -> Self {
         Self {
             claim_name: name.into(),
-            level: ClaimLevel::HighlyDemanded,
+            level: ClaimLevel::Demanded,
+            subscription: ClaimSubscription::None,
             claim_type,
             justification: Some(justification.into()),
+        }
+    }
+
+    /// Whether an approval may share this claim as `sharing`: a required
+    /// subscription admits only updates, none admits no updates, and a
+    /// required claim cannot be left unshared in an approval (the user denies
+    /// instead).
+    pub fn admits(&self, sharing: ClaimSharing) -> bool {
+        match sharing {
+            ClaimSharing::None => self.level != ClaimLevel::Required,
+            ClaimSharing::Static => self.subscription != ClaimSubscription::Required,
+            ClaimSharing::Subscribed => self.subscription != ClaimSubscription::None,
         }
     }
 }
@@ -236,6 +327,9 @@ pub struct ClaimGrant {
     /// Whether this grants data or attestation access.
     pub claim_type: ClaimType,
 
+    /// Whether later changes of the claim reach the client.
+    pub mode: ConsentMode,
+
     /// When this grant was given.
     pub granted_at: Timestamp,
 
@@ -248,12 +342,14 @@ impl ClaimGrant {
         consent_id: ConsentId,
         claim_name: impl Into<String>,
         claim_type: ClaimType,
+        mode: ConsentMode,
     ) -> Self {
         Self {
             id: ClaimGrantId::new(),
             consent_id,
             claim_name: claim_name.into(),
             claim_type,
+            mode,
             granted_at: Timestamp::now(),
             revoked_at: None,
         }
@@ -286,6 +382,9 @@ pub struct ConsentRecord {
     /// Individual claim grants within this consent.
     pub grants: Vec<ClaimGrant>,
 
+    /// The scopes granted to the client, per protected resource.
+    pub scope_grants: Vec<ScopeGrant>,
+
     /// When consent was first given.
     pub consented_at: Timestamp,
 
@@ -305,6 +404,7 @@ impl ConsentRecord {
             client_id: client_id.into(),
             status: ConsentStatus::Requested,
             grants: vec![],
+            scope_grants: vec![],
             consented_at: now,
             revoked_at: None,
             updated_at: now,
@@ -312,22 +412,83 @@ impl ConsentRecord {
     }
 
     /// Grant a claim. A claim has one grant: granting a revoked claim again
-    /// renews that grant, granting an active one changes nothing.
-    pub fn grant_claim(&mut self, claim_name: impl Into<String>, claim_type: ClaimType) {
+    /// renews that grant, granting an active one only takes the new mode.
+    pub fn grant_claim(
+        &mut self,
+        claim_name: impl Into<String>,
+        claim_type: ClaimType,
+        mode: ConsentMode,
+    ) {
         let claim_name = claim_name.into();
         let now = Timestamp::now();
         match self.grants.iter_mut().find(|g| g.claim_name == claim_name) {
-            Some(grant) if grant.is_active() => return,
+            Some(grant) if grant.is_active() && grant.mode == mode => return,
+            Some(grant) if grant.is_active() => grant.mode = mode,
             Some(grant) => {
                 grant.claim_type = claim_type;
+                grant.mode = mode;
                 grant.granted_at = now;
                 grant.revoked_at = None;
             }
             None => self
                 .grants
-                .push(ClaimGrant::new(self.id, claim_name, claim_type)),
+                .push(ClaimGrant::new(self.id, claim_name, claim_type, mode)),
         }
         self.updated_at = now;
+    }
+
+    /// Add `scopes` for `resource` to what the client is granted; scopes
+    /// already granted stay as they are.
+    pub fn grant_scopes(&mut self, resource: ResourceId, scopes: &[String]) {
+        let now = Timestamp::now();
+        let grant = match self
+            .scope_grants
+            .iter_mut()
+            .position(|g| g.resource_id == resource)
+        {
+            Some(i) => &mut self.scope_grants[i],
+            None => {
+                self.scope_grants.push(ScopeGrant {
+                    resource_id: resource,
+                    scopes: Vec::new(),
+                    granted_at: now,
+                });
+                let last = self.scope_grants.len() - 1;
+                &mut self.scope_grants[last]
+            }
+        };
+        let mut added = false;
+        for scope in scopes {
+            if !grant.scopes.contains(scope) {
+                grant.scopes.push(scope.clone());
+                added = true;
+            }
+        }
+        if added {
+            grant.granted_at = now;
+            self.updated_at = now;
+        }
+    }
+
+    /// Whether this consent, active, already grants every one of `scopes`
+    /// for `resource` and every one of `claims` (consent-flow.md: skip the
+    /// screen only when current consent covers the request).
+    pub fn covers(&self, resource: ResourceId, scopes: &[String], claims: &[&str]) -> bool {
+        if !self.status.is_active() {
+            return false;
+        }
+        let Some(granted) = self.scope_grants.iter().find(|g| g.resource_id == resource) else {
+            return scopes.is_empty() && self.covers_claims(claims);
+        };
+        scopes.iter().all(|s| granted.scopes.contains(s)) && self.covers_claims(claims)
+    }
+
+    fn covers_claims(&self, claims: &[&str]) -> bool {
+        claims.iter().all(|c| {
+            self.grants
+                .iter()
+                .any(|g| g.is_active() && g.claim_name == *c)
+        })
     }
 
     /// Gateway: obtain typed wrapper if consent is Requested (awaiting user decision).

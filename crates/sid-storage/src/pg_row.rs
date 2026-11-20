@@ -527,6 +527,8 @@ pub struct OAuth2ClientRow {
     pub backchannel_logout_session_required: bool,
     pub post_logout_redirect_uris: Vec<String>,
     pub claim_mappings: Option<String>,
+    pub claim_requests: Option<String>,
+    pub consent_exempt: bool,
     pub login_strategy: String,
     pub show_federation_button: bool,
     pub federation_timeout_ms: i32,
@@ -619,6 +621,14 @@ impl OAuth2ClientRow {
                 .transpose()
                 .map_err(|e| parse("claim_mappings", e.to_string()))?
                 .unwrap_or_default(),
+            claim_requests: self
+                .claim_requests
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| parse("claim_requests", e.to_string()))?
+                .unwrap_or_default(),
+            consent_exempt: self.consent_exempt,
             login_strategy: self
                 .login_strategy
                 .parse()

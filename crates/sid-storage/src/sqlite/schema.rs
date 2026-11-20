@@ -529,6 +529,9 @@ CREATE TABLE IF NOT EXISTS oauth2_clients (
     -- Post-logout redirect URIs: a JSON array of strings.
     post_logout_redirect_uris           TEXT NOT NULL DEFAULT '[]',
     claim_mappings                      TEXT,
+    -- The claims the client asks for: a JSON array of claim requests.
+    claim_requests                      TEXT,
+    consent_exempt                      INTEGER NOT NULL DEFAULT 0 CHECK (consent_exempt IN (0, 1)),
     logo_uri                            TEXT,
     token_endpoint_auth_method          TEXT NOT NULL DEFAULT 'client_secret_basic',
     response_types                      TEXT NOT NULL DEFAULT 'code',
@@ -1619,9 +1622,49 @@ CREATE TABLE IF NOT EXISTS claim_grants (
     consent_id      BLOB NOT NULL CHECK (length(consent_id) = 16) REFERENCES consents(id) ON DELETE CASCADE,
     claim_name      TEXT NOT NULL,
     claim_type      TEXT NOT NULL CHECK (claim_type IN ('data', 'attestation')),
+    mode            TEXT NOT NULL DEFAULT 'static' CHECK (mode IN ('static', 'subscribed')),
     granted_at      TEXT NOT NULL,
     revoked_at      TEXT,
     UNIQUE (consent_id, claim_name)
+) STRICT;
+
+-- A browser authorization awaiting or carrying the user's consent decision,
+-- from the review to the issuer's one code issuance. It ends with the IdP
+-- session that authenticated it.
+CREATE TABLE IF NOT EXISTS authorization_operations (
+    id                      BLOB PRIMARY KEY CHECK (length(id) = 16),
+    issuer_id               BLOB NOT NULL CHECK (length(issuer_id) = 16) REFERENCES oidc_issuers(id),
+    client_id               TEXT NOT NULL,
+    redirect_uri            TEXT NOT NULL,
+    response_type           TEXT NOT NULL,
+    state                   TEXT,
+    code_challenge          TEXT,
+    code_challenge_method   TEXT,
+    nonce                   TEXT,
+    resource_id             BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
+    scopes                  TEXT NOT NULL,
+    session_id              BLOB NOT NULL CHECK (length(session_id) = 16) REFERENCES sessions(id) ON DELETE CASCADE,
+    profile_id              BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    status                  TEXT NOT NULL
+                                CHECK (status IN ('awaiting_consent', 'approved', 'denied', 'completed', 'expired')),
+    revision                INTEGER NOT NULL CHECK (revision >= 0),
+    decision                TEXT,
+    created_at              TEXT NOT NULL,
+    expires_at              TEXT NOT NULL,
+    decided_at              TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_authorization_operations_expires_at
+    ON authorization_operations(expires_at);
+
+-- The scopes a consent grants its client for one protected resource, as a
+-- space-separated scope list (RFC 6749 §3.3).
+CREATE TABLE IF NOT EXISTS consent_scope_grants (
+    consent_id      BLOB NOT NULL CHECK (length(consent_id) = 16) REFERENCES consents(id) ON DELETE CASCADE,
+    resource_id     BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES protected_resources(id),
+    scopes          TEXT NOT NULL,
+    granted_at      TEXT NOT NULL,
+    PRIMARY KEY (consent_id, resource_id)
 ) STRICT;
 
 --------------------------------------------------------------------------------

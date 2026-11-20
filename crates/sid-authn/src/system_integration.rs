@@ -402,6 +402,10 @@ fn new_integration(
         backchannel_logout_session_required: true,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
+        // Provisioning by the installation is not consent: only an
+        // administrator exempts a client (authz/consent-flow.md).
+        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

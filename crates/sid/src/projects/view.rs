@@ -72,6 +72,12 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
         revision: c.revision,
         jwks: c.jwks.as_ref().map(sid_core::models::ClientKeySet::to_json),
         post_logout_redirect_uris: c.post_logout_redirect_uris.clone(),
+        claim_requests: c
+            .claim_requests
+            .iter()
+            .map(crate::oauth::consent::claim_request_to_wire)
+            .collect(),
+        consent_exempt: c.consent_exempt,
     }
 }
 

@@ -36,7 +36,8 @@ use uuid::Uuid;
 use crate::{
     CeremonyStateStore, ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore,
     IssuerStore, OperationResultStore, PrincipalStore, SignInHistoryStore, WorkStore,
-    entry_connection::EntryConnectionStore, platform_ca::PlatformCaStore,
+    authorization_operation::AuthorizationOperationStore, entry_connection::EntryConnectionStore,
+    platform_ca::PlatformCaStore,
 };
 
 /// The right to run one background job, exclusive across every instance on
@@ -87,6 +88,7 @@ pub trait StorageBackend:
     + CeremonyStateStore
     + PlatformCaStore
     + EntryConnectionStore
+    + AuthorizationOperationStore
     + Send
     + Sync
     + 'static

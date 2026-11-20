@@ -203,6 +203,8 @@ mod verify {
             backchannel_logout_session_required: false,
             post_logout_redirect_uris: vec![],
             claim_mappings: vec![],
+            claim_requests: vec![],
+            consent_exempt: false,
             login_strategy: LoginStrategy::LocalFirst,
             show_federation_button: true,
             federation_timeout_ms: 500,

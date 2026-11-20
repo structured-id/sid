@@ -312,6 +312,43 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockStorage {
+    async fn create_authorization_operation(
+        &self,
+        _: &sid_core::models::AuthorizationOperation,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+    ) -> Result<Option<sid_core::models::AuthorizationOperation>> {
+        unimplemented!()
+    }
+    async fn decide_authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+        _: sid_core::models::SessionId,
+        _: u64,
+        _: &sid_core::models::AuthorizationDecision,
+        _: jiff::Timestamp,
+        _: MutationContext,
+    ) -> Result<sid_core::models::DecisionOutcome> {
+        unimplemented!()
+    }
+    async fn complete_authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+        _: Option<&sid_core::models::AuthorizationCode>,
+        _: jiff::Timestamp,
+        _: MutationContext,
+    ) -> Result<sid_core::models::CompletionOutcome> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
     async fn entry_connection(
         &self,

@@ -368,6 +368,14 @@ async fn complete(
         format!("{}/account", deployment.installation)
     );
 
+    // The user approved the account integration once, as any client
+    // (authz/consent-flow.md); these tests are about the BFF's sessions.
+    common::consented(
+        &*deployment.svc.storage,
+        deployment.profile.id,
+        &asked["client_id"],
+    )
+    .await;
     let idp_session = common::fresh_token(&deployment.svc, &deployment.profile).await;
     let mut request = tonic::Request::new(OAuth2AuthorizeRequest {
         client_id: asked["client_id"].clone(),

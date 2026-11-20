@@ -185,6 +185,8 @@ async fn authorize_account(
 ) -> String {
     use sid_proto::sid::v1::auth_service_server::AuthService;
     use sid_proto::sid::v1::o_auth2_authorize_response::Result as Authorized;
+    // The user approved the account client once, as any client.
+    common::consented(&*svc.storage, profile.id, &connection.client_id).await;
     let session = common::fresh_token(svc, profile).await;
     let request = bearer(
         sid_proto::sid::v1::OAuth2AuthorizeRequest {

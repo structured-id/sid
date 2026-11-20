@@ -20,6 +20,7 @@ mod attestation;
 mod audit;
 mod audit_retention;
 mod auth;
+mod authorization_operation;
 mod binding;
 mod branding;
 mod ceremony_state;

@@ -44,10 +44,15 @@ impl Prompt {
         self.none
     }
 
-    /// Interaction other than authentication the request asks for:
-    /// `consent` or `select_account`.
-    pub fn asks_interaction(self) -> bool {
-        self.consent || self.select_account
+    /// `consent`: an actual decision for this request, whatever consent is
+    /// held (authz/consent-flow.md).
+    pub fn consent(self) -> bool {
+        self.consent
+    }
+
+    /// `select_account`: the user chooses the account on the sign-in page.
+    pub fn select_account(self) -> bool {
+        self.select_account
     }
 
     /// The oldest authentication the request accepts, at `now`: `login` and

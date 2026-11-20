@@ -187,6 +187,26 @@ impl BrowserCsrf {
         decoded.len() == token.as_bytes().len()
             && bool::from(decoded.as_slice().ct_eq(token.as_bytes()))
     }
+
+    /// The session's token bound to `context` as well (an operation and the
+    /// revision reviewed): HMAC-SHA-256 keyed by the token (RFC 2104). Only
+    /// a holder of the session's token makes it, and it matches no other
+    /// context, so a value for an earlier revision or another operation is
+    /// useless.
+    pub fn bound(token: &BrowserCsrfToken, context: &[u8]) -> [u8; 32] {
+        use hmac::{KeyInit, Mac};
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(token.as_bytes())
+            .expect("HMAC takes a key of any length");
+        mac.update(context);
+        mac.finalize().into_bytes().into()
+    }
+
+    /// Whether `sent` is the session's token bound to `context`, compared in
+    /// constant time.
+    pub fn bound_matches(sent: &[u8], token: &BrowserCsrfToken, context: &[u8]) -> bool {
+        let expected = Self::bound(token, context);
+        sent.len() == expected.len() && bool::from(sent.ct_eq(&expected))
+    }
 }
 
 /// Whether the request's `Origin` header value `origin` is exactly `allowed`

@@ -7,6 +7,7 @@ use sid_core::{
         MutationContext, ProfileId,
         consent::{
             ClaimDecision, ClaimGrant, ClaimGrantChange, ClaimGrantId, ConsentId, ConsentRecord,
+            ScopeGrant,
         },
     },
 };
@@ -24,12 +25,15 @@ macro_rules! select_consents {
     };
 }
 
-fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> SidResult<ClaimGrant> {
+pub(super) fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> SidResult<ClaimGrant> {
     Ok(ClaimGrant {
         id: ClaimGrantId(uuid_col(row, "id")?),
         consent_id: ConsentId(uuid_col(row, "consent_id")?),
         claim_name: col(row, "claim_name")?,
         claim_type: col::<String>(row, "claim_type")?
+            .parse()
+            .map_err(SidError::Storage)?,
+        mode: col::<String>(row, "mode")?
             .parse()
             .map_err(SidError::Storage)?,
         granted_at: dt_col(row, "granted_at")?,
@@ -40,7 +44,7 @@ fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> SidResult<ClaimGrant> {
 impl SqliteBackend {
     async fn claim_grants(&self, consent_id: Uuid) -> SidResult<Vec<ClaimGrant>> {
         let rows = sqlx::query(
-            "SELECT id, consent_id, claim_name, claim_type, granted_at, revoked_at \
+            "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at \
              FROM claim_grants WHERE consent_id = ? ORDER BY granted_at",
         )
         .bind(consent_id)
@@ -48,6 +52,29 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         rows.iter().map(row_to_grant).collect()
+    }
+
+    async fn scope_grants(&self, consent_id: Uuid) -> SidResult<Vec<ScopeGrant>> {
+        let rows = sqlx::query(
+            "SELECT resource_id, scopes, granted_at FROM consent_scope_grants \
+             WHERE consent_id = ? ORDER BY granted_at, resource_id",
+        )
+        .bind(consent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("load scope grants: {e}")))?;
+        rows.iter()
+            .map(|row| {
+                Ok(ScopeGrant {
+                    resource_id: col(row, "resource_id")?,
+                    scopes: col::<String>(row, "scopes")?
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect(),
+                    granted_at: dt_col(row, "granted_at")?,
+                })
+            })
+            .collect()
     }
 
     async fn consent_from_row(&self, row: &sqlx::sqlite::SqliteRow) -> SidResult<ConsentRecord> {
@@ -60,6 +87,7 @@ impl SqliteBackend {
                 .parse()
                 .map_err(SidError::Storage)?,
             grants: self.claim_grants(id).await?,
+            scope_grants: self.scope_grants(id).await?,
             consented_at: dt_col(row, "consented_at")?,
             revoked_at: dt_col_opt(row, "revoked_at")?,
             updated_at: dt_col(row, "updated_at")?,
@@ -88,18 +116,32 @@ impl SqliteBackend {
         .map_err(|e| insert_error("consent", e))?;
         for grant in &consent.grants {
             sqlx::query(
-                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at, revoked_at) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(grant.id.0)
             .bind(consent.id.0)
             .bind(&grant.claim_name)
             .bind(grant.claim_type.as_str())
+            .bind(grant.mode.as_str())
             .bind(fmt_dt(&grant.granted_at))
             .bind(fmt_dt_opt(grant.revoked_at))
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("claim grant", e))?;
+        }
+        for grant in &consent.scope_grants {
+            sqlx::query(
+                "INSERT INTO consent_scope_grants (consent_id, resource_id, scopes, granted_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(consent.id.0)
+            .bind(grant.resource_id)
+            .bind(grant.scopes.join(" "))
+            .bind(fmt_dt(&grant.granted_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("scope grant", e))?;
         }
         Self::commit_mutation(tx, &format!("consent:{}", consent.id.0), audit).await
     }

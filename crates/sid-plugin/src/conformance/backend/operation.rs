@@ -269,7 +269,9 @@ pub async fn test_terminal_abort_races_the_commit(backend: &dyn StorageBackend) 
 /// must find it completed rather than apply it over that decision.
 pub async fn test_unchanged_mutation_records_its_completion(backend: &dyn StorageBackend) {
     use sid_core::models::Profile;
-    use sid_core::models::consent::{ClaimDecision, ClaimGrantChange, ClaimType, ConsentRecord};
+    use sid_core::models::consent::{
+        ClaimDecision, ClaimGrantChange, ClaimType, ConsentMode, ConsentRecord,
+    };
     let profile = Profile::new(Some(&format!(
         "unchanged{}",
         &Uuid::now_v7().simple().to_string()[16..]
@@ -279,7 +281,7 @@ pub async fn test_unchanged_mutation_records_its_completion(backend: &dyn Storag
         .await
         .unwrap();
     let mut consent = ConsentRecord::new(profile.id, format!("app_{}", Uuid::now_v7().simple()));
-    consent.grant_claim("phone", ClaimType::Data);
+    consent.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }

@@ -320,10 +320,10 @@ const OAUTH2_CLIENT_CREATE: &str = "INSERT INTO oauth2_clients (client_id, proje
         registration_access_token_hash, org_id,
         client_id_issued_at, client_secret_expires_at,
         created_at, revision, application_id, default_resource, jwks,
-        post_logout_redirect_uris, participant_admission)
+        post_logout_redirect_uris, participant_admission, claim_requests, consent_exempt)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-        $36, $37, $38, $39, $40)
+        $36, $37, $38, $39, $40, $41, $42)
     ON CONFLICT DO NOTHING";
 
 /// Update of a stored client at revision `$35`, with the parameters of
@@ -344,6 +344,7 @@ const OAUTH2_CLIENT_UPDATE: &str = "UPDATE oauth2_clients SET
         registration_access_token_hash = $30, org_id = $31,
         client_secret_expires_at = $33, default_resource = $37, jwks = $38,
         post_logout_redirect_uris = $39, participant_admission = $40,
+        claim_requests = $41, consent_exempt = $42,
         revision = revision + 1
     WHERE client_id = $1 AND revision = $35
       AND registration_iat IS NOT DISTINCT FROM $29
@@ -1420,6 +1421,14 @@ impl PostgresBackend {
                     .map_err(|e| SidError::Internal(format!("claim mappings: {e}")))?,
             )
         };
+        let claim_requests_json = if client.claim_requests.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&client.claim_requests)
+                    .map_err(|e| SidError::Internal(format!("claim requests: {e}")))?,
+            )
+        };
         let revision = i64::try_from(client.revision)
             .map_err(|e| SidError::Validation(format!("client revision: {e}")))?;
         let written = sqlx::query(sql)
@@ -1463,6 +1472,8 @@ impl PostgresBackend {
             .bind(client.jwks.as_ref().map(ClientKeySet::to_json))
             .bind(&client.post_logout_redirect_uris)
             .bind(client.participant_admission.as_deref())
+            .bind(&claim_requests_json)
+            .bind(client.consent_exempt)
             .execute(&mut **tx)
             .await
             .map_err(|e| SidError::Storage(format!("write oauth2 client: {e}")))?
@@ -1585,7 +1596,7 @@ impl PostgresBackend {
         consent_id: uuid::Uuid,
     ) -> SidResult<Vec<sid_core::models::consent::ClaimGrant>> {
         let rows = sqlx::query_as::<_, ClaimGrantRow>(
-            "SELECT id, consent_id, claim_name, claim_type, granted_at, revoked_at \
+            "SELECT id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at \
              FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at",
         )
         .bind(consent_id)
@@ -1596,6 +1607,41 @@ impl PostgresBackend {
         rows.into_iter()
             .map(ClaimGrantRow::into_claim_grant)
             .collect()
+    }
+
+    /// Load a consent's scope grants, one per resource.
+    async fn load_scope_grants(
+        &self,
+        consent_id: uuid::Uuid,
+    ) -> SidResult<Vec<sid_core::models::consent::ScopeGrant>> {
+        let rows = sqlx::query_as::<_, (sid_core::models::ResourceId, String, PgTime)>(
+            "SELECT resource_id, scopes, granted_at \
+             FROM consent_scope_grants WHERE consent_id = $1 ORDER BY granted_at, resource_id",
+        )
+        .bind(consent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("load scope grants: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(resource_id, scopes, granted_at)| sid_core::models::consent::ScopeGrant {
+                    resource_id,
+                    scopes: scopes.split_whitespace().map(str::to_owned).collect(),
+                    granted_at: granted_at.jiff(),
+                },
+            )
+            .collect())
+    }
+
+    /// A consent row with its claim and scope grants.
+    async fn consent_of(
+        &self,
+        row: ConsentRow,
+    ) -> SidResult<sid_core::models::consent::ConsentRecord> {
+        let grants = self.load_claim_grants(row.id).await?;
+        let scope_grants = self.load_scope_grants(row.id).await?;
+        row.into_consent_record(grants, scope_grants)
     }
 
     /// Run one export job status change (`$1` id, `$2` time); `true` when it
@@ -1744,6 +1790,7 @@ impl ConsentRow {
     fn into_consent_record(
         self,
         grants: Vec<sid_core::models::consent::ClaimGrant>,
+        scope_grants: Vec<sid_core::models::consent::ScopeGrant>,
     ) -> SidResult<sid_core::models::consent::ConsentRecord> {
         Ok(sid_core::models::consent::ConsentRecord {
             id: sid_core::models::consent::ConsentId(self.id),
@@ -1751,6 +1798,7 @@ impl ConsentRow {
             client_id: self.client_id,
             status: self.status.parse().map_err(SidError::Storage)?,
             grants,
+            scope_grants,
             consented_at: self.consented_at.jiff(),
             revoked_at: self.revoked_at.jiff(),
             updated_at: self.updated_at.jiff(),
@@ -1765,6 +1813,7 @@ struct ClaimGrantRow {
     consent_id: uuid::Uuid,
     claim_name: String,
     claim_type: String,
+    mode: String,
     granted_at: PgTime,
     revoked_at: Option<PgTime>,
 }
@@ -1776,6 +1825,7 @@ impl ClaimGrantRow {
             consent_id: sid_core::models::consent::ConsentId(self.consent_id),
             claim_name: self.claim_name,
             claim_type: self.claim_type.parse().map_err(SidError::Storage)?,
+            mode: self.mode.parse().map_err(SidError::Storage)?,
             granted_at: self.granted_at.jiff(),
             revoked_at: self.revoked_at.jiff(),
         })
@@ -7152,17 +7202,31 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| insert_error("consent", e))?;
         for grant in &consent.grants {
             sqlx::query(
-                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at, revoked_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, mode, granted_at, revoked_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(grant.id.0).bind(consent.id.0)
             .bind(&grant.claim_name)
             .bind(grant.claim_type.as_str())
+            .bind(grant.mode.as_str())
             .bind(grant.granted_at.pg())
             .bind(grant.revoked_at.pg())
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("claim grant", e))?;
+        }
+        for grant in &consent.scope_grants {
+            sqlx::query(
+                "INSERT INTO consent_scope_grants (consent_id, resource_id, scopes, granted_at) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(consent.id.0)
+            .bind(grant.resource_id)
+            .bind(grant.scopes.join(" "))
+            .bind(grant.granted_at.pg())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("scope grant", e))?;
         }
         Self::audit_in_tx(&mut tx, &format!("consent:{}", consent.id.0), audit).await?;
         tx.commit()
@@ -7245,10 +7309,7 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| sid_core::Error::Storage(e.to_string()))?;
 
         match row {
-            Some(r) => {
-                let grants = self.load_claim_grants(r.id).await?;
-                r.into_consent_record(grants).map(Some)
-            }
+            Some(r) => self.consent_of(r).await.map(Some),
             None => Ok(None),
         }
     }
@@ -7269,10 +7330,7 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| sid_core::Error::Storage(e.to_string()))?;
 
         match row {
-            Some(r) => {
-                let grants = self.load_claim_grants(r.id).await?;
-                r.into_consent_record(grants).map(Some)
-            }
+            Some(r) => self.consent_of(r).await.map(Some),
             None => Ok(None),
         }
     }
@@ -7292,8 +7350,7 @@ impl StorageBackend for PostgresBackend {
 
         let mut results = Vec::with_capacity(rows.len());
         for r in rows {
-            let grants = self.load_claim_grants(r.id).await?;
-            results.push(r.into_consent_record(grants)?);
+            results.push(self.consent_of(r).await?);
         }
         Ok(results)
     }
@@ -9915,6 +9972,7 @@ mod assignment_set;
 mod audit_retention;
 mod audit_store;
 pub use audit_store::PgAuditStore;
+mod authorization_operation;
 mod binding;
 mod ceremony_state;
 mod closure;

@@ -224,3 +224,22 @@ fn csrf_matches_only_the_session_token_once() {
         );
     }
 }
+
+/// A bound value matches only the session's token and the exact context it
+/// was made for: another session's token, another operation or revision, and
+/// a truncated value do not. Bug prevented: a CSRF value read for one review
+/// approving a later revision or another operation.
+#[test]
+fn bound_csrf_matches_only_its_session_and_context() {
+    let token = BrowserCsrf::generate();
+    let value = BrowserCsrf::bound(&token, b"op-1:0");
+    assert_eq!(value, BrowserCsrf::bound(&token, b"op-1:0"));
+    assert!(BrowserCsrf::bound_matches(&value, &token, b"op-1:0"));
+
+    let other = BrowserCsrf::generate();
+    assert!(!BrowserCsrf::bound_matches(&value, &other, b"op-1:0"));
+    assert!(!BrowserCsrf::bound_matches(&value, &token, b"op-1:1"));
+    assert!(!BrowserCsrf::bound_matches(&value, &token, b"op-2:0"));
+    assert!(!BrowserCsrf::bound_matches(&value[..31], &token, b"op-1:0"));
+    assert!(!BrowserCsrf::bound_matches(&[], &token, b"op-1:0"));
+}

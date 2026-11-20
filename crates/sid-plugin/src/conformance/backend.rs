@@ -18,6 +18,7 @@ pub mod application;
 pub mod assignment_set;
 pub mod audit_chain;
 pub mod audit_retention;
+pub mod authorization_operation;
 pub mod backup;
 pub mod branding;
 pub mod browser_session;
@@ -156,6 +157,8 @@ pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
+        consent_exempt: false,
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,
@@ -764,7 +767,7 @@ pub async fn test_cedar_policy_concurrent_update(backend: &dyn StorageBackend) {
 /// per profile, updated, revoked with the profile's other consents and
 /// deleted with their grants.
 pub async fn test_consent_roundtrip(backend: &dyn StorageBackend) {
-    use sid_core::models::consent::{ClaimType, ConsentRecord, ConsentStatus};
+    use sid_core::models::consent::{ClaimType, ConsentMode, ConsentRecord, ConsentStatus};
 
     let profile = create_test_profile("consent");
     backend
@@ -772,8 +775,8 @@ pub async fn test_consent_roundtrip(backend: &dyn StorageBackend) {
         .await
         .unwrap();
     let mut consent = ConsentRecord::new(profile.id, "rp-consent");
-    consent.grant_claim("email", ClaimType::Data);
-    consent.grant_claim("age_over_18", ClaimType::Attestation);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("age_over_18", ClaimType::Attestation, ConsentMode::Static);
     consent
         .as_requested()
         .expect("new consent is requested")
@@ -2632,6 +2635,21 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
             transform: None,
             condition: Some("scope:email".to_string()),
         }],
+        claim_requests: vec![
+            sid_core::models::ClaimRequest {
+                claim_name: "email".into(),
+                level: sid_core::models::ClaimLevel::Required,
+                subscription: sid_core::models::ClaimSubscription::Required,
+                claim_type: sid_core::models::ClaimType::Data,
+                justification: None,
+            },
+            sid_core::models::ClaimRequest::demanded(
+                "age_verified",
+                sid_core::models::ClaimType::Attestation,
+                "Age-restricted content, by law.",
+            ),
+        ],
+        consent_exempt: true,
         login_strategy: LoginStrategy::FederationFirst,
         show_federation_button: false,
         federation_timeout_ms: 1500,
@@ -2694,6 +2712,10 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
         got.post_logout_redirect_uris,
         client.post_logout_redirect_uris
     );
+    // The consent review offers exactly the stored claim requests, and only
+    // a stored exemption skips it.
+    assert_eq!(got.claim_requests, client.claim_requests);
+    assert_eq!(got.consent_exempt, client.consent_exempt);
     assert_eq!(got.claim_mappings.len(), 1);
     assert_eq!(got.claim_mappings[0].target, "mail");
     assert_eq!(got.login_strategy, client.login_strategy);

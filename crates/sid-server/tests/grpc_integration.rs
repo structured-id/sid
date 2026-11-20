@@ -2900,6 +2900,8 @@ fn client_settings(kind: ApplicationType) -> ClientRoleSettings {
         jwks: None,
         post_logout_redirect_uris: vec![],
         participant_admission: None,
+        claim_requests: vec![],
+        consent_exempt: false,
     }
 }
 
@@ -3889,6 +3891,10 @@ async fn test_admin_update_client_role() {
             post_logout_redirect_uris: Some(sid_proto::sid::v1::UriList {
                 uris: vec!["https://new.sid.example.com/signed-out".to_string()],
             }),
+            claim_requests: Some(sid_proto::sid::v1::ClaimRequestList {
+                requests: vec![email_request()],
+            }),
+            consent_exempt: Some(true),
         },
     );
 
@@ -3909,6 +3915,67 @@ async fn test_admin_update_client_role() {
         client.post_logout_redirect_uris,
         vec!["https://new.sid.example.com/signed-out"]
     );
+    assert_eq!(client.claim_requests, vec![email_request()]);
+    assert!(client.consent_exempt);
+}
+
+/// A demanded email claim request with its reason, as an administrator
+/// registers it.
+fn email_request() -> sid_proto::sid::v1::common::ClaimRequest {
+    use sid_proto::sid::v1::common::{ClaimRequestLevel, ClaimSubscription, ClaimType};
+    sid_proto::sid::v1::common::ClaimRequest {
+        name: "email".into(),
+        level: ClaimRequestLevel::Demanded as i32,
+        subscription: ClaimSubscription::Preferred as i32,
+        r#type: ClaimType::Data as i32,
+        justification: Some("Receipts are sent there.".into()),
+    }
+}
+
+/// A claim request the consent review could not present is refused, naming
+/// the field, and nothing changes: a demanded claim without its reason, a
+/// repeated claim, an unspecified level.
+#[tokio::test]
+async fn test_admin_claim_requests_are_validated() {
+    use sid_proto::sid::v1::common::ClaimRequestLevel;
+    let storage = MockStorage::new()
+        .with_system_project()
+        .with_client(test_client());
+    let svc = TestServices::new(storage);
+    let unjustified = sid_proto::sid::v1::common::ClaimRequest {
+        justification: None,
+        ..email_request()
+    };
+    let unleveled = sid_proto::sid::v1::common::ClaimRequest {
+        level: ClaimRequestLevel::Unspecified as i32,
+        ..email_request()
+    };
+    for requests in [
+        vec![unjustified],
+        vec![email_request(), email_request()],
+        vec![unleveled],
+    ] {
+        let refused = svc
+            .project
+            .update_client_role(admin_request(
+                &svc,
+                UpdateClientRoleRequest {
+                    client_id: "test-client".to_string(),
+                    claim_requests: Some(sid_proto::sid::v1::ClaimRequestList { requests }),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{refused:?}");
+    }
+    let stored = svc
+        .storage
+        .get_oauth2_client("test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.claim_requests.is_empty());
 }
 
 /// A post-logout redirect URI an administrator sets is held to the redirect
@@ -4532,6 +4599,8 @@ async fn test_e2e_admin_project_and_application_flow() {
                     jwks: None,
                     post_logout_redirect_uris: vec![],
                     participant_admission: None,
+                    claim_requests: vec![],
+                    consent_exempt: false,
                 }),
                 resource: None,
                 org_id: None,

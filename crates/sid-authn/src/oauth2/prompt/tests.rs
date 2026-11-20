@@ -8,13 +8,11 @@ fn test_prompt_parses_defined_values() {
     assert_eq!(Prompt::parse(Some("")).unwrap(), Prompt::default());
     assert!(Prompt::parse(Some("none")).unwrap().none());
     let both = Prompt::parse(Some("login consent")).unwrap();
-    assert!(both.asks_interaction() && !both.none());
-    assert!(
-        Prompt::parse(Some("select_account"))
-            .unwrap()
-            .asks_interaction()
-    );
-    assert!(!Prompt::parse(Some("login")).unwrap().asks_interaction());
+    assert!(both.consent() && !both.select_account() && !both.none());
+    let select = Prompt::parse(Some("select_account")).unwrap();
+    assert!(select.select_account() && !select.consent());
+    let login = Prompt::parse(Some("login")).unwrap();
+    assert!(!login.consent() && !login.select_account());
 }
 
 /// `none` with another value, an unknown value and a repeated one are

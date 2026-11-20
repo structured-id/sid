@@ -10,7 +10,7 @@ mod common;
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_token, test_client, test_profile};
 use sid_core::models::AuditEntry;
-use sid_core::models::consent::{ClaimType, ConsentRecord};
+use sid_core::models::consent::{ClaimType, ConsentMode, ConsentRecord};
 use sid_core::models::principal::{Principal, PrincipalId, PrincipalType};
 use sid_proto::sid::v1::account::account_service_server::AccountService;
 use sid_proto::sid::v1::account::*;
@@ -65,8 +65,8 @@ async fn test_list_consents_with_data() {
 
     // Create a consent record.
     let mut consent = ConsentRecord::new(profile.id, "test-app-1");
-    consent.grant_claim("email", ClaimType::Data);
-    consent.grant_claim("avatar", ClaimType::Attestation);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("avatar", ClaimType::Attestation, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -105,7 +105,7 @@ async fn test_list_consents_resolves_site_name() {
 
     // Create consent for that client.
     let mut consent = ConsentRecord::new(profile.id, "named-app");
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -148,7 +148,7 @@ async fn test_get_consent_detail_resolves_site_name() {
     common::store_client(&*svc.storage, &client).await.unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "detail-named-app");
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -209,8 +209,8 @@ async fn test_get_consent_detail_success() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "detail-app");
-    consent.grant_claim("email", ClaimType::Data);
-    consent.grant_claim("phone", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -253,7 +253,11 @@ async fn test_get_consent_detail_attestation_no_preview() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "attest-app");
-    consent.grant_claim("passport_verified", ClaimType::Attestation);
+    consent.grant_claim(
+        "passport_verified",
+        ClaimType::Attestation,
+        ConsentMode::Static,
+    );
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -315,8 +319,8 @@ async fn test_get_consent_detail_phone_masking() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "phone-app");
-    consent.grant_claim("phone_number", ClaimType::Data);
-    consent.grant_claim("name", ClaimType::Data);
+    consent.grant_claim("phone_number", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("name", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -387,7 +391,7 @@ async fn one_consent(site: &str) -> (TestServices, String) {
         .await
         .unwrap();
     let mut consent = ConsentRecord::new(profile.id, site);
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -485,7 +489,7 @@ async fn test_update_claim_consent_grant() {
 
     // Create consent with one claim.
     let mut consent = ConsentRecord::new(profile.id, "update-app");
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -530,7 +534,7 @@ async fn test_update_claim_consent_refused_on_revoked_consent() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "revoked-app");
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     consent.as_requested().unwrap().deny();
     svc.storage
         .create_consent(&consent, AuditEntry::system("test", "setup").into())
@@ -576,8 +580,8 @@ async fn test_update_claim_consent_revoke() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "revoke-app");
-    consent.grant_claim("email", ClaimType::Data);
-    consent.grant_claim("phone", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
+    consent.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -625,7 +629,7 @@ async fn test_update_claim_consent_retry_keeps_a_later_decision() {
         .await
         .unwrap();
     let mut consent = ConsentRecord::new(profile.id, "retry-app");
-    consent.grant_claim("phone", ClaimType::Data);
+    consent.grant_claim("phone", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }
@@ -722,7 +726,7 @@ async fn test_disconnect_site_success() {
         .unwrap();
 
     let mut consent = ConsentRecord::new(profile.id, "disconnect-app");
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Static);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
     }

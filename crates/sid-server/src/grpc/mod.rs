@@ -6,6 +6,7 @@
 
 pub mod account_service;
 pub mod admin_service;
+pub mod auth_flow_service;
 pub mod auth_service;
 pub mod authz_service;
 pub mod branding_service;
