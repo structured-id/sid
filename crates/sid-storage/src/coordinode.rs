@@ -326,6 +326,11 @@ where
             Decision::Commit(answer) => match db.commit_transaction(id) {
                 Ok(_) => return Ok(answer),
                 Err(e) if contention(&e) => continue,
+                // A statement already refuses a value its snapshot shows
+                // held, so a unique value refused at commit was taken by a
+                // commit after the snapshot. The commit applied nothing; the
+                // run again decides on what that commit left.
+                Err(DatabaseError::UniqueViolation { .. }) => continue,
                 Err(e) => return Err(storage(e)),
             },
         }
