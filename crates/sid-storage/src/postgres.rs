@@ -1589,9 +1589,10 @@ impl PostgresBackend {
         self.schema.as_deref()
     }
 
-    /// Load claim grants for a consent record.
-    async fn load_claim_grants(
-        &self,
+    /// Load claim grants for a consent record through `exec`, the pool or
+    /// a transaction reading the consent whole.
+    async fn load_claim_grants<'e>(
+        exec: impl sqlx::PgExecutor<'e>,
         consent_id: uuid::Uuid,
     ) -> SidResult<Vec<sid_core::models::consent::ClaimGrant>> {
         let rows = sqlx::query_as::<_, ClaimGrantRow>(concat!(
@@ -1600,7 +1601,7 @@ impl PostgresBackend {
             " FROM claim_grants WHERE consent_id = $1 ORDER BY granted_at"
         ))
         .bind(consent_id)
-        .fetch_all(&self.pool)
+        .fetch_all(exec)
         .await
         .map_err(|e| sid_core::Error::Storage(e.to_string()))?;
 
@@ -1609,9 +1610,9 @@ impl PostgresBackend {
             .collect()
     }
 
-    /// Load a consent's scope grants, one per resource.
-    async fn load_scope_grants(
-        &self,
+    /// Load a consent's scope grants, one per resource, through `exec`.
+    async fn load_scope_grants<'e>(
+        exec: impl sqlx::PgExecutor<'e>,
         consent_id: uuid::Uuid,
     ) -> SidResult<Vec<sid_core::models::consent::ScopeGrant>> {
         let rows = sqlx::query_as::<_, (sid_core::models::ResourceId, String, PgTime)>(
@@ -1619,7 +1620,7 @@ impl PostgresBackend {
              FROM consent_scope_grants WHERE consent_id = $1 ORDER BY granted_at, resource_id",
         )
         .bind(consent_id)
-        .fetch_all(&self.pool)
+        .fetch_all(exec)
         .await
         .map_err(|e| SidError::Storage(format!("load scope grants: {e}")))?;
         Ok(rows
@@ -1634,14 +1635,44 @@ impl PostgresBackend {
             .collect())
     }
 
-    /// A consent row with its claim and scope grants.
+    /// The consent `found` names, whole: its row with its claim and scope
+    /// grants read again in one snapshot (PostgreSQL 13.2.2, Repeatable Read
+    /// Isolation Level), never a row of one state beside grants of another.
+    /// `None` when it was deleted since `found` was read.
     async fn consent_of(
         &self,
-        row: ConsentRow,
-    ) -> SidResult<sid_core::models::consent::ConsentRecord> {
-        let grants = self.load_claim_grants(row.id).await?;
-        let scope_grants = self.load_scope_grants(row.id).await?;
-        row.into_consent_record(grants, scope_grants)
+        found: ConsentRow,
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("load consent: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        let consent = Self::consent_in(&mut tx, found.id).await?;
+        tx.rollback().await.map_err(storage)?;
+        Ok(consent)
+    }
+
+    /// The consent `id` read whole inside `tx`.
+    async fn consent_in(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: uuid::Uuid,
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
+        let Some(row) = sqlx::query_as::<_, ConsentRow>(
+            "SELECT id, profile_id, client_id, status, consented_at, revoked_at, updated_at \
+             FROM consents WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("load consent: {e}")))?
+        else {
+            return Ok(None);
+        };
+        let grants = Self::load_claim_grants(&mut **tx, row.id).await?;
+        let scope_grants = Self::load_scope_grants(&mut **tx, row.id).await?;
+        row.into_consent_record(grants, scope_grants).map(Some)
     }
 
     /// Run one export job status change (`$1` id, `$2` time); `true` when it
@@ -7370,16 +7401,17 @@ impl StorageBackend for PostgresBackend {
         let id = held.id;
         let mut tx = self.pool.begin().await.map_err(storage)?;
         // The consent row lock orders the delivery with every decision and
-        // with the consent's revocation or deletion; each of them moves its
-        // revision, so an unchanged revision means the consent is `held`.
-        let unchanged = sqlx::query_as::<_, (String, PgTime)>(
-            "SELECT status, updated_at FROM consents WHERE id = $1 FOR UPDATE",
-        )
-        .bind(id.0)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage)?
-        .is_some_and(|(status, at)| status == "active" && at.jiff() == held.updated_at);
+        // with the consent's revocation or deletion, which all take it; the
+        // consent read whole under it is the committed state, and the
+        // delivery applies only over exactly the state `held` was.
+        sqlx::query("SELECT 1 FROM consents WHERE id = $1 FOR UPDATE")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        let unchanged = Self::consent_in(&mut tx, id.0)
+            .await?
+            .is_some_and(|stored| stored.status.is_active() && stored.same_state(held));
         if !unchanged {
             tx.rollback().await.map_err(storage)?;
             return Ok(None);
@@ -7431,7 +7463,7 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| sid_core::Error::Storage(e.to_string()))?;
 
         match row {
-            Some(r) => self.consent_of(r).await.map(Some),
+            Some(r) => self.consent_of(r).await,
             None => Ok(None),
         }
     }
@@ -7452,7 +7484,7 @@ impl StorageBackend for PostgresBackend {
         .map_err(|e| sid_core::Error::Storage(e.to_string()))?;
 
         match row {
-            Some(r) => self.consent_of(r).await.map(Some),
+            Some(r) => self.consent_of(r).await,
             None => Ok(None),
         }
     }
@@ -7472,7 +7504,9 @@ impl StorageBackend for PostgresBackend {
 
         let mut results = Vec::with_capacity(rows.len());
         for r in rows {
-            results.push(self.consent_of(r).await?);
+            if let Some(consent) = self.consent_of(r).await? {
+                results.push(consent);
+            }
         }
         Ok(results)
     }

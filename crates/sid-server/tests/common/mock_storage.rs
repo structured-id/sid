@@ -97,6 +97,9 @@ pub struct MockStorageInner {
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
+    /// See [`MockStorage::lose_next_delivery_reply`].
+    delivery_reply_lost: Option<bool>,
+    consent_reads_fail: bool,
     /// The next contact settings edit finds its contact made primary by a
     /// move committed after the editor read it.
     primary_moved_before_contact_edit: bool,
@@ -516,6 +519,15 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_contact_reads(&self) {
         self.inner.lock().unwrap().contact_reads_fail = true;
+    }
+
+    /// The next subscribed delivery commits and then reports an error, as a
+    /// commit whose reply was lost; with `then_consents_unreadable`, reading
+    /// consents fails from then on.
+    #[allow(dead_code)]
+    pub fn lose_next_delivery_reply(&self, then_consents_unreadable: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.delivery_reply_lost = Some(then_consents_unreadable);
     }
 
     /// The next contact settings edit finds its contact made primary since
@@ -1707,6 +1719,7 @@ impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockSt
         session: SessionId,
         revision: u64,
         decision: &sid_core::models::AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
         now: jiff::Timestamp,
         ctx: MutationContext,
     ) -> SidResult<sid_core::models::DecisionOutcome> {
@@ -1725,6 +1738,29 @@ impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockSt
             DecisionStep::Conflict => return Ok(DecisionOutcome::Conflict),
             DecisionStep::NotFound => return Ok(DecisionOutcome::NotFound),
         };
+        if matches!(decision, AuthorizationDecision::Approve { .. }) {
+            let owner = decided.profile_id;
+            let values = inner
+                .profiles
+                .get(&owner)
+                .map(|profile| {
+                    sid_core::models::consent::claim_values(
+                        profile,
+                        inner
+                            .profile_emails
+                            .values()
+                            .find(|e| e.profile_id == owner && e.is_primary),
+                        inner
+                            .profile_phones
+                            .values()
+                            .find(|p| p.profile_id == owner && p.is_primary),
+                    )
+                })
+                .unwrap_or_default();
+            if decided.shown(&values) != shown {
+                return Ok(DecisionOutcome::Stale);
+            }
+        }
         if let AuthorizationDecision::Approve { choices } = decision {
             let held_consent = inner
                 .consents
@@ -3468,12 +3504,20 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
         let mut inner = self.inner.lock().unwrap();
         // As the stores: only over the consent exactly as it was read.
-        if inner.consents.get(&held.id.0) != Some(held) || !held.status.is_active() {
+        if !inner
+            .consents
+            .get(&held.id.0)
+            .is_some_and(|stored| stored.status.is_active() && stored.same_state(held))
+        {
             return Ok(None);
         }
         let delivered = held.with_delivery(updates);
         inner.owe(&ctx)?;
         inner.consents.insert(held.id.0, delivered.clone());
+        if let Some(then_unreadable) = inner.delivery_reply_lost.take() {
+            inner.consent_reads_fail = then_unreadable;
+            return Err(sid_core::Error::Storage("delivery reply lost".into()));
+        }
         Ok(Some(delivered))
     }
 
@@ -3490,6 +3534,9 @@ impl StorageBackend for MockStorage {
         client_id: &str,
     ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
         let inner = self.inner.lock().unwrap();
+        if inner.consent_reads_fail {
+            return Err(sid_core::Error::Storage("read consent".into()));
+        }
         Ok(inner
             .consents
             .values()

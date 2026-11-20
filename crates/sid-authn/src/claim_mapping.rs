@@ -52,6 +52,31 @@ pub fn resolve_claims(
     claims
 }
 
+/// Whether any of `mappings` reads a holder-disclosed field, so resolving
+/// them needs the holder's disclosure; literals, metadata, roles and status
+/// do not.
+pub fn reads_holder_fields(mappings: &[ClaimMapping]) -> bool {
+    mappings.iter().any(|m| {
+        matches!(
+            m.source.strip_prefix("profile."),
+            Some(
+                "email"
+                    | "email_verified"
+                    | "phone"
+                    | "phone_number"
+                    | "phone_verified"
+                    | "phone_number_verified"
+                    | "username"
+                    | "display_name"
+                    | "name"
+                    | "given_name"
+                    | "family_name"
+                    | "middle_name"
+            )
+        )
+    })
+}
+
 /// Evaluate a condition string against current scopes.
 ///
 /// Supported conditions:
@@ -242,6 +267,29 @@ mod tests {
             grant("given_name", "Alice", None),
             grant("family_name", "Smith", None),
         ]
+    }
+
+    /// Only a mapping of a holder field needs the holder's disclosure:
+    /// literals, metadata, roles and status resolve without reading it.
+    #[test]
+    fn only_holder_fields_need_the_disclosure() {
+        let mapping = |source: &str| ClaimMapping {
+            source: source.to_string(),
+            target: "x".to_string(),
+            transform: None,
+            condition: None,
+        };
+        assert!(!reads_holder_fields(&[
+            mapping("literal(acme)"),
+            mapping("profile.roles"),
+            mapping("profile.status"),
+            mapping("profile.metadata.department"),
+        ]));
+        assert!(reads_holder_fields(&[
+            mapping("profile.roles"),
+            mapping("profile.email"),
+        ]));
+        assert!(reads_holder_fields(&[mapping("profile.display_name")]));
     }
 
     /// A holder-disclosed field mapped under any name or transform comes

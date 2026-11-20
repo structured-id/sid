@@ -223,10 +223,12 @@ impl AuthorizationOperationStore for CoordinodeBackend {
         session: SessionId,
         revision: u64,
         decision: &AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
         now: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<DecisionOutcome> {
         let decision = decision.clone();
+        let shown = shown.to_vec();
         self.transaction(move |tx| {
             let Some(held) = stored(tx, id)? else {
                 return Ok(Decision::Abandon(DecisionOutcome::NotFound));
@@ -245,6 +247,12 @@ impl AuthorizationOperationStore for CoordinodeBackend {
                 DecisionStep::Conflict => return Ok(Decision::Abandon(DecisionOutcome::Conflict)),
                 DecisionStep::NotFound => return Ok(Decision::Abandon(DecisionOutcome::NotFound)),
             };
+            if matches!(decision, AuthorizationDecision::Approve { .. })
+                && decided.shown(&super::profile::held_claim_values(tx, decided.profile_id)?)
+                    != shown
+            {
+                return Ok(Decision::Abandon(DecisionOutcome::Stale));
+            }
             tx.run(
                 "MATCH (o:SidAuthorizationOperation) WHERE o.id = $id
                  SET o.status = $status, o.revision = $revision, o.decision = $decision,

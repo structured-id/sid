@@ -188,14 +188,19 @@ impl GrantHost for ProfileGrant<'_> {
                 .map_err(|e| internal("token claims", e))?;
             // The holder's approved disclosure to this client: a mapping
             // takes a holder field from here only, never the current Profile.
-            let disclosed = self
-                .oauth
-                .held_disclosure(profile.id, &client.client_id)
-                .await
-                .map_err(|e| internal("token claims", e))?
-                .filter(|c| c.status.is_active())
-                .map(|c| c.grants)
-                .unwrap_or_default();
+            // Read only when a mapping consumes such a field.
+            let disclosed = if sid_authn::claim_mapping::reads_holder_fields(&client.claim_mappings)
+            {
+                self.oauth
+                    .held_disclosure(profile.id, &client.client_id)
+                    .await
+                    .map_err(|e| internal("token claims", e))?
+                    .filter(|c| c.status.is_active())
+                    .map(|c| c.grants)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let resolved = sid_authn::claim_mapping::resolve_claims(
                 &client.claim_mappings,
                 profile,

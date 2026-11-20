@@ -365,6 +365,69 @@ pub struct DisclosedValue {
     pub verified: Option<bool>,
 }
 
+/// The value each claim this issuer discloses has in `profile` with its
+/// primary `email` and `phone`: its names, its username and those contacts
+/// (OIDC Core 1.0 §5.1). A claim without a value is absent.
+pub fn claim_values(
+    profile: &super::Profile,
+    email: Option<&super::ProfileEmail>,
+    phone: Option<&super::ProfilePhone>,
+) -> Vec<(&'static str, DisclosedValue)> {
+    let text = |value: Option<String>| {
+        value.map(|value| DisclosedValue {
+            value,
+            verified: None,
+        })
+    };
+    let mut values: Vec<(&'static str, DisclosedValue)> = [
+        ("name", text(profile.formatted_name())),
+        ("given_name", text(profile.given_name.clone())),
+        ("family_name", text(profile.family_name.clone())),
+        ("middle_name", text(profile.middle_name.clone())),
+        ("preferred_username", text(profile.username.clone())),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| (name, value)))
+    .collect();
+    if let Some(email) = email {
+        values.push((
+            "email",
+            DisclosedValue {
+                value: email.email.clone(),
+                verified: Some(email.verified),
+            },
+        ));
+    }
+    if let Some(phone) = phone {
+        values.push((
+            "phone_number",
+            DisclosedValue {
+                value: phone.formatted_e164(),
+                verified: Some(phone.verified),
+            },
+        ));
+    }
+    values
+}
+
+/// The value `request` discloses from `values` ([`claim_values`]): the value
+/// itself for a data request, only its verification for an attestation.
+pub fn disclosed_for(
+    request: &ClaimRequest,
+    values: &[(&'static str, DisclosedValue)],
+) -> Option<DisclosedValue> {
+    let (_, value) = values
+        .iter()
+        .find(|(name, _)| *name == request.claim_name)?;
+    Some(match request.claim_type {
+        ClaimType::Data => value.clone(),
+        ClaimType::Attestation => DisclosedValue {
+            value: String::new(),
+            verified: value.verified,
+        },
+    })
+}
+
 /// One subscribed claim's delivered value: `next` replaces `prior` only
 /// while the grant still holds `prior`, so a delivery computed from an older
 /// Profile version never overwrites a newer one. `next` absent: the field
@@ -582,6 +645,29 @@ impl ConsentRecord {
             });
         }
         (!updates.is_empty()).then_some(updates)
+    }
+
+    /// Whether `other` is this consent in the same state: the same status,
+    /// claim grants (each with its type, mode, revocation and disclosed
+    /// value) and scope grants, in any order. Its revision time is not
+    /// compared: writers stamp it from different clocks, so equal times do
+    /// not prove an unchanged record, and the state itself does.
+    pub fn same_state(&self, other: &ConsentRecord) -> bool {
+        fn claims(c: &ConsentRecord) -> Vec<&ClaimGrant> {
+            let mut grants: Vec<_> = c.grants.iter().collect();
+            grants.sort_by(|a, b| a.claim_name.cmp(&b.claim_name));
+            grants
+        }
+        fn scopes(c: &ConsentRecord) -> Vec<&ScopeGrant> {
+            let mut grants: Vec<_> = c.scope_grants.iter().collect();
+            grants.sort_by_key(|g| g.resource_id);
+            grants
+        }
+        self.id == other.id
+            && self.status == other.status
+            && self.revoked_at == other.revoked_at
+            && claims(self) == claims(other)
+            && scopes(self) == scopes(other)
     }
 
     /// This consent with `updates` delivered: their values on the active

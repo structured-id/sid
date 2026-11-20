@@ -92,6 +92,12 @@ fn approve() -> AuthorizationDecision {
     }
 }
 
+/// What the review of an [`awaiting`] operation showed: its Profile has no
+/// contacts, so neither requested claim had a value.
+fn reviewed() -> Vec<(String, Option<DisclosedValue>)> {
+    vec![("email".into(), None), ("phone".into(), None)]
+}
+
 /// The code the issuer issues on completing `operation`, authorized by
 /// `session`.
 fn code(operation: &AuthorizationOperation, session: &Session) -> AuthorizationCode {
@@ -165,7 +171,15 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
     let now = Timestamp::now();
 
     let recorded = backend
-        .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            &reviewed(),
+            now,
+            test_audit(),
+        )
         .await
         .unwrap();
     let DecisionOutcome::Recorded(decided) = recorded else {
@@ -212,7 +226,15 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
     assert!(!phone.is_active() && phone.disclosed.is_none());
 
     let replay = backend
-        .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            &reviewed(),
+            now,
+            test_audit(),
+        )
         .await
         .unwrap();
     assert!(
@@ -235,6 +257,7 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
                     session.id,
                     revision,
                     &decision,
+                    &reviewed(),
                     now,
                     test_audit()
                 )
@@ -243,6 +266,101 @@ pub async fn test_approval_commits_its_consent(backend: &dyn StorageBackend) {
             DecisionOutcome::Conflict
         );
     }
+}
+
+/// An approval commits only over the values its review showed, read again
+/// inside the commit: a primary email added after the review makes it stale
+/// and nothing is written. A decision already recorded is replayed without
+/// reading the Profile again, so a later edit does not undo its answer.
+pub async fn test_approval_of_changed_values_is_stale(backend: &dyn StorageBackend) {
+    let (operation, session) = awaiting(backend).await;
+    let now = Timestamp::now();
+    let add_email = |address: &'static str| {
+        let at = Timestamp::now();
+        sid_core::models::ProfileEmail {
+            id: sid_core::models::ProfileEmailId::new(),
+            profile_id: operation.profile_id,
+            email: format!("{address}-{}@sid.example.com", Uuid::now_v7().simple()),
+            label: sid_core::models::EmailLabel::Personal,
+            custom_label: None,
+            is_primary: true,
+            verified: false,
+            verified_at: None,
+            created_at: at,
+            updated_at: at,
+        }
+    };
+    backend
+        .create_profile_email(&add_email("late"), test_audit())
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .decide_authorization_operation(
+                operation.id,
+                session.id,
+                0,
+                &approve(),
+                &reviewed(),
+                now,
+                test_audit(),
+            )
+            .await
+            .unwrap(),
+        DecisionOutcome::Stale
+    );
+    let stored = backend
+        .authorization_operation(operation.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, AuthorizationStatus::AwaitingConsent);
+    assert!(
+        backend
+            .get_consent_by_client(operation.profile_id, &operation.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let (operation, session) = awaiting(backend).await;
+    let recorded = backend
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            &reviewed(),
+            now,
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(recorded, DecisionOutcome::Recorded(_)),
+        "{recorded:?}"
+    );
+    let mut later = add_email("later");
+    later.profile_id = operation.profile_id;
+    backend
+        .create_profile_email(&later, test_audit())
+        .await
+        .unwrap();
+    assert!(matches!(
+        backend
+            .decide_authorization_operation(
+                operation.id,
+                session.id,
+                0,
+                &approve(),
+                &reviewed(),
+                now,
+                test_audit(),
+            )
+            .await
+            .unwrap(),
+        DecisionOutcome::Replayed(_)
+    ));
 }
 
 /// A consent revoked and then approved again holds only what the new
@@ -271,6 +389,7 @@ pub async fn test_reapproval_after_revocation_grants_only_the_approval(
             session.id,
             0,
             &approve(),
+            &reviewed(),
             Timestamp::now(),
             test_audit(),
         )
@@ -309,6 +428,7 @@ pub async fn test_denial_grants_nothing(backend: &dyn StorageBackend) {
             session.id,
             0,
             &AuthorizationDecision::Deny,
+            &[],
             Timestamp::now(),
             test_audit(),
         )
@@ -336,7 +456,15 @@ pub async fn test_decision_needs_its_session_and_lifetime(backend: &dyn StorageB
     ] {
         assert_eq!(
             backend
-                .decide_authorization_operation(operation.id, by, 0, &approve(), at, test_audit())
+                .decide_authorization_operation(
+                    operation.id,
+                    by,
+                    0,
+                    &approve(),
+                    &reviewed(),
+                    at,
+                    test_audit()
+                )
                 .await
                 .unwrap(),
             DecisionOutcome::NotFound
@@ -349,6 +477,7 @@ pub async fn test_decision_needs_its_session_and_lifetime(backend: &dyn StorageB
                 session.id,
                 0,
                 &approve(),
+                &reviewed(),
                 Timestamp::now(),
                 test_audit()
             )
@@ -370,12 +499,14 @@ pub async fn test_concurrent_decisions_record_one(backend: &dyn StorageBackend) 
     let (operation, session) = awaiting(backend).await;
     let now = Timestamp::now();
     let approval = approve();
+    let shown = reviewed();
     let (a, b) = tokio::join!(
         backend.decide_authorization_operation(
             operation.id,
             session.id,
             0,
             &approval,
+            &shown,
             now,
             test_audit()
         ),
@@ -384,6 +515,7 @@ pub async fn test_concurrent_decisions_record_one(backend: &dyn StorageBackend) 
             session.id,
             0,
             &AuthorizationDecision::Deny,
+            &[],
             now,
             test_audit()
         ),
@@ -408,6 +540,7 @@ pub async fn test_concurrent_decisions_record_one(backend: &dyn StorageBackend) 
             session.id,
             0,
             &approval,
+            &shown,
             now,
             test_audit()
         ),
@@ -416,6 +549,7 @@ pub async fn test_concurrent_decisions_record_one(backend: &dyn StorageBackend) 
             session.id,
             0,
             &approval,
+            &shown,
             now,
             test_audit()
         ),
@@ -458,7 +592,15 @@ pub async fn test_completion_issues_one_code(backend: &dyn StorageBackend) {
         "an undecided operation completed"
     );
     backend
-        .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            &reviewed(),
+            now,
+            test_audit(),
+        )
         .await
         .unwrap();
 
@@ -505,6 +647,7 @@ pub async fn test_completion_issues_one_code(backend: &dyn StorageBackend) {
                 session.id,
                 0,
                 &approve(),
+                &reviewed(),
                 now,
                 test_audit()
             )
@@ -524,6 +667,7 @@ pub async fn test_denial_and_expiry_at_completion(backend: &dyn StorageBackend) 
             session.id,
             0,
             &AuthorizationDecision::Deny,
+            &[],
             now,
             test_audit(),
         )
@@ -539,7 +683,15 @@ pub async fn test_denial_and_expiry_at_completion(backend: &dyn StorageBackend) 
 
     let (operation, session) = awaiting(backend).await;
     backend
-        .decide_authorization_operation(operation.id, session.id, 0, &approve(), now, test_audit())
+        .decide_authorization_operation(
+            operation.id,
+            session.id,
+            0,
+            &approve(),
+            &reviewed(),
+            now,
+            test_audit(),
+        )
         .await
         .unwrap();
     let late = code(&operation, &session);

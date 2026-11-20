@@ -252,24 +252,7 @@ pub fn review_requests(
     requests
 }
 
-/// The value `request` discloses from `values`, the selected Profile's
-/// current claim values: the value itself for a data request, only its
-/// verification for an attestation request.
-fn disclosed_for(
-    request: &ClaimRequest,
-    values: &[(&'static str, DisclosedValue)],
-) -> Option<DisclosedValue> {
-    let (_, value) = values
-        .iter()
-        .find(|(name, _)| *name == request.claim_name)?;
-    Some(match request.claim_type {
-        ClaimType::Data => value.clone(),
-        ClaimType::Attestation => DisclosedValue {
-            value: String::new(),
-            verified: value.verified,
-        },
-    })
-}
+use sid_core::models::consent::disclosed_for;
 
 /// The sharing choices a claim request admits, in the order shown, when the
 /// Profile holds a value for it; without one, only not sharing.
@@ -294,52 +277,18 @@ impl OAuth {
         &self,
         profile: sid_core::models::ProfileId,
     ) -> Result<Vec<(&'static str, DisclosedValue)>, SidError> {
-        let Some(sid_plugin::storage::ProfileContacts {
-            profile: found,
-            email,
-            phone,
-        }) = self
+        Ok(self
             .storage
             .get_profile_with_primary_contacts(profile)
             .await?
-        else {
-            return Ok(Vec::new());
-        };
-        let text = |value: Option<String>| {
-            value.map(|value| DisclosedValue {
-                value,
-                verified: None,
+            .map(|found| {
+                sid_core::models::consent::claim_values(
+                    &found.profile,
+                    found.email.as_ref(),
+                    found.phone.as_ref(),
+                )
             })
-        };
-        let mut values: Vec<(&'static str, DisclosedValue)> = [
-            ("name", text(found.formatted_name())),
-            ("given_name", text(found.given_name.clone())),
-            ("family_name", text(found.family_name.clone())),
-            ("middle_name", text(found.middle_name.clone())),
-            ("preferred_username", text(found.username.clone())),
-        ]
-        .into_iter()
-        .filter_map(|(name, value)| value.map(|value| (name, value)))
-        .collect();
-        if let Some(email) = email {
-            values.push((
-                "email",
-                DisclosedValue {
-                    value: email.email,
-                    verified: Some(email.verified),
-                },
-            ));
-        }
-        if let Some(phone) = phone {
-            values.push((
-                "phone_number",
-                DisclosedValue {
-                    value: phone.formatted_e164(),
-                    verified: Some(phone.verified),
-                },
-            ));
-        }
-        Ok(values)
+            .unwrap_or_default())
     }
 
     /// The disclosure Profile `profile` holds for client `client_id` now, as
@@ -348,10 +297,12 @@ impl OAuth {
     /// subscribed, so UserInfo and the tokens read a committed snapshot and
     /// never the live Profile (consent-flow.md, claim update propagation).
     /// A delivery lost to a decision committed meanwhile is retried from
-    /// what that one committed. Delivery is not a condition of the answer:
-    /// when it cannot be read or written (a store refusing mutations under a
-    /// backup barrier, say), the snapshot already approved is answered
-    /// (backup-restore.md: reads and authentication continue at BACKUP).
+    /// what that one committed. When the Profile values cannot be read, no
+    /// delivery is attempted and the consent as read is answered. A failed
+    /// delivery write has an unknown outcome (its commit may have landed),
+    /// so the consent is read again and that committed state is answered;
+    /// when even that read fails, the call fails rather than disclose from
+    /// a copy that may no longer be in force.
     pub(crate) async fn held_disclosure(
         &self,
         profile: sid_core::models::ProfileId,
@@ -403,8 +354,8 @@ impl OAuth {
                         .await?;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "subscribed delivery not committed");
-                    return Ok(held);
+                    tracing::warn!(error = %e, "subscribed delivery outcome unknown");
+                    return self.storage.get_consent_by_client(profile, client_id).await;
                 }
             }
         }
@@ -418,11 +369,7 @@ impl OAuth {
         operation: &AuthorizationOperation,
     ) -> Result<Vec<(String, Option<DisclosedValue>)>, SidError> {
         let values = self.current_values(operation.profile_id).await?;
-        Ok(operation
-            .claim_requests
-            .iter()
-            .map(|request| (request.claim_name.clone(), disclosed_for(request, &values)))
-            .collect())
+        Ok(operation.shown(&values))
     }
 
     /// The operation `id` at `issuer`, for `session`, the browser's IdP
@@ -546,11 +493,13 @@ impl OAuth {
         {
             return Ok(self.view(issuer, operation, now));
         }
-        let decision = match decision {
-            SubmittedDecision::Deny => AuthorizationDecision::Deny,
+        let (decision, shown) = match decision {
+            SubmittedDecision::Deny => (AuthorizationDecision::Deny, Vec::new()),
             // Read against the claim requests pinned on the operation and the
             // values the review showed: a registration or a value changed
             // meanwhile never turns this approval into another disclosure.
+            // The store checks the same values again inside the commit, so
+            // a change landing after this check is caught there too.
             SubmittedDecision::Approve(choices) => {
                 let shown = self.shown(&operation).await?;
                 if !BrowserCsrf::bound_matches(
@@ -560,9 +509,8 @@ impl OAuth {
                 ) {
                     return Err(ConsentError::Stale);
                 }
-                AuthorizationDecision::Approve {
-                    choices: reviewed_choices(&operation.claim_requests, &shown, choices)?,
-                }
+                let choices = reviewed_choices(&operation.claim_requests, &shown, choices)?;
+                (AuthorizationDecision::Approve { choices }, shown)
             }
         };
         let ctx: MutationContext = AuditEntry::user(
@@ -573,11 +521,11 @@ impl OAuth {
         .into();
         let decided = match self
             .storage
-            .decide_authorization_operation(id, session.id, revision, &decision, now, ctx)
+            .decide_authorization_operation(id, session.id, revision, &decision, &shown, now, ctx)
             .await?
         {
             DecisionOutcome::Recorded(op) | DecisionOutcome::Replayed(op) => op,
-            DecisionOutcome::Conflict => return Err(ConsentError::Stale),
+            DecisionOutcome::Conflict | DecisionOutcome::Stale => return Err(ConsentError::Stale),
             DecisionOutcome::NotFound => return Err(ConsentError::NotFound),
         };
         Ok(self.view(issuer, decided, now))

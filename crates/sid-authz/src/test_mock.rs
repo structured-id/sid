@@ -332,6 +332,7 @@ impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockSt
         _: sid_core::models::SessionId,
         _: u64,
         _: &sid_core::models::AuthorizationDecision,
+        _: &[(String, Option<sid_core::models::DisclosedValue>)],
         _: jiff::Timestamp,
         _: MutationContext,
     ) -> Result<sid_core::models::DecisionOutcome> {

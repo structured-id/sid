@@ -44,16 +44,25 @@ pub trait AuthorizationOperationStore: Send + Sync {
     /// grants nothing and changes no earlier consent. `ctx` commits only with
     /// a recorded decision.
     ///
+    /// An approval commits only while the selected Profile and its primary
+    /// contacts, read in the same commit and held unchanged until it ends,
+    /// still give `shown`, the values the holder reviewed
+    /// ([`AuthorizationOperation::shown`]); otherwise it is
+    /// [`DecisionOutcome::Stale`] and nothing is written.
+    ///
     /// The same decision repeated for the revision it was recorded at answers
-    /// [`DecisionOutcome::Replayed`] and writes nothing; another decision, or
-    /// another revision, is [`DecisionOutcome::Conflict`]; an operation that
-    /// is gone, expired or another session's is [`DecisionOutcome::NotFound`].
+    /// [`DecisionOutcome::Replayed`] and writes nothing, without reading the
+    /// Profile again; another decision, or another revision, is
+    /// [`DecisionOutcome::Conflict`]; an operation that is gone, expired or
+    /// another session's is [`DecisionOutcome::NotFound`].
+    #[allow(clippy::too_many_arguments)]
     async fn decide_authorization_operation(
         &self,
         id: AuthorizationOperationId,
         session: SessionId,
         revision: u64,
         decision: &AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
         now: Timestamp,
         ctx: MutationContext,
     ) -> Result<DecisionOutcome>;

@@ -215,6 +215,24 @@ impl AuthorizationOperation {
         }
     }
 
+    /// What this operation's review shows from `values`, the selected
+    /// Profile's claim values ([`super::consent::claim_values`]): each
+    /// reviewed claim with the value it discloses, in the review's order.
+    pub fn shown(
+        &self,
+        values: &[(&'static str, DisclosedValue)],
+    ) -> Vec<(String, Option<DisclosedValue>)> {
+        self.claim_requests
+            .iter()
+            .map(|request| {
+                (
+                    request.claim_name.clone(),
+                    super::consent::disclosed_for(request, values),
+                )
+            })
+            .collect()
+    }
+
     /// Whether the issuer may complete this operation at `now`: decided,
     /// not completed, not expired.
     pub fn completable_at(&self, now: Timestamp) -> bool {
@@ -295,6 +313,10 @@ pub enum DecisionOutcome {
     /// Another decision was recorded for that revision, or the revision is
     /// not the current one: nothing written.
     Conflict,
+    /// An approval whose reviewed values no longer match the selected
+    /// Profile when it would commit: nothing written, the holder reviews
+    /// again (identity-model.md, recipient disclosure).
+    Stale,
     /// The operation is gone, expired, or not this session's.
     NotFound,
 }

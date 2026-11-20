@@ -580,14 +580,16 @@ impl CoordinodeBackend {
         let id = held.id;
         let updates = updates.to_vec();
         let delivered = held.with_delivery(&updates);
-        let revision = held.updated_at;
+        let held = held.clone();
         self.transaction(move |tx| {
-            // Every decision, revocation or deletion moves the revision and
-            // writes the consent node, which this commit writes too.
+            // The consent read whole in this transaction is one snapshot;
+            // every decision, revocation or deletion writes the consent
+            // node, which this commit writes too, so a change committed
+            // after this read conflicts with it.
             let unchanged =
                 consents_where(tx, "c.id = $id", Params::default().with("id", uuid(&id.0)))?
                     .pop()
-                    .is_some_and(|c| c.status.as_str() == "active" && c.updated_at == revision);
+                    .is_some_and(|c| c.status.is_active() && c.same_state(&held));
             if !unchanged {
                 return Ok(Decision::Abandon(None));
             }

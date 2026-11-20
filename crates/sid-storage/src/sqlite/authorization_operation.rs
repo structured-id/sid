@@ -290,6 +290,7 @@ impl AuthorizationOperationStore for SqliteBackend {
         session: SessionId,
         revision: u64,
         decision: &AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
         now: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<DecisionOutcome> {
@@ -306,6 +307,26 @@ impl AuthorizationOperationStore for SqliteBackend {
             DecisionStep::Conflict => return Ok(DecisionOutcome::Conflict),
             DecisionStep::NotFound => return Ok(DecisionOutcome::NotFound),
         };
+        // Under the write lock of `BEGIN IMMEDIATE` no other writer commits,
+        // so the Profile read now stays as read until this decision commits.
+        if matches!(decision, AuthorizationDecision::Approve { .. }) {
+            let values = Self::profile_contacts_on(&mut tx, decided.profile_id)
+                .await?
+                .map(|found| {
+                    sid_core::models::consent::claim_values(
+                        &found.profile,
+                        found.email.as_ref(),
+                        found.phone.as_ref(),
+                    )
+                })
+                .unwrap_or_default();
+            if decided.shown(&values) != shown {
+                tx.rollback()
+                    .await
+                    .map_err(storage("roll back a stale authorization decision"))?;
+                return Ok(DecisionOutcome::Stale);
+            }
+        }
         sqlx::query(
             "UPDATE authorization_operations
              SET status = ?, revision = ?, decision = ?, decided_at = ? WHERE id = ?",

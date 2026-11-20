@@ -143,6 +143,7 @@ macro_rules! __storage_conformance {
             $crate::__storage_scenarios!($setup [$(super::$finish)?],authorization_operation:
                 test_authorization_operation_roundtrip
                 test_approval_commits_its_consent
+                test_approval_of_changed_values_is_stale
                 test_reapproval_after_revocation_grants_only_the_approval
                 test_denial_grants_nothing
                 test_decision_needs_its_session_and_lifetime

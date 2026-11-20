@@ -116,6 +116,48 @@ async fn locked(
         .transpose()
 }
 
+/// The claim values of Profile `profile` now, its row and its primary
+/// contacts' rows share-locked for the rest of `tx`, so none of them changes
+/// before the decision commits. A primary contact added where none existed
+/// is not held off, but such a claim had no value in the review, so it
+/// could not be shared and the approval discloses nothing of it.
+async fn shared_values(
+    tx: &mut Tx<'_>,
+    profile: sid_core::models::ProfileId,
+) -> SidResult<Vec<(&'static str, sid_core::models::DisclosedValue)>> {
+    let Some(found) = sqlx::query_as::<_, crate::pg_row::ProfileRow>(
+        "SELECT * FROM profiles WHERE id = $1 FOR SHARE",
+    )
+    .bind(profile)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage("lock the reviewed profile"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let email = sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+        "SELECT * FROM profile_emails WHERE profile_id = $1 AND is_primary = true FOR SHARE",
+    )
+    .bind(profile)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage("lock the reviewed email"))?
+    .map(|r| r.into_domain());
+    let phone = sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+        "SELECT * FROM profile_phones WHERE profile_id = $1 AND is_primary = true FOR SHARE",
+    )
+    .bind(profile)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage("lock the reviewed phone"))?
+    .map(|r| r.into_domain());
+    Ok(sid_core::models::consent::claim_values(
+        &found.into_domain()?,
+        email.as_ref(),
+        phone.as_ref(),
+    ))
+}
+
 /// Write `decided` over the locked row it was read from.
 async fn store_decided(tx: &mut Tx<'_>, decided: &AuthorizationOperation) -> SidResult<()> {
     sqlx::query(
@@ -329,6 +371,7 @@ impl AuthorizationOperationStore for PostgresBackend {
         session: SessionId,
         revision: u64,
         decision: &AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
         now: Timestamp,
         ctx: MutationContext,
     ) -> SidResult<DecisionOutcome> {
@@ -349,6 +392,14 @@ impl AuthorizationOperationStore for PostgresBackend {
             DecisionStep::Conflict => return Ok(DecisionOutcome::Conflict),
             DecisionStep::NotFound => return Ok(DecisionOutcome::NotFound),
         };
+        if matches!(decision, AuthorizationDecision::Approve { .. })
+            && decided.shown(&shared_values(&mut tx, decided.profile_id).await?) != shown
+        {
+            tx.rollback()
+                .await
+                .map_err(storage("roll back a stale authorization decision"))?;
+            return Ok(DecisionOutcome::Stale);
+        }
         store_decided(&mut tx, &decided).await?;
         if let AuthorizationDecision::Approve { choices } = decision {
             let held = locked_consent(&mut tx, &decided).await?;

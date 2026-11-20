@@ -828,6 +828,53 @@ async fn user_info_delivers_subscribed_changes_only_whole() {
     );
 }
 
+/// A delivery whose commit landed but whose reply was lost has an unknown
+/// outcome: UserInfo answers the consent read again, the delivered value;
+/// when the consent cannot be read again, it fails rather than disclose
+/// from the copy read before the delivery.
+#[tokio::test]
+async fn a_lost_delivery_reply_answers_what_was_committed() {
+    use sid_core::models::{ClaimType, ConsentMode, ConsentRecord, DisclosedValue};
+    let after_lost_reply = |then_unreadable: bool| async move {
+        let user = signed_in().await;
+        let token = user.token(&["openid", "profile"], None).await;
+        let mut consent = ConsentRecord::new(user.profile.id, "test-client");
+        consent.grant_claim("given_name", ClaimType::Data, ConsentMode::Subscribed);
+        consent.grants[0].disclosed = Some(DisclosedValue {
+            value: "Alice".into(),
+            verified: None,
+        });
+        consent.as_requested().unwrap().grant();
+        user.svc
+            .storage
+            .create_consent(
+                &consent,
+                sid_core::models::AuditEntry::system("test", "consent").into(),
+            )
+            .await
+            .unwrap();
+        let mut renamed = user.profile.clone();
+        renamed.given_name = Some("Alicia".into());
+        user.svc
+            .storage
+            .update_profile(
+                &renamed,
+                sid_core::models::AuditEntry::system("test", "rename").into(),
+            )
+            .await
+            .unwrap();
+        user.svc
+            .mock_storage
+            .lose_next_delivery_reply(then_unreadable);
+        let request = user.request(Some(&format!("Bearer {token}")), None);
+        user.provider.get_user_info(request).await
+    };
+
+    let answered = after_lost_reply(false).await.unwrap().into_inner();
+    assert_eq!(answered.given_name.as_deref(), Some("Alicia"));
+    assert!(after_lost_reply(true).await.is_err());
+}
+
 /// Without a token both schemes are offered, without an error code
 /// (RFC 6750 §3, RFC 9449 §7.1).
 #[tokio::test]
@@ -2108,15 +2155,32 @@ async fn decide(
     operation: sid_core::models::AuthorizationOperationId,
     decision: sid_core::models::AuthorizationDecision,
 ) {
-    let outcome = browser
-        .user
-        .svc
-        .storage
+    let storage = &browser.user.svc.storage;
+    // What the review showed: the operation's claims from the Profile now.
+    let pending = storage
+        .authorization_operation(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let values = storage
+        .get_profile_with_primary_contacts(pending.profile_id)
+        .await
+        .unwrap()
+        .map(|found| {
+            sid_core::models::consent::claim_values(
+                &found.profile,
+                found.email.as_ref(),
+                found.phone.as_ref(),
+            )
+        })
+        .unwrap_or_default();
+    let outcome = storage
         .decide_authorization_operation(
             operation,
             browser.user.session.id,
             0,
             &decision,
+            &pending.shown(&values),
             jiff::Timestamp::now(),
             sid_core::models::AuditEntry::system("test", "consent").into(),
         )

@@ -384,28 +384,38 @@ impl SqliteBackend {
     ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("profile with contacts: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        let found = Self::profile_contacts_on(&mut tx, id).await?;
+        tx.rollback().await.map_err(storage)?;
+        Ok(found)
+    }
+
+    /// Profile `id` with its primary contacts read on `conn`, which a caller
+    /// holds in one transaction.
+    pub(crate) async fn profile_contacts_on(
+        conn: &mut sqlx::SqliteConnection,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("profile with contacts: {e}"));
         let Some(profile) = sqlx::query("SELECT * FROM profiles WHERE id = ?")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(storage)?
         else {
-            tx.rollback().await.map_err(storage)?;
             return Ok(None);
         };
         let email =
             sqlx::query("SELECT * FROM profile_emails WHERE profile_id = ? AND is_primary = 1")
                 .bind(id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *conn)
                 .await
                 .map_err(storage)?;
         let phone =
             sqlx::query("SELECT * FROM profile_phones WHERE profile_id = ? AND is_primary = 1")
                 .bind(id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *conn)
                 .await
                 .map_err(storage)?;
-        tx.rollback().await.map_err(storage)?;
         Ok(Some(sid_plugin::storage::ProfileContacts {
             profile: row_to_profile(&profile)?,
             email: email.as_ref().map(row_to_profile_email).transpose()?,

@@ -59,26 +59,32 @@ macro_rules! claim_grant_columns {
 pub(super) use claim_grant_columns;
 
 impl SqliteBackend {
-    async fn claim_grants(&self, consent_id: Uuid) -> SidResult<Vec<ClaimGrant>> {
+    async fn claim_grants(
+        conn: &mut sqlx::SqliteConnection,
+        consent_id: Uuid,
+    ) -> SidResult<Vec<ClaimGrant>> {
         let rows = sqlx::query(concat!(
             "SELECT ",
             claim_grant_columns!(),
             " FROM claim_grants WHERE consent_id = ? ORDER BY granted_at"
         ))
         .bind(consent_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         rows.iter().map(row_to_grant).collect()
     }
 
-    async fn scope_grants(&self, consent_id: Uuid) -> SidResult<Vec<ScopeGrant>> {
+    async fn scope_grants(
+        conn: &mut sqlx::SqliteConnection,
+        consent_id: Uuid,
+    ) -> SidResult<Vec<ScopeGrant>> {
         let rows = sqlx::query(
             "SELECT resource_id, scopes, granted_at FROM consent_scope_grants \
              WHERE consent_id = ? ORDER BY granted_at, resource_id",
         )
         .bind(consent_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("load scope grants: {e}")))?;
         rows.iter()
@@ -95,7 +101,12 @@ impl SqliteBackend {
             .collect()
     }
 
-    async fn consent_from_row(&self, row: &sqlx::sqlite::SqliteRow) -> SidResult<ConsentRecord> {
+    /// The consent `row` names with its grants, read on `conn`: inside one
+    /// transaction, all from one snapshot.
+    async fn consent_from_row(
+        conn: &mut sqlx::SqliteConnection,
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> SidResult<ConsentRecord> {
         let id = uuid_col(row, "id")?;
         Ok(ConsentRecord {
             id: ConsentId(id),
@@ -104,8 +115,8 @@ impl SqliteBackend {
             status: col::<String>(row, "status")?
                 .parse()
                 .map_err(SidError::Storage)?,
-            grants: self.claim_grants(id).await?,
-            scope_grants: self.scope_grants(id).await?,
+            grants: Self::claim_grants(conn, id).await?,
+            scope_grants: Self::scope_grants(conn, id).await?,
             consented_at: dt_col(row, "consented_at")?,
             revoked_at: dt_col_opt(row, "revoked_at")?,
             updated_at: dt_col(row, "updated_at")?,
@@ -241,20 +252,12 @@ impl SqliteBackend {
         let storage = |e: sqlx::Error| SidError::Storage(format!("deliver subscribed: {e}"));
         let id = held.id;
         let mut tx = self.begin_write().await?;
-        // Every decision, revocation or deletion moves the revision, so an
-        // unchanged one under the write lock means the consent is `held`.
-        let unchanged = match sqlx::query("SELECT status, updated_at FROM consents WHERE id = ?")
-            .bind(id.0)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?
-        {
-            Some(row) => {
-                col::<String>(&row, "status")? == "active"
-                    && dt_col(&row, "updated_at")? == held.updated_at
-            }
-            None => false,
-        };
+        // Under the write lock of `BEGIN IMMEDIATE` no other writer commits,
+        // so the consent read whole on this transaction is the committed
+        // state; the delivery applies only over exactly the state `held` was.
+        let unchanged = Self::consent_by_id(&mut tx, id)
+            .await?
+            .is_some_and(|stored| stored.status.is_active() && stored.same_state(held));
         if !unchanged {
             tx.rollback().await.map_err(storage)?;
             return Ok(None);
@@ -291,16 +294,37 @@ impl SqliteBackend {
         Ok(Some(delivered))
     }
 
-    pub(crate) async fn get_consent_impl(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {
+    /// The consent `id` read whole on `conn`.
+    async fn consent_by_id(
+        conn: &mut sqlx::SqliteConnection,
+        id: ConsentId,
+    ) -> SidResult<Option<ConsentRecord>> {
         let row = sqlx::query(select_consents!("id = ?"))
             .bind(id.0)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         match row {
-            Some(row) => self.consent_from_row(&row).await.map(Some),
+            Some(row) => Self::consent_from_row(conn, &row).await.map(Some),
             None => Ok(None),
         }
+    }
+
+    /// A read transaction: everything read on it comes from one snapshot.
+    async fn begin_read(&self) -> SidResult<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        self.pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(format!("begin read: {e}")))
+    }
+
+    pub(crate) async fn get_consent_impl(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {
+        let mut tx = self.begin_read().await?;
+        let consent = Self::consent_by_id(&mut tx, id).await?;
+        tx.rollback()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(consent)
     }
 
     pub(crate) async fn get_consent_by_client_impl(
@@ -308,33 +332,42 @@ impl SqliteBackend {
         profile_id: ProfileId,
         client_id: &str,
     ) -> SidResult<Option<ConsentRecord>> {
+        let mut tx = self.begin_read().await?;
         let row = sqlx::query(select_consents!("profile_id = ? AND client_id = ?"))
             .bind(profile_id)
             .bind(client_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        match row {
-            Some(row) => self.consent_from_row(&row).await.map(Some),
-            None => Ok(None),
-        }
+        let consent = match row {
+            Some(row) => Some(Self::consent_from_row(&mut tx, &row).await?),
+            None => None,
+        };
+        tx.rollback()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(consent)
     }
 
     pub(crate) async fn list_consents_by_profile_impl(
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Vec<ConsentRecord>> {
+        let mut tx = self.begin_read().await?;
         let rows = sqlx::query(select_consents!(
             "profile_id = ? ORDER BY consented_at DESC"
         ))
         .bind(profile_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         let mut consents = Vec::with_capacity(rows.len());
         for row in &rows {
-            consents.push(self.consent_from_row(row).await?);
+            consents.push(Self::consent_from_row(&mut tx, row).await?);
         }
+        tx.rollback()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(consents)
     }
 

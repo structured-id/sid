@@ -54,6 +54,42 @@ fn test_covers_requires_an_approved_value() {
     assert!(c.covers(api, &[], &[&email]));
 }
 
+/// The state of a consent is its decisions, not its revision time: a record
+/// read again with its grants in another order or another `updated_at` is
+/// the same state, while a withdrawn claim or another disclosed value is
+/// not.
+#[test]
+fn test_same_state_compares_decisions_not_times() {
+    let mut c = make_consent();
+    share(
+        &mut c,
+        "name",
+        ClaimType::Data,
+        ConsentMode::Subscribed,
+        "Alice",
+    );
+    share(
+        &mut c,
+        "email",
+        ClaimType::Data,
+        ConsentMode::Static,
+        "a@sid.example.com",
+    );
+
+    let mut reread = c.clone();
+    reread.grants.reverse();
+    reread.updated_at = Timestamp::now() + jiff::SignedDuration::from_secs(5);
+    assert!(c.same_state(&reread));
+
+    let mut withdrawn = c.clone();
+    withdrawn.as_active().unwrap().revoke_claim("name");
+    assert!(!c.same_state(&withdrawn));
+
+    let mut other_value = c.clone();
+    other_value.grants[1].disclosed = Some(value("b@sid.example.com"));
+    assert!(!c.same_state(&other_value));
+}
+
 /// A Profile edit is delivered only through subscriptions, as one complete
 /// replacement: every changed field subscribed gives the new values; one
 /// changed static field keeps the whole snapshot for the holder's review;

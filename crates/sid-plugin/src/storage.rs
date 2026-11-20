@@ -438,11 +438,11 @@ pub trait StorageBackend:
 
     /// Deliver `updates`, a subscription's replacement of the disclosure of
     /// `held`, the consent as it was read: in one step, and only while the
-    /// stored consent is still exactly `held` (active, at its revision
-    /// `updated_at`), so no decision or revocation committed since is
-    /// overwritten. Returns the consent as committed, which is
-    /// `held.with_delivery(updates)`; `None`, with nothing written and `ctx`
-    /// dropped, when the consent changed or ended meanwhile.
+    /// stored consent, read whole in that step, is still active and in
+    /// exactly `held`'s state ([`ConsentRecord::same_state`]), so no
+    /// decision or revocation committed since is overwritten. Returns the
+    /// consent as committed, which is `held.with_delivery(updates)`; `None`,
+    /// with nothing written and `ctx` dropped, when it changed or ended.
     async fn deliver_subscribed(
         &self,
         held: &ConsentRecord,
