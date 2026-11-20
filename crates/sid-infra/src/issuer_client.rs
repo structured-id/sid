@@ -41,14 +41,10 @@ pub enum RpClientError {
 
 /// The connection the deployment delivered in the file at `path`, for the
 /// adapter's key `kid`.
-pub fn load_connection(
-    path: &Path,
-    installation_url: &str,
-    kid: &str,
-) -> Result<Connection, RpClientError> {
+pub fn load_connection(path: &Path, kid: &str) -> Result<Connection, RpClientError> {
     let json = std::fs::read_to_string(path)
         .map_err(|e| ConnectionError(format!("connection {path:?} cannot be read: {e}")))?;
-    Ok(Connection::parse(&json, installation_url, kid)?)
+    Ok(Connection::parse(&json, kid)?)
 }
 
 /// The account API's answer as the one connection representation. The
@@ -157,10 +153,7 @@ impl RpClient {
                     .get_account_connection(GetAccountConnectionRequest { proof })
                     .await?
                     .into_inner();
-                Ok(Connection::accept(
-                    answered(answer, &self.kid),
-                    &self.installation_url,
-                )?)
+                Ok(Connection::accept(answered(answer, &self.kid))?)
             })
             .await
     }

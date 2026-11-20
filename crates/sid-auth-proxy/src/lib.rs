@@ -77,10 +77,7 @@ pub(crate) fn test_issuers() -> Arc<IssuerDirectory> {
             Ok(None)
         }
     }
-    Arc::new(IssuerDirectory::new(
-        "https://sid.example.com",
-        Arc::new(NoIssuers),
-    ))
+    Arc::new(IssuerDirectory::new(Arc::new(NoIssuers)))
 }
 
 /// A proxy state for tests: the BFF off unless a test gives it its sessions.

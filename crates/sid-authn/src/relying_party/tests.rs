@@ -23,7 +23,7 @@ fn bundle() -> ClientConnection {
 /// endpoint needs taken from the issuer.
 #[test]
 fn a_provisioned_connection_is_accepted() {
-    let connection = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let connection = Connection::accept(bundle()).unwrap();
     assert_eq!(connection.issuer_handle, HANDLE);
     assert_eq!(
         connection.token_endpoint(),
@@ -38,7 +38,7 @@ fn a_provisioned_connection_is_accepted() {
 fn a_connection_to_the_root_issuer_is_accepted() {
     let mut root = bundle();
     root.issuer = INSTALLATION.into();
-    let connection = Connection::accept(root, INSTALLATION).unwrap();
+    let connection = Connection::accept(root).unwrap();
     assert_eq!(connection.issuer_handle, "");
     assert_eq!(
         connection.token_endpoint(),
@@ -46,18 +46,35 @@ fn a_connection_to_the_root_issuer_is_accepted() {
     );
 }
 
-/// A connection that would have the BFF sign in at another installation,
-/// under a handle that is not one, as a client it cannot authenticate, or
+/// The issuer's host is not the adapter's to compare: an issuer whose
+/// canonical URL lives at another host than the one the adapter reaches the
+/// installation at is selected by its organization segment, and its
+/// endpoints are under that issuer.
+#[test]
+fn an_issuer_at_another_host_is_selected_by_its_segment() {
+    let mut elsewhere = bundle();
+    elsewhere.issuer = format!("https://login.acme.example/i/{HANDLE}");
+    let connection = Connection::accept(elsewhere).unwrap();
+    assert_eq!(connection.issuer_handle, HANDLE);
+    assert_eq!(
+        connection.token_endpoint(),
+        format!("https://login.acme.example/i/{HANDLE}/oauth2/token")
+    );
+}
+
+/// A connection the BFF could not address (an issuer that is not an issuer
+/// URL, a handle that is not one), as a client it cannot authenticate, or
 /// without its target, is refused, wherever it came from.
 #[test]
 fn an_unusable_connection_is_refused() {
-    let cases: [fn(&mut ClientConnection); 12] = [
+    let cases: [fn(&mut ClientConnection); 13] = [
         // Two scopes in one entry would be split by the issuer and match
         // neither registered scope (RFC 6749 §3.3).
         |c| c.scopes.push("orders.read orders.write".into()),
         |c| c.scopes.push(String::new()),
-        |c| c.issuer = format!("https://other.example.com/i/{HANDLE}"),
         |c| c.issuer = format!("{INSTALLATION}/i/not-a-handle"),
+        |c| c.issuer = format!("{INSTALLATION}/i/{HANDLE}?tenant=x"),
+        |c| c.issuer = "not a url".into(),
         |c| c.token_endpoint_auth_method = "client_secret_basic".into(),
         |c| c.client_id = String::new(),
         |c| c.resource = String::new(),
@@ -73,10 +90,7 @@ fn an_unusable_connection_is_refused() {
     for spoil in cases {
         let mut bad = bundle();
         spoil(&mut bad);
-        assert!(
-            Connection::accept(bad.clone(), INSTALLATION).is_err(),
-            "{bad:?}"
-        );
+        assert!(Connection::accept(bad.clone()).is_err(), "{bad:?}");
     }
 }
 
@@ -87,19 +101,17 @@ fn an_unusable_connection_is_refused() {
 fn a_delivered_bundle_is_parsed_and_validated() {
     let json = serde_json::to_string(&bundle()).unwrap();
     assert_eq!(
-        Connection::parse(&json, INSTALLATION, KID).unwrap(),
-        Connection::accept(bundle(), INSTALLATION).unwrap()
+        Connection::parse(&json, KID).unwrap(),
+        Connection::accept(bundle()).unwrap()
     );
 
-    assert!(Connection::parse("{", INSTALLATION, KID).is_err());
+    assert!(Connection::parse("{", KID).is_err());
     let mut extended = serde_json::to_value(bundle()).unwrap();
     extended["client_secret"] = "s3cret".into();
-    assert!(Connection::parse(&extended.to_string(), INSTALLATION, KID).is_err());
-    let mut foreign = bundle();
-    foreign.issuer = format!("https://other.example.com/i/{HANDLE}");
-    assert!(
-        Connection::parse(&serde_json::to_string(&foreign).unwrap(), INSTALLATION, KID).is_err()
-    );
+    assert!(Connection::parse(&extended.to_string(), KID).is_err());
+    let mut malformed = bundle();
+    malformed.issuer = format!("{INSTALLATION}/i/not-a-handle");
+    assert!(Connection::parse(&serde_json::to_string(&malformed).unwrap(), KID).is_err());
 }
 
 /// A bundle of a client that did not register the BFF's key (another
@@ -108,12 +120,10 @@ fn a_delivered_bundle_is_parsed_and_validated() {
 #[test]
 fn a_bundle_of_a_client_without_the_bffs_key_is_refused() {
     let json = serde_json::to_string(&bundle()).unwrap();
-    assert!(Connection::parse(&json, INSTALLATION, "another-key").is_err());
+    assert!(Connection::parse(&json, "another-key").is_err());
     let mut keyless = bundle();
     keyless.key_ids.clear();
-    assert!(
-        Connection::parse(&serde_json::to_string(&keyless).unwrap(), INSTALLATION, KID).is_err()
-    );
+    assert!(Connection::parse(&serde_json::to_string(&keyless).unwrap(), KID).is_err());
 }
 
 /// The callback goes into protocol requests exactly as registered: SID
@@ -123,7 +133,7 @@ fn a_bundle_of_a_client_without_the_bffs_key_is_refused() {
 fn the_callback_is_sent_as_registered() {
     let mut b = bundle();
     b.redirect_uri = "https://Account.SID.example.com/auth/callback".into();
-    let connection = Connection::accept(b, INSTALLATION).unwrap();
+    let connection = Connection::accept(b).unwrap();
     assert_eq!(
         connection.redirect_uri,
         "https://Account.SID.example.com/auth/callback"
@@ -140,21 +150,17 @@ fn the_callback_is_sent_as_registered() {
 /// narrows them is another connection, while their order is not.
 #[test]
 fn the_binding_covers_the_scopes_but_not_their_order() {
-    let base = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let base = Connection::accept(bundle()).unwrap();
     let mut narrowed = bundle();
     narrowed.scopes = vec!["openid".into()];
     assert_ne!(
-        Connection::accept(narrowed, INSTALLATION)
-            .unwrap()
-            .binding(),
+        Connection::accept(narrowed).unwrap().binding(),
         base.binding()
     );
     let mut reordered = bundle();
     reordered.scopes.reverse();
     assert_eq!(
-        Connection::accept(reordered, INSTALLATION)
-            .unwrap()
-            .binding(),
+        Connection::accept(reordered).unwrap().binding(),
         base.binding()
     );
 }
@@ -163,10 +169,10 @@ fn the_binding_covers_the_scopes_but_not_their_order() {
 /// only the callback keeps sessions but not sign-ins started before it.
 #[test]
 fn the_sign_in_binding_covers_the_callback() {
-    let base = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let base = Connection::accept(bundle()).unwrap();
     let mut moved = bundle();
     moved.redirect_uri = "https://new.sid.example.com/auth/callback".into();
-    let moved = Connection::accept(moved, INSTALLATION).unwrap();
+    let moved = Connection::accept(moved).unwrap();
     assert_eq!(moved.binding(), base.binding());
     assert_ne!(moved.sign_in_binding(), base.sign_in_binding());
 }
@@ -176,7 +182,7 @@ fn the_sign_in_binding_covers_the_callback() {
 /// encoded, none is taken from the browser's request.
 #[test]
 fn the_authorization_request_asks_for_the_connection_resource() {
-    let connection = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let connection = Connection::accept(bundle()).unwrap();
     let url = connection.authorize_url("challenge", "state-1", "nonce-1");
     assert_eq!(
         url.as_str().split('?').next().unwrap(),

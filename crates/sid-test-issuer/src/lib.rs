@@ -388,7 +388,6 @@ impl TestIssuer {
     ) -> sid_auth::config::ReceiverConfig {
         sid_auth::config::ReceiverConfig {
             upstream: self.upstream(),
-            issuer_url: INSTALLATION.into(),
             resource: resource.into(),
             origin: origin.into(),
             checker: self.client_config(checker, secret_file),

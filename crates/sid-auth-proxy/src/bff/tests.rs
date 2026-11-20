@@ -26,23 +26,20 @@ const LONG: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// The connection SID would give the test BFF.
 pub(crate) fn test_connection() -> Connection {
-    Connection::accept(
-        sid_authn::client_connection::ClientConnection {
-            issuer: BFF_ISSUER.into(),
-            client_id: "account-web".into(),
-            resource: "https://sid.example.com/account".into(),
-            scopes: vec![
-                "openid".into(),
-                "profile".into(),
-                "email".into(),
-                "account".into(),
-            ],
-            redirect_uri: CALLBACK.into(),
-            token_endpoint_auth_method: "private_key_jwt".into(),
-            key_ids: vec!["bff-key".into()],
-        },
-        "https://sid.example.com",
-    )
+    Connection::accept(sid_authn::client_connection::ClientConnection {
+        issuer: BFF_ISSUER.into(),
+        client_id: "account-web".into(),
+        resource: "https://sid.example.com/account".into(),
+        scopes: vec![
+            "openid".into(),
+            "profile".into(),
+            "email".into(),
+            "account".into(),
+        ],
+        redirect_uri: CALLBACK.into(),
+        token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec!["bff-key".into()],
+    })
     .unwrap()
 }
 

@@ -139,10 +139,9 @@ async fn replica(deployment: &Deployment) -> String {
     let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
         Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),
-        Arc::new(IssuerDirectory::new(
-            &installation,
-            Arc::new(GrpcIssuerSource::new(issuer)),
-        )),
+        Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
+            issuer,
+        )))),
         Arc::new(sessions(deployment)),
         revocation,
         COOKIE.into(),

@@ -3,11 +3,12 @@
 //! them: their exact identifiers, public keys and registered resources, read
 //! from the installation's registry and cached per replica.
 //!
-//! A request path or a token names an issuer by its handle; the directory
-//! asks the registry for that issuer's exact URL and public keys and verifies
-//! its tokens from the answer. Only issuers of this installation are known: a
-//! token naming any other `iss` is refused without fetching anything for it
-//! (oidc-issuer-model: never fetch keys for an arbitrary `iss`).
+//! A request path or a token names an issuer by its organization segment;
+//! the directory asks the installation's registry for that issuer's exact URL
+//! and public keys and verifies its tokens from the answer. Keys come only
+//! from the registry, never from the host a token names
+//! (oidc-issuer-model: never fetch keys for an arbitrary `iss`), and a token
+//! whose `iss` is not exactly the registry's URL is refused.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -134,9 +135,6 @@ struct CachedResource {
 /// The cache holds public data read from the registry; every replica reads
 /// the same, so it holds no state a replica must agree on.
 pub struct IssuerDirectory {
-    /// The installation whose issuers these are: the condition a URL meets
-    /// to be one of them.
-    installation: crate::issuer::InstallationIssuers,
     source: Arc<dyn IssuerSource>,
     cache: DashMap<String, Cached>,
     /// Registered resources by (issuer handle, indicator). Only resources the
@@ -146,26 +144,25 @@ pub struct IssuerDirectory {
 
 impl std::fmt::Debug for IssuerDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IssuerDirectory")
-            .field("installation", &self.installation)
-            .finish_non_exhaustive()
+        f.debug_struct("IssuerDirectory").finish_non_exhaustive()
     }
 }
 
 impl IssuerDirectory {
-    /// The issuers of the installation at `base`, its public URL.
-    pub fn new(base: &str, source: Arc<dyn IssuerSource>) -> Self {
+    /// The issuers `source`, the installation's registry, describes.
+    pub fn new(source: Arc<dyn IssuerSource>) -> Self {
         Self {
-            installation: crate::issuer::InstallationIssuers::new(base),
             source,
             cache: DashMap::new(),
             resources: DashMap::new(),
         }
     }
 
-    /// Which issuer `issuer` selects, when it is one of this installation's.
+    /// Which issuer `issuer` selects in the registry, by its organization
+    /// segment; whether it is exactly that issuer is checked against the
+    /// registry's answer.
     fn selector_of(&self, issuer: &str) -> Option<crate::issuer::IssuerSelector> {
-        self.installation.select(issuer)
+        crate::issuer::select_issuer(issuer)
     }
 
     /// The resource `resource` registered under the issuer `issuer` (its

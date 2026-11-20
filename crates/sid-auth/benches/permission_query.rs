@@ -21,7 +21,7 @@ use sid_proto::sid::v1::authz::{
     RequestEvaluation,
 };
 use sid_proto::sid::v1::authz_service_client::AuthzServiceClient;
-use sid_test_issuer::{Checker, INSTALLATION, Setup, TestIssuer};
+use sid_test_issuer::{Checker, Setup, TestIssuer};
 
 const RESOURCE: &str = "https://orders.example/";
 const ORIGIN: &str = "https://orders.example";
@@ -133,7 +133,6 @@ fn main() {
             .expect("channel");
         let checker = sid_infra::client_credential::ClientCredential::checker(
             &issuer.client_config(CHECKER, &secret),
-            INSTALLATION,
             sid_infra::deadline::issuer(channel.clone()),
         )
         .expect("checker credential");

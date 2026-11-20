@@ -16,7 +16,6 @@ use crate::client_connection::ClientConnection;
 use crate::issuer_directory::{IssuerRecord, IssuerSource, RegistryUnavailable, ResourceRecord};
 use crate::jwt::AccessTokenClaims;
 
-const INSTALLATION: &str = "https://sid.example.com";
 const ISSUER: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef";
 const OTHER_ISSUER: &str = "https://sid.example.com/i/fedcba9876543210fedcba9876543210";
 const CLIENT: &str = "web";
@@ -269,18 +268,15 @@ impl ApplicationClient for Client {
 }
 
 fn connection() -> Connection {
-    Connection::accept(
-        ClientConnection {
-            issuer: ISSUER.into(),
-            client_id: CLIENT.into(),
-            resource: RESOURCE.into(),
-            scopes: vec!["openid".into()],
-            redirect_uri: format!("{ORIGIN}/auth/callback"),
-            token_endpoint_auth_method: "private_key_jwt".into(),
-            key_ids: vec![],
-        },
-        INSTALLATION,
-    )
+    Connection::accept(ClientConnection {
+        issuer: ISSUER.into(),
+        client_id: CLIENT.into(),
+        resource: RESOURCE.into(),
+        scopes: vec!["openid".into()],
+        redirect_uri: format!("{ORIGIN}/auth/callback"),
+        token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec![],
+    })
     .unwrap()
 }
 
@@ -312,7 +308,7 @@ impl World {
     fn replica(&self) -> BrowserSessions<Client> {
         BrowserSessions::new(
             self.client.clone(),
-            Arc::new(IssuerDirectory::new(INSTALLATION, self.registry.clone())),
+            Arc::new(IssuerDirectory::new(self.registry.clone())),
             Arc::new(BffSessionStore::new(self.store.clone(), LONG, LONG, LONG)),
             self.revocation.clone(),
             COOKIE.into(),

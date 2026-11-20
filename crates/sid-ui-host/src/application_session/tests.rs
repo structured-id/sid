@@ -135,18 +135,15 @@ fn unreachable() -> sid_infra::deadline::IssuerChannel {
 }
 
 fn connection() -> Connection {
-    Connection::accept(
-        ClientConnection {
-            issuer: ISSUER.into(),
-            client_id: "ops-web".into(),
-            resource: "https://ops.sid.example.com/api/".into(),
-            scopes: vec!["openid".into()],
-            redirect_uri: "https://ops.sid.example.com/auth/callback".into(),
-            token_endpoint_auth_method: "private_key_jwt".into(),
-            key_ids: vec![],
-        },
-        INSTALLATION,
-    )
+    Connection::accept(ClientConnection {
+        issuer: ISSUER.into(),
+        client_id: "ops-web".into(),
+        resource: "https://ops.sid.example.com/api/".into(),
+        scopes: vec!["openid".into()],
+        redirect_uri: "https://ops.sid.example.com/auth/callback".into(),
+        token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec![],
+    })
     .unwrap()
 }
 
@@ -188,7 +185,7 @@ fn fixture_with(
     Fixture {
         adapter: ApplicationSessions::new(
             Arc::new(client),
-            Arc::new(IssuerDirectory::new(INSTALLATION, source)),
+            Arc::new(IssuerDirectory::new(source)),
             sessions.clone(),
             revocation.clone(),
             COOKIE.into(),
@@ -841,7 +838,7 @@ async fn a_refresh_ends_within_its_claim() {
     let sessions = Arc::new(BffSessionStore::new(memory(), LONG, LONG, LONG));
     let adapter = ApplicationSessions::new(
         Arc::new(client),
-        Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(SlowIssuers))),
+        Arc::new(IssuerDirectory::new(Arc::new(SlowIssuers))),
         sessions.clone(),
         Arc::new(RevocationCache::new(
             LONG,

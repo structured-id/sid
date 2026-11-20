@@ -209,7 +209,7 @@ async fn adapter(
                 .kid()
                 .context("the client key names no key id")?
                 .to_owned();
-            let connection = load_connection(std::path::Path::new(&path), &installation, &kid)?;
+            let connection = load_connection(std::path::Path::new(&path), &kid)?;
             tracing::info!(
                 issuer = %connection.issuer,
                 client_id = %connection.client_id,
@@ -240,10 +240,9 @@ async fn adapter(
     let listener = revocation.listen().await;
     let sessions = ApplicationSessions::new(
         Arc::new(client),
-        Arc::new(IssuerDirectory::new(
-            &installation,
-            Arc::new(GrpcIssuerSource::new(channel)),
-        )),
+        Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
+            channel,
+        )))),
         Arc::new(BffSessionStore::new(
             store,
             SESSION_MAX_AGE,

@@ -10,7 +10,7 @@
 //! - `SID_NATS_TOPOLOGY` and the `SID_NATS_*` bounds — the event topology, as for every SID service
 //! - `SID_NOTIFY_DATABASE_URL` — PostgreSQL URL for delivery jobs and templates (required)
 //! - `SID_IDENTITY_GRPC_ADDRESS` — sid-identity gRPC address for recipient resolution (optional, e.g., `http://127.0.0.1:9000`)
-//! - `SID_GRPC_UPSTREAM`, `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`,
+//! - `SID_GRPC_UPSTREAM`, `SID_RECEIVER_RESOURCE`,
 //!   `SID_RECEIVER_ORIGIN`, `SID_AUTHZ_CHECKER_*` — the template API's
 //!   receiver: the issuer it asks, the installation's account API resource it
 //!   serves, its external origin and its own checker credential (required)

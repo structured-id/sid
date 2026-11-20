@@ -44,7 +44,7 @@ impl Connection {
     /// registered the adapter's key `kid`. Unlike discovery, nothing proved
     /// the pairing of bundle and key: a bundle of another client would pass
     /// every authorization and fail every code redemption.
-    pub fn parse(json: &str, installation_url: &str, kid: &str) -> Result<Self, ConnectionError> {
+    pub fn parse(json: &str, kid: &str) -> Result<Self, ConnectionError> {
         let bundle: ClientConnection = serde_json::from_str(json)
             .map_err(|e| ConnectionError(format!("not a connection bundle: {e}")))?;
         if !bundle.key_ids.iter().any(|registered| registered == kid) {
@@ -53,27 +53,25 @@ impl Connection {
                 bundle.client_id
             )));
         }
-        Self::accept(bundle, installation_url)
+        Self::accept(bundle)
     }
 
-    /// The details of `bundle`, accepted only when they name an issuer of
-    /// `installation_url` and the client authenticates with its key: a
-    /// connection that would have the adapter sign in elsewhere, or as a
-    /// client holding a secret it does not have, is refused rather than
-    /// followed.
-    pub fn accept(
-        bundle: ClientConnection,
-        installation_url: &str,
-    ) -> Result<Self, ConnectionError> {
+    /// The details of `bundle`, accepted only when they name an issuer by
+    /// its organization segment and the client authenticates with its key: a
+    /// connection the adapter could not address, or one that would have it
+    /// sign in as a client holding a secret it does not have, is refused
+    /// rather than followed. The issuer's host is not compared with the
+    /// address the adapter reaches the installation at; its tokens must carry
+    /// exactly this issuer.
+    pub fn accept(bundle: ClientConnection) -> Result<Self, ConnectionError> {
         let invalid = |why: &str| Err(ConnectionError(why.to_owned()));
         if bundle.token_endpoint_auth_method != "private_key_jwt" {
             return invalid("the client does not authenticate by key");
         }
-        let Some(issuer_handle) = crate::issuer::InstallationIssuers::new(installation_url)
-            .select(&bundle.issuer)
-            .map(|selector| selector.wire().to_owned())
+        let Some(issuer_handle) =
+            crate::issuer::select_issuer(&bundle.issuer).map(|selector| selector.wire().to_owned())
         else {
-            return invalid("the issuer is not one of this installation's");
+            return invalid("the issuer is not an issuer URL");
         };
         if bundle.client_id.is_empty() {
             return invalid("the client is missing");

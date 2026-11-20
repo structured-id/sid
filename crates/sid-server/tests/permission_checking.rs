@@ -1316,7 +1316,6 @@ async fn guard_trusting(
         targets: _,
     } = serve_issuer(a, verifiers).await;
     let issuer = &a.svc.issuer.canonical_url;
-    let base = issuer.split("/i/").next().unwrap();
     let route_file = file(&format!(
         r#"
 applications:
@@ -1343,7 +1342,7 @@ applications:
         wiki = a.wiki.indicator,
     ));
     let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
-        "upstream: http://{addr}\nissuer_url: {base}\nroute_policy_path: {}\n\
+        "upstream: http://{addr}\nroute_policy_path: {}\n\
          authz_checker:\n  issuer: {issuer}\n  client_id: {CHECKER}\n  authentication: {authentication}\n",
         route_file.path().display()
     ))
@@ -2042,7 +2041,6 @@ async fn protected_at(a: &Asking, issuer: Issuer) -> Protected {
     let canonical = a.svc.issuer.canonical_url.clone();
     let config = sid_auth::config::ReceiverConfig {
         upstream: format!("http://{}", issuer.addr),
-        issuer_url: canonical.split("/i/").next().unwrap().to_owned(),
         resource: a.orders.indicator.as_str().to_owned(),
         origin: SERVICE_ORIGIN.into(),
         checker: sid_infra::client_credential::ClientCredentialConfig {

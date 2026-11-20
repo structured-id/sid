@@ -591,7 +591,6 @@ async fn test_a_machine_with_the_actions_changes_no_key() {
     std::fs::write(&secret.0, "ci-agent-secret").unwrap();
     let credential = sid_infra::client_credential::ClientCredential::for_resource(
         &f.issuer.client_config("ci-agent", &secret.0),
-        sid_test_issuer::INSTALLATION,
         sid_infra::deadline::issuer(
             tonic::transport::Channel::from_shared(f.issuer.upstream())
                 .unwrap()

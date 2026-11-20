@@ -17,8 +17,6 @@ pub struct AuthConfig {
     pub grpc_listen: String,
     /// The SID server's gRPC address: its issuer registry and sid-authz.
     pub upstream: String,
-    /// The installation's public URL, the base of its issuers' URLs.
-    pub issuer_url: String,
     /// Where a 401 sends a browser to sign in; empty for no redirect.
     #[serde(default)]
     pub login_url: String,
@@ -55,8 +53,6 @@ pub const CHECKER_ENV: &str = "SID_AUTHZ_CHECKER";
 pub struct ReceiverConfig {
     /// The SID server's gRPC address: its issuer registry and sid-authz.
     pub upstream: String,
-    /// The installation's public URL, the base of its issuers' URLs.
-    pub issuer_url: String,
     /// The service's registered resource indicator, the `aud` every
     /// admitted token carries.
     pub resource: String,
@@ -70,7 +66,7 @@ pub struct ReceiverConfig {
 }
 
 impl ReceiverConfig {
-    /// From `SID_GRPC_UPSTREAM`, `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`,
+    /// From `SID_GRPC_UPSTREAM`, `SID_RECEIVER_RESOURCE`,
     /// `SID_RECEIVER_ORIGIN` and `SID_AUTHZ_CHECKER_*`, all required.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_vars(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
@@ -80,7 +76,6 @@ impl ReceiverConfig {
         let required = |name: &str| var(name).ok_or_else(|| anyhow::anyhow!("{name} is required"));
         Ok(Self {
             upstream: required("SID_GRPC_UPSTREAM")?,
-            issuer_url: required("SID_ISSUER_URL")?,
             resource: required("SID_RECEIVER_RESOURCE")?,
             origin: required("SID_RECEIVER_ORIGIN")?,
             checker: ClientCredentialConfig::from_vars(CHECKER_ENV, &var)?
@@ -102,16 +97,14 @@ impl AuthConfig {
             .map_err(|e| anyhow::anyhow!("failed to parse config {path}: {e}"))
     }
 
-    /// Load from `SID_*` environment variables. `SID_ISSUER_URL` is required;
-    /// `SID_AUTH_HTTP_BIND` turns the HTTP form on at that address.
+    /// Load from `SID_*` environment variables. `SID_GRPC_UPSTREAM` is
+    /// required; `SID_AUTH_HTTP_BIND` turns the HTTP form on at that address.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         Ok(Self {
             grpc_listen: var("SID_AUTH_GRPC_BIND").unwrap_or_else(default_grpc_listen),
             upstream: var("SID_GRPC_UPSTREAM")
                 .ok_or_else(|| anyhow::anyhow!("SID_GRPC_UPSTREAM is required"))?,
-            issuer_url: var("SID_ISSUER_URL")
-                .ok_or_else(|| anyhow::anyhow!("SID_ISSUER_URL is required"))?,
             login_url: var("SID_LOGIN_URL").unwrap_or_default(),
             route_policy_path: var("SID_ROUTE_POLICY_PATH"),
             // The deployment's general cache first; the specific name exists

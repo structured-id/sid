@@ -400,7 +400,6 @@ async fn harness_with(authz: MockAuthz, registry_down: bool) -> Harness {
     std::fs::write(&secret, CHECKER_SECRET).unwrap();
     let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
         "upstream: http://{upstream}\n\
-         issuer_url: https://sid.example.com\n\
          login_url: https://sid.example.com/auth/login\n\
          route_policy_path: {}/tests/fixtures/routes.yaml\n\
          http:\n  listen: {{ http: \"127.0.0.1:0\" }}\n\
