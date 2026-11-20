@@ -76,6 +76,67 @@ fn a_claim_without_a_value_cannot_be_shared() {
     assert!(refused.unwrap().contains("phone"));
 }
 
+/// A retry matches the recorded decision only as a first submission of it
+/// would have passed: one choice per requested claim, the recorded sharing
+/// for a recorded claim, and not sharing for one the review showed without
+/// a value. An extra claim, a duplicate or another sharing is no retry.
+#[test]
+fn a_retry_matches_only_the_recorded_decision() {
+    let mut shown = shown();
+    shown[1].1 = None;
+    let submitted = |given: &[(&str, ClaimSharing)]| {
+        SubmittedDecision::Approve(
+            given
+                .iter()
+                .map(|(name, sharing)| ((*name).to_string(), *sharing))
+                .collect(),
+        )
+    };
+    let first = [
+        ("email", ClaimSharing::Subscribed),
+        ("phone", ClaimSharing::None),
+    ];
+    let recorded = AuthorizationDecision::Approve {
+        choices: reviewed_choices(
+            &requests(),
+            &shown,
+            first.iter().map(|(n, s)| ((*n).to_string(), *s)).collect(),
+        )
+        .unwrap(),
+    };
+    let same =
+        |given: &[(&str, ClaimSharing)]| same_choices(&requests(), &recorded, &submitted(given));
+
+    assert!(same(&first));
+    assert!(same(&[
+        ("phone", ClaimSharing::None),
+        ("email", ClaimSharing::Subscribed),
+    ]));
+    assert!(!same(&[("email", ClaimSharing::Subscribed)]));
+    assert!(!same(&[
+        ("email", ClaimSharing::Subscribed),
+        ("phone", ClaimSharing::None),
+        ("name", ClaimSharing::None),
+    ]));
+    assert!(!same(&[
+        ("email", ClaimSharing::Subscribed),
+        ("email", ClaimSharing::None),
+    ]));
+    assert!(!same(&[
+        ("email", ClaimSharing::Subscribed),
+        ("phone", ClaimSharing::Static),
+    ]));
+    assert!(!same(&[
+        ("email", ClaimSharing::Static),
+        ("phone", ClaimSharing::None),
+    ]));
+    assert!(!same_choices(
+        &requests(),
+        &recorded,
+        &SubmittedDecision::Deny
+    ));
+}
+
 /// Claims the scopes ask for (OIDC Core 1.0 §5.4) join the review as
 /// voluntary without updates, after the client's registered requests, which
 /// keep their own terms; `openid` alone asks for none, and a claim disclosed

@@ -489,7 +489,7 @@ impl OAuth {
         // Profile changed since: the recorded values stand.
         if operation.revision == revision + 1
             && let Some(recorded) = &operation.decision
-            && same_choices(recorded, &decision)
+            && same_choices(&operation.claim_requests, recorded, &decision)
         {
             return Ok(self.view(issuer, operation, now));
         }
@@ -567,20 +567,33 @@ impl OAuth {
     }
 }
 
-/// Whether `submitted` is the holder's `recorded` decision: both denials, or
-/// approvals with the same sharing for every recorded claim, any other
-/// submitted claim not shared (one without a value records no choice).
-fn same_choices(recorded: &AuthorizationDecision, submitted: &SubmittedDecision) -> bool {
+/// Whether `submitted` is the holder's `recorded` decision on `requests`,
+/// the operation's pinned claim requests: both denials, or an approval with
+/// exactly one choice per requested claim, the recorded sharing for a claim
+/// recorded, and not sharing for one the review showed without a value
+/// (which records no choice). Read from the recorded decision alone, never
+/// the Profile now.
+fn same_choices(
+    requests: &[ClaimRequest],
+    recorded: &AuthorizationDecision,
+    submitted: &SubmittedDecision,
+) -> bool {
     match (recorded, submitted) {
         (AuthorizationDecision::Deny, SubmittedDecision::Deny) => true,
         (AuthorizationDecision::Approve { choices }, SubmittedDecision::Approve(submitted)) => {
-            choices.iter().all(|choice| {
-                submitted
-                    .iter()
-                    .any(|(name, sharing)| *name == choice.name && *sharing == choice.sharing)
-            }) && submitted.iter().all(|(name, sharing)| {
-                *sharing == ClaimSharing::None || choices.iter().any(|c| c.name == *name)
-            })
+            submitted.len() == requests.len()
+                && requests.iter().all(|request| {
+                    let mut given = submitted
+                        .iter()
+                        .filter(|(name, _)| *name == request.claim_name);
+                    let (Some((_, sharing)), None) = (given.next(), given.next()) else {
+                        return false;
+                    };
+                    match choices.iter().find(|c| c.name == request.claim_name) {
+                        Some(choice) => choice.sharing == *sharing,
+                        None => *sharing == ClaimSharing::None,
+                    }
+                })
         }
         _ => false,
     }

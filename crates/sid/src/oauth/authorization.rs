@@ -415,24 +415,33 @@ impl OAuth {
         let Some(consent) = held else {
             return Ok(true);
         };
-        // A claim the Profile has no value for offers no choice, so it needs
-        // no decision until a value exists; its absence is not a refusal.
-        let values = self.current_values(profile).await?;
-        let decided = super::consent::review_requests(
+        if !consent.covers(admitted.resource, &admitted.validated.scopes, &required) {
+            return Ok(true);
+        }
+        // Refused, or shared with its approved value; a grant re-enabled
+        // without one is not yet decided.
+        let undecided: Vec<ClaimRequest> = super::consent::review_requests(
             &client.claim_requests,
             &admitted.validated.scopes,
             Some(&consent),
         )
-        .iter()
-        .filter(|request| sid_core::models::consent::disclosed_for(request, &values).is_some())
-        .all(|request| {
-            // Refused, or shared with its approved value; a grant re-enabled
-            // without one is not yet decided.
-            consent.grants.iter().any(|g| {
+        .into_iter()
+        .filter(|request| {
+            !consent.grants.iter().any(|g| {
                 g.claim_name == request.claim_name && (!g.is_active() || g.disclosed.is_some())
             })
-        });
-        Ok(!(decided && consent.covers(admitted.resource, &admitted.validated.scopes, &required)))
+        })
+        .collect();
+        if undecided.is_empty() {
+            return Ok(false);
+        }
+        // A claim the Profile has no value for offers no choice, so it needs
+        // no decision until a value exists; its absence is not a refusal.
+        // The Profile is read only here, where that changes the answer.
+        let values = self.current_values(profile).await?;
+        Ok(undecided
+            .iter()
+            .any(|request| sid_core::models::consent::disclosed_for(request, &values).is_some()))
     }
 
     /// `request` admitted for `session`: the client's and the request's

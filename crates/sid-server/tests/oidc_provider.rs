@@ -2938,6 +2938,26 @@ async fn only_the_holders_decision_lets_a_client_without_claims_in() {
     assert_eq!(refused["error"], "consent_required");
 }
 
+/// A request the recorded consent already decides completes from that
+/// consent alone: the Profile and its contacts are not read, so the usual
+/// sign-in costs no extra Profile read and works while they are unreadable.
+#[tokio::test]
+async fn a_decided_request_reads_no_profile_values() {
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let request = with_query(&browser.authorize, &authorize_query(REDIRECT_URI));
+    let (operation, continuation) = consent_redirect(&browser, &browser.get(&request).await);
+    decide(
+        &browser,
+        operation,
+        sid_core::models::AuthorizationDecision::Approve { choices: vec![] },
+    )
+    .await;
+    assert!(redirect_query(&browser.get(&continuation).await, REDIRECT_URI).contains_key("code"));
+
+    browser.user.svc.mock_storage.fail_contact_reads();
+    assert!(redirect_query(&browser.get(&request).await, REDIRECT_URI).contains_key("code"));
+}
+
 /// A recorded consent covers only the scopes it granted: a request adding a
 /// scope the client may ask for but the holder never approved goes to the
 /// review, and `prompt=none` answers `consent_required`.
