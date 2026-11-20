@@ -352,10 +352,10 @@ impl OAuth {
                 .storage
                 .get_consent_by_client(session.profile_id, &client.client_id)
                 .await?;
-            let claim_requests = super::consent::review_requests(
+            let claim_requests = sid_core::models::consent::review_requests(
                 &client.claim_requests,
                 &admitted.validated.scopes,
-                held.as_ref(),
+                super::consent::held_grants(held.as_ref()),
             );
             return Ok(Authorized::ConsentOwed(Box::new(AuthorizationOperation {
                 id: AuthorizationOperationId::generate(),
@@ -420,10 +420,10 @@ impl OAuth {
         }
         // Refused, or shared with its approved value; a grant re-enabled
         // without one is not yet decided.
-        let undecided: Vec<ClaimRequest> = super::consent::review_requests(
+        let undecided: Vec<ClaimRequest> = sid_core::models::consent::review_requests(
             &client.claim_requests,
             &admitted.validated.scopes,
-            Some(&consent),
+            super::consent::held_grants(Some(&consent)),
         )
         .into_iter()
         .filter(|request| {

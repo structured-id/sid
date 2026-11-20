@@ -154,7 +154,8 @@ fn the_review_covers_registered_scope_and_earlier_claims() {
     );
     held.as_requested().unwrap().grant();
 
-    let requests = review_requests(&registered, &scopes, Some(&held));
+    let requests =
+        sid_core::models::consent::review_requests(&registered, &scopes, held_grants(Some(&held)));
     let names: Vec<&str> = requests.iter().map(|r| r.claim_name.as_str()).collect();
     assert_eq!(
         names,
@@ -174,7 +175,7 @@ fn the_review_covers_registered_scope_and_earlier_claims() {
     assert_eq!(requests[2].level, ClaimLevel::Optional);
     assert_eq!(requests[2].subscription, ClaimSubscription::None);
     assert_eq!(
-        review_requests(&registered, &["openid".into()], None).len(),
+        sid_core::models::consent::review_requests(&registered, &["openid".into()], &[]).len(),
         2
     );
 }

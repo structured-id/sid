@@ -376,7 +376,7 @@ pub async fn consented(
     consent.grant_scopes(resource, &client.allowed_scopes);
     // The holder decided on every claim those scopes ask for: none shared,
     // so the review is not owed and nothing is disclosed.
-    for name in sid::oauth::consent::scope_claims(&client.allowed_scopes) {
+    for name in sid_core::models::consent::scope_claims(&client.allowed_scopes) {
         consent.grant_claim(
             name,
             sid_core::models::ClaimType::Data,

@@ -365,6 +365,72 @@ pub struct DisclosedValue {
     pub verified: Option<bool>,
 }
 
+/// The claims an OIDC request asks for through its scopes, OIDC Core 1.0
+/// §5.4: those of the `profile`, `email` and `phone` scopes. `openid` alone
+/// asks for none.
+pub fn scope_claims(scopes: &[String]) -> Vec<&'static str> {
+    let mut claims = Vec::new();
+    for scope in scopes {
+        claims.extend_from_slice(match scope.as_str() {
+            "profile" => &[
+                "name",
+                "given_name",
+                "family_name",
+                "middle_name",
+                "preferred_username",
+            ][..],
+            "email" => &["email"][..],
+            "phone" => &["phone_number"][..],
+            _ => &[][..],
+        });
+    }
+    claims
+}
+
+/// The claims a disclosure review covers for a client that registered
+/// `registered` and asks for `scopes`, with `held` the grants of the
+/// disclosure the recipient holds now: the registered requests, then each
+/// claim the scopes ask for that it did not register, as voluntary and
+/// without updates (consent-flow.md, OIDC scope requests), then every claim
+/// disclosed before, so the whole disclosure is reviewed (identity-model.md,
+/// recipient disclosure). Each claim once.
+pub fn review_requests(
+    registered: &[ClaimRequest],
+    scopes: &[String],
+    held: &[ClaimGrant],
+) -> Vec<ClaimRequest> {
+    let mut requests = registered.to_vec();
+    let mut add = |request: ClaimRequest| {
+        if !requests.iter().any(|r| r.claim_name == request.claim_name) {
+            requests.push(request);
+        }
+    };
+    for name in scope_claims(scopes) {
+        add(ClaimRequest::optional(name, ClaimType::Data));
+    }
+    for grant in held.iter().filter(|g| g.is_active()) {
+        add(ClaimRequest::optional(
+            grant.claim_name.clone(),
+            grant.claim_type,
+        ));
+    }
+    requests
+}
+
+/// The sharing choices a claim request admits, in the order shown, when the
+/// Profile holds a value for it; without one, only not sharing.
+pub fn allowed_sharing(request: &ClaimRequest, has_value: bool) -> Vec<ClaimSharing> {
+    [
+        ClaimSharing::None,
+        ClaimSharing::Static,
+        ClaimSharing::Subscribed,
+    ]
+    .into_iter()
+    .filter(|sharing| request.admits(*sharing))
+    .filter(|sharing| has_value || *sharing == ClaimSharing::None)
+    .collect()
+}
+
 /// The value each claim this issuer discloses has in `profile` with its
 /// primary `email` and `phone`: its names, its username and those contacts
 /// (OIDC Core 1.0 §5.1). A claim without a value is absent.

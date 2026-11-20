@@ -194,78 +194,16 @@ fn shown_context(
     context
 }
 
-/// The claims an OIDC request asks for through its scopes, OIDC Core 1.0
-/// §5.4: the ones of the admitted `profile`, `email` and `phone` scopes this
-/// issuer holds values for. `openid` alone asks for none.
-pub fn scope_claims(scopes: &[String]) -> Vec<&'static str> {
-    let mut claims = Vec::new();
-    for scope in scopes {
-        claims.extend_from_slice(match scope.as_str() {
-            "profile" => &[
-                "name",
-                "given_name",
-                "family_name",
-                "middle_name",
-                "preferred_username",
-            ][..],
-            "email" => &["email"][..],
-            "phone" => &["phone_number"][..],
-            _ => &[][..],
-        });
-    }
-    claims
-}
+use sid_core::models::consent::{allowed_sharing, disclosed_for};
 
-/// The claims a review covers for a client that registered `registered` and
-/// asks for `scopes`, with `held`, the holder's current consent: the
-/// registered requests, then each
-/// claim the scopes ask for that it did not register, as voluntary and
-/// without updates (consent-flow.md, OIDC scope requests), then every claim
-/// disclosed before, so the whole disclosure is reviewed (identity-model.md,
-/// recipient disclosure). Each claim once.
-pub fn review_requests(
-    registered: &[ClaimRequest],
-    scopes: &[String],
+/// The grants of `held`, the holder's consent, that a review counts as the
+/// disclosure held now: none when it is not active.
+pub(crate) fn held_grants(
     held: Option<&sid_core::models::ConsentRecord>,
-) -> Vec<ClaimRequest> {
-    let mut requests = registered.to_vec();
-    let mut add = |request: ClaimRequest| {
-        if !requests.iter().any(|r| r.claim_name == request.claim_name) {
-            requests.push(request);
-        }
-    };
-    for name in scope_claims(scopes) {
-        add(ClaimRequest::optional(name, ClaimType::Data));
-    }
-    for grant in held
-        .filter(|c| c.status.is_active())
+) -> &[sid_core::models::ClaimGrant] {
+    held.filter(|c| c.status.is_active())
         .map(|c| c.grants.as_slice())
         .unwrap_or_default()
-        .iter()
-        .filter(|g| g.is_active())
-    {
-        add(ClaimRequest::optional(
-            grant.claim_name.clone(),
-            grant.claim_type,
-        ));
-    }
-    requests
-}
-
-use sid_core::models::consent::disclosed_for;
-
-/// The sharing choices a claim request admits, in the order shown, when the
-/// Profile holds a value for it; without one, only not sharing.
-pub fn allowed_sharing(request: &ClaimRequest, has_value: bool) -> Vec<ClaimSharing> {
-    [
-        ClaimSharing::None,
-        ClaimSharing::Static,
-        ClaimSharing::Subscribed,
-    ]
-    .into_iter()
-    .filter(|sharing| request.admits(*sharing))
-    .filter(|sharing| has_value || *sharing == ClaimSharing::None)
-    .collect()
 }
 
 impl OAuth {

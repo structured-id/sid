@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use sid::oauth::consent::{
-    ConsentReview, FlowView, Submission, SubmittedDecision, allowed_sharing, claim_request_to_wire,
-    level_to_wire,
+    ConsentReview, FlowView, Submission, SubmittedDecision, claim_request_to_wire, level_to_wire,
 };
+use sid_core::models::consent::allowed_sharing;
 use sid_core::models::{
     AuthorizationOperationId, AuthorizationStatus, ClaimSharing as Sharing, ClaimType,
 };

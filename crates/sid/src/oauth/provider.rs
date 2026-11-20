@@ -138,7 +138,7 @@ pub fn disclosed_claims(
     held: Option<&sid_core::models::ConsentRecord>,
 ) -> UserInfo {
     let scopes: Vec<String> = scopes.split_whitespace().map(str::to_owned).collect();
-    let asked = super::consent::scope_claims(&scopes);
+    let asked = sid_core::models::consent::scope_claims(&scopes);
     let mut info = UserInfo {
         sub,
         ..Default::default()
