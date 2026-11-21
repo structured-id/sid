@@ -137,8 +137,6 @@ pub struct Registration {
     keys: Arc<dyn sid_keys::KeyManager>,
     /// The issuer whose events announce new accounts.
     issuer: String,
-    /// The enrollment mode the deployment pins over the stored one.
-    pinned: Option<EnrollmentMode>,
 }
 
 impl Registration {
@@ -151,18 +149,7 @@ impl Registration {
             storage,
             keys,
             issuer,
-            pinned: None,
         }
-    }
-
-    /// Apply `mode` whatever mode is stored.
-    pub fn set_pinned(&mut self, mode: Option<EnrollmentMode>) {
-        self.pinned = mode;
-    }
-
-    /// The enrollment mode the deployment pins, if any.
-    pub fn pinned(&self) -> Option<EnrollmentMode> {
-        self.pinned
     }
 
     /// Decide what a registration started for `principal` may commit, with
@@ -382,7 +369,6 @@ impl Registration {
                 return Err(RegistrationError::NotEnabled);
             }
             registration = registration.admitted_by(sid_core::models::EnrollmentGate {
-                pinned: self.pinned,
                 email: matches!(principal_type, PrincipalType::Email).then(|| value.clone()),
                 invite_code,
             });
@@ -635,7 +621,7 @@ impl Registration {
         if !enabled {
             return Err(RegistrationError::NotEnabled);
         }
-        let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned).await?;
+        let policy = crate::enrollment::stored_or_default(self.storage.as_ref()).await?;
         let email = matches!(principal_type, PrincipalType::Email).then_some(value);
         if let EnrollmentDecision::Deny(reason) = evaluate_enrollment(&policy, email, invite_code) {
             return Err(RegistrationError::Restricted(requirement(&reason)));
@@ -670,7 +656,7 @@ impl Registration {
         if !enabled {
             return Err(RegistrationError::NotEnabled);
         }
-        let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned).await?;
+        let policy = crate::enrollment::stored_or_default(self.storage.as_ref()).await?;
         let email = claims
             .has_verified_email()
             .then_some(claims.email.as_deref())

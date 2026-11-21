@@ -6,7 +6,6 @@
 
 use super::{create_test_profile, test_audit, test_invite};
 use sid_core::enrollment::EnrollmentDenialReason;
-use sid_core::models::ModeWrite;
 use sid_core::models::{
     EnrollmentGate, EnrollmentMode, EnrollmentPolicy, InviteConfig, NewRegistration,
     SignupIdentifier,
@@ -14,48 +13,29 @@ use sid_core::models::{
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
 
-const REPLACE: ModeWrite = ModeWrite::Replace;
+/// The store refuses a domain-restricted mode without a domain, whatever
+/// policy is stored before, and keeps the stored one; with a domain it is
+/// stored.
+pub async fn test_domain_restricted_needs_a_domain(backend: &dyn StorageBackend) {
+    let open = policy(EnrollmentMode::Open, &[]);
+    backend
+        .set_enrollment_policy(&open, test_audit())
+        .await
+        .unwrap();
+    assert!(matches!(
+        backend
+            .set_enrollment_policy(&policy(EnrollmentMode::DomainRestricted, &[]), test_audit())
+            .await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    assert_eq!(backend.enrollment_policy().await.unwrap(), Some(open));
 
-/// Under `KeepStored` the stored mode stays, decided in the write's own
-/// transaction, and the schema refuses whatever would leave a
-/// domain-restricted mode without a domain, whichever side supplied it.
-pub async fn test_kept_mode_and_domains_enforced(backend: &dyn StorageBackend) {
     let restricted = policy(EnrollmentMode::DomainRestricted, &["a.example"]);
     backend
-        .set_enrollment_policy(&restricted, REPLACE, test_audit())
+        .set_enrollment_policy(&restricted, test_audit())
         .await
         .unwrap();
-
-    // The kept mode is domain-restricted: removing every domain is refused.
-    let emptied = policy(EnrollmentMode::Open, &[]);
-    assert!(matches!(
-        backend
-            .set_enrollment_policy(&emptied, ModeWrite::KeepStored, test_audit())
-            .await,
-        Err(sid_core::Error::Validation(_))
-    ));
-
-    // Other fields change, the mode stays.
-    let moved = policy(EnrollmentMode::Open, &["b.example"]);
-    backend
-        .set_enrollment_policy(&moved, ModeWrite::KeepStored, test_audit())
-        .await
-        .unwrap();
-    let stored = backend.enrollment_policy().await.unwrap().unwrap();
-    assert_eq!(stored.mode, EnrollmentMode::DomainRestricted);
-    assert_eq!(stored.allowed_domains, vec!["b.example"]);
-
-    // Replacing with a domain-restricted mode needs a domain as well.
-    assert!(matches!(
-        backend
-            .set_enrollment_policy(
-                &policy(EnrollmentMode::DomainRestricted, &[]),
-                REPLACE,
-                test_audit()
-            )
-            .await,
-        Err(sid_core::Error::Validation(_))
-    ));
+    assert_eq!(backend.enrollment_policy().await.unwrap(), Some(restricted));
 }
 
 /// A self-registration of a fresh username through `gate`.
@@ -71,7 +51,6 @@ fn gated(name: &str, gate: EnrollmentGate) -> NewRegistration {
 
 fn plain_gate(invite_code: Option<&str>) -> EnrollmentGate {
     EnrollmentGate {
-        pinned: None,
         email: None,
         invite_code: invite_code.map(str::to_string),
     }
@@ -79,15 +58,11 @@ fn plain_gate(invite_code: Option<&str>) -> EnrollmentGate {
 
 /// The policy decides in the account's own transaction: a registration under
 /// a closed policy stores nothing, and the same one is admitted once the
-/// policy opens. A pinned mode applies over the stored one.
+/// policy opens.
 pub async fn test_registration_admitted_by_the_stored_policy(backend: &dyn StorageBackend) {
     let tag = Uuid::now_v7().simple().to_string();
     backend
-        .set_enrollment_policy(
-            &policy(EnrollmentMode::AdminOnly, &[]),
-            REPLACE,
-            test_audit(),
-        )
+        .set_enrollment_policy(&policy(EnrollmentMode::AdminOnly, &[]), test_audit())
         .await
         .unwrap();
     let closed = gated(&format!("closed_{}", &tag[..12]), plain_gate(None));
@@ -110,27 +85,13 @@ pub async fn test_registration_admitted_by_the_stored_policy(backend: &dyn Stora
     );
 
     backend
-        .set_enrollment_policy(&policy(EnrollmentMode::Open, &[]), REPLACE, test_audit())
+        .set_enrollment_policy(&policy(EnrollmentMode::Open, &[]), test_audit())
         .await
         .unwrap();
     backend
         .register_profile(&closed, test_audit())
         .await
         .unwrap();
-
-    let pinned = gated(
-        &format!("pinned_{}", &tag[..12]),
-        EnrollmentGate {
-            pinned: Some(EnrollmentMode::AdminOnly),
-            ..plain_gate(None)
-        },
-    );
-    assert!(matches!(
-        backend.register_profile(&pinned, test_audit()).await,
-        Err(sid_core::Error::RegistrationRestricted(
-            EnrollmentDenialReason::AdminOnly
-        ))
-    ));
 }
 
 /// Regression: an invited account was recorded as a self-signup, and the
@@ -150,7 +111,7 @@ pub async fn test_admission_records_its_source(backend: &dyn StorageBackend) {
     let mut tracked = policy(EnrollmentMode::InviteOnly, &[]);
     tracked.track_source = true;
     backend
-        .set_enrollment_policy(&tracked, REPLACE, test_audit())
+        .set_enrollment_policy(&tracked, test_audit())
         .await
         .unwrap();
 
@@ -176,7 +137,7 @@ pub async fn test_admission_records_its_source(backend: &dyn StorageBackend) {
     let mut untracked = tracked;
     untracked.track_source = false;
     backend
-        .set_enrollment_policy(&untracked, REPLACE, test_audit())
+        .set_enrollment_policy(&untracked, test_audit())
         .await
         .unwrap();
     let quiet = gated(
@@ -222,7 +183,7 @@ pub async fn test_admission_records_its_source(backend: &dyn StorageBackend) {
             .is_none()
     );
     backend
-        .set_enrollment_policy(&tracked_again(), REPLACE, test_audit())
+        .set_enrollment_policy(&tracked_again(), test_audit())
         .await
         .unwrap();
     let tracked_admin = provisioned(&format!("src_adt_{}", &tag[..12]));
@@ -265,11 +226,7 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
         .await
         .unwrap();
     backend
-        .set_enrollment_policy(
-            &policy(EnrollmentMode::InviteOnly, &[]),
-            REPLACE,
-            test_audit(),
-        )
+        .set_enrollment_policy(&policy(EnrollmentMode::InviteOnly, &[]), test_audit())
         .await
         .unwrap();
 
@@ -359,11 +316,7 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
     );
 
     backend
-        .set_enrollment_policy(
-            &policy(EnrollmentMode::InviteOnly, &[]),
-            REPLACE,
-            test_audit(),
-        )
+        .set_enrollment_policy(&policy(EnrollmentMode::InviteOnly, &[]), test_audit())
         .await
         .unwrap();
     let first = gated(
@@ -462,14 +415,14 @@ pub async fn test_enrollment_policy_stored_and_replaced(backend: &dyn StorageBac
         &["acme.example", "partner.example"],
     );
     backend
-        .set_enrollment_policy(&restricted, REPLACE, test_audit())
+        .set_enrollment_policy(&restricted, test_audit())
         .await
         .unwrap();
     assert_eq!(backend.enrollment_policy().await.unwrap(), Some(restricted));
 
     let admin_only = policy(EnrollmentMode::AdminOnly, &[]);
     backend
-        .set_enrollment_policy(&admin_only, REPLACE, test_audit())
+        .set_enrollment_policy(&admin_only, test_audit())
         .await
         .unwrap();
     assert_eq!(backend.enrollment_policy().await.unwrap(), Some(admin_only));
@@ -484,7 +437,7 @@ pub async fn test_enrollment_policy_keeps_invite_range(backend: &dyn StorageBack
         default_expiry_hours: 0,
     };
     backend
-        .set_enrollment_policy(&wide, REPLACE, test_audit())
+        .set_enrollment_policy(&wide, test_audit())
         .await
         .unwrap();
     assert_eq!(backend.enrollment_policy().await.unwrap(), Some(wide));

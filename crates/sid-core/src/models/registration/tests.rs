@@ -67,13 +67,8 @@ fn stored(mode: EnrollmentMode, domains: &[&str]) -> Option<EnrollmentPolicy> {
     Some(policy)
 }
 
-fn gate(
-    pinned: Option<EnrollmentMode>,
-    email: Option<&str>,
-    invite: Option<&str>,
-) -> EnrollmentGate {
+fn gate(email: Option<&str>, invite: Option<&str>) -> EnrollmentGate {
     EnrollmentGate {
-        pinned,
         email: email.map(str::to_string),
         invite_code: invite.map(str::to_string),
     }
@@ -87,30 +82,16 @@ fn invite_of(
     gate.admit(stored).map(|a| a.invite.map(str::to_string))
 }
 
-/// Nothing stored is the open default; a stored mode applies; a pinned mode
-/// applies over whatever is stored.
+/// Nothing stored is the open default; the stored mode is the one applied.
 #[test]
-fn gate_applies_the_pinned_mode_over_the_stored() {
-    assert_eq!(invite_of(&gate(None, None, None), None), Ok(None));
+fn gate_applies_the_stored_mode() {
+    assert_eq!(invite_of(&gate(None, None), None), Ok(None));
     assert_eq!(
-        invite_of(
-            &gate(None, None, None),
-            stored(EnrollmentMode::AdminOnly, &[])
-        ),
+        invite_of(&gate(None, None), stored(EnrollmentMode::AdminOnly, &[])),
         Err(EnrollmentDenialReason::AdminOnly)
     );
     assert_eq!(
-        invite_of(
-            &gate(Some(EnrollmentMode::AdminOnly), None, None),
-            stored(EnrollmentMode::Open, &[])
-        ),
-        Err(EnrollmentDenialReason::AdminOnly)
-    );
-    assert_eq!(
-        invite_of(
-            &gate(Some(EnrollmentMode::Open), None, None),
-            stored(EnrollmentMode::AdminOnly, &[])
-        ),
+        invite_of(&gate(None, None), stored(EnrollmentMode::Open, &[])),
         Ok(None)
     );
 }
@@ -121,16 +102,16 @@ fn gate_applies_the_pinned_mode_over_the_stored() {
 fn gate_names_the_invite_to_spend_only_when_invite_only() {
     let invite_only = || stored(EnrollmentMode::InviteOnly, &[]);
     assert_eq!(
-        invite_of(&gate(None, None, Some("ABCD1234")), invite_only()),
+        invite_of(&gate(None, Some("ABCD1234")), invite_only()),
         Ok(Some("ABCD1234".into()))
     );
     assert_eq!(
-        invite_of(&gate(None, None, None), invite_only()),
+        invite_of(&gate(None, None), invite_only()),
         Err(EnrollmentDenialReason::InviteRequired)
     );
     assert_eq!(
         invite_of(
-            &gate(None, None, Some("ABCD1234")),
+            &gate(None, Some("ABCD1234")),
             stored(EnrollmentMode::Open, &[])
         ),
         Ok(None)
@@ -142,15 +123,15 @@ fn gate_names_the_invite_to_spend_only_when_invite_only() {
 fn gate_checks_the_email_domain() {
     let restricted = || stored(EnrollmentMode::DomainRestricted, &["acme.example"]);
     assert_eq!(
-        invite_of(&gate(None, Some("a@acme.example"), None), restricted()),
+        invite_of(&gate(Some("a@acme.example"), None), restricted()),
         Ok(None)
     );
     assert!(matches!(
-        invite_of(&gate(None, Some("a@other.example"), None), restricted()),
+        invite_of(&gate(Some("a@other.example"), None), restricted()),
         Err(EnrollmentDenialReason::DomainNotAllowed { .. })
     ));
     assert_eq!(
-        invite_of(&gate(None, None, None), restricted()),
+        invite_of(&gate(None, None), restricted()),
         Err(EnrollmentDenialReason::EmailRequired)
     );
 }
@@ -163,7 +144,7 @@ fn gate_checks_the_email_domain() {
 fn admission_records_the_source_its_policy_decides() {
     use super::super::RegistrationSourceType;
     let invite_only = stored(EnrollmentMode::InviteOnly, &[]);
-    let invited = gate(None, None, Some(" abcd1234 "));
+    let invited = gate(None, Some(" abcd1234 "));
     let source = invited
         .admit(invite_only.clone())
         .unwrap()
@@ -172,11 +153,7 @@ fn admission_records_the_source_its_policy_decides() {
     assert_eq!(source.source_type, RegistrationSourceType::Invite);
     assert_eq!(source.source_id, "invite:ABCD1234");
 
-    let open = gate(None, None, None)
-        .admit(None)
-        .unwrap()
-        .source()
-        .unwrap();
+    let open = gate(None, None).admit(None).unwrap().source().unwrap();
     assert_eq!(open.source_type, RegistrationSourceType::SelfSignup);
 
     let mut untracked = invite_only.unwrap();

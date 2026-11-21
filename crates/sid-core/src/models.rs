@@ -269,7 +269,7 @@ pub use scim_outbound::{
 };
 pub use security_policy::{
     AuthPolicy, CountryMode, CurrentPasswordRule, DevicePolicy, EnforcementConfig, EnforcementMode,
-    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement, ModeWrite,
+    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement,
     NetworkPolicy, NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy,
     SecurityPolicyId, SessionDecayConfig, SessionPolicy,
 };

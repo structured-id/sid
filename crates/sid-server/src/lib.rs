@@ -9,7 +9,6 @@
 pub mod auth_mail;
 pub mod config;
 pub mod embedded_nats;
-pub mod enrollment;
 pub mod feature_flags;
 pub mod grpc;
 pub mod init;

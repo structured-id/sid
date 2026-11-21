@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The enrollment mode in force (enrollment-policy.md): an administrator
-//! stores it, a deployment may pin it, and self-registration follows it at
-//! its start and again at its commit.
+//! stores it, and self-registration follows it at its start and again at
+//! its commit.
 
 mod common;
 
 use common::mock_storage::MockStorage;
 use common::opaque_client::{try_register, try_register_invited};
 use common::{TestServices, fresh_token, zkpp_client};
-use sid_core::models::{EnrollmentMode, PrincipalType, Profile};
+use sid_core::models::{PrincipalType, Profile};
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 use sid_proto::sid::v1::admin::{
     EnrollmentMode as ProtoMode, EnrollmentPolicy as ProtoPolicy, InviteConfig,
@@ -28,13 +28,12 @@ fn administrator() -> Profile {
     admin
 }
 
-fn enrollment(svc: &TestServices, pinned: Option<EnrollmentMode>) -> EnrollmentServiceImpl {
+fn enrollment(svc: &TestServices) -> EnrollmentServiceImpl {
     EnrollmentServiceImpl::new(
         svc.storage.clone(),
         svc.jwt.clone(),
         svc.revocation_cache.clone(),
     )
-    .with_pinned_mode(pinned)
 }
 
 fn policy(mode: ProtoMode, domains: &[&str]) -> ProtoPolicy {
@@ -46,7 +45,6 @@ fn policy(mode: ProtoMode, domains: &[&str]) -> ProtoPolicy {
         }),
         allowed_domains: domains.iter().map(|d| (*d).to_string()).collect(),
         track_source: true,
-        mode_pinned: false,
     }
 }
 
@@ -90,61 +88,24 @@ fn requirement(err: &tonic::Status) -> String {
         .expect("requirement")
 }
 
-/// A deployment pinning `admin_only` closes self-registration whatever an
-/// administrator stored, reports the mode as pinned, and refuses an update
-/// that would change it, storing nothing.
-#[tokio::test]
-async fn pinned_admin_only_closes_self_registration() {
-    let admin = administrator();
-    let svc = TestServices::with_enrollment_pin(
-        MockStorage::new().with_profile(admin.clone()),
-        EnrollmentMode::AdminOnly,
-    );
-    let service = enrollment(&svc, Some(EnrollmentMode::AdminOnly));
-
-    let err = try_register(&svc, &svc, "walk_in", PASSWORD, None)
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::PermissionDenied, "{}", err.message());
-    assert_eq!(requirement(&err), "admin_only");
-    assert!(!registered(&svc, "walk_in").await);
-
-    let current = service
-        .get_enrollment_policy(Request::new(()))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(current.mode(), ProtoMode::AdminOnly);
-    assert!(current.mode_pinned);
-
-    let err = update(&svc, &service, &admin, policy(ProtoMode::Open, &[]))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::FailedPrecondition, "{}", err.message());
-    assert_eq!(
-        err.get_error_details().error_info().unwrap().reason,
-        "INVALID_STATE"
-    );
-    assert_eq!(svc.storage.enrollment_policy().await.unwrap(), None);
-    let err = try_register(&svc, &svc, "walk_in", PASSWORD, None)
-        .await
-        .unwrap_err();
-    assert_eq!(requirement(&err), "admin_only");
-}
-
 /// An administrator's stored mode applies to the next registration on every
 /// replica sharing the store, and opening it again admits registration.
 #[tokio::test]
 async fn stored_mode_applies_to_registration() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
 
     let stored = update(&svc, &service, &admin, policy(ProtoMode::AdminOnly, &[]))
         .await
         .unwrap();
     assert_eq!(stored.mode(), ProtoMode::AdminOnly);
-    assert!(!stored.mode_pinned);
+    let current = service
+        .get_enrollment_policy(Request::new(()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(current.mode(), ProtoMode::AdminOnly);
     let replica = svc.restarted().await;
     let err = try_register(&replica, &replica, "early", PASSWORD, None)
         .await
@@ -166,7 +127,7 @@ async fn stored_mode_applies_to_registration() {
 async fn mode_closed_mid_registration_refuses_its_commit() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
 
     let started = zkpp_client::start(PASSWORD);
     let prepared = svc
@@ -213,7 +174,7 @@ async fn update_is_an_administrator_action_and_validated() {
             .with_profile(admin.clone())
             .with_profile(member.clone()),
     );
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
 
     let err = update(&svc, &service, &member, policy(ProtoMode::AdminOnly, &[]))
         .await
@@ -270,7 +231,7 @@ async fn update_is_an_administrator_action_and_validated() {
 async fn closed_policy_refuses_held_and_free_identifiers_alike() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     try_register(&svc, &svc, "held_name", PASSWORD, None)
         .await
         .unwrap();
@@ -310,7 +271,7 @@ async fn closed_policy_refuses_held_and_free_identifiers_alike() {
 async fn policy_closed_mid_registration_refuses_held_and_free_alike() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     try_register(&svc, &svc, "held_late", PASSWORD, None)
         .await
         .unwrap();
@@ -358,7 +319,7 @@ async fn policy_closed_mid_registration_refuses_held_and_free_alike() {
 async fn invite_use_limit_beyond_storage_is_refused() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     let err = create_invite(
         &svc,
         &service,
@@ -417,7 +378,7 @@ async fn create_invite(
 async fn invite_only_admits_a_registration_per_invite_use() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     update(&svc, &service, &admin, policy(ProtoMode::InviteOnly, &[]))
         .await
         .unwrap();
@@ -447,7 +408,7 @@ async fn invite_only_admits_a_registration_per_invite_use() {
 async fn single_use_invite_admits_one_of_two_in_flight() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     update(&svc, &service, &admin, policy(ProtoMode::InviteOnly, &[]))
         .await
         .unwrap();
@@ -497,35 +458,13 @@ async fn single_use_invite_admits_one_of_two_in_flight() {
     assert!(!registered(&svc, "second_in").await);
 }
 
-/// Regression: under a pin, an update of other fields stored the pinned
-/// mode, so removing the pin left the installation in it. The stored mode
-/// stays what it was.
-#[tokio::test]
-async fn update_under_a_pin_keeps_the_stored_mode() {
-    let admin = administrator();
-    let svc = TestServices::with_enrollment_pin(
-        MockStorage::new().with_profile(admin.clone()),
-        EnrollmentMode::AdminOnly,
-    );
-    let pinned = enrollment(&svc, Some(EnrollmentMode::AdminOnly));
-    let mut request = policy(ProtoMode::AdminOnly, &[]);
-    request.track_source = false;
-    let reported = update(&svc, &pinned, &admin, request).await.unwrap();
-    assert_eq!(reported.mode(), ProtoMode::AdminOnly);
-    assert!(reported.mode_pinned);
-
-    let stored = svc.storage.enrollment_policy().await.unwrap().unwrap();
-    assert_eq!(stored.mode, EnrollmentMode::Open);
-    assert!(!stored.track_source);
-}
-
 /// Regression: the stored invite defaults were ignored; an invite created
 /// without its own limits got one use and no expiry whatever was stored.
 #[tokio::test]
 async fn new_invites_take_the_stored_defaults() {
     let admin = administrator();
     let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
-    let service = enrollment(&svc, None);
+    let service = enrollment(&svc);
     let mut defaults = policy(ProtoMode::InviteOnly, &[]);
     defaults.invite = Some(InviteConfig {
         default_max_uses: 5,

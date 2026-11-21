@@ -30,7 +30,7 @@ async fn harness(storage: Arc<dyn StorageBackend>) -> Harness {
     common::adopt_operation_period(storage.as_ref()).await;
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let auth = common::auth_service_over(storage.clone(), cache, None, None);
+    let auth = common::auth_service_over(storage.clone(), cache, None);
     Harness {
         account: Arc::new(AccountServiceImpl::new(
             storage.clone(),

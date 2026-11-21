@@ -1171,10 +1171,9 @@ impl StorageBackend for CoordinodeBackend {
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
-        mode: sid_core::models::ModeWrite,
         ctx: MutationContext,
     ) -> Result<()> {
-        CoordinodeBackend::set_enrollment_policy(self, policy, mode, ctx).await
+        CoordinodeBackend::set_enrollment_policy(self, policy, ctx).await
     }
 
     async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {

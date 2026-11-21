@@ -15,66 +15,29 @@ fn policy(mode: EnrollmentMode, domains: &[&str]) -> EnrollmentPolicy {
     }
 }
 
-/// A pinned mode cannot be changed through the API; the other fields can,
-/// so long as the request carries the pinned mode.
+/// The mode an administrator gives is the mode stored, with the other fields;
+/// a domain-restricted mode without domains admits no one and is refused.
 #[test]
-fn test_validated_refuses_changing_pinned_mode() {
-    assert_eq!(
-        validated(
-            policy(EnrollmentMode::Open, &[]),
-            Some(EnrollmentMode::AdminOnly),
-            EnrollmentMode::Open,
-        ),
-        Err(Refusal::Pinned(EnrollmentMode::AdminOnly))
-    );
-}
-
-/// Regression: an update of other fields under a pin wrote the pinned mode
-/// into the store, so removing the pin left the installation in it. The
-/// stored mode is kept, and the domain check applies to the mode stored.
-#[test]
-fn test_validated_keeps_the_stored_mode_under_a_pin() {
+fn test_validated_stores_the_given_mode() {
     let mut request = policy(EnrollmentMode::AdminOnly, &[]);
     request.track_source = false;
-    let stored = validated(
-        request,
-        Some(EnrollmentMode::AdminOnly),
-        EnrollmentMode::Open,
-    )
-    .unwrap();
-    assert_eq!(stored.mode, EnrollmentMode::Open);
+    let stored = validated(request).unwrap();
+    assert_eq!(stored.mode, EnrollmentMode::AdminOnly);
     assert!(!stored.track_source);
     assert_eq!(
-        validated(
-            policy(EnrollmentMode::AdminOnly, &[]),
-            Some(EnrollmentMode::AdminOnly),
-            EnrollmentMode::DomainRestricted,
-        ),
+        validated(policy(EnrollmentMode::DomainRestricted, &[])),
         Err(Refusal::NoDomain)
     );
 }
 
-/// Regression: a pinned domain-restricted mode over a stored open one took
-/// a policy without domains, though the mode in force then admitted no one.
-/// And a default use limit no invite can store was accepted.
+/// Regression: a default use limit no invite can store was accepted.
 #[test]
-fn test_validated_checks_the_pinned_mode_and_use_range() {
-    assert_eq!(
-        validated(
-            policy(EnrollmentMode::DomainRestricted, &[]),
-            Some(EnrollmentMode::DomainRestricted),
-            EnrollmentMode::Open,
-        ),
-        Err(Refusal::NoDomain)
-    );
+fn test_validated_checks_the_use_range() {
     let mut wide = policy(EnrollmentMode::Open, &[]);
     wide.invite.default_max_uses = MAX_INVITE_USES + 1;
-    assert_eq!(
-        validated(wide.clone(), None, EnrollmentMode::Open),
-        Err(Refusal::TooManyUses)
-    );
+    assert_eq!(validated(wide.clone()), Err(Refusal::TooManyUses));
     wide.invite.default_max_uses = MAX_INVITE_USES;
-    assert!(validated(wide, None, EnrollmentMode::Open).is_ok());
+    assert!(validated(wide).is_ok());
 }
 
 /// Regression: a default expiry beyond what a time can hold panicked when an
@@ -92,10 +55,7 @@ fn test_default_expiry_is_bounded() {
 
     let mut far = policy(EnrollmentMode::Open, &[]);
     far.invite.default_expiry_hours = u32::MAX;
-    assert_eq!(
-        validated(far, None, EnrollmentMode::Open),
-        Err(Refusal::ExpiryTooFar)
-    );
+    assert_eq!(validated(far), Err(Refusal::ExpiryTooFar));
 }
 
 /// Domains are stored as registration compares them; a domain-restricted
@@ -103,22 +63,17 @@ fn test_default_expiry_is_bounded() {
 /// is refused rather than stored as a policy that admits no one.
 #[test]
 fn test_validated_normalizes_and_checks_domains() {
-    let open = EnrollmentMode::Open;
     assert_eq!(
-        validated(
-            policy(
-                EnrollmentMode::DomainRestricted,
-                &[" Acme.Example ", "acme.example", "xn--bcher-kva.example"]
-            ),
-            None,
-            open,
-        )
+        validated(policy(
+            EnrollmentMode::DomainRestricted,
+            &[" Acme.Example ", "acme.example", "xn--bcher-kva.example"]
+        ))
         .unwrap()
         .allowed_domains,
         vec!["acme.example", "xn--bcher-kva.example"]
     );
     assert_eq!(
-        validated(policy(EnrollmentMode::DomainRestricted, &[]), None, open),
+        validated(policy(EnrollmentMode::DomainRestricted, &[])),
         Err(Refusal::NoDomain)
     );
     for bad in [
@@ -131,14 +86,14 @@ fn test_validated_normalizes_and_checks_domains() {
     ] {
         assert!(
             matches!(
-                validated(policy(EnrollmentMode::DomainRestricted, &[bad]), None, open),
+                validated(policy(EnrollmentMode::DomainRestricted, &[bad])),
                 Err(Refusal::BadDomain(_))
             ),
             "{bad:?} accepted"
         );
     }
     // Other modes need no domain.
-    assert!(validated(policy(EnrollmentMode::InviteOnly, &[]), None, open).is_ok());
+    assert!(validated(policy(EnrollmentMode::InviteOnly, &[])).is_ok());
 }
 
 /// An unspecified or unknown mode and a missing invite configuration are

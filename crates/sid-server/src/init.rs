@@ -170,6 +170,30 @@ pub struct CeComponents {
     pub upstream_svc: Arc<crate::grpc::upstream_service::UpstreamServiceImpl>,
 }
 
+/// The WebAuthn relying party: the ID (`SID_RP_ID`) and origin
+/// (`SID_RP_ORIGIN`) given, each defaulting to the `issuer`'s host and
+/// origin. An issuer with no host, or a given origin that is not a URL, is a
+/// configuration error.
+pub fn webauthn_relying_party(
+    issuer: &Url,
+    rp_id: Option<String>,
+    rp_origin: Option<String>,
+) -> anyhow::Result<(String, Url)> {
+    let rp_id = match rp_id {
+        Some(id) => id,
+        None => issuer
+            .host_str()
+            .context("SID_ISSUER has no host to serve as the WebAuthn relying party")?
+            .to_owned(),
+    };
+    let origin = match rp_origin {
+        Some(origin) => Url::parse(&origin).context("SID_RP_ORIGIN is not a URL")?,
+        None => Url::parse(&issuer.origin().ascii_serialization())
+            .context("SID_ISSUER has no origin to serve as the WebAuthn relying party")?,
+    };
+    Ok((rp_id, origin))
+}
+
 /// Whether magic links are enabled, from the `SID_MAGIC_LINKS_ENABLED` value.
 ///
 /// Off unless set to `true`. Any other value is a configuration error, and so is
@@ -612,12 +636,14 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     } = installation;
 
     // ── WebAuthn ──
-    // RP_ID must match the domain users access (e.g., "structured.id", "localhost").
-    // RP_ORIGIN must include the scheme (e.g., "https://structured.id").
-    // Defaults are safe for local development. Production MUST set these.
-    let rp_id = env_setting("SID_RP_ID")?.unwrap_or_else(|| "localhost".into());
-    let rp_origin = env_setting("SID_RP_ORIGIN")?.unwrap_or_else(|| "http://localhost".into());
-    let rp_origin_url = Url::parse(&rp_origin)?;
+    // The relying party is the host users reach the installation at: by
+    // default the issuer's host and origin, set apart only where sign-in is
+    // presented on another host than the issuer.
+    let (rp_id, rp_origin_url) = webauthn_relying_party(
+        &issuer_base,
+        env_setting("SID_RP_ID")?,
+        env_setting("SID_RP_ORIGIN")?,
+    )?;
     let webauthn = Arc::new(WebAuthnServer::new(
         &rp_id,
         &rp_origin_url,
@@ -649,12 +675,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     };
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
-
-    let enrollment_pin =
-        crate::enrollment::pinned_mode_setting(std::env::var(crate::enrollment::PIN_VARIABLE))?;
-    if let Some(mode) = enrollment_pin {
-        info!(%mode, "enrollment mode pinned by the deployment");
-    }
 
     // The SCIM directory resource: provisioning connectors hold their roles
     // on it and their tokens target it.
@@ -758,8 +778,10 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         &key_manager,
     )?;
 
+    // Under the data directory by default: the installation's volume keeps
+    // prepared exports across restarts, which a temporary directory does not.
     let export_dir =
-        env_setting("SID_EXPORT_DIR")?.unwrap_or_else(|| "/tmp/sid-exports".to_string());
+        env_setting("SID_EXPORT_DIR")?.unwrap_or_else(|| format!("{data_dir}/exports"));
     let data_export = Arc::new(DataExportService::new(storage.clone(), export_dir));
 
     // Event bus: SID_NATS_URL unset / `embedded` bundles nats-server with
@@ -967,7 +989,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         authz_engine.clone(),
         history_authority,
     )
-    .with_enrollment_pin(enrollment_pin)
     .with_browser_cookie(browser_cookie);
     let auth_svc = match host.login_policy {
         Some(source) => auth_svc.with_login_policy(source),
@@ -1120,7 +1141,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             jwt.clone(),
             revocation_cache.clone(),
         )
-        .with_pinned_mode(enrollment_pin)
         .with_invite_services(invite_services),
     );
     let security_svc = Arc::new(crate::grpc::security_service::SecurityServiceImpl::new(

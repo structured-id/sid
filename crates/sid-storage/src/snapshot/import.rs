@@ -496,7 +496,6 @@ pub async fn import(
                 backend
                     .set_enrollment_policy(
                         policy,
-                        sid_core::models::ModeWrite::Replace,
                         audit("import_enrollment_policy", "installation"),
                     )
                     .await?;

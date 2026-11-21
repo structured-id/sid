@@ -691,13 +691,6 @@ impl AuthServiceImpl {
         )
     }
 
-    /// Apply `mode` to self-registration whatever mode is stored: the
-    /// deployment pins it (`SID_ENROLLMENT_MODE`).
-    pub fn with_enrollment_pin(mut self, mode: Option<sid_core::models::EnrollmentMode>) -> Self {
-        self.registration.set_pinned(mode);
-        self
-    }
-
     /// Who completes a sign-in ceremony sent with `metadata`: a native
     /// client, or this authority's sign-in page.
     #[allow(clippy::result_large_err)]

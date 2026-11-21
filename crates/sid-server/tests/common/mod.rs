@@ -106,6 +106,23 @@ pub async fn adopt_operation_period(storage: &dyn sid_plugin::OperationResultSto
     assert_eq!(*OPERATION_PERIOD.get_or_init(|| period), period);
 }
 
+/// A PostgreSQL backend in a schema of its own on the test database
+/// (54399, `DATABASE_URL`): the installation policies it reads start unset,
+/// so policies other tests store in the shared schema never reach it.
+#[allow(dead_code)]
+pub async fn pg_in_own_schema() -> Arc<dyn StorageBackend> {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
+    let schema = format!("own_{}", uuid::Uuid::now_v7().simple());
+    let backend = sid_storage::PostgresBackend::new(&url, Some(schema.clone()))
+        .await
+        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("migrations in the test's schema");
+    Arc::new(backend)
+}
+
 /// A new command's operation context: a fresh key under the adopted period.
 pub fn new_operation_context() -> sid_core::models::OperationContext {
     let period = *OPERATION_PERIOD.get_or_init(|| sid_core::models::OperationPeriod::new(1));
@@ -988,8 +1005,6 @@ struct Options {
     magic_links: bool,
     /// The security policy; None keeps the CE default.
     security_policy: Option<sid_core::models::SecurityPolicy>,
-    /// The enrollment mode the deployment pins; None pins nothing.
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     /// This authority's browser-session cookie; None keeps the default.
     browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
     /// Configure no browser sign-in page, as a deployment without one runs.
@@ -1019,8 +1034,6 @@ pub struct AuthOptions {
     pub security_policy: Option<sid_core::models::SecurityPolicy>,
     /// The history evaluator's store, co-located as CE runs it.
     pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
-    /// The enrollment mode the deployment pins; None pins nothing.
-    pub enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     /// This authority's browser-session cookie; None keeps the default.
     pub browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
     /// Configure no browser sign-in page ([`SIGN_IN_PAGE`] otherwise).
@@ -1069,7 +1082,7 @@ pub fn auth_service_with_sites(
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     identities: Arc<dyn sid_fed::recipient::PresentedIdentities>,
 ) -> Arc<AuthServiceImpl> {
-    let options = default_auth_options(storage.clone(), None, None, None, test_revocation());
+    let options = default_auth_options(storage.clone(), None, None, test_revocation());
     Arc::new(build_auth_service(storage, cache, options, true).with_site_evidence(identities))
 }
 
@@ -1093,7 +1106,6 @@ fn build_auth_service(
         cascade,
         security_policy,
         history_keys,
-        enrollment_pin,
         browser_cookie,
         without_sign_in_page,
         login_policy,
@@ -1157,7 +1169,6 @@ fn build_auth_service(
             history_keys: test_key_manager(),
         },
     )
-    .with_enrollment_pin(enrollment_pin)
     .with_browser_cookie(browser_cookie.unwrap_or_default())
     .with_password_resets(resets);
     let service = if without_sign_in_page {
@@ -1176,16 +1187,14 @@ fn build_auth_service(
 }
 
 /// The authentication service over `storage` and `cache` with the test
-/// sign-in page, under `security_policy` (the CE default when None) and the
-/// enrollment mode `enrollment_pin` pins (the stored one when None).
+/// sign-in page, under `security_policy` (the CE default when None).
 #[allow(dead_code)]
 pub fn auth_service_over(
     storage: Arc<dyn StorageBackend>,
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     security_policy: Option<sid_core::models::SecurityPolicy>,
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
 ) -> Arc<AuthServiceImpl> {
-    auth_service_under(storage, cache, security_policy, enrollment_pin, None)
+    auth_service_under(storage, cache, security_policy, None)
 }
 
 /// As [`auth_service_over`], reading the login requirements from
@@ -1195,14 +1204,12 @@ pub fn auth_service_under(
     storage: Arc<dyn StorageBackend>,
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     security_policy: Option<sid_core::models::SecurityPolicy>,
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
 ) -> Arc<AuthServiceImpl> {
     auth_service_revoking(
         storage,
         cache,
         security_policy,
-        enrollment_pin,
         login_policy,
         test_revocation(),
     )
@@ -1319,14 +1326,12 @@ pub fn auth_service_revoking(
     storage: Arc<dyn StorageBackend>,
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     security_policy: Option<sid_core::models::SecurityPolicy>,
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     revocation_cache: Arc<RevocationCache>,
 ) -> Arc<AuthServiceImpl> {
     let options = default_auth_options(
         storage.clone(),
         security_policy,
-        enrollment_pin,
         login_policy,
         revocation_cache,
     );
@@ -1337,7 +1342,6 @@ pub fn auth_service_revoking(
 fn default_auth_options(
     storage: Arc<dyn StorageBackend>,
     security_policy: Option<sid_core::models::SecurityPolicy>,
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     revocation_cache: Arc<RevocationCache>,
 ) -> AuthOptions {
@@ -1360,7 +1364,6 @@ fn default_auth_options(
         security_policy,
         // Passwords are not set by these tests.
         history_keys: Arc::new(mock_storage::MockStorage::new()),
-        enrollment_pin,
         browser_cookie: None,
         without_sign_in_page: false,
         login_policy,
@@ -1399,7 +1402,6 @@ pub fn auth_service_before_keys(storage: Arc<dyn StorageBackend>) -> Arc<AuthSer
             security_policy: None,
             // No password is installed while the keys are generated.
             history_keys: Arc::new(mock_storage::MockStorage::new()),
-            enrollment_pin: None,
             browser_cookie: None,
             without_sign_in_page: false,
             login_policy: None,
@@ -1509,7 +1511,6 @@ impl TestServices {
                 zkpp: Some((verifiers, config)),
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1532,28 +1533,6 @@ impl TestServices {
                 zkpp: Some((vec![verifier], config)),
                 magic_links: false,
                 security_policy: Some(policy),
-                enrollment_pin: None,
-                browser_cookie: None,
-                without_sign_in_page: false,
-                login_policy: None,
-            },
-        )
-    }
-
-    /// TestServices whose deployment pins the enrollment mode to `mode`.
-    #[allow(dead_code)]
-    pub fn with_enrollment_pin(
-        storage: MockStorage,
-        mode: sid_core::models::EnrollmentMode,
-    ) -> Self {
-        Self::with_options(
-            storage,
-            FeatureFlagService::disabled(),
-            Options {
-                zkpp: None,
-                magic_links: false,
-                security_policy: None,
-                enrollment_pin: Some(mode),
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1576,7 +1555,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: Some(cookie),
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1594,7 +1572,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: true,
                 login_policy: None,
@@ -1615,7 +1592,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: Some(policy),
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1637,7 +1613,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: Some(source),
@@ -1654,7 +1629,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: true,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1670,7 +1644,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1694,7 +1667,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,
@@ -1793,7 +1765,6 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy,
@@ -1815,7 +1786,6 @@ impl TestServices {
             zkpp,
             magic_links,
             security_policy,
-            enrollment_pin,
             browser_cookie,
             without_sign_in_page,
             login_policy,
@@ -1912,7 +1882,6 @@ impl TestServices {
                 cascade: cascade_service.clone(),
                 security_policy,
                 history_keys: mock_storage.clone(),
-                enrollment_pin,
                 browser_cookie,
                 without_sign_in_page,
                 login_policy,
