@@ -78,9 +78,11 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      # No redirect is followed and only the publication's JSON is taken: a
-      # platform that does not publish its set stops the build, so no image
-      # goes out without the certificates it verifies under.
+      # No redirect is followed and only the publication's JSON is taken. A
+      # platform that does not publish its set yet gives an image that carries
+      # none (an empty file): it serves local sign-in and verifies no
+      # federated identity until its platform publishes, then the server
+      # fetches the set itself. An unreachable platform still stops the build.
       - name: Platform CA set
         if: steps.scope.outputs.run == 'true' && env.SID_BUILD_PLATFORM != ''
         run: |
@@ -89,7 +91,10 @@ jobs:
             "$SID_BUILD_PLATFORM/.well-known/sid-ca/index.json")"
           case "$type" in
             application/json*) ;;
-            *) echo "::error::$SID_BUILD_PLATFORM publishes no platform CA set (answered $type)"; exit 1 ;;
+            *)
+              echo "::warning::$SID_BUILD_PLATFORM publishes no platform CA set yet (answered $type): the image carries none"
+              : > "$SID_BUILD_PLATFORM_CAS"
+              ;;
           esac
       # The CE image packs a binary built on the runner (Dockerfile copies
       # target/release/sid); the embedded image compiles inside its build.
