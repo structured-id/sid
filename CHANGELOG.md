@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.34](https://github.com/structured-id/sid/compare/v0.2.33...v0.2.34) - 2026-11-21
+
+### Other
+
+- *(server)* drop settings a standalone installation derives or stores ([#730](https://github.com/structured-id/sid/pull/730))
+
 ## [0.2.33](https://github.com/structured-id/sid/compare/v0.2.32...v0.2.33) - 2026-11-21
 
 ### Added
