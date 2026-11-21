@@ -673,15 +673,6 @@ pub async fn import(
         )
         .await?;
     }
-    for consent in &snapshot.consents {
-        result.settings += created(
-            backend
-                .create_consent(consent, audit("import_consent", &consent.id.0.to_string()))
-                .await,
-            || async { Ok(backend.get_consent(consent.id).await?.as_ref() == Some(consent)) },
-        )
-        .await?;
-    }
     for preferences in &snapshot.notification_preferences {
         let subject = preferences.profile_id.to_string();
         match backend
@@ -1014,6 +1005,18 @@ pub async fn import(
                 result.resource_access += 1;
             }
         }
+    }
+
+    // Consents after their profiles and the resources their scope grants
+    // name.
+    for consent in &snapshot.consents {
+        result.settings += created(
+            backend
+                .create_consent(consent, audit("import_consent", &consent.id.0.to_string()))
+                .await,
+            || async { Ok(backend.get_consent(consent.id).await?.as_ref() == Some(consent)) },
+        )
+        .await?;
     }
 
     // A session's grants after their session and the resources they name.

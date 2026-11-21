@@ -43,8 +43,8 @@ sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "json", "ipnet"]
 # version sqlx links: one SQLite library per binary.
 libsqlite3-sys = { version = "0.39", optional = true }
 # The host's CoordiNode database and its value type.
-coordinode-embed = { version = "0.9", optional = true }
-coordinode-core = { version = "0.9", optional = true }
+coordinode-embed = { version = "0.10", optional = true }
+coordinode-core = { version = "0.10", optional = true }
 # CoordiNode's nested document value: a free-form JSON value is stored as a
 # document, not as serialized text.
 rmpv = { version = "1", features = ["with-serde"], optional = true }

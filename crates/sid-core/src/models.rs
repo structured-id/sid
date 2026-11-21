@@ -24,6 +24,7 @@ pub mod application;
 pub mod audit;
 pub mod auth_code;
 pub mod auth_flow;
+pub mod authorization_operation;
 pub mod authz;
 pub mod backchannel_logout;
 pub mod blob;
@@ -101,6 +102,11 @@ pub use auth_flow::{
     ActionConfig, ActionOnError, ActionPoint, ActionType, FlowAction, FlowActionId, FlowConfig,
     FlowType, StepConfig,
 };
+pub use authorization_operation::{
+    AUTHORIZATION_OPERATION_LIFETIME_SECS, AuthorizationDecision, AuthorizationOperation,
+    AuthorizationOperationId, AuthorizationStatus, ClaimChoice, ClaimSharing, CompletionOutcome,
+    DecisionOutcome, DecisionStep,
+};
 pub use authz::{
     AUTHZ_ADMINISTER, AUTHZ_CHECK, AdminEnvelope, AdminOperation, AssignmentFence,
     AssignmentProvenance, AssignmentSet, AssignmentSetChange, AuthorityBasis, AuthzPrincipal,
@@ -124,8 +130,8 @@ pub use branding::{
 pub use certificate::{Certificate, CertificateId, CertificateType};
 pub use claim_mapping::{ClaimMapping, ClaimTransform};
 pub use consent::{
-    ClaimGrant, ClaimGrantId, ClaimLevel, ClaimRequest, ClaimType, ConsentId, ConsentRecord,
-    ConsentStatus,
+    ClaimGrant, ClaimGrantId, ClaimLevel, ClaimRequest, ClaimSubscription, ClaimType, ConsentId,
+    ConsentMode, ConsentRecord, ConsentStatus, DisclosedValue, ScopeGrant,
 };
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialFence, CredentialId,

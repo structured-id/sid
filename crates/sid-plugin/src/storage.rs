@@ -36,8 +36,17 @@ use uuid::Uuid;
 use crate::{
     CeremonyStateStore, ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore,
     IssuerStore, OperationResultStore, PrincipalStore, SignInHistoryStore, WorkStore,
-    entry_connection::EntryConnectionStore, platform_ca::PlatformCaStore,
+    authorization_operation::AuthorizationOperationStore, entry_connection::EntryConnectionStore,
+    platform_ca::PlatformCaStore,
 };
+
+/// A profile with its primary email and phone, read together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileContacts {
+    pub profile: Profile,
+    pub email: Option<ProfileEmail>,
+    pub phone: Option<ProfilePhone>,
+}
 
 /// The right to run one background job, exclusive across every instance on
 /// the same store until released.
@@ -87,6 +96,7 @@ pub trait StorageBackend:
     + CeremonyStateStore
     + PlatformCaStore
     + EntryConnectionStore
+    + AuthorizationOperationStore
     + Send
     + Sync
     + 'static
@@ -98,6 +108,14 @@ pub trait StorageBackend:
 
     /// Get a profile by ID.
     async fn get_profile(&self, id: ProfileId) -> Result<Option<Profile>>;
+
+    /// Profile `id` with its primary email and phone, all read from one
+    /// consistent state of the store: a concurrent edit of the names and a
+    /// contact is seen whole or not at all, never as a mix of versions.
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> Result<Option<ProfileContacts>>;
 
     /// Get a profile by username.
     async fn get_profile_by_username(&self, username: &str) -> Result<Option<Profile>>;
@@ -417,6 +435,20 @@ pub trait StorageBackend:
         decision: sid_core::models::consent::ClaimDecision,
         ctx: MutationContext,
     ) -> Result<sid_core::models::consent::ClaimGrantChange>;
+
+    /// Deliver `updates`, a subscription's replacement of the disclosure of
+    /// `held`, the consent as it was read: in one step, and only while the
+    /// stored consent, read whole in that step, is still active and in
+    /// exactly `held`'s state ([`ConsentRecord::same_state`]), so no
+    /// decision or revocation committed since is overwritten. Returns the
+    /// consent as committed, which is `held.with_delivery(updates)`; `None`,
+    /// with nothing written and `ctx` dropped, when it changed or ended.
+    async fn deliver_subscribed(
+        &self,
+        held: &ConsentRecord,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> Result<Option<ConsentRecord>>;
 
     /// Get a consent record by ID.
     async fn get_consent(&self, id: ConsentId) -> Result<Option<ConsentRecord>>;

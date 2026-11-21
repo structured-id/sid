@@ -8,7 +8,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sid_authn::resource::{self, Scheme, SenderError};
 use sid_core::Error as SidError;
-use sid_core::models::{OidcIssuer, Profile, ProfileEmail, ProfilePhone, SessionId};
+use sid_core::models::{OidcIssuer, SessionId};
 use sid_proto::sid::v1::{JsonWebKey, JsonWebKeySet, ProviderMetadata, UserInfo};
 
 use super::OAuth;
@@ -126,41 +126,51 @@ pub fn metadata(issuer: &str) -> ProviderMetadata {
     }
 }
 
-/// The claims of `profile` the token's `scopes` grant (OIDC Core 1.0 §5.4),
-/// about subject `sub`.
-pub fn granted_claims(
+/// The UserInfo of subject `sub`: the values `held`, the holder's consent to
+/// the token's client, discloses for the claims the token's `scopes` ask
+/// for (OIDC Core 1.0 §5.4) or the client registered (`registered`). Only
+/// an approved value is delivered, never the current Profile; a claim the
+/// holder did not share is left out (consent-flow.md, OIDC scope requests).
+pub fn disclosed_claims(
     sub: String,
     scopes: &str,
-    profile: &Profile,
-    email: Option<&ProfileEmail>,
-    phone: Option<&ProfilePhone>,
+    registered: &[sid_core::models::ClaimRequest],
+    held: Option<&sid_core::models::ConsentRecord>,
 ) -> UserInfo {
-    let granted = |scope: &str| scopes.split_whitespace().any(|s| s == scope);
+    let scopes: Vec<String> = scopes.split_whitespace().map(str::to_owned).collect();
+    let asked = sid_core::models::consent::scope_claims(&scopes);
     let mut info = UserInfo {
         sub,
         ..Default::default()
     };
-    if granted("profile") {
-        info.name = profile.formatted_name();
-        info.given_name = profile.given_name.clone();
-        info.family_name = profile.family_name.clone();
-        info.middle_name = profile.middle_name.clone();
-        info.preferred_username = profile.username.clone();
-        // Seconds since the epoch fit 32 bits until 2106; a time outside
-        // that range is left out rather than wrapped.
-        info.updated_at = u32::try_from(profile.updated_at.as_second()).ok();
-    }
-    if granted("email")
-        && let Some(email) = email
-    {
-        info.email = Some(email.email.clone());
-        info.email_verified = Some(email.verified);
-    }
-    if granted("phone")
-        && let Some(phone) = phone
-    {
-        info.phone_number = Some(phone.formatted_e164());
-        info.phone_number_verified = Some(phone.verified);
+    let Some(held) = held.filter(|c| c.status.is_active()) else {
+        return info;
+    };
+    for grant in held.grants.iter().filter(|g| g.is_active()) {
+        let requested = asked.contains(&grant.claim_name.as_str())
+            || registered.iter().any(|r| r.claim_name == grant.claim_name);
+        let Some(disclosed) = grant.disclosed.as_ref().filter(|_| requested) else {
+            continue;
+        };
+        // An attestation discloses only that the value was verified.
+        let value = (grant.claim_type == sid_core::models::ClaimType::Data)
+            .then(|| disclosed.value.clone());
+        match grant.claim_name.as_str() {
+            "name" => info.name = value,
+            "given_name" => info.given_name = value,
+            "family_name" => info.family_name = value,
+            "middle_name" => info.middle_name = value,
+            "preferred_username" => info.preferred_username = value,
+            "email" => {
+                info.email = value;
+                info.email_verified = disclosed.verified;
+            }
+            "phone_number" => {
+                info.phone_number = value;
+                info.phone_number_verified = disclosed.verified;
+            }
+            _ => {}
+        }
     }
     info
 }
@@ -277,16 +287,24 @@ impl OAuth {
             .get_profile(session.profile_id)
             .await?
             .ok_or(ProviderError::InvalidToken(scheme))?;
-        let email = self.storage.get_primary_profile_email(profile.id).await?;
-        let phone = self.storage.get_primary_profile_phone(profile.id).await?;
+        // What the holder disclosed to the token's client: its approved
+        // values, never the current Profile (identity-model.md, recipient
+        // disclosure).
+        let client_id = claims.client_id.as_deref().unwrap_or_default();
+        let registered = self
+            .storage
+            .get_oauth2_client(client_id)
+            .await?
+            .map(|c| c.claim_requests)
+            .unwrap_or_default();
+        let held = self.held_disclosure(profile.id, client_id).await?;
         // `sub` as the token carries it: the ID token of this client under
         // the same hop carried the same value (OIDC Core 1.0 §5.3.2).
-        Ok(granted_claims(
+        Ok(disclosed_claims(
             claims.sub.clone(),
             &claims.scope,
-            &profile,
-            email.as_ref(),
-            phone.as_ref(),
+            &registered,
+            held.as_ref(),
         ))
     }
 }

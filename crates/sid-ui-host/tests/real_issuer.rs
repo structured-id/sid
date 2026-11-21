@@ -55,6 +55,8 @@ struct World {
     sessions: Arc<BffSessionStore>,
     /// The application's client at the issuer, as a replica holds it.
     client: Arc<RpClient>,
+    /// The signed-in user.
+    profile: sid_core::models::Profile,
 }
 
 async fn world() -> World {
@@ -64,7 +66,7 @@ async fn world() -> World {
     })
     .await;
     let (key, pem) = ClientKey::generate_ed25519().unwrap();
-    issuer
+    let registered = issuer
         .web_client(CLIENT, API, CALLBACK, key.public_jwks().unwrap())
         .await;
     let kid = key.kid().unwrap().to_owned();
@@ -104,6 +106,9 @@ async fn world() -> World {
     let client = rp_client(channel());
     drop(key);
     let profile = issuer.profile().await;
+    // The user approved this application before; the consent review itself
+    // is covered by the issuer's own tests.
+    issuer.consent(&profile, &registered).await;
     let (issuer_session, bearer) = issuer.sign_in(&profile).await;
     World {
         issuer,
@@ -112,6 +117,7 @@ async fn world() -> World {
         issuer_session,
         sessions,
         client,
+        profile,
     }
 }
 
@@ -326,7 +332,8 @@ async fn another_browser_cannot_complete_a_sign_in() {
 async fn a_code_of_another_client_makes_no_session() {
     let w = world().await;
     let (other_key, _) = ClientKey::generate_ed25519().unwrap();
-    w.issuer
+    let other = w
+        .issuer
         .web_client(
             "other-web",
             API,
@@ -334,6 +341,7 @@ async fn a_code_of_another_client_makes_no_session() {
             other_key.public_jwks().unwrap(),
         )
         .await;
+    w.issuer.consent(&w.profile, &other).await;
     let (query, pair) = start(&w.replicas[0]).await;
     let mut foreign = query.clone();
     foreign.insert("client_id".into(), "other-web".into());

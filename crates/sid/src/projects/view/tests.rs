@@ -41,6 +41,7 @@ fn client(kind: ApplicationType) -> OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec!["https://app.sid.example.com/signed-out".into()],
         claim_mappings: vec![],
+        claim_requests: vec![],
         login_strategy: sid_core::models::LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

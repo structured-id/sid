@@ -110,11 +110,6 @@ fn test_mask_claim_value_empty() {
     assert_eq!(mask_claim_value("email", ""), "");
 }
 
-#[test]
-fn test_claim_preview_no_profile() {
-    assert_eq!(claim_preview("email", None, &[]), "");
-}
-
 fn phone(id: ProfilePhoneId, label: PhoneLabel) -> ProfilePhone {
     let now = jiff::Timestamp::now();
     ProfilePhone {

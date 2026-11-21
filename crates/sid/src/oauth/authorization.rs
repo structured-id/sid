@@ -19,7 +19,9 @@ use sid_authn::oauth2::prompt::Prompt;
 use sid_core::Error as SidError;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::{
-    AuditEntry, MutationContext, OAuth2Client, OidcIssuer, ProfileId, Session, SessionId,
+    AuditEntry, AuthorizationOperation, AuthorizationOperationId, AuthorizationStatus, ClaimLevel,
+    ClaimRequest, CompletionOutcome, MutationContext, OAuth2Client, OidcIssuer, ProfileId,
+    ResourceId, Session, SessionId,
 };
 use sid_proto::sid::v1::{
     OAuth2AuthorizeRequest, OAuth2AuthorizeResponse, SignInContext, o_auth2_authorize_response,
@@ -43,6 +45,11 @@ pub enum AuthorizationError {
     /// The application's login requirements ask for more first.
     #[error("a step-up is required")]
     StepUp(Unmet),
+    /// No current consent covers the request and this entry point cannot
+    /// hold the user's decision; a caller saying it showed a screen is not
+    /// consent (authz/consent-flow.md, return the protocol outcome).
+    #[error("the user's consent is required")]
+    ConsentRequired,
     /// The login policy changed while the code was committed; the
     /// authorization is asked again.
     #[error("the login policy changed")]
@@ -78,6 +85,27 @@ pub enum AuthorizationError {
 /// RFC 9126 §2.2.
 pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
+/// Prefix of the `request_uri` that continues a decided authorization
+/// operation at its issuer.
+pub const OPERATION_URI_PREFIX: &str = "urn:sid:authorization-operation:";
+
+/// The GET of the authorization endpoint at `issuer_url` that continues
+/// operation `id` of `client_id`: the only continuation a consent decision
+/// returns (authz/consent-flow.md, resume at the issuer). It carries no code,
+/// token or destination; the issuer completes only for the session that
+/// reviewed the operation.
+pub fn operation_continuation(
+    issuer_url: &str,
+    client_id: &str,
+    id: AuthorizationOperationId,
+) -> Option<url::Url> {
+    let mut url = url::Url::parse(&format!("{issuer_url}/oauth2/authorize")).ok()?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("request_uri", &format!("{OPERATION_URI_PREFIX}{id}"));
+    Some(url)
+}
+
 /// How long a kept authorization request waits for the user to sign in.
 const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -110,9 +138,9 @@ pub struct PendingAuthorization {
     max_age: Option<u32>,
     /// When the request arrived: `prompt=login` and `max_age` count from it.
     arrived_at: Timestamp,
-    /// The interaction `prompt` asked for (account selection, consent) has
-    /// been offered on the sign-in page.
-    interacted: bool,
+    /// The account selection `prompt=select_account` asked for has been
+    /// offered on the sign-in page.
+    account_offered: bool,
 }
 
 impl PendingAuthorization {
@@ -133,7 +161,7 @@ impl PendingAuthorization {
             prompt: request.prompt,
             max_age: request.max_age,
             arrived_at: Timestamp::now(),
-            interacted: false,
+            account_offered: false,
         }
     }
 
@@ -208,10 +236,40 @@ pub struct SignInRequirements {
     pub max_age: Option<std::time::Duration>,
 }
 
+/// A request admitted for a session: the policy fence its code commits
+/// under, the validated request and its target.
+struct Admitted {
+    fence: Option<sid_core::models::ActorFence>,
+    validated: sid_authn::oauth2::ValidatedAuthorizeRequest,
+    resource: ResourceId,
+}
+
+/// A continued operation's outcome, with where its client is answered.
+pub struct Continuation {
+    pub redirect_uri: String,
+    pub state: Option<String>,
+    pub outcome: BrowserAuthorization,
+}
+
+/// What an admitted authorization request leads to.
+pub enum Authorized {
+    /// Current consent covers it: the authorization response.
+    Code(OAuth2AuthorizeResponse),
+    /// The user decides first: the operation to hold that decision, not yet
+    /// stored.
+    ConsentOwed(Box<AuthorizationOperation>),
+}
+
 /// What the browser endpoint answers an authorization request with.
 pub enum BrowserAuthorization {
     /// The authorization response for the client.
     Answer(OAuth2AuthorizeResponse),
+    /// The user reviews the request on the consent page; the stored
+    /// operation holds it and the decision.
+    Consent { operation: AuthorizationOperationId },
+    /// The user declined the request on the consent page: `access_denied`
+    /// for the client (RFC 6749 §4.1.2.1).
+    Denied,
     /// The user signs in (or interacts) first; the request is kept under
     /// `reference` for the sign-in page to return to.
     SignIn { reference: String },
@@ -268,18 +326,134 @@ impl OAuth {
         Ok((client, issuer))
     }
 
-    /// The authorization code `session` grants for `request` to `client` at
-    /// `issuer`: the client's and the request's assurance judged against the
-    /// session, the request validated, the code bound to its resource and
-    /// carrying the session's authentication. The code commits only while
-    /// the policy it was judged under holds.
+    /// What `session` may do with `request` to `client` at `issuer`: the
+    /// request admitted (assurance, validation, target), then the code when
+    /// current consent covers it, else the operation the user's decision is
+    /// recorded on (authz/consent-flow.md, browser consent transaction).
+    /// `consent_asked` is `prompt=consent`: it needs an actual decision for
+    /// this request whatever consent is held.
     pub async fn authorize_with(
         &self,
         client: &OAuth2Client,
         issuer: &OidcIssuer,
         session: &Session,
         request: OAuth2AuthorizeRequest,
-    ) -> Result<OAuth2AuthorizeResponse, AuthorizationError> {
+        consent_asked: bool,
+    ) -> Result<Authorized, AuthorizationError> {
+        let acr_values = request.acr_values.clone();
+        let admitted = self.admit(client, issuer, session, request).await?;
+        if consent_asked
+            || self
+                .consent_owed(client, session.profile_id, &admitted)
+                .await?
+        {
+            let now = Timestamp::now();
+            let held = self
+                .storage
+                .get_consent_by_client(session.profile_id, &client.client_id)
+                .await?;
+            let claim_requests = sid_core::models::consent::review_requests(
+                &client.claim_requests,
+                &admitted.validated.scopes,
+                super::consent::held_grants(held.as_ref()),
+            );
+            return Ok(Authorized::ConsentOwed(Box::new(AuthorizationOperation {
+                id: AuthorizationOperationId::generate(),
+                issuer_id: issuer.id,
+                client_id: admitted.validated.client_id.clone(),
+                redirect_uri: admitted.validated.redirect_uri.clone(),
+                response_type: "code".into(),
+                state: admitted.validated.state.clone(),
+                code_challenge: admitted.validated.code_challenge.clone(),
+                // Validation admits S256 only (RFC 7636 §4.2).
+                code_challenge_method: Some("S256".into()),
+                nonce: admitted.validated.nonce.clone(),
+                resource_id: admitted.resource,
+                scopes: admitted.validated.scopes.clone(),
+                acr_values,
+                claim_requests,
+                session_id: session.id,
+                profile_id: session.profile_id,
+                status: AuthorizationStatus::AwaitingConsent,
+                revision: 0,
+                decision: None,
+                created_at: now,
+                expires_at: AuthorizationOperation::expiry_from(now),
+                decided_at: None,
+            })));
+        }
+        self.issue(client, issuer, session, admitted, None)
+            .await
+            .map(Authorized::Code)
+    }
+
+    /// Whether the holder's recorded consent of `profile` to `client` leaves
+    /// the admitted request uncovered: its scopes for its resource, every
+    /// required claim the client asks for, and a decision on every claim it
+    /// asks for, shared or refused (a claim asked for the first time needs
+    /// one; one refused before is not asked again). Only the holder's own
+    /// grant covers it; the client's registration, an integration or an
+    /// empty claim list never does (authz/consent-flow.md, holder consent
+    /// authority).
+    async fn consent_owed(
+        &self,
+        client: &OAuth2Client,
+        profile: ProfileId,
+        admitted: &Admitted,
+    ) -> Result<bool, AuthorizationError> {
+        // The whole request, not only its name: a grant of another claim type
+        // or a sharing mode the request no longer admits does not cover it.
+        let required: Vec<&ClaimRequest> = client
+            .claim_requests
+            .iter()
+            .filter(|r| r.level == ClaimLevel::Required)
+            .collect();
+        let held = self
+            .storage
+            .get_consent_by_client(profile, &client.client_id)
+            .await?;
+        let Some(consent) = held else {
+            return Ok(true);
+        };
+        if !consent.covers(admitted.resource, &admitted.validated.scopes, &required) {
+            return Ok(true);
+        }
+        // Refused, or shared with its approved value; a grant re-enabled
+        // without one is not yet decided.
+        let undecided: Vec<ClaimRequest> = sid_core::models::consent::review_requests(
+            &client.claim_requests,
+            &admitted.validated.scopes,
+            super::consent::held_grants(Some(&consent)),
+        )
+        .into_iter()
+        .filter(|request| {
+            !consent.grants.iter().any(|g| {
+                g.claim_name == request.claim_name && (!g.is_active() || g.disclosed.is_some())
+            })
+        })
+        .collect();
+        if undecided.is_empty() {
+            return Ok(false);
+        }
+        // A claim the Profile has no value for offers no choice, so it needs
+        // no decision until a value exists; its absence is not a refusal.
+        // The Profile is read only here, where that changes the answer.
+        let values = self.current_values(profile).await?;
+        Ok(undecided
+            .iter()
+            .any(|request| sid_core::models::consent::disclosed_for(request, &values).is_some()))
+    }
+
+    /// `request` admitted for `session`: the client's and the request's
+    /// assurance judged against the session, the request validated and its
+    /// target resolved.
+    async fn admit(
+        &self,
+        client: &OAuth2Client,
+        issuer: &OidcIssuer,
+        session: &Session,
+        request: OAuth2AuthorizeRequest,
+    ) -> Result<Admitted, AuthorizationError> {
         let profile_id = session.profile_id;
         // Every authorization is judged, over an existing session too: the
         // requirements the policy states for this client now, with the
@@ -331,12 +505,37 @@ impl OAuth {
         let target = self
             .select_target(issuer, client, &request.resource)
             .await?;
+        Ok(Admitted {
+            fence: requirements.fence,
+            validated,
+            resource: target.resource_id(),
+        })
+    }
+
+    /// The code `session` grants for the `admitted` request, carrying the
+    /// session's authentication. Stored on its own, or, for `operation`, by
+    /// completing that operation, which issues at most one code. It commits
+    /// only while the policy it was judged under holds.
+    async fn issue(
+        &self,
+        client: &OAuth2Client,
+        issuer: &OidcIssuer,
+        session: &Session,
+        admitted: Admitted,
+        operation: Option<AuthorizationOperationId>,
+    ) -> Result<OAuth2AuthorizeResponse, AuthorizationError> {
+        let profile_id = session.profile_id;
+        let Admitted {
+            fence,
+            validated,
+            resource,
+        } = admitted;
         let (raw_code, mut auth_code) = self
             .oauth2
             .generate_auth_code(
                 profile_id,
                 &validated,
-                target.resource_id(),
+                resource,
                 session.grant_authentication(),
             )
             .map_err(|e| {
@@ -361,10 +560,24 @@ impl OAuth {
             auth_code.client_id.clone(),
         )
         .into();
-        if let Some(fence) = requirements.fence {
+        if let Some(fence) = fence {
             ctx = ctx.fenced_by(fence);
         }
-        match self.storage.create_auth_code(&auth_code, ctx).await {
+        let stored = match operation {
+            None => self.storage.create_auth_code(&auth_code, ctx).await,
+            Some(id) => match self
+                .storage
+                .complete_authorization_operation(id, Some(&auth_code), Timestamp::now(), ctx)
+                .await
+            {
+                Ok(CompletionOutcome::Completed) => Ok(()),
+                // Completed meanwhile (a concurrent continuation issued its
+                // one code) or expired: no second code.
+                Ok(CompletionOutcome::NotDecided) => return Err(AuthorizationError::NotWaiting),
+                Err(e) => Err(e),
+            },
+        };
+        match stored {
             Ok(()) => {}
             Err(SidError::Fenced(_)) => return Err(AuthorizationError::PolicyChanged),
             // The authorizing session ended (a logout) before the code was
@@ -386,9 +599,10 @@ impl OAuth {
 
     /// The typed RPC's authorization: the installation session `verified`
     /// stands for authorizes `request`, while it may authorize and is fresh
-    /// enough for the request's `max_age` or `prompt`. The caller of this
-    /// RPC is its own interface, so the interaction `prompt` asks for is its
-    /// to have shown.
+    /// enough for the request's `max_age` or `prompt`. It passes the same
+    /// consent gate as the browser endpoint and cannot hold a decision: a
+    /// request no current consent covers, or one with `prompt=consent`, is
+    /// [`AuthorizationError::ConsentRequired`].
     pub async fn authorize_session(
         &self,
         sign_in: &SignIn,
@@ -420,7 +634,126 @@ impl OAuth {
                     .is_none_or(|after| session.authenticated_at >= after)
             })
             .ok_or(AuthorizationError::SessionEnded)?;
-        self.authorize_with(client, issuer, &session, request).await
+        match self
+            .authorize_with(client, issuer, &session, request, prompt.consent())
+            .await?
+        {
+            Authorized::Code(answer) => Ok(answer),
+            Authorized::ConsentOwed(_) => Err(AuthorizationError::ConsentRequired),
+        }
+    }
+
+    /// Store `operation`, owed the holder's decision, for its review: the
+    /// browser's consent page or an embedding host in the same process then
+    /// reviews and decides it, and [`Self::continue_operation`] issues its
+    /// code.
+    pub async fn hold_for_consent(
+        &self,
+        operation: &AuthorizationOperation,
+    ) -> Result<AuthorizationOperationId, AuthorizationError> {
+        let ctx: MutationContext = AuditEntry::user(
+            operation.profile_id.to_string(),
+            "authorization_operation.create",
+            operation.client_id.clone(),
+        )
+        .into();
+        self.storage
+            .create_authorization_operation(operation, ctx)
+            .await?;
+        Ok(operation.id)
+    }
+
+    /// Continue the decided operation `id` at `issuer`, the issuer whose
+    /// endpoint the browser returned to, with `session`, the browser's IdP
+    /// session (authz/consent-flow.md, resume at the issuer). Only the
+    /// session that reviewed it continues it. The issuer, client, redirect,
+    /// assurance and current consent are judged again now: an approval saved
+    /// before a revocation or a policy change revives nothing. An approval
+    /// issues its one code by completing the operation; a denial completes
+    /// it with none. Anything else is [`AuthorizationError::NotWaiting`],
+    /// the same for every cause.
+    pub async fn continue_operation(
+        &self,
+        sign_in: &SignIn,
+        issuer: &OidcIssuer,
+        session: Option<Session>,
+        id: AuthorizationOperationId,
+    ) -> Result<Continuation, AuthorizationError> {
+        let now = Timestamp::now();
+        let operation = self
+            .storage
+            .authorization_operation(id)
+            .await?
+            .filter(|op| op.issuer_id == issuer.id)
+            .ok_or(AuthorizationError::NotWaiting)?;
+        let session = session
+            .filter(|s| s.id == operation.session_id && s.profile_id == operation.profile_id)
+            .filter(|s| sign_in.authorizes(s, now))
+            .ok_or(AuthorizationError::NotWaiting)?;
+        let resource = self
+            .storage
+            .get_protected_resource(operation.resource_id)
+            .await?
+            .ok_or(AuthorizationError::NotWaiting)?;
+        let request = OAuth2AuthorizeRequest {
+            client_id: operation.client_id.clone(),
+            redirect_uri: operation.redirect_uri.clone(),
+            response_type: operation.response_type.clone(),
+            scope: Some(operation.scopes.join(" ")),
+            state: operation.state.clone(),
+            code_challenge: operation.code_challenge.clone(),
+            code_challenge_method: operation.code_challenge_method.clone(),
+            nonce: operation.nonce.clone(),
+            // The level the relying party asked for is judged again: an
+            // elevation that lapsed during the review issues no code.
+            acr_values: operation.acr_values.clone(),
+            issuer_handle: issuer.handle.to_string(),
+            resource: vec![resource.indicator.to_string()],
+            prompt: None,
+            max_age: None,
+            request_uri: None,
+        };
+        // An inactive client or a redirect no longer registered is answered
+        // by no redirect at all (RFC 6749 §4.1.2.1).
+        let (client, issuer) = self.authorize_client(&request, None).await?;
+        let continuation = |outcome| Continuation {
+            redirect_uri: operation.redirect_uri.clone(),
+            state: operation.state.clone(),
+            outcome,
+        };
+        match operation.status {
+            AuthorizationStatus::Denied => {
+                let ctx: MutationContext = AuditEntry::user(
+                    session.profile_id.to_string(),
+                    "authorization_operation.deny",
+                    operation.client_id.clone(),
+                )
+                .into();
+                match self
+                    .storage
+                    .complete_authorization_operation(id, None, now, ctx)
+                    .await?
+                {
+                    CompletionOutcome::Completed => Ok(continuation(BrowserAuthorization::Denied)),
+                    CompletionOutcome::NotDecided => Err(AuthorizationError::NotWaiting),
+                }
+            }
+            AuthorizationStatus::Approved if operation.completable_at(now) => {
+                let admitted = self.admit(&client, &issuer, &session, request).await?;
+                if self
+                    .consent_owed(&client, session.profile_id, &admitted)
+                    .await?
+                {
+                    return Err(AuthorizationError::NotWaiting);
+                }
+                let answer = self
+                    .issue(&client, &issuer, &session, admitted, Some(id))
+                    .await?;
+                self.storage.touch_session(session.id, now).await?;
+                Ok(continuation(BrowserAuthorization::Answer(answer)))
+            }
+            _ => Err(AuthorizationError::NotWaiting),
+        }
     }
 
     /// The session `session_id` of `profile` while it still stands and its
@@ -501,18 +834,26 @@ impl Authorizations {
             sign_in.authorizes(session, now)
                 && after.is_none_or(|after| session.authenticated_at >= after)
         });
-        let interaction_owed = prompt.asks_interaction() && !pending.interacted;
+        let selection_owed = prompt.select_account() && !pending.account_offered;
         match session {
-            Some(session) if !interaction_owed => {
+            Some(session) if !selection_owed => {
                 match oauth
-                    .authorize_with(&client, &issuer, &session, request)
+                    .authorize_with(&client, &issuer, &session, request, prompt.consent())
                     .await
                 {
-                    Ok(answer) => {
+                    Ok(Authorized::Code(answer)) => {
                         // Only an accepted use counts as activity.
                         oauth.storage.touch_session(session.id, now).await?;
                         Ok(BrowserAuthorization::Answer(answer))
                     }
+                    // The user decides on the consent page, unless no page
+                    // may be shown (OIDC Core 1.0 §3.1.2.6).
+                    Ok(Authorized::ConsentOwed(_)) if prompt.none() => {
+                        Ok(BrowserAuthorization::NoInteraction("consent_required"))
+                    }
+                    Ok(Authorized::ConsentOwed(operation)) => Ok(BrowserAuthorization::Consent {
+                        operation: oauth.hold_for_consent(&operation).await?,
+                    }),
                     // Below the level or methods the client requires: the
                     // user authenticates further (OIDC Core 1.0 §3.1.2.3).
                     Err(AuthorizationError::StepUp(_)) => self.sign_in_first(prompt, pending).await,
@@ -533,9 +874,10 @@ impl Authorizations {
         if prompt.none() {
             return Ok(BrowserAuthorization::NoInteraction("login_required"));
         }
-        // The sign-in page offers account selection and consent; the
-        // continued request does not ask for them again.
-        pending.interacted |= prompt.asks_interaction();
+        // The sign-in page offers account selection; the continued request
+        // does not ask for it again. Consent is never decided there: it is
+        // the consent page's recorded decision.
+        pending.account_offered |= prompt.select_account();
         Ok(BrowserAuthorization::SignIn {
             reference: self.keep(&pending).await?,
         })

@@ -55,6 +55,8 @@ struct World {
     issuer: TestIssuer,
     replicas: [Router; 2],
     bearer: String,
+    /// The signed-in user.
+    profile: sid_core::models::Profile,
 }
 
 async fn world() -> World {
@@ -64,7 +66,7 @@ async fn world() -> World {
     })
     .await;
     let (key, pem) = ClientKey::generate_ed25519().unwrap();
-    issuer
+    let client = issuer
         .web_client(CLIENT, API, CALLBACK, key.public_jwks().unwrap())
         .await;
     let kid = key.kid().unwrap().to_owned();
@@ -109,11 +111,15 @@ async fn world() -> World {
     };
     let replicas = [replica(&pem), replica(&pem)];
     let profile = issuer.profile().await;
+    // The user approved this application before; the consent review itself
+    // is covered by the issuer's own tests.
+    issuer.consent(&profile, &client).await;
     let (_, bearer) = issuer.sign_in(&profile).await;
     World {
         issuer,
         replicas,
         bearer,
+        profile,
     }
 }
 
@@ -352,7 +358,8 @@ async fn another_browser_cannot_complete_a_sign_in() {
 async fn a_code_of_another_client_makes_no_session() {
     let w = world().await;
     let (other_key, _) = ClientKey::generate_ed25519().unwrap();
-    w.issuer
+    let other = w
+        .issuer
         .web_client(
             "other-web",
             API,
@@ -360,6 +367,7 @@ async fn a_code_of_another_client_makes_no_session() {
             other_key.public_jwks().unwrap(),
         )
         .await;
+    w.issuer.consent(&w.profile, &other).await;
     let (query, pair) = start(&w.replicas[0]).await;
     let mut foreign = query.clone();
     foreign.insert("client_id".into(), "other-web".into());

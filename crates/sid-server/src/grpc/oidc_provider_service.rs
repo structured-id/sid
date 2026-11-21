@@ -34,6 +34,7 @@ use super::auth_service::{
 };
 use super::client_metadata;
 use super::project_service::ProjectServiceImpl;
+use sid::oauth::authorization::{OPERATION_URI_PREFIX, operation_continuation};
 use sid_infra::oauth_http::{self, Form};
 
 /// How long HTTP caches may keep a key set, and serve a stale one while
@@ -111,6 +112,15 @@ impl OidcProviderServiceImpl {
         // The typed logic resolves the issuer by its handle, which the root
         // route does not carry.
         asked.issuer_handle = issuer.handle.to_string();
+        // The browser returning from the consent page continues the decided
+        // operation; nothing of the request comes from the URL.
+        if let Some(operation) = asked
+            .request_uri
+            .as_deref()
+            .and_then(|uri| uri.strip_prefix(OPERATION_URI_PREFIX))
+        {
+            return self.continue_operation(&metadata, &issuer, operation).await;
+        }
         let pending = match asked.request_uri.as_deref() {
             None => PendingAuthorization::arrived(asked),
             Some(uri) => {
@@ -183,6 +193,22 @@ impl OidcProviderServiceImpl {
                 Ok(answer(&[(key, &value)]))
             }
             Ok(BrowserAuthorization::NoInteraction(error)) => Ok(answer(&[("error", error)])),
+            Ok(BrowserAuthorization::Denied) => Ok(answer(&[("error", "access_denied")])),
+            Ok(BrowserAuthorization::Consent { operation }) => {
+                let login = match self.sign_in_page.sign_in_page().await {
+                    Ok(login) => login,
+                    Err(status) => return Ok(refused(status)),
+                };
+                Ok(
+                    match (
+                        login.and_then(|login| login.join("consent").ok()),
+                        operation_continuation(&issuer.canonical_url, &client_id, operation),
+                    ) {
+                        (Some(page), Some(back)) => oauth_http::consent(&page, operation, &back),
+                        _ => answer(&[("error", "interaction_required")]),
+                    },
+                )
+            }
             Ok(BrowserAuthorization::SignIn { reference }) => {
                 let login = match self.sign_in_page.sign_in_page().await {
                     Ok(login) => login,
@@ -204,6 +230,55 @@ impl OidcProviderServiceImpl {
 }
 
 impl OidcProviderServiceImpl {
+    /// The browser's return from the consent page to `issuer`, continuing
+    /// the operation `reference` names: the client's code, or its
+    /// `access_denied`, at the operation's validated redirect URI; a page
+    /// when the operation is not one this browser may continue.
+    async fn continue_operation(
+        &self,
+        metadata: &MetadataMap,
+        issuer: &OidcIssuer,
+        reference: &str,
+    ) -> Result<Response<HttpBody>, Status> {
+        let expired = || {
+            oauth_http::page(
+                400,
+                "Authorization request expired or unknown: start again from the application",
+            )
+        };
+        let Ok(id) = sid_core::models::AuthorizationOperationId::parse(reference) else {
+            return Ok(expired());
+        };
+        let continued = match self.auth.continue_operation(metadata, issuer, id).await {
+            Ok(continued) => continued,
+            Err(status) => {
+                tracing::info!(error = %status, "authorization operation not continued");
+                return Ok(match oauth_http::classify_authorize_refusal(&status) {
+                    oauth_http::AuthorizeRefusal::Show(code, error) => {
+                        oauth_http::page(code, &format!("Authorization request refused: {error}"))
+                    }
+                    _ => expired(),
+                });
+            }
+        };
+        let answer = |params: &[(&str, &str)]| {
+            oauth_http::authorization_response(
+                &continued.redirect_uri,
+                &issuer.canonical_url,
+                params,
+                continued.state.as_deref(),
+            )
+        };
+        Ok(match continued.outcome {
+            BrowserAuthorization::Answer(response) => match response.result {
+                Some(AuthorizeResult::AuthorizationCode(code)) => answer(&[("code", &code)]),
+                _ => answer(&[("error", "server_error")]),
+            },
+            BrowserAuthorization::Denied => answer(&[("error", "access_denied")]),
+            _ => expired(),
+        })
+    }
+
     /// RP-Initiated Logout `request` at the issuer `handle` names: a 303 to
     /// the validated post-logout redirect, or a page (signed out, or a
     /// confirmation form for ending the browser's IdP session). The IdP

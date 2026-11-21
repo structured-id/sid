@@ -54,7 +54,7 @@ fn kept_request_continues_as_it_arrived() {
     assert_eq!(again.state.as_deref(), Some("xyz"));
     assert_eq!(again.issuer_handle, "acme");
     assert!(again.request_uri.is_none());
-    assert!(!pending.interacted);
+    assert!(!pending.account_offered);
 }
 
 /// What a kept request asks of the sign-in, counted from its arrival as the

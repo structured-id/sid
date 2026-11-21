@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use jiff::{SignedDuration as Duration, Timestamp};
 use sid_authn::snapshot_rules::AuthnSnapshotRules;
-use sid_core::models::consent::{ClaimType, ConsentRecord, ConsentStatus};
+use sid_core::models::consent::{ClaimType, ConsentMode, ConsentRecord, ConsentStatus};
 use sid_core::models::notification::NotificationPreferences;
 use sid_core::models::*;
 use sid_plugin::storage::StorageBackend;
@@ -18,11 +18,19 @@ use sid_storage::sqlite::{SqliteAuditLog, SqliteBackend};
 use uuid::Uuid;
 
 /// Tables whose rows a move does not carry, with the reason.
-const NOT_MOVED: &[(&str, &str)] = &[(
-    "job_locks",
-    "a held lock belongs to the process that took it; the moved \
-     installation's workers take their own",
-)];
+const NOT_MOVED: &[(&str, &str)] = &[
+    (
+        "job_locks",
+        "a held lock belongs to the process that took it; the moved \
+         installation's workers take their own",
+    ),
+    (
+        "authorization_operations",
+        "a browser authorization waits minutes for its decision; what a \
+         decision grants (the consent, the code) moves in its own table, and \
+         an authorization interrupted by the move restarts from the client",
+    ),
+];
 
 /// Tables the import appends to after the rows it moved, with the reason;
 /// every source row must still be there, as it was.
@@ -314,6 +322,7 @@ fn client_for(app: &Application, org: OrgId) -> OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,
@@ -941,7 +950,8 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
 
     let mut consent = ConsentRecord::new(profile.id, installation.client.client_id.clone());
     consent.status = ConsentStatus::Active;
-    consent.grant_claim("email", ClaimType::Data);
+    consent.grant_claim("email", ClaimType::Data, ConsentMode::Subscribed);
+    consent.grant_scopes(installation.resource.id, &["openid".to_owned()]);
     source.create_consent(&consent, ctx()).await.unwrap();
     source
         .save_notification_preferences(&NotificationPreferences::defaults(profile.id), ctx())

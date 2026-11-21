@@ -312,6 +312,44 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockStorage {
+    async fn create_authorization_operation(
+        &self,
+        _: &sid_core::models::AuthorizationOperation,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+    ) -> Result<Option<sid_core::models::AuthorizationOperation>> {
+        unimplemented!()
+    }
+    async fn decide_authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+        _: sid_core::models::SessionId,
+        _: u64,
+        _: &sid_core::models::AuthorizationDecision,
+        _: &[(String, Option<sid_core::models::DisclosedValue>)],
+        _: jiff::Timestamp,
+        _: MutationContext,
+    ) -> Result<sid_core::models::DecisionOutcome> {
+        unimplemented!()
+    }
+    async fn complete_authorization_operation(
+        &self,
+        _: sid_core::models::AuthorizationOperationId,
+        _: Option<&sid_core::models::AuthorizationCode>,
+        _: jiff::Timestamp,
+        _: MutationContext,
+    ) -> Result<sid_core::models::CompletionOutcome> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
     async fn entry_connection(
         &self,
@@ -736,6 +774,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn get_profile(&self, _: ProfileId) -> Result<Option<Profile>> {
         unimplemented!()
     }
+    async fn get_profile_with_primary_contacts(
+        &self,
+        _: ProfileId,
+    ) -> Result<Option<sid_plugin::storage::ProfileContacts>> {
+        unimplemented!()
+    }
     async fn get_profile_by_username(&self, _: &str) -> Result<Option<Profile>> {
         unimplemented!()
     }
@@ -872,6 +916,14 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: sid_core::models::consent::ClaimDecision,
         _: MutationContext,
     ) -> Result<sid_core::models::consent::ClaimGrantChange> {
+        unimplemented!()
+    }
+    async fn deliver_subscribed(
+        &self,
+        _: &sid_core::models::consent::ConsentRecord,
+        _: &[sid_core::models::consent::DisclosureUpdate],
+        _: MutationContext,
+    ) -> Result<Option<sid_core::models::consent::ConsentRecord>> {
         unimplemented!()
     }
     async fn get_consent(

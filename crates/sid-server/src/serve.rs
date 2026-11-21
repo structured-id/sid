@@ -136,6 +136,12 @@ impl CeServices {
             .await
             .add(AuthServiceServer::from_arc(c.auth_svc.clone()))
             .await
+            .add(
+                sid_proto::sid::v1::authn::auth_flow_service_server::AuthFlowServiceServer::new(
+                    crate::grpc::auth_flow_service::AuthFlowServiceImpl::new(c.auth_svc.clone()),
+                ),
+            )
+            .await
             .add(ProjectServiceServer::from_arc(c.project_svc.clone()))
             .await
             .add(OidcIssuerServiceServer::new(

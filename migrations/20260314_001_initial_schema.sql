@@ -1183,9 +1183,13 @@ CREATE TABLE claim_grants (
     consent_id uuid NOT NULL,
     claim_name text NOT NULL,
     claim_type text DEFAULT 'data'::text NOT NULL,
+    mode text DEFAULT 'static'::text NOT NULL,
     granted_at timestamp with time zone DEFAULT now() NOT NULL,
     revoked_at timestamp with time zone,
+    disclosed_value text,
+    disclosed_verified boolean,
     CONSTRAINT claim_grants_claim_type_check CHECK ((claim_type = ANY (ARRAY['data'::text, 'attestation'::text]))),
+    CONSTRAINT claim_grants_mode_check CHECK ((mode = ANY (ARRAY['static'::text, 'subscribed'::text]))),
     CONSTRAINT claim_grants_consent_id_claim_name_key UNIQUE (consent_id, claim_name),
     CONSTRAINT claim_grants_pkey PRIMARY KEY (id),
     CONSTRAINT claim_grants_consent_id_fkey FOREIGN KEY (consent_id) REFERENCES consents(id) ON DELETE CASCADE
@@ -1483,6 +1487,42 @@ CREATE TABLE authorization_codes (
     CONSTRAINT authorization_codes_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES protected_resources(id)
 );
 
+-- A browser authorization awaiting or carrying the user's consent decision,
+-- from the review to the issuer's one code issuance. It ends with the IdP
+-- session that authenticated it.
+CREATE TABLE authorization_operations (
+    id uuid NOT NULL,
+    issuer_id uuid NOT NULL,
+    client_id text NOT NULL,
+    redirect_uri text NOT NULL,
+    response_type text NOT NULL,
+    state text,
+    code_challenge text,
+    code_challenge_method text,
+    nonce text,
+    resource_id uuid NOT NULL,
+    scopes text NOT NULL,
+    acr_values text,
+    claim_requests jsonb NOT NULL,
+    session_id uuid NOT NULL,
+    profile_id uuid NOT NULL,
+    status text NOT NULL,
+    revision bigint NOT NULL,
+    decision jsonb,
+    created_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    decided_at timestamp with time zone,
+    CONSTRAINT authorization_operations_pkey PRIMARY KEY (id),
+    CONSTRAINT authorization_operations_status_check CHECK ((status = ANY (ARRAY['awaiting_consent'::text, 'approved'::text, 'denied'::text, 'completed'::text, 'expired'::text]))),
+    CONSTRAINT authorization_operations_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT authorization_operations_issuer_id_fkey FOREIGN KEY (issuer_id) REFERENCES oidc_issuers(id),
+    CONSTRAINT authorization_operations_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES protected_resources(id),
+    CONSTRAINT authorization_operations_session_id_fkey FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    CONSTRAINT authorization_operations_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+
+CREATE INDEX authorization_operations_expires_at_idx ON authorization_operations (expires_at);
+
 CREATE TABLE cedar_policies (
     id uuid NOT NULL,
     project_id uuid,
@@ -1564,6 +1604,7 @@ CREATE TABLE oauth2_clients (
     backchannel_logout_uri text,
     backchannel_logout_session_required boolean DEFAULT false NOT NULL,
     claim_mappings text,
+    claim_requests text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     logo_uri text,
     login_strategy text DEFAULT 'local_first'::text NOT NULL,
@@ -1658,6 +1699,18 @@ CREATE TABLE resource_access (
     CONSTRAINT resource_access_machine_client_id_fkey FOREIGN KEY (machine_client_id) REFERENCES machine_users(client_id) ON DELETE CASCADE,
     CONSTRAINT resource_access_oauth_client_id_fkey FOREIGN KEY (oauth_client_id) REFERENCES oauth2_clients(client_id) ON DELETE CASCADE,
     CONSTRAINT resource_access_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES protected_resources(id)
+);
+
+-- The scopes a consent grants its client for one protected resource, as a
+-- space-separated scope list (RFC 6749 §3.3).
+CREATE TABLE consent_scope_grants (
+    consent_id uuid NOT NULL,
+    resource_id uuid NOT NULL,
+    scopes text NOT NULL,
+    granted_at timestamp with time zone NOT NULL,
+    CONSTRAINT consent_scope_grants_pkey PRIMARY KEY (consent_id, resource_id),
+    CONSTRAINT consent_scope_grants_consent_id_fkey FOREIGN KEY (consent_id) REFERENCES consents(id) ON DELETE CASCADE,
+    CONSTRAINT consent_scope_grants_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES protected_resources(id)
 );
 
 CREATE TABLE role_assignments (

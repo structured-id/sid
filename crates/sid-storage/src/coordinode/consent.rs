@@ -12,7 +12,8 @@
 use coordinode_core::graph::types::Value;
 use jiff::Timestamp;
 use sid_core::models::consent::{
-    ClaimDecision, ClaimGrant, ClaimGrantChange, ClaimGrantId, ConsentId, ConsentRecord,
+    ClaimDecision, ClaimGrant, ClaimGrantChange, ClaimGrantId, ConsentId, ConsentMode,
+    ConsentRecord, ScopeGrant,
 };
 use sid_core::models::{
     MutationContext, ProfileGrant, ProfileGrantId, ProfileId, ProjectId, UpstreamIdentity,
@@ -24,7 +25,7 @@ use sid_keys::EncryptedField;
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
     get_bytes, get_id, get_int, get_opt_text, get_opt_time, get_parsed, get_text, get_texts,
-    get_time, get_uuid, key, opt_text, opt_time, texts, time, uuid,
+    get_time, get_uuid, hold_first, key, opt_text, opt_time, texts, time, uuid,
 };
 
 const CONSENT: &str = "c.id AS id, c.profile_id AS profile_id, c.client_id AS client_id,
@@ -32,7 +33,11 @@ const CONSENT: &str = "c.id AS id, c.profile_id AS profile_id, c.client_id AS cl
     c.updated_at AS updated_at";
 
 const CLAIM: &str = "g.id AS id, g.consent_id AS consent_id, g.claim_name AS claim_name,
-    g.claim_type AS claim_type, g.granted_at AS granted_at, g.revoked_at AS revoked_at";
+    g.claim_type AS claim_type, g.mode AS mode, g.granted_at AS granted_at,
+    g.revoked_at AS revoked_at, g.disclosed_value AS disclosed_value,
+    g.disclosed_verified AS disclosed_verified";
+
+const SCOPE: &str = "s.resource_id AS resource_id, s.scopes AS scopes, s.granted_at AS granted_at";
 
 const GRANT: &str = "g.id AS id, g.project_id AS project_id, g.profile_id AS profile_id,
     g.role_keys AS role_keys, g.granted_by AS granted_by, g.expires_at AS expires_at,
@@ -82,8 +87,25 @@ fn claim(row: &Row) -> SidResult<ClaimGrant> {
         consent_id: ConsentId(get_uuid(row, "consent_id")?),
         claim_name: get_text(row, "claim_name")?,
         claim_type: get_parsed(row, "claim_type")?,
+        mode: get_parsed(row, "mode")?,
         granted_at: get_time(row, "granted_at")?,
         revoked_at: get_opt_time(row, "revoked_at")?,
+        disclosed: get_opt_text(row, "disclosed_value")?
+            .map(|value| -> SidResult<sid_core::models::DisclosedValue> {
+                Ok(sid_core::models::DisclosedValue {
+                    value,
+                    verified: super::get_opt_bool(row, "disclosed_verified")?,
+                })
+            })
+            .transpose()?,
+    })
+}
+
+fn scope(row: &Row) -> SidResult<ScopeGrant> {
+    Ok(ScopeGrant {
+        resource_id: get_id(row, "resource_id")?,
+        scopes: get_texts(row, "scopes")?,
+        granted_at: get_time(row, "granted_at")?,
     })
 }
 
@@ -94,6 +116,11 @@ fn consent(tx: &Statements<'_>, row: &Row) -> SidResult<ConsentRecord> {
         Params::default().with("id", uuid(&id)),
     )?;
     let grants = rows.iter().map(claim).collect::<SidResult<Vec<_>>>()?;
+    let rows = tx.run(
+        &format!("MATCH (s:SidConsentScope) WHERE s.consent_id = $id RETURN {SCOPE}"),
+        Params::default().with("id", uuid(&id)),
+    )?;
+    let scope_grants = rows.iter().map(scope).collect::<SidResult<Vec<_>>>()?;
     Ok(ConsentRecord {
         id: ConsentId(id),
         profile_id: get_id(row, "profile_id")?,
@@ -101,6 +128,12 @@ fn consent(tx: &Statements<'_>, row: &Row) -> SidResult<ConsentRecord> {
         status: get_parsed(row, "status")?,
         // Oldest grant first.
         grants: super::sorted_page(grants, |g| (g.granted_at, g.id.0), 0, u64::MAX),
+        scope_grants: super::sorted_page(
+            scope_grants,
+            |s| (s.granted_at, s.resource_id),
+            0,
+            u64::MAX,
+        ),
         consented_at: get_time(row, "consented_at")?,
         revoked_at: get_opt_time(row, "revoked_at")?,
         updated_at: get_time(row, "updated_at")?,
@@ -126,16 +159,58 @@ fn claim_pair(consent_id: ConsentId, claim_name: &str) -> SidResult<Value> {
 fn insert_claim(tx: &Statements<'_>, consent_id: ConsentId, g: &ClaimGrant) -> SidResult<()> {
     tx.run(
         "CREATE (g:SidClaimGrant {id: $id, pair: $pair, consent_id: $consent_id,
-            claim_name: $claim_name, claim_type: $claim_type, granted_at: $granted_at,
-            revoked_at: $revoked_at})",
+            claim_name: $claim_name, claim_type: $claim_type, mode: $mode,
+            granted_at: $granted_at, revoked_at: $revoked_at,
+            disclosed_value: $disclosed_value, disclosed_verified: $disclosed_verified})",
         Params::default()
             .with("id", uuid(&g.id.0))
             .with("pair", claim_pair(consent_id, &g.claim_name)?)
             .with("consent_id", uuid(&consent_id.0))
             .with("claim_name", Value::String(g.claim_name.clone()))
             .with("claim_type", Value::String(g.claim_type.as_str().into()))
+            .with("mode", Value::String(g.mode.as_str().into()))
             .with("granted_at", time(g.granted_at))
-            .with("revoked_at", opt_time(g.revoked_at)),
+            .with("revoked_at", opt_time(g.revoked_at))
+            .with(
+                "disclosed_value",
+                opt_text(g.disclosed.as_ref().map(|d| d.value.as_str())),
+            )
+            .with(
+                "disclosed_verified",
+                g.disclosed
+                    .as_ref()
+                    .and_then(|d| d.verified)
+                    .map_or(Value::Null, Value::Bool),
+            ),
+    )?;
+    Ok(())
+}
+
+/// Store a scope grant of `consent_id`; its resource is only held, as every
+/// other grant's resource is.
+fn insert_scope(tx: &Statements<'_>, consent_id: ConsentId, s: &ScopeGrant) -> SidResult<()> {
+    let held = tx.run(
+        "MATCH (n:SidResource) WHERE n.id = $id RETURN id(n) AS node",
+        Params::default().with("id", bin(s.resource_id.as_bytes())),
+    )?;
+    if !hold_first(tx, &held)? {
+        return Err(SidError::NotFound(format!(
+            "protected resource {}",
+            s.resource_id
+        )));
+    }
+    tx.run(
+        "CREATE (s:SidConsentScope {pair: $pair, consent_id: $consent_id,
+            resource_id: $resource_id, scopes: $scopes, granted_at: $granted_at})",
+        Params::default()
+            .with(
+                "pair",
+                key(&[consent_id.0.as_bytes(), s.resource_id.as_bytes()])?,
+            )
+            .with("consent_id", uuid(&consent_id.0))
+            .with("resource_id", bin(s.resource_id.as_bytes()))
+            .with("scopes", texts(&s.scopes))
+            .with("granted_at", time(s.granted_at)),
     )?;
     Ok(())
 }
@@ -259,6 +334,93 @@ fn identities_where(
     rows.iter().map(identity).collect()
 }
 
+/// Create consent `c` in `tx` with its claim and scope grants; the pair's
+/// uniqueness refuses a second consent of one Profile and client.
+fn insert_consent(tx: &Statements<'_>, c: &ConsentRecord) -> SidResult<()> {
+    tx.run(
+        "CREATE (c:SidConsent {id: $id, pair: $pair, profile_id: $profile_id,
+            client_id: $client_id, status: $status, consented_at: $consented_at,
+            revoked_at: $revoked_at, updated_at: $updated_at})",
+        Params::default()
+            .with("id", uuid(&c.id.0))
+            .with(
+                "pair",
+                key(&[c.profile_id.as_bytes(), c.client_id.as_bytes()])?,
+            )
+            .with("profile_id", bin(c.profile_id.as_bytes()))
+            .with("client_id", Value::String(c.client_id.clone()))
+            .with("status", Value::String(c.status.as_str().into()))
+            .with("consented_at", time(c.consented_at))
+            .with("revoked_at", opt_time(c.revoked_at))
+            .with("updated_at", time(c.updated_at)),
+    )?;
+    for g in &c.grants {
+        insert_claim(tx, c.id, g)?;
+    }
+    for s in &c.scope_grants {
+        insert_scope(tx, c.id, s)?;
+    }
+    Ok(())
+}
+
+/// The consent of `profile` to `client_id` as held in `tx`, if any.
+pub(super) fn consent_of_pair(
+    tx: &Statements<'_>,
+    profile: ProfileId,
+    client_id: &str,
+) -> SidResult<Option<ConsentRecord>> {
+    Ok(consents_where(
+        tx,
+        "c.pair = $pair",
+        Params::default().with("pair", key(&[profile.as_bytes(), client_id.as_bytes()])?),
+    )?
+    .pop())
+}
+
+/// Write `consent` in `tx`: created when new, else its state and its claim
+/// and scope grants as they now stand. Writing the consent node makes a
+/// concurrent change of it conflict with this commit.
+pub(super) fn store_consent(tx: &Statements<'_>, consent: &ConsentRecord) -> SidResult<()> {
+    let updated = tx.run(
+        "MATCH (c:SidConsent) WHERE c.id = $id
+         SET c.status = $status, c.revoked_at = $revoked_at, c.updated_at = $updated_at
+         RETURN c.id AS id",
+        Params::default()
+            .with("id", uuid(&consent.id.0))
+            .with("status", Value::String(consent.status.as_str().into()))
+            .with("revoked_at", opt_time(consent.revoked_at))
+            .with("updated_at", time(consent.updated_at)),
+    )?;
+    if updated.is_empty() {
+        claim_ref(
+            tx,
+            "SidProfile",
+            bin(consent.profile_id.as_bytes()),
+            &format!("profile {}", consent.profile_id),
+        )?;
+        return insert_consent(tx, consent);
+    }
+    delete_consent_grants(tx, consent.id.0)?;
+    for g in &consent.grants {
+        insert_claim(tx, consent.id, g)?;
+    }
+    for s in &consent.scope_grants {
+        insert_scope(tx, consent.id, s)?;
+    }
+    Ok(())
+}
+
+/// Delete in `tx` the claim and scope grants of consent `id`.
+fn delete_consent_grants(tx: &Statements<'_>, id: uuid::Uuid) -> SidResult<()> {
+    for query in [
+        "MATCH (g:SidClaimGrant) WHERE g.consent_id = $id DETACH DELETE g",
+        "MATCH (s:SidConsentScope) WHERE s.consent_id = $id DETACH DELETE s",
+    ] {
+        tx.run(query, Params::default().with("id", uuid(&id)))?;
+    }
+    Ok(())
+}
+
 /// Delete in `tx` the consents, grants and linked identities of `profile`.
 pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
     let rows = tx.run(
@@ -266,10 +428,7 @@ pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) ->
         Params::default().with("id", bin(profile.as_bytes())),
     )?;
     for row in &rows {
-        tx.run(
-            "MATCH (g:SidClaimGrant) WHERE g.consent_id = $id DETACH DELETE g",
-            Params::default().with("id", uuid(&get_uuid(row, "id")?)),
-        )?;
+        delete_consent_grants(tx, get_uuid(row, "id")?)?;
     }
     for query in [
         "MATCH (c:SidConsent) WHERE c.profile_id = $id DETACH DELETE c",
@@ -315,27 +474,7 @@ impl CoordinodeBackend {
             {
                 return Err(SidError::Conflict("consent already exists".into()));
             }
-            tx.run(
-                "CREATE (c:SidConsent {id: $id, pair: $pair, profile_id: $profile_id,
-                    client_id: $client_id, status: $status, consented_at: $consented_at,
-                    revoked_at: $revoked_at, updated_at: $updated_at})",
-                Params::default()
-                    .with("id", uuid(&c.id.0))
-                    .with(
-                        "pair",
-                        key(&[c.profile_id.as_bytes(), c.client_id.as_bytes()])?,
-                    )
-                    .with("profile_id", bin(c.profile_id.as_bytes()))
-                    .with("client_id", Value::String(c.client_id.clone()))
-                    .with("status", Value::String(c.status.as_str().into()))
-                    .with("consented_at", time(c.consented_at))
-                    .with("revoked_at", opt_time(c.revoked_at))
-                    .with("updated_at", time(c.updated_at)),
-            )?;
-            for g in &c.grants {
-                insert_claim(tx, c.id, g)?;
-            }
-            Ok(())
+            insert_consent(tx, &c)
         })
         .await
     }
@@ -373,8 +512,14 @@ impl CoordinodeBackend {
                         consent_id: id,
                         claim_name: claim_name.clone(),
                         claim_type,
+                        // Account management grants a snapshot; the user
+                        // chooses updates in a consent review.
+                        mode: ConsentMode::Static,
                         granted_at: now,
                         revoked_at: None,
+                        // No reviewed value: it discloses nothing until a
+                        // consent review records one.
+                        disclosed: None,
                     };
                     insert_claim(tx, id, &g)?;
                     true
@@ -382,7 +527,9 @@ impl CoordinodeBackend {
                 (ClaimDecision::Grant(claim_type), Some(g)) if g.revoked_at.is_some() => {
                     tx.run(
                         "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
-                         SET g.claim_type = $claim_type, g.granted_at = $now, g.revoked_at = null",
+                         SET g.claim_type = $claim_type, g.granted_at = $now, g.revoked_at = null,
+                             g.mode = 'static',
+                             g.disclosed_value = null, g.disclosed_verified = null",
                         Params::default()
                             .with("pair", pair)
                             .with("claim_type", Value::String(claim_type.as_str().into()))
@@ -418,6 +565,79 @@ impl CoordinodeBackend {
             )?;
             finalize(tx, &format!("consent:{}", id.0), ctx.clone())?;
             Ok(Decision::Commit(ClaimGrantChange::Changed))
+        })
+        .await
+    }
+
+    /// Deliver a subscription's replacement of the active consent `id`'s
+    /// disclosure, all or nothing: every grant is read and written in one
+    /// transaction, so a concurrent decision on any of them conflicts.
+    pub(super) async fn deliver_subscribed(
+        &self,
+        held: &ConsentRecord,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> SidResult<Option<ConsentRecord>> {
+        let id = held.id;
+        let updates = updates.to_vec();
+        let delivered = held.with_delivery(&updates);
+        let held = held.clone();
+        self.transaction(move |tx| {
+            // The consent read whole in this transaction is one snapshot;
+            // every decision, revocation or deletion writes the consent
+            // node, which this commit writes too, so a change committed
+            // after this read conflicts with it.
+            let unchanged =
+                consents_where(tx, "c.id = $id", Params::default().with("id", uuid(&id.0)))?
+                    .pop()
+                    .is_some_and(|c| c.status.is_active() && c.same_state(&held));
+            if !unchanged {
+                return Ok(Decision::Abandon(None));
+            }
+            for update in &updates {
+                let pair = claim_pair(id, &update.claim_name)?;
+                let active = tx
+                    .run(
+                        &format!("MATCH (g:SidClaimGrant) WHERE g.pair = $pair RETURN {CLAIM}"),
+                        Params::default().with("pair", pair.clone()),
+                    )?
+                    .first()
+                    .map(claim)
+                    .transpose()?
+                    .is_some_and(|g| g.is_active());
+                if !active {
+                    return Err(SidError::Storage(format!(
+                        "deliver subscribed: claim {} is not active in the consent read",
+                        update.claim_name
+                    )));
+                }
+                tx.run(
+                    "MATCH (g:SidClaimGrant) WHERE g.pair = $pair
+                     SET g.disclosed_value = $value, g.disclosed_verified = $verified",
+                    Params::default()
+                        .with("pair", pair)
+                        .with(
+                            "value",
+                            opt_text(update.next.as_ref().map(|d| d.value.as_str())),
+                        )
+                        .with(
+                            "verified",
+                            update
+                                .next
+                                .as_ref()
+                                .and_then(|d| d.verified)
+                                .map_or(Value::Null, Value::Bool),
+                        ),
+                )?;
+            }
+            tx.run(
+                "MATCH (c:SidConsent) WHERE c.id = $id SET c.updated_at = $now",
+                Params::default()
+                    .with("id", uuid(&id.0))
+                    .with("now", time(delivered.updated_at)),
+            )?;
+            finalize(tx, &format!("consent:{}", id.0), ctx.clone())?;
+            Ok(Decision::Commit(Some(delivered.clone())))
         })
         .await
     }
@@ -521,11 +741,8 @@ impl CoordinodeBackend {
             if super::get_count(&rows)? == 0 {
                 return Ok(Decision::Abandon(false));
             }
-            // Its claim grants go with it.
-            tx.run(
-                "MATCH (g:SidClaimGrant) WHERE g.consent_id = $id DETACH DELETE g",
-                Params::default().with("id", uuid(&id.0)),
-            )?;
+            // Its claim and scope grants go with it.
+            delete_consent_grants(tx, id.0)?;
             finalize(tx, &format!("consent:{}", id.0), ctx.clone())?;
             Ok(Decision::Commit(true))
         })

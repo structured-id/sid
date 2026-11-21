@@ -59,6 +59,7 @@ fn create_test_client() -> OAuth2Client {
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,
@@ -107,11 +108,11 @@ fn test_authentication() -> sid_core::models::GrantAuthentication {
     }
 }
 
-fn create_test_profile() -> Profile {
-    Profile::new(Some("alice"))
+fn create_test_profile() -> sid_core::models::Profile {
+    sid_core::models::Profile::new(Some("alice"))
 }
 
-fn create_test_session(profile: &Profile) -> Session {
+fn create_test_session(profile: &sid_core::models::Profile) -> Session {
     Session::new(
         profile.id,
         None,
@@ -385,12 +386,7 @@ async fn test_issue_tokens() {
             Some("nonce123"),
             None,
             None,
-            Some(IdTokenSource {
-                profile: &profile,
-                email: None,
-                phone: None,
-                presentation: None,
-            }),
+            Some(IdTokenSource { presentation: None }),
         )
         .expect("Token issuance should succeed");
 
@@ -480,9 +476,6 @@ async fn the_id_token_alone_carries_the_binding_presentation() {
             None,
             None,
             Some(IdTokenSource {
-                profile: &profile,
-                email: None,
-                phone: None,
                 presentation: Some(&presentation),
             }),
         )

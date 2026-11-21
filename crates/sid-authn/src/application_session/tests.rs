@@ -393,6 +393,8 @@ async fn a_sign_in_completes_across_replicas() {
         .unwrap()
         .unwrap();
     assert_eq!(session.claims.sub, "subject-1");
+    // The Profile claims the issuer disclosed in the verified ID token are
+    // kept as received.
     assert_eq!(
         session.claims.email.as_deref(),
         Some("user@sid.example.com")

@@ -14,6 +14,7 @@ extern crate self as sid_plugin;
 
 pub mod audit;
 pub mod auth;
+pub mod authorization_operation;
 pub mod blob_store;
 pub mod cache;
 pub mod ceremony_state;

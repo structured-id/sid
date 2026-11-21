@@ -21,6 +21,7 @@ use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
+mod authorization_operation;
 mod backend;
 mod binding;
 mod branding;
@@ -325,6 +326,11 @@ where
             Decision::Commit(answer) => match db.commit_transaction(id) {
                 Ok(_) => return Ok(answer),
                 Err(e) if contention(&e) => continue,
+                // A statement already refuses a value its snapshot shows
+                // held, so a unique value refused at commit was taken by a
+                // commit after the snapshot. The commit applied nothing; the
+                // run again decides on what that commit left.
+                Err(DatabaseError::UniqueViolation { .. }) => continue,
                 Err(e) => return Err(storage(e)),
             },
         }
@@ -581,6 +587,16 @@ pub(super) fn get_bool(row: &Row, name: &str) -> SidResult<bool> {
     match field(row, name)? {
         Value::Bool(v) => Ok(*v),
         other => Err(SidError::Storage(format!(
+            "{name} is not a boolean: {other:?}"
+        ))),
+    }
+}
+
+pub(super) fn get_opt_bool(row: &Row, name: &str) -> SidResult<Option<bool>> {
+    match row.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(v)) => Ok(Some(*v)),
+        Some(other) => Err(SidError::Storage(format!(
             "{name} is not a boolean: {other:?}"
         ))),
     }

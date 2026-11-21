@@ -65,7 +65,8 @@ fn baseline() -> LoginRequirements {
 }
 
 /// The services, the host policy they read and a bearer token of a basic
-/// password session that began `minutes_ago`.
+/// password session that began `minutes_ago`, of a holder who already
+/// approved the test client: these tests judge the login policy alone.
 async fn signed_in(minutes_ago: i64) -> (TestServices, Arc<HostPolicy>, String) {
     let profile = test_profile();
     let policy = HostPolicy::new();
@@ -75,6 +76,7 @@ async fn signed_in(minutes_ago: i64) -> (TestServices, Arc<HostPolicy>, String) 
             .with_client(test_client()),
         policy.clone(),
     );
+    common::consented(&*svc.storage, profile.id, "test-client").await;
     let mut session = common::authenticated_session(&profile, AuthLevel::Basic, minutes_ago);
     session.amr = vec!["pwd".to_string()];
     let token = common::stored_session_token(&svc, &profile, session).await;
@@ -139,6 +141,7 @@ async fn a_factor_enabled_later_asks_an_existing_session_to_step_up() {
             .with_client(test_client()),
         HostPolicy::new(),
     );
+    common::consented(&*svc.storage, profile.id, "test-client").await;
     let mut session = common::authenticated_session(&profile, AuthLevel::Basic, 0);
     session.amr = vec!["pwd".to_string()];
     let token = common::stored_session_token(&svc, &profile, session).await;

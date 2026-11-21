@@ -233,8 +233,8 @@ time = "0.3"
 # Identifier packages of the StructuredID SDK. The SDK's own tests build
 # these crates with its workspace copies patched in; accepting the next minor
 # lets that build resolve one copy while it is not published yet.
-sid-ids = { version = ">=0.8, <0.10", default-features = false }
-sid-ids-proto = "0.1.9"
+sid-ids = { version = ">=0.9, <0.11", default-features = false }
+sid-ids-proto = "0.1.10"
 
 # Workspace crates
 # The engine closure carries versions: a packaged consumer resolves these

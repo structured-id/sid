@@ -38,6 +38,7 @@ use tracing::warn;
 use crate::rate_limit::{RateLimitStats, RateLimiter};
 
 pub mod authorization;
+pub mod consent;
 pub mod device_approval;
 pub mod end_session;
 mod grants;

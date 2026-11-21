@@ -109,6 +109,7 @@ fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2C
         backchannel_logout_session_required: false,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
+        claim_requests: vec![],
         login_strategy: LoginStrategy::LocalFirst,
         show_federation_button: true,
         federation_timeout_ms: 500,

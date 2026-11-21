@@ -421,7 +421,7 @@ impl<C: ApplicationClient> BrowserSessions<C> {
             )
             .await
             .map_err(|e| SignInFailure::IssuerFailed(format!("code redemption: {e}")))?;
-        let mut claims = SessionClaims::from(
+        let claims = SessionClaims::from(
             self.issuers
                 .issued_access_token(
                     &connection.issuer,
@@ -433,8 +433,10 @@ impl<C: ApplicationClient> BrowserSessions<C> {
                     SignInFailure::IssuerFailed(format!("not a token for the API: {e}"))
                 })?,
         );
-        // The ID token is this sign-in's (its nonce) and the user's profile
-        // claims come from it; an access token carries none (RFC 9068 §2.2).
+        // The ID token is this sign-in's (its nonce) and names its user, with
+        // the Profile claims its issuer disclosed to this client there, if
+        // any: they are taken from the verified token as received. A SID
+        // issuer puts none there; a session then holds only its subject.
         let id_token = tokens
             .id_token
             .as_deref()
@@ -456,9 +458,12 @@ impl<C: ApplicationClient> BrowserSessions<C> {
                 "the ID and access tokens name different users".into(),
             ));
         }
-        claims.email = identity.email;
-        claims.name = identity.name;
-        claims.preferred_username = identity.preferred_username;
+        let claims = SessionClaims {
+            email: identity.email,
+            name: identity.name,
+            preferred_username: identity.preferred_username,
+            ..claims
+        };
         // A callback that arrives after the issuer ended this issuer session
         // opens nothing (Back-Channel Logout 1.0 §2.7).
         if self

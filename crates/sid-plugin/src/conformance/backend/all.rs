@@ -140,11 +140,28 @@ macro_rules! __storage_conformance {
                 test_flow_configs
                 test_email_provider_config
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],authorization_operation:
+                test_authorization_operation_roundtrip
+                test_approval_commits_its_consent
+                test_approval_of_changed_values_is_stale
+                test_reapproval_after_revocation_grants_only_the_approval
+                test_denial_grants_nothing
+                test_decision_needs_its_session_and_lifetime
+                test_concurrent_decisions_record_one
+                test_completion_issues_one_code
+                test_denial_and_expiry_at_completion
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],consent:
+                test_consent_reads_back_grants_and_scopes
                 test_create_consent_never_replaces
                 test_change_claim_grant
                 test_claim_grant_keeps_ended_consent_ended
                 test_claim_grants_under_concurrency
+                test_regranted_claim_is_an_unreviewed_snapshot
+                test_profile_with_contacts_reads_one_state
+                test_subscribed_delivery_commits_over_the_consent_read
+                test_subscribed_delivery_yields_to_a_later_decision
+                test_subscribed_delivery_under_concurrency
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],device:
                 test_create_device_never_replaces

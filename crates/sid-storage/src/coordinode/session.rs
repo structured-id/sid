@@ -284,6 +284,7 @@ fn delete_owned(tx: &Statements<'_>, id: SessionId) -> SidResult<()> {
         "MATCH (g:SidNativeGeneration) WHERE g.session_id = $id DETACH DELETE g",
         "MATCH (t:SidRefreshToken) WHERE t.session_id = $id DETACH DELETE t",
         "MATCH (a:SidAuthCode) WHERE a.authorizing_session_id = $id DETACH DELETE a",
+        "MATCH (o:SidAuthorizationOperation) WHERE o.session_id = $id DETACH DELETE o",
     ] {
         tx.run(query, params())?;
     }
@@ -343,6 +344,7 @@ pub(super) fn delete_profile_grants(tx: &Statements<'_>, profile: ProfileId) -> 
         "MATCH (s:SidSession) WHERE s.profile_id = $profile DETACH DELETE s",
         "MATCH (t:SidRefreshToken) WHERE t.profile_id = $profile DETACH DELETE t",
         "MATCH (a:SidAuthCode) WHERE a.profile_id = $profile DETACH DELETE a",
+        "MATCH (o:SidAuthorizationOperation) WHERE o.profile_id = $profile DETACH DELETE o",
     ] {
         tx.run(
             query,
@@ -957,26 +959,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let code = code.clone();
         self.mutate(format!("auth_code:{}", code.client_id), ctx, move |tx| {
-            if !tx
-                .run(
-                    "MATCH (a:SidAuthCode) WHERE a.code_hash = $hash RETURN a.code_hash AS h",
-                    Params::default().with("hash", Value::Binary(code.code_hash.clone())),
-                )?
-                .is_empty()
-            {
-                return Err(SidError::Conflict(
-                    "authorization code already exists".into(),
-                ));
-            }
-            let auth = &code.authentication;
-            check_levels(auth.assurance_level, auth.elevation)?;
-            // A logout racing the authorization either ends the session first,
-            // and no code is stored, or conflicts with this commit and finds
-            // the code to end with it.
-            if !claim_session(tx, auth.session)? {
-                return Err(SidError::NotFound(format!("session {}", auth.session)));
-            }
-            insert_code(tx, &code)
+            store_code(tx, &code)
         })
         .await
     }
@@ -1271,6 +1254,31 @@ fn session_grants(tx: &Statements<'_>, id: SessionId) -> SidResult<SessionGrants
         authorization_codes,
         native_generations,
     })
+}
+
+/// Store a newly issued `code` in `tx`, under the session that authorized
+/// it; an existing code hash is a `Conflict`, an ended session `NotFound`.
+pub(super) fn store_code(tx: &Statements<'_>, code: &AuthorizationCode) -> SidResult<()> {
+    if !tx
+        .run(
+            "MATCH (a:SidAuthCode) WHERE a.code_hash = $hash RETURN a.code_hash AS h",
+            Params::default().with("hash", Value::Binary(code.code_hash.clone())),
+        )?
+        .is_empty()
+    {
+        return Err(SidError::Conflict(
+            "authorization code already exists".into(),
+        ));
+    }
+    let auth = &code.authentication;
+    check_levels(auth.assurance_level, auth.elevation)?;
+    // A logout racing the authorization either ends the session first, and
+    // no code is stored, or conflicts with this commit and finds the code to
+    // end with it.
+    if !claim_session(tx, auth.session)? {
+        return Err(SidError::NotFound(format!("session {}", auth.session)));
+    }
+    insert_code(tx, code)
 }
 
 /// Store `code` in `tx` as given, its redemption included.

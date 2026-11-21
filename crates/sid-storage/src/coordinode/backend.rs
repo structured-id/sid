@@ -501,6 +501,13 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::get_profile(self, id).await
     }
 
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> Result<Option<sid_plugin::storage::ProfileContacts>> {
+        CoordinodeBackend::get_profile_with_primary_contacts(self, id).await
+    }
+
     async fn get_profile_by_username(&self, username: &str) -> Result<Option<Profile>> {
         CoordinodeBackend::get_profile_by_username(self, username).await
     }
@@ -725,6 +732,15 @@ impl StorageBackend for CoordinodeBackend {
         ctx: MutationContext,
     ) -> Result<sid_core::models::consent::ClaimGrantChange> {
         CoordinodeBackend::change_claim_grant(self, id, claim_name, decision, ctx).await
+    }
+
+    async fn deliver_subscribed(
+        &self,
+        held: &ConsentRecord,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> Result<Option<ConsentRecord>> {
+        CoordinodeBackend::deliver_subscribed(self, held, updates, ctx).await
     }
 
     async fn get_consent(&self, id: ConsentId) -> Result<Option<ConsentRecord>> {

@@ -321,12 +321,16 @@ fn primary_of(profile: ProfileId, is_primary: bool) -> Value {
 }
 
 /// Take the primary flag from `profile`'s primary contact of `label` at `at`.
+/// Every move of a primary claims the profile node first, so it conflicts
+/// with a transaction holding the primary contacts as read, a first
+/// primary that had no node yet included ([`held_claim_values`]).
 fn clear_primary(
     tx: &Statements<'_>,
     label: &str,
     profile: ProfileId,
     at: Timestamp,
 ) -> SidResult<()> {
+    touch_profile(tx, profile)?;
     tx.run(
         &format!(
             "MATCH (c:{label}) WHERE c.primary_of = $profile
@@ -459,7 +463,19 @@ pub(super) fn upsert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResu
     )?;
     if updated.is_empty() {
         insert_email(tx, email)?;
+    } else if email.is_primary {
+        touch_profile(tx, email.profile_id)?;
     }
+    Ok(())
+}
+
+/// Write the profile node, when it exists, so this transaction conflicts
+/// with one holding its primary contacts as read ([`held_claim_values`]).
+fn touch_profile(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
+    tx.run(
+        "MATCH (p:SidProfile) WHERE p.id = $id SET p.turn = coalesce(p.turn, 0) + 1",
+        Params::default().with("id", profile_value(profile)),
+    )?;
     Ok(())
 }
 
@@ -503,6 +519,8 @@ pub(super) fn upsert_phone(tx: &Statements<'_>, phone: &ProfilePhone) -> SidResu
     )?;
     if updated.is_empty() {
         insert_phone(tx, phone)?;
+    } else if phone.is_primary {
+        touch_profile(tx, phone.profile_id)?;
     }
     Ok(())
 }
@@ -597,6 +615,37 @@ fn primary<T>(
     rows.first().map(decode).transpose()
 }
 
+/// The claim values of Profile `profile` read in `tx`, with the profile
+/// node and its primary contact nodes written in `tx` too: a change of any
+/// of them committed by another transaction then conflicts with this one,
+/// so the values stay as read until it commits. A primary contact added
+/// where none existed claims the profile node and conflicts as well.
+pub(super) fn held_claim_values(
+    tx: &Statements<'_>,
+    profile: ProfileId,
+) -> SidResult<Vec<(&'static str, sid_core::models::DisclosedValue)>> {
+    let Some(found) = get(tx, profile)? else {
+        return Ok(Vec::new());
+    };
+    claim_profile(tx, profile)?;
+    for label in ["SidEmail", "SidPhone"] {
+        tx.run(
+            &format!(
+                "MATCH (c:{label}) WHERE c.primary_of = $profile
+                 SET c.turn = coalesce(c.turn, 0) + 1"
+            ),
+            Params::default().with("profile", profile_value(profile)),
+        )?;
+    }
+    let email = primary(tx, "SidEmail", EMAIL, profile, email)?;
+    let phone = primary(tx, "SidPhone", PHONE, profile, phone)?;
+    Ok(sid_core::models::consent::claim_values(
+        &found,
+        email.as_ref(),
+        phone.as_ref(),
+    ))
+}
+
 /// Make `id` of `label` `profile`'s primary contact at `at`; false when the
 /// profile has no such contact.
 fn set_primary(
@@ -634,6 +683,25 @@ fn set_primary(
 impl CoordinodeBackend {
     pub(super) async fn get_profile(&self, id: ProfileId) -> SidResult<Option<Profile>> {
         self.read(move |tx| get(tx, id)).await
+    }
+
+    /// Profile `id` with its primary contacts, read in one transaction and
+    /// so from one snapshot.
+    pub(super) async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        self.read(move |tx| {
+            let Some(profile) = get(tx, id)? else {
+                return Ok(None);
+            };
+            Ok(Some(sid_plugin::storage::ProfileContacts {
+                profile,
+                email: primary(tx, "SidEmail", EMAIL, id, email)?,
+                phone: primary(tx, "SidPhone", PHONE, id, phone)?,
+            }))
+        })
+        .await
     }
 
     pub(super) async fn get_profile_by_username(

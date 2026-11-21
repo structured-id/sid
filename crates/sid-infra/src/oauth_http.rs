@@ -405,6 +405,21 @@ pub fn sign_in(login: &url::Url, authorize_url: &url::Url) -> Response<HttpBody>
     redirect(&url)
 }
 
+/// The consent page `page`, told the operation it reviews and the issuer's
+/// continuation it returns to after the decision (`rd`), which carries no
+/// code or destination of its own.
+pub fn consent(
+    page: &url::Url,
+    operation: impl std::fmt::Display,
+    continuation: &url::Url,
+) -> Response<HttpBody> {
+    let mut url = page.clone();
+    url.query_pairs_mut()
+        .append_pair("operation", &operation.to_string())
+        .append_pair("rd", continuation.as_str());
+    redirect(&url)
+}
+
 /// A token endpoint refusal as an [`ApiError`]: `ErrorInfo.metadata["oauthError"]`
 /// carries the RFC 6749 §5.2 `error` code [`refusal`] answers with.
 pub fn token_error(error: TokenError, message: impl Into<Cow<'static, str>>) -> ApiError {

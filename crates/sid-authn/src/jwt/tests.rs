@@ -6,25 +6,12 @@ fn generate_test_keys() -> (Vec<u8>, Vec<u8>) {
     (private_pem.to_vec(), public_pem.to_vec())
 }
 
+use sid_core::models::Profile;
+
 fn create_test_profile() -> Profile {
     let mut profile = Profile::new(Some("alice"));
     profile.given_name = Some("Alice".to_string());
     profile
-}
-
-fn create_test_email() -> ProfileEmail {
-    ProfileEmail {
-        id: sid_core::models::ProfileEmailId::new(),
-        profile_id: sid_core::models::ProfileId::generate(),
-        email: "alice@sid.example.com".to_string(),
-        label: sid_core::models::EmailLabel::Personal,
-        custom_label: None,
-        is_primary: true,
-        verified: true,
-        verified_at: None,
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-    }
 }
 
 fn create_test_session(profile: &Profile) -> Session {
@@ -35,24 +22,15 @@ fn create_test_session(profile: &Profile) -> Session {
     )
 }
 
-/// Helper: issue_id_token with default primary email, no phone
+/// An ID token of `profile`'s `session` for the test client.
 fn issue_test_id_token(
     jwt: &JwtService,
     profile: &Profile,
     session: &Session,
     nonce: Option<&str>,
 ) -> String {
-    let email = create_test_email();
-    jwt.issue_id_token(
-        &profile.id.to_string(),
-        profile,
-        session,
-        "test-client",
-        nonce,
-        Some(&email),
-        None,
-    )
-    .expect("ID token issuance failed")
+    jwt.issue_id_token(&profile.id.to_string(), session, "test-client", nonce)
+        .expect("ID token issuance failed")
 }
 
 /// The installation's first-start key is made in process (no `openssl`
@@ -368,11 +346,6 @@ fn test_id_token() {
     assert_eq!(token_data.claims.sub, profile.id.to_string());
     assert_eq!(token_data.claims.aud, "test-client");
     assert_eq!(token_data.claims.nonce.as_deref(), Some("test-nonce-123"));
-    assert_eq!(
-        token_data.claims.email.as_deref(),
-        Some("alice@sid.example.com")
-    );
-    assert_eq!(token_data.claims.email_verified, Some(true));
     assert_eq!(
         token_data.claims.auth_time,
         session.authenticated_at.as_second()
@@ -926,10 +899,16 @@ fn test_elevated_token_ends_with_its_elevation() {
     assert!(lapsed.exp > until.as_second());
 }
 
-// ── OIDC §5.1 Standard Claims tests ──
+// ── OIDC Core 1.0 §5.4 claim location ──
 
+/// An ID token carries the authentication and the subject only: no name,
+/// username, contact or update time, however full the Profile. Every flow
+/// issuing it also issues an access token, so the claims the scopes ask for
+/// reach the recipient through UserInfo, from the holder's approved
+/// disclosure (consent-flow.md, OIDC scope requests). Before, it carried the
+/// live Profile's names and contacts whatever the holder chose.
 #[test]
-fn test_id_token_structured_name_claims() {
+fn an_id_token_carries_no_profile_claims() {
     let (private_pem, public_pem) = generate_test_keys();
     let jwt = JwtService::new(
         &private_pem,
@@ -937,298 +916,33 @@ fn test_id_token_structured_name_claims() {
         "https://sid.example.com".to_string(),
     )
     .unwrap();
-
     let mut profile = create_test_profile();
     profile.given_name = Some("Alice".to_string());
     profile.family_name = Some("Smith".to_string());
     profile.middle_name = Some("Marie".to_string());
     let session = create_test_session(&profile);
 
-    let token = issue_test_id_token(&jwt, &profile, &session, None);
+    let token = issue_test_id_token(&jwt, &profile, &session, Some("n-1"));
+    let payload = token.split('.').nth(1).unwrap();
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
 
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert_eq!(token_data.claims.given_name.as_deref(), Some("Alice"));
-    assert_eq!(token_data.claims.family_name.as_deref(), Some("Smith"));
-    assert_eq!(token_data.claims.middle_name.as_deref(), Some("Marie"));
-    assert_eq!(token_data.claims.name.as_deref(), Some("Alice Marie Smith"));
-}
-
-#[test]
-fn test_id_token_mononym_no_family_name() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let mut profile = create_test_profile();
-    profile.given_name = Some("Bono".to_string());
-    profile.family_name = None;
-    profile.middle_name = None;
-    let session = create_test_session(&profile);
-
-    let token = issue_test_id_token(&jwt, &profile, &session, None);
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert_eq!(token_data.claims.given_name.as_deref(), Some("Bono"));
-    assert!(token_data.claims.family_name.is_none());
-    assert!(token_data.claims.middle_name.is_none());
-    assert_eq!(token_data.claims.name.as_deref(), Some("Bono"));
-}
-
-#[test]
-fn test_id_token_no_name_fields() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let mut profile = create_test_profile();
-    profile.given_name = None;
-    profile.family_name = None;
-    profile.middle_name = None;
-    let session = create_test_session(&profile);
-
-    let token = issue_test_id_token(&jwt, &profile, &session, None);
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert!(token_data.claims.given_name.is_none());
-    assert!(token_data.claims.family_name.is_none());
-    assert!(token_data.claims.middle_name.is_none());
-    assert!(token_data.claims.name.is_none());
-}
-
-#[test]
-fn test_id_token_phone_claims_absent_without_profile_phone() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let profile = create_test_profile();
-    let session = create_test_session(&profile);
-
-    let token = issue_test_id_token(&jwt, &profile, &session, None);
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    // Profile.phone is None → phone claims absent
-    assert!(token_data.claims.phone_number.is_none());
-    assert!(token_data.claims.phone_number_verified.is_none());
-}
-
-#[test]
-fn test_id_token_phone_claims_present_when_verified() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let profile = create_test_profile();
-    let session = create_test_session(&profile);
-    let email = create_test_email();
-    let phone = ProfilePhone {
-        id: sid_core::models::ProfilePhoneId::new(),
-        profile_id: profile.id,
-        e164: 380501234567,
-        extension: None,
-        label: sid_core::models::PhoneLabel::Mobile,
-        custom_label: None,
-        is_primary: true,
-        can_receive_sms: true,
-        can_receive_fax: false,
-        can_receive_voice: true,
-        verified: true,
-        verified_at: None,
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-    };
-
-    let token = jwt
-        .issue_id_token(
-            &profile.id.to_string(),
-            &profile,
-            &session,
-            "test-client",
-            None,
-            Some(&email),
-            Some(&phone),
-        )
-        .unwrap();
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert_eq!(
-        token_data.claims.phone_number.as_deref(),
-        Some("+380501234567")
-    );
-    assert_eq!(token_data.claims.phone_number_verified, Some(true));
-}
-
-#[test]
-fn test_id_token_phone_claims_present_unverified() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let profile = create_test_profile();
-    let session = create_test_session(&profile);
-    let email = create_test_email();
-    let phone = ProfilePhone {
-        id: sid_core::models::ProfilePhoneId::new(),
-        profile_id: profile.id,
-        e164: 14155551234,
-        extension: None,
-        label: sid_core::models::PhoneLabel::Mobile,
-        custom_label: None,
-        is_primary: true,
-        can_receive_sms: true,
-        can_receive_fax: false,
-        can_receive_voice: true,
-        verified: false,
-        verified_at: None,
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-    };
-
-    let token = jwt
-        .issue_id_token(
-            &profile.id.to_string(),
-            &profile,
-            &session,
-            "test-client",
-            None,
-            Some(&email),
-            Some(&phone),
-        )
-        .unwrap();
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert_eq!(
-        token_data.claims.phone_number.as_deref(),
-        Some("+14155551234")
-    );
-    assert_eq!(token_data.claims.phone_number_verified, Some(false));
-}
-
-#[test]
-fn test_id_token_updated_at_claim() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let profile = create_test_profile();
-    let expected_updated_at = profile.updated_at.as_second();
-    let session = create_test_session(&profile);
-
-    let token = issue_test_id_token(&jwt, &profile, &session, None);
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    assert_eq!(token_data.claims.updated_at, Some(expected_updated_at));
-}
-
-#[test]
-fn test_id_token_email_verified_absent_when_no_email() {
-    let (private_pem, public_pem) = generate_test_keys();
-    let jwt = JwtService::new(
-        &private_pem,
-        &public_pem,
-        "https://sid.example.com".to_string(),
-    )
-    .unwrap();
-
-    let profile = create_test_profile();
-    let session = create_test_session(&profile);
-    // No primary email → email claims should be absent
-    let token = jwt
-        .issue_id_token(
-            &profile.id.to_string(),
-            &profile,
-            &session,
-            "test-client",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&["https://sid.example.com"]);
-    validation.set_audience(&["test-client"]);
-    validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
-
-    let token_data: TokenData<IdTokenClaims> =
-        decode(&token, &jwt.decoding_key, &validation).unwrap();
-
-    // No email → email_verified should be absent (not false)
-    assert!(token_data.claims.email.is_none());
-    assert!(token_data.claims.email_verified.is_none());
+    for name in [
+        "name",
+        "given_name",
+        "family_name",
+        "middle_name",
+        "preferred_username",
+        "email",
+        "email_verified",
+        "phone_number",
+        "phone_number_verified",
+        "updated_at",
+    ] {
+        assert!(claims.get(name).is_none(), "{name} in {claims}");
+    }
+    assert_eq!(claims["sub"], profile.id.to_string());
+    assert_eq!(claims["nonce"], "n-1");
 }
 
 /// The token of a sign-in still owing its second factor authenticates

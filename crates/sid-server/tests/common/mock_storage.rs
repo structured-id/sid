@@ -34,6 +34,11 @@ pub struct MockStorageInner {
     principal_unique: HashSet<(String, String)>,
     /// Consent records: consent_id → ConsentRecord.
     consents: HashMap<Uuid, consent::ConsentRecord>,
+    /// Browser authorization operations by id.
+    authorization_operations: HashMap<
+        sid_core::models::AuthorizationOperationId,
+        sid_core::models::AuthorizationOperation,
+    >,
     /// Anomaly event records.
     anomaly_events: Vec<AnomalyEventRecord>,
     /// Profile emails: email_id → ProfileEmail.
@@ -92,6 +97,9 @@ pub struct MockStorageInner {
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
+    /// See [`MockStorage::lose_next_delivery_reply`].
+    delivery_reply_lost: Option<bool>,
+    consent_reads_fail: bool,
     /// The next contact settings edit finds its contact made primary by a
     /// move committed after the editor read it.
     primary_moved_before_contact_edit: bool,
@@ -511,6 +519,15 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_contact_reads(&self) {
         self.inner.lock().unwrap().contact_reads_fail = true;
+    }
+
+    /// The next subscribed delivery commits and then reports an error, as a
+    /// commit whose reply was lost; with `then_consents_unreadable`, reading
+    /// consents fails from then on.
+    #[allow(dead_code)]
+    pub fn lose_next_delivery_reply(&self, then_consents_unreadable: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.delivery_reply_lost = Some(then_consents_unreadable);
     }
 
     /// The next contact settings edit finds its contact made primary since
@@ -1665,6 +1682,134 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
 /// The double registers no entry connection: none is found, and a write is
 /// refused, so a test that needs one uses a real store.
 #[async_trait]
+impl sid_plugin::authorization_operation::AuthorizationOperationStore for MockStorage {
+    async fn create_authorization_operation(
+        &self,
+        operation: &sid_core::models::AuthorizationOperation,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.authorization_operations.contains_key(&operation.id) {
+            return Err(sid_core::Error::Conflict(
+                "authorization operation exists".into(),
+            ));
+        }
+        inner
+            .authorization_operations
+            .insert(operation.id, operation.clone());
+        Ok(())
+    }
+
+    async fn authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+    ) -> SidResult<Option<sid_core::models::AuthorizationOperation>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .authorization_operations
+            .get(&id)
+            .cloned())
+    }
+
+    async fn decide_authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+        session: SessionId,
+        revision: u64,
+        decision: &sid_core::models::AuthorizationDecision,
+        shown: &[(String, Option<sid_core::models::DisclosedValue>)],
+        now: jiff::Timestamp,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::DecisionOutcome> {
+        use sid_core::models::{AuthorizationDecision, DecisionOutcome, DecisionStep};
+        // The one lock orders it as the stores' row lock does.
+        let mut inner = self.inner.lock().unwrap();
+        let Some(held) = inner.authorization_operations.get(&id).cloned() else {
+            return Ok(DecisionOutcome::NotFound);
+        };
+        let decided = match held.decide(session, revision, decision, now) {
+            DecisionStep::Apply(decided) => *decided,
+            DecisionStep::Replayed => {
+                inner.complete(&ctx)?;
+                return Ok(DecisionOutcome::Replayed(held));
+            }
+            DecisionStep::Conflict => return Ok(DecisionOutcome::Conflict),
+            DecisionStep::NotFound => return Ok(DecisionOutcome::NotFound),
+        };
+        if matches!(decision, AuthorizationDecision::Approve { .. }) {
+            let owner = decided.profile_id;
+            let values = inner
+                .profiles
+                .get(&owner)
+                .map(|profile| {
+                    sid_core::models::consent::claim_values(
+                        profile,
+                        inner
+                            .profile_emails
+                            .values()
+                            .find(|e| e.profile_id == owner && e.is_primary),
+                        inner
+                            .profile_phones
+                            .values()
+                            .find(|p| p.profile_id == owner && p.is_primary),
+                    )
+                })
+                .unwrap_or_default();
+            if decided.shown(&values) != shown {
+                return Ok(DecisionOutcome::Stale);
+            }
+        }
+        if let AuthorizationDecision::Approve { choices } = decision {
+            let held_consent = inner
+                .consents
+                .values()
+                .find(|c| c.profile_id == decided.profile_id && c.client_id == decided.client_id)
+                .cloned();
+            let consent = decided.approved_consent(held_consent, choices);
+            inner.consents.insert(consent.id.0, consent);
+        }
+        inner.complete(&ctx)?;
+        inner.authorization_operations.insert(id, decided.clone());
+        Ok(DecisionOutcome::Recorded(decided))
+    }
+
+    async fn complete_authorization_operation(
+        &self,
+        id: sid_core::models::AuthorizationOperationId,
+        code: Option<&AuthorizationCode>,
+        now: jiff::Timestamp,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::CompletionOutcome> {
+        use sid_core::models::{AuthorizationStatus, CompletionOutcome};
+        let mut inner = self.inner.lock().unwrap();
+        let completable = inner
+            .authorization_operations
+            .get(&id)
+            .is_some_and(|held| held.completable_at(now));
+        if !completable {
+            return Ok(CompletionOutcome::NotDecided);
+        }
+        if let Some(code) = code {
+            if inner.auth_codes_by_hash.contains_key(&code.code_hash) {
+                return Err(sid_core::Error::Conflict(
+                    "authorization code exists".into(),
+                ));
+            }
+            inner
+                .auth_codes_by_hash
+                .insert(code.code_hash.clone(), code.clone());
+        }
+        inner.complete(&ctx)?;
+        if let Some(held) = inner.authorization_operations.get_mut(&id) {
+            held.status = AuthorizationStatus::Completed;
+        }
+        Ok(CompletionOutcome::Completed)
+    }
+}
+
+#[async_trait]
 impl sid_plugin::entry_connection::EntryConnectionStore for MockStorage {
     async fn entry_connection(
         &self,
@@ -2591,6 +2736,34 @@ impl StorageBackend for MockStorage {
         Ok(inner.profiles.get(&id).cloned())
     }
 
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        // One lock: the read sees one state, as the stores' snapshots do.
+        let inner = self.inner.lock().unwrap();
+        if inner.profile_reads_fail || inner.contact_reads_fail {
+            return Err(sid_core::Error::Storage("read profile".into()));
+        }
+        Ok(inner
+            .profiles
+            .get(&id)
+            .cloned()
+            .map(|profile| sid_plugin::storage::ProfileContacts {
+                profile,
+                email: inner
+                    .profile_emails
+                    .values()
+                    .find(|e| e.profile_id == id && e.is_primary)
+                    .cloned(),
+                phone: inner
+                    .profile_phones
+                    .values()
+                    .find(|p| p.profile_id == id && p.is_primary)
+                    .cloned(),
+            }))
+    }
+
     async fn get_profile_by_username(&self, username: &str) -> SidResult<Option<Profile>> {
         let inner = self.inner.lock().unwrap();
         let profile = inner
@@ -3293,7 +3466,22 @@ impl StorageBackend for MockStorage {
         }
         let mut changed = consent.clone();
         match decision {
-            ClaimDecision::Grant(claim_type) => changed.grant_claim(claim_name, claim_type),
+            ClaimDecision::Grant(claim_type) => {
+                // As the stores: a claim granted from account management is
+                // a snapshot without a reviewed value, renewed or new.
+                changed.grant_claim(
+                    claim_name,
+                    claim_type,
+                    sid_core::models::ConsentMode::Static,
+                );
+                if let Some(grant) = changed
+                    .grants
+                    .iter_mut()
+                    .find(|g| g.claim_name == claim_name && g.is_active())
+                {
+                    grant.disclosed = None;
+                }
+            }
             ClaimDecision::Revoke => {
                 if let Some(mut active) = changed.as_active() {
                     active.revoke_claim(claim_name);
@@ -3314,6 +3502,31 @@ impl StorageBackend for MockStorage {
         Ok(ClaimGrantChange::Changed)
     }
 
+    async fn deliver_subscribed(
+        &self,
+        held: &sid_core::models::consent::ConsentRecord,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        ctx: MutationContext,
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
+        let mut inner = self.inner.lock().unwrap();
+        // As the stores: only over the consent exactly as it was read.
+        if !inner
+            .consents
+            .get(&held.id.0)
+            .is_some_and(|stored| stored.status.is_active() && stored.same_state(held))
+        {
+            return Ok(None);
+        }
+        let delivered = held.with_delivery(updates);
+        inner.owe(&ctx)?;
+        inner.consents.insert(held.id.0, delivered.clone());
+        if let Some(then_unreadable) = inner.delivery_reply_lost.take() {
+            inner.consent_reads_fail = then_unreadable;
+            return Err(sid_core::Error::Storage("delivery reply lost".into()));
+        }
+        Ok(Some(delivered))
+    }
+
     async fn get_consent(
         &self,
         id: sid_core::models::consent::ConsentId,
@@ -3327,6 +3540,9 @@ impl StorageBackend for MockStorage {
         client_id: &str,
     ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
         let inner = self.inner.lock().unwrap();
+        if inner.consent_reads_fail {
+            return Err(sid_core::Error::Storage("read consent".into()));
+        }
         Ok(inner
             .consents
             .values()

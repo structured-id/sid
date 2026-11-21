@@ -25,6 +25,34 @@ pub(super) fn policy_changed() -> Status {
 /// The answer to a refused or failed authorization request. An unknown
 /// client and an unregistered redirect URI are marked with their field, so
 /// the front channel shows them instead of redirecting (RFC 6749 §4.1.2.1).
+/// A consent interaction refusal, with the reasons the AuthFlowService
+/// contract names.
+pub(crate) fn consent_refusal(e: sid::oauth::consent::ConsentError) -> Status {
+    use sid::oauth::consent::ConsentError as E;
+    match e {
+        E::NotFound => ApiError::new(
+            ErrorReason::ConsentNotFound,
+            "no authorization operation this session may read",
+        )
+        .into(),
+        E::Csrf => ApiError::new(
+            ErrorReason::CsrfTokenInvalid,
+            "the CSRF value is not this review's",
+        )
+        .into(),
+        E::Stale => ApiError::new(
+            ErrorReason::ConcurrentModification,
+            "the authorization operation changed since it was reviewed",
+        )
+        .into(),
+        E::Choice(claim) => sid_infra::grpc_error::refuse::invalid_field(
+            "choices",
+            format!("claim {claim}: not a choice the review offered"),
+        ),
+        E::Store(e) => storage_failure(e),
+    }
+}
+
 pub(super) fn authorization_refusal(e: AuthorizationError) -> Status {
     use AuthorizationError as E;
     match e {
@@ -34,6 +62,12 @@ pub(super) fn authorization_refusal(e: AuthorizationError) -> Status {
         ),
         E::Request(e) => authorize_refusal(e),
         E::StepUp(unmet) => super::step_up_required(&unmet).into(),
+        // The request is valid; the user's recorded decision is what is
+        // missing (authz/consent-flow.md, typed OAuth2Authorize).
+        E::ConsentRequired => Status::from(ApiError::new(
+            ErrorReason::ConsentRequired,
+            "the user's consent to this request is required",
+        )),
         E::PolicyChanged => policy_changed(),
         E::SessionEnded => session_ended(),
         E::NotWaiting => sid_infra::grpc_error::refuse::invalid_field(
@@ -77,6 +111,111 @@ impl AuthServiceImpl {
             .browser(&self.oauth, &self.sign_ins, session, pending)
             .await
             .map_err(authorization_refusal)
+    }
+
+    /// Continue the decided operation `id` at `issuer`, the browser's IdP
+    /// session read from the `cookie` headers of `metadata` (see
+    /// [`sid::oauth::OAuth::continue_operation`]).
+    pub(crate) async fn continue_operation(
+        &self,
+        metadata: &MetadataMap,
+        issuer: &OidcIssuer,
+        id: sid_core::models::AuthorizationOperationId,
+    ) -> Result<sid::oauth::authorization::Continuation, Status> {
+        self.check_maintenance().await?;
+        let session = self.browser_session(metadata).await?;
+        self.oauth
+            .continue_operation(&self.sign_ins, issuer, session, id)
+            .await
+            .map_err(authorization_refusal)
+    }
+
+    /// The browser IdP session of a consent interaction call: from this
+    /// authority's sign-in page, by its exact Origin (a missing, `null` or
+    /// foreign Origin is refused), then by its session cookie
+    /// (authz/consent-flow.md, narrow interaction API authority). Alongside,
+    /// the issuer the call was addressed to: the one its route named, or the
+    /// root-addressed base issuer.
+    pub(crate) async fn consent_caller(
+        &self,
+        metadata: &MetadataMap,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+    ) -> Result<(Option<sid_core::models::Session>, OidcIssuer), Status> {
+        self.check_maintenance().await?;
+        if !matches!(
+            self.ceremony_client(metadata)?,
+            sid_authn::sign_in_delivery::CeremonyClient::Browser
+        ) {
+            return Err(ApiError::new(
+                ErrorReason::InsufficientPermissions,
+                "the consent interaction is called by this authority's sign-in page",
+            )
+            .into());
+        }
+        let issuer = match addressed {
+            Some(addressed) => addressed.0.clone(),
+            None => self
+                .oauth
+                .routed_issuer("")
+                .await
+                .map_err(|e| authorization_refusal(e.into()))?
+                .ok_or_else(|| consent_refusal(sid::oauth::consent::ConsentError::NotFound))?,
+        };
+        Ok((self.browser_session(metadata).await?, issuer))
+    }
+
+    /// The review of `operation` (see [`sid::oauth::OAuth::review_consent`]).
+    pub(crate) async fn review_consent(
+        &self,
+        metadata: &MetadataMap,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+        operation: sid_core::models::AuthorizationOperationId,
+    ) -> Result<sid::oauth::consent::ConsentReview, Status> {
+        let (session, issuer) = self.consent_caller(metadata, addressed).await?;
+        self.oauth
+            .review_consent(
+                &self.sign_ins,
+                &issuer,
+                session.as_ref(),
+                sid::oauth::consent::Interaction::Browser,
+                operation,
+            )
+            .await
+            .map_err(consent_refusal)
+    }
+
+    /// Record `submission` (see [`sid::oauth::OAuth::submit_consent`]).
+    pub(crate) async fn submit_consent(
+        &self,
+        metadata: &MetadataMap,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+        submission: sid::oauth::consent::Submission,
+    ) -> Result<sid::oauth::consent::FlowView, Status> {
+        let (session, issuer) = self.consent_caller(metadata, addressed).await?;
+        self.oauth
+            .submit_consent(
+                &self.sign_ins,
+                &issuer,
+                session.as_ref(),
+                sid::oauth::consent::Interaction::Browser,
+                submission,
+            )
+            .await
+            .map_err(consent_refusal)
+    }
+
+    /// The state of `operation` (see [`sid::oauth::OAuth::flow_state`]).
+    pub(crate) async fn flow_state(
+        &self,
+        metadata: &MetadataMap,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+        operation: sid_core::models::AuthorizationOperationId,
+    ) -> Result<sid::oauth::consent::FlowView, Status> {
+        let (session, issuer) = self.consent_caller(metadata, addressed).await?;
+        self.oauth
+            .flow_state(&self.sign_ins, &issuer, session.as_ref(), operation)
+            .await
+            .map_err(consent_refusal)
     }
 
     /// Keep `pending` under a fresh random reference.

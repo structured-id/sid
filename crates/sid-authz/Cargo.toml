@@ -32,7 +32,7 @@ sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite", "s
 # The registration helpers the decision scenarios store resources with.
 sid-plugin = { workspace = true, features = ["conformance"] }
 # A CoordiNode database in memory for the decision scenarios.
-coordinode-embed = "0.9"
+coordinode-embed = "0.10"
 # Each PostgreSQL decision scenario drops the schema it ran in.
 sqlx = { workspace = true, features = ["postgres"] }
 

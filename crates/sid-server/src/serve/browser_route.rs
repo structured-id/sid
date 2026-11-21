@@ -78,6 +78,11 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthService/ExecutePasswordReset",
     "/sid.v1.authn.AuthService/CompletePasswordReset",
     "/sid.v1.authn.PasswordHistoryEvaluatorService/EvaluatePasswordHistory",
+    // The consent review of an operation this issuer keeps: the page calls
+    // it under the issuer the authorization is for.
+    "/sid.v1.authn.AuthFlowService/GetConsent",
+    "/sid.v1.authn.AuthFlowService/SubmitConsent",
+    "/sid.v1.authn.AuthFlowService/GetFlowState",
     "/sid.v1.admin.EnrollmentService/GetInstanceStatus",
     "/sid.v1.admin.EnrollmentService/GetEnrollmentPolicy",
 ];

@@ -14,8 +14,6 @@ use sid_authn::caller::Caller;
 use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::consent::{ClaimDecision, ClaimGrantChange, ClaimType as DomainClaimType};
-use sid_core::models::principal::{Principal, PrincipalType};
-use sid_core::models::profile::Profile;
 use sid_core::models::profile_email::{EmailLabel, ProfileEmailId};
 use sid_core::models::profile_phone::{PhoneLabel, ProfilePhoneId};
 use sid_core::models::{
@@ -206,8 +204,6 @@ impl Account {
             .get_consent_by_client(profile_id, &site_id)
             .await?
             .ok_or_else(|| AccountError::ConsentNotFound(site_id.clone()))?;
-        let profile = self.storage.get_profile(profile_id).await?;
-        let principals = self.storage.get_principals_by_profile(profile_id).await?;
         let claims: Vec<v1a::ClaimConsent> = record
             .grants
             .iter()
@@ -222,12 +218,15 @@ impl Account {
                 } else {
                     v1a::ClaimConsentStatus::Denied.into()
                 },
-                // Attestations have no value to preview.
-                value_preview: match g.claim_type {
-                    DomainClaimType::Attestation => String::new(),
-                    DomainClaimType::Data => {
-                        claim_preview(&g.claim_name, profile.as_ref(), &principals)
+                // The value the client was given, masked: the approved
+                // disclosure, never the Profile's current value. An
+                // attestation and a claim without an approved value have
+                // nothing to preview.
+                value_preview: match (g.claim_type, &g.disclosed) {
+                    (DomainClaimType::Data, Some(disclosed)) if !disclosed.value.is_empty() => {
+                        mask_claim_value(&g.claim_name, &disclosed.value)
                     }
+                    _ => String::new(),
                 },
                 last_propagated: None,
             })
@@ -796,36 +795,6 @@ fn mask_name(name: &str) -> String {
     }
     let first_char_len = name.chars().next().map_or(0, |c| c.len_utf8());
     format!("{}***", &name[..first_char_len])
-}
-
-/// The masked current value of a claim: OIDC claim names map to Profile
-/// fields or the primary Principal of their kind.
-fn claim_preview(claim_name: &str, profile: Option<&Profile>, principals: &[Principal]) -> String {
-    let raw_value = match claim_name {
-        "name" | "display_name" => profile.and_then(|p| p.formatted_name()),
-        "given_name" => profile.and_then(|p| p.given_name.clone()),
-        "family_name" => profile.and_then(|p| p.family_name.clone()),
-        "middle_name" => profile.and_then(|p| p.middle_name.clone()),
-        "preferred_username" => profile.and_then(|p| p.username.clone()),
-        "email" | "email_verified" => principals
-            .iter()
-            .find(|p| p.principal_type == PrincipalType::Email && p.is_primary)
-            .map(|p| p.value.clone()),
-        "phone" | "phone_number" | "phone_number_verified" => principals
-            .iter()
-            .find(|p| p.principal_type == PrincipalType::Phone && p.is_primary)
-            .or_else(|| {
-                principals
-                    .iter()
-                    .find(|p| p.principal_type == PrincipalType::Phone)
-            })
-            .map(|p| p.value.clone()),
-        _ => None,
-    };
-    match raw_value {
-        Some(val) if !val.is_empty() => mask_claim_value(claim_name, &val),
-        _ => String::new(),
-    }
 }
 
 // ── Messages ──

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{
-    ActorFence, AuditEntry, AuthCodeRedemption, MutationContext, OAuth2Client, OidcIssuer, Profile,
-    ProfileEmail, ProfilePhone, ResourceId, Session, SessionId,
+    ActorFence, AuditEntry, AuthCodeRedemption, MutationContext, OAuth2Client, OidcIssuer,
+    ResourceId, Session, SessionId,
 };
 use sid_plugin::GrantStore;
 use tracing::warn;
@@ -51,12 +51,10 @@ impl<E> GrantFailure<E> {
     }
 }
 
-/// What an ID token is built from, owned by the grant that issues it.
+/// What an ID token carries beyond the authentication and the subject,
+/// owned by the grant that issues it.
 #[derive(Debug, Clone)]
 pub struct IdTokenAccount {
-    pub profile: Profile,
-    pub email: Option<ProfileEmail>,
-    pub phone: Option<ProfilePhone>,
     /// The Binding presentation of the sign-in the host's request redeems,
     /// when the client is a SID installation's federation client and the
     /// holder's executor made one for it; carried in the ID token only.
@@ -66,9 +64,6 @@ pub struct IdTokenAccount {
 impl IdTokenAccount {
     fn source(&self) -> IdTokenSource<'_> {
         IdTokenSource {
-            profile: &self.profile,
-            email: self.email.as_ref(),
-            phone: self.phone.as_ref(),
             presentation: self.presentation.as_ref(),
         }
     }

@@ -20,6 +20,7 @@ mod attestation;
 mod audit;
 mod audit_retention;
 mod auth;
+mod authorization_operation;
 mod binding;
 mod branding;
 mod ceremony_state;
@@ -1015,6 +1016,13 @@ impl StorageBackend for SqliteBackend {
     }
 
     // Profile operations — see profile.rs
+    async fn get_profile_with_primary_contacts(
+        &self,
+        id: sid_core::models::ProfileId,
+    ) -> SidResult<Option<sid_plugin::storage::ProfileContacts>> {
+        self.get_profile_with_primary_contacts_impl(id).await
+    }
+
     async fn get_profile(
         &self,
         id: sid_core::models::ProfileId,
@@ -1313,6 +1321,15 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<sid_core::models::consent::ClaimGrantChange> {
         self.change_claim_grant_impl(id, claim_name, decision, audit)
             .await
+    }
+
+    async fn deliver_subscribed(
+        &self,
+        held: &sid_core::models::consent::ConsentRecord,
+        updates: &[sid_core::models::consent::DisclosureUpdate],
+        audit: MutationContext,
+    ) -> SidResult<Option<sid_core::models::consent::ConsentRecord>> {
+        self.deliver_subscribed_impl(held, updates, audit).await
     }
 
     async fn get_consent(
