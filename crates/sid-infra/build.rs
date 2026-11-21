@@ -6,7 +6,9 @@
 //! binary as the set the installation verifies under from its first start,
 //! with no network. A build that names a platform (`SID_BUILD_PLATFORM`)
 //! and no set is refused: a delivery for a platform never goes out without
-//! that platform's certificates. A build that names neither carries none.
+//! that platform's certificates. An empty file names a platform that
+//! publishes no set yet: the binary carries none and fetches the set from
+//! that platform once it publishes. A build that names neither carries none.
 
 use std::path::PathBuf;
 
