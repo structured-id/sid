@@ -4494,7 +4494,6 @@ impl StorageBackend for PostgresBackend {
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
-        mode: sid_core::models::ModeWrite,
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self
@@ -4512,7 +4511,7 @@ impl StorageBackend for PostgresBackend {
                  invite_default_max_uses, invite_default_expiry_hours, updated_at)
              VALUES ('installation', $1, $2, $3, $4, $5, NOW())
              ON CONFLICT (scope) DO UPDATE SET
-                 mode = CASE WHEN $6 THEN enrollment_policy.mode ELSE EXCLUDED.mode END,
+                 mode = EXCLUDED.mode,
                  allowed_domains = EXCLUDED.allowed_domains,
                  track_source = EXCLUDED.track_source,
                  invite_default_max_uses = EXCLUDED.invite_default_max_uses,
@@ -4524,7 +4523,6 @@ impl StorageBackend for PostgresBackend {
         .bind(policy.track_source)
         .bind(i64::from(policy.invite.default_max_uses))
         .bind(i64::from(policy.invite.default_expiry_hours))
-        .bind(mode == sid_core::models::ModeWrite::KeepStored)
         .execute(&mut *tx)
         .await
         .map_err(crate::enrollment_policy_write_error)?;

@@ -48,12 +48,9 @@ impl SignupIdentifier<'_> {
 
 /// The admission of a self-registration under the enrollment policy, which
 /// the storage applies in the account's own transaction, so a policy changed
-/// meanwhile applies to it: the deployment's pinned mode and what the
-/// registrant presented.
+/// meanwhile applies to it: what the registrant presented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrollmentGate {
-    /// The mode the deployment pins over the stored one.
-    pub pinned: Option<EnrollmentMode>,
     /// The registrant's email address, for a domain-restricted policy.
     pub email: Option<String>,
     /// The invite code presented, for an invite-only policy.
@@ -61,16 +58,13 @@ pub struct EnrollmentGate {
 }
 
 impl EnrollmentGate {
-    /// Admit the registration under `stored` (`None`: the defaults) with the
-    /// pinned mode over it, or say why it is refused.
+    /// Admit the registration under `stored` (`None`: the defaults), or say
+    /// why it is refused.
     pub fn admit(
         &self,
         stored: Option<EnrollmentPolicy>,
     ) -> core::result::Result<Admission<'_>, EnrollmentDenialReason> {
-        let mut policy = stored.unwrap_or_else(|| SecurityPolicy::ce_default().enrollment);
-        if let Some(mode) = self.pinned {
-            policy.mode = mode;
-        }
+        let policy = stored.unwrap_or_else(|| SecurityPolicy::ce_default().enrollment);
         match evaluate_enrollment(&policy, self.email.as_deref(), self.invite_code.as_deref()) {
             EnrollmentDecision::Deny(reason) => Err(reason),
             EnrollmentDecision::Allow => Ok(Admission {

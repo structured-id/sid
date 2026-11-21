@@ -203,7 +203,6 @@ impl Installation {
                 ),
                 security_policy: None,
                 history_keys: self.history_keys.clone(),
-                enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
                 login_policy: None,

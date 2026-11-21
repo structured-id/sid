@@ -1758,7 +1758,6 @@ fn self_registration(name: &str) -> sid_core::models::NewRegistration {
     )
     .unwrap()
     .admitted_by(sid_core::models::EnrollmentGate {
-        pinned: None,
         email: None,
         invite_code: None,
     })

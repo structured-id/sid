@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Enrollment: the policy in force (the one an administrator stored, else the
-//! defaults, with the mode the deployment pins, if it pins one), invite codes
-//! and registration statistics. The same operations for the service and an
+//! defaults), invite codes and registration statistics. The same operations for the service and an
 //! embedding application. The policy is read from the store on every use,
 //! so every replica applies a change at once.
 
@@ -13,8 +12,8 @@ use sid_authn::operation::{CommandError, Effect, KeyedCommand, OperationError};
 use sid_core::Error as SidError;
 use sid_core::models::{
     AuditEntry, EnrollmentMode, EnrollmentPolicy, Invite, InviteCreator, InviteFilter, InviteId,
-    InviteStatus, MachineUserId, ModeWrite, MutationContext, OperationContext, ProfileId,
-    SecurityPolicy, generate_invite_code,
+    InviteStatus, MachineUserId, MutationContext, OperationContext, ProfileId, SecurityPolicy,
+    generate_invite_code,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::admin::enrollment_service as keyed;
@@ -40,24 +39,9 @@ pub async fn stored_or_default(storage: &dyn StorageBackend) -> sid_core::Result
         .unwrap_or_else(|| SecurityPolicy::ce_default().enrollment))
 }
 
-/// The policy in force: the stored one with the pinned mode over its own.
-pub async fn effective(
-    storage: &dyn StorageBackend,
-    pinned: Option<EnrollmentMode>,
-) -> sid_core::Result<EnrollmentPolicy> {
-    let mut policy = stored_or_default(storage).await?;
-    if let Some(mode) = pinned {
-        policy.mode = mode;
-    }
-    Ok(policy)
-}
-
 /// Why an administrator's policy is not stored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    /// The deployment pins another mode.
-    #[error("the deployment pins the enrollment mode to {0}")]
-    Pinned(EnrollmentMode),
     /// Domain-restricted enrollment without any domain would admit no one
     /// while looking configured.
     #[error("a domain-restricted policy needs at least one allowed domain")]
@@ -85,22 +69,10 @@ pub fn default_expiry(now: jiff::Timestamp, hours: u32) -> Option<Option<jiff::T
 }
 
 /// `policy` as it is stored: allowed domains trimmed, lowercased and without
-/// repeats (registration compares them case-insensitively). While a mode is
-/// pinned the request carries that mode, as the API reports it, and the
-/// `stored_mode` is kept, so removing the pin restores it. Refused when it
-/// changes a pinned mode, leaves a domain-restricted mode (stored or pinned)
-/// without a usable domain, or sets a default use limit no invite can hold.
-pub fn validated(
-    mut policy: EnrollmentPolicy,
-    pinned: Option<EnrollmentMode>,
-    stored_mode: EnrollmentMode,
-) -> Result<EnrollmentPolicy, Refusal> {
-    if let Some(mode) = pinned {
-        if policy.mode != mode {
-            return Err(Refusal::Pinned(mode));
-        }
-        policy.mode = stored_mode;
-    }
+/// repeats (registration compares them case-insensitively). Refused when it
+/// leaves a domain-restricted mode without a usable domain, or sets a default
+/// use limit no invite can hold.
+pub fn validated(mut policy: EnrollmentPolicy) -> Result<EnrollmentPolicy, Refusal> {
     if policy.invite.default_max_uses > MAX_INVITE_USES {
         return Err(Refusal::TooManyUses);
     }
@@ -130,10 +102,7 @@ pub fn validated(
             domains.push(domain);
         }
     }
-    // The domains apply under the mode in force (a pinned one) and under the
-    // stored one once the pin is removed.
-    let restricted = |mode: Option<EnrollmentMode>| mode == Some(EnrollmentMode::DomainRestricted);
-    if (restricted(Some(policy.mode)) || restricted(pinned)) && domains.is_empty() {
+    if policy.mode == EnrollmentMode::DomainRestricted && domains.is_empty() {
         return Err(Refusal::NoDomain);
     }
     policy.allowed_domains = domains;
@@ -163,9 +132,6 @@ pub enum EnrollmentError {
     /// A field holds a value the operation does not take.
     #[error("{field}: {reason}")]
     InvalidField { field: &'static str, reason: String },
-    /// The deployment pins the mode the update would change.
-    #[error("{0}")]
-    ModePinned(Refusal),
     #[error("invite {0} not found")]
     InviteNotFound(InviteId),
 }
@@ -312,24 +278,18 @@ fn next_page(offset: u64, limit: u64, returned: usize) -> String {
 /// The enrollment of one installation.
 pub struct Enrollment {
     storage: Arc<dyn StorageBackend>,
-    /// The enrollment mode the deployment pins over the stored one.
-    pinned_mode: Option<EnrollmentMode>,
 }
 
 impl Enrollment {
-    pub fn new(storage: Arc<dyn StorageBackend>, pinned_mode: Option<EnrollmentMode>) -> Self {
-        Self {
-            storage,
-            pinned_mode,
-        }
+    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+        Self { storage }
     }
 
     /// The policy in force, as the API reports it.
     pub async fn policy_in_force(&self) -> Result<v1::EnrollmentPolicy, EnrollmentError> {
-        let policy = effective(self.storage.as_ref(), self.pinned_mode).await?;
-        let mut proto = policy_to_proto(&policy);
-        proto.mode_pinned = self.pinned_mode.is_some();
-        Ok(proto)
+        Ok(policy_to_proto(
+            &stored_or_default(self.storage.as_ref()).await?,
+        ))
     }
 
     /// Whether the administrator claim is open: public, since the
@@ -365,46 +325,25 @@ impl Enrollment {
             return Ok(recorded);
         }
         let policy = policy_from_proto(req.policy.ok_or(EnrollmentError::MissingField("policy"))?)?;
-        let stored_mode = stored_or_default(self.storage.as_ref()).await?.mode;
-        let policy =
-            validated(policy, self.pinned_mode, stored_mode).map_err(|refusal| match refusal {
-                Refusal::Pinned(_) => EnrollmentError::ModePinned(refusal),
-                Refusal::NoDomain | Refusal::BadDomain(_) => {
-                    invalid_field("policy.allowed_domains", refusal.to_string())
-                }
-                Refusal::TooManyUses => {
-                    invalid_field("policy.invite.default_max_uses", refusal.to_string())
-                }
-                Refusal::ExpiryTooFar => {
-                    invalid_field("policy.invite.default_expiry_hours", refusal.to_string())
-                }
-            })?;
-        // Under a pin the stored mode stays, decided in the write's own
-        // transaction; the mode read above is written only when none is
-        // stored yet.
-        let mode_write = match self.pinned_mode {
-            Some(_) => ModeWrite::KeepStored,
-            None => ModeWrite::Replace,
-        };
-        // The policy in force once stored: a pinned mode overrides the stored
-        // one, as `policy_in_force` reads it.
-        let mut in_force = policy.clone();
-        if let Some(mode) = self.pinned_mode {
-            in_force.mode = mode;
-        }
-        let mut response = policy_to_proto(&in_force);
-        response.mode_pinned = self.pinned_mode.is_some();
+        let policy = validated(policy).map_err(|refusal| match refusal {
+            Refusal::NoDomain | Refusal::BadDomain(_) => {
+                invalid_field("policy.allowed_domains", refusal.to_string())
+            }
+            Refusal::TooManyUses => {
+                invalid_field("policy.invite.default_max_uses", refusal.to_string())
+            }
+            Refusal::ExpiryTooFar => {
+                invalid_field("policy.invite.default_expiry_hours", refusal.to_string())
+            }
+        })?;
+        let response = policy_to_proto(&policy);
         let ctx = MutationContext::from(AuditEntry::admin(
             caller.profile_id.to_string(),
             "enrollment_policy.update",
             "installation".to_string(),
         ))
         .with_operation(command.completion(response.encode_to_vec()));
-        match self
-            .storage
-            .set_enrollment_policy(&policy, mode_write, ctx)
-            .await
-        {
+        match self.storage.set_enrollment_policy(&policy, ctx).await {
             Ok(_) => {}
             Err(SidError::OperationCompleted(_)) => {
                 let recorded = command.committed_elsewhere(&*self.storage).await?;
@@ -750,13 +689,11 @@ fn policy_to_proto(ep: &EnrollmentPolicy) -> v1::EnrollmentPolicy {
         }),
         allowed_domains: ep.allowed_domains.clone(),
         track_source: ep.track_source,
-        mode_pinned: false,
     }
 }
 
 /// An administrator's policy as stored. An unspecified or unknown mode and a
-/// missing invite configuration are refused, never read as a default; the
-/// output-only `mode_pinned` is ignored.
+/// missing invite configuration are refused, never read as a default.
 fn policy_from_proto(p: v1::EnrollmentPolicy) -> Result<EnrollmentPolicy, EnrollmentError> {
     use v1::EnrollmentMode as P;
     let mode = match P::try_from(p.mode) {

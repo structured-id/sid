@@ -900,14 +900,12 @@ pub trait StorageBackend:
     async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>>;
 
     /// Store `policy` as the installation's enrollment policy, replacing the
-    /// one stored, with its audit entry in the same transaction; `mode` says
-    /// whether its mode replaces the stored one. A domain-restricted mode
-    /// without an allowed domain is refused (`Error::Validation`), whichever
-    /// side supplied the mode.
+    /// one stored, with its audit entry in the same transaction. A
+    /// domain-restricted mode without an allowed domain is refused
+    /// (`Error::Validation`).
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
-        mode: sid_core::models::ModeWrite,
         ctx: MutationContext,
     ) -> Result<()>;
 

@@ -9,7 +9,7 @@ use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::{AuthenticatedService, ServiceCaller};
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
-use sid_core::models::{EnrollmentMode, INVITE_CREATE, INVITE_READ, INVITE_REVOKE, ResourceId};
+use sid_core::models::{INVITE_CREATE, INVITE_READ, INVITE_REVOKE, ResourceId};
 use sid_infra::authn::caller::authenticate;
 use sid_infra::authn::operation::context;
 use sid_infra::authn::own_token::authenticate_service;
@@ -31,15 +31,6 @@ pub(crate) fn refusal(e: EnrollmentError) -> Status {
         EnrollmentError::Internal => ApiError::internal().into(),
         EnrollmentError::MissingField(field) => missing_field(field),
         EnrollmentError::InvalidField { field, reason } => invalid_field(field, reason),
-        EnrollmentError::ModePinned(refusal) => {
-            ApiError::new(ErrorReason::InvalidState, refusal.to_string())
-                .with_precondition(
-                    "pinned_by_deployment",
-                    "enrollment_policy.mode",
-                    refusal.to_string(),
-                )
-                .into()
-        }
         EnrollmentError::InviteNotFound(id) => {
             not_found(ErrorReason::InviteNotFound, "Invite", id.to_string())
         }
@@ -79,7 +70,7 @@ impl EnrollmentServiceImpl {
         revocation: Arc<RevocationCache>,
     ) -> Self {
         Self {
-            enrollment: Enrollment::new(storage.clone(), None),
+            enrollment: Enrollment::new(storage.clone()),
             storage,
             jwt,
             revocation,
@@ -97,13 +88,6 @@ impl EnrollmentServiceImpl {
     /// admitted: the access guard verifies them with it.
     pub fn invite_tokens(&self) -> Option<Arc<ResourceTokenVerifier>> {
         self.invite_services.as_ref().map(|s| s.tokens.clone())
-    }
-
-    /// Report `mode` as the one in force and refuse updates changing it: the
-    /// deployment pins it (`SID_ENROLLMENT_MODE`).
-    pub fn with_pinned_mode(mut self, mode: Option<EnrollmentMode>) -> Self {
-        self.enrollment = Enrollment::new(self.storage.clone(), mode);
-        self
     }
 
     async fn caller<T>(&self, request: &Request<T>) -> Result<Caller, Status> {

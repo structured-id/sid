@@ -15,7 +15,7 @@ use sid_core::enrollment::EnrollmentDenialReason;
 use sid_core::models::{
     AuditEntry, BootstrapPolicy, CentralAdoption, CredentialId, EnrollmentGate, EnrollmentPolicy,
     InstanceSecret, Invite, InviteConfig, InviteCreator, InviteFilter, InviteId, InviteRedemption,
-    MachineUserId, ModeWrite, MutationContext, NewRegistration, ProfileId, RegistrationSource,
+    MachineUserId, MutationContext, NewRegistration, ProfileId, RegistrationSource,
     RegistrationSourceType, SourceRecording, UtmParams,
 };
 use sid_core::{Error as SidError, Result as SidResult};
@@ -525,7 +525,6 @@ impl CoordinodeBackend {
     pub(super) async fn set_enrollment_policy(
         &self,
         policy: &EnrollmentPolicy,
-        mode: ModeWrite,
         ctx: MutationContext,
     ) -> SidResult<()> {
         if policy.mode == sid_core::models::EnrollmentMode::DomainRestricted
@@ -540,18 +539,6 @@ impl CoordinodeBackend {
             "installation:enrollment_policy".to_owned(),
             ctx,
             move |tx| {
-                // The stored mode, read in this write, stays when asked to.
-                let written = match (mode, held_enrollment_policy(tx)?) {
-                    (ModeWrite::KeepStored, Some(stored)) => stored.mode,
-                    _ => policy.mode,
-                };
-                if written == sid_core::models::EnrollmentMode::DomainRestricted
-                    && policy.allowed_domains.is_empty()
-                {
-                    return Err(SidError::Validation(
-                        "a domain-restricted enrollment mode needs an allowed domain".into(),
-                    ));
-                }
                 tx.run(
                     "MATCH (p:SidEnrollmentPolicy) WHERE p.scope = $scope
                  SET p.stored = true, p.mode = $mode, p.allowed_domains = $domains,
@@ -559,7 +546,7 @@ impl CoordinodeBackend {
                      p.invite_default_expiry_hours = $expiry_hours, p.updated_at = $now",
                     Params::default()
                         .with("scope", scope())
-                        .with("mode", Value::String(written.as_str().into()))
+                        .with("mode", Value::String(policy.mode.as_str().into()))
                         .with("domains", texts(&policy.allowed_domains))
                         .with("track_source", Value::Bool(policy.track_source))
                         .with(
