@@ -8531,9 +8531,8 @@ async fn test_enrollment_get_policy_returns_ce_defaults() {
         .unwrap()
         .into_inner();
 
-    // Nothing stored, nothing pinned: the CE defaults, Open mode, tracked.
+    // Nothing stored: the CE defaults, Open mode, tracked.
     assert_eq!(resp.mode(), sid_proto::sid::v1::admin::EnrollmentMode::Open);
-    assert!(!resp.mode_pinned);
     assert!(resp.invite.is_some());
     assert!(resp.track_source);
 }

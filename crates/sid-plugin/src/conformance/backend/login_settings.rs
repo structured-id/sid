@@ -6,8 +6,7 @@
 
 use super::test_audit;
 use sid_core::models::{
-    AdmittedSources, EnrollmentMode, EnrollmentPolicy, InviteConfig, LoginSettings, ModeWrite,
-    OrgId,
+    AdmittedSources, EnrollmentMode, EnrollmentPolicy, InviteConfig, LoginSettings, OrgId,
 };
 use sid_plugin::storage::StorageBackend;
 
@@ -334,7 +333,7 @@ pub async fn test_login_settings_and_enrollment_policy_are_independent(
     };
     let invite_only = enrollment(EnrollmentMode::InviteOnly);
     backend
-        .set_enrollment_policy(&invite_only, ModeWrite::Replace, test_audit())
+        .set_enrollment_policy(&invite_only, test_audit())
         .await
         .unwrap();
     assert_eq!(backend.login_settings().await.unwrap(), None);
@@ -352,7 +351,7 @@ pub async fn test_login_settings_and_enrollment_policy_are_independent(
 
     let admin_only = enrollment(EnrollmentMode::AdminOnly);
     backend
-        .set_enrollment_policy(&admin_only, ModeWrite::Replace, test_audit())
+        .set_enrollment_policy(&admin_only, test_audit())
         .await
         .unwrap();
     assert_eq!(

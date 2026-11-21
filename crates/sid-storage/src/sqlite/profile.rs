@@ -1381,7 +1381,6 @@ impl SqliteBackend {
     pub(crate) async fn set_enrollment_policy_impl(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
-        mode: sid_core::models::ModeWrite,
         audit: MutationContext,
     ) -> SidResult<()> {
         let domains = serde_json::to_string(&policy.allowed_domains)
@@ -1392,7 +1391,7 @@ impl SqliteBackend {
                  invite_default_max_uses, invite_default_expiry_hours, updated_at)
              VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (scope) DO UPDATE SET
-                 mode = CASE WHEN ? THEN enrollment_policy.mode ELSE excluded.mode END,
+                 mode = excluded.mode,
                  allowed_domains = excluded.allowed_domains,
                  track_source = excluded.track_source,
                  invite_default_max_uses = excluded.invite_default_max_uses,
@@ -1404,7 +1403,6 @@ impl SqliteBackend {
         .bind(policy.track_source)
         .bind(i64::from(policy.invite.default_max_uses))
         .bind(i64::from(policy.invite.default_expiry_hours))
-        .bind(mode == sid_core::models::ModeWrite::KeepStored)
         .execute(&mut *tx)
         .await
         .map_err(crate::enrollment_policy_write_error)?;

@@ -28,16 +28,25 @@ use tonic::Request;
 
 const REDIRECT: &str = "https://sid.example.com/account/login/upstream";
 
+/// A schema of the test's own, so the enrollment mode it stores reaches no
+/// other test.
 async fn storage() -> Arc<dyn StorageBackend> {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
+    common::pg_in_own_schema().await
+}
+
+/// Store `mode` as the installation's enrollment mode, as an administrator
+/// sets it.
+async fn store_mode(storage: &dyn StorageBackend, mode: EnrollmentMode) {
+    storage
+        .set_enrollment_policy(
+            &sid_core::models::EnrollmentPolicy {
+                mode,
+                ..SecurityPolicy::ce_default().enrollment
+            },
+            AuditEntry::system("test.enrollment", "installation").into(),
+        )
         .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-    Arc::new(backend)
+        .unwrap();
 }
 
 struct Setup {
@@ -47,16 +56,14 @@ struct Setup {
     service: UpstreamServiceImpl,
 }
 
-/// The upstream service over `storage`, admitting new accounts under the
-/// enrollment mode `pin`, completing sign-ins under `policy`.
+/// The upstream service over `storage`, completing sign-ins under `policy`.
 fn service(
     storage: Arc<dyn StorageBackend>,
-    pin: EnrollmentMode,
     policy: Option<SecurityPolicy>,
 ) -> UpstreamServiceImpl {
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let auth = common::auth_service_over(storage.clone(), cache, policy, Some(pin));
+    let auth = common::auth_service_over(storage.clone(), cache, policy);
     UpstreamServiceImpl::new(
         storage,
         common::test_key_manager(),
@@ -67,16 +74,17 @@ fn service(
 }
 
 /// A provider registered on PostgreSQL, and its upstream service admitting
-/// new accounts under `pin` with the CE security policy.
-async fn setup(pin: EnrollmentMode) -> Setup {
-    setup_on(storage().await, pin, None).await
+/// new accounts under `mode` with the CE security policy.
+async fn setup(mode: EnrollmentMode) -> Setup {
+    setup_on(storage().await, mode, None).await
 }
 
 async fn setup_on(
     storage: Arc<dyn StorageBackend>,
-    pin: EnrollmentMode,
+    mode: EnrollmentMode,
     policy: Option<SecurityPolicy>,
 ) -> Setup {
+    store_mode(storage.as_ref(), mode).await;
     common::crypto::install_tls();
     let provider = Provider::start(None).await;
     let keys = common::test_key_manager();
@@ -104,7 +112,7 @@ async fn setup_on(
         .await
         .unwrap();
     Setup {
-        service: service(storage.clone(), pin, policy),
+        service: service(storage.clone(), policy),
         storage,
         provider,
         provider_id: id,
@@ -112,9 +120,9 @@ async fn setup_on(
 }
 
 impl Setup {
-    /// The same installation, admitting new accounts under `pin` now.
-    fn reopened(mut self, pin: EnrollmentMode) -> Self {
-        self.service = service(self.storage.clone(), pin, None);
+    /// The same installation, admitting new accounts under `mode` now.
+    async fn reopened(self, mode: EnrollmentMode) -> Self {
+        store_mode(self.storage.as_ref(), mode).await;
         self
     }
 
@@ -402,7 +410,7 @@ async fn a_linked_subject_signs_in_on_a_closed_installation() {
         .handle_upstream_callback(s.callback(state, None))
         .await
         .unwrap();
-    let s = s.reopened(EnrollmentMode::InviteOnly);
+    let s = s.reopened(EnrollmentMode::InviteOnly).await;
     let state = s.started(&sub).await;
     let signed_in = s
         .service

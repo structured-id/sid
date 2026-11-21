@@ -907,3 +907,31 @@ fn management_setting_names_central_or_self() {
         assert!(management_setting(Some(setting)).is_err(), "{setting:?}");
     }
 }
+
+/// Without settings the WebAuthn relying party is the issuer's host and
+/// origin, so an installation reached at its issuer runs passkeys with no
+/// further configuration; before, it defaulted to localhost and every
+/// ceremony at a real address failed its origin check.
+#[test]
+fn the_relying_party_defaults_to_the_issuer() {
+    let issuer = Url::parse("https://sid.example.com:8443/base").unwrap();
+    let (id, origin) = webauthn_relying_party(&issuer, None, None).unwrap();
+    assert_eq!(id, "sid.example.com");
+    assert_eq!(origin.as_str(), "https://sid.example.com:8443/");
+}
+
+/// Sign-in presented on another host than the issuer names its own relying
+/// party, and an origin that is not a URL stops the start.
+#[test]
+fn the_relying_party_follows_its_settings() {
+    let issuer = Url::parse("https://sid.example.com").unwrap();
+    let (id, origin) = webauthn_relying_party(
+        &issuer,
+        Some("example.com".into()),
+        Some("https://login.example.com".into()),
+    )
+    .unwrap();
+    assert_eq!(id, "example.com");
+    assert_eq!(origin.as_str(), "https://login.example.com/");
+    assert!(webauthn_relying_party(&issuer, None, Some("not a url".into())).is_err());
+}

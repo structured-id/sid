@@ -209,7 +209,7 @@ macro_rules! __storage_conformance {
                 test_email_key_written_only_under_the_active_revision
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],enrollment_policy:
-                test_kept_mode_and_domains_enforced
+                test_domain_restricted_needs_a_domain
                 test_registration_admitted_by_the_stored_policy
                 test_admission_records_its_source
                 test_invite_creator_and_redemptions

@@ -108,7 +108,6 @@ fn installation(storage: Arc<dyn StorageBackend>, pool: sqlx::PgPool) -> Install
         storage.clone(),
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         None,
-        None,
     );
     let keys = common::test_key_manager();
     let codes = Arc::new(sid_authn::otp::OtpService::new(

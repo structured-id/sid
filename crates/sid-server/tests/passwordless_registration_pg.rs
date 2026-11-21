@@ -45,15 +45,11 @@ struct Installation {
     codes: sid_authn::otp::OtpService,
 }
 
-fn installation(
-    storage: Arc<dyn StorageBackend>,
-    enrollment_pin: Option<EnrollmentMode>,
-) -> Installation {
+fn installation(storage: Arc<dyn StorageBackend>) -> Installation {
     let auth = common::auth_service_over(
         storage.clone(),
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         None,
-        enrollment_pin,
     );
     let codes = sid_authn::otp::OtpService::new(
         storage.clone(),
@@ -330,6 +326,21 @@ impl Installation {
     }
 }
 
+/// Store `mode` as the installation's enrollment mode, the rest at the
+/// defaults, as an administrator sets it.
+async fn store_mode(storage: &dyn StorageBackend, mode: EnrollmentMode) {
+    storage
+        .set_enrollment_policy(
+            &sid_core::models::EnrollmentPolicy {
+                mode,
+                ..sid_core::models::SecurityPolicy::ce_default().enrollment
+            },
+            AuditEntry::system("test.enrollment", "installation").into(),
+        )
+        .await
+        .unwrap();
+}
+
 /// The suite's database: one PostgreSQL schema of its own, migrated once.
 /// Each scenario runs on a new installation over it with data of its own;
 /// the schema is dropped at the end, also after a failed scenario.
@@ -354,24 +365,19 @@ async fn passwordless_registration() {
         .unwrap();
     common::assign_administrator(storage.as_ref(), administrator.id).await;
     let outcome = tokio::spawn(async move {
-        the_page_registers_a_passkey_account_that_then_signs_in(installation(
-            storage.clone(),
-            None,
-        ))
-        .await;
-        a_native_client_registers_with_its_bearer(installation(storage.clone(), None)).await;
-        a_held_address_is_refused_before_any_code(installation(storage.clone(), None)).await;
-        a_closed_policy_answers_held_and_free_addresses_alike(installation(
-            storage.clone(),
-            Some(EnrollmentMode::AdminOnly),
-        ))
-        .await;
-        sign_in_and_registration_codes_do_not_cross(installation(storage.clone(), None)).await;
-        the_context_needs_its_csrf_token_and_the_page(installation(storage.clone(), None)).await;
-        the_context_opens_no_account_call(installation(storage.clone(), None)).await;
-        a_lost_finish_reply_answers_the_same_passkey(installation(storage.clone(), None)).await;
-        an_address_taken_meanwhile_commits_nothing(installation(storage.clone(), None)).await;
-        concurrent_finishes_commit_once(installation(storage, None)).await;
+        the_page_registers_a_passkey_account_that_then_signs_in(installation(storage.clone()))
+            .await;
+        a_native_client_registers_with_its_bearer(installation(storage.clone())).await;
+        a_held_address_is_refused_before_any_code(installation(storage.clone())).await;
+        store_mode(storage.as_ref(), EnrollmentMode::AdminOnly).await;
+        a_closed_policy_answers_held_and_free_addresses_alike(installation(storage.clone())).await;
+        store_mode(storage.as_ref(), EnrollmentMode::Open).await;
+        sign_in_and_registration_codes_do_not_cross(installation(storage.clone())).await;
+        the_context_needs_its_csrf_token_and_the_page(installation(storage.clone())).await;
+        the_context_opens_no_account_call(installation(storage.clone())).await;
+        a_lost_finish_reply_answers_the_same_passkey(installation(storage.clone())).await;
+        an_address_taken_meanwhile_commits_nothing(installation(storage.clone())).await;
+        concurrent_finishes_commit_once(installation(storage)).await;
     })
     .await;
     for statement in [

@@ -1,5 +1,4 @@
 use super::*;
-use sid::enrollment::Refusal;
 use sid_core::models::InviteId;
 use sid_infra::grpc_error::extract_error_info;
 use tonic::Code;
@@ -8,11 +7,6 @@ use tonic::Code;
 #[test]
 fn refusals_keep_their_status() {
     for (refused, code, expected) in [
-        (
-            EnrollmentError::ModePinned(Refusal::Pinned(EnrollmentMode::AdminOnly)),
-            Code::FailedPrecondition,
-            "INVALID_STATE",
-        ),
         (
             EnrollmentError::InviteNotFound(InviteId::generate()),
             Code::NotFound,

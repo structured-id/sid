@@ -11,22 +11,16 @@ use std::sync::Arc;
 
 use jiff::{SignedDuration as Duration, Timestamp};
 use sid_core::models::session::{AcceptedEvidence, AuthLevel, ELEVATION_TTL_MINUTES};
-use sid_core::models::{AuditEntry, EnrollmentMode, Profile, SecurityPolicy};
+use sid_core::models::{AuditEntry, Profile, SecurityPolicy};
 use sid_plugin::storage::StorageBackend;
 
 /// The application each sign-in continues to.
 const CLIENT: Option<&str> = Some("an-application");
 
+/// A schema of the test's own: its enrollment policy is the open default,
+/// whatever other tests store in theirs.
 async fn storage() -> Arc<dyn StorageBackend> {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-    Arc::new(backend)
+    common::pg_in_own_schema().await
 }
 
 /// The authority over `storage` under a policy requiring `min_acr`.
@@ -38,7 +32,7 @@ fn authority(
     policy.auth.min_acr = min_acr;
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    common::auth_service_over(storage, cache, Some(policy), Some(EnrollmentMode::Open))
+    common::auth_service_over(storage, cache, Some(policy))
 }
 
 async fn profile(storage: &dyn StorageBackend) -> Profile {
@@ -724,7 +718,6 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
         storage.clone(),
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         Some(policy),
-        Some(EnrollmentMode::Open),
         None,
         revocation,
     );
@@ -803,12 +796,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let mut policy = SecurityPolicy::ce_default();
     policy.auth.min_acr = AuthLevel::Basic;
-    let auth = common::auth_service_over(
-        storage.clone(),
-        cache.clone(),
-        Some(policy),
-        Some(EnrollmentMode::Open),
-    );
+    let auth = common::auth_service_over(storage.clone(), cache.clone(), Some(policy));
     let profile = profile(storage.as_ref()).await;
     let op = operation();
     let deadline = Timestamp::now() + Duration::from_mins(10);

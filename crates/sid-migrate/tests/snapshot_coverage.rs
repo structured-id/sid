@@ -909,7 +909,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                 allowed_domains: vec![],
                 track_source: true,
             },
-            ModeWrite::Replace,
             ctx(),
         )
         .await
@@ -942,7 +941,6 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
     )
     .unwrap()
     .admitted_by(EnrollmentGate {
-        pinned: None,
         email: Some("invited@sid.example.com".into()),
         invite_code: Some(invite.code.clone()),
     });
