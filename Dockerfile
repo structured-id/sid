@@ -9,7 +9,7 @@
 # same as in Dockerfile.embedded, under their own ids.
 
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:trixie AS builder
+FROM docker.io/library/rust:trixie AS builder
 
 WORKDIR /build
 
@@ -47,10 +47,10 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
 
 # The bundled event bus: with SID_NATS_URL unset the server runs this
 # nats-server as a child process (JetStream under SID_DATA_DIR/nats).
-FROM nats:2.15-alpine AS nats
+FROM docker.io/library/nats:2.15-alpine AS nats
 
 # ── Stage 2: Runtime ────────────────────────────────────────────
-FROM debian:trixie-slim
+FROM docker.io/library/debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget \
