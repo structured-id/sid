@@ -1,5 +1,4 @@
 target/
-!target/release/sid
 .git/
 *.md
 !README.md

@@ -20,7 +20,7 @@
 # `docker buildx prune --filter until=168h`.
 
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:1.99-trixie AS builder
+FROM docker.io/library/rust:trixie AS builder
 
 WORKDIR /build
 
