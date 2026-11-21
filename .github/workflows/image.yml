@@ -1,9 +1,9 @@
 # The server images on ghcr.io/structured-id/sid:
 # - embedded (Dockerfile.embedded): SQLite, in-process event bus, REST and
 #   gRPC; tagged <version>-embedded, floating tag embedded;
-# - ce (Dockerfile): PostgreSQL storage, bundled NATS, REST and gRPC, packing
-#   a binary built here with the default features; tagged <version>,
-#   floating tag latest.
+# - ce (Dockerfile): PostgreSQL storage, bundled NATS, REST and gRPC, the
+#   default features compiled inside its build; tagged <version>, floating
+#   tag latest.
 # A server release tag `v<version>` publishes one multi-arch manifest per
 # image under its versioned tag and keeps the floating tag on the newest
 # final release; a pull request only builds the images. Each
@@ -57,22 +57,14 @@ jobs:
             file: Dockerfile.embedded
           - variant: ce
             file: Dockerfile
-            host_binary: true
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    # The CE binary built on the runner links with mold (see ci.yml); on arm64
-    # the target's own linker is the system one, which mold replaces.
-    env:
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - name: Skip arm64 on pull requests
         id: scope
         run: echo "run=${{ github.event_name != 'pull_request' || !matrix.release_only }}" >> "$GITHUB_OUTPUT"
-      - uses: rui314/setup-mold@v1
-        if: steps.scope.outputs.run == 'true' && matrix.host_binary
       - uses: actions/checkout@v7
         if: steps.scope.outputs.run == 'true'
         with:
@@ -96,21 +88,6 @@ jobs:
               : > "$SID_BUILD_PLATFORM_CAS"
               ;;
           esac
-      # The CE image packs a binary built on the runner (Dockerfile copies
-      # target/release/sid); the embedded image compiles inside its build.
-      - name: Latest stable toolchain
-        if: steps.scope.outputs.run == 'true' && matrix.host_binary
-        run: rustup update stable --no-self-update
-      - name: protoc with the well-known types
-        if: steps.scope.outputs.run == 'true' && matrix.host_binary
-        uses: taiki-e/install-action@v2
-        with:
-          tool: protoc
-      - uses: Swatinem/rust-cache@v2
-        if: steps.scope.outputs.run == 'true' && matrix.host_binary
-      - name: Server binary
-        if: steps.scope.outputs.run == 'true' && matrix.host_binary
-        run: cargo build --locked --release -p sid-server && strip target/release/sid
       - uses: docker/setup-buildx-action@v4
         if: steps.scope.outputs.run == 'true'
       - uses: docker/login-action@v4
@@ -127,8 +104,10 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
-          # The embedded image compiles inside its build; the CE image packs
-          # the binary the step above built under the same value.
+          # Both images compile inside their build, with the toolchain and
+          # glibc of the Debian release they run on: a binary built on the
+          # runner's distribution carried its ISA level (x86-64-v3) and glibc
+          # into the image.
           build-args: |
             SID_BUILD_PLATFORM=${{ env.SID_BUILD_PLATFORM }}
           # A pull request only proves the image builds; a release pushes it
