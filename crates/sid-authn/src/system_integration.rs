@@ -31,57 +31,6 @@ const CLIENT_SCOPES: [&str; 5] = [
     "account.write",
 ];
 
-/// Scopes the administrative API understands, as the methods the console
-/// calls declare them: reading the installation and changing it. The
-/// console's access grants exactly these; the administrator's current
-/// authority still decides every operation.
-pub const ADMIN_SCOPES: [&str; 2] = ["admin.read", "admin.write"];
-
-/// Scopes the console's web client may request: sign-in and the
-/// administrative API.
-const ADMIN_CLIENT_SCOPES: [&str; 5] = ["openid", "profile", "email", "admin.read", "admin.write"];
-
-/// What tells one system integration from another: the registry entry, the
-/// API path under the installation URL and the scopes of API and client.
-struct Spec {
-    kind: SystemIntegration,
-    name: &'static str,
-    api_path: &'static str,
-    api_scopes: &'static [&'static str],
-    client_scopes: &'static [&'static str],
-    /// Prefix of its audit actions.
-    audit: &'static str,
-}
-
-const ACCOUNT: Spec = Spec {
-    kind: SystemIntegration::Account,
-    name: "Account",
-    api_path: "/account",
-    api_scopes: &ACCOUNT_SCOPES,
-    client_scopes: &CLIENT_SCOPES,
-    audit: "account_integration",
-};
-
-const ADMINISTRATION: Spec = Spec {
-    kind: SystemIntegration::Administration,
-    name: "Administration",
-    api_path: "/admin",
-    api_scopes: &ADMIN_SCOPES,
-    client_scopes: &ADMIN_CLIENT_SCOPES,
-    audit: "administration_integration",
-};
-
-/// Where a system integration's web client receives its responses and with
-/// which keys its UI host signs.
-pub trait ClientEndpoints {
-    /// The registered redirect URI.
-    fn callback(&self) -> String;
-    /// The registered back-channel logout URI.
-    fn backchannel_logout(&self) -> String;
-    /// The UI host's public keys.
-    fn keys(&self) -> &ClientKeySet;
-}
-
 /// The path on the account URL's origin the UI host receives authorization
 /// responses at.
 pub const CALLBACK_PATH: &str = "/auth/callback";
@@ -223,6 +172,27 @@ impl AccountSettings {
         &self.pages
     }
 
+    /// The registered redirect URI of the account web client, under the
+    /// application URL its UI host mounts its sign-in endpoints at.
+    pub fn callback(&self) -> String {
+        self.endpoint(CALLBACK_PATH)
+    }
+
+    /// The registered back-channel logout URI of the account web client,
+    /// under the same mount as the callback.
+    pub fn backchannel_logout(&self) -> String {
+        self.endpoint(BACKCHANNEL_LOGOUT_PATH)
+    }
+
+    /// `path` under the application URL.
+    fn endpoint(&self, path: &str) -> String {
+        format!(
+            "{}{}{path}",
+            self.application.origin().ascii_serialization(),
+            self.application.path().trim_end_matches('/')
+        )
+    }
+
     /// The account UI's sign-in route (see [`AccountPages::sign_in_page`]).
     pub fn sign_in_page(&self) -> url::Url {
         self.pages.sign_in_page()
@@ -237,150 +207,56 @@ impl AccountSettings {
     pub fn password_reset_page(&self) -> url::Url {
         self.pages.password_reset_page()
     }
-}
 
-impl ClientEndpoints for AccountSettings {
-    /// Under the application URL its UI host mounts its sign-in endpoints at.
-    fn callback(&self) -> String {
-        endpoint(&self.application, CALLBACK_PATH)
-    }
-
-    fn backchannel_logout(&self) -> String {
-        endpoint(&self.application, BACKCHANNEL_LOGOUT_PATH)
-    }
-
-    fn keys(&self) -> &ClientKeySet {
+    /// The account UI host's public keys.
+    pub fn keys(&self) -> &ClientKeySet {
         &self.keys
     }
-}
-
-/// The console integration's settings, from trusted configuration: the URL
-/// the console's UI host mounts its sign-in endpoints under (the console's
-/// own mount, such as `https://sid.example.com/admin`) and the public keys
-/// it signs with.
-#[derive(Debug, Clone)]
-pub struct AdministrationSettings {
-    application: url::Url,
-    keys: ClientKeySet,
-}
-
-impl AdministrationSettings {
-    /// Settings for a console whose UI host serves its endpoints under
-    /// `application_url` (see [`AccountPages::new`] for the URL rules).
-    pub fn new(application_url: &str, keys: ClientKeySet) -> Result<Self, String> {
-        Ok(Self {
-            application: trusted_url("administration console URL", application_url)?,
-            keys,
-        })
-    }
-}
-
-impl ClientEndpoints for AdministrationSettings {
-    fn callback(&self) -> String {
-        endpoint(&self.application, CALLBACK_PATH)
-    }
-
-    fn backchannel_logout(&self) -> String {
-        endpoint(&self.application, BACKCHANNEL_LOGOUT_PATH)
-    }
-
-    fn keys(&self) -> &ClientKeySet {
-        &self.keys
-    }
-}
-
-/// `path` under `application`, a URL from trusted configuration.
-fn endpoint(application: &url::Url, path: &str) -> String {
-    format!(
-        "{}{}{path}",
-        application.origin().ascii_serialization(),
-        application.path().trim_end_matches('/')
-    )
 }
 
 /// The account API's resource indicator at the installation served at
 /// `installation_url` (RFC 8707 §2: an absolute URI naming the API).
 pub fn account_api_indicator(installation_url: &str) -> SidResult<ResourceIndicator> {
-    api_indicator(&ACCOUNT, installation_url)
-}
-
-/// The administrative API's resource indicator at the installation served
-/// at `installation_url`.
-pub fn admin_api_indicator(installation_url: &str) -> SidResult<ResourceIndicator> {
-    api_indicator(&ADMINISTRATION, installation_url)
-}
-
-fn api_indicator(spec: &Spec, installation_url: &str) -> SidResult<ResourceIndicator> {
     ResourceIndicator::parse(&format!(
-        "{}{}",
-        installation_url.trim_end_matches('/'),
-        spec.api_path
+        "{}/account",
+        installation_url.trim_end_matches('/')
     ))
-    .map_err(|e| SidError::Validation(format!("{} API indicator: {e}", spec.name)))
+    .map_err(|e| SidError::Validation(format!("account API indicator: {e}")))
 }
 
-/// A stored system integration: its application and both roles.
+/// The stored account integration.
 #[derive(Debug, Clone)]
-pub struct Integration {
+pub struct AccountIntegration {
     pub application: Application,
     pub client: OAuth2Client,
     pub resource: ProtectedResource,
-    /// The client's access to its API; `None` until it is granted.
+    /// The client's access to the account API; `None` until it is granted.
     pub access: Option<ResourceAccess>,
 }
 
-impl Integration {
+impl AccountIntegration {
     /// Whether the integration can serve sign-ins now: its client is active,
-    /// its API accepts tokens and the client may obtain them. An integration
-    /// an administrator disabled stays disabled.
+    /// the account API accepts tokens and the client may obtain them. An
+    /// integration an administrator disabled stays disabled.
     pub fn is_ready(&self) -> bool {
         self.client.active && self.resource.is_target() && self.access.is_some()
     }
 }
 
 /// The installation's account integration as stored, if it was provisioned.
-pub async fn account_integration(storage: &dyn StorageBackend) -> SidResult<Option<Integration>> {
-    stored(storage, &ACCOUNT).await
-}
-
-/// The installation's console integration as stored, if it was provisioned.
-pub async fn administration_integration(
+/// A provisioned integration missing its client or resource role is an
+/// error: its roles are never removed separately.
+pub async fn account_integration(
     storage: &dyn StorageBackend,
-) -> SidResult<Option<Integration>> {
-    stored(storage, &ADMINISTRATION).await
-}
-
-/// Provision the account integration (see [`ensure`]).
-pub async fn ensure_account_integration(
-    storage: &dyn StorageBackend,
-    issuer: &OidcIssuer,
-    installation_url: &str,
-    settings: &AccountSettings,
-) -> SidResult<Integration> {
-    ensure(storage, issuer, installation_url, &ACCOUNT, settings).await
-}
-
-/// Provision the console integration (see [`ensure`]): its web client may
-/// obtain administrator-delegated tokens for the administrative API, which
-/// carry no authority of their own.
-pub async fn ensure_administration_integration(
-    storage: &dyn StorageBackend,
-    issuer: &OidcIssuer,
-    installation_url: &str,
-    settings: &AdministrationSettings,
-) -> SidResult<Integration> {
-    ensure(storage, issuer, installation_url, &ADMINISTRATION, settings).await
-}
-
-/// The integration of `spec` as stored, if it was provisioned. A provisioned
-/// integration missing its client or resource role is an error: its roles
-/// are never removed separately.
-async fn stored(storage: &dyn StorageBackend, spec: &Spec) -> SidResult<Option<Integration>> {
-    let Some(application) = storage.system_application(spec.kind).await? else {
+) -> SidResult<Option<AccountIntegration>> {
+    let Some(application) = storage
+        .system_application(SystemIntegration::Account)
+        .await?
+    else {
         return Ok(None);
     };
     let incomplete =
-        |role: &str| SidError::InvalidState(format!("the {} integration has no {role}", spec.name));
+        |role: &str| SidError::InvalidState(format!("the account integration has no {role}"));
     let client = storage
         .oauth2_client_of_application(application.id)
         .await?
@@ -392,7 +268,7 @@ async fn stored(storage: &dyn StorageBackend, spec: &Spec) -> SidResult<Option<I
     let access = storage
         .resource_access(&client.client_id, resource.id)
         .await?;
-    Ok(Some(Integration {
+    Ok(Some(AccountIntegration {
         application,
         client,
         resource,
@@ -400,27 +276,26 @@ async fn stored(storage: &dyn StorageBackend, spec: &Spec) -> SidResult<Option<I
     }))
 }
 
-fn owned(scopes: &[&str]) -> Vec<String> {
-    scopes.iter().map(|s| (*s).to_owned()).collect()
-}
-
-/// Provision the integration of `spec` under `issuer`, the installation
+/// Provision the account integration under `issuer`, the installation
 /// organization's local issuer, for the installation served at
 /// `installation_url`: once, whatever replicas start together, and kept
 /// matching `settings` (callback and keys) on every start. Its identifiers
 /// never change, and an administrator's disabling of its client is kept.
-async fn ensure(
+pub async fn ensure_account_integration(
     storage: &dyn StorageBackend,
     issuer: &OidcIssuer,
     installation_url: &str,
-    spec: &Spec,
-    settings: &impl ClientEndpoints,
-) -> SidResult<Integration> {
+    settings: &AccountSettings,
+) -> SidResult<AccountIntegration> {
     storage
         .ensure_system_project(AuditEntry::system("project.ensure", "system").into())
         .await?;
-    if storage.system_application(spec.kind).await?.is_none() {
-        let (app, client, resource) = new_integration(issuer, installation_url, spec, settings)?;
+    if storage
+        .system_application(SystemIntegration::Account)
+        .await?
+        .is_none()
+    {
+        let (app, client, resource) = new_integration(issuer, installation_url, settings)?;
         // Replicas starting together race here: the first registration is
         // kept and every one of them reads that one back below.
         match storage
@@ -428,7 +303,7 @@ async fn ensure(
                 &app,
                 Some(&client),
                 Some(&resource),
-                AuditEntry::system(format!("{}.created", spec.audit), app.id.to_string()).into(),
+                AuditEntry::system("account_integration.created", app.id.to_string()).into(),
             )
             .await
         {
@@ -436,25 +311,22 @@ async fn ensure(
             Err(e) => return Err(e),
         }
     }
-    let mut integration = stored(storage, spec).await?.ok_or_else(|| {
-        SidError::Storage(format!(
-            "the {} integration is missing right after it was stored",
-            spec.name
-        ))
+    let mut integration = account_integration(storage).await?.ok_or_else(|| {
+        SidError::Storage("account integration missing right after it was stored".into())
     })?;
-    integration.client = keep_client_current(storage, integration.client, spec, settings).await?;
+    integration.client = keep_client_current(storage, integration.client, settings).await?;
     if integration.access.is_none() {
         let access = ResourceAccess {
             client_id: integration.client.client_id.clone(),
             resource_id: integration.resource.id,
-            scopes: owned(spec.api_scopes),
+            scopes: ACCOUNT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
             created_at: jiff::Timestamp::now(),
         };
         storage
             .set_resource_access(
                 &access,
                 AuditEntry::system(
-                    format!("{}.access", spec.audit),
+                    "account_integration.access",
                     integration.client.client_id.clone(),
                 )
                 .into(),
@@ -465,19 +337,18 @@ async fn ensure(
     Ok(integration)
 }
 
-/// A new integration of `spec`: its application, web client and API.
+/// A new account integration: its application, web client and account API.
 fn new_integration(
     issuer: &OidcIssuer,
     installation_url: &str,
-    spec: &Spec,
-    settings: &impl ClientEndpoints,
+    settings: &AccountSettings,
 ) -> SidResult<(Application, OAuth2Client, ProtectedResource)> {
     let now = jiff::Timestamp::now();
     let app = Application {
         id: ApplicationId::generate(),
         project_id: ProjectId::SYSTEM,
-        name: spec.name.to_owned(),
-        system: Some(spec.kind),
+        name: "Account".to_owned(),
+        system: Some(SystemIntegration::Account),
         revision: 0,
         created_at: now,
         updated_at: now,
@@ -486,8 +357,8 @@ fn new_integration(
         id: ResourceId::generate(),
         application_id: Some(app.id),
         issuer_id: issuer.id,
-        indicator: api_indicator(spec, installation_url)?,
-        scopes: owned(spec.api_scopes),
+        indicator: account_api_indicator(installation_url)?,
+        scopes: ACCOUNT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
         state: ResourceState::Active,
         revision: 0,
         created_at: now,
@@ -501,10 +372,10 @@ fn new_integration(
         default_resource: Some(resource.id),
         application_type: ApplicationType::Web,
         client_secret_hash: None,
-        jwks: Some(settings.keys().clone()),
+        jwks: Some(settings.keys.clone()),
         participant_admission: None,
         redirect_uris: vec![settings.callback()],
-        allowed_scopes: owned(spec.client_scopes),
+        allowed_scopes: CLIENT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],
         client_name: app.name.clone(),
         logo_uri: None,
@@ -549,13 +420,12 @@ fn new_integration(
 async fn keep_client_current(
     storage: &dyn StorageBackend,
     mut client: OAuth2Client,
-    spec: &Spec,
-    settings: &impl ClientEndpoints,
+    settings: &AccountSettings,
 ) -> SidResult<OAuth2Client> {
     for _ in 0..UPDATE_ATTEMPTS {
         let callback = vec![settings.callback()];
         let logout = Some(settings.backchannel_logout());
-        let keys = Some(settings.keys().clone());
+        let keys = Some(settings.keys.clone());
         if client.redirect_uris == callback
             && client.backchannel_logout_uri == logout
             && client.backchannel_logout_session_required
@@ -571,8 +441,7 @@ async fn keep_client_current(
         if storage
             .update_oauth2_client(
                 &current,
-                AuditEntry::system(format!("{}.updated", spec.audit), client.client_id.clone())
-                    .into(),
+                AuditEntry::system("account_integration.updated", client.client_id.clone()).into(),
             )
             .await?
         {
@@ -583,16 +452,12 @@ async fn keep_client_current(
             .get_oauth2_client(&client.client_id)
             .await?
             .ok_or_else(|| {
-                SidError::InvalidState(format!(
-                    "the {} integration's client was removed",
-                    spec.name
-                ))
+                SidError::InvalidState("the account integration's client was removed".into())
             })?;
     }
-    Err(SidError::Conflict(format!(
-        "the {} integration's client keeps changing concurrently",
-        spec.name
-    )))
+    Err(SidError::Conflict(
+        "the account integration's client keeps changing concurrently".into(),
+    ))
 }
 
 #[cfg(test)]

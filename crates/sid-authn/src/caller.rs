@@ -8,7 +8,7 @@
 //! the token itself, so the rules are the same in every service and in
 //! process.
 
-use crate::account_api::InstallationApiToken;
+use crate::account_api::AccountApiToken;
 use crate::jwt::{AccessTokenClaims, TokenVerifier, VerifiedAccess};
 use crate::revocation_cache::RevocationCache;
 use sid_core::models::ProfileId;
@@ -51,10 +51,6 @@ pub enum TokenKind {
     Interactive,
     /// A token a machine obtained to act as a user.
     Impersonation,
-    /// A token an application obtained for the user (the administration
-    /// console's): it acts for the user within its scopes, never as the
-    /// user's own session.
-    Delegated,
 }
 
 /// The authenticated party of a request.
@@ -189,9 +185,6 @@ pub enum TokenSource {
     Installation,
     /// An account API token (its `sid` names an application session).
     AccountApi,
-    /// The administration console's token for the administrative API (its
-    /// `sid` names the console's application session).
-    AdminApi,
 }
 
 impl Verified {
@@ -227,10 +220,6 @@ pub async fn authenticate_token(
         VerifiedAccess::AccountApi(token) => {
             let caller = Caller::for_account_api(&token);
             (token.claims, caller, TokenSource::AccountApi)
-        }
-        VerifiedAccess::AdminApi(token) => {
-            let caller = Caller::for_admin_api(&token);
-            (token.claims, caller, TokenSource::AdminApi)
         }
     };
     if claims.cnf.is_some() {
@@ -319,25 +308,12 @@ impl Caller {
     /// in the application session it belongs to. It carries no
     /// administrator authority: the account integration's client serves a
     /// user's own account, and administration is not an account operation.
-    pub fn for_account_api(token: &InstallationApiToken) -> Self {
+    pub fn for_account_api(token: &AccountApiToken) -> Self {
         Self {
             profile_id: token.profile_id,
             session_id: token.claims.sid.clone(),
             admin: false,
             kind: TokenKind::Interactive,
-        }
-    }
-
-    /// The caller of a verified console token: the administrator it acts
-    /// for, with the authority the current assignments give, in the
-    /// console's application session. It never stands for the user's own
-    /// session.
-    pub fn for_admin_api(token: &InstallationApiToken) -> Self {
-        Self {
-            profile_id: token.profile_id,
-            session_id: token.claims.sid.clone(),
-            admin: token.administers,
-            kind: TokenKind::Delegated,
         }
     }
 

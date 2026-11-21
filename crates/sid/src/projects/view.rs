@@ -121,9 +121,6 @@ pub(super) fn application_to_proto(
         system_integration: match app.system {
             None => proto::SystemIntegration::Unspecified,
             Some(sid_core::models::SystemIntegration::Account) => proto::SystemIntegration::Account,
-            Some(sid_core::models::SystemIntegration::Administration) => {
-                proto::SystemIntegration::Administration
-            }
         }
         .into(),
     }
