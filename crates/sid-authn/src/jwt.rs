@@ -58,16 +58,16 @@ impl TokenSigner for JwtService {
 pub struct TokenVerifier {
     decoding_key: DecodingKey,
     issuer: String,
-    /// The account API's tokens, when this installation serves the account
-    /// integration's API.
-    account: Option<std::sync::Arc<crate::account_api::AccountApiVerifier>>,
+    /// The tokens of the installation's own APIs its system integrations
+    /// call (account, administration), each for exactly its resource.
+    apis: Vec<std::sync::Arc<crate::account_api::InstallationApiVerifier>>,
 }
 
 impl fmt::Debug for TokenVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TokenVerifier")
             .field("issuer", &self.issuer)
-            .field("account", &self.account)
+            .field("apis", &self.apis)
             .finish_non_exhaustive()
     }
 }
@@ -78,7 +78,10 @@ pub enum VerifiedAccess {
     /// The installation's own token: a sign-in session, PAT or impersonation.
     Session(AccessTokenClaims),
     /// An account API token of the account integration.
-    AccountApi(crate::account_api::AccountApiToken),
+    AccountApi(crate::account_api::InstallationApiToken),
+    /// The administration console's token for the administrative API,
+    /// delegated by the administrator it acts for.
+    AdminApi(crate::account_api::InstallationApiToken),
 }
 
 impl TokenVerifier {
@@ -89,19 +92,26 @@ impl TokenVerifier {
         Ok(Self {
             decoding_key,
             issuer,
-            account: None,
+            apis: Vec::new(),
         })
     }
 
-    /// Verify `token` as either kind the installation's services accept: an
-    /// account API token when its `iss` is the account integration's issuer,
-    /// the installation's own token otherwise. The `iss` read before the
-    /// signature only picks the verifier; each verifies it exactly.
+    /// Verify `token` as a kind the installation's services accept: a token
+    /// of one of its own APIs when its `iss` and `aud` name that API's issuer
+    /// and resource, the installation's own token otherwise. What is read
+    /// before the signature only picks the verifier; each verifies exactly.
     pub async fn verify(&self, token: &str) -> SidResult<VerifiedAccess> {
-        if let Some(account) = &self.account
-            && unverified_issuer(token).as_deref() == Some(account.issuer())
+        if let Some((iss, aud)) = unverified_target(token)
+            && let Some(api) = self.apis.iter().find(|api| {
+                api.issuer() == iss && aud.iter().any(|a| a == api.indicator().as_str())
+            })
         {
-            return account.verify(token).await.map(VerifiedAccess::AccountApi);
+            let verified = api.verify(token).await?;
+            return Ok(if api.is_administration() {
+                VerifiedAccess::AdminApi(verified)
+            } else {
+                VerifiedAccess::AccountApi(verified)
+            });
         }
         self.validate_access_token(token)
             .map(VerifiedAccess::Session)
@@ -560,13 +570,13 @@ impl JwtService {
         })
     }
 
-    /// Accept the account integration's API tokens beside the installation's
-    /// own, verified by `account`.
-    pub fn with_account_api(
+    /// Accept the tokens of one of the installation's own APIs beside its
+    /// own session tokens, verified by `api`.
+    pub fn with_installation_api(
         mut self,
-        account: std::sync::Arc<crate::account_api::AccountApiVerifier>,
+        api: std::sync::Arc<crate::account_api::InstallationApiVerifier>,
     ) -> Self {
-        self.verifier.account = Some(account);
+        self.verifier.apis.push(api);
         self
     }
 
@@ -952,16 +962,30 @@ pub fn logout_token_signed_by<S: TokenSigner>(
 /// The event every logout token carries (Back-Channel Logout 1.0 §2.4).
 pub const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
-/// The `iss` a JWT names, read without verifying it: only to choose which
-/// verifier checks it.
-fn unverified_issuer(token: &str) -> Option<String> {
+/// The `iss` and `aud` a JWT names, read without verifying them: only to
+/// choose which verifier checks it. `aud` is a string or an array (RFC 7519
+/// §4.1.3).
+fn unverified_target(token: &str) -> Option<(String, Vec<String>)> {
     #[derive(Deserialize)]
-    struct Iss {
+    #[serde(untagged)]
+    enum Aud {
+        One(String),
+        Many(Vec<String>),
+    }
+    #[derive(Deserialize)]
+    struct Target {
         iss: String,
+        aud: Option<Aud>,
     }
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    serde_json::from_slice::<Iss>(&bytes).ok().map(|i| i.iss)
+    let target = serde_json::from_slice::<Target>(&bytes).ok()?;
+    let aud = match target.aud {
+        Some(Aud::One(a)) => vec![a],
+        Some(Aud::Many(a)) => a,
+        None => Vec::new(),
+    };
+    Some((target.iss, aud))
 }
 
 /// Extract the 32-byte Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.

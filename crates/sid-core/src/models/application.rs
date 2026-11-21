@@ -42,17 +42,26 @@ pub enum SystemIntegration {
     /// SID's own account UI: its web client, the account API and the
     /// client's access to it.
     Account,
+    /// SID's own administration console: its web client, the
+    /// administrative API it calls for an administrator and the client's
+    /// access to it.
+    Administration,
 }
 
 impl SystemIntegration {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Account => "account",
+            Self::Administration => "administration",
         }
     }
 }
 
-parse_stored!(SystemIntegration, "system integration", [Account]);
+parse_stored!(
+    SystemIntegration,
+    "system integration",
+    [Account, Administration]
+);
 
 /// The public identifier of a protected resource and the `aud` of tokens
 /// issued for it: an absolute URI without a fragment (RFC 8707 §2).

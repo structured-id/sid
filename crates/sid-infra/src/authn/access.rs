@@ -373,11 +373,19 @@ impl Access {
                 Ok(verified) => {
                     let kind = match (verified.source, verified.caller.kind()) {
                         (TokenSource::AccountApi, _) => CredentialKind::AccountApi,
+                        // The console's token, for the administrative API
+                        // on an administrator's behalf.
+                        (TokenSource::AdminApi, _) => CredentialKind::Delegated,
                         (TokenSource::Installation, TokenKind::Interactive) => {
                             CredentialKind::OwnSession
                         }
                         (TokenSource::Installation, TokenKind::Impersonation) => {
                             CredentialKind::Impersonation
+                        }
+                        // The installation's own token never stands for an
+                        // application's delegated grant.
+                        (TokenSource::Installation, TokenKind::Delegated) => {
+                            return Err(CallerError::Unauthenticated.into_status());
                         }
                     };
                     let granted = scope_set(&verified.claims.scope);

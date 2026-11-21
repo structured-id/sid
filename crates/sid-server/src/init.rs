@@ -723,7 +723,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
 
     // The services accept the installation's own tokens and the account
     // API's, issued by its local issuer for the account resource.
-    let account_api = sid_authn::account_api::AccountApiVerifier::new(
+    let account_api = sid_authn::account_api::InstallationApiVerifier::account(
         issuers.clone(),
         local_issuer.clone(),
         sid_authn::system_integration::account_api_indicator(&issuer)
@@ -731,10 +731,22 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     )
     .await
     .context("account API verifier")?;
+    // And the administration console's, on an administrator's behalf, with
+    // the authority the current assignments give.
+    let admin_api = sid_authn::account_api::InstallationApiVerifier::administration(
+        issuers.clone(),
+        local_issuer.clone(),
+        sid_authn::system_integration::admin_api_indicator(&issuer)
+            .context("administrative API indicator")?,
+        storage.clone(),
+    )
+    .await
+    .context("administrative API verifier")?;
     let jwt = Arc::new(
         JwtService::new(&private_pem, &public_pem, issuer.clone())?
             .with_access_token_ttl(access_token_ttl)
-            .with_account_api(Arc::new(account_api)),
+            .with_installation_api(Arc::new(account_api))
+            .with_installation_api(Arc::new(admin_api)),
     );
 
     // ── OAuth2 ──

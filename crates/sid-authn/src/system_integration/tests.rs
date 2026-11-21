@@ -105,6 +105,73 @@ async fn the_integration_is_provisioned_in_the_registry() {
     assert!(integration.is_ready());
 }
 
+/// The console is a second system integration beside the account pages: its
+/// own client with its own callback under the console's mount, the
+/// administrative API with the administrative scopes only, and nothing of the
+/// account integration. Its user tokens are an ordinary delegated grant, not
+/// account API access.
+#[tokio::test]
+async fn the_console_is_its_own_integration() {
+    let (storage, issuer) = store().await;
+    let account = ensure_account_integration(
+        &storage,
+        &issuer,
+        INSTALLATION,
+        &settings("https://sid.example.com/account", "bff-1"),
+    )
+    .await
+    .unwrap();
+    let console_settings =
+        AdministrationSettings::new("https://sid.example.com/admin", keys("console-1")).unwrap();
+    let console =
+        ensure_administration_integration(&storage, &issuer, INSTALLATION, &console_settings)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        console.application.system,
+        Some(SystemIntegration::Administration)
+    );
+    assert_ne!(console.client.client_id, account.client.client_id);
+    assert_eq!(
+        console.client.redirect_uris,
+        ["https://sid.example.com/admin/auth/callback"]
+    );
+    assert_eq!(console.client.jwks.as_ref(), Some(console_settings.keys()));
+    assert_eq!(
+        console.resource.indicator.as_str(),
+        "https://sid.example.com/admin"
+    );
+    assert_eq!(
+        console.access.as_ref().unwrap().scopes,
+        ["admin.read", "admin.write"]
+    );
+    assert!(
+        !console
+            .client
+            .allowed_scopes
+            .iter()
+            .any(|s| s.starts_with("account.")),
+        "the console's client never obtains account API access"
+    );
+    let target = crate::target::select_target(
+        &storage,
+        issuer.id,
+        &console.client,
+        Some(&console.resource.indicator),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(target.grant(), crate::jwt::UserGrant::Delegated);
+
+    let again =
+        ensure_administration_integration(&storage, &issuer, INSTALLATION, &console_settings)
+            .await
+            .unwrap();
+    assert_eq!(again.client.client_id, console.client.client_id);
+}
+
 /// Restarts and replicas starting together keep one integration and its
 /// identifiers.
 #[tokio::test]

@@ -1831,16 +1831,31 @@ impl TestServices {
             sid_authn::issuer::IssuerRegistry::new(storage.clone(), test_key_manager())
                 .with_base_issuer(&issuer),
         );
-        // The services accept the account API's tokens, as a server does.
+        // The services accept the account API's tokens and the console's, as
+        // a server does.
         let account_api =
-            futures::executor::block_on(sid_authn::account_api::AccountApiVerifier::new(
+            futures::executor::block_on(sid_authn::account_api::InstallationApiVerifier::account(
                 issuers.clone(),
                 issuer.clone(),
                 sid_authn::system_integration::account_api_indicator("https://sid.example.com")
                     .unwrap(),
             ))
             .expect("account API verifier");
-        let jwt = Arc::new(test_jwt_service().with_account_api(Arc::new(account_api)));
+        let admin_api = futures::executor::block_on(
+            sid_authn::account_api::InstallationApiVerifier::administration(
+                issuers.clone(),
+                issuer.clone(),
+                sid_authn::system_integration::admin_api_indicator("https://sid.example.com")
+                    .unwrap(),
+                storage.clone(),
+            ),
+        )
+        .expect("administrative API verifier");
+        let jwt = Arc::new(
+            test_jwt_service()
+                .with_installation_api(Arc::new(account_api))
+                .with_installation_api(Arc::new(admin_api)),
+        );
         let oauth2 = Arc::new(OAuth2Server::new(jwt.clone()));
         let webauthn = test_webauthn(storage.clone());
         let revocation_cache = Arc::new(RevocationCache::recorded_in(
