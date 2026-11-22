@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.35](https://github.com/structured-id/sid/compare/v0.2.34...v0.2.35) - 2026-11-22
+
+### Added
+
+- *(server)* serve the account pages and console ([#735](https://github.com/structured-id/sid/pull/735))
+
 ## [0.2.34](https://github.com/structured-id/sid/compare/v0.2.33...v0.2.34) - 2026-11-21
 
 ### Other
