@@ -841,6 +841,23 @@ impl CoordinodeBackend {
             .await
     }
 
+    /// One read transaction for the whole page: each lookup is an index
+    /// access of the embedded store.
+    pub(super) async fn primary_profile_phones(
+        &self,
+        owners: &[ProfileId],
+    ) -> SidResult<Vec<ProfilePhone>> {
+        let owners = owners.to_vec();
+        self.read(move |tx| {
+            let mut found = Vec::new();
+            for owner in &owners {
+                found.extend(primary(tx, "SidPhone", PHONE, *owner, phone)?);
+            }
+            Ok(found)
+        })
+        .await
+    }
+
     pub(super) async fn create_profile_phone(
         &self,
         stored: &ProfilePhone,
@@ -948,6 +965,23 @@ impl CoordinodeBackend {
     ) -> SidResult<Option<ProfileEmail>> {
         self.read(move |tx| primary(tx, "SidEmail", EMAIL, owner, email))
             .await
+    }
+
+    /// One read transaction for the whole page: each lookup is an index
+    /// access of the embedded store.
+    pub(super) async fn primary_profile_emails(
+        &self,
+        owners: &[ProfileId],
+    ) -> SidResult<Vec<ProfileEmail>> {
+        let owners = owners.to_vec();
+        self.read(move |tx| {
+            let mut found = Vec::new();
+            for owner in &owners {
+                found.extend(primary(tx, "SidEmail", EMAIL, *owner, email)?);
+            }
+            Ok(found)
+        })
+        .await
     }
 
     pub(super) async fn create_profile_email(

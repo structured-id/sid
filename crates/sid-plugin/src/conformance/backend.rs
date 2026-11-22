@@ -4449,6 +4449,105 @@ pub async fn test_profile_phone_roundtrip(backend: &dyn StorageBackend) {
     assert!(backend.get_profile_phone(phone.id).await.unwrap().is_none());
 }
 
+/// A page's primary contacts in one batch: each named profile's primary
+/// email and phone, nothing for a profile without one, never a secondary
+/// contact, never a profile not named.
+pub async fn test_primary_contacts_batch(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        EmailLabel, PhoneLabel, ProfileEmail, ProfileEmailId, ProfilePhone, ProfilePhoneId,
+    };
+
+    let email = |profile: ProfileId, primary: bool| ProfileEmail {
+        id: ProfileEmailId::new(),
+        profile_id: profile,
+        email: format!("batch-{}@sid.example.com", Uuid::now_v7()),
+        label: EmailLabel::Personal,
+        custom_label: None,
+        is_primary: primary,
+        verified: false,
+        verified_at: None,
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
+    };
+    let phone = |profile: ProfileId, e164: u64| ProfilePhone {
+        id: ProfilePhoneId::new(),
+        profile_id: profile,
+        e164,
+        extension: None,
+        label: PhoneLabel::Mobile,
+        custom_label: None,
+        is_primary: true,
+        can_receive_sms: true,
+        can_receive_fax: false,
+        can_receive_voice: true,
+        verified: false,
+        verified_at: None,
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
+    };
+
+    let with_both = create_test_profile("batch_both");
+    let with_email = create_test_profile("batch_email");
+    let without = create_test_profile("batch_none");
+    let not_named = create_test_profile("batch_other");
+    for p in [&with_both, &with_email, &without, &not_named] {
+        backend.create_profile(p, test_audit()).await.unwrap();
+    }
+    let both_email = email(with_both.id, true);
+    let only_email = email(with_email.id, true);
+    let secondary = email(with_email.id, false);
+    let other_email = email(not_named.id, true);
+    for e in [&both_email, &only_email, &secondary, &other_email] {
+        backend.create_profile_email(e, test_audit()).await.unwrap();
+    }
+    let both_phone = phone(with_both.id, 380501112233);
+    let other_phone = phone(not_named.id, 380504445566);
+    for p in [&both_phone, &other_phone] {
+        backend.create_profile_phone(p, test_audit()).await.unwrap();
+    }
+
+    let page = [with_both.id, with_email.id, without.id];
+    let mut emails: Vec<_> = backend
+        .primary_profile_emails(&page)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    emails.sort_by_key(|id| id.0);
+    let mut expected = vec![both_email.id, only_email.id];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(emails, expected, "exactly the page's primary emails");
+
+    let phones: Vec<_> = backend
+        .primary_profile_phones(&page)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(
+        phones,
+        vec![both_phone.id],
+        "exactly the page's primary phones"
+    );
+
+    assert!(
+        backend
+            .primary_profile_emails(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        backend
+            .primary_profile_phones(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// Test profile_emails CRUD: save email, read back, update, delete, primary lookup.
 pub async fn test_profile_email_roundtrip(backend: &dyn StorageBackend) {
     use sid_core::models::{EmailLabel, ProfileEmail, ProfileEmailId};

@@ -569,6 +569,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::get_primary_profile_phone(self, profile_id).await
     }
 
+    async fn primary_profile_phones(&self, profile_ids: &[ProfileId]) -> Result<Vec<ProfilePhone>> {
+        CoordinodeBackend::primary_profile_phones(self, profile_ids).await
+    }
+
     async fn create_profile_phone(&self, phone: &ProfilePhone, ctx: MutationContext) -> Result<()> {
         CoordinodeBackend::create_profile_phone(self, phone, ctx).await
     }
@@ -612,6 +616,10 @@ impl StorageBackend for CoordinodeBackend {
         profile_id: ProfileId,
     ) -> Result<Option<ProfileEmail>> {
         CoordinodeBackend::get_primary_profile_email(self, profile_id).await
+    }
+
+    async fn primary_profile_emails(&self, profile_ids: &[ProfileId]) -> Result<Vec<ProfileEmail>> {
+        CoordinodeBackend::primary_profile_emails(self, profile_ids).await
     }
 
     async fn create_profile_email(&self, email: &ProfileEmail, ctx: MutationContext) -> Result<()> {

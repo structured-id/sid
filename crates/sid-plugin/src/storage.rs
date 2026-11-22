@@ -183,6 +183,10 @@ pub trait StorageBackend:
         profile_id: ProfileId,
     ) -> Result<Option<ProfilePhone>>;
 
+    /// The primary phone of each of `profile_ids` that has one, read in one
+    /// batch (a listing page), not one read per profile. Order unspecified.
+    async fn primary_profile_phones(&self, profile_ids: &[ProfileId]) -> Result<Vec<ProfilePhone>>;
+
     /// Insert a new phone; an existing id is `Conflict`. A primary phone
     /// takes the flag from the profile's current primary in the same write.
     async fn create_profile_phone(&self, phone: &ProfilePhone, ctx: MutationContext) -> Result<()>;
@@ -226,6 +230,10 @@ pub trait StorageBackend:
         &self,
         profile_id: ProfileId,
     ) -> Result<Option<ProfileEmail>>;
+
+    /// The primary email of each of `profile_ids` that has one, read in one
+    /// batch (a listing page), not one read per profile. Order unspecified.
+    async fn primary_profile_emails(&self, profile_ids: &[ProfileId]) -> Result<Vec<ProfileEmail>>;
 
     /// Insert a new email; an existing id is `Conflict`. A primary email
     /// takes the flag from the profile's current primary in the same write.

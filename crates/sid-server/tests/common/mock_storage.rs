@@ -2968,6 +2968,21 @@ impl StorageBackend for MockStorage {
             .find(|p| p.profile_id == profile_id && p.is_primary)
             .cloned())
     }
+    async fn primary_profile_phones(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfilePhone>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.contact_reads_fail {
+            return Err(sid_core::Error::Storage("read primary phones".into()));
+        }
+        Ok(inner
+            .profile_phones
+            .values()
+            .filter(|p| p.is_primary && profile_ids.contains(&p.profile_id))
+            .cloned()
+            .collect())
+    }
     async fn create_profile_phone(
         &self,
         phone: &ProfilePhone,
@@ -3099,6 +3114,21 @@ impl StorageBackend for MockStorage {
             .values()
             .find(|e| e.profile_id == profile_id && e.is_primary)
             .cloned())
+    }
+    async fn primary_profile_emails(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfileEmail>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.contact_reads_fail {
+            return Err(sid_core::Error::Storage("read primary emails".into()));
+        }
+        Ok(inner
+            .profile_emails
+            .values()
+            .filter(|e| e.is_primary && profile_ids.contains(&e.profile_id))
+            .cloned()
+            .collect())
     }
     async fn create_profile_email(
         &self,

@@ -721,6 +721,31 @@ impl SqliteBackend {
         row.as_ref().map(row_to_profile_phone).transpose()
     }
 
+    /// One query per bounded run of profiles, not one per profile.
+    pub(crate) async fn primary_profile_phones_impl(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfilePhone>> {
+        let mut phones = Vec::new();
+        for run in profile_ids.chunks(super::rbac::IN_LIST_CHUNK) {
+            let ids = super::rbac::placeholders(run.len());
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM profile_phones WHERE profile_id IN ({ids}) AND is_primary = 1"
+            )));
+            for id in run {
+                read = read.bind(*id);
+            }
+            let rows = read
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
+            for row in &rows {
+                phones.push(row_to_profile_phone(row)?);
+            }
+        }
+        Ok(phones)
+    }
+
     pub(crate) async fn delete_profile_phone_impl(
         &self,
         id: ProfilePhoneId,
@@ -769,6 +794,31 @@ impl SqliteBackend {
                 .await
                 .map_err(|e| SidError::Storage(e.to_string()))?;
         row.as_ref().map(row_to_profile_email).transpose()
+    }
+
+    /// One query per bounded run of profiles, not one per profile.
+    pub(crate) async fn primary_profile_emails_impl(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfileEmail>> {
+        let mut emails = Vec::new();
+        for run in profile_ids.chunks(super::rbac::IN_LIST_CHUNK) {
+            let ids = super::rbac::placeholders(run.len());
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM profile_emails WHERE profile_id IN ({ids}) AND is_primary = 1"
+            )));
+            for id in run {
+                read = read.bind(*id);
+            }
+            let rows = read
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
+            for row in &rows {
+                emails.push(row_to_profile_email(row)?);
+            }
+        }
+        Ok(emails)
     }
 
     pub(crate) async fn delete_profile_email_impl(

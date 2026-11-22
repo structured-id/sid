@@ -4105,6 +4105,57 @@ async fn test_admin_list_profiles() {
     assert_eq!(body.profiles.len(), 2);
 }
 
+/// The listing carries each profile's primary email, as reading one profile
+/// does. Bug prevented: the console's user list showed "—" for every email,
+/// since the listing left the contacts out.
+#[tokio::test]
+async fn test_admin_list_profiles_carries_primary_email() {
+    let svc = TestServices::new(MockStorage::unclaimed());
+    let created = svc
+        .identity
+        .create_profile(admin_request(
+            &svc,
+            CreateProfileRequest {
+                username: None,
+                email: Some("listed@sid.example.com".to_string()),
+                phone: None,
+                given_name: None,
+                family_name: None,
+                middle_name: None,
+                honorific_prefix: None,
+                honorific_suffix: None,
+                profile_type: 0,
+                invite_code: None,
+                referrer_id: None,
+                utm: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .profile
+        .unwrap();
+
+    let listed = svc
+        .identity
+        .list_profiles(admin_request(
+            &svc,
+            ListProfilesRequest {
+                page_size: 100,
+                page_token: String::new(),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .profiles;
+    let row = listed
+        .iter()
+        .find(|p| p.id == created.id)
+        .expect("the created profile is listed");
+    assert_eq!(row.email.as_deref(), Some("listed@sid.example.com"));
+}
+
 #[tokio::test]
 async fn test_admin_delete_profile() {
     let profile = test_profile();

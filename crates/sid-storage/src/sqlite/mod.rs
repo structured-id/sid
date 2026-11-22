@@ -1099,6 +1099,13 @@ impl StorageBackend for SqliteBackend {
         self.get_primary_profile_phone_impl(profile_id).await
     }
 
+    async fn primary_profile_phones(
+        &self,
+        profile_ids: &[sid_core::models::ProfileId],
+    ) -> SidResult<Vec<sid_core::models::ProfilePhone>> {
+        self.primary_profile_phones_impl(profile_ids).await
+    }
+
     async fn create_profile_phone(
         &self,
         phone: &sid_core::models::ProfilePhone,
@@ -1158,6 +1165,13 @@ impl StorageBackend for SqliteBackend {
         profile_id: sid_core::models::ProfileId,
     ) -> SidResult<Option<sid_core::models::ProfileEmail>> {
         self.get_primary_profile_email_impl(profile_id).await
+    }
+
+    async fn primary_profile_emails(
+        &self,
+        profile_ids: &[sid_core::models::ProfileId],
+    ) -> SidResult<Vec<sid_core::models::ProfileEmail>> {
+        self.primary_profile_emails_impl(profile_ids).await
     }
 
     async fn create_profile_email(

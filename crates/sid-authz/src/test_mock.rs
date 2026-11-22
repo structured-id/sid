@@ -823,6 +823,9 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn get_primary_profile_phone(&self, _: ProfileId) -> Result<Option<ProfilePhone>> {
         unimplemented!()
     }
+    async fn primary_profile_phones(&self, _: &[ProfileId]) -> Result<Vec<ProfilePhone>> {
+        unimplemented!()
+    }
     async fn create_profile_phone(&self, _: &ProfilePhone, _audit: MutationContext) -> Result<()> {
         unimplemented!()
     }
@@ -857,6 +860,9 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn get_primary_profile_email(&self, _: ProfileId) -> Result<Option<ProfileEmail>> {
+        unimplemented!()
+    }
+    async fn primary_profile_emails(&self, _: &[ProfileId]) -> Result<Vec<ProfileEmail>> {
         unimplemented!()
     }
     async fn create_profile_email(&self, _: &ProfileEmail, _audit: MutationContext) -> Result<()> {
