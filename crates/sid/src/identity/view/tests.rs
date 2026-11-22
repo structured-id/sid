@@ -73,7 +73,7 @@ fn test_profile_to_proto_basic_fields() {
     profile.given_name = Some("Test".to_string());
     profile.family_name = Some("User".to_string());
 
-    let proto = profile_to_proto(&profile);
+    let proto = profile_to_proto_with_contacts(&profile, None, None);
     assert_eq!(proto.given_name.as_deref(), Some("Test"));
     assert_eq!(proto.family_name.as_deref(), Some("User"));
     assert!(proto.phone.is_none());

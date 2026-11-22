@@ -29,11 +29,6 @@ pub(crate) fn export_status_to_proto(status: &ExportStatus) -> v1::ExportStatus 
     }
 }
 
-/// `p` without its contacts.
-pub(crate) fn profile_to_proto(p: &Profile) -> v1::Profile {
-    profile_to_proto_with_contacts(p, None, None)
-}
-
 /// `p` with its primary email and phone.
 pub(crate) fn profile_to_proto_with_contacts(
     p: &Profile,

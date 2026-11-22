@@ -425,7 +425,7 @@ macro_rules! __storage_shared_scenarios {
             test_principal_source_contact_fk_roundtrip test_principal_quarantine_roundtrip
             test_principal_get_by_value test_principal_bindings_crud
             test_principal_count_active_bindings test_removing_shared_principal_keeps_other_holder
-            test_profile_phone_roundtrip test_profile_email_roundtrip
+            test_profile_phone_roundtrip test_profile_email_roundtrip test_primary_contacts_batch
             test_get_profile_by_email_via_join test_multiple_phones_per_profile
             test_phone_extension test_register_profile_commits_all
             test_register_profile_without_credential test_register_profile_without_username

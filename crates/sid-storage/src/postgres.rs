@@ -2939,6 +2939,21 @@ impl StorageBackend for PostgresBackend {
         Ok(row.map(|r| r.into_domain()))
     }
 
+    async fn primary_profile_phones(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfilePhone>> {
+        let ids: Vec<uuid::Uuid> = profile_ids.iter().map(|p| p.into_uuid()).collect();
+        let rows = sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE profile_id = ANY($1) AND is_primary = true",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        Ok(rows.into_iter().map(|r| r.into_domain()).collect())
+    }
+
     async fn create_profile_phone(
         &self,
         phone: &ProfilePhone,
@@ -3089,6 +3104,21 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
         Ok(row.map(|r| r.into_domain()))
+    }
+
+    async fn primary_profile_emails(
+        &self,
+        profile_ids: &[ProfileId],
+    ) -> SidResult<Vec<ProfileEmail>> {
+        let ids: Vec<uuid::Uuid> = profile_ids.iter().map(|p| p.into_uuid()).collect();
+        let rows = sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+            "SELECT * FROM profile_emails WHERE profile_id = ANY($1) AND is_primary = true",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        Ok(rows.into_iter().map(|r| r.into_domain()).collect())
     }
 
     async fn create_profile_email(

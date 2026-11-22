@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use prost::Message;
 use sid_authn::account_closure::AccountClosureService;
+use std::collections::HashMap;
+
 use sid_authn::caller::{Caller, CallerError};
 use sid_authn::credential_enrollment::EnrollmentError;
 use sid_authn::data_export::DataExportService;
@@ -43,7 +45,7 @@ mod view;
 
 use view::{
     credential_to_proto, device_to_proto, export_status_to_proto, principal_to_proto,
-    profile_to_proto, profile_to_proto_with_contacts,
+    profile_to_proto_with_contacts,
 };
 
 /// Profiles per ListProfiles page when the request names no size.
@@ -987,8 +989,28 @@ impl Identity {
             .filter(|next| profiles.len() as u64 == limit && i64::try_from(*next).is_ok())
             .map(|next| next.to_string())
             .unwrap_or_default();
+        // Each profile with its primary contacts, as reading one profile
+        // gives them: one batch per contact kind for the whole page.
+        let ids: Vec<ProfileId> = profiles.iter().map(|p| p.id).collect();
+        let emails: HashMap<ProfileId, ProfileEmail> = self
+            .storage
+            .primary_profile_emails(&ids)
+            .await?
+            .into_iter()
+            .map(|e| (e.profile_id, e))
+            .collect();
+        let phones: HashMap<ProfileId, ProfilePhone> = self
+            .storage
+            .primary_profile_phones(&ids)
+            .await?
+            .into_iter()
+            .map(|p| (p.profile_id, p))
+            .collect();
         Ok(ListProfilesResponse {
-            profiles: profiles.iter().map(profile_to_proto).collect(),
+            profiles: profiles
+                .iter()
+                .map(|p| profile_to_proto_with_contacts(p, emails.get(&p.id), phones.get(&p.id)))
+                .collect(),
             next_page_token,
         })
     }
