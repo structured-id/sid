@@ -62,8 +62,14 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(format!("write web settings: {e}")))?;
         if let Some(end) = end_browser {
+            // The browser sessions and the application sessions they signed
+            // in: access derived from the formerly shared secret ends too.
             let ended = sqlx::query(
-                "DELETE FROM sessions WHERE browser_secret_hash IS NOT NULL RETURNING *",
+                "DELETE FROM sessions
+                 WHERE browser_secret_hash IS NOT NULL
+                    OR authenticated_by IN
+                       (SELECT id FROM sessions WHERE browser_secret_hash IS NOT NULL)
+                 RETURNING *",
             )
             .fetch_all(&mut *tx)
             .await

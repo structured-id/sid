@@ -130,7 +130,11 @@ pub async fn test_web_settings_end_browser_sessions(backend: &dyn StorageBackend
     hash[..16].copy_from_slice(uuid::Uuid::now_v7().as_bytes());
     browser.browser_secret_hash = Some(BrowserSecretHash::from_bytes(hash));
     let native = create_test_session(profile.id);
-    for s in [&browser, &native] {
+    // An application session the browser session signed in: access derived
+    // from the formerly shared secret.
+    let mut application = create_test_session(profile.id);
+    application.authenticated_by = Some(browser.id);
+    for s in [&browser, &native, &application] {
         backend.create_session(s, test_audit()).await.unwrap();
     }
 
@@ -156,20 +160,26 @@ pub async fn test_web_settings_end_browser_sessions(backend: &dyn StorageBackend
     );
     assert!(backend.get_session(browser.id).await.unwrap().is_none());
     assert!(
+        backend.get_session(application.id).await.unwrap().is_none(),
+        "an application session the browser session signed in outlived it"
+    );
+    assert!(
         backend.get_session(native.id).await.unwrap().is_some(),
         "a session without a browser secret was ended"
     );
-    let revocation = SessionRevocation {
-        session_id: browser.id.to_string(),
+    for ended in [browser.id, application.id] {
+        let revocation = SessionRevocation {
+            session_id: ended.to_string(),
+        }
+        .work();
+        assert_eq!(
+            backend
+                .get_work(revocation.id)
+                .await
+                .unwrap()
+                .map(|w| w.state),
+            Some(WorkState::Pending),
+            "the revocation of {ended} was not stored with the narrowing"
+        );
     }
-    .work();
-    assert_eq!(
-        backend
-            .get_work(revocation.id)
-            .await
-            .unwrap()
-            .map(|w| w.state),
-        Some(WorkState::Pending),
-        "the ended session's revocation was not stored with the narrowing"
-    );
 }

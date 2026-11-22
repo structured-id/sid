@@ -6367,18 +6367,26 @@ impl StorageBackend for MockStorage {
         if inner.web_settings.as_ref() != expected {
             return Ok(false);
         }
+        // The browser sessions and the application sessions they signed in.
+        let browsers: std::collections::HashSet<_> = inner
+            .sessions
+            .values()
+            .filter(|s| s.browser_secret_hash.is_some())
+            .map(|s| s.id)
+            .collect();
+        let ended = |s: &sid_core::models::Session| {
+            browsers.contains(&s.id) || s.authenticated_by.is_some_and(|b| browsers.contains(&b))
+        };
         if let Some(end) = end_browser {
             for session in inner.sessions.values() {
-                if session.browser_secret_hash.is_some() {
+                if ended(session) {
                     ctx.work.extend(end.owed_by(session));
                 }
             }
         }
         inner.owe(&ctx)?;
         if end_browser.is_some() {
-            inner
-                .sessions
-                .retain(|_, s| s.browser_secret_hash.is_none());
+            inner.sessions.retain(|_, s| !ended(s));
         }
         inner.web_settings = Some(settings.clone());
         Ok(true)

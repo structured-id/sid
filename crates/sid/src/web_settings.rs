@@ -43,9 +43,10 @@ const PATTERN_SIZE_LIMIT: usize = 1 << 16;
 
 /// Paths the installation itself serves on its public origin: a console
 /// placed at or under one would shadow it.
-const RESERVED_PATHS: [&str; 7] = [
+const RESERVED_PATHS: [&str; 8] = [
     "/account/",
     "/api/",
+    "/auth/",
     "/v1/",
     "/.well-known/",
     "/oauth2/",
@@ -204,23 +205,28 @@ fn console_url(value: &str, public: &Url) -> Result<Url, WebSettingsError> {
     if !same_site(&url, public) {
         return Err(invalid(FIELD, "on the public URL's site"));
     }
-    if url.origin() == public.origin() {
-        let path = url.path();
-        if path == "/" {
+    let path = url.path();
+    if path == "/" {
+        // A sibling host's root is the console's own; the public URL's root
+        // serves the installation.
+        if url.origin() == public.origin() {
             return Err(invalid(
                 FIELD,
                 "the public URL's root serves the installation",
             ));
         }
-        if let Some(reserved) = RESERVED_PATHS
-            .iter()
-            .find(|r| path.starts_with(**r) || r.starts_with(path))
-        {
-            return Err(invalid(
-                FIELD,
-                format!("{reserved} is served by the installation"),
-            ));
-        }
+        return Ok(url);
+    }
+    // The installation's routes answer on every host the console may use,
+    // so a console at or around one of them would be shadowed there.
+    if let Some(reserved) = RESERVED_PATHS
+        .iter()
+        .find(|r| path.starts_with(**r) || r.starts_with(path))
+    {
+        return Err(invalid(
+            FIELD,
+            format!("{reserved} is served by the installation"),
+        ));
     }
     Ok(url)
 }

@@ -65,8 +65,14 @@ impl PostgresBackend {
         .await
         .map_err(storage)?;
         if let Some(end) = end_browser {
+            // The browser sessions and the application sessions they signed
+            // in: access derived from the formerly shared secret ends too.
             let ended = sqlx::query_as::<_, crate::pg_row::SessionRow>(
-                "DELETE FROM sessions WHERE browser_secret_hash IS NOT NULL RETURNING *",
+                "DELETE FROM sessions
+                 WHERE browser_secret_hash IS NOT NULL
+                    OR authenticated_by IN
+                       (SELECT id FROM sessions WHERE browser_secret_hash IS NOT NULL)
+                 RETURNING *",
             )
             .fetch_all(&mut *tx)
             .await

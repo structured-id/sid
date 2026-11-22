@@ -345,13 +345,12 @@ pub(super) fn end_browser_sessions(
         &format!("MATCH (s:SidSession) WHERE s.browser_secret_hash IS NOT NULL RETURN {SESSION}"),
         Params::default(),
     )?;
-    for ended in rows.iter().map(session).collect::<SidResult<Vec<_>>>()? {
-        delete_owned(tx, ended.id)?;
-        tx.run(
-            "MATCH (s:SidSession) WHERE s.id = $id DETACH DELETE s",
-            Params::default().with("id", session_value(ended.id)),
-        )?;
-        ctx.work.extend(end.owed_by(&ended));
+    // Each browser session with the application sessions it signed in:
+    // access derived from the formerly shared secret ends too.
+    for browser in rows.iter().map(session).collect::<SidResult<Vec<_>>>()? {
+        for ended in end_with_dependents(tx, browser.id)? {
+            ctx.work.extend(end.owed_by(&ended));
+        }
     }
     Ok(())
 }
