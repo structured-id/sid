@@ -22,14 +22,7 @@ use sid_server::grpc::identity_service::IdentityServiceImpl;
 use tonic::{Code, Request, Response, Status};
 
 async fn postgres() -> Arc<dyn StorageBackend> {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".into());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     common::adopt_operation_period(&backend).await;
     Arc::new(backend)
 }

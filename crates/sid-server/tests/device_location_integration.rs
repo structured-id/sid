@@ -14,20 +14,9 @@ use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
-/// The test database; an unreachable one fails the test instead of skipping it.
-async fn setup_pg_storage() -> Option<Arc<dyn StorageBackend>> {
-    let backend = sid_storage::PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("test PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
-    Some(Arc::new(backend))
+/// The test database the run prepared; an unreachable one fails the test.
+async fn setup_pg_storage() -> Arc<dyn StorageBackend> {
+    Arc::new(sid_storage::testing::prepared_postgres().await)
 }
 
 fn test_profile_id() -> ProfileId {
@@ -72,10 +61,7 @@ fn create_test_session_with_device(
 
 #[tokio::test]
 async fn test_pg_has_recent_session_from_device_no_sessions() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_id = test_profile_id();
     let device_id = uuid::Uuid::now_v7();
     let window = Duration::from_secs(90 * 24 * 3600);
@@ -89,10 +75,7 @@ async fn test_pg_has_recent_session_from_device_no_sessions() {
 
 #[tokio::test]
 async fn test_pg_has_recent_session_from_device_found() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_id = create_test_profile(storage.as_ref()).await;
     let device_id = uuid::Uuid::now_v7();
 
@@ -118,10 +101,7 @@ async fn test_pg_has_recent_session_from_device_found() {
 
 #[tokio::test]
 async fn test_pg_has_recent_session_from_device_different_profile() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_a = create_test_profile(storage.as_ref()).await;
     let profile_b = create_test_profile(storage.as_ref()).await;
     let device_id = uuid::Uuid::now_v7();
@@ -156,10 +136,7 @@ async fn test_pg_has_recent_session_from_device_different_profile() {
 
 #[tokio::test]
 async fn test_pg_record_login_location_builds_designation() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_id = create_test_profile(storage.as_ref()).await;
 
     // First login from RO → not designated yet (threshold=3).
@@ -201,10 +178,7 @@ async fn test_pg_record_login_location_builds_designation() {
 
 #[tokio::test]
 async fn test_pg_designated_locations_per_profile_isolation() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_a = create_test_profile(storage.as_ref()).await;
     let profile_b = create_test_profile(storage.as_ref()).await;
 
@@ -234,10 +208,7 @@ async fn test_pg_designated_locations_per_profile_isolation() {
 
 #[tokio::test]
 async fn test_pg_multiple_designated_countries() {
-    let storage = match setup_pg_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = setup_pg_storage().await;
     let profile_id = create_test_profile(storage.as_ref()).await;
 
     // 3 logins from UA and 3 from RO.

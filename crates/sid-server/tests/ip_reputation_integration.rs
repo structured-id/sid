@@ -19,23 +19,11 @@ fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
     Arc::new(NoCacheBackend)
 }
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
-/// The test database; an unreachable one fails the test instead of skipping it.
-async fn create_storage() -> Option<Arc<dyn StorageBackend>> {
-    let backend = sid_storage::PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("test PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-
+/// The test database the run prepared; an unreachable one fails the test.
+async fn create_storage() -> Arc<dyn StorageBackend> {
     // No global DELETE: each test uses its own address, so tests running in
     // parallel never clear each other's rows.
-    Some(Arc::new(backend))
+    Arc::new(sid_storage::testing::prepared_postgres().await)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -44,10 +32,7 @@ async fn create_storage() -> Option<Arc<dyn StorageBackend>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_record_failures_builds_reputation() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Use unique IP per run to avoid leftover data.
     let run_id = uuid::Uuid::now_v7();
@@ -76,10 +61,7 @@ async fn test_pg_record_failures_builds_reputation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_successes_reduce_score() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     let ip = "198.51.100.100";
     // Some failures first.
@@ -102,10 +84,7 @@ async fn test_pg_successes_reduce_score() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_provider_refresh_loads_suspicious_ips() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Record failures to make IP suspicious.
     let ip = "198.51.100.101";
@@ -148,10 +127,7 @@ async fn test_pg_provider_refresh_loads_suspicious_ips() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_provider_pipeline_to_anomaly_detector() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Record 15 failures.
     let ip = "198.51.100.102";
@@ -230,10 +206,7 @@ async fn test_unreadable_reputation_store_fails_classification() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_classify_without_refresh_uses_per_call_db_query() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Record 10 failures for an IP.
     let ip = "198.51.100.200";
@@ -280,10 +253,7 @@ async fn test_pg_classify_without_refresh_uses_per_call_db_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_classify_below_threshold_returns_none() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Record mostly successes — score will be below threshold.
     let ip = "198.51.100.201";
@@ -310,10 +280,7 @@ async fn test_pg_classify_below_threshold_returns_none() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_get_ip_reputation_score() {
-    let storage = match create_storage().await {
-        Some(s) => s,
-        None => return,
-    };
+    let storage = create_storage().await;
 
     // Unknown IP → None (unique IP per run to avoid leftover DB data).
     let run_id = uuid::Uuid::now_v7();
@@ -345,12 +312,7 @@ async fn test_pg_get_ip_reputation_score() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_decay_reduces_scores() {
-    let backend = sid_storage::PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("test PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     // Use fully unique IP: all 16 UUID bytes, to avoid collision with stale DB data.
     let run_id = uuid::Uuid::now_v7();
     let bytes = run_id.as_bytes();

@@ -16,15 +16,9 @@ use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use sid_proto::sid::v1::*;
 use sid_server::grpc::authz_service::AuthzServiceImpl;
-use sid_storage::PostgresBackend;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tonic::{Code, Request};
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
 
 struct Harness {
     svc: AuthzServiceImpl,
@@ -33,13 +27,8 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-    let backend = PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(sid_storage::testing::prepared_postgres().await);
     common::adopt_operation_period(storage.as_ref()).await;
     let jwt = test_jwt();
     let svc = AuthzServiceImpl::new(

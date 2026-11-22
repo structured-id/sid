@@ -212,25 +212,10 @@ async fn test_get_anomaly_event_log_no_auth() {
 // PostgreSQL integration tests (port 54399)
 // ═══════════════════════════════════════════════════════════════════
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_anomaly_event_save_and_list() {
-    let backend = match sid_storage::PostgresBackend::new(&database_url(), None).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: PostgreSQL not available: {e}");
-            return;
-        }
-    };
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(sid_storage::testing::prepared_postgres().await);
 
     let event = AnomalyEventRecord::new(
         "brute_force",
@@ -257,18 +242,8 @@ async fn test_pg_anomaly_event_save_and_list() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_anomaly_event_filter_by_rule() {
-    let backend = match sid_storage::PostgresBackend::new(&database_url(), None).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: PostgreSQL not available: {e}");
-            return;
-        }
-    };
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(sid_storage::testing::prepared_postgres().await);
 
     // Use unique rule_id to avoid collision with other tests.
     let unique_rule = format!("test_rule_{}", uuid::Uuid::now_v7());

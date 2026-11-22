@@ -12,12 +12,8 @@ use sid_authn::magic_link::{MagicLinkService, MagicLinkVerifyResult};
 use sid_core::models::{AuditEntry, MagicLinkSession};
 use sid_plugin::StorageBackend;
 use sid_storage::PostgresBackend;
+use sid_storage::testing::database_url;
 use std::sync::Arc;
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
 
 /// An address no other run has used: the test database outlives a run, and an
 /// unconsumed link from an earlier run counts against the per-address limit.
@@ -49,15 +45,8 @@ impl RequestOwn for MagicLinkService {
 }
 
 async fn setup() -> (MagicLinkService, Arc<dyn StorageBackend>) {
-    let backend = PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
-
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(sid_storage::testing::prepared_postgres().await);
     let service = MagicLinkService::new(storage.clone(), common::test_key_manager());
     (service, storage)
 }

@@ -22,21 +22,9 @@ fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
     Arc::new(NoCacheBackend)
 }
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
 async fn create_storage() -> Arc<dyn StorageBackend> {
-    let backend = sid_storage::PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-
     // No global DELETE — tests use unique CIDRs to avoid parallel interference.
-    Arc::new(backend)
+    Arc::new(sid_storage::testing::prepared_postgres().await)
 }
 
 /// The audit of a test's own allowlist change.
