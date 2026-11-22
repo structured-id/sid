@@ -149,13 +149,6 @@ pub(crate) fn group_write(id: GroupId, e: SidError) -> Status {
             "members",
             "not an existing user",
         ),
-        // A member that granted this group a role: it would reach itself.
-        SidError::PolicyViolation(_) => invalid(
-            ErrorReason::InvalidFieldValue,
-            "invalidValue",
-            "members",
-            "a user that granted this group a role cannot join it",
-        ),
         other => shared_write(other),
     }
 }

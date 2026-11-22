@@ -1273,7 +1273,6 @@ async fn a_replacement_never_deadlocks_with_a_removal_of_its_assignment() {
         },
         role: (role.id, role.permissions.iter().cloned().collect()),
         recipient_membership: None,
-        grantor_outside: None,
     };
     let change = AssignmentSetChange {
         set: set.clone(),

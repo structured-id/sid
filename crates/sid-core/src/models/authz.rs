@@ -507,6 +507,13 @@ pub struct RoleAssignment {
     /// recorded, which confers no delegation authority.
     #[serde(default)]
     pub provenance: Option<AssignmentProvenance>,
+    /// For a grant to a group, the member it never reaches: the Profile that
+    /// granted it on a basis that did not cover assigning to itself (D050 B
+    /// point 4). That member may join the group, yet receives neither the
+    /// role nor its administrative authority from this assignment, for as
+    /// long as the assignment exists.
+    #[serde(default)]
+    pub withheld_from: Option<ProfileId>,
     /// Stored revision: 0 when created, moved on by every change, so a
     /// mutation authorized by this assignment commits only over the
     /// revision it was checked at.
@@ -526,8 +533,15 @@ impl RoleAssignment {
             admin: None,
             policy_admin: None,
             provenance: None,
+            withheld_from: None,
             revision: 0,
         }
+    }
+
+    /// Whether it reaches `profile` through its group: false only for the
+    /// member it is withheld from.
+    pub fn reaches_member(&self, profile: ProfileId) -> bool {
+        self.withheld_from != Some(profile)
     }
 
     /// Whether it carries any administrative authority: role administration,

@@ -340,9 +340,6 @@ pub struct AssignmentFence {
     /// The recipient group and the member the envelope's restriction was
     /// satisfied by; the membership must still hold.
     pub recipient_membership: Option<(GroupId, super::ProfileId)>,
-    /// A group recipient and the Profile granting it a role: the grantor
-    /// must still be outside the group, or the grant would reach itself.
-    pub grantor_outside: Option<(GroupId, super::ProfileId)>,
 }
 
 #[cfg(test)]

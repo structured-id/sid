@@ -1038,13 +1038,17 @@ CREATE TABLE IF NOT EXISTS role_assignments (
     basis_assignment_id      BLOB CHECK (length(basis_assignment_id) = 16),
     depends_on_assignment_id BLOB CHECK (length(depends_on_assignment_id) = 16)
                              REFERENCES role_assignments(id) ON DELETE CASCADE,
+    -- For a grant to a group, the member it never reaches: its grantor, when
+    -- the grant's basis did not cover assigning to itself.
+    withheld_from            BLOB CHECK (length(withheld_from) = 16),
     revision                 INTEGER NOT NULL DEFAULT 0,
     CHECK (
         (profile_id IS NOT NULL) + (group_id IS NOT NULL) + (machine_user_id IS NOT NULL)
             + (oauth_client_id IS NOT NULL) + (provisioning_connector_id IS NOT NULL) = 1
     ),
     CHECK (granted_by IS NOT NULL
-           OR (basis_assignment_id IS NULL AND depends_on_assignment_id IS NULL))
+           OR (basis_assignment_id IS NULL AND depends_on_assignment_id IS NULL)),
+    CHECK (withheld_from IS NULL OR group_id IS NOT NULL)
 ) STRICT;
 
 -- The envelope of an administrative assignment. A group recipients are

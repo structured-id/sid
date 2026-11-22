@@ -161,11 +161,6 @@ fn test_refusals_keep_their_status() {
             "INVALID_STATE",
         ),
         (
-            E::GrantorOutsideGroup("why".into()),
-            Code::FailedPrecondition,
-            "INVALID_STATE",
-        ),
-        (
             E::ResourceRetired(resource),
             Code::FailedPrecondition,
             "RESOURCE_RETIRED",

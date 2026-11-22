@@ -156,6 +156,17 @@ impl Office {
             .is_empty()
     }
 
+    /// Whether `who` holds `role` by any assignment, directly or through its
+    /// groups, as the authorization engine reads it.
+    async fn effectively_holds(&self, who: ProfileId, role: &Role) -> bool {
+        self.storage
+            .list_role_assignments_held_by_profile(who)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.role_id == role.id)
+    }
+
     async fn holds(&self, who: ProfileId, role: &Role) -> bool {
         self.storage
             .list_role_assignments_for_profile(who)
@@ -645,12 +656,15 @@ async fn role_editing_is_its_own_right(storage: Arc<dyn StorageBackend>) {
     );
 }
 
-/// An administrator that granted a group a role can never join that group
-/// afterwards: the grant would reach its own grantor.
-async fn a_grantor_never_joins_the_group_it_granted(storage: Arc<dyn StorageBackend>) {
+/// An administrator that granted a group a role may join that group, yet the
+/// grant never reaches it: every other member holds the role, the grantor
+/// does not, and losing its administrative assignment later changes
+/// nothing. An independent assignment of the same role still reaches it.
+async fn a_grantor_joins_but_its_grant_never_reaches_it(storage: Arc<dyn StorageBackend>) {
     let o = Office::new(storage).await;
     let team_admin = profile(&o.storage).await;
-    o.core
+    let basis = o
+        .core
         .assign(
             &o.root,
             RoleAssignment::new(
@@ -668,6 +682,11 @@ async fn a_grantor_never_joins_the_group_it_granted(storage: Arc<dyn StorageBack
         .unwrap();
     let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&team, audit()).await.unwrap();
+    let colleague = profile(&o.storage).await;
+    o.storage
+        .add_to_group(&GroupMember::new(team.id, colleague), audit())
+        .await
+        .unwrap();
     o.core
         .assign(
             &Administrator::Holder(AuthzPrincipal::Profile(team_admin)),
@@ -677,13 +696,99 @@ async fn a_grantor_never_joins_the_group_it_granted(storage: Arc<dyn StorageBack
         )
         .await
         .unwrap();
-    let err = o
-        .storage
+    o.storage
         .add_to_group(&GroupMember::new(team.id, team_admin), audit())
         .await
-        .expect_err("the grantor joins its own grant");
-    assert!(matches!(err, Error::PolicyViolation(_)), "{err:?}");
-    assert!(!o.holds_through_groups(team_admin).await);
+        .expect("an independently authorized membership commits");
+    assert!(o.holds_through_groups(team_admin).await, "it is a member");
+    assert!(!o.effectively_holds(team_admin, &o.auditor).await);
+    assert!(o.effectively_holds(colleague, &o.auditor).await);
+
+    // Leaving office does not widen the approved recipients.
+    o.core.revoke(&o.root, basis.id, audit()).await.unwrap();
+    assert!(!o.effectively_holds(team_admin, &o.auditor).await);
+
+    // Another source of the same role still reaches it.
+    o.core
+        .assign(
+            &o.root,
+            RoleAssignment::new(RoleAssignmentPrincipal::Profile(team_admin), o.auditor.id),
+            audit(),
+        )
+        .await
+        .unwrap();
+    assert!(o.effectively_holds(team_admin, &o.auditor).await);
+}
+
+/// An administrator may grant an administrative role to a group it belongs
+/// to: the grant is withheld from it, and every other member administers
+/// through it.
+async fn a_group_the_grantor_belongs_to_receives_its_grant(storage: Arc<dyn StorageBackend>) {
+    let o = Office::new(storage).await;
+    let team_admin = profile(&o.storage).await;
+    let mut delegable = envelope(
+        &[&o.accountant],
+        &["ledger.read", "ledger.post"],
+        &[RecipientKind::Group, RecipientKind::Profile],
+    );
+    delegable.operations.insert(AdminOperation::Redelegate);
+    o.core
+        .assign(
+            &o.root,
+            RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(team_admin),
+                o.administrator_role.id,
+            )
+            .administering(delegable)
+            .with_expiry(in_days(30)),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
+    o.storage.create_group(&team, audit()).await.unwrap();
+    o.storage
+        .add_to_group(&GroupMember::new(team.id, team_admin), audit())
+        .await
+        .unwrap();
+    let colleague = profile(&o.storage).await;
+    o.storage
+        .add_to_group(&GroupMember::new(team.id, colleague), audit())
+        .await
+        .unwrap();
+    let group_grant = o
+        .core
+        .assign(
+            &Administrator::Holder(AuthzPrincipal::Profile(team_admin)),
+            RoleAssignment::new(
+                RoleAssignmentPrincipal::Group(team.id),
+                o.administrator_role.id,
+            )
+            .administering(envelope(
+                &[&o.accountant],
+                &["ledger.read", "ledger.post"],
+                &[RecipientKind::Profile],
+            ))
+            .with_expiry(in_days(10)),
+            audit(),
+        )
+        .await
+        .expect("a group the grantor belongs to may receive it");
+    assert_eq!(group_grant.withheld_from, Some(team_admin));
+    // The colleague administers through the group's grant.
+    let by_colleague = o
+        .core
+        .assign(
+            &Administrator::Holder(AuthzPrincipal::Profile(colleague)),
+            o.accountant_for(profile(&o.storage).await, 3),
+            audit(),
+        )
+        .await
+        .expect("another member holds the group's authority");
+    assert_eq!(
+        by_colleague.provenance.and_then(|p| p.basis),
+        Some(group_grant.id)
+    );
 }
 
 /// A redelegation never outlives its source: it may not run past the
@@ -806,8 +911,9 @@ async fn a_role_edit_racing_a_grant_keeps_the_ceiling(storage: Arc<dyn StorageBa
     }
 }
 
-/// A grant to a group racing its grantor joining that group never ends
-/// with both: the grant reaching its own grantor.
+/// A grant to a group racing its grantor joining that group: both commit, in
+/// either order, and the grant never reaches its grantor while another
+/// member holds it.
 async fn a_membership_racing_a_grant_never_reaches_the_grantor(storage: Arc<dyn StorageBackend>) {
     let o = Office::new(storage).await;
     let team_admin = profile(&o.storage).await;
@@ -831,6 +937,11 @@ async fn a_membership_racing_a_grant_never_reaches_the_grantor(storage: Arc<dyn 
     for round in 0..RACES {
         let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
         o.storage.create_group(&team, audit()).await.unwrap();
+        let colleague = profile(&o.storage).await;
+        o.storage
+            .add_to_group(&GroupMember::new(team.id, colleague), audit())
+            .await
+            .unwrap();
         let joining = GroupMember::new(team.id, team_admin);
         let delay = stagger(round);
         let (granted, joined) = tokio::join!(
@@ -845,25 +956,29 @@ async fn a_membership_racing_a_grant_never_reaches_the_grantor(storage: Arc<dyn 
                 o.storage.add_to_group(&joining, audit()).await
             },
         );
-        let member = o
-            .storage
-            .list_group_members(team.id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.profile_id == team_admin);
-        let held = !o
-            .storage
-            .list_role_assignments_for_group(team.id)
-            .await
-            .unwrap()
-            .is_empty();
+        let granted = granted.expect("the grant commits whatever the membership");
+        joined.expect("the membership commits whatever the grant");
         assert!(
-            !(member && held),
-            "the grant reached its grantor (grant {granted:?}, join {joined:?})"
+            o.storage
+                .list_group_members(team.id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.profile_id == team_admin)
         );
-        assert_eq!(member, joined.is_ok());
-        assert_eq!(held, granted.is_ok());
+        let holds = |who| {
+            let o = &o;
+            async move {
+                o.storage
+                    .list_role_assignments_held_by_profile(who)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.id == granted.id)
+            }
+        };
+        assert!(!holds(team_admin).await, "the grant reached its grantor");
+        assert!(holds(colleague).await, "another member holds it");
     }
 }
 
@@ -1297,7 +1412,8 @@ on_both_engines!(
     a_connector_never_administers,
     a_role_never_outgrows_an_approved_ceiling,
     role_editing_is_its_own_right,
-    a_grantor_never_joins_the_group_it_granted,
+    a_grantor_joins_but_its_grant_never_reaches_it,
+    a_group_the_grantor_belongs_to_receives_its_grant,
     a_redelegation_never_outlives_its_source,
     a_role_edit_racing_a_grant_keeps_the_ceiling,
     a_membership_racing_a_grant_never_reaches_the_grantor,

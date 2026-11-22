@@ -94,6 +94,7 @@ fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssign
                 })
             })
             .transpose()?,
+        withheld_from: col(row, "withheld_from")?,
         revision: u64::try_from(col::<i64>(row, "revision")?)
             .map_err(|e| SidError::Storage(format!("column revision: {e}")))?,
     })
@@ -133,8 +134,8 @@ pub(crate) async fn insert_role_assignment_row(
     sqlx::query(
         "INSERT INTO role_assignments (id, profile_id, group_id, machine_user_id, oauth_client_id,
             provisioning_connector_id, role_id, scope, expires_at, created_at,
-            granted_by, basis_assignment_id, depends_on_assignment_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            granted_by, basis_assignment_id, depends_on_assignment_id, withheld_from)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(assignment.id)
     .bind(profile_id)
@@ -149,6 +150,7 @@ pub(crate) async fn insert_role_assignment_row(
     .bind(provenance.map(|p| p.granted_by.as_str()))
     .bind(provenance.and_then(|p| p.basis))
     .bind(provenance.and_then(|p| p.depends_on))
+    .bind(assignment.withheld_from)
     .execute(&mut **tx)
     .await
     .map_err(|e| super::insert_error("role assignment", e))?;
@@ -480,20 +482,6 @@ pub(super) async fn check_assignment_fence(
         if held.is_none() {
             return Err(SidError::Fenced(
                 "the recipient left the eligible group since it was checked".into(),
-            ));
-        }
-    }
-    if let Some((group, grantor)) = fence.grantor_outside {
-        let inside: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ? AND profile_id = ?")
-                .bind(group)
-                .bind(grantor)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(read)?;
-        if inside.is_some() {
-            return Err(SidError::Fenced(
-                "the grantor joined the recipient group since it was checked".into(),
             ));
         }
     }
@@ -1148,7 +1136,7 @@ impl SqliteBackend {
              UNION ALL
              SELECT ra.* FROM role_assignments ra
              JOIN group_members gm ON gm.group_id = ra.group_id
-             WHERE gm.profile_id = ?1",
+             WHERE gm.profile_id = ?1 AND ra.withheld_from IS NOT ?1",
         )
         .bind(profile_id)
         .fetch_all(&self.pool)

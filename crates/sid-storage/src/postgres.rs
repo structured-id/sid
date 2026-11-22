@@ -861,8 +861,8 @@ impl PostgresBackend {
         sqlx::query(
             "INSERT INTO role_assignments (id, profile_id, group_id, machine_user_id, oauth_client_id,
                 provisioning_connector_id, role_id, scope, expires_at, created_at,
-                granted_by, basis_assignment_id, depends_on_assignment_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                granted_by, basis_assignment_id, depends_on_assignment_id, withheld_from)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(assignment.id)
         .bind(profile_id)
@@ -876,6 +876,7 @@ impl PostgresBackend {
         .bind(provenance.map(|p| p.granted_by.as_str()))
         .bind(provenance.and_then(|p| p.basis))
         .bind(provenance.and_then(|p| p.depends_on))
+        .bind(assignment.withheld_from)
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("role assignment", e))?;
@@ -1176,29 +1177,6 @@ impl PostgresBackend {
             if held.is_none() {
                 return Err(SidError::Fenced(
                     "the recipient left the eligible group since it was checked".into(),
-                ));
-            }
-        }
-        if let Some((group, grantor)) = fence.grantor_outside {
-            // Shared lock on the group: a member added concurrently takes it
-            // FOR UPDATE, so it either commits first and is seen here, or
-            // waits and sees this assignment.
-            sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR SHARE")
-                .bind(group)
-                .execute(&mut **tx)
-                .await
-                .map_err(read)?;
-            let inside: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM group_members WHERE group_id = $1 AND profile_id = $2",
-            )
-            .bind(group)
-            .bind(grantor)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(read)?;
-            if inside.is_some() {
-                return Err(SidError::Fenced(
-                    "the grantor joined the recipient group since it was checked".into(),
                 ));
             }
         }
@@ -5334,13 +5312,14 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
     ) -> SidResult<Vec<RoleAssignment>> {
         // Both branches use an index: role_assignments(profile_id), and
-        // group_members(profile_id) joined to role_assignments(group_id).
+        // group_members(profile_id) joined to role_assignments(group_id). A
+        // group's assignment withheld from this member is not held by it.
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE profile_id = $1
              UNION ALL
              SELECT ra.* FROM role_assignments ra
              JOIN group_members gm ON gm.group_id = ra.group_id
-             WHERE gm.profile_id = $1",
+             WHERE gm.profile_id = $1 AND ra.withheld_from IS DISTINCT FROM $1",
         )
         .bind(profile_id)
         .fetch_all(&self.pool)
