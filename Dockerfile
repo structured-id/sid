@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# StructuredID CE — PostgreSQL storage, bundled NATS, REST beside gRPC.
+# StructuredID CE: PostgreSQL storage, bundled NATS, REST beside gRPC, the
+# account pages and the administration console.
 #
 # Build: docker build -t sid .
 #
@@ -45,6 +46,20 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
     && strip target/release/sid \
     && install -D target/release/sid /out/sid
 
+# The account pages and the administration console, built from the ui-core
+# submodule the way its own CI builds them.
+FROM docker.io/library/node:26-trixie AS ui
+
+WORKDIR /ui
+COPY ui-core/ ./
+# Node no longer ships corepack; it is installed from npm, then fetches the
+# Yarn the workspace's packageManager names.
+RUN npm install -g corepack && corepack enable && corepack install
+RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
+    cd apps/ui-profile && yarn install --immutable && yarn build
+RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
+    cd apps/ui-admin && yarn install --immutable && yarn build
+
 # The bundled event bus: with SID_NATS_URL unset the server runs this
 # nats-server as a child process (JetStream under SID_DATA_DIR/nats).
 FROM docker.io/library/nats:2.15-alpine AS nats
@@ -58,6 +73,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=builder /out/sid /usr/local/bin/sid
+# The bundles the server serves: account pages at /account/, the console
+# where the installation settings place it (/admin/ by default).
+COPY --from=ui /ui/apps/ui-profile/dist/spa /usr/share/sid/ui/account
+COPY --from=ui /ui/apps/ui-admin/dist/spa /usr/share/sid/ui/admin
 
 # Data directory for auto-generated keys and runtime state
 RUN mkdir -p /var/lib/sid && chown nobody:nogroup /var/lib/sid
@@ -66,6 +85,7 @@ VOLUME /var/lib/sid
 ENV SID_BIND=0.0.0.0:8080
 ENV SID_GRPC_BIND=0.0.0.0:50051
 ENV SID_DATA_DIR=/var/lib/sid
+ENV SID_UI_DIR=/usr/share/sid/ui
 EXPOSE 8080 50051
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \

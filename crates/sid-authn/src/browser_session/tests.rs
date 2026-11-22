@@ -97,6 +97,75 @@ fn test_an_issuer_names_its_cookie_after_its_handle() {
     );
 }
 
+/// Widened to a domain, the cookie keeps its value, lifetime and secure
+/// attributes, gains `Domain` and takes the `__Secure-` name, since browsers
+/// reject a `__Host-` cookie with `Domain` (RFC 6265bis §4.1.3.2). A removal
+/// stays a removal; another cookie's value is not rescoped. Bug prevented: a
+/// widened scope whose cookie every browser silently drops.
+#[test]
+fn test_cookie_widens_to_a_domain() {
+    let secret = BrowserSecret::generate();
+    let set = cookie().set(&secret, 3600);
+    let value = set.split(';').next().unwrap().split_once('=').unwrap().1;
+    assert_eq!(cookie().domain_name(), "__Secure-sid_session");
+    assert_eq!(
+        cookie().for_domain(&set, "sid.example.com").unwrap(),
+        format!(
+            "__Secure-sid_session={value}; Domain=sid.example.com; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600"
+        )
+    );
+    assert_eq!(
+        cookie()
+            .for_domain(&cookie().clear(), "sid.example.com")
+            .unwrap(),
+        cookie().clear_for_domain("sid.example.com")
+    );
+    assert_eq!(
+        cookie().clear_for_domain("sid.example.com"),
+        "__Secure-sid_session=; Domain=sid.example.com; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
+    );
+    let other = BrowserCookie::new("__Host-sid_other").unwrap();
+    assert!(
+        cookie()
+            .for_domain(&other.set(&secret, 60), "sid.example.com")
+            .is_none()
+    );
+    assert!(cookie().for_domain("garbage", "sid.example.com").is_none());
+}
+
+/// Under a widened scope the domain cookie is what the server reads: its
+/// value is presented under the cookie's own name and a host-only copy (an
+/// older sign-in on this host) gives way to it. Under a narrower scope the
+/// domain cookie is dropped and reported, so the response can remove it.
+/// Other cookies pass untouched. Bug prevented: two values of one session
+/// cookie reaching the reader, which names no session.
+#[test]
+fn test_domain_variant_on_a_request() {
+    let (wide, host) = (BrowserSecret::generate(), BrowserSecret::generate());
+    let wide_pair = format!("__Secure-sid_session={}", wide.encode().as_str());
+    let host_pair = format!("__Host-sid_session={}", host.encode().as_str());
+    let header = format!("theme=dark; {host_pair}; {wide_pair}");
+
+    let (admitted, present) = cookie().with_domain_variant([header.as_str()], true);
+    assert!(present);
+    let read = cookie()
+        .secret(admitted.iter().map(String::as_str))
+        .unwrap();
+    assert_eq!(read.hash(), wide.hash());
+    assert!(admitted.iter().any(|h| h.contains("theme=dark")));
+
+    let (refused, present) = cookie().with_domain_variant([header.as_str()], false);
+    assert!(present);
+    let read = cookie().secret(refused.iter().map(String::as_str)).unwrap();
+    assert_eq!(read.hash(), host.hash());
+    assert!(refused.iter().all(|h| !h.contains("__Secure-sid_session")));
+
+    let plain = format!("theme=dark; {host_pair}");
+    let (kept, present) = cookie().with_domain_variant([plain.as_str()], true);
+    assert!(!present);
+    assert_eq!(kept, vec![plain]);
+}
+
 /// Every secret is fresh: two sessions never share a hash.
 #[test]
 fn test_generated_secrets_differ() {
@@ -193,6 +262,35 @@ fn test_same_site() {
     ];
     for (a, b) in different {
         assert!(!same_site(&url(a), &url(b)), "{a} {b}");
+    }
+}
+
+/// A cookie may be widened to a domain name with a registrable domain of its
+/// own; a public suffix, `localhost` and an address are refused, since a
+/// browser would drop or misplace such a cookie.
+#[test]
+fn test_domain_cookie_allowed() {
+    for allowed in [
+        "https://sid.example.com",
+        "https://example.co.uk",
+        "https://SID.Example.com",
+    ] {
+        assert!(
+            domain_cookie_allowed(&url(allowed).host().unwrap()),
+            "{allowed}"
+        );
+    }
+    for refused in [
+        "https://github.io",
+        "https://co.uk",
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://[::1]",
+    ] {
+        assert!(
+            !domain_cookie_allowed(&url(refused).host().unwrap()),
+            "{refused}"
+        );
     }
 }
 

@@ -54,6 +54,8 @@ pub enum BundleError {
     NoShell(PathBuf),
     #[error("public configuration is not usable: {0}")]
     Config(String),
+    #[error("the bundle's index.html cannot be served: {0}")]
+    Shell(String),
 }
 
 /// A compiled UI bundle and where it is served.
@@ -62,6 +64,10 @@ pub struct UiBundle {
     /// The bundle directory, canonical: every served file resolves inside it.
     dir: PathBuf,
     mount: String,
+    /// The application shell as served: the bundle's `index.html` naming the
+    /// mount as its `<base href>`, so one build, whose asset URLs are
+    /// relative, works under whatever mount the installation configures.
+    shell: Bytes,
     /// The configuration served now; `None` before a live bundle's first
     /// settings projection.
     config: ServedConfig,
@@ -77,12 +83,14 @@ impl UiBundle {
     /// it must hold only public values.
     pub fn new(dir: &Path, mount: &str, config: &[u8]) -> Result<Self, BundleError> {
         let (dir, _) = Self::checked(dir, mount, config)?;
+        let shell = shell(&dir, mount)?;
         // The sender goes: the configuration never changes, and a receiver
         // keeps the last value.
         let (_, served) = tokio::sync::watch::channel(Some(Served::of(config.to_vec())));
         Ok(Self {
             dir,
             mount: mount.to_owned(),
+            shell,
             config: served,
         })
     }
@@ -104,11 +112,13 @@ impl UiBundle {
                 settings::SETTINGS_KEY
             )));
         }
+        let shell = shell(&dir, mount)?;
         let (sink, served) = SettingsSink::new(base);
         Ok((
             Self {
                 dir,
                 mount: mount.to_owned(),
+                shell,
                 config: served,
             },
             sink,
@@ -122,18 +132,7 @@ impl UiBundle {
         mount: &str,
         config: &[u8],
     ) -> Result<(PathBuf, Map<String, Value>), BundleError> {
-        let literal = mount
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
-        // A `.` or `..` segment would be normalized away by the browser
-        // (WHATWG URL, path state), leaving the UI unreachable.
-        let dot_segment = mount.split('/').any(|s| s == "." || s == "..");
-        if !mount.starts_with('/')
-            || !mount.ends_with('/')
-            || !literal
-            || mount.contains("//")
-            || dot_segment
-        {
+        if !sid_core::models::is_ui_mount(mount) {
             return Err(BundleError::Mount(mount.to_owned()));
         }
         let dir = dir
@@ -157,6 +156,37 @@ impl UiBundle {
         }
         Ok((dir, object))
     }
+}
+
+/// The bundle's `index.html` in `dir` with `<base href="{mount}">` as the
+/// first element of its head, read once: a shell that names its own
+/// `<base>` is refused, since it would contradict the mount. The mount is
+/// a literal path of unreserved characters (checked before), so it needs no
+/// escaping in the attribute.
+fn shell(dir: &Path, mount: &str) -> Result<Bytes, BundleError> {
+    let path = dir.join("index.html");
+    let html =
+        std::fs::read_to_string(&path).map_err(|_| BundleError::NoShell(dir.to_path_buf()))?;
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("<base") {
+        return Err(BundleError::Shell("the shell names its own <base>".into()));
+    }
+    // Right after the first of `<head>`, `<html>` or the doctype the shell
+    // has (HTML lets both tags be omitted); before everything else
+    // otherwise. Ahead of the doctype it would switch to quirks mode.
+    let after = |tag: &str| -> Option<usize> {
+        let start = lower.find(tag)?;
+        lower[start..].find('>').map(|end| start + end + 1)
+    };
+    let at = after("<head")
+        .or_else(|| after("<html"))
+        .or_else(|| after("<!doctype"))
+        .unwrap_or(0);
+    Ok(Bytes::from(format!(
+        "{}<base href=\"{mount}\">{}",
+        &html[..at],
+        &html[at..]
+    )))
 }
 
 /// The routes serving `bundle`, to run alone or merge into a host router.
@@ -262,10 +292,14 @@ async fn respond(bundle: &UiBundle, request: Request) -> Response {
             None => not_found(),
         };
     }
-    match file(bundle, &request, "index.html").await {
-        Some(response) => no_store(response),
-        None => not_found(),
-    }
+    // The shell naming the mount as its base, never stored: it follows each
+    // release at once.
+    let mut response = Response::new(Body::from(bundle.shell.clone()));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    no_store(response)
 }
 
 /// The configuration from memory, kept by the browser and revalidated on

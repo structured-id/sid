@@ -1928,6 +1928,15 @@ CREATE TABLE IF NOT EXISTS login_settings (
     updated_at                       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
+-- The installation's browser-facing settings: public URL override, console
+-- address and session cookie scope, as one JSON document.
+CREATE TABLE IF NOT EXISTS web_settings (
+    scope       TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    settings    BLOB NOT NULL,
+    revision    INTEGER NOT NULL CHECK (revision >= 0),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
+
 -- The certificate the platform issued for this installation's site, and the
 -- certificates above it: each behind its four-byte length, in order.
 CREATE TABLE IF NOT EXISTS site_enrollment (

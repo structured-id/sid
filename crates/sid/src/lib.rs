@@ -40,6 +40,7 @@ pub mod security;
 pub mod sign_in;
 pub mod snapshot;
 pub mod upstream;
+pub mod web_settings;
 mod wire;
 pub mod work;
 

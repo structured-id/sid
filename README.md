@@ -14,15 +14,40 @@ Identity belongs to the person. Trust is independently verifiable. Relationships
 
 ## Quick Start
 
+The embedded image runs a complete installation on SQLite, with no database
+or broker to set up. It serves the account pages and the administration
+console from the same address:
+
 ```bash
-# Build
+docker run -d --name sid -p 8080:8080 \
+  -e SID_ISSUER=http://localhost:8080 \
+  -v sid-data:/var/lib/sid \
+  ghcr.io/structured-id/sid:embedded
+```
+
+1. **Claim the installation.** Until it has an administrator, the server
+   logs a claim token at startup (`docker logs sid`, the line "No
+   administrator yet"). Open <http://localhost:8080/account/register>,
+   register, and enter the token: that account becomes the administrator.
+2. **Use your account** at <http://localhost:8080/account/>.
+3. **Open the console** at <http://localhost:8080/admin/>. It works in the
+   session you already have, with no second sign-in. The console checks your
+   rights on every call: an account that does not administer the
+   installation is refused (`the caller may not perform this operation`).
+
+The console's address is an installation setting (Settings, Addresses):
+another path on the public URL (`/console/`) or a host of the same site
+(`https://admin.example.com/`). The account pages stay at `/account/`.
+
+For a public deployment set `SID_ISSUER` to its `https://` URL. The
+PostgreSQL image (`ghcr.io/structured-id/sid:latest`) takes
+`SID_DATABASE_URL` instead of the volume.
+
+From source:
+
+```bash
 cargo build --release
-
-# Run
 ./target/release/sid
-
-# Or with cargo
-cargo run -p sid-server
 ```
 
 ## Architecture
@@ -66,6 +91,7 @@ Environment variables:
 | `SID_NATS_URL` | `embedded` | Event bus: `embedded` runs a bundled NATS server under the data directory, a `nats://` or `tls://` URL connects to an external cluster, `in-process` runs without a broker (see below) |
 | `SID_EVENT_RECEIVERS` | none on `embedded` and `in-process`; required on an external bus | Comma-separated receivers every committed fact is owed to (for example `sid-notify`), or `none` |
 | `SID_ACCOUNT_URL` | - | Public URL of the account UI, including the path it is mounted under (such as `https://sid.example.com/account/`), set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its UI host's public JWK Set); its `/login` page runs browser sign-in, its `/verify` page opens emailed sign-in links and its `/reset/new` page emailed password reset links. The UI host's sign-in endpoints (`/auth/callback`, `/auth/backchannel-logout`) are registered at the root of that URL's origin. A host composition that serves its account cabinet client apart from these pages, on a closed host, takes this URL as the mount of the shared ceremony pages alone: password resets and emailed links stay off, and its account client is configured by `SID_ACCOUNT_CLIENT_URL` (that closed host's public URL, its sign-in endpoints registered under the URL's path, such as `https://ops.sid.example.com/account/auth/callback`) together with `SID_ACCOUNT_CLIENT_JWKS`; with neither, no account client is provisioned. Without it, and without an email provider configured by an administrator, password reset requests are refused as not configured |
+| `SID_UI_DIR` | - (`/usr/share/sid/ui` in the images) | Directory holding the built web UI: `account/` served at `/account/`, `admin/` at the console address; unset serves no web UI |
 | `SID_MAGIC_LINKS_ENABLED` | `false` | Email sign-in links to Corporate accounts; requires `SID_ACCOUNT_URL` |
 | `RUST_LOG` | `sid=info` | Log level |
 

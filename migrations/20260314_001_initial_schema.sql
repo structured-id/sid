@@ -453,6 +453,18 @@ CREATE TABLE login_settings (
     CONSTRAINT login_settings_pkey PRIMARY KEY (scope)
 );
 
+-- The installation's browser-facing settings: public URL override, console
+-- address and session cookie scope, as one document.
+CREATE TABLE web_settings (
+    scope text NOT NULL,
+    settings jsonb NOT NULL,
+    revision bigint NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT web_settings_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT web_settings_scope_check CHECK ((scope = 'installation'::text)),
+    CONSTRAINT web_settings_pkey PRIMARY KEY (scope)
+);
+
 -- The certificate the platform issued for this installation's site, and the
 -- certificates above it: each behind its four-byte length, in order.
 CREATE TABLE site_enrollment (

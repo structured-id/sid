@@ -88,6 +88,7 @@ pub mod status_policy;
 pub mod upstream_identity;
 pub mod upstream_provider;
 pub mod username;
+pub mod web_settings;
 pub mod webauthn;
 
 pub use access_request::{AccessRequest, AccessRequestId, AccessRequestStatus};
@@ -292,4 +293,5 @@ pub use upstream_provider::{
 pub use username::{
     SuspensionReason, UsernameError, UsernameStatus, validate_corporate_login, validate_username,
 };
+pub use web_settings::{CookieScope, DEFAULT_CONSOLE_PATH, WebSettings, is_ui_mount};
 pub use webauthn::{AttestationFormat, WebAuthnCredential, WebAuthnTransport};

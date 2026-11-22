@@ -207,7 +207,7 @@ async fn serve(
     let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, sign_in)
         .unwrap()
         .expect("a bind address gives a transcoder");
-    let upstream = sid_server::serve::transcoder_upstream(routes, issuers);
+    let upstream = sid_server::serve::transcoder_upstream(routes, issuers, Vec::new());
     // Serves until the test's runtime ends.
     tokio::spawn(async move {
         sid_infra::http::serve_on(

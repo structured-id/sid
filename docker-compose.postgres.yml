@@ -1,0 +1,24 @@
+# StructuredID CE on your PostgreSQL: add to docker-compose.embedded.yml
+#
+#   docker compose -f docker-compose.yml -f docker-compose.embedded.yml \
+#     -f docker-compose.postgres.yml up
+#
+# Switches SID to the PostgreSQL server image and your database. SID keeps
+# its tables in their own schema (default `sid`), apart from your
+# application's. The database must be reachable: SID does not fall back to
+# SQLite when it is not.
+
+services:
+  sid:
+    # The newest released PostgreSQL server; pin a release with
+    # SID_IMAGE=ghcr.io/structured-id/sid:<version>.
+    image: "${SID_IMAGE:-ghcr.io/structured-id/sid:latest}"
+    environment:
+      SID_DATABASE_URL: "postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-app}"
+      SID_STORAGE_POSTGRESQL_SCHEMA: "${SID_STORAGE_POSTGRESQL_SCHEMA:-sid}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

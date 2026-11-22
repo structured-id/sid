@@ -8,6 +8,8 @@
 
 pub mod auth_mail;
 pub mod config;
+#[cfg(feature = "http")]
+pub mod cookie_scope;
 pub mod embedded_nats;
 pub mod feature_flags;
 pub mod grpc;
@@ -16,5 +18,9 @@ pub mod init;
 pub mod metrics;
 pub mod organization_publications;
 pub mod serve;
+#[cfg(feature = "http")]
+pub mod session_establish;
 pub mod state;
 pub mod telemetry;
+#[cfg(feature = "ui")]
+pub mod ui;

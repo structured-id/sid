@@ -334,6 +334,27 @@ pub(super) fn end_profile_sessions(
     Ok(sessions)
 }
 
+/// End every session that holds a browser secret; each ended session's owed
+/// work is added to `ctx`.
+pub(super) fn end_browser_sessions(
+    tx: &Statements<'_>,
+    end: &SessionEnd,
+    ctx: &mut MutationContext,
+) -> SidResult<()> {
+    let rows = tx.run(
+        &format!("MATCH (s:SidSession) WHERE s.browser_secret_hash IS NOT NULL RETURN {SESSION}"),
+        Params::default(),
+    )?;
+    // Each browser session with the application sessions it signed in:
+    // access derived from the formerly shared secret ends too.
+    for browser in rows.iter().map(session).collect::<SidResult<Vec<_>>>()? {
+        for ended in end_with_dependents(tx, browser.id)? {
+            ctx.work.extend(end.owed_by(&ended));
+        }
+    }
+    Ok(())
+}
+
 /// Delete everything a deleted profile's sessions held, owing nothing: the
 /// account itself is gone.
 pub(super) fn delete_profile_grants(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {

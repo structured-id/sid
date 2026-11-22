@@ -20,6 +20,11 @@ pub const DEFAULT_COOKIE_NAME: &str = "__Host-sid_session";
 /// (RFC 6265bis §4.1.3.2).
 const HOST_PREFIX: &str = "__Host-";
 
+/// The prefix of the same cookie widened to a domain: a browser accepts it
+/// only with `Secure`, and unlike `__Host-` it may carry `Domain`
+/// (RFC 6265bis §4.1.3.1).
+const SECURE_PREFIX: &str = "__Secure-";
+
 /// Attributes every value of the cookie carries: host-only, TLS only, out of
 /// reach of scripts, and sent on top-level navigations from other sites but
 /// not on their subrequests or POSTs (RFC 6265bis §5.6.7.1).
@@ -113,6 +118,86 @@ impl BrowserCookie {
     /// (RFC 6265bis §5.7).
     pub fn clear(&self) -> String {
         format!("{}=; {ATTRIBUTES}; Max-Age=0", self.name)
+    }
+
+    /// The name this cookie takes widened to a domain: `__Secure-` in place
+    /// of `__Host-`, since a browser rejects a `__Host-` cookie with `Domain`
+    /// (RFC 6265bis §4.1.3.2).
+    pub fn domain_name(&self) -> String {
+        let rest = self
+            .name
+            .strip_prefix(HOST_PREFIX)
+            .expect("a browser cookie name is a __Host- name");
+        format!("{SECURE_PREFIX}{rest}")
+    }
+
+    /// `set`, a `Set-Cookie` value [`set`](Self::set) or
+    /// [`clear`](Self::clear) of this cookie made, for `domain` and its
+    /// subdomains: the same value and lifetime under [`domain_name`]
+    /// (Self::domain_name) with `Domain`. None for another cookie's value.
+    pub fn for_domain(&self, set: &str, domain: &str) -> Option<String> {
+        let (pair, attributes) = set.split_once(';')?;
+        let value = pair.strip_prefix(self.name.as_str())?.strip_prefix('=')?;
+        let max_age = attributes
+            .split(';')
+            .find_map(|a| a.trim().strip_prefix("Max-Age="))?;
+        Some(format!(
+            "{}={value}; Domain={domain}; {ATTRIBUTES}; Max-Age={max_age}",
+            self.domain_name()
+        ))
+    }
+
+    /// The `Set-Cookie` value that removes this cookie widened to `domain`.
+    pub fn clear_for_domain(&self, domain: &str) -> String {
+        format!(
+            "{}=; Domain={domain}; {ATTRIBUTES}; Max-Age=0",
+            self.domain_name()
+        )
+    }
+
+    /// The `Cookie` request header values `headers` with this cookie's
+    /// domain-widened copy resolved: when `admitted` it is read in place of
+    /// this cookie (its pairs take this cookie's name, a host-only pair gives
+    /// way to it); otherwise it is dropped. Also whether such a copy was
+    /// present. Other cookies are kept as sent.
+    pub fn with_domain_variant<'a>(
+        &self,
+        headers: impl IntoIterator<Item = &'a str>,
+        admitted: bool,
+    ) -> (Vec<String>, bool) {
+        let domain_name = self.domain_name();
+        let headers: Vec<&str> = headers.into_iter().collect();
+        let named =
+            |pair: &str, name: &str| pair.trim().split_once('=').is_some_and(|(n, _)| n == name);
+        let present = headers
+            .iter()
+            .any(|h| h.split(';').any(|p| named(p, &domain_name)));
+        if !present {
+            return (headers.into_iter().map(str::to_owned).collect(), false);
+        }
+        let rewritten = headers
+            .into_iter()
+            .map(|header| {
+                header
+                    .split(';')
+                    .filter_map(|pair| {
+                        if named(pair, &domain_name) {
+                            admitted.then(|| {
+                                let value = pair.trim().split_once('=').map_or("", |(_, v)| v);
+                                format!("{}={value}", self.name)
+                            })
+                        } else if admitted && named(pair, &self.name) {
+                            None
+                        } else {
+                            Some(pair.trim().to_owned())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|header| !header.is_empty())
+            .collect();
+        (rewritten, true)
     }
 }
 
@@ -237,6 +322,17 @@ pub fn same_site(a: &url::Url, b: &url::Url) -> bool {
             }
         }
         (a, b) => a == b,
+    }
+}
+
+/// Whether a cookie may name `host` in its `Domain` attribute and so reach
+/// its subdomains: a domain name that is not itself a public suffix. A
+/// browser ignores `Domain` naming a public suffix (RFC 6265bis §5.7 step
+/// 9), and an address or `localhost` has no subdomains to share with.
+pub fn domain_cookie_allowed(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(domain) => registrable(&domain.to_ascii_lowercase()).is_some(),
+        _ => false,
     }
 }
 

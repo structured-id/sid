@@ -1,44 +1,37 @@
-# StructuredID CE — Embedded Auth Service
+# StructuredID CE: authentication service beside your application
 #
-# Drop-in authentication for any application using shared PostgreSQL.
-# SID creates its own schema (default: "sid") — no table conflicts.
+# Starts with no database to configure: SID keeps its users, keys and
+# sessions in SQLite on the `sid_data` volume, which survives restarts.
 #
 # Usage:
 #   1. Copy this file to your project
-#   2. Merge with your docker-compose.yml (or use `docker compose -f ... -f ...`)
-#   3. Set SID_DATABASE_URL to your shared PostgreSQL
-#   4. SID auto-generates JWT keys on first start
+#   2. Merge it with your docker-compose.yml
+#      (or `docker compose -f docker-compose.yml -f docker-compose.embedded.yml up`)
+#   3. Set SID_ISSUER to the URL your application and browsers reach SID at
+#   4. SID generates its keys on first start
+#
+# To keep SID's data in your PostgreSQL instead, add
+# docker-compose.postgres.yml as well; it switches to the PostgreSQL image.
 #
 # Ports:
-#   - 8090: REST API (OIDC, OAuth2, user management)
-#   - 50051: gRPC API (native clients)
+#   - 8090: HTTP (sign-in pages, OIDC, REST)
+#   - 50051: gRPC (native clients)
 
 services:
   sid:
-    # The CE server image of the latest release; pin a version
-    # (ghcr.io/structured-id/sid:<version>) or point SID_IMAGE at your own build.
-    image: "${SID_IMAGE:-ghcr.io/structured-id/sid:latest}"
+    # The newest released SQLite server; pin a release with
+    # SID_IMAGE=ghcr.io/structured-id/sid:<version>-embedded.
+    image: "${SID_IMAGE:-ghcr.io/structured-id/sid:embedded}"
     environment:
-      # Required: PostgreSQL connection (shared with your app)
-      SID_DATABASE_URL: "postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-app}"
-      # Schema isolation: SID tables live in their own schema
-      SID_STORAGE_POSTGRESQL_SCHEMA: "${SID_STORAGE_POSTGRESQL_SCHEMA:-sid}"
-      # OIDC issuer URL (must match what clients/frontend use)
+      # The URL clients and browsers use; it names every token SID issues.
       SID_ISSUER: "${SID_ISSUER:-http://localhost:8090}"
-      SID_BIND: "0.0.0.0:8080"
-      SID_GRPC_BIND: "0.0.0.0:50051"
       RUST_LOG: "${SID_LOG_LEVEL:-sid=info}"
     ports:
       - "${SID_HTTP_PORT:-8090}:8080"
       - "${SID_GRPC_PORT:-50051}:50051"
     volumes:
+      # The SQLite database and the generated keys.
       - sid_data:/var/lib/sid
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
     restart: unless-stopped
 
 volumes:

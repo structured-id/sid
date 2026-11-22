@@ -344,6 +344,11 @@ pub struct Snapshot {
     /// identities it admits), when an administrator set them.
     pub login_settings: Option<LoginSettings>,
 
+    /// The installation's browser-facing settings (public URL, console
+    /// address, session cookie scope), when an administrator set them.
+    #[serde(default)]
+    pub web_settings: Option<sid_core::models::WebSettings>,
+
     /// The installation's enrollment as a site of the federation, when it
     /// holds one: the moved installation is the same site.
     #[serde(default)]
@@ -543,6 +548,7 @@ impl Snapshot {
             enrollment_policy: None,
             bootstrap_policy: BootstrapPolicy::SelfManaged,
             login_settings: None,
+            web_settings: None,
             site_enrollment: None,
             login_policy_epoch: None,
             platform_cas: Default::default(),
@@ -643,6 +649,7 @@ impl Snapshot {
             u64::from(self.enrollment_policy.is_some()),
             u64::from(self.bootstrap_policy == BootstrapPolicy::CentrallyManaged),
             u64::from(self.login_settings.is_some()),
+            u64::from(self.web_settings.is_some()),
             u64::from(self.site_enrollment.is_some()),
             u64::from(self.login_policy_epoch.is_some()),
             self.platform_cas.len() as u64,

@@ -1176,6 +1176,20 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::set_enrollment_policy(self, policy, ctx).await
     }
 
+    async fn web_settings(&self) -> Result<Option<sid_core::models::WebSettings>> {
+        CoordinodeBackend::web_settings(self).await
+    }
+
+    async fn set_web_settings(
+        &self,
+        settings: &sid_core::models::WebSettings,
+        expected: Option<&sid_core::models::WebSettings>,
+        end_browser: Option<&sid_core::models::SessionEnd>,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::set_web_settings(self, settings, expected, end_browser, ctx).await
+    }
+
     async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>> {
         CoordinodeBackend::login_settings(self).await
     }

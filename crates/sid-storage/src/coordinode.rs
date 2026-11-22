@@ -56,6 +56,7 @@ mod scim;
 mod session;
 mod signals;
 mod site_enrollment;
+mod web_settings;
 mod work;
 
 #[cfg(test)]

@@ -100,6 +100,10 @@ pub struct CeComponents {
     pub cache_backend: Arc<dyn CacheBackend>,
     pub app_state: AppState,
     pub issuer: String,
+    /// The installation's browser-facing settings (public URL, console
+    /// address, session cookie scope): changed by RealmService, applied by
+    /// the cookie issuer and the UI host.
+    pub web_settings: Arc<sid::web_settings::WebSettingsAdmin>,
     pub grpc_addr: SocketAddr,
     /// Field encryption for stored secrets every service seals.
     pub key_manager: Arc<dyn sid_keys::KeyManager>,
@@ -124,6 +128,9 @@ pub struct CeComponents {
     /// form allows it credentialed CORS. A host's interactive branch replaces
     /// only [`sign_in_page`](Self::sign_in_page), never this.
     pub ceremony_page: Option<url::Url>,
+    /// The signing key of the account pages' web client this process
+    /// serves itself (see [`CeHost::served_account`]); none without them.
+    pub account_client_key: Option<sid_authn::client_key::ClientKey>,
     /// The one authorization evaluator of this process.
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
@@ -453,6 +460,13 @@ pub struct CeHost {
     pub own_presentations: Option<Arc<dyn sid::oauth::OwnPresentations>>,
     /// Whether this composition delivers an account cabinet client.
     pub account_client: AccountClient,
+    /// The account settings the host itself provides; none reads them from
+    /// the environment.
+    pub account: Option<Account>,
+    /// The URL (with its mount) of account pages this process serves itself:
+    /// their web client is provisioned with the installation's own key,
+    /// shared by every replica, in place of any other account settings.
+    pub served_account: Option<String>,
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -691,16 +705,50 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let scim_issuer = local_issuer.clone();
     // SID's own account UI, when the deployment serves one: its web client,
     // the account API and the access between them.
+    // Account pages served in process sign in with the installation's own
+    // client key, created once and read back by every replica.
+    let account_client_key = match &host.served_account {
+        Some(_) => Some(
+            sid_authn::client_key::ClientKey::installation_ed25519(
+                storage.as_ref(),
+                key_manager.as_ref(),
+                sid_core::models::InstanceSecret::AccountClientKey,
+            )
+            .await
+            .context("account client key")?,
+        ),
+        None => None,
+    };
+    let served = match (&host.served_account, &account_client_key) {
+        (Some(url), Some(key)) => {
+            let jwks = key
+                .public_jwks()
+                .context("the account client key has no public half")?;
+            let keys = sid_core::models::ClientKeySet::from_json(&jwks.to_string())
+                .map_err(|e| anyhow::anyhow!("account client key: {e}"))?;
+            let integration = sid_authn::system_integration::AccountSettings::new(url, keys)
+                .map_err(|e| anyhow::anyhow!("account pages {url}: {e}"))?;
+            Some(Account {
+                pages: Some(integration.pages().clone()),
+                mailed: Some(integration.pages().clone()),
+                integration: Some(integration),
+            })
+        }
+        _ => None,
+    };
     let Account {
         pages: account_pages,
         integration: account,
         mailed: mailed_pages,
-    } = account_settings(
-        env_setting("SID_ACCOUNT_URL")?.as_deref(),
-        env_setting("SID_ACCOUNT_CLIENT_URL")?.as_deref(),
-        env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
-        host.account_client,
-    )?;
+    } = match served.or(host.account) {
+        Some(account) => account,
+        None => account_settings(
+            env_setting("SID_ACCOUNT_URL")?.as_deref(),
+            env_setting("SID_ACCOUNT_CLIENT_URL")?.as_deref(),
+            env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
+            host.account_client,
+        )?,
+    };
     if let Some(account) = &account {
         let integration = sid_authn::system_integration::ensure_account_integration(
             storage.as_ref(),
@@ -1164,6 +1212,11 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         None => sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
     };
 
+    let web_settings = Arc::new(sid::web_settings::WebSettingsAdmin::new(
+        storage.clone(),
+        &issuer_base,
+    ));
+
     Ok(CeComponents {
         magic_link_mail,
         code_mail,
@@ -1173,6 +1226,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         issuers,
         sign_in_page: Arc::new(ceremony_page.clone()),
         ceremony_page,
+        account_client_key,
         authz_engine,
         organization,
         #[cfg(feature = "scim")]
@@ -1197,6 +1251,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         required_receivers,
         cache_backend,
         app_state,
+        web_settings,
         issuer,
         grpc_addr,
         key_manager,

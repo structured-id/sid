@@ -226,6 +226,11 @@ macro_rules! __storage_conformance {
                 test_login_settings_advance_the_login_policy_epoch
                 test_login_settings_and_enrollment_policy_are_independent
             );
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],web_settings:
+                test_web_settings_stored_and_replaced
+                test_web_settings_concurrent_writers
+                test_web_settings_end_browser_sessions
+            );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],site_enrollment:
                 test_site_enrollment_held_and_renewed
                 test_site_enrollment_replaces_only_what_was_read

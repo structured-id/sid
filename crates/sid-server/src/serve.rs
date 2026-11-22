@@ -64,6 +64,44 @@ pub struct HostServices<'a> {
     )>,
 }
 
+/// The origins of the installation's own pages, as its settings place them
+/// now: the public URL's and the console's.
+struct InstallationPages(std::sync::Arc<sid::web_settings::WebSettingsAdmin>);
+
+#[async_trait::async_trait]
+impl sid_infra::authn::access::AdmittedOrigins for InstallationPages {
+    async fn admits(&self, origin: &str) -> bool {
+        match self.0.recent().await {
+            Ok(placed) => [&placed.public_url, &placed.console_url]
+                .iter()
+                .any(|url| url.origin().ascii_serialization() == origin),
+            // Settings that cannot be read admit no page.
+            Err(e) => {
+                tracing::warn!(error = %e, "web settings unavailable; browser session refused");
+                false
+            }
+        }
+    }
+}
+
+/// The console's origin as credentialed CORS admits it, when the settings
+/// place the console on a sibling host: its calls of the installation's API
+/// are cross-origin. Read from the settings held in this process, refreshed
+/// every second by the server; the guard still checks every call's origin
+/// against the stored settings and admits nothing on CORS alone.
+#[cfg(feature = "http")]
+pub struct ConsoleOrigin(pub std::sync::Arc<sid::web_settings::WebSettingsAdmin>);
+
+#[cfg(feature = "http")]
+impl structured_proxy::hooks::CorsOrigins for ConsoleOrigin {
+    fn admits(&self, origin: &str) -> bool {
+        self.0.last().is_some_and(|placed| {
+            let console = placed.console_url.origin();
+            console != placed.public_url.origin() && console.ascii_serialization() == origin
+        })
+    }
+}
+
 /// The services one server exposes: routed and reported on the gRPC health
 /// service together, each behind the access guard of the rules its schema
 /// declares.
@@ -77,6 +115,13 @@ pub struct CeServices {
     /// RPCs the HTTP form serves beside SID's.
     #[cfg(feature = "http")]
     transcoded: Vec<&'static [u8]>,
+    /// Routes the HTTP port serves beside the annotated RPCs (the
+    /// installation's own web UI).
+    #[cfg(feature = "http")]
+    extra_routes: Vec<structured_proxy::hooks::ExtraRoute>,
+    /// Services served under path prefixes of their own on the HTTP port.
+    #[cfg(feature = "http")]
+    mounts: Vec<(String, MountFactory)>,
 }
 
 impl CeServices {
@@ -123,6 +168,12 @@ impl CeServices {
         for (service, tokens) in host.service_tokens {
             access = access.with_service_tokens(service, tokens);
         }
+        // The installation's own pages (account, console) call its API with
+        // its browser session.
+        access = access.with_browser_sessions(sid_infra::authn::access::BrowserSessions {
+            cookie: c.auth_svc.browser_cookie().clone(),
+            origins: std::sync::Arc::new(InstallationPages(c.web_settings.clone())),
+        });
 
         let mut services = Self {
             services: served,
@@ -130,6 +181,17 @@ impl CeServices {
             receivers: Vec::new(),
             #[cfg(feature = "http")]
             transcoded: Vec::new(),
+            // The session on a selected subdomain: hosts the scope selects
+            // establish their own cookie through these steps.
+            #[cfg(feature = "http")]
+            extra_routes: crate::session_establish::routes(
+                c.web_settings.clone(),
+                c.storage.clone(),
+                c.key_manager.clone(),
+                c.auth_svc.browser_cookie().clone(),
+            ),
+            #[cfg(feature = "http")]
+            mounts: Vec::new(),
         };
         services
             .add(IdentityServiceServer::from_arc(c.identity_svc.clone()))
@@ -232,6 +294,7 @@ impl CeServices {
                     c.jwt.clone(),
                     c.revocation_cache.clone(),
                     c.key_manager.clone(),
+                    c.web_settings.clone(),
                 ),
             ))
             .await
@@ -334,6 +397,25 @@ impl CeServices {
         #[cfg(not(feature = "http"))]
         let _ = descriptors;
         self.add(svc).await
+    }
+
+    /// Serve the service `build` makes from the server's own services on the
+    /// HTTP port for calls under `prefix` (without a trailing `/`), which it
+    /// receives with the prefix removed.
+    #[cfg(feature = "http")]
+    pub fn add_mount(&mut self, prefix: &str, build: MountFactory) -> &mut Self {
+        self.mounts.push((prefix.to_owned(), build));
+        self
+    }
+
+    /// Serve `routes` on the HTTP port beside the annotated RPCs.
+    #[cfg(feature = "http")]
+    pub fn add_routes(
+        &mut self,
+        routes: impl IntoIterator<Item = structured_proxy::hooks::ExtraRoute>,
+    ) -> &mut Self {
+        self.extra_routes.extend(routes);
+        self
     }
 }
 
@@ -481,7 +563,42 @@ pub async fn serve_on(
         // host may have replaced: the auth service admits ceremonies from it.
         c.ceremony_page.as_ref(),
         &services.transcoded,
-    )?;
+    )?
+    .map(|proxy| {
+        let proxy = proxy.with_extra_routes(services.extra_routes.clone());
+        // The console's origin joins credentialed CORS only where that
+        // policy is in force (origins are listed): with none listed the
+        // transcoder answers every origin without credentials, which
+        // browser relying parties fetching discovery and keys depend on, and
+        // the hook would replace that with the credentialed policy.
+        if proxy.config().cors.origins.is_empty() {
+            proxy
+        } else {
+            proxy.with_cors_origins(std::sync::Arc::new(ConsoleOrigin(c.web_settings.clone())))
+        }
+    });
+    // The settings CORS reads synchronously follow the store within a
+    // second, whatever the traffic; the task ends with the server.
+    #[cfg(feature = "http")]
+    {
+        let web = c.web_settings.clone();
+        let stop = stopped.clone().wait();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(sid::web_settings::RECENT_FOR);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tokio::pin!(stop);
+            loop {
+                tokio::select! {
+                    () = &mut stop => break,
+                    _ = every.tick() => {
+                        if let Err(e) = web.recent().await {
+                            tracing::warn!(error = %e, "web settings unavailable");
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let engine = crate::init::engine(&c, &services.receivers)?.start();
     let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
@@ -494,7 +611,17 @@ pub async fn serve_on(
     #[cfg(feature = "http")]
     let mut http = http_proxy.map(|proxy| {
         info!(bind = %proxy.config().listen.http, "HTTP transcoder listening");
-        let upstream = transcoder_upstream(routes.clone(), c.issuers.clone());
+        let mounts = services
+            .mounts
+            .into_iter()
+            .map(|(prefix, build)| (prefix, build(routes.clone())))
+            .collect();
+        // The installation cookie reaches as far as its scope setting says.
+        let upstream = crate::cookie_scope::CookieScopeEdge::new(
+            transcoder_upstream(routes.clone(), c.issuers.clone(), mounts),
+            c.web_settings.clone(),
+            c.auth_svc.browser_cookie().clone(),
+        );
         let http_stopped = stopped.clone().wait();
         tokio::spawn(
             async move { sid_infra::http::serve(&proxy, upstream, http_stopped, drain).await },
@@ -569,16 +696,106 @@ pub async fn serve_on(
     Ok(())
 }
 
-/// The services the embedded transcoder calls in process: gRPC-Web answered
-/// here under the API mount, browser sign-in calls addressed to an issuer of
-/// `issuers` (see [`browser_route`]), and every transcoded call carrying the
-/// HTTP request it was made from (see [`transcoded_request`]).
+/// A service the HTTP port serves under a path prefix of its own, ahead of
+/// the installation's API (an application hosted in process).
+#[cfg(feature = "http")]
+pub type MountedService = tower::util::BoxCloneSyncService<
+    http::Request<Body>,
+    http::Response<Body>,
+    std::convert::Infallible,
+>;
+
+/// What builds a mounted service once the server's own services exist: it
+/// receives them, behind their access guards, to call in process.
+#[cfg(feature = "http")]
+pub type MountFactory = Box<dyn FnOnce(tonic::service::Routes) -> MountedService + Send>;
+
+/// Calls under a mount's prefix go to its service with the prefix removed;
+/// every other call goes to `inner`.
+#[cfg(feature = "http")]
+#[derive(Clone)]
+pub struct Mounts<S> {
+    inner: S,
+    mounts: std::sync::Arc<[(String, MountedService)]>,
+}
+
+#[cfg(feature = "http")]
+impl<S> Service<http::Request<Body>> for Mounts<S>
+where
+    S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = http::Response<Body>;
+    type Error = Infallible;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
+        use tower::ServiceExt as _;
+        let path = request.uri().path().to_owned();
+        for (prefix, service) in self.mounts.iter() {
+            let Some(rest) = path.strip_prefix(prefix.as_str()) else {
+                continue;
+            };
+            if !rest.starts_with('/') {
+                continue;
+            }
+            let mut parts = request.uri().clone().into_parts();
+            let query = request
+                .uri()
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            match http::uri::PathAndQuery::try_from(format!("{rest}{query}")) {
+                Ok(rewritten) => parts.path_and_query = Some(rewritten),
+                Err(e) => {
+                    let refused = sid_infra::grpc_error::refuse::internal("route the mount", e);
+                    return Box::pin(async move { Ok(refused.into_http()) });
+                }
+            }
+            match http::Uri::from_parts(parts) {
+                Ok(uri) => *request.uri_mut() = uri,
+                Err(e) => {
+                    let refused = sid_infra::grpc_error::refuse::internal("route the mount", e);
+                    return Box::pin(async move { Ok(refused.into_http()) });
+                }
+            }
+            let service = service.clone();
+            return Box::pin(service.oneshot(request));
+        }
+        // The service polled ready serves this call; its clone the next one.
+        let ready = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, ready);
+        Box::pin(inner.call(request))
+    }
+}
+
+/// The services the embedded transcoder calls in process: the mounted
+/// applications' calls under their prefixes, gRPC-Web answered here under
+/// the API mount, browser sign-in calls addressed to an issuer of `issuers`
+/// (see [`browser_route`]), and every transcoded call carrying the HTTP
+/// request it was made from (see [`transcoded_request`]).
 #[cfg(feature = "http")]
 pub fn transcoder_upstream(
     routes: tonic::service::Routes,
     issuers: std::sync::Arc<sid_authn::issuer::IssuerRegistry>,
+    mounts: Vec<(String, MountedService)>,
 ) -> impl structured_proxy::upstream::Upstream {
+    let mounts: std::sync::Arc<[(String, MountedService)]> = mounts.into();
     tower::ServiceBuilder::new()
+        .layer(tower::layer::layer_fn(move |inner| Mounts {
+            inner,
+            mounts: mounts.clone(),
+        }))
         .map_request(browser_route::mark_browser_call)
         .layer(tonic_web::GrpcWebLayer::new())
         .layer(tower::layer::layer_fn(move |inner| {

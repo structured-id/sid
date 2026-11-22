@@ -49,6 +49,7 @@ pub struct MockStorageInner {
     access_requests: HashMap<sid_core::models::AccessRequestId, sid_core::models::AccessRequest>,
     email_provider: Option<sid_core::models::EmailProviderConfig>,
     login_settings: Option<sid_core::models::LoginSettings>,
+    web_settings: Option<sid_core::models::WebSettings>,
     site_enrollment: Option<sid_core::models::SiteEnrollment>,
     machine_users: HashMap<MachineUserId, sid_core::models::MachineUser>,
     machine_credentials: Vec<sid_core::models::MachineUserCredential>,
@@ -6351,6 +6352,44 @@ impl StorageBackend for MockStorage {
     }
     async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
         Ok(self.inner.lock().unwrap().login_settings.clone())
+    }
+    async fn web_settings(&self) -> SidResult<Option<sid_core::models::WebSettings>> {
+        Ok(self.inner.lock().unwrap().web_settings.clone())
+    }
+    async fn set_web_settings(
+        &self,
+        settings: &sid_core::models::WebSettings,
+        expected: Option<&sid_core::models::WebSettings>,
+        end_browser: Option<&SessionEnd>,
+        mut ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.web_settings.as_ref() != expected {
+            return Ok(false);
+        }
+        // The browser sessions and the application sessions they signed in.
+        let browsers: std::collections::HashSet<_> = inner
+            .sessions
+            .values()
+            .filter(|s| s.browser_secret_hash.is_some())
+            .map(|s| s.id)
+            .collect();
+        let ended = |s: &sid_core::models::Session| {
+            browsers.contains(&s.id) || s.authenticated_by.is_some_and(|b| browsers.contains(&b))
+        };
+        if let Some(end) = end_browser {
+            for session in inner.sessions.values() {
+                if ended(session) {
+                    ctx.work.extend(end.owed_by(session));
+                }
+            }
+        }
+        inner.owe(&ctx)?;
+        if end_browser.is_some() {
+            inner.sessions.retain(|_, s| !ended(s));
+        }
+        inner.web_settings = Some(settings.clone());
+        Ok(true)
     }
     async fn set_login_settings(
         &self,

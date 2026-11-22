@@ -53,23 +53,43 @@ ENV SID_BUILD_PLATFORM_CAS=${SID_BUILD_PLATFORM:+/build/platform-cas.json}
 # fetched.
 COPY platform-cas.jso[n] ./
 
-# Build embedded mode: SQLite backend, REST beside gRPC (`http`), no
-# telemetry. The event bus is the in-process one: required work lives in
+# Build embedded mode: SQLite backend, REST beside gRPC and the web UI
+# (`ui`), no telemetry. The event bus is the in-process one: required work lives in
 # SQLite and the work runner executes it, so the image carries no broker.
 RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sid-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sid-target-embedded,target=/build/target,sharing=locked \
     cargo build --release -p sid-server \
     --no-default-features \
-    --features embedded-dev,http \
+    --features embedded-dev,ui \
     && strip target/release/sid \
     && install -D target/release/sid /out/sid \
     && install -d -m 0700 /out/data
 
-# ── Stage 2: Runtime ────────────────────────────────────────────
+# ── Stage 2: Web UI ─────────────────────────────────────────────
+# The account pages and the administration console, built from the ui-core
+# submodule the way its own CI builds them: each application installs its
+# locked dependencies and builds its static bundle.
+FROM docker.io/library/node:26-trixie AS ui
+
+WORKDIR /ui
+COPY ui-core/ ./
+# Node no longer ships corepack; it is installed from npm, then fetches the
+# Yarn the workspace's packageManager names.
+RUN npm install -g corepack && corepack enable && corepack install
+RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
+    cd apps/ui-profile && yarn install --immutable && yarn build
+RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
+    cd apps/ui-admin && yarn install --immutable && yarn build
+
+# ── Stage 3: Runtime ────────────────────────────────────────────
 FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=builder /out/sid /usr/local/bin/sid
+# The bundles the server serves: account pages at /account/, the console
+# where the installation settings place it (/admin/ by default).
+COPY --from=ui /ui/apps/ui-profile/dist/spa /usr/share/sid/ui/account
+COPY --from=ui /ui/apps/ui-admin/dist/spa /usr/share/sid/ui/admin
 
 # Data directory for SQLite database and auto-generated keys, owned by the
 # nonroot user (65532) the server runs as: a new volume mounted here takes
@@ -85,6 +105,7 @@ ENV SID_STORAGE_SQLITE_PATH=/var/lib/sid/auth.db
 # No history replay and no addressed work for separate receivers; a
 # deployment that needs them sets a NATS URL.
 ENV SID_NATS_URL=in-process
+ENV SID_UI_DIR=/usr/share/sid/ui
 
 EXPOSE 8080 50051
 

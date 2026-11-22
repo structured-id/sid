@@ -909,6 +909,27 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
+    /// The installation's stored browser-facing settings (public URL
+    /// override, console address, session cookie scope); `None` until an
+    /// administrator sets them, which reads as the defaults.
+    async fn web_settings(&self) -> Result<Option<sid_core::models::WebSettings>>;
+
+    /// Store `settings` in place of `expected`, the ones the caller read
+    /// (`None`: never set), with its audit entry in the same transaction.
+    /// With `end_browser`, every session holding a browser secret ends in
+    /// that transaction too and owes what [`SessionEnd::owed`] names: a
+    /// narrowed cookie scope leaves no secret shared under the former one
+    /// usable, also after a crash. `false`, with nothing written, when the
+    /// stored settings are no longer `expected`: the caller reads again, so a
+    /// change never overwrites a concurrent one.
+    async fn set_web_settings(
+        &self,
+        settings: &sid_core::models::WebSettings,
+        expected: Option<&sid_core::models::WebSettings>,
+        end_browser: Option<&SessionEnd>,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
     /// The installation's stored login settings; `None` until an
     /// administrator sets them, which reads as the defaults.
     async fn login_settings(&self) -> Result<Option<sid_core::models::LoginSettings>>;

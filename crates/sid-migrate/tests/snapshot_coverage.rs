@@ -112,6 +112,11 @@ const OWN_COLUMNS: &[(&str, &str, &str)] = &[
         "updated_at",
         "when this store recorded the enrollment; never read",
     ),
+    (
+        "web_settings",
+        "updated_at",
+        "when this store recorded the settings; never read",
+    ),
 ];
 
 fn ctx() -> MutationContext {
@@ -1102,6 +1107,27 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
                     },
                     revision: 3,
                 },
+                None,
+                ctx(),
+            )
+            .await
+            .unwrap()
+    );
+    // The browser-facing settings, every field off its default: the moved
+    // installation keeps its addresses and its cookie scope.
+    assert!(
+        source
+            .set_web_settings(
+                &sid_core::models::WebSettings {
+                    public_url: Some("https://login.sid.example.com/".into()),
+                    console_url: Some("https://admin.sid.example.com/".into()),
+                    cookie_scope: sid_core::models::CookieScope::SelectedSubdomains {
+                        hosts: vec!["app.sid.example.com".into()],
+                        pattern: Some(r"[a-z]+\.apps\.sid\.example\.com".into()),
+                    },
+                    revision: 2,
+                },
+                None,
                 None,
                 ctx(),
             )

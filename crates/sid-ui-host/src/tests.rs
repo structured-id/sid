@@ -840,3 +840,47 @@ async fn test_root_mount() {
     let (status, _) = get_path(&app, Method::GET, "/config.json").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// One build serves every placement the installation configures: the shell
+/// names its mount as `<base href>`, right after `<head>` (or after the
+/// doctype when the shell omits `<head>`), so relative asset URLs and the
+/// SPA router resolve under it on every page, deep links included.
+#[tokio::test]
+async fn test_shell_names_its_mount_as_base() {
+    let dir = bundle_dir("base-head");
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><html><head><title>shell</title></head></html>",
+    )
+    .unwrap();
+    for mount in ["/admin/", "/console/", "/"] {
+        let app = router(UiBundle::new(&dir, mount, CONFIG).unwrap());
+        let deep = format!("{mount}users/42");
+        let (status, response) = get_path(&app, Method::GET, &deep).await;
+        assert_eq!(status, StatusCode::OK, "{mount}");
+        assert_eq!(
+            body(response).await,
+            format!(
+                "<!doctype html><html><head><base href=\"{mount}\"><title>shell</title></head></html>"
+            ),
+        );
+    }
+
+    let app = router(UiBundle::new(&bundle_dir("base-nohead"), "/admin/", CONFIG).unwrap());
+    let (_, response) = get_path(&app, Method::GET, "/admin/").await;
+    assert_eq!(
+        body(response).await,
+        "<!doctype html><base href=\"/admin/\"><title>shell</title>"
+    );
+}
+
+/// A shell naming its own `<base>` would contradict the mount: refused.
+#[test]
+fn test_shell_with_its_own_base_is_refused() {
+    let dir = bundle_dir("base-own");
+    std::fs::write(dir.join("index.html"), "<head><base href=\"/x/\"></head>").unwrap();
+    assert!(matches!(
+        UiBundle::new(&dir, "/admin/", CONFIG),
+        Err(BundleError::Shell(_))
+    ));
+}

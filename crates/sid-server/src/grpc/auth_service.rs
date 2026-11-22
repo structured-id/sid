@@ -434,6 +434,9 @@ pub struct AuthServiceImpl {
     authorizations: sid::oauth::authorization::Authorizations,
     /// The end-session endpoint, with the logout confirmations it offered.
     end_sessions: sid::oauth::end_session::EndSessions,
+    /// Ends a browser's installation session with its tokens, client logout
+    /// and revoked event, as every other session end does.
+    cascade: Arc<RevocationCascadeService>,
 }
 
 pub use sid::sign_in::completions::AdmittedCompletion;
@@ -506,7 +509,7 @@ impl AuthServiceImpl {
             installation_org,
             authz,
             revocation: revocation_cache.clone(),
-            cascade,
+            cascade: cascade.clone(),
             cache: cache_backend,
             login_policy: Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(
                 &SecurityPolicy::ce_default(),
@@ -580,6 +583,7 @@ impl AuthServiceImpl {
             sign_in_origin: None,
             registration,
             email_registrations,
+            cascade,
         }
     }
 
@@ -1719,6 +1723,76 @@ impl AuthService for AuthServiceImpl {
             .await
             .map(Response::new)
             .map_err(sign_in_refusal)
+    }
+
+    /// The browser's installation session, which the access guard admitted
+    /// from its cookie on an admitted page origin: the CSRF token its later
+    /// calls echo, its end and whether its Profile administers now.
+    #[instrument(skip_all, fields(method = "get_browser_session"))]
+    async fn get_browser_session(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<sid_proto::sid::v1::authn::BrowserSession>, Status> {
+        use sid_infra::grpc_error::IntoStatus;
+        let unauthenticated = || sid_authn::caller::CallerError::Unauthenticated.into_status();
+        let browser = sid_infra::authn::access::browser_caller(request.extensions())
+            .ok_or_else(unauthenticated)?;
+        let csrf = browser
+            .session
+            .browser_csrf
+            .as_ref()
+            .ok_or_else(unauthenticated)?;
+        let expires_at = browser.session.expires_at;
+        let mut response = Response::new(sid_proto::sid::v1::authn::BrowserSession {
+            csrf_token: sid_authn::browser_session::BrowserCsrf::encode(csrf),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: expires_at.as_second(),
+                nanos: expires_at.subsec_nanosecond(),
+            }),
+            administrator: browser.caller.is_admin(),
+        });
+        // The answer carries the session's CSRF token: no cache keeps it.
+        response.metadata_mut().insert(
+            "cache-control",
+            tonic::metadata::MetadataValue::from_static("no-store"),
+        );
+        Ok(response)
+    }
+
+    #[tracing::instrument(skip_all, fields(rpc = "end_browser_session"))]
+    async fn end_browser_session(&self, request: Request<()>) -> Result<Response<()>, Status> {
+        use sid_infra::grpc_error::IntoStatus;
+        // The access guard admitted the browser's session with its CSRF token
+        // from an admitted origin; without one there is nothing to end.
+        let browser = sid_infra::authn::access::browser_caller(request.extensions())
+            .ok_or_else(|| sid_authn::caller::CallerError::Unauthenticated.into_status())?;
+        let session_id = browser.session.id;
+        // Tokens stop in every process, refresh tokens are revoked and the
+        // session is deleted; its client logout and revoked event commit with
+        // the deletion.
+        self.cascade
+            .revoke_session(
+                session_id,
+                sid_core::models::RevocationReason::UserRequested,
+                &browser.caller.profile_id.to_string(),
+                "session.end_browser",
+            )
+            .await
+            .map_err(|e| sid_infra::grpc_error::refuse::internal("end the browser session", e))?;
+        tracing::info!(%session_id, "browser session ended");
+        let mut response = Response::new(());
+        // The cookie that named the ended session is cleared with the
+        // attributes that set it.
+        let clear =
+            self.browser_cookie().clear().parse().map_err(|e| {
+                sid_infra::grpc_error::refuse::internal("clear the session cookie", e)
+            })?;
+        response.metadata_mut().insert("set-cookie", clear);
+        response.metadata_mut().insert(
+            "cache-control",
+            tonic::metadata::MetadataValue::from_static("no-store"),
+        );
+        Ok(response)
     }
 
     // ── Unified Login Flow ──

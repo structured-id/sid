@@ -871,6 +871,17 @@ pub fn magic_link(id: uuid::Uuid) -> Option<sid_ids_proto::MagicLinkId> {
 }
 
 /// The field-encryption key manager every test server uses.
+/// The browser-facing settings of a test installation whose own URL is
+/// `https://sid.example.com/`, over `storage`.
+pub fn test_web_settings(
+    storage: Arc<dyn sid_plugin::StorageBackend>,
+) -> Arc<sid::web_settings::WebSettingsAdmin> {
+    Arc::new(sid::web_settings::WebSettingsAdmin::new(
+        storage,
+        &url::Url::parse("https://sid.example.com").expect("a valid URL"),
+    ))
+}
+
 pub fn test_key_manager() -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
         sid_keys::SoftwareKeyManager::new(

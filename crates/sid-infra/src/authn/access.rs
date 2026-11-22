@@ -21,7 +21,8 @@ use std::task::{Context, Poll};
 use futures::future::BoxFuture;
 use prost_reflect::{DescriptorPool, Value};
 use sid_authn::caller::{
-    CallerError, CurrentToken, TokenKind, TokenSource, Verified, authenticate_token,
+    BrowserCaller, BrowserSessionRefusal, CallerError, CurrentToken, TokenKind, TokenSource,
+    Verified, authenticate_browser_session, authenticate_token,
 };
 use sid_authn::jwt::JwtService;
 use sid_authn::resource_token::{OwnTokenError, ResourceTokenVerifier};
@@ -166,7 +167,13 @@ impl AccessRule {
 pub struct AccessRules {
     methods: HashMap<String, AccessRule>,
     services: std::collections::HashSet<String>,
+    /// Methods declaring `idempotency_level = NO_SIDE_EFFECTS`: a call
+    /// changes nothing.
+    reads: std::collections::HashSet<String>,
 }
+
+/// `google.protobuf.MethodOptions.IdempotencyLevel.NO_SIDE_EFFECTS`.
+const NO_SIDE_EFFECTS: i32 = 1;
 
 impl AccessRules {
     /// The rules every service of the encoded `descriptor_set` declares. A
@@ -189,8 +196,15 @@ impl AccessRules {
         for service in pool.services() {
             for method in service.methods() {
                 let path = format!("/{}/{}", service.full_name(), method.name());
-                let rule =
-                    rule_of(&method.options(), &access).map_err(|why| format!("{path}: {why}"))?;
+                let options = method.options();
+                let rule = rule_of(&options, &access).map_err(|why| format!("{path}: {why}"))?;
+                if options
+                    .get_field_by_name("idempotency_level")
+                    .and_then(|level| level.as_enum_number())
+                    == Some(NO_SIDE_EFFECTS)
+                {
+                    self.reads.insert(path.clone());
+                }
                 self.methods.insert(path, rule);
             }
             self.services.insert(service.full_name().to_owned());
@@ -209,6 +223,11 @@ impl AccessRules {
     /// The rule of the method at `path`.
     pub fn rule(&self, path: &str) -> Option<&AccessRule> {
         self.methods.get(path)
+    }
+
+    /// Whether the method at `path` declares that a call changes nothing.
+    pub fn changes_nothing(&self, path: &str) -> bool {
+        self.reads.contains(path)
     }
 
     /// Whether the schema declares the service `name`.
@@ -294,6 +313,23 @@ fn rule_of(
     }
 }
 
+/// Which page origins may act with the installation's browser session.
+#[async_trait::async_trait]
+pub trait AdmittedOrigins: Send + Sync {
+    /// Whether `origin`, a request's serialized `Origin`, is one of the
+    /// installation's pages (its public origin, its console's origin).
+    async fn admits(&self, origin: &str) -> bool;
+}
+
+/// The installation's own browser session as an OWN_SESSION credential: its
+/// session cookie, from a page on an admitted origin, echoing the session's
+/// CSRF token on every call that changes something.
+#[derive(Clone)]
+pub struct BrowserSessions {
+    pub cookie: sid_authn::browser_session::BrowserCookie,
+    pub origins: Arc<dyn AdmittedOrigins>,
+}
+
 /// What the guard verifies credentials with.
 pub struct Access {
     rules: Arc<AccessRules>,
@@ -304,6 +340,8 @@ pub struct Access {
     /// The verifier of a service's own tokens for an API, by the gRPC
     /// service that serves it.
     service_tokens: HashMap<String, Arc<ResourceTokenVerifier>>,
+    /// The installation's browser session, when its pages call this API.
+    browser: Option<BrowserSessions>,
 }
 
 impl Access {
@@ -323,6 +361,74 @@ impl Access {
             storage,
             revocation,
             service_tokens: HashMap::new(),
+            browser: None,
+        }
+    }
+
+    /// The installation's pages call this API with its browser session.
+    pub fn with_browser_sessions(mut self, browser: BrowserSessions) -> Self {
+        self.browser = Some(browser);
+        self
+    }
+
+    /// Admit a protected call presenting no bearer token by the browser
+    /// session its cookie holds.
+    async fn admit_browser(
+        &self,
+        path: &str,
+        rule: &AccessRule,
+        headers: &http::HeaderMap,
+        extensions: &mut http::Extensions,
+    ) -> Result<(), Status> {
+        let unauthenticated = || CallerError::Unauthenticated.into_status();
+        let browser = self.browser.as_ref().ok_or_else(unauthenticated)?;
+        let values = |name: &str| {
+            headers
+                .get_all(name)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .collect::<Vec<_>>()
+        };
+        let secret = browser
+            .cookie
+            .secret(values("cookie"))
+            .ok_or_else(unauthenticated)?;
+        // Only the installation's own pages act with its session: one exact
+        // Origin (RFC 6454 §7), never `null` or another page of the site.
+        let not_the_page = || {
+            Status::from(ApiError::new(
+                ErrorReason::CsrfTokenInvalid,
+                "the request does not come from a page of the installation",
+            ))
+        };
+        let origins = values("origin");
+        let [origin] = origins.as_slice() else {
+            return Err(not_the_page());
+        };
+        if !browser.origins.admits(origin).await {
+            return Err(not_the_page());
+        }
+        if !rule.admits(CredentialKind::OwnSession) {
+            return Err(CallerError::Denied.into_status());
+        }
+        // A call that changes nothing needs no CSRF token: the Origin check
+        // already keeps other pages from reading its answer.
+        let csrf = values(sid_authn::browser_session::CSRF_HEADER);
+        let csrf = (!self.rules.changes_nothing(path)).then_some(csrf);
+        match authenticate_browser_session(self.storage.as_ref(), &secret, csrf).await {
+            Ok(caller) => {
+                extensions.insert(Arc::new(caller));
+                Ok(())
+            }
+            Err(BrowserSessionRefusal::NotSignedIn) => Err(unauthenticated()),
+            Err(BrowserSessionRefusal::Csrf) => Err(ApiError::new(
+                ErrorReason::CsrfTokenInvalid,
+                "the request does not carry this session's CSRF token",
+            )
+            .into()),
+            Err(BrowserSessionRefusal::Unavailable(detail)) => Err(
+                crate::grpc_error::refuse::dependency_unavailable("installation session", detail),
+            ),
         }
     }
 
@@ -357,7 +463,7 @@ impl Access {
     async fn admit(
         &self,
         path: &str,
-        presented: Option<&str>,
+        headers: &http::HeaderMap,
         extensions: &mut http::Extensions,
     ) -> Result<(), Status> {
         let Some(rule) = self.rules.rule(path) else {
@@ -367,7 +473,13 @@ impl Access {
         let AccessRule::Protected { scopes, .. } = rule else {
             return Ok(());
         };
-        let token = bearer(presented).ok_or_else(|| CallerError::Unauthenticated.into_status())?;
+        let presented = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        let Some(token) = bearer(presented) else {
+            // No bearer: the installation's own page with its session cookie.
+            return self.admit_browser(path, rule, headers, extensions).await;
+        };
         let (kind, granted) =
             match authenticate_token(token, self.tokens.verifier(), self.current.as_ref()).await {
                 Ok(verified) => {
@@ -490,17 +602,8 @@ where
         let access = self.access.clone();
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
-            let presented = parts
-                .headers
-                .get(http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
             if let Err(status) = access
-                .admit(
-                    parts.uri.path(),
-                    presented.as_deref(),
-                    &mut parts.extensions,
-                )
+                .admit(parts.uri.path(), &parts.headers, &mut parts.extensions)
                 .await
             {
                 return Ok(status.into_http());
@@ -513,6 +616,11 @@ where
 /// The credential the guard verified for `extensions`' request, if any.
 pub fn verified(extensions: &http::Extensions) -> Option<&Verified> {
     extensions.get::<Arc<Verified>>().map(Arc::as_ref)
+}
+
+/// The browser session the guard admitted for `extensions`' request, if any.
+pub fn browser_caller(extensions: &http::Extensions) -> Option<&BrowserCaller> {
+    extensions.get::<Arc<BrowserCaller>>().map(Arc::as_ref)
 }
 
 /// The service credential the guard verified for `extensions`' request, if

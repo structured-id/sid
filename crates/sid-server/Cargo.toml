@@ -92,14 +92,23 @@ serde-saphyr = { workspace = true }
 # The gRPC-Web layer wraps the services the transcoder calls in process, and
 # each call carries the HTTP request it was transcoded from.
 tower = { workspace = true, features = ["util"] }
+# The installation's own web UI served in process (`ui`): bundles, the
+# account pages' browser adapter, the console where the settings place it.
+sid-ui-host = { path = "../sid-ui-host", optional = true }
+axum = { workspace = true, optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [features]
-default = ["telemetry", "storage-pg", "scim", "http"]
+default = ["telemetry", "storage-pg", "scim", "http", "ui"]
 
 # Serve the annotated RPCs over HTTP (OIDC endpoints, RFC protocol forms)
 # through structured-proxy embedded as a library, at SID_BIND or per
 # SID_HTTP_CONFIG.
 http = ["dep:structured-proxy", "sid-infra/http"]
+
+# Serve the installation's own web UI (account pages, administration
+# console) from the bundles in SID_UI_DIR, on the HTTP port.
+ui = ["http", "dep:sid-ui-host", "dep:axum", "dep:http-body-util"]
 
 # PostgreSQL storage backend (default for a full deployment).
 storage-pg = ["sid-storage/storage-pg"]

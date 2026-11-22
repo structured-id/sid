@@ -17,6 +17,10 @@ pub enum InstanceSecret {
     /// (PKCS#8). The platform enrolls its public half; the site signs with
     /// it what it states about itself. Every replica signs as the one site.
     FederationSiteKey,
+    /// The private key (PKCS#8) of the account pages' web client when the
+    /// installation serves them in process. Every replica signs that
+    /// client's assertions with it; the client registers its public half.
+    AccountClientKey,
 }
 
 impl InstanceSecret {
@@ -27,6 +31,7 @@ impl InstanceSecret {
             Self::CaptchaKey => "captcha_key",
             Self::AdminClaim => "admin_claim",
             Self::FederationSiteKey => "federation_site_key",
+            Self::AccountClientKey => "account_client_key",
         }
     }
 }
