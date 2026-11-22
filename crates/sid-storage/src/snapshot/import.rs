@@ -512,6 +512,20 @@ pub async fn import(
     {
         result.policies += 1;
     }
+    // The browser-facing settings move as stored into a target that holds
+    // none; a target that already set its own keeps them.
+    if let Some(settings) = &snapshot.web_settings
+        && backend
+            .set_web_settings(
+                settings,
+                None,
+                None,
+                audit("import_web_settings", "installation"),
+            )
+            .await?
+    {
+        result.policies += 1;
+    }
     // The site's key first, insert-only and read back: the enrollment held
     // next certifies it, and a concurrent initializer never replaces it.
     if let Some(key) = &snapshot.federation_site_key {

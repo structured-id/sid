@@ -74,7 +74,9 @@ FROM docker.io/library/node:26-trixie AS ui
 
 WORKDIR /ui
 COPY ui-core/ ./
-RUN corepack enable && corepack install
+# Node no longer ships corepack; it is installed from npm, then fetches the
+# Yarn the workspace's packageManager names.
+RUN npm install -g corepack && corepack enable && corepack install
 RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
     cd apps/ui-profile && yarn install --immutable && yarn build
 RUN --mount=type=cache,id=sid-yarn-cache,target=/root/.yarn/berry/cache,sharing=locked \
