@@ -85,6 +85,8 @@ jiff-sqlx = { workspace = true, optional = true }
 secrecy = { workspace = true }
 
 [dev-dependencies]
+# The integration tests connect to the test databases the run prepared once.
+sid-storage = { path = ".", features = ["test-support"] }
 sid-crypto = { workspace = true, features = ["std", "primitives"] }
 # Field-encryption integration tests are #[tokio::test]; the library itself
 # needs no macros, so the attribute is enabled here only.

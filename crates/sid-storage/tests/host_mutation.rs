@@ -55,16 +55,7 @@ mod postgres {
     use sqlx::PgPool;
 
     async fn backend() -> PostgresBackend {
-        let url = std::env::var("SID_STORAGE_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://sid:sid_dev@localhost:54399/sid_storage_test".to_string()
-        });
-        let backend = PostgresBackend::new(&url, None)
-            .await
-            .expect("the SID test PostgreSQL on port 54399");
-        sid_storage::migrator::run_migrations(backend.pool(), None)
-            .await
-            .expect("migrations");
-        backend
+        sid_storage::testing::prepared_storage_postgres().await
     }
 
     async fn pool() -> PgPool {

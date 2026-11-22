@@ -2,7 +2,8 @@
 //! SCIM 2.0 integration tests with real PostgreSQL.
 //!
 //! Requires running PostgreSQL: `cd sid && docker compose -f docker-compose.test.yml up -d`
-//! Run with: `cargo test -p sid-scim --test scim_integration`
+//! Run with: `cargo nextest run -p sid-scim --test scim_integration` (its setup
+//! script prepares the database).
 
 use std::sync::Arc;
 
@@ -22,21 +23,14 @@ use sid_proto::sid::v1 as proto;
 use sid_proto::sid::v1::scim_service_server::ScimService;
 use sid_scim::grpc::{ScimDirectory, ScimServiceImpl};
 use sid_scim::mapping::ScimOrgContext;
-use sid_storage::PostgresBackend;
 use tonic::Request;
 use uuid::Uuid;
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
 
 /// A pool on the test database, to read what the trait does not return
 /// (the audit trail).
 async fn storage_pool() -> sqlx::PgPool {
-    PostgresBackend::new(&database_url(), None)
+    sid_storage::testing::prepared_postgres()
         .await
-        .expect("test database")
         .pool()
         .clone()
 }
@@ -63,15 +57,8 @@ async fn setup_directory() -> (
     Arc<RevocationCache>,
     ScimDirectory,
 ) {
-    let backend = PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
-
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(sid_storage::testing::prepared_postgres().await);
 
     // Create a project for SCIM group scoping
     let project_id = ProjectId::SYSTEM;

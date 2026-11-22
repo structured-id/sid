@@ -14,23 +14,12 @@ use sid_plugin::InstanceSecretStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 
-/// The Compose test server's database.
-const COMPOSE_DATABASE_URL: &str = "postgres://sid:sid_dev@localhost:54399/sid_storage_test";
-
-fn database_url() -> String {
-    std::env::var("SID_STORAGE_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| COMPOSE_DATABASE_URL.to_string())
-}
+use sid_storage::testing::{
+    COMPOSE_STORAGE_DATABASE_URL as COMPOSE_DATABASE_URL, storage_database_url as database_url,
+};
 
 async fn setup() -> PostgresBackend {
-    let backend = PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
+    let backend = sid_storage::testing::prepared_storage_postgres().await;
 
     // Tests run concurrently against one database, so none of them clears
     // tables: every scenario works on rows it created under unique keys.

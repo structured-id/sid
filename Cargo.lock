@@ -6716,6 +6716,7 @@ dependencies = [
  "sid-ids",
  "sid-keys",
  "sid-plugin",
+ "sid-storage",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

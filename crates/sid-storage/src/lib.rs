@@ -20,7 +20,7 @@ pub mod postgres;
 #[cfg(feature = "storage-pg")]
 pub mod postgres_blob;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(feature = "test-support", all(test, feature = "storage-pg")))]
 pub mod testing;
 
 #[cfg(feature = "storage-pg")]

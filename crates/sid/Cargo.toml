@@ -78,7 +78,7 @@ sid-authn = { workspace = true, features = ["keyed", "password-operation", "soft
 sid-fed = { workspace = true, features = ["test-support"] }
 # Signs the device-key proofs of the enrollment ceremony tests.
 jsonwebtoken = { workspace = true }
-sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite", "test-support"] }
 sqlx = { workspace = true, features = ["postgres"] }
 # Writes a closure's grace end straight into `timestamptz`.
 jiff-sqlx = { workspace = true }

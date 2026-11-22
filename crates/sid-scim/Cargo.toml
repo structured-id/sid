@@ -33,7 +33,7 @@ sid-crypto = { workspace = true, features = ["tls-aws-lc", "primitives", "jwt"] 
 sid-keys = { path = "../sid-keys" }
 url = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
+sid-storage = { path = "../sid-storage", features = ["storage-sqlite", "test-support"] }
 secrecy = { workspace = true }
 sqlx = { workspace = true }
 tonic-types = { workspace = true }

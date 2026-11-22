@@ -20,14 +20,7 @@ use sid_core::models::{
 use sid_plugin::StorageBackend;
 
 async fn setup() -> (Arc<dyn StorageBackend>, AccountClosureService, sqlx::PgPool) {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     let pool = backend.pool().clone();
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let cascade = Arc::new(RevocationCascadeService::new(
