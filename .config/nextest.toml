@@ -1,6 +1,19 @@
 # nextest configuration for SID CE workspace
 # Docs: https://nexte.st/docs/configuration/
 
+experimental = ["setup-scripts"]
+
+# The shared PostgreSQL test database is migrated once per run, before any
+# test that can reach it; tests connect without migrating it. Each test runs
+# in its own process, so migrating per test repeated the whole migration
+# check, queued on the migrator's lock, in every test.
+[scripts.setup.test-database]
+command = "cargo run --locked --quiet -p sid-storage --features test-support --example prepare_test_database"
+
+[[profile.default.scripts]]
+filter = "rdeps(sid-storage)"
+setup = "test-database"
+
 [profile.default]
 # Default: 8 parallel test threads
 test-threads = 8

@@ -20,6 +20,9 @@ pub mod postgres;
 #[cfg(feature = "storage-pg")]
 pub mod postgres_blob;
 
+#[cfg(feature = "test-support")]
+pub mod testing;
+
 #[cfg(feature = "storage-pg")]
 pub use postgres::{
     PgAuditStore, PgHistoryKeyStore, PgOperationStore, PgWorkStore, PostgresBackend,

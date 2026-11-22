@@ -15,8 +15,15 @@ required-features = ["storage-pg"]
 name = "field_encryption_pg"
 required-features = ["storage-pg"]
 
+[[example]]
+name = "prepare_test_database"
+required-features = ["test-support"]
+
 [features]
 default = ["storage-pg"]
+
+# The shared PostgreSQL test database a test run migrates once (tests only).
+test-support = ["storage-pg"]
 
 # PostgreSQL backend (full deployment)
 storage-pg = ["dep:sqlx", "sqlx?/postgres", "sid-ids/sqlx-postgres", "dep:jiff-sqlx"]

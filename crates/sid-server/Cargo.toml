@@ -171,8 +171,9 @@ jsonwebtoken = { workspace = true }
 p256 = { workspace = true, features = ["pkcs8"] }
 # Harnesses set state no operation writes (a grace period end in the past).
 sqlx = { workspace = true }
-# Startup steps are tested against a real in-memory engine.
-sid-storage = { workspace = true, features = ["storage-sqlite"] }
+# Startup steps are tested against a real in-memory engine; PostgreSQL tests
+# connect to the shared test database the run prepared once.
+sid-storage = { workspace = true, features = ["storage-sqlite", "test-support"] }
 # The site service is tested against certificates a development platform
 # really issues.
 sid-fed = { workspace = true, features = ["test-support"] }
