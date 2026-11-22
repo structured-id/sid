@@ -328,6 +328,7 @@ async fn transcoder(svc: &TestServices) -> SocketAddr {
     let upstream = sid_server::serve::transcoder_upstream(
         tonic::service::Routes::new(AuthServiceServer::from_arc(svc.auth.clone())),
         svc.issuers.clone(),
+        Vec::new(),
     );
     tokio::spawn(async move {
         sid_infra::http::serve_on(

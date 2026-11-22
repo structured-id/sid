@@ -4532,6 +4532,21 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))
     }
 
+    async fn web_settings(&self) -> SidResult<Option<sid_core::models::WebSettings>> {
+        self.web_settings_impl().await
+    }
+
+    async fn set_web_settings(
+        &self,
+        settings: &sid_core::models::WebSettings,
+        expected: Option<&sid_core::models::WebSettings>,
+        end_browser: Option<&sid_core::models::SessionEnd>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_web_settings_impl(settings, expected, end_browser, ctx)
+            .await
+    }
+
     async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {
         self.login_settings_impl().await
     }
@@ -10145,6 +10160,7 @@ mod native_session;
 mod operation;
 mod platform_ca;
 mod site_enrollment;
+mod web_settings;
 pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;

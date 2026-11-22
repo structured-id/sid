@@ -108,6 +108,7 @@ async fn over_http() -> String {
             Arc::new(MockStorage::new()),
             common::test_key_manager(),
         )),
+        Vec::new(),
     );
     tokio::spawn(async move {
         sid_infra::http::serve_on(

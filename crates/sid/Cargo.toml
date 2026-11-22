@@ -53,6 +53,10 @@ serde_json = { workspace = true }
 # Constant-time comparison of registration access tokens.
 subtle = { workspace = true }
 thiserror = { workspace = true }
+# The subdomain pattern of a selected session cookie scope.
+regex = "1"
+# The web settings read last, shared without a lock by every request.
+arc-swap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }

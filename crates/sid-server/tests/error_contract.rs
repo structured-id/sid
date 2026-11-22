@@ -204,10 +204,11 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         .await
         .add(RealmServiceServer::new(
             sid_server::grpc::realm_service::RealmServiceImpl::new(
-                storage,
+                storage.clone(),
                 jwt,
                 revocation_cache,
                 test_key_manager(),
+                common::test_web_settings(storage),
             ),
         ))
         .await;

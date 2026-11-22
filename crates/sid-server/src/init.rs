@@ -100,6 +100,10 @@ pub struct CeComponents {
     pub cache_backend: Arc<dyn CacheBackend>,
     pub app_state: AppState,
     pub issuer: String,
+    /// The installation's browser-facing settings (public URL, console
+    /// address, session cookie scope): changed by RealmService, applied by
+    /// the cookie issuer and the UI host.
+    pub web_settings: Arc<sid::web_settings::WebSettingsAdmin>,
     pub grpc_addr: SocketAddr,
     /// Field encryption for stored secrets every service seals.
     pub key_manager: Arc<dyn sid_keys::KeyManager>,
@@ -453,6 +457,9 @@ pub struct CeHost {
     pub own_presentations: Option<Arc<dyn sid::oauth::OwnPresentations>>,
     /// Whether this composition delivers an account cabinet client.
     pub account_client: AccountClient,
+    /// The account settings the host itself provides (the account UI it
+    /// serves in process); none reads them from the environment.
+    pub account: Option<Account>,
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -695,12 +702,15 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         pages: account_pages,
         integration: account,
         mailed: mailed_pages,
-    } = account_settings(
-        env_setting("SID_ACCOUNT_URL")?.as_deref(),
-        env_setting("SID_ACCOUNT_CLIENT_URL")?.as_deref(),
-        env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
-        host.account_client,
-    )?;
+    } = match host.account {
+        Some(account) => account,
+        None => account_settings(
+            env_setting("SID_ACCOUNT_URL")?.as_deref(),
+            env_setting("SID_ACCOUNT_CLIENT_URL")?.as_deref(),
+            env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
+            host.account_client,
+        )?,
+    };
     if let Some(account) = &account {
         let integration = sid_authn::system_integration::ensure_account_integration(
             storage.as_ref(),
@@ -1164,6 +1174,11 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         None => sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
     };
 
+    let web_settings = Arc::new(sid::web_settings::WebSettingsAdmin::new(
+        storage.clone(),
+        &issuer_base,
+    ));
+
     Ok(CeComponents {
         magic_link_mail,
         code_mail,
@@ -1197,6 +1212,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         required_receivers,
         cache_backend,
         app_state,
+        web_settings,
         issuer,
         grpc_addr,
         key_manager,

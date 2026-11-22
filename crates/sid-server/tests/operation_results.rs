@@ -1406,6 +1406,7 @@ async fn test_email_settings_retry_keeps_a_later_change() {
         svc.jwt.clone(),
         svc.revocation_cache.clone(),
         common::test_key_manager(),
+        common::test_web_settings(svc.storage.clone()),
     );
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let settings = |host: &str| EmailSettings {

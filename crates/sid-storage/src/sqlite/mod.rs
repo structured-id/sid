@@ -45,6 +45,7 @@ mod password_history;
 mod platform_ca;
 mod principal_transfer;
 mod site_enrollment;
+mod web_settings;
 pub use password_history::SqliteHistoryKeyStore;
 mod profile;
 mod project;
@@ -1817,6 +1818,21 @@ impl StorageBackend for SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         self.set_enrollment_policy_impl(policy, audit).await
+    }
+
+    async fn web_settings(&self) -> SidResult<Option<sid_core::models::WebSettings>> {
+        self.web_settings_impl().await
+    }
+
+    async fn set_web_settings(
+        &self,
+        settings: &sid_core::models::WebSettings,
+        expected: Option<&sid_core::models::WebSettings>,
+        end_browser: Option<&sid_core::models::SessionEnd>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_web_settings_impl(settings, expected, end_browser, ctx)
+            .await
     }
 
     async fn login_settings(&self) -> SidResult<Option<sid_core::models::LoginSettings>> {

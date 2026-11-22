@@ -7,12 +7,15 @@
 //! The email provider (PLAIN/LOGIN and XOAUTH2 for Microsoft 365 / Google
 //! Workspace) is configured through [`sid::email_provider`] and tested here
 //! over the delivery channel. The login settings serve the admission of
-//! incoming external identities through [`sid::login_settings`]. The other
-//! settings are not part of this build and answer FEATURE_NOT_AVAILABLE.
+//! incoming external identities through [`sid::login_settings`]; the
+//! browser-facing addresses and session cookie scope through
+//! [`sid::web_settings`]. The other settings are not part of this build and
+//! answer FEATURE_NOT_AVAILABLE.
 
 use secrecy::ExposeSecret;
 use sid::email_provider::{EmailProvider, EmailProviderError};
 use sid::login_settings::{LoginSettingsAdmin, LoginSettingsError};
+use sid::web_settings::{WebSettingsAdmin, WebSettingsError};
 use sid_authn::caller::Caller;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
@@ -30,6 +33,10 @@ use sid_notify::channels::{
 use sid_plugin::notification::NotificationChannel;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::admin::{EmailSettings, realm_service_server::RealmService};
+use sid_proto::sid::v1::admin::{
+    InstallationAddresses, SessionCookieScope, UpdateInstallationAddressesRequest,
+    UpdateSessionCookieScopeRequest,
+};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
@@ -39,6 +46,22 @@ pub struct RealmServiceImpl {
     revocation: Arc<RevocationCache>,
     email: EmailProvider,
     login: LoginSettingsAdmin,
+    web: Arc<WebSettingsAdmin>,
+}
+
+/// The status a web settings refusal answers with.
+fn web_refusal(e: WebSettingsError) -> Status {
+    match e {
+        WebSettingsError::Caller(e) => e.into_status(),
+        WebSettingsError::Operation(e) => e.into_status(),
+        WebSettingsError::Store(e) => storage_failure(e),
+        WebSettingsError::InvalidField { field, reason } => invalid_field(field, reason),
+        // Other administrators' changes kept landing first: the caller
+        // repeats the command.
+        WebSettingsError::Contended => {
+            dependency_unavailable("web settings", "changed concurrently, repeat the change")
+        }
+    }
 }
 
 /// The status a login settings refusal answers with.
@@ -70,17 +93,21 @@ fn refusal(e: EmailProviderError) -> Status {
 }
 
 impl RealmServiceImpl {
+    /// `web` is the installation's browser-facing settings, shared with the
+    /// cookie issuer and the UI host that apply them.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
         keys: Arc<dyn sid_keys::KeyManager>,
+        web: Arc<WebSettingsAdmin>,
     ) -> Self {
         Self {
             jwt,
             revocation,
             login: LoginSettingsAdmin::new(storage.clone()),
             email: EmailProvider::new(storage, keys),
+            web,
         }
     }
 
@@ -232,6 +259,62 @@ impl RealmService for RealmServiceImpl {
         _request: Request<sid_proto::sid::v1::admin::UpdateRealmRequest>,
     ) -> Result<Response<sid_proto::sid::v1::admin::RealmSettings>, Status> {
         Err(not_in_this_build("realm_settings"))
+    }
+
+    // ── Browser-facing settings: addresses and session cookie scope ──────────
+
+    #[instrument(skip(self, request), fields(rpc = "GetInstallationAddresses"))]
+    async fn get_installation_addresses(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<InstallationAddresses>, Status> {
+        let caller = self.caller(&request).await?;
+        self.web
+            .addresses(&caller)
+            .await
+            .map(Response::new)
+            .map_err(web_refusal)
+    }
+
+    #[instrument(skip(self, request), fields(rpc = "UpdateInstallationAddresses"))]
+    async fn update_installation_addresses(
+        &self,
+        request: Request<UpdateInstallationAddressesRequest>,
+    ) -> Result<Response<InstallationAddresses>, Status> {
+        let caller = self.caller(&request).await?;
+        let operation = context(&request)?;
+        self.web
+            .update_addresses(&caller, operation, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(web_refusal)
+    }
+
+    #[instrument(skip(self, request), fields(rpc = "GetSessionCookieScope"))]
+    async fn get_session_cookie_scope(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<SessionCookieScope>, Status> {
+        let caller = self.caller(&request).await?;
+        self.web
+            .cookie_scope(&caller)
+            .await
+            .map(Response::new)
+            .map_err(web_refusal)
+    }
+
+    #[instrument(skip(self, request), fields(rpc = "UpdateSessionCookieScope"))]
+    async fn update_session_cookie_scope(
+        &self,
+        request: Request<UpdateSessionCookieScopeRequest>,
+    ) -> Result<Response<SessionCookieScope>, Status> {
+        let caller = self.caller(&request).await?;
+        let operation = context(&request)?;
+        self.web
+            .update_cookie_scope(&caller, operation, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(web_refusal)
     }
 
     // ── Login settings: the admission of incoming external identities ────────

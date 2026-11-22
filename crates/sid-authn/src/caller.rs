@@ -303,6 +303,75 @@ pub async fn check_revocation(
         .map_err(|e| CallerError::unavailable("token revocation state", e))
 }
 
+/// Why a browser's installation session was not admitted as a caller.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BrowserSessionRefusal {
+    /// No live, fully signed-in session holds the cookie's secret.
+    #[error("no installation session")]
+    NotSignedIn,
+    /// The request does not echo the session's CSRF token.
+    #[error("the request does not carry this session's CSRF token")]
+    Csrf,
+    /// The store could not answer.
+    #[error("installation session unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// A browser's installation session admitted as a caller, and the session.
+#[derive(Debug, Clone)]
+pub struct BrowserCaller {
+    pub caller: Caller,
+    pub session: sid_core::models::Session,
+}
+
+/// The caller a browser's installation session `secret` stands for: a live
+/// session that completed its sign-in (not a pending second factor, not a
+/// channel-proof provisional session, not past its policy grace), with the
+/// CSRF token it was given among `csrf` unless the call is a read that
+/// changes nothing (`csrf` is `None`). Its administrator authority is the
+/// Profile's current assignment, not what held when it signed in. The
+/// adapter has checked that the request comes from an admitted origin.
+pub async fn authenticate_browser_session<'a>(
+    storage: &dyn sid_plugin::storage::StorageBackend,
+    secret: &crate::browser_session::BrowserSecret,
+    csrf: Option<impl IntoIterator<Item = &'a str>>,
+) -> Result<BrowserCaller, BrowserSessionRefusal> {
+    let unavailable = |e: sid_core::Error| BrowserSessionRefusal::Unavailable(e.to_string());
+    let session = storage
+        .get_session_by_browser_secret(&secret.hash())
+        .await
+        .map_err(unavailable)?
+        .ok_or(BrowserSessionRefusal::NotSignedIn)?;
+    let past_grace = session.policy_grace
+        && session
+            .grace_deadline
+            .is_some_and(|deadline| jiff::Timestamp::now() >= deadline);
+    if session.is_expired() || session.is_provisional || past_grace {
+        return Err(BrowserSessionRefusal::NotSignedIn);
+    }
+    if let Some(sent) = csrf {
+        let token = session
+            .browser_csrf
+            .as_ref()
+            .ok_or(BrowserSessionRefusal::NotSignedIn)?;
+        if !crate::browser_session::BrowserCsrf::matches(sent, token) {
+            return Err(BrowserSessionRefusal::Csrf);
+        }
+    }
+    let admin = crate::account_roles::administers_installation(storage, session.profile_id)
+        .await
+        .map_err(unavailable)?;
+    Ok(BrowserCaller {
+        caller: Caller {
+            profile_id: session.profile_id,
+            session_id: session.id.to_string(),
+            admin,
+            kind: TokenKind::Interactive,
+        },
+        session,
+    })
+}
+
 impl Caller {
     /// The caller of a verified account API token: the Profile it acts for,
     /// in the application session it belongs to. It carries no

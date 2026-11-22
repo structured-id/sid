@@ -15,11 +15,13 @@ use std::sync::Arc;
 use tonic::{Code, Request};
 
 fn service() -> RealmServiceImpl {
+    let storage = Arc::new(MockStorage::new());
     RealmServiceImpl::new(
-        Arc::new(MockStorage::new()),
+        storage.clone(),
         test_jwt(),
         test_revocation(),
         common::test_key_manager(),
+        common::test_web_settings(storage),
     )
 }
 

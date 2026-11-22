@@ -83,14 +83,19 @@ pub async fn verify_factor_request<T>(
         .or_status()
 }
 
-/// Authenticate the caller of `request` from its bearer access token (see
-/// [`verify_request`]).
+/// Authenticate the caller of `request`: the installation's browser session
+/// the access guard admitted, else its bearer access token (see
+/// [`verify_request`]). A handler that needs the token's claims verifies the
+/// request instead, and a browser session is not such a token.
 #[allow(clippy::result_large_err)]
 pub async fn authenticate<T>(
     request: &Request<T>,
     verifier: &TokenVerifier,
     current: &(impl CurrentToken + ?Sized),
 ) -> Result<Caller, Status> {
+    if let Some(browser) = super::access::browser_caller(request.extensions()) {
+        return Ok(browser.caller.clone());
+    }
     Ok(verify_request(request, verifier, current).await?.caller)
 }
 

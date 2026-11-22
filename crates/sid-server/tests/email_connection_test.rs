@@ -30,6 +30,7 @@ fn services() -> (RealmServiceImpl, Arc<MockStorage>) {
         test_jwt(),
         test_revocation(),
         test_key_manager(),
+        common::test_web_settings(storage.clone()),
     );
     (svc, storage)
 }

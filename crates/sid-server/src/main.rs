@@ -7,7 +7,6 @@
 use tracing::info;
 
 use sid_serve::shutdown;
-use sid_server::init::init_ce;
 use sid_server::serve::{CeServices, serve};
 
 fn main() -> anyhow::Result<()> {
@@ -32,8 +31,42 @@ async fn run() -> anyhow::Result<()> {
 
     info!("Starting StructuredID v{}", env!("CARGO_PKG_VERSION"));
 
-    let c = init_ce().await?;
-    let services = CeServices::new(&c, Default::default()).await?;
+    // The installation's own web UI, when the image carries its bundles: it
+    // brings the account settings its pages sign in with.
+    #[cfg(feature = "ui")]
+    let ui = match sid_server::init::env_setting("SID_ISSUER")? {
+        Some(issuer) => {
+            let data = sid_server::init::env_setting("SID_DATA_DIR")?
+                .unwrap_or_else(|| "/var/lib/sid".to_owned());
+            sid_server::ui::prepare(&issuer, std::path::Path::new(&data))?
+        }
+        None => None,
+    };
+    #[cfg(feature = "ui")]
+    let (ui, account) = match ui {
+        Some((prepared, account)) => (Some(prepared), Some(account)),
+        None => (None, None),
+    };
+    #[cfg(not(feature = "ui"))]
+    let account = None;
+
+    let c = sid_server::init::init_ce_with(sid_server::init::CeHost {
+        account,
+        ..Default::default()
+    })
+    .await?;
+    #[allow(unused_mut)]
+    let mut services = CeServices::new(&c, Default::default()).await?;
+    #[cfg(feature = "ui")]
+    if let Some(prepared) = ui {
+        let started = sid_server::ui::start(&c, prepared).await?;
+        services
+            .add(sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionServiceServer::from_arc(started.adapter))
+            .await;
+        services.add_routes(started.routes);
+        services.add_mount("/account", started.account_api);
+        info!("web UI served: account pages and administration console");
+    }
     serve(c, services, shutdown::signal()).await?;
 
     info!("Server shutdown complete");

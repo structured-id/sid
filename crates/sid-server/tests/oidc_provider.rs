@@ -230,6 +230,7 @@ async fn over_http(provider: OidcProviderServiceImpl) -> String {
             Arc::new(MockStorage::new()),
             common::test_key_manager(),
         )),
+        Vec::new(),
     );
     // Bound before the task starts: a request queues until it is accepted.
     // Serves until the test's runtime ends.

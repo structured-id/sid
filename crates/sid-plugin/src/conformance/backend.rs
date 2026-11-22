@@ -54,6 +54,7 @@ pub mod session_elevation;
 pub mod site_enrollment;
 pub mod transfer;
 pub mod upstream;
+pub mod web_settings;
 pub mod work;
 
 // ─── Builders ───

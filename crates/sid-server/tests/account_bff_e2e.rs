@@ -694,7 +694,11 @@ async fn a_user_signs_in_and_reads_their_account() {
         .await
         .unwrap();
     assert_eq!(page.status(), reqwest::StatusCode::OK);
-    assert_eq!(page.text().await.unwrap(), "<!doctype html>");
+    // The host names its mount, here the root, as the shell's base.
+    assert_eq!(
+        page.text().await.unwrap(),
+        "<!doctype html><base href=\"/\">"
+    );
 }
 
 /// Two first sign-ins of one browser, both started before either answer
