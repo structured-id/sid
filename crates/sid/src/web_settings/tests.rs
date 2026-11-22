@@ -78,6 +78,9 @@ fn console_url_is_same_site_and_away_from_served_paths() {
         "https://sid.example.com/.well-known/",
         "https://admin.example.net/",
         "http://admin.example.com/",
+        // The bundle cannot be mounted at an escaped path (dot segments are
+        // normalized away by URL parsing before this check).
+        "https://sid.example.com/my%20console/",
     ] {
         assert_eq!(
             field(console_url(bad, &public).unwrap_err()),

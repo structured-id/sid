@@ -191,6 +191,14 @@ fn console_url(value: &str, public: &Url) -> Result<Url, WebSettingsError> {
         let path = format!("{}/", url.path());
         url.set_path(&path);
     }
+    // A path the console's bundle cannot be mounted at would leave it
+    // unreachable everywhere once saved.
+    if !sid_core::models::is_ui_mount(url.path()) {
+        return Err(invalid(
+            FIELD,
+            "a literal path of letters, digits, `-._~` and `/`",
+        ));
+    }
     // The console calls the installation's cookie-owning endpoint; a browser
     // sends the session to it only from the same site (RFC 6265bis §5.2).
     if !same_site(&url, public) {

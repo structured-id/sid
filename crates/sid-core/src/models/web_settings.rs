@@ -35,7 +35,19 @@ impl CookieScope {
             (Self::AllSubdomains, Self::AllSubdomains) => false,
             (Self::AllSubdomains, _) => true,
             (Self::SelectedSubdomains { .. }, Self::ThisHost) => true,
-            (Self::SelectedSubdomains { .. }, Self::SelectedSubdomains { .. }) => before != self,
+            // A host no longer listed is lost; a pattern changed or removed
+            // may admit fewer names, so only an unchanged or newly added
+            // pattern keeps the former hosts for certain.
+            (
+                Self::SelectedSubdomains {
+                    hosts: old_hosts,
+                    pattern: old_pattern,
+                },
+                Self::SelectedSubdomains { hosts, pattern },
+            ) => {
+                old_hosts.iter().any(|h| !hosts.contains(h))
+                    || (old_pattern.is_some() && old_pattern != pattern)
+            }
             _ => false,
         }
     }
@@ -58,6 +70,20 @@ pub struct WebSettings {
 
 /// The console's default base path on the public URL.
 pub const DEFAULT_CONSOLE_PATH: &str = "/admin/";
+
+/// Whether `path` can mount a web UI: absolute, ending with `/`, literal
+/// (unreserved characters and `/`, RFC 3986 §2.3) and free of empty, `.` or
+/// `..` segments, which a browser would normalize away (WHATWG URL, path
+/// state), leaving the UI unreachable.
+pub fn is_ui_mount(path: &str) -> bool {
+    path.starts_with('/')
+        && path.ends_with('/')
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b))
+        && !path.contains("//")
+        && !path.split('/').any(|s| s == "." || s == "..")
+}
 
 #[cfg(test)]
 mod tests;

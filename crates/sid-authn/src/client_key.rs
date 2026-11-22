@@ -33,6 +33,7 @@ pub enum ClientKeyError {
 }
 
 /// A client's signing key.
+#[derive(Clone)]
 pub struct ClientKey {
     encoding: EncodingKey,
     algorithm: Algorithm,
@@ -101,6 +102,27 @@ impl ClientKey {
             })?;
         let pem = SecretString::from(pem.as_str());
         Ok((Self::ed25519_from_pem(&pem)?, pem))
+    }
+
+    /// The installation's own client key for `secret`: created once, stored
+    /// sealed under the installation's keys, and read back by every replica,
+    /// so all of them sign as the one client its registration names.
+    pub async fn installation_ed25519(
+        storage: &dyn sid_plugin::InstanceSecretStore,
+        keys: &dyn sid_keys::KeyManager,
+        secret: sid_core::models::InstanceSecret,
+    ) -> Result<Self, crate::instance_secret::InstanceSecretError<ClientKeyError>> {
+        let stored = crate::instance_secret::load_or_create(storage, keys, secret, || {
+            let (_, pem) = Self::generate_ed25519()?;
+            Ok(zeroize::Zeroizing::new(
+                pem.expose_secret().as_bytes().to_vec(),
+            ))
+        })
+        .await?;
+        let pem = std::str::from_utf8(&stored)
+            .map_err(|_| crate::instance_secret::InstanceSecretError::Malformed)?;
+        Self::ed25519_from_pem(&SecretString::from(pem))
+            .map_err(|_| crate::instance_secret::InstanceSecretError::Malformed)
     }
 
     /// The key a PKCS#8 PEM private key of the JWS `algorithm` (`EdDSA`,

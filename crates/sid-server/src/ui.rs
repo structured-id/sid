@@ -11,18 +11,16 @@
 //!   installation's own browser session against its API at `/api`.
 //!
 //! `SID_UI_DIR` names the directory of the compiled bundles (`account/`,
-//! `admin/`); unset, no UI is served. The account client's key is created
-//! in `SID_DATA_DIR` on the first start and registered as the account
-//! integration's, so the image needs no configuration of its own.
+//! `admin/`); unset, no UI is served. The account client's key is the
+//! installation's own, created once in its store and read by every replica,
+//! so the image needs no configuration of its own.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use secrecy::SecretString;
 use sid_authn::bff_session::BffSessionStore;
-use sid_authn::client_key::ClientKey;
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_infra::issuer_client::RpClient;
 use sid_infra::issuer_registry::GrpcIssuerSource;
@@ -34,7 +32,7 @@ use tokio::sync::Mutex;
 use tonic::codegen::http;
 use tower::{Layer as _, ServiceExt as _};
 
-use crate::init::{Account, CeComponents};
+use crate::init::CeComponents;
 use crate::serve::{MountFactory, MountedService};
 
 /// Where the account pages are served.
@@ -50,53 +48,35 @@ const SESSION_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 const SESSION_IDLE: Duration = Duration::from_secs(3600);
 /// A started sign-in waits this long for its callback.
 const SIGN_IN_TTL: Duration = Duration::from_secs(300);
-/// How often expired account sessions and sign-ins are removed.
-const PURGE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The UI prepared before the components start: its bundles and the
 /// account client's key.
 pub struct Prepared {
     account_dir: PathBuf,
     console_dir: PathBuf,
-    key_file: PathBuf,
+    account_url: String,
 }
 
-/// The UI `SID_UI_DIR` names, with the account settings it brings: the
-/// account pages under the issuer's origin, their web client's key created
-/// in `data_dir` on the first start. None when `SID_UI_DIR` is unset.
-pub fn prepare(issuer: &str, data_dir: &Path) -> anyhow::Result<Option<(Prepared, Account)>> {
+/// The UI `SID_UI_DIR` names, its account pages under the issuer's origin.
+/// None when `SID_UI_DIR` is unset.
+pub fn prepare(issuer: &str) -> anyhow::Result<Option<Prepared>> {
     let Some(dir) = crate::init::env_setting("SID_UI_DIR")? else {
         return Ok(None);
     };
     let dir = PathBuf::from(dir);
     let issuer = url::Url::parse(issuer).context("SID_ISSUER is not a URL")?;
-    let account_url = format!("{}{ACCOUNT_MOUNT}", issuer.origin().ascii_serialization());
-    let key_file = data_dir.join("account-client.pem");
-    let jwks_file = data_dir.join("account-client.jwks.json");
-    if !key_file.exists() && !jwks_file.exists() {
-        let kid = sid_ui_host::client_key_files::generate(&key_file, &jwks_file)
-            .context("account client key")?;
-        tracing::info!(%kid, "account client key created");
+    Ok(Some(Prepared {
+        account_dir: dir.join("account"),
+        console_dir: dir.join("admin"),
+        account_url: format!("{}{ACCOUNT_MOUNT}", issuer.origin().ascii_serialization()),
+    }))
+}
+
+impl Prepared {
+    /// Where the account pages are served: their web client's URL.
+    pub fn account_url(&self) -> &str {
+        &self.account_url
     }
-    let jwks = std::fs::read_to_string(&jwks_file)
-        .with_context(|| format!("{jwks_file:?} cannot be read"))?;
-    let keys = sid_core::models::ClientKeySet::from_json(&jwks)
-        .map_err(|e| anyhow::anyhow!("{jwks_file:?}: {e}"))?;
-    let integration = sid_authn::system_integration::AccountSettings::new(&account_url, keys)
-        .map_err(|e| anyhow::anyhow!("account pages {account_url}: {e}"))?;
-    let account = Account {
-        pages: Some(integration.pages().clone()),
-        mailed: Some(integration.pages().clone()),
-        integration: Some(integration),
-    };
-    Ok(Some((
-        Prepared {
-            account_dir: dir.join("account"),
-            console_dir: dir.join("admin"),
-            key_file,
-        },
-        account,
-    )))
 }
 
 /// The deployment's public configuration of a bundle.
@@ -111,23 +91,17 @@ fn bundle_config(extra: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&config).expect("a JSON object encodes")
 }
 
-/// This process's gRPC port on the loopback.
-fn loopback(c: &CeComponents) -> String {
-    format!("http://127.0.0.1:{}", c.grpc_addr.port())
-}
-
-/// The database the account adapter keeps its sessions in: the
-/// installation's own, so replicas sharing it share the sessions.
-fn adapter_database() -> anyhow::Result<String> {
-    if let Some(url) = crate::init::env_setting("SID_UI_DATABASE_URL")? {
-        return Ok(url);
-    }
-    if let Some(url) = crate::init::env_setting("SID_DATABASE_URL")? {
-        return Ok(url);
-    }
-    let path = crate::init::env_setting("SID_STORAGE_SQLITE_PATH")?
-        .unwrap_or_else(|| "/var/lib/sid/auth.db".to_owned());
-    Ok(format!("sqlite:{path}"))
+/// Where this process's gRPC listener bound at `bound` is reached: a
+/// wildcard bind on the loopback of its own address family, a specific
+/// address as it is.
+fn reachable(bound: std::net::SocketAddr) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let ip = match bound.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}", std::net::SocketAddr::new(ip, bound.port()))
 }
 
 /// What the UI adds to the server.
@@ -145,21 +119,18 @@ pub struct Started {
 
 /// Set up the account adapter and return what the server serves of the UI.
 pub async fn start(c: &CeComponents, prepared: Prepared) -> anyhow::Result<Started> {
-    let grpc = loopback(c);
-    let pem = SecretString::from(
-        std::fs::read_to_string(&prepared.key_file)
-            .with_context(|| format!("{:?} cannot be read", prepared.key_file))?,
-    );
-    let key = ClientKey::ed25519_from_pem(&pem).context("account client key")?;
+    let grpc = reachable(c.grpc_addr);
+    // The installation provisioned the pages' web client with its own key.
+    let key = c
+        .account_client_key
+        .clone()
+        .context("the installation provisioned no account client key")?;
     let channel = issuer_channel(&grpc)?;
     let client = RpClient::new(key, c.issuer.clone(), channel.clone())?;
-    let store = sid_storage::application_store::ceremony_store(&adapter_database()?)
-        .await
-        .context("account session store")?;
-    tokio::spawn(sid_storage::application_store::purge_expired(
-        store.clone(),
-        PURGE_INTERVAL,
-    ));
+    // The account sessions live in the installation's own store, in its
+    // schema: replicas sharing the store share them, and the installation's
+    // maintenance removes the expired ones.
+    let store: Arc<dyn sid_plugin::CeremonyStateStore> = c.storage.clone();
     let sessions = Arc::new(ApplicationSessions::new(
         Arc::new(client),
         Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(

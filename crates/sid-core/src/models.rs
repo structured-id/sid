@@ -293,5 +293,5 @@ pub use upstream_provider::{
 pub use username::{
     SuspensionReason, UsernameError, UsernameStatus, validate_corporate_login, validate_username,
 };
-pub use web_settings::{CookieScope, DEFAULT_CONSOLE_PATH, WebSettings};
+pub use web_settings::{CookieScope, DEFAULT_CONSOLE_PATH, WebSettings, is_ui_mount};
 pub use webauthn::{AttestationFormat, WebAuthnCredential, WebAuthnTransport};

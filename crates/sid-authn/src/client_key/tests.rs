@@ -12,6 +12,30 @@ fn public_jwk(key: &ClientKey) -> Jwk {
     serde_json::from_value(key.public_jwks().unwrap()["keys"][0].clone()).unwrap()
 }
 
+// Replicas sharing the store sign as one client: the first start creates
+// the key, every later or concurrent start reads the same one back, so no
+// replica registers keys that invalidate another's assertions. Bug
+// prevented: replicas with their own key files replacing the client's
+// registered keys on every start.
+#[tokio::test]
+async fn the_installation_key_is_one_for_every_replica() {
+    let storage = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .unwrap();
+    let keys = crate::test_support::key_manager();
+    let secret = sid_core::models::InstanceSecret::AccountClientKey;
+    let (a, b) = tokio::join!(
+        ClientKey::installation_ed25519(&storage, keys.as_ref(), secret),
+        ClientKey::installation_ed25519(&storage, keys.as_ref(), secret),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.public_jwks(), b.public_jwks());
+    let later = ClientKey::installation_ed25519(&storage, keys.as_ref(), secret)
+        .await
+        .unwrap();
+    assert_eq!(later.kid(), a.kid());
+}
+
 /// The key id is the RFC 7638 thumbprint, as jsonwebtoken computes it for
 /// the published JWK: a verifier can recompute it from the public key.
 #[test]

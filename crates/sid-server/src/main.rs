@@ -31,27 +31,22 @@ async fn run() -> anyhow::Result<()> {
 
     info!("Starting StructuredID v{}", env!("CARGO_PKG_VERSION"));
 
-    // The installation's own web UI, when the image carries its bundles: it
-    // brings the account settings its pages sign in with.
+    // The installation's own web UI, when the image carries its bundles: its
+    // account pages, whose web client the installation provisions itself.
     #[cfg(feature = "ui")]
     let ui = match sid_server::init::env_setting("SID_ISSUER")? {
-        Some(issuer) => {
-            let data = sid_server::init::env_setting("SID_DATA_DIR")?
-                .unwrap_or_else(|| "/var/lib/sid".to_owned());
-            sid_server::ui::prepare(&issuer, std::path::Path::new(&data))?
-        }
+        Some(issuer) => sid_server::ui::prepare(&issuer)?,
         None => None,
     };
     #[cfg(feature = "ui")]
-    let (ui, account) = match ui {
-        Some((prepared, account)) => (Some(prepared), Some(account)),
-        None => (None, None),
-    };
+    let served_account = ui
+        .as_ref()
+        .map(|prepared| prepared.account_url().to_owned());
     #[cfg(not(feature = "ui"))]
-    let account = None;
+    let served_account = None;
 
     let c = sid_server::init::init_ce_with(sid_server::init::CeHost {
-        account,
+        served_account,
         ..Default::default()
     })
     .await?;

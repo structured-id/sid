@@ -132,18 +132,7 @@ impl UiBundle {
         mount: &str,
         config: &[u8],
     ) -> Result<(PathBuf, Map<String, Value>), BundleError> {
-        let literal = mount
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
-        // A `.` or `..` segment would be normalized away by the browser
-        // (WHATWG URL, path state), leaving the UI unreachable.
-        let dot_segment = mount.split('/').any(|s| s == "." || s == "..");
-        if !mount.starts_with('/')
-            || !mount.ends_with('/')
-            || !literal
-            || mount.contains("//")
-            || dot_segment
-        {
+        if !sid_core::models::is_ui_mount(mount) {
             return Err(BundleError::Mount(mount.to_owned()));
         }
         let dir = dir

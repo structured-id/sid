@@ -13,6 +13,23 @@ fn host_name_drops_the_port() {
     assert_eq!(host_name("[::1]"), "[::1]");
 }
 
+// The account adapter reaches the gRPC listener where it actually listens:
+// a wildcard bind on the loopback of its own family, a specific address as
+// it is. Bug prevented: an adapter dialing 127.0.0.1 while the server
+// listens only on [::1] or on one interface, so sign-in fails at run time.
+#[test]
+fn the_adapter_reaches_the_bound_grpc_address() {
+    for (bound, reached) in [
+        ("0.0.0.0:50051", "http://127.0.0.1:50051"),
+        ("[::]:50051", "http://[::1]:50051"),
+        ("127.0.0.1:50051", "http://127.0.0.1:50051"),
+        ("[::1]:50051", "http://[::1]:50051"),
+        ("10.0.0.5:50051", "http://10.0.0.5:50051"),
+    ] {
+        assert_eq!(reachable(bound.parse().unwrap()), reached, "{bound}");
+    }
+}
+
 /// A console over a store whose settings are `stored`, with a bundle in a
 /// temporary directory.
 async fn console(stored: Option<WebSettings>) -> (Console, tempfile::TempDir) {
