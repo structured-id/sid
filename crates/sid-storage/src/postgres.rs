@@ -350,6 +350,11 @@ const OAUTH2_CLIENT_UPDATE: &str = "UPDATE oauth2_clients SET
       AND registration_iat IS NOT DISTINCT FROM $29
       AND client_id_issued_at = $32 AND created_at = $34 AND application_id = $36";
 
+/// The open connections one process's pool holds unless its deployment sets
+/// another number; a deployment tunes it to its replicas and its server's
+/// connection limit.
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 20;
+
 impl PostgresBackend {
     /// Create a new PostgreSQL backend
     ///
@@ -379,22 +384,21 @@ impl PostgresBackend {
     }
 
     /// The same, with at most `max_connections` open connections in this
-    /// process's pool; `None` keeps the pool's default (10). Every replica
-    /// opens its own pool, so the database must admit replicas times this.
+    /// process's pool; `None` takes [`DEFAULT_MAX_CONNECTIONS`]. Every
+    /// replica opens its own pool, so the database must admit replicas times
+    /// this.
     pub async fn connect(
         database_url: &str,
         schema: Option<String>,
         max_connections: Option<u32>,
     ) -> SidResult<Self> {
-        if max_connections == Some(0) {
+        let max = max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        if max == 0 {
             return Err(SidError::Validation(
                 "a database pool needs at least one connection".into(),
             ));
         }
-        let mut pool = sqlx::postgres::PgPoolOptions::new();
-        if let Some(max) = max_connections {
-            pool = pool.max_connections(max);
-        }
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(max);
         let pool_opts = if let Some(ref schema_name) = schema {
             // Every connection runs this, so the name is checked once here
             // rather than trusted from configuration.
