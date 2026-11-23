@@ -375,7 +375,26 @@ impl PostgresBackend {
     /// }
     /// ```
     pub async fn new(database_url: &str, schema: Option<String>) -> SidResult<Self> {
-        // sqlx pool (target for all new queries)
+        Self::connect(database_url, schema, None).await
+    }
+
+    /// The same, with at most `max_connections` open connections in this
+    /// process's pool; `None` keeps the pool's default (10). Every replica
+    /// opens its own pool, so the database must admit replicas times this.
+    pub async fn connect(
+        database_url: &str,
+        schema: Option<String>,
+        max_connections: Option<u32>,
+    ) -> SidResult<Self> {
+        if max_connections == Some(0) {
+            return Err(SidError::Validation(
+                "a database pool needs at least one connection".into(),
+            ));
+        }
+        let mut pool = sqlx::postgres::PgPoolOptions::new();
+        if let Some(max) = max_connections {
+            pool = pool.max_connections(max);
+        }
         let pool_opts = if let Some(ref schema_name) = schema {
             // Every connection runs this, so the name is checked once here
             // rather than trusted from configuration.
@@ -383,30 +402,29 @@ impl PostgresBackend {
             let opts: sqlx::postgres::PgConnectOptions = database_url
                 .parse()
                 .map_err(|e| SidError::Storage(format!("Invalid database URL: {}", e)))?;
-            sqlx::postgres::PgPoolOptions::new()
-                .after_connect({
+            pool.after_connect({
+                let schema_name = schema_name.clone();
+                move |conn, _meta| {
                     let schema_name = schema_name.clone();
-                    move |conn, _meta| {
-                        let schema_name = schema_name.clone();
-                        Box::pin(async move {
-                            sqlx::Executor::execute(
-                                conn,
-                                // Validated above, and quoted so the name
-                                // cannot extend the statement.
-                                sqlx::query(sqlx::AssertSqlSafe(format!(
-                                    "SET search_path TO \"{}\", public",
-                                    schema_name
-                                ))),
-                            )
-                            .await?;
-                            Ok(())
-                        })
-                    }
-                })
-                .connect_with(opts)
-                .await
+                    Box::pin(async move {
+                        sqlx::Executor::execute(
+                            conn,
+                            // Validated above, and quoted so the name
+                            // cannot extend the statement.
+                            sqlx::query(sqlx::AssertSqlSafe(format!(
+                                "SET search_path TO \"{}\", public",
+                                schema_name
+                            ))),
+                        )
+                        .await?;
+                        Ok(())
+                    })
+                }
+            })
+            .connect_with(opts)
+            .await
         } else {
-            PgPool::connect(database_url).await
+            pool.connect(database_url).await
         };
         let pool =
             pool_opts.map_err(|e| SidError::Storage(format!("Failed to connect (sqlx): {}", e)))?;
@@ -2437,7 +2455,10 @@ impl GrantStore for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         session_grants::insert_auth_code(&mut tx, code).await?;
-        Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
+        // On its authorizing session's chain: codes of other sessions, the
+        // same client's included, do not wait for one another.
+        let chain = format!("session:{}", code.authentication.session);
+        Self::audit_in_tx(&mut tx, &chain, audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;

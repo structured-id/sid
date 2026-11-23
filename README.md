@@ -79,6 +79,7 @@ Environment variables:
 | `SID_ISSUER` | - (required) | Public base URL of the installation; its host is the installation organization's domain |
 | `SID_DATABASE_URL` | - (required) | PostgreSQL connection string |
 | `SID_STORAGE_POSTGRESQL_SCHEMA` | - | Schema holding this installation's tables; unset uses the account's default schema (see below) |
+| `SID_DATABASE_MAX_CONNECTIONS` | `10` | Most connections one process holds open to PostgreSQL; every replica opens its own, so the server must admit replicas times this |
 | `SID_GRPC_BIND` | `127.0.0.1:50051` | gRPC listen address |
 | `SID_BIND` | - | HTTP listen address of the embedded transcoder (OIDC endpoints, SCIM); unset serves no HTTP |
 | `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |

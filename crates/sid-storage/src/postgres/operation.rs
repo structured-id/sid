@@ -1086,7 +1086,9 @@ impl OperationResultStore for PostgresBackend {
         let chain = ctx
             .operation
             .as_ref()
-            .map(|o| format!("operation:{}", o.namespace))
+            // One chain per command: commands of one namespace do not wait
+            // for one another.
+            .map(|o| format!("operation:{}:{}", o.namespace, o.key.as_str()))
             .unwrap_or_else(|| "operation".to_string());
         let mut tx = self
             .pool

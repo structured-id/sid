@@ -679,7 +679,9 @@ impl OperationResultStore for CoordinodeBackend {
     async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
         let chain = ctx.operation.as_ref().map_or_else(
             || "operation".to_owned(),
-            |o| format!("operation:{}", o.namespace),
+            // One chain per command: commands of one namespace write no
+            // shared head, so they do not conflict.
+            |o| format!("operation:{}:{}", o.namespace, o.key.as_str()),
         );
         self.mutate(chain, ctx, |_| Ok(())).await
     }

@@ -979,10 +979,11 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let code = code.clone();
-        self.mutate(format!("auth_code:{}", code.client_id), ctx, move |tx| {
-            store_code(tx, &code)
-        })
-        .await
+        // On its authorizing session's chain: codes of other sessions write
+        // no shared head, so they do not conflict.
+        let chain = format!("session:{}", code.authentication.session);
+        self.mutate(chain, ctx, move |tx| store_code(tx, &code))
+            .await
     }
 
     pub(super) async fn get_auth_code_by_hash(

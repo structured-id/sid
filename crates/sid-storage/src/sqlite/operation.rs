@@ -574,7 +574,8 @@ impl OperationResultStore for SqliteBackend {
         let chain = ctx
             .operation
             .as_ref()
-            .map(|o| format!("operation:{}", o.namespace))
+            // One chain per command, as on every store.
+            .map(|o| format!("operation:{}:{}", o.namespace, o.key.as_str()))
             .unwrap_or_else(|| "operation".to_string());
         let tx = self.begin_write().await?;
         Self::commit_mutation(tx, &chain, ctx).await
