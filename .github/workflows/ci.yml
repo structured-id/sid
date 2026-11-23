@@ -162,7 +162,7 @@ jobs:
       # keeps at the fixed 1.0.10 (async-nats → tokio-websockets still asks
       # for 0.26).
       - name: Vulnerability audit
-        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0381
+        run: cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0381
       - name: License and ban check
         run: cargo deny check
       - name: SBOM (CycloneDX)

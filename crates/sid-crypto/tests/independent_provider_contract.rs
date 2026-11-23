@@ -42,7 +42,7 @@ fn jwt_signatures_interoperate_with_independent_backend() {
     let ec256 = p256::SecretKey::from_slice(&[1; 32]).unwrap();
     let ec384 = p384::SecretKey::from_slice(&[2; 48]).unwrap();
     let ed = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
-    let rsa = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    let rsa = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let rsa_private = rsa.to_pkcs1_der().unwrap();
     let rsa_public = rsa.to_public_key().to_pkcs1_der().unwrap();
     let mut cases = vec![

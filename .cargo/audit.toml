@@ -4,15 +4,4 @@
 # not reworded.
 
 [advisories]
-ignore = [
-    # rsa 0.10.0-rc.19, Marvin attack: private-key material can be recovered
-    # from the timing of private-key operations. The crate is linked only by
-    # structured-webauthn 0.1.0, which builds `RsaPublicKey` alone
-    # (src/response/register.rs) to verify RS256 authenticator signatures;
-    # `RsaPrivateKey` appears only in its own tests. JWT RSA signing runs on
-    # aws-lc and does not link this crate (`cargo tree -i rsa`).
-    #
-    # This entry stops holding the moment any RSA private-key operation in
-    # this workspace runs on the `rsa` crate.
-    "RUSTSEC-2023-0071",
-]
+ignore = []

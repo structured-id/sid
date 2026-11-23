@@ -3,7 +3,7 @@
 
 use crypto_bigint::BoxedUint;
 use der::Decode;
-use rsa::RsaPublicKey;
+use rsa::PublicKey as RsaPublicKey;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InvalidPublicKey;

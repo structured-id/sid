@@ -241,7 +241,7 @@ fn certificate_validation_is_not_bypassed() {
 
 fn rsa_oracle_key() -> KeyPair {
     use rsa::pkcs8::EncodePrivateKey;
-    let key = rsa::RsaPrivateKey::new(
+    let key = rsa::PrivateKey::new(
         &mut getrandom::rand_core::UnwrapErr(getrandom::SysRng),
         2048,
     )

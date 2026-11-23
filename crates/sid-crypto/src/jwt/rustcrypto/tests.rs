@@ -74,7 +74,7 @@ fn allowed_signatures_round_trip_through_jsonwebtoken() {
     }
 }
 
-fn rsa_signature(key: rsa::RsaPrivateKey, algorithm: Algorithm, input: &[u8]) -> Vec<u8> {
+fn rsa_signature(key: rsa::PrivateKey, algorithm: Algorithm, input: &[u8]) -> Vec<u8> {
     use signature::{RandomizedSigner, Signer};
     // Generated test keys are an oracle only; the product factory never accepts RSA signing.
     match algorithm {
@@ -111,7 +111,7 @@ fn rsa_signature(key: rsa::RsaPrivateKey, algorithm: Algorithm, input: &[u8]) ->
 fn rsa_public_jwt_verification_and_private_refusal() {
     use rsa::pkcs1::EncodeRsaPublicKey;
     install();
-    let private = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    let private = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let public = private.to_public_key();
     let der = public.to_pkcs1_der().unwrap();
     for algorithm in [
