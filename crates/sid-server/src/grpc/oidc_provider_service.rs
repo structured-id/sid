@@ -201,7 +201,7 @@ impl OidcProviderServiceImpl {
                 };
                 Ok(
                     match (
-                        login.and_then(|login| login.join("consent").ok()),
+                        login.and_then(|login| oauth_http::consent_page(&login)),
                         operation_continuation(&issuer.canonical_url, &client_id, operation),
                     ) {
                         (Some(page), Some(back)) => oauth_http::consent(&page, operation, &back),

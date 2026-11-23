@@ -343,6 +343,33 @@ fn test_sign_in_redirect() {
     );
 }
 
+/// The bug: the consent page was the sign-in page's sibling without the
+/// sign-in page's query, so a root-addressed issuer's route hint was lost
+/// and the page called its ceremonies on another issuer's surface. The
+/// consent page keeps that query; the redirect adds the operation and `rd`.
+#[test]
+fn test_consent_page_keeps_the_sign_in_hints() {
+    let login = url::Url::parse("https://sid.example.com/account/login?route=%2Fi%2Fh&federated=1")
+        .unwrap();
+    let page = consent_page(&login).unwrap();
+    assert_eq!(
+        page.as_str(),
+        "https://sid.example.com/account/consent?route=%2Fi%2Fh&federated=1"
+    );
+    let back = url::Url::parse("https://sid.example.com/oauth2/authorize?operation=o").unwrap();
+    let response = consent(&page, "o", &back);
+    assert_eq!(
+        location(&response),
+        "https://sid.example.com/account/consent?route=%2Fi%2Fh&federated=1&operation=o&rd=https%3A%2F%2Fsid.example.com%2Foauth2%2Fauthorize%3Foperation%3Do"
+    );
+    // A sign-in page without hints gives a consent page without a query.
+    let plain = url::Url::parse("https://sid.example.com/account/login").unwrap();
+    assert_eq!(
+        consent_page(&plain).unwrap().as_str(),
+        "https://sid.example.com/account/consent"
+    );
+}
+
 /// A page is plain text with its status.
 #[test]
 fn test_page() {

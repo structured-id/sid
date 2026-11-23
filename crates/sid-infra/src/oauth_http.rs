@@ -405,6 +405,15 @@ pub fn sign_in(login: &url::Url, authorize_url: &url::Url) -> Response<HttpBody>
     redirect(&url)
 }
 
+/// The consent page beside the sign-in page `login`, with the hints the
+/// sign-in page's query carries (the issuer's route on a shared host): the
+/// consent page runs its calls on the same issuer surface as the sign-in.
+pub fn consent_page(login: &url::Url) -> Option<url::Url> {
+    let mut page = login.join("consent").ok()?;
+    page.set_query(login.query());
+    Some(page)
+}
+
 /// The consent page `page`, told the operation it reviews and the issuer's
 /// continuation it returns to after the decision (`rd`), which carries no
 /// code or destination of its own.
