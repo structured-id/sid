@@ -587,6 +587,9 @@ impl SecondFactors {
             }
             LiveCaller::StepUp(session) => session.id,
         };
+        // The step-up answers with a bearer token: a host without a token
+        // signer refuses it before the elevation commits.
+        let jwt = sign_in.jwt()?;
 
         // A token must not claim an elevation that was not stored.
         let session = self
@@ -611,8 +614,7 @@ impl SecondFactors {
             .ok_or(SecondFactorError::SessionEnded)?;
         let sub = profile_id.to_string();
         let roles = sid_authn::account_roles::account_roles(storage.as_ref(), &profile).await?;
-        let access_token = sign_in
-            .jwt()
+        let access_token = jwt
             .issue_access_token(
                 &sub,
                 Some(&sub),
@@ -628,7 +630,7 @@ impl SecondFactors {
         // back the same way, whoever it is (a native client or a BFF).
         Ok(SignedIn {
             session_id,
-            expires_in: sign_in.jwt().access_token_ttl_secs(),
+            expires_in: jwt.access_token_ttl_secs(),
             delivery: Delivery::bearer(access_token.into()),
         })
     }
@@ -902,6 +904,9 @@ impl SecondFactors {
         request: CompleteStepUpRequest,
     ) -> Result<CompleteStepUpResponse, SecondFactorError> {
         verified.require_installation()?;
+        // The step-up rotates a bearer token: refused before any proof is
+        // judged or spent on a host without a token signer.
+        let jwt = sign_in.jwt()?;
         let claims = &verified.claims;
         let profile_id = verified.caller.profile_id;
         let session_id = token_session(verified)?;
@@ -1011,14 +1016,12 @@ impl SecondFactors {
         // sealed into that commit: the elevation, the factor's spend and
         // the answer to a lost response commit together, kept no longer
         // than the token they replace.
-        let new_token = sign_in
-            .jwt()
+        let new_token = jwt
             .reissue_elevated_token(claims, &elevated)
             .map_err(|e| internal("reissue stepped-up token", e))?;
         // Kept while both the token it replaces and the replacement are
         // valid: a replacement past its own expiry is never delivered.
-        let replacement_exp = sign_in
-            .jwt()
+        let replacement_exp = jwt
             .validate_access_token(&new_token)
             .map_err(|e| internal("read the stepped-up token", e))?
             .exp;
@@ -1168,7 +1171,7 @@ impl SecondFactors {
         // token is no longer deliverable, and handing it out would replace
         // the client's current one with a revoked credential.
         let rotated = sign_in
-            .jwt()
+            .jwt()?
             .validate_access_token(secrecy::ExposeSecret::expose_secret(&token))
             .map_err(|e| internal("read the stepped-up token", e))?;
         let replaced = sign_in

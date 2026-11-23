@@ -536,7 +536,7 @@ impl AuthServiceImpl {
         );
         let sign_ins = sid::sign_in::SignIn::new(sid::sign_in::SignInParts {
             storage: storage.clone(),
-            jwt: jwt.clone(),
+            jwt: Some(jwt.clone()),
             revocation: revocation_cache.clone(),
             issuer: issuer.clone(),
             anomaly: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),

@@ -394,6 +394,7 @@ async fn configured_sod_warnings_reach_the_conflict_check() {
     };
     let claims = sign_in
         .jwt()
+        .unwrap()
         .validate_access_token(token.expose_secret())
         .unwrap();
     let caller = sid_authn::caller::Caller::from_claims(&claims).unwrap();

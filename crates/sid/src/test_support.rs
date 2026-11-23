@@ -50,7 +50,7 @@ pub(crate) fn sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
     );
     SignIn::new(SignInParts {
         storage,
-        jwt: Arc::new(jwt),
+        jwt: Some(Arc::new(jwt)),
         revocation: Arc::new(sid_authn::revocation_cache::RevocationCache::new(
             std::time::Duration::from_secs(900),
             cache.clone(),

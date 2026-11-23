@@ -3,7 +3,9 @@
 
 use sid::sign_in::SignInError;
 use sid_authn::sign_in_security::SignInRefusal;
-use sid_infra::grpc_error::refuse::{dependency_unavailable, invalid_field, storage_failure};
+use sid_infra::grpc_error::refuse::{
+    dependency_unavailable, invalid_field, not_in_this_build, storage_failure,
+};
 use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus};
 use tonic::Status;
 
@@ -33,6 +35,7 @@ pub(crate) fn sign_in_refusal(e: SignInError) -> Status {
         SignInError::SessionEnded => session_ended(),
         SignInError::Expired => ceremony_expired("sign-in"),
         SignInError::AuthenticationFailed => authentication_failed(),
+        SignInError::BearerNotServed => not_in_this_build("bearer_sign_in"),
         SignInError::Ceremony(e) => e.into_status(),
         SignInError::Unavailable { what, cause } => dependency_unavailable(what, cause),
         SignInError::Store(e) => storage_failure(e),

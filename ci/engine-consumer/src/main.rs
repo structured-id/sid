@@ -157,6 +157,80 @@ fn tokens() -> Result<Arc<JwtService>, Failure> {
     )?))
 }
 
+/// What sign-in uses on `installation`. With `jwt`, native clients get
+/// bearer tokens; without one the host serves browsers alone, which sign in
+/// with the session cookie and need no token signer or PEM pair.
+fn sign_in_parts(installation: &Installation, jwt: Option<Arc<JwtService>>) -> SignInParts {
+    let storage = installation.storage.clone();
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
+    SignInParts {
+        storage,
+        jwt,
+        revocation: installation.revocation_cache.clone(),
+        issuer: ISSUER.to_owned(),
+        anomaly: Arc::new(sid_authn::anomaly::AnomalyDetector::ce_default(
+            ceremonies.clone(),
+        )),
+        ip_intelligence: Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
+            vec![],
+            cache.clone(),
+            Duration::from_secs(60),
+        )),
+        geoip: Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
+        captcha_gate: sid_authn::captcha::CaptchaGate::new(
+            ceremonies,
+            installation.key_manager.clone(),
+        ),
+        captcha_provider: Arc::new(sid_authn::captcha::SidPowProvider::new(
+            installation.captcha_pow_key,
+            4,
+            300,
+        )),
+        opaque: installation.opaque_router.clone(),
+        keys: installation.key_manager.clone(),
+    }
+}
+
+/// `principal`'s password sign-in with `password` on `sign_in` for
+/// `client`, as far as its first factor takes it.
+async fn password_first_factor(
+    sign_in: &SignIn,
+    policy: &dyn sid_authn::login_policy::LoginPolicySource,
+    principal: &str,
+    password: &[u8],
+    client: sid_authn::sign_in_delivery::CeremonyClient,
+) -> Result<sid::sign_in::FirstFactorSignedIn, Failure> {
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+    let login = sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut rng, password)?;
+    let started = sign_in
+        .password_start(principal, &login.message.serialize(), None)
+        .await?;
+    let response = sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(
+        &started.credential_response,
+    )?;
+    let finished = login.state.finish(
+        &mut rng,
+        password,
+        response,
+        sid_opaque_ke::ClientLoginFinishParameters::default(),
+    )?;
+    Ok(sign_in
+        .password_sign_in(
+            policy,
+            &started.login_id,
+            &finished.message.serialize(),
+            Completer {
+                client,
+                client_ip: None,
+                context: AttemptContext::default(),
+            },
+            None,
+        )
+        .await?)
+}
+
 /// What a host serves an installation with: sign-in, registration,
 /// administration and authorization management over its parts.
 struct Served {
@@ -338,33 +412,7 @@ impl Served {
         let history = evaluation.ok_or("the history evaluator runs in the host")?;
         let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
             Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
-        let sign_in = SignIn::new(SignInParts {
-            storage: storage.clone(),
-            jwt: jwt.clone(),
-            revocation: installation.revocation_cache.clone(),
-            issuer: ISSUER.to_owned(),
-            anomaly: Arc::new(sid_authn::anomaly::AnomalyDetector::ce_default(
-                ceremonies.clone(),
-            )),
-            ip_intelligence: Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
-                vec![],
-                cache.clone(),
-                Duration::from_secs(60),
-            )),
-            geoip: Arc::new(sid_authn::geoip::GeoIpChain::empty(cache.clone())),
-            captcha_gate: sid_authn::captcha::CaptchaGate::new(
-                ceremonies,
-                installation.key_manager.clone(),
-            ),
-            captcha_provider: Arc::new(sid_authn::captcha::SidPowProvider::new(
-                installation.captcha_pow_key,
-                4,
-                300,
-            )),
-            opaque: installation.opaque_router.clone(),
-            keys: installation.key_manager.clone(),
-        });
+        let sign_in = SignIn::new(sign_in_parts(&installation, Some(jwt.clone())));
         let cascade = Arc::new(
             sid_authn::revocation_cascade::RevocationCascadeService::new(
                 storage.clone(),
@@ -591,36 +639,14 @@ impl Served {
         principal: &str,
         password: &[u8],
     ) -> Result<sid::sign_in::FirstFactorSignedIn, Failure> {
-        let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-        let login = sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut rng, password)?;
-        let started = self
-            .sign_in
-            .password_start(principal, &login.message.serialize(), None)
-            .await?;
-        let response = sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(
-            &started.credential_response,
-        )?;
-        let finished = login.state.finish(
-            &mut rng,
+        password_first_factor(
+            &self.sign_in,
+            policy,
+            principal,
             password,
-            response,
-            sid_opaque_ke::ClientLoginFinishParameters::default(),
-        )?;
-        let signed_in = self
-            .sign_in
-            .password_sign_in(
-                policy,
-                &started.login_id,
-                &finished.message.serialize(),
-                Completer {
-                    client: sid_authn::sign_in_delivery::CeremonyClient::Native,
-                    client_ip: None,
-                    context: AttemptContext::default(),
-                },
-                None,
-            )
-            .await?;
-        Ok(signed_in)
+            sid_authn::sign_in_delivery::CeremonyClient::Native,
+        )
+        .await
     }
 
     /// A native passkey sign-in with `key`, for `principal`'s account or,
@@ -1258,6 +1284,36 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     )?;
     let administrator = served.administrator(PASSWORD).await?;
     println!("verified: the claiming account signs in with its password and administers");
+
+    // A host serving browsers alone gives sign-in no token signer: the same
+    // engine signs the account in with the session cookie, and a native
+    // client is refused before any session commits.
+    {
+        use sid_authn::sign_in_delivery::{CeremonyClient, Delivery};
+        let browser_only = SignIn::new(sign_in_parts(&served.installation, None));
+        let policy = sid_authn::login_policy::FixedLoginPolicy::of(&SecurityPolicy::ce_default());
+        let signed_in = password_first_factor(
+            &browser_only,
+            &policy,
+            ROOT,
+            PASSWORD,
+            CeremonyClient::Browser,
+        )
+        .await?
+        .signed_in;
+        let session = storage.get_session(signed_in.session_id).await?;
+        check(
+            !matches!(signed_in.delivery, Delivery::Bearer { .. })
+                && session.is_some_and(|s| s.browser_secret_hash.is_some()),
+            "a browser-only host signs a browser in with its cookie, without a token signer",
+        )?;
+        refused(
+            browser_only.serves(CeremonyClient::Native),
+            |e| matches!(e, sid::sign_in::SignInError::BearerNotServed),
+            "a browser-only host refuses a native client",
+        )?;
+        drop(browser_only);
+    }
 
     // A registered user without the role is refused administration.
     served
@@ -2062,6 +2118,27 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     served.close().await;
     drop((storage, source, zkpp));
     let source = S::open(&host.database("source")).await?;
+    // A lost master is reported as the master to restore: the open writes
+    // no substitute, and putting the original back opens the installation.
+    let master = std::fs::read(host.master_key())?;
+    std::fs::remove_file(host.master_key())?;
+    refused(
+        Installation::open(source.backend(), settings(&host.master_key())).await,
+        |e| {
+            matches!(
+                e,
+                sid::InstallationError::FieldKeys(
+                    sid_authn::field_keys::FieldKeyError::MasterMissing { .. }
+                )
+            )
+        },
+        "a lost master is reported, never replaced",
+    )?;
+    check(
+        !host.master_key().exists(),
+        "no substitute master is written",
+    )?;
+    std::fs::write(host.master_key(), &master)?;
     let reopened = Served::new(
         Installation::open(source.backend(), settings(&host.master_key())).await?,
         source.history_keys(),

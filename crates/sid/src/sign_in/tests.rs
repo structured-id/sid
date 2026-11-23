@@ -25,18 +25,27 @@ fn keys() -> Arc<dyn sid_keys::KeyManager> {
 }
 
 fn sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
     let jwt = JwtService::new(
         include_bytes!("../../../sid-authn/tests/fixtures/test_ed25519_private.pem"),
         include_bytes!("../../../sid-authn/tests/fixtures/test_ed25519_public.pem"),
         "https://sid.example.com".to_string(),
     )
     .unwrap();
+    sign_in_with(storage, Some(Arc::new(jwt)))
+}
+
+/// Sign-in of a host that serves browsers alone: no token signer.
+fn browser_only(storage: Arc<dyn StorageBackend>) -> SignIn {
+    sign_in_with(storage, None)
+}
+
+fn sign_in_with(storage: Arc<dyn StorageBackend>, jwt: Option<Arc<JwtService>>) -> SignIn {
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
     SignIn::new(SignInParts {
         storage,
-        jwt: Arc::new(jwt),
+        jwt,
         revocation: Arc::new(RevocationCache::new(
             std::time::Duration::from_secs(900),
             cache.clone(),
@@ -184,6 +193,90 @@ async fn browser_sign_in_delivers_cookie() {
         .unwrap()
         .expect("the session is stored");
     assert!(stored.browser_secret_hash.is_some());
+}
+
+/// The bug: a host serving browsers alone had to hand sign-in a token signer
+/// and its PEM pair it never uses. Without one, a browser sign-in and a
+/// browser sign-in owing a second factor both deliver the session cookie.
+#[tokio::test]
+async fn a_browser_only_host_signs_browsers_in_without_a_token_signer() {
+    let storage = storage().await;
+    let sign_in = browser_only(storage.clone());
+    sign_in.serves(CeremonyClient::Browser).unwrap();
+    let profile = stored_profile(storage.as_ref()).await;
+    let signed_in = sign_in
+        .sign_in(
+            &profile,
+            sign_in.new_session(profile.id, None),
+            CeremonyClient::Browser,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!matches!(signed_in.delivery, Delivery::Bearer { .. }));
+    assert!(
+        storage
+            .get_session(signed_in.session_id)
+            .await
+            .unwrap()
+            .expect("the session is stored")
+            .browser_secret_hash
+            .is_some()
+    );
+
+    let (pending, csrf) = sign_in
+        .sign_in_pending(
+            &profile,
+            sign_in.new_session(profile.id, None),
+            CeremonyClient::Browser,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!matches!(pending.delivery, Delivery::Bearer { .. }));
+    assert!(
+        csrf.is_some(),
+        "the pending page completes with its CSRF token"
+    );
+}
+
+/// A native client on a browser-only host is refused as a capability this
+/// host does not serve, before any session commits; never handed a cookie it
+/// did not ask for.
+#[tokio::test]
+async fn a_browser_only_host_refuses_native_clients_and_commits_nothing() {
+    let storage = storage().await;
+    let sign_in = browser_only(storage.clone());
+    assert!(matches!(
+        sign_in.serves(CeremonyClient::Native),
+        Err(SignInError::BearerNotServed)
+    ));
+    let profile = stored_profile(storage.as_ref()).await;
+    let session = sign_in.new_session(profile.id, None);
+    let id = session.id;
+    let refused = sign_in
+        .sign_in(
+            &profile,
+            session,
+            CeremonyClient::Native,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(refused, Err(SignInError::BearerNotServed)));
+    assert!(storage.get_session(id).await.unwrap().is_none());
+    assert!(matches!(
+        sign_in
+            .native_access(&profile, &sign_in.new_session(profile.id, None), None)
+            .await,
+        Err(SignInError::BearerNotServed)
+    ));
 }
 
 /// A sign-in whose proved credential changed before the session committed
