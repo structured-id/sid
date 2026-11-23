@@ -834,7 +834,6 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
         basis: authority(basis.id, 0),
         role: content(&working),
         recipient_membership: Some((group.id, worker)),
-        grantor_outside: None,
     };
     let proposed = || {
         RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), working.id)
@@ -959,10 +958,11 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
     assert_eq!(held(backend, worker).await, 0, "nothing written");
 }
 
-/// A Profile that granted a group a role under an administrative assignment
-/// never joins that group, by any writer (`PolicyViolation`, nothing written);
-/// and a grant to a group the grantor joined after the check is `Fenced`.
-pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
+/// A grant to a group withheld from its grantor and the grantor's membership
+/// both commit, in either order and by any writer; the grant is then held by
+/// every other member and never by the grantor, while an independent
+/// assignment of the same role still reaches the grantor (D050 B point 4).
+pub async fn test_withheld_grant_never_reaches_its_grantor(backend: &dyn StorageBackend) {
     use sid_core::models::{
         AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance, DirectoryGroupWrite,
         DirectoryWriteMode, Group, GroupMember, RecipientKind,
@@ -985,79 +985,91 @@ pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
         .unwrap();
     let new_group = || Group::new(ProjectId::SYSTEM, format!("g-{}", Uuid::now_v7().simple()));
     let to_group = |group: &Group| {
-        RoleAssignment::new(RoleAssignmentPrincipal::Group(group.id), working.id)
+        let mut grant = RoleAssignment::new(RoleAssignmentPrincipal::Group(group.id), working.id)
             .granted(AssignmentProvenance {
                 granted_by: format!("user:{grantor}"),
                 basis: Some(basis.id),
                 depends_on: None,
                 ceiling: Some(["documents:read".to_string()].into()),
             })
-            .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1))
+            .with_expiry(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1));
+        grant.withheld_from = Some(grantor);
+        grant
     };
-    let fence = |group: &Group| AssignmentFence {
+    let fence = AssignmentFence {
         basis: authority(basis.id, 0),
         role: content(&working),
         recipient_membership: None,
-        grantor_outside: Some((group.id, grantor)),
     };
-    let refused = |err: Error| assert!(matches!(err, Error::PolicyViolation(_)), "{err:?}");
+    let holds = |profile, grant: sid_core::models::RoleAssignmentId| async move {
+        backend
+            .list_role_assignments_held_by_profile(profile)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == grant)
+    };
 
+    // Grant first, then the grantor joins through both writers.
     let granted = new_group();
     backend.create_group(&granted, test_audit()).await.unwrap();
+    let first = to_group(&granted);
     backend
-        .create_role_assignment_fenced(&to_group(&granted), &fence(&granted), test_audit())
+        .create_role_assignment_fenced(&first, &fence, test_audit())
         .await
         .unwrap();
-    refused(
-        backend
-            .add_to_group(&GroupMember::new(granted.id, grantor), test_audit())
-            .await
-            .unwrap_err(),
-    );
+    backend
+        .add_to_group(&GroupMember::new(granted.id, grantor), test_audit())
+        .await
+        .unwrap();
+    let colleague = assignee(backend).await;
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, granted.clone());
     write
         .add_members
-        .push(GroupMember::new(granted.id, grantor));
-    refused(
-        backend
-            .write_directory_group(&write, test_audit())
-            .await
-            .unwrap_err(),
-    );
-    assert!(
-        backend
-            .list_group_members(granted.id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "nothing written"
-    );
-    // Anyone else joins.
-    let colleague = assignee(backend).await;
+        .push(GroupMember::new(granted.id, colleague));
     backend
-        .add_to_group(&GroupMember::new(granted.id, colleague), test_audit())
+        .write_directory_group(&write, test_audit())
         .await
         .unwrap();
+    let stored = backend
+        .list_role_assignments_for_group(granted.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].withheld_from,
+        Some(grantor),
+        "the exclusion is kept"
+    );
+    assert!(!holds(grantor, first.id).await, "never held by its grantor");
+    assert!(holds(colleague, first.id).await, "held by another member");
 
-    // The grantor joined another group after the check: its grant is fenced.
+    // The grantor is a member first, then the grant commits.
     let joined = new_group();
     backend.create_group(&joined, test_audit()).await.unwrap();
+    let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, joined.clone());
+    write.add_members.push(GroupMember::new(joined.id, grantor));
     backend
-        .add_to_group(&GroupMember::new(joined.id, grantor), test_audit())
+        .write_directory_group(&write, test_audit())
         .await
         .unwrap();
-    let err = backend
-        .create_role_assignment_fenced(&to_group(&joined), &fence(&joined), test_audit())
+    let second = to_group(&joined);
+    backend
+        .create_role_assignment_fenced(&second, &fence, test_audit())
         .await
-        .unwrap_err();
-    assert!(matches!(err, Error::Fenced(_)), "{err:?}");
+        .unwrap();
     assert!(
-        backend
-            .list_role_assignments_for_group(joined.id)
-            .await
-            .unwrap()
-            .is_empty()
+        !holds(grantor, second.id).await,
+        "never held by its grantor"
     );
+
+    // An independent assignment of the same role still reaches the grantor.
+    let own = RoleAssignment::new(RoleAssignmentPrincipal::Profile(grantor), working.id);
+    backend
+        .create_role_assignment(&own, test_audit())
+        .await
+        .unwrap();
+    assert!(holds(grantor, own.id).await, "its own assignment is held");
 }
 
 /// A fenced role edit commits only while what it was checked against still

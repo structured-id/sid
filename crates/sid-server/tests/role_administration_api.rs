@@ -294,10 +294,10 @@ async fn update_role_keeps_approved_ceilings() {
     assert!(!stored.has_permission("payroll.read"));
 }
 
-/// AddToGroup refuses to put an administrator into a group it granted a
-/// role, naming the failed precondition rather than an internal error.
+/// AddToGroup puts an administrator into a group it granted a role through
+/// the API, and the grant stays withheld from it: the role does not reach it.
 #[tokio::test]
-async fn a_grantor_is_not_added_to_its_group() {
+async fn a_grantor_added_to_its_group_does_not_receive_its_grant() {
     use sid_core::models::Group;
     use sid_proto::sid::v1::authz::AddToGroupRequest;
     let h = harness().await;
@@ -332,8 +332,7 @@ async fn a_grantor_is_not_added_to_its_group() {
     )
     .await;
 
-    let err = h
-        .svc
+    h.svc
         .add_to_group(authed(
             AddToGroupRequest {
                 group_id: Some(team.id.into()),
@@ -342,18 +341,23 @@ async fn a_grantor_is_not_added_to_its_group() {
             &h.admin_token,
         ))
         .await
-        .expect_err("the grantor would reach its own grant");
-    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
-    let precondition = tonic_types::StatusExt::get_details_precondition_failure(&err)
-        .and_then(|p| p.violations.into_iter().next())
-        .expect("a precondition violation");
-    assert_eq!(precondition.r#type, "GRANTOR_OUTSIDE_GROUP");
+        .expect("an independently authorized membership commits");
     assert!(
         h.storage
             .list_group_members(team.id)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .any(|m| m.profile_id == team_admin.id)
+    );
+    assert!(
+        !h.storage
+            .list_role_assignments_held_by_profile(team_admin.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.role_id == auditor.id),
+        "the grant is withheld from its grantor"
     );
 }
 

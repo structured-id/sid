@@ -933,6 +933,7 @@ pub struct RoleAssignmentRow {
     pub granted_by: Option<String>,
     pub basis_assignment_id: Option<RoleAssignmentId>,
     pub depends_on_assignment_id: Option<RoleAssignmentId>,
+    pub withheld_from: Option<ProfileId>,
     pub revision: i64,
 }
 
@@ -974,6 +975,7 @@ impl RoleAssignmentRow {
                 // The ceiling lives in its own table; the store attaches it.
                 ceiling: None,
             }),
+            withheld_from: self.withheld_from,
             revision: u64::try_from(self.revision).map_err(|_| {
                 SidError::Storage(format!(
                     "role_assignment {} has a negative revision",

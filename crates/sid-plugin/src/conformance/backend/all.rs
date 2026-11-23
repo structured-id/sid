@@ -322,7 +322,7 @@ macro_rules! __storage_conformance {
                 test_cedar_policies_by_scope
                 test_administrative_assignment
                 test_fenced_assignment
-                test_grantor_never_joins_its_group
+                test_withheld_grant_never_reaches_its_grantor
                 test_fenced_role_edit
                 test_create_role_assignment_never_replaces
             );

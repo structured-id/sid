@@ -70,7 +70,6 @@ async fn grantor(backend: &dyn StorageBackend, role: &Role) -> Grantor {
         },
         role: (role.id, role.permissions.iter().cloned().collect()),
         recipient_membership: None,
-        grantor_outside: None,
     };
     Grantor { id, basis, fence }
 }
@@ -401,7 +400,6 @@ pub async fn test_replacement_keeps_an_administrator(backend: &dyn StorageBacken
             administrator.permissions.iter().cloned().collect(),
         ),
         recipient_membership: None,
-        grantor_outside: None,
     };
     let removed = backend
         .replace_role_assignments(

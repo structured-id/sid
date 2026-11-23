@@ -519,27 +519,10 @@ async fn update_group(tx: &mut WriteTx, group: &Group) -> SidResult<bool> {
         .map_err(|e| insert_error("group", e))
 }
 
-/// Add a member (a repeat is no change). A Profile that granted the group a
-/// role under an administrative assignment never joins it: the grant would
-/// reach its own grantor. The write transaction is the only writer, so no
-/// such grant can commit in between.
+/// Add a member (a repeat is no change). A grant the new member made to the
+/// group stays withheld from it (`RoleAssignment::withheld_from`), so joining
+/// needs no check against the group's grants.
 pub(super) async fn add_member(tx: &mut WriteTx, member: &GroupMember) -> SidResult<()> {
-    let granted: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM role_assignments
-         WHERE group_id = ? AND basis_assignment_id IS NOT NULL AND granted_by = ?
-         LIMIT 1",
-    )
-    .bind(member.group_id)
-    .bind(format!("user:{}", member.profile_id))
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| SidError::Storage(format!("check group grants: {e}")))?;
-    if granted.is_some() {
-        return Err(SidError::PolicyViolation(format!(
-            "profile {} granted this group a role; it cannot join the group",
-            member.profile_id
-        )));
-    }
     sqlx::query(
         "INSERT INTO group_members (group_id, profile_id, added_at) VALUES (?, ?, ?)
          ON CONFLICT(group_id, profile_id) DO NOTHING",

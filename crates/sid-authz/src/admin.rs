@@ -98,6 +98,31 @@ fn not_permitted() -> Error {
     Error::AuthorizationDenied("no administrative assignment covers this change".into())
 }
 
+/// Whether `recipient` is the actor itself: an envelope never covers
+/// assigning to oneself (D050 B point 4).
+fn is_self(holder: &AuthzPrincipal, recipient: &RoleAssignmentPrincipal) -> bool {
+    match (holder, recipient) {
+        (AuthzPrincipal::Profile(a), RoleAssignmentPrincipal::Profile(b)) => a == b,
+        (AuthzPrincipal::MachineUser(a), RoleAssignmentPrincipal::MachineUser(b)) => a == b,
+        (AuthzPrincipal::OAuthClient(a), RoleAssignmentPrincipal::OAuthClient(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The member a grant by `holder` to `recipient` is withheld from: for a
+/// group, the granting Profile, whose envelope never covers assigning to
+/// itself. It may belong to the group now or join it later, in either order;
+/// the grant never reaches it.
+fn withheld_member(
+    holder: &AuthzPrincipal,
+    recipient: &RoleAssignmentPrincipal,
+) -> Option<sid_core::models::ProfileId> {
+    match (holder, recipient) {
+        (AuthzPrincipal::Profile(grantor), RoleAssignmentPrincipal::Group(_)) => Some(*grantor),
+        _ => None,
+    }
+}
+
 /// `assignment` as the authority of `holder`, through the group it reached
 /// `holder` by.
 fn basis(holder: &AuthzPrincipal, assignment: &RoleAssignment) -> AuthorityBasis {
@@ -238,7 +263,6 @@ impl RoleAdministration {
                     basis: *basis,
                     role: content(role),
                     recipient_membership: None,
-                    grantor_outside: None,
                 },
                 None,
                 None,
@@ -247,6 +271,7 @@ impl RoleAdministration {
             (Administrator::Root(_), None) => unreachable!("a root has its basis"),
             (Administrator::Holder(holder), _) => {
                 let (basis, fence) = self.basis_for_grant(holder, role, proposed).await?;
+                proposed.withheld_from = withheld_member(holder, &proposed.principal);
                 if proposed.administers() {
                     // A redelegation depends on its source.
                     (fence, Some(basis.id), Some(basis.id), None)
@@ -283,7 +308,6 @@ impl RoleAdministration {
                 basis: *basis,
                 role: content(role),
                 recipient_membership: None,
-                grantor_outside: None,
             }),
             (Administrator::Root(_), None) => unreachable!("a root has its basis"),
             (Administrator::Holder(holder), _) => {
@@ -359,7 +383,6 @@ impl RoleAdministration {
                     basis: *basis,
                     role: content(role),
                     recipient_membership: None,
-                    grantor_outside: None,
                 },
                 (Administrator::Root(_), None) => unreachable!("a root has its basis"),
                 (Administrator::Holder(holder), _) => {
@@ -432,7 +455,7 @@ impl RoleAdministration {
         role: &Role,
         set: &AssignmentSet,
     ) -> Result<AssignmentFence> {
-        if self.is_self(holder, &set.principal).await? {
+        if is_self(holder, &set.principal) {
             return Err(not_permitted());
         }
         for candidate in self.envelopes_of(holder, &set.scope).await? {
@@ -454,17 +477,10 @@ impl RoleAdministration {
                     .is_some_and(|k| envelope.recipient_kinds.contains(&k))
                 && (envelope.recipient_group.is_none() || member);
             if covered {
-                let grantor_outside = match (holder, &set.principal) {
-                    (AuthzPrincipal::Profile(grantor), RoleAssignmentPrincipal::Group(group)) => {
-                        Some((*group, *grantor))
-                    }
-                    _ => None,
-                };
                 return Ok(AssignmentFence {
                     basis: basis(holder, &candidate),
                     role: content(role),
                     recipient_membership: membership,
-                    grantor_outside,
                 });
             }
         }
@@ -547,7 +563,6 @@ impl RoleAdministration {
                 basis,
                 role: content(&role),
                 recipient_membership: None,
-                grantor_outside: None,
             },
             (Administrator::Root(_), None) => unreachable!("a root has its basis"),
             (Administrator::Holder(holder), _) => {
@@ -685,22 +700,14 @@ impl RoleAdministration {
     }
 
     /// Every live administrative assignment `holder` holds, directly or
-    /// through its groups, in any scope.
+    /// through its groups, in any scope; a group's assignment withheld from
+    /// it is not held.
     async fn all_envelopes_of(&self, holder: &AuthzPrincipal) -> Result<Vec<RoleAssignment>> {
         let mut held = match holder {
             AuthzPrincipal::Profile(profile) => {
-                let mut all = self
-                    .storage
-                    .list_role_assignments_for_profile(*profile)
-                    .await?;
-                for group in self.storage.list_groups_for_profile(*profile).await? {
-                    all.extend(
-                        self.storage
-                            .list_role_assignments_for_group(group.id)
-                            .await?,
-                    );
-                }
-                all
+                self.storage
+                    .list_role_assignments_held_by_profile(*profile)
+                    .await?
             }
             AuthzPrincipal::MachineUser(machine) => {
                 self.storage
@@ -717,27 +724,6 @@ impl RoleAdministration {
         };
         held.retain(|a| a.administers() && !a.is_expired());
         Ok(held)
-    }
-
-    /// Whether `recipient` is the actor itself, directly or as a group the
-    /// actor belongs to: self-assignment is never implied by an envelope.
-    async fn is_self(
-        &self,
-        holder: &AuthzPrincipal,
-        recipient: &RoleAssignmentPrincipal,
-    ) -> Result<bool> {
-        Ok(match (holder, recipient) {
-            (AuthzPrincipal::Profile(a), RoleAssignmentPrincipal::Profile(b)) => a == b,
-            (AuthzPrincipal::Profile(a), RoleAssignmentPrincipal::Group(group)) => self
-                .storage
-                .list_group_members(*group)
-                .await?
-                .iter()
-                .any(|m| m.profile_id == *a),
-            (AuthzPrincipal::MachineUser(a), RoleAssignmentPrincipal::MachineUser(b)) => a == b,
-            (AuthzPrincipal::OAuthClient(a), RoleAssignmentPrincipal::OAuthClient(b)) => a == b,
-            _ => false,
-        })
     }
 
     /// Whether `recipient` belongs to `group`, and the membership a fence
@@ -770,7 +756,7 @@ impl RoleAdministration {
         role: &Role,
         proposed: &RoleAssignment,
     ) -> Result<(RoleAssignment, AssignmentFence)> {
-        if self.is_self(holder, &proposed.principal).await? {
+        if is_self(holder, &proposed.principal) {
             return Err(not_permitted());
         }
         let validity = proposed
@@ -829,18 +815,10 @@ impl RoleAdministration {
                 }),
             };
             if roles_covered && policies_covered {
-                // Checked outside by `is_self`; the commit re-checks it.
-                let grantor_outside = match (holder, &proposed.principal) {
-                    (AuthzPrincipal::Profile(grantor), RoleAssignmentPrincipal::Group(group)) => {
-                        Some((*group, *grantor))
-                    }
-                    _ => None,
-                };
                 let fence = AssignmentFence {
                     basis: basis(holder, &candidate),
                     role: content(role),
                     recipient_membership: membership,
-                    grantor_outside,
                 };
                 return Ok((candidate, fence));
             }
@@ -908,7 +886,6 @@ impl RoleAdministration {
                     basis: basis(holder, candidate),
                     role: content(role),
                     recipient_membership: None,
-                    grantor_outside: None,
                 });
             }
         }

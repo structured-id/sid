@@ -197,12 +197,6 @@ pub(crate) fn refusal(e: AuthorizationError) -> Status {
         .with_precondition("LAST_ADMINISTRATOR", "installation", why)
         .into(),
         E::Assignment(rule) => assignment_refusal(rule),
-        E::GrantorOutsideGroup(why) => ApiError::new(
-            ErrorReason::InvalidState,
-            "the profile granted this group a role and cannot join it",
-        )
-        .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why)
-        .into(),
         E::NotInThisBuild(what) => not_in_this_build(what),
         E::ProfileNotFound(id) => {
             not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())

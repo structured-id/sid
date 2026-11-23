@@ -45,6 +45,7 @@ const ASSIGNMENT: &str = "a.id AS id, a.profile_id AS profile_id, a.group_id AS 
     a.connector_id AS connector_id, a.role_id AS role_id, a.scope AS scope,
     a.expires_at AS expires_at, a.created_at AS created_at, a.granted_by AS granted_by,
     a.basis_id AS basis_id, a.depends_on_id AS depends_on_id, a.ceiling AS ceiling,
+    a.withheld_from AS withheld_from,
     a.policy_operations AS policy_operations, a.administers AS administers,
     a.admin_operations AS admin_operations, a.admin_ceiling AS admin_ceiling,
     a.admin_recipient_kinds AS admin_recipient_kinds, a.admin_group AS admin_group,
@@ -340,31 +341,20 @@ fn member_pair(group_id: GroupId, profile: ProfileId) -> SidResult<Value> {
     key(&[group_id.as_bytes(), profile.as_bytes()])
 }
 
-/// Add `m` to its group in `tx` (a repeat is no change). A Profile that
-/// granted the group a role under an administrative assignment never joins
-/// it: the grant would reach its own grantor.
+/// Add `m` to its group in `tx` (a repeat is no change). A grant the new
+/// member made to the group stays withheld from it
+/// (`RoleAssignment::withheld_from`), so joining needs no check against the
+/// group's grants.
 pub(super) fn add_member(tx: &Statements<'_>, m: &GroupMember) -> SidResult<()> {
     let missing = || SidError::Validation("a group member is not an existing account".into());
+    // The group's turn orders changes of its membership; a grant to the group
+    // never takes it.
     if !take_turn(tx, "SidGroup", "id", bin(m.group_id.as_bytes()))? {
         return Err(missing());
     }
     // The member is claimed: its deletion removes its memberships.
     if !claim(tx, "SidProfile", "id", bin(m.profile_id.as_bytes()))? {
         return Err(missing());
-    }
-    let granted = tx.run(
-        "MATCH (a:SidRoleAssignment) WHERE a.group_id = $group AND a.granted_by = $grantor
-           AND a.basis_id IS NOT NULL
-         RETURN a.id AS id",
-        Params::default()
-            .with("group", bin(m.group_id.as_bytes()))
-            .with("grantor", Value::String(format!("user:{}", m.profile_id))),
-    )?;
-    if !granted.is_empty() {
-        return Err(SidError::PolicyViolation(format!(
-            "profile {} granted this group a role; it cannot join the group",
-            m.profile_id
-        )));
     }
     let pair = member_pair(m.group_id, m.profile_id)?;
     let held = tx.run(
@@ -522,6 +512,7 @@ fn assignment(tx: &Statements<'_>, row: &Row) -> SidResult<RoleAssignment> {
                 })
             })
             .transpose()?,
+        withheld_from: opt_id(row, "withheld_from", ProfileId::from_slice)?,
         revision: revision_of(row)?,
     })
 }
@@ -797,6 +788,7 @@ fn store_assignment(
             connector_id: $connector_id, role_id: $role_id, scope: $scope,
             expires_at: $expires_at, created_at: $created_at, granted_by: $granted_by,
             basis_id: $basis_id, depends_on_id: $depends_on_id, ceiling: $ceiling,
+            withheld_from: $withheld_from,
             policy_operations: $policy_operations, administers: $administers,
             admin_operations: $admin_operations, admin_ceiling: $admin_ceiling,
             admin_recipient_kinds: $admin_recipient_kinds, admin_group: $admin_group,
@@ -837,6 +829,10 @@ fn store_assignment(
                 provenance
                     .and_then(|p| p.ceiling.as_ref())
                     .map_or(Value::Null, |c| name_list(c.iter().map(String::as_str))),
+            )
+            .with(
+                "withheld_from",
+                opt_bin(a.withheld_from.as_ref().map(|p| p.as_bytes())),
             )
             .with(
                 "policy_operations",
@@ -1077,19 +1073,6 @@ fn check_assignment_fence(tx: &Statements<'_>, fence: &AssignmentFence) -> SidRe
         return Err(SidError::Fenced(
             "the recipient left the eligible group since it was checked".into(),
         ));
-    }
-    if let Some((group_id, grantor)) = fence.grantor_outside {
-        // The group's turn: a member joining meanwhile conflicts.
-        take_turn(tx, "SidGroup", "id", bin(group_id.as_bytes()))?;
-        let inside = tx.run(
-            "MATCH (m:SidGroupMember) WHERE m.pair = $pair RETURN m.pair AS pair",
-            Params::default().with("pair", member_pair(group_id, grantor)?),
-        )?;
-        if !inside.is_empty() {
-            return Err(SidError::Fenced(
-                "the grantor joined the recipient group since it was checked".into(),
-            ));
-        }
     }
     Ok(())
 }
@@ -1667,11 +1650,12 @@ impl CoordinodeBackend {
         self.read(move |tx| {
             let mut held = assignments_where(tx, "a.profile_id = $value", bin(profile.as_bytes()))?;
             for m in memberships(tx, profile)? {
-                held.extend(assignments_where(
-                    tx,
-                    "a.group_id = $value",
-                    bin(m.group_id.as_bytes()),
-                )?);
+                // A group's assignment withheld from this member is not held by it.
+                held.extend(
+                    assignments_where(tx, "a.group_id = $value", bin(m.group_id.as_bytes()))?
+                        .into_iter()
+                        .filter(|a| a.reaches_member(profile)),
+                );
             }
             Ok(held)
         })

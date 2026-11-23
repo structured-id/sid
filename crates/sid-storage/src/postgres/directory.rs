@@ -600,33 +600,10 @@ async fn update_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<bool> {
         .map_err(|e| insert_error("group", e))
 }
 
-/// Add a member (a repeat is no change). A Profile that granted the group a
-/// role under an administrative assignment never joins it: the grant would
-/// reach its own grantor.
+/// Add a member (a repeat is no change). A grant the new member made to the
+/// group stays withheld from it (`RoleAssignment::withheld_from`), so joining
+/// needs no check against the group's grants.
 pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResult<()> {
-    // Exclusive lock on the group: a fenced grant to it takes it FOR SHARE,
-    // so neither commits unseen by the other.
-    sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
-        .bind(member.group_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(storage("lock group"))?;
-    let granted: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM role_assignments
-         WHERE group_id = $1 AND basis_assignment_id IS NOT NULL AND granted_by = $2
-         LIMIT 1",
-    )
-    .bind(member.group_id)
-    .bind(format!("user:{}", member.profile_id))
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(storage("check group grants"))?;
-    if granted.is_some() {
-        return Err(SidError::PolicyViolation(format!(
-            "profile {} granted this group a role; it cannot join the group",
-            member.profile_id
-        )));
-    }
     sqlx::query(
         "INSERT INTO group_members (group_id, profile_id, added_at)
         VALUES ($1, $2, $3)

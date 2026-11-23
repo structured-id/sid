@@ -279,9 +279,6 @@ pub enum AuthorizationError {
     /// A role assignment of a shape the engine refuses.
     #[error("{}", .0.message())]
     Assignment(AssignmentRule),
-    /// The Profile granted the group a role and cannot join it.
-    #[error("the profile granted this group a role and cannot join it: {0}")]
-    GrantorOutsideGroup(String),
     /// The request needs what this build does not include.
     #[error("{0} is not in this build")]
     NotInThisBuild(&'static str),
@@ -1316,10 +1313,7 @@ impl Authorization {
             )
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.add_to_group(&member, ctx).await;
-            let answer = settled(committed, answer, |e| match e {
-                SidError::PolicyViolation(why) => AuthorizationError::GrantorOutsideGroup(why),
-                other => AuthorizationError::Store(other),
-            })?;
+            let answer = settled(committed, answer, AuthorizationError::Store)?;
 
             info!("Added profile {profile_id} to group {group_id}");
             Ok(answer)
