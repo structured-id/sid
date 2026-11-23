@@ -528,34 +528,6 @@ mod operation_result_store {
         an_oversized_result_is_refused,
         concurrent_imports_under_one_period_all_land,
     );
-
-    /// Run `scenario` on a store of its own with a period capacity of 8.
-    macro_rules! small_capacity {
-        ($($scenario:ident),* $(,)?) => {$(
-            #[tokio::test(flavor = "multi_thread")]
-            async fn $scenario() {
-                let harness::Store(backend, db) = store().await;
-                tokio::task::spawn_blocking(move || {
-                    db.execute_cypher_shared(
-                        "MATCH (s:SidOperationState) WHERE s.id = 1 SET s.capacity = 8",
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .expect("a host write");
-                })
-                .await
-                .unwrap();
-                sid_plugin::conformance::operation_result_store::$scenario(&backend).await;
-            }
-        )*};
-    }
-
-    small_capacity!(
-        a_full_period_refuses_new_completions,
-        imported_completions_keep_the_period_bound,
-    );
 }
 
 /// Run ceremony state conformance `scenario`; each one uses namespaces of
@@ -814,59 +786,6 @@ mod principal_store {
         other_type_resolves_nobody,
         other_key_revision_resolves_nobody,
         released_principal_resolves_nobody,
-    );
-}
-
-/// Regression: a store whose operation period state was written before the
-/// policy held its bounds opened, then failed every keyed commit. It is
-/// refused at opening.
-#[tokio::test(flavor = "multi_thread")]
-async fn opening_refuses_operation_state_of_an_earlier_schema() {
-    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
-    let host = db.clone();
-    tokio::task::spawn_blocking(move || {
-        host.execute_cypher_shared(
-            "CREATE (s:SidOperationState {id: 1, issued_through: 0, acceptance_seconds: 3600,
-                retention_seconds: 86400})",
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("a host write");
-    })
-    .await
-    .unwrap();
-    let refused = CoordinodeBackend::new(db).await;
-    assert!(
-        matches!(refused, Err(sid_core::Error::Storage(_))),
-        "an earlier operation state was taken"
-    );
-}
-
-/// Likewise a store whose periods count their completions on their own
-/// node, as before periods had places: every keyed commit under such a
-/// period would be refused as full. It is refused at opening.
-#[tokio::test(flavor = "multi_thread")]
-async fn opening_refuses_periods_counted_on_their_own_node() {
-    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
-    let host = db.clone();
-    tokio::task::spawn_blocking(move || {
-        for statement in [
-            "CREATE (s:SidOperationState {id: 1, issued_through: 1, acceptance_seconds: 3600,
-                retention_seconds: 86400, capacity: 100000, result_bytes: 65536})",
-            "CREATE (p:SidOperationPeriod {period: 1, retired: false, recorded: 0})",
-        ] {
-            host.execute_cypher_shared(statement, None, None, None, None)
-                .expect("a host write");
-        }
-    })
-    .await
-    .unwrap();
-    let refused = CoordinodeBackend::new(db).await;
-    assert!(
-        matches!(refused, Err(sid_core::Error::Storage(_))),
-        "a period counted on its own node was taken"
     );
 }
 
