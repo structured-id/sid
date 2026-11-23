@@ -116,22 +116,36 @@ pub(super) async fn record_in_tx(
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
     let size = i64::try_from(operation.result.len()).unwrap_or(i64::MAX);
+    // One round trip takes the key's lock ([`lock_key`]), the period (the
+    // lock the completion's foreign key takes anyway, taken before the key
+    // is read rather than at the insert) and the size limit. The key is read
+    // only by the next statement, whose snapshot follows the lock.
     let limit: Option<i64> = match period {
-        // The lock is the one the completion's foreign key takes anyway,
-        // taken before the key is checked rather than at the insert.
         Some(period) => {
             sqlx::query_scalar(
-                "SELECT s.result_bytes FROM operation_periods p, operation_period_state s
-             WHERE p.period = $1 FOR KEY SHARE OF p",
+                "SELECT s.result_bytes
+                 FROM operation_periods p, operation_period_state s,
+                      LATERAL (SELECT pg_advisory_xact_lock(
+                          hashtextextended($2 || chr(31) || $3, 0))) k
+                 WHERE p.period = $1 FOR KEY SHARE OF p",
             )
             .bind(period)
+            .bind(&operation.namespace)
+            .bind(operation.key.as_str())
             .fetch_optional(&mut **tx)
             .await
         }
         None => {
-            sqlx::query_scalar("SELECT result_bytes FROM operation_period_state")
-                .fetch_optional(&mut **tx)
-                .await
+            sqlx::query_scalar(
+                "SELECT s.result_bytes
+                 FROM operation_period_state s,
+                      LATERAL (SELECT pg_advisory_xact_lock(
+                          hashtextextended($1 || chr(31) || $2, 0))) k",
+            )
+            .bind(&operation.namespace)
+            .bind(operation.key.as_str())
+            .fetch_optional(&mut **tx)
+            .await
         }
     }
     .map_err(|e| SidError::Storage(format!("operation result limit: {e}")))?;
@@ -149,27 +163,31 @@ pub(super) async fn record_in_tx(
             too_large(limit)
         });
     }
-    lock_key(tx, &operation.namespace, &operation.key).await?;
-    consume_expired(tx, &operation.namespace, &operation.key).await?;
-    let held: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
-        "SELECT method, fingerprint, period FROM operation_resources
-         WHERE namespace = $1 AND op_key = $2",
-    )
-    .bind(&operation.namespace)
-    .bind(operation.key.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
-    if let Some((method, fingerprint, held_in)) = held
-        && (method != operation.method || fingerprint != operation.fingerprint || held_in != period)
-    {
-        return Err(SidError::OperationKeyReused(operation.key.as_str().into()));
-    }
-    let inserted = sqlx::query(
-        "INSERT INTO operation_results
-             (namespace, op_key, method, fingerprint, result, period, retain_until)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (namespace, op_key) DO NOTHING",
+    // One round trip consumes a completion whose retention ended (with its
+    // binding), checks the key's binding against this command and inserts
+    // the completion. A consumed key is inserted by a statement of its own:
+    // one statement cannot delete a key's row and insert it again.
+    let (consumed, reused, inserted): (bool, bool, bool) = sqlx::query_as(
+        "WITH gone AS (
+             DELETE FROM operation_results
+             WHERE namespace = $1 AND op_key = $2 AND retain_until <= NOW()
+             RETURNING namespace, op_key),
+         freed AS (
+             DELETE FROM operation_resources r USING gone g
+             WHERE r.namespace = g.namespace AND r.op_key = g.op_key),
+         reused AS (
+             SELECT 1 FROM operation_resources
+             WHERE namespace = $1 AND op_key = $2 AND NOT EXISTS (SELECT 1 FROM gone)
+               AND (method <> $3 OR fingerprint <> $4 OR period IS DISTINCT FROM $6)),
+         inserted AS (
+             INSERT INTO operation_results
+                 (namespace, op_key, method, fingerprint, result, period, retain_until)
+             SELECT $1, $2, $3, $4, $5, $6, $7
+             WHERE NOT EXISTS (SELECT 1 FROM gone) AND NOT EXISTS (SELECT 1 FROM reused)
+             ON CONFLICT (namespace, op_key) DO NOTHING
+             RETURNING 1)
+         SELECT EXISTS (SELECT 1 FROM gone), EXISTS (SELECT 1 FROM reused),
+                EXISTS (SELECT 1 FROM inserted)",
     )
     .bind(&operation.namespace)
     .bind(operation.key.as_str())
@@ -178,11 +196,33 @@ pub(super) async fn record_in_tx(
     .bind(&operation.result)
     .bind(period)
     .bind(operation.retain_until.pg())
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
-    .rows_affected();
-    if inserted == 0 {
+    .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?;
+    if reused {
+        return Err(SidError::OperationKeyReused(operation.key.as_str().into()));
+    }
+    let inserted = inserted
+        || (consumed
+            && sqlx::query(
+                "INSERT INTO operation_results
+                     (namespace, op_key, method, fingerprint, result, period, retain_until)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (namespace, op_key) DO NOTHING",
+            )
+            .bind(&operation.namespace)
+            .bind(operation.key.as_str())
+            .bind(&operation.method)
+            .bind(&operation.fingerprint)
+            .bind(&operation.result)
+            .bind(period)
+            .bind(operation.retain_until.pg())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
+            .rows_affected()
+                == 1);
+    if !inserted {
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
