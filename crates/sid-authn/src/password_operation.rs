@@ -867,23 +867,24 @@ pub enum HistoryAuthorityError {
 
 impl PasswordHistoryAuthority {
     /// The evaluator in this process over `store`, its keys under the master
-    /// key file `master_key` and the versions `store` records. With `cutoff`,
-    /// the store's durable write cutoff is raised to it first, so epochs
-    /// created before it are replaced; an older cutoff lowers nothing.
+    /// key file `master_key` and the versions `store` records. The keys open
+    /// first: a custody that does not open (a lost master) changes nothing.
+    /// With `cutoff`, the store's durable write cutoff is then raised to it, so
+    /// epochs created before it are replaced; an older cutoff lowers nothing.
     pub async fn in_process(
         store: Arc<dyn HistoryKeyStore>,
         master_key: &std::path::Path,
         crypto: Arc<dyn sid_crypto::CryptoPrimitives>,
         cutoff: Option<jiff::Timestamp>,
     ) -> Result<Self, HistoryAuthorityError> {
+        let history_keys =
+            crate::field_keys::field_key_manager(store.as_ref(), master_key, crypto).await?;
         if let Some(cutoff) = cutoff {
             store
                 .raise_write_cutoff(cutoff, audit("password_history.write_cutoff"))
                 .await
                 .map_err(HistoryAuthorityError::Cutoff)?;
         }
-        let history_keys =
-            crate::field_keys::field_key_manager(store.as_ref(), master_key, crypto).await?;
         Ok(Self::InProcess {
             store,
             history_keys,

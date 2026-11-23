@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use sid_core::models::{BootstrapPolicy, InstanceSecret, Profile, Role, RoleAssignment};
-use sid_plugin::StorageBackend;
+use sid_plugin::{InstanceSecretStore, StorageBackend};
 
 use super::*;
 
@@ -123,6 +123,120 @@ async fn another_master_key_does_not_open_the_installation() {
             .await
             .is_err()
     );
+}
+
+/// The bug: an installation whose master file was lost opened with a fresh
+/// master written in its place, after it had already changed the store. The
+/// open now refuses with the master to restore, writes no file and changes
+/// nothing; putting the original master back opens the same installation.
+#[tokio::test]
+async fn a_lost_master_changes_nothing_and_its_restore_reopens() {
+    let storage = sqlite().await;
+    let master = MasterKey::new();
+    let first = Installation::open(storage.clone(), settings(&master, None))
+        .await
+        .unwrap();
+    let backup = std::fs::read(master.path()).unwrap();
+    std::fs::remove_file(master.path()).unwrap();
+
+    let projects = storage.count_projects().await.unwrap();
+    let versions = storage.list_key_versions().await.unwrap().len();
+    let refused = Installation::open(storage.clone(), settings(&master, None))
+        .await
+        .err()
+        .expect("a lost master does not open");
+    assert!(
+        matches!(
+            refused,
+            InstallationError::FieldKeys(
+                sid_authn::field_keys::FieldKeyError::MasterMissing { .. }
+            )
+        ),
+        "{refused:?}"
+    );
+    assert!(!master.path().exists(), "no substitute master was written");
+    assert_eq!(storage.count_projects().await.unwrap(), projects);
+    assert_eq!(storage.list_key_versions().await.unwrap().len(), versions);
+
+    std::fs::write(master.path(), &backup).unwrap();
+    let restored = Installation::open(storage, settings(&master, None))
+        .await
+        .unwrap();
+    assert_eq!(restored.issuer.id, first.issuer.id);
+    assert_eq!(restored.captcha_pow_key, first.captcha_pow_key);
+}
+
+/// On a store with key versions but no installation yet, a missing master
+/// refuses the open before any of the installation's state is made: no
+/// instance secret, no second key version, no master file.
+#[tokio::test]
+async fn a_lost_master_makes_no_installation_state() {
+    let storage = sqlite().await;
+    storage
+        .insert_key_version(
+            &sid_keys::KeyVersionParams::new(1, vec![7; 32], "key-v1"),
+            AuditEntry::system("test", "key_version:1").into(),
+        )
+        .await
+        .unwrap();
+    let master = MasterKey::new();
+    assert!(
+        Installation::open(storage.clone(), settings(&master, None))
+            .await
+            .is_err()
+    );
+    for secret in [
+        InstanceSecret::CaptchaKey,
+        InstanceSecret::OpaqueServerSetup,
+    ] {
+        assert!(
+            storage.get_instance_secret(secret).await.unwrap().is_none(),
+            "{secret:?} was made"
+        );
+    }
+    assert_eq!(storage.list_key_versions().await.unwrap().len(), 1);
+    assert!(!master.path().exists());
+}
+
+/// The history evaluator's custody opens before its write cutoff moves: a
+/// lost master refuses the evaluator and leaves the cutoff where it was.
+#[tokio::test]
+async fn a_lost_history_master_raises_no_cutoff() {
+    use sid_plugin::history_keys::HistoryKeyStore;
+    let store: Arc<dyn HistoryKeyStore> = Arc::new(sqlite().await.history_keys());
+    let master = MasterKey::new();
+    let crypto: Arc<dyn sid_crypto::CryptoPrimitives> =
+        Arc::new(sid_crypto::RustCryptoPrimitives::new());
+    sid_authn::password_operation::PasswordHistoryAuthority::in_process(
+        store.clone(),
+        &master.path(),
+        crypto.clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(master.path()).unwrap();
+
+    let refused = sid_authn::password_operation::PasswordHistoryAuthority::in_process(
+        store.clone(),
+        &master.path(),
+        crypto,
+        Some(jiff::Timestamp::now()),
+    )
+    .await
+    .err()
+    .expect("a lost master does not open");
+    assert!(
+        matches!(
+            refused,
+            sid_authn::password_operation::HistoryAuthorityError::Keys(
+                sid_authn::field_keys::FieldKeyError::MasterMissing { .. }
+            )
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(store.write_cutoff().await.unwrap(), None);
+    assert!(!master.path().exists());
 }
 
 /// An issuer without a host names no organization and is refused.
