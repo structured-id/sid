@@ -131,6 +131,80 @@ struct Commit {
     consumption: Option<sid_core::models::CeremonyConsumption>,
 }
 
+/// A registration finish verified up to its write.
+#[derive(Debug)]
+pub enum PreparedFinish {
+    /// A repeat of a finish that already committed: its recorded answer,
+    /// with nothing to write.
+    Answered(OpaqueZkppRegistrationFinishResponse),
+    /// The account to write, and the answer once it is written. Boxed: the
+    /// sealed registration is large and the answer variant is not.
+    Ready {
+        prepared: Box<PreparedRegistration>,
+        response: OpaqueZkppRegistrationFinishResponse,
+    },
+}
+
+/// A registration checked and sealed, ready to be written by the storage's
+/// commit or in a host's own transaction, either way with the same records.
+#[derive(Debug)]
+pub struct PreparedRegistration {
+    registration: NewRegistration,
+    ctx: MutationContext,
+    profile_id: ProfileId,
+    credential_id: CredentialId,
+    principal_type: PrincipalType,
+    spends_context: bool,
+}
+
+impl PreparedRegistration {
+    /// What is written: the account, its identifier and first credential.
+    pub fn registration(&self) -> &NewRegistration {
+        &self.registration
+    }
+
+    /// What commits with it: its audit, owed work and the operation
+    /// completion a retry of the finish is answered from. A host running its
+    /// attempt again writes it again under a fresh copy.
+    pub fn context(&self) -> MutationContext {
+        self.ctx.clone()
+    }
+
+    /// The new account's profile.
+    pub fn profile_id(&self) -> ProfileId {
+        self.profile_id
+    }
+
+    /// The new account's first credential.
+    pub fn credential_id(&self) -> CredentialId {
+        self.credential_id
+    }
+
+    /// The registration refusal a storage refusal of this write stands for,
+    /// the same for the storage's commit and a host's transaction.
+    pub fn refusal(&self, e: SidError) -> RegistrationError {
+        match e {
+            // The registration's context was spent by a concurrent finish or
+            // ran out meanwhile.
+            SidError::Expired(_) | SidError::OperationCompleted(_) if self.spends_context => {
+                RegistrationError::ContextEnded
+            }
+            // Another registration took the identifier between start and finish.
+            SidError::Conflict(_) => RegistrationError::AlreadyRegistered(self.principal_type),
+            // The claim was taken between start and finish.
+            SidError::InvalidState(_) => RegistrationError::Restricted("instance_claim"),
+            // The policy in force at the commit refuses it, or its invite is
+            // no longer usable.
+            SidError::RegistrationRestricted(reason) => {
+                RegistrationError::Restricted(requirement(&reason))
+            }
+            e => {
+                sid_authn::password_operation::commit_refusal(e, RegistrationError::Store).refusal()
+            }
+        }
+    }
+}
+
 /// Self-registration on one installation.
 pub struct Registration {
     storage: Arc<dyn StorageBackend>,
@@ -298,10 +372,40 @@ impl Registration {
     async fn commit_with(
         &self,
         pending: PendingRegistration,
-        mut credential: Credential,
+        credential: Credential,
         commit: Commit,
         enabled: bool,
     ) -> Result<(ProfileId, CredentialId), RegistrationError> {
+        let prepared = self
+            .prepare_with(pending, credential, commit, enabled)
+            .await?;
+        self.commit_prepared(&prepared).await?;
+        Ok((prepared.profile_id, prepared.credential_id))
+    }
+
+    /// Write `prepared` in the storage's own transaction.
+    async fn commit_prepared(
+        &self,
+        prepared: &PreparedRegistration,
+    ) -> Result<(), RegistrationError> {
+        self.storage
+            .register_profile(&prepared.registration, prepared.ctx.clone())
+            .await
+            .map_err(|e| prepared.refusal(e))?;
+        info!(
+            "Self-registration committed for profile {}",
+            prepared.profile_id
+        );
+        Ok(())
+    }
+
+    async fn prepare_with(
+        &self,
+        pending: PendingRegistration,
+        mut credential: Credential,
+        commit: Commit,
+        enabled: bool,
+    ) -> Result<PreparedRegistration, RegistrationError> {
         let Commit {
             history,
             first_passkey,
@@ -401,36 +505,14 @@ impl Registration {
         if let Some(consumption) = consumption {
             ctx = ctx.consuming(consumption);
         }
-        match self.storage.register_profile(&registration, ctx).await {
-            Ok(()) => {}
-            // The registration's context was spent by a concurrent finish
-            // or ran out meanwhile.
-            Err(SidError::Expired(_) | SidError::OperationCompleted(_)) if spends_context => {
-                return Err(RegistrationError::ContextEnded);
-            }
-            // Another registration took the identifier between start and finish.
-            Err(SidError::Conflict(_)) => {
-                return Err(RegistrationError::AlreadyRegistered(principal_type));
-            }
-            // The claim was taken between start and finish.
-            Err(SidError::InvalidState(_)) => {
-                return Err(RegistrationError::Restricted("instance_claim"));
-            }
-            // The policy in force at the commit refuses it, or its invite is
-            // no longer usable.
-            Err(SidError::RegistrationRestricted(reason)) => {
-                return Err(RegistrationError::Restricted(requirement(&reason)));
-            }
-            Err(e) => {
-                return Err(sid_authn::password_operation::commit_refusal(
-                    e,
-                    RegistrationError::Store,
-                )
-                .refusal());
-            }
-        }
-        info!("Self-registration committed for profile {}", profile_id);
-        Ok((profile_id, credential_id))
+        Ok(PreparedRegistration {
+            registration,
+            ctx,
+            profile_id,
+            credential_id,
+            principal_type,
+            spends_context,
+        })
     }
 
     /// Start a registration of `principal` through `operations`: the
@@ -489,6 +571,34 @@ impl Registration {
         history_max_age_days: u32,
         enabled: bool,
     ) -> Result<OpaqueZkppRegistrationFinishResponse, RegistrationError> {
+        match self
+            .prepare_finish(operations, zkpp, request, history_max_age_days, enabled)
+            .await?
+        {
+            PreparedFinish::Answered(response) => Ok(response),
+            PreparedFinish::Ready { prepared, response } => {
+                self.commit_prepared(&prepared).await?;
+                Ok(response)
+            }
+        }
+    }
+
+    /// Everything [`Self::finish`] does before it writes: the operation and
+    /// its purpose read, the proof and the history verified, the credential
+    /// sealed, the result a retry gets recorded in the completion. A host
+    /// writing the account in its own transaction
+    /// (`sid_storage::coordinode::HostTransaction`) calls this once, outside
+    /// its runs again, writes [`PreparedRegistration::registration`] under
+    /// [`PreparedRegistration::context`], answers the response on success
+    /// and reports a refusal through [`PreparedRegistration::refusal`].
+    pub async fn prepare_finish(
+        &self,
+        operations: &PasswordOperations,
+        zkpp: Arc<ZkppOpaqueServer>,
+        request: OpaqueZkppRegistrationFinishRequest,
+        history_max_age_days: u32,
+        enabled: bool,
+    ) -> Result<PreparedFinish, RegistrationError> {
         let id = sid_authn::password_operation::operation_id(request.operation_id.as_ref())?;
         let done = match operations
             .finish(
@@ -507,6 +617,7 @@ impl Registration {
         {
             Finish::Completed(result) => {
                 return prost::Message::decode(result.as_slice())
+                    .map(PreparedFinish::Answered)
                     .map_err(|e| internal("decode recorded password operation result", e));
             }
             Finish::Ready(done) => *done,
@@ -528,9 +639,23 @@ impl Registration {
             commit.max_age_days = history_max_age_days;
             commit
         });
-        self.commit(pending, credential, history, Some(completion), enabled)
+        let prepared = self
+            .prepare_with(
+                pending,
+                credential,
+                Commit {
+                    history,
+                    first_passkey: None,
+                    completion: Some(completion),
+                    consumption: None,
+                },
+                enabled,
+            )
             .await?;
-        Ok(response)
+        Ok(PreparedFinish::Ready {
+            prepared: Box::new(prepared),
+            response,
+        })
     }
 
     /// The refusal of a held identifier's registration finish: the one a new

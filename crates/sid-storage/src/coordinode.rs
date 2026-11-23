@@ -276,6 +276,105 @@ impl Statements<'_> {
     }
 }
 
+/// Why a write in a [`HostTransaction`] or its commit did not report success.
+#[derive(Debug)]
+pub enum HostWriteError {
+    /// Refused for a concurrent transaction: nothing applied, and the host
+    /// runs its whole attempt again, beginning a new transaction.
+    Contended,
+    /// Refused before anything was committed (the registration as it
+    /// stands, or a failed statement): nothing applied, and the host ends
+    /// its attempt with [`HostTransaction::rollback`].
+    Refused(SidError),
+    /// The commit failed for a reason that does not establish whether it
+    /// applied. The host settles the outcome from its own operation record,
+    /// not by assuming a rollback; it neither rolls back nor writes again
+    /// before that.
+    Unknown(SidError),
+}
+
+/// A transaction a host runs on the database SID's records live in, so its
+/// own writes and the SID records it asks for commit together or not at all.
+/// The host runs its own statements under [`HostTransaction::id`] and has
+/// SID's records written through this type's methods. The shared database
+/// and transaction give the host's process no access it lacks anyway: this
+/// type is how SID's records are written correctly, not an access boundary.
+/// CoordiNode's API blocks the calling thread: call it off an async runtime.
+pub struct HostTransaction<'a> {
+    statements: Statements<'a>,
+}
+
+impl<'a> HostTransaction<'a> {
+    /// Begin one on `db`, a database a [`CoordinodeBackend`] serves.
+    pub fn begin(db: &'a Database) -> SidResult<Self> {
+        let snapshot_floor = db.read_ts().as_raw();
+        let id = db.begin_transaction().map_err(storage)?;
+        Ok(Self {
+            statements: Statements {
+                db,
+                id,
+                snapshot_floor,
+                contended: Cell::new(false),
+            },
+        })
+    }
+
+    /// The transaction the host runs its own statements in.
+    pub fn id(&self) -> TransactionId {
+        self.statements.id
+    }
+
+    /// Write `registration`, already verified, with everything a
+    /// [`CoordinodeBackend`] commits with it: its admission under the policy
+    /// in force, the uniqueness of its identifier, and `ctx` (its audit,
+    /// owed work, operation completion and spent ceremony). Nothing is
+    /// committed here, so every error is [`HostWriteError::Contended`] or
+    /// [`HostWriteError::Refused`].
+    pub fn register_profile(
+        &self,
+        registration: &sid_core::models::NewRegistration,
+        ctx: MutationContext,
+    ) -> Result<(), HostWriteError> {
+        let written = registration.check_reference().and_then(|()| {
+            let chain = format!("profile:{}", registration.profile.id);
+            enrollment::register(&self.statements, registration, &ctx.audit)?;
+            finalize(&self.statements, &chain, ctx)
+        });
+        written.map_err(|e| self.refusal(e))
+    }
+
+    /// Commit the host's writes and SID's together.
+    pub fn commit(self) -> Result<(), HostWriteError> {
+        let Statements { db, id, .. } = self.statements;
+        match db.commit_transaction(id) {
+            Ok(_) => Ok(()),
+            // As `in_transaction`: a refusal for a concurrent transaction, or
+            // a unique value taken by a commit after the snapshot, applied
+            // nothing.
+            Err(e) if contention(&e) || matches!(e, DatabaseError::UniqueViolation { .. }) => {
+                Err(HostWriteError::Contended)
+            }
+            // Any other failure of the commit itself leaves its outcome
+            // unestablished.
+            Err(e) => Err(HostWriteError::Unknown(storage(e))),
+        }
+    }
+
+    /// End it, applying nothing.
+    pub fn rollback(self) -> SidResult<()> {
+        let Statements { db, id, .. } = self.statements;
+        db.rollback_transaction(id).map_err(storage)
+    }
+
+    fn refusal(&self, e: SidError) -> HostWriteError {
+        if self.statements.contended.get() {
+            HostWriteError::Contended
+        } else {
+            HostWriteError::Refused(e)
+        }
+    }
+}
+
 /// One result row, by column name (CoordiNode's row shape).
 pub(super) type Row = std::collections::BTreeMap<String, Value>;
 
