@@ -360,7 +360,7 @@ fn sources_since(tx: &Statements<'_>, since: Timestamp) -> SidResult<Vec<Registr
 // === Registration ===
 
 /// Commit `registration` in `tx`, as the storage contract states it.
-fn register(
+pub(super) fn register(
     tx: &Statements<'_>,
     registration: &NewRegistration,
     audit: &AuditEntry,

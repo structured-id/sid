@@ -276,6 +276,92 @@ impl Statements<'_> {
     }
 }
 
+/// Why a write in a [`HostTransaction`] or its commit did not take effect.
+#[derive(Debug)]
+pub enum HostWriteError {
+    /// Refused for a concurrent transaction: nothing applied, and the host
+    /// runs its whole attempt again, beginning a new transaction.
+    Contended,
+    /// Refused by SID: the registration cannot be written as it stands.
+    Refused(SidError),
+}
+
+/// A transaction a host runs on the database SID's records live in, so its
+/// own writes and the SID records it asks for commit together or not at all.
+/// The host runs its own statements under [`HostTransaction::id`]; SID's
+/// records are written only through this type's methods, never by the host.
+/// CoordiNode's API blocks the calling thread: call it off an async runtime.
+pub struct HostTransaction<'a> {
+    statements: Statements<'a>,
+}
+
+impl<'a> HostTransaction<'a> {
+    /// Begin one on `db`, a database a [`CoordinodeBackend`] serves.
+    pub fn begin(db: &'a Database) -> SidResult<Self> {
+        let snapshot_floor = db.read_ts().as_raw();
+        let id = db.begin_transaction().map_err(storage)?;
+        Ok(Self {
+            statements: Statements {
+                db,
+                id,
+                snapshot_floor,
+                contended: Cell::new(false),
+            },
+        })
+    }
+
+    /// The transaction the host runs its own statements in.
+    pub fn id(&self) -> TransactionId {
+        self.statements.id
+    }
+
+    /// Write `registration`, already verified, with everything a
+    /// [`CoordinodeBackend`] commits with it: its admission under the policy
+    /// in force, the uniqueness of its identifier, and `ctx` (its audit,
+    /// owed work, operation completion and spent ceremony). On any error the
+    /// host ends its attempt with [`HostTransaction::rollback`].
+    pub fn register_profile(
+        &self,
+        registration: &sid_core::models::NewRegistration,
+        ctx: MutationContext,
+    ) -> Result<(), HostWriteError> {
+        let written = registration.check_reference().and_then(|()| {
+            let chain = format!("profile:{}", registration.profile.id);
+            enrollment::register(&self.statements, registration, &ctx.audit)?;
+            finalize(&self.statements, &chain, ctx)
+        });
+        written.map_err(|e| self.refusal(e))
+    }
+
+    /// Commit the host's writes and SID's together.
+    pub fn commit(self) -> Result<(), HostWriteError> {
+        let Statements { db, id, .. } = self.statements;
+        match db.commit_transaction(id) {
+            Ok(_) => Ok(()),
+            // As `in_transaction`: a unique value refused at commit was taken
+            // by a commit after the snapshot, and nothing applied.
+            Err(e) if contention(&e) || matches!(e, DatabaseError::UniqueViolation { .. }) => {
+                Err(HostWriteError::Contended)
+            }
+            Err(e) => Err(HostWriteError::Refused(storage(e))),
+        }
+    }
+
+    /// End it, applying nothing.
+    pub fn rollback(self) -> SidResult<()> {
+        let Statements { db, id, .. } = self.statements;
+        db.rollback_transaction(id).map_err(storage)
+    }
+
+    fn refusal(&self, e: SidError) -> HostWriteError {
+        if self.statements.contended.get() {
+            HostWriteError::Contended
+        } else {
+            HostWriteError::Refused(e)
+        }
+    }
+}
+
 /// One result row, by column name (CoordiNode's row shape).
 pub(super) type Row = std::collections::BTreeMap<String, Value>;
 

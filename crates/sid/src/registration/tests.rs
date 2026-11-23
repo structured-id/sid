@@ -126,6 +126,68 @@ async fn claim_registration_commits_then_identifier_is_held() {
     ));
 }
 
+/// Two claim registrations prepared before either is written, as a host
+/// prepares them outside its transaction: the first written becomes the
+/// first account, and the storage's refusal of the second, its claim spent,
+/// reads as the commit's own refusal and leaves no credential.
+#[tokio::test]
+async fn a_prepared_claim_registration_refuses_as_the_commit_does() {
+    let storage = storage().await;
+    let (registration, keys) = registration(storage.clone());
+    let token = sid_authn::admin_claim::open_claim(storage.as_ref(), keys.as_ref())
+        .await
+        .unwrap()
+        .expect("an open claim");
+    let token = secrecy::ExposeSecret::expose_secret(&token).to_string();
+    let mut prepared = Vec::new();
+    for who in ["first@example.com", "second@example.com"] {
+        let pending = registration
+            .begin(who, Some(&token), None, false)
+            .await
+            .unwrap();
+        let PendingRegistration::NewAccount { profile_id, .. } = pending else {
+            panic!("a new account");
+        };
+        prepared.push(
+            registration
+                .prepare(pending, password(profile_id), None, None, false)
+                .await
+                .unwrap(),
+        );
+    }
+    let (first, second) = (&prepared[0], &prepared[1]);
+    assert_ne!(
+        first
+            .registration()
+            .credential
+            .as_ref()
+            .unwrap()
+            .data
+            .expose(),
+        b"password file",
+        "sealed before it is written"
+    );
+    storage
+        .register_profile(first.registration(), first.context())
+        .await
+        .unwrap();
+    let refused = storage
+        .register_profile(second.registration(), second.context())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        second.refusal(refused),
+        RegistrationError::Restricted("instance_claim")
+    ));
+    assert!(
+        storage
+            .get_credentials_by_profile(second.profile_id(), Some(CredentialType::Opaque))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// A held identifier's finish under a policy now closed is refused as the
 /// policy refuses a free one, telling no more than the start did; one
 /// started by the claim is answered as already registered.
