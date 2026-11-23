@@ -385,8 +385,10 @@ impl SignIn {
     }
 
     /// Whether this host delivers to `client`: a browser always, a native
-    /// client only with a token signer. A ceremony checks it before it
-    /// starts, and the delivery again before its commit.
+    /// client only with a token signer. Checked before anything is spent or
+    /// rotated: before a native refresh looks up its generation, before a
+    /// second factor's code is judged, and again by the delivery before its
+    /// commit.
     pub fn serves(&self, client: CeremonyClient) -> Result<(), SignInError> {
         match client {
             CeremonyClient::Browser => Ok(()),
