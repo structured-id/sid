@@ -126,47 +126,127 @@ async fn claim_registration_commits_then_identifier_is_held() {
     ));
 }
 
-/// Two claim registrations prepared before either is written, as a host
-/// prepares them outside its transaction: the first written becomes the
-/// first account, and the storage's refusal of the second, its claim spent,
-/// reads as the commit's own refusal and leaves no credential.
+/// This installation's password operations over `backend`.
+fn operations(backend: &Arc<sid_storage::sqlite::SqliteBackend>) -> PasswordOperations {
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = backend.clone();
+    PasswordOperations::with_authority(
+        storage,
+        ceremonies,
+        keys(),
+        sid_core::models::OrgId::generate(),
+        sid_authn::password_operation::PasswordHistoryAuthority::InProcess {
+            store: Arc::new(backend.history_keys()),
+            history_keys: keys(),
+        },
+    )
+    .0
+}
+
+/// A ZKPP server installing passwords without a policy proof, on a fresh
+/// server setup.
+fn zkpp() -> Arc<ZkppOpaqueServer> {
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
+    use sid_plugin::crypto::{CurveId, OpaqueOperations};
+    let primary = PallasOpaque::new();
+    let setup = primary.create_setup(None).expect("setup");
+    let mut verifiers: std::collections::HashMap<CurveId, Box<dyn OpaqueOperations>> =
+        std::collections::HashMap::new();
+    verifiers.insert(CurveId::Pallas, Box::new(PallasOpaque::new()));
+    let router = OpaqueRouter::new(Box::new(primary), verifiers, setup);
+    let config = sid_authn::opaque_zkpp::ZkppConfig {
+        require_proof: false,
+        policy_version: 1,
+    };
+    Arc::new(ZkppOpaqueServer::new(&router, vec![], config).expect("ZKPP server"))
+}
+
+/// A registration of `principal` with `password` started on `operations`
+/// and finished by the client, as the finish request it sends.
+async fn started(
+    registration: &Registration,
+    operations: &PasswordOperations,
+    zkpp: &ZkppOpaqueServer,
+    principal: &str,
+    claim: &str,
+    password: &[u8],
+) -> OpaqueZkppRegistrationFinishRequest {
+    use rand::rand_core::UnwrapErr;
+    use rand::rngs::SysRng;
+    use sid_opaque_ke::{
+        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
+    };
+    use sid_pake_core::pallas_opaque::PallasCipherSuite;
+    let mut rng = UnwrapErr(SysRng);
+    let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let start = registration
+        .start(
+            operations,
+            zkpp,
+            principal,
+            Some(claim),
+            None,
+            client.message.serialize().to_vec(),
+            false,
+        )
+        .await
+        .unwrap();
+    let upload = client
+        .state
+        .finish(
+            &mut rng,
+            password,
+            RegistrationResponse::deserialize(&start.registration_response).unwrap(),
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    OpaqueZkppRegistrationFinishRequest {
+        operation_id: start.history.expect("its operation").operation_id,
+        registration_record: upload.message.serialize().to_vec(),
+        proof: None,
+    }
+}
+
+/// Two claims of one installation by different logins, each through a real
+/// start and client finish and verified by `prepare_finish` before either is
+/// written, as a host prepares outside its transaction. The first written
+/// becomes the first account; the second, its claim spent, is refused as the
+/// engine's own finish refuses it and leaves no credential; a repeat of the
+/// first finish is answered from its recorded result with nothing to write.
 #[tokio::test]
-async fn a_prepared_claim_registration_refuses_as_the_commit_does() {
-    let storage = storage().await;
+async fn a_verified_finish_is_written_or_refused_as_the_finish_is() {
+    let backend = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let storage: Arc<dyn StorageBackend> = backend.clone();
     let (registration, keys) = registration(storage.clone());
+    let operations = operations(&backend);
+    let zkpp = zkpp();
     let token = sid_authn::admin_claim::open_claim(storage.as_ref(), keys.as_ref())
         .await
         .unwrap()
         .expect("an open claim");
     let token = secrecy::ExposeSecret::expose_secret(&token).to_string();
-    let mut prepared = Vec::new();
+    let password = b"Str0ngP@ssword1";
+    let mut requests = Vec::new();
     for who in ["first@example.com", "second@example.com"] {
-        let pending = registration
-            .begin(who, Some(&token), None, false)
-            .await
-            .unwrap();
-        let PendingRegistration::NewAccount { profile_id, .. } = pending else {
-            panic!("a new account");
-        };
-        prepared.push(
-            registration
-                .prepare(pending, password(profile_id), None, None, false)
-                .await
-                .unwrap(),
-        );
+        requests.push(started(&registration, &operations, &zkpp, who, &token, password).await);
     }
-    let (first, second) = (&prepared[0], &prepared[1]);
-    assert_ne!(
-        first
-            .registration()
-            .credential
-            .as_ref()
+    let mut ready = Vec::new();
+    for request in &requests {
+        match registration
+            .prepare_finish(&operations, zkpp.clone(), request.clone(), 365, false)
+            .await
             .unwrap()
-            .data
-            .expose(),
-        b"password file",
-        "sealed before it is written"
-    );
+        {
+            PreparedFinish::Ready { prepared, response } => ready.push((prepared, response)),
+            PreparedFinish::Answered(_) => panic!("nothing is written yet"),
+        }
+    }
+    let ((first, first_response), (second, _)) = (&ready[0], &ready[1]);
+
     storage
         .register_profile(first.registration(), first.context())
         .await
@@ -184,8 +264,27 @@ async fn a_prepared_claim_registration_refuses_as_the_commit_does() {
             .get_credentials_by_profile(second.profile_id(), Some(CredentialType::Opaque))
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "no credential is left behind"
     );
+    assert_eq!(
+        storage
+            .get_credentials_by_profile(first.profile_id(), Some(CredentialType::Opaque))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A repeat of the committed finish is answered from its record.
+    match registration
+        .prepare_finish(&operations, zkpp.clone(), requests[0].clone(), 365, false)
+        .await
+        .unwrap()
+    {
+        PreparedFinish::Answered(response) => assert_eq!(&response, first_response),
+        PreparedFinish::Ready { .. } => panic!("a committed finish is not written again"),
+    }
 }
 
 /// A held identifier's finish under a policy now closed is refused as the

@@ -276,20 +276,29 @@ impl Statements<'_> {
     }
 }
 
-/// Why a write in a [`HostTransaction`] or its commit did not take effect.
+/// Why a write in a [`HostTransaction`] or its commit did not report success.
 #[derive(Debug)]
 pub enum HostWriteError {
     /// Refused for a concurrent transaction: nothing applied, and the host
     /// runs its whole attempt again, beginning a new transaction.
     Contended,
-    /// Refused by SID: the registration cannot be written as it stands.
+    /// Refused before anything was committed (the registration as it
+    /// stands, or a failed statement): nothing applied, and the host ends
+    /// its attempt with [`HostTransaction::rollback`].
     Refused(SidError),
+    /// The commit failed for a reason that does not establish whether it
+    /// applied. The host settles the outcome from its own operation record,
+    /// not by assuming a rollback; it neither rolls back nor writes again
+    /// before that.
+    Unknown(SidError),
 }
 
 /// A transaction a host runs on the database SID's records live in, so its
 /// own writes and the SID records it asks for commit together or not at all.
-/// The host runs its own statements under [`HostTransaction::id`]; SID's
-/// records are written only through this type's methods, never by the host.
+/// The host runs its own statements under [`HostTransaction::id`] and has
+/// SID's records written through this type's methods. The shared database
+/// and transaction give the host's process no access it lacks anyway: this
+/// type is how SID's records are written correctly, not an access boundary.
 /// CoordiNode's API blocks the calling thread: call it off an async runtime.
 pub struct HostTransaction<'a> {
     statements: Statements<'a>,
@@ -318,8 +327,9 @@ impl<'a> HostTransaction<'a> {
     /// Write `registration`, already verified, with everything a
     /// [`CoordinodeBackend`] commits with it: its admission under the policy
     /// in force, the uniqueness of its identifier, and `ctx` (its audit,
-    /// owed work, operation completion and spent ceremony). On any error the
-    /// host ends its attempt with [`HostTransaction::rollback`].
+    /// owed work, operation completion and spent ceremony). Nothing is
+    /// committed here, so every error is [`HostWriteError::Contended`] or
+    /// [`HostWriteError::Refused`].
     pub fn register_profile(
         &self,
         registration: &sid_core::models::NewRegistration,
@@ -338,12 +348,15 @@ impl<'a> HostTransaction<'a> {
         let Statements { db, id, .. } = self.statements;
         match db.commit_transaction(id) {
             Ok(_) => Ok(()),
-            // As `in_transaction`: a unique value refused at commit was taken
-            // by a commit after the snapshot, and nothing applied.
+            // As `in_transaction`: a refusal for a concurrent transaction, or
+            // a unique value taken by a commit after the snapshot, applied
+            // nothing.
             Err(e) if contention(&e) || matches!(e, DatabaseError::UniqueViolation { .. }) => {
                 Err(HostWriteError::Contended)
             }
-            Err(e) => Err(HostWriteError::Refused(storage(e))),
+            // Any other failure of the commit itself leaves its outcome
+            // unestablished.
+            Err(e) => Err(HostWriteError::Unknown(storage(e))),
         }
     }
 

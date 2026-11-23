@@ -144,6 +144,7 @@ async fn of_two_competing_claims_one_commits_and_the_other_leaves_nothing() {
                     true
                 }
                 Err(HostWriteError::Refused(e)) => panic!("refused at the write: {e:?}"),
+                Err(HostWriteError::Unknown(e)) => panic!("a write commits nothing: {e:?}"),
                 Ok(()) => {
                     first.commit().unwrap();
                     matches!(second.commit(), Err(HostWriteError::Contended))
