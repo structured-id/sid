@@ -199,11 +199,17 @@ pub(super) async fn record_in_tx(
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?;
-    if reused {
+    // Bindings are written only under the key's lock, but a purge removes
+    // them without it: one committed while this statement waited on the
+    // expired completion is gone, though its snapshot still held the
+    // binding. Only a binding a fresh statement still finds refuses the key.
+    if reused && another_holds(tx, operation, period).await? {
         return Err(SidError::OperationKeyReused(operation.key.as_str().into()));
     }
+    // Inserted by a statement of its own when the key was freed in this one:
+    // its expired completion consumed, or a binding a purge removed.
     let inserted = inserted
-        || (consumed
+        || ((consumed || reused)
             && sqlx::query(
                 "INSERT INTO operation_results
                      (namespace, op_key, method, fingerprint, result, period, retain_until)
@@ -226,6 +232,28 @@ pub(super) async fn record_in_tx(
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
+}
+
+/// Whether another command's binding holds `operation`'s key, read by a
+/// statement of its own and so after every commit before it.
+async fn another_holds(
+    conn: &mut sqlx::PgConnection,
+    operation: &OperationCompletion,
+    period: Option<i64>,
+) -> SidResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM operation_resources
+             WHERE namespace = $1 AND op_key = $2
+               AND (method <> $3 OR fingerprint <> $4 OR period IS DISTINCT FROM $5))",
+    )
+    .bind(&operation.namespace)
+    .bind(operation.key.as_str())
+    .bind(&operation.method)
+    .bind(&operation.fingerprint)
+    .bind(period)
+    .fetch_one(conn)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))
 }
 
 /// Whether `operation`'s key holds a completion still kept.

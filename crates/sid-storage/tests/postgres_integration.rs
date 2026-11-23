@@ -404,6 +404,83 @@ async fn host_audit_tables_of_another_schema_are_refused() {
     assert!(kept, "the refused database was changed");
 }
 
+/// Regression: a new command under a key whose completion expired waited
+/// for a purge removing that completion and its binding, then checked the
+/// binding against the snapshot taken before the purge committed, found the
+/// old command's binding and was refused as reusing the key. It commits.
+#[tokio::test]
+async fn a_purge_racing_a_new_command_under_its_key_releases_the_key() {
+    use sid_core::models::{OperationCompletion, OperationKey, OperationResourceBinding};
+    use sid_plugin::OperationResultStore;
+
+    let (store, schema) = host_operation_store().await;
+    let pool = schema_pool(&schema).await;
+    let period = store
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_mins(5))
+        .await
+        .unwrap()
+        .period;
+    let key = OperationKey::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let command = |inputs: &[u8]| {
+        OperationCompletion::new(
+            "purge-race",
+            key.clone(),
+            "create",
+            inputs,
+            b"done".to_vec(),
+        )
+        .in_period(period)
+    };
+    // The old command bound the key and completed, its retention already over.
+    store
+        .bind_operation_resource(&OperationResourceBinding {
+            namespace: "purge-race".into(),
+            key: key.clone(),
+            method: "create".into(),
+            fingerprint: sid_core::models::operation::fingerprint(b"old"),
+            period: Some(period),
+            resource: uuid::Uuid::now_v7(),
+        })
+        .await
+        .unwrap();
+    let mut old = pool.begin().await.unwrap();
+    sid_storage::PgOperationStore::record_in_tx(
+        &mut old,
+        &command(b"old")
+            .retained_until(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    old.commit().await.unwrap();
+
+    // A purge holds both rows deleted while the new command consumes them.
+    let mut purge = pool.begin().await.unwrap();
+    for table in ["operation_results", "operation_resources"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE namespace = 'purge-race'"
+        )))
+        .execute(&mut *purge)
+        .await
+        .unwrap();
+    }
+    let new = tokio::spawn({
+        let (pool, completion) = (pool.clone(), command(b"new"));
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            sid_storage::PgOperationStore::record_in_tx(&mut tx, &completion).await?;
+            tx.commit()
+                .await
+                .map_err(|e| sid_core::Error::Storage(e.to_string()))
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    purge.commit().await.unwrap();
+    let outcome = new.await.unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    outcome.expect("the new command commits under the released key");
+}
+
 /// Regression: every keyed commit under a period counted into one row of
 /// that period and held it until its commit, so all keyed mutations of an
 /// installation, on every replica, committed one at a time. While one
