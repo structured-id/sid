@@ -307,6 +307,112 @@ async fn a_published_master_is_never_replaced() {
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
+fn dir_syncs() -> usize {
+    DIR_SYNCS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A custody whose first version may be recorded only after the master's
+/// directory was synced in this process.
+struct RecordsAfterSync {
+    versions: Versions,
+    synced_before: usize,
+}
+
+#[async_trait::async_trait]
+impl KeyVersionStore for RecordsAfterSync {
+    async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>> {
+        self.versions.versions().await
+    }
+
+    async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool> {
+        assert!(
+            dir_syncs() > self.synced_before,
+            "the first version was recorded before the master's name was durable"
+        );
+        self.versions.insert(params, audit).await
+    }
+}
+
+/// The bug: a starter that found the master another starter had just linked
+/// (or lost the link to it) went on to record the first version before that
+/// name was durable, so a power loss could keep the version and lose the
+/// master's name. Whoever records the first version syncs the directory
+/// first, whether it published the master or took another's.
+#[tokio::test]
+async fn the_first_version_follows_a_durable_master_name() {
+    for published_by_another in [false, true] {
+        let path = temp_path("master.key");
+        if published_by_another {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, [9u8; MASTER_LEN]).unwrap();
+        }
+        let store = RecordsAfterSync {
+            versions: Versions::default(),
+            synced_before: dir_syncs(),
+        };
+        field_key_manager(&store, &path, rust_crypto())
+            .await
+            .unwrap();
+        assert_eq!(store.versions.versions().await.unwrap().len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+}
+
+/// An established custody's open syncs no directory: the barrier belongs to
+/// the bootstrap alone.
+#[tokio::test]
+async fn an_established_custody_opens_without_a_directory_sync() {
+    let path = temp_path("master.key");
+    let store = Versions::default();
+    field_key_manager(&store, &path, rust_crypto())
+        .await
+        .unwrap();
+    let before = dir_syncs();
+    field_key_manager(&store, &path, rust_crypto())
+        .await
+        .unwrap();
+    assert_eq!(dir_syncs(), before);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+/// Losing the link to a master another starter published is no error, and
+/// leaves their master and no staging file behind.
+#[test]
+fn a_lost_link_keeps_the_winners_master() {
+    let path = temp_path("master.key");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, [9u8; MASTER_LEN]).unwrap();
+    publish_master(&path, &RustCryptoPrimitives::new(), 7).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), [9u8; MASTER_LEN]);
+    assert!(!staging_path(&path, 7).exists());
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+/// The bug: a staging name already taken was removed as if this call had
+/// made it, and the collision was taken for a lost publication. It is now an
+/// error naming the staging file, which stays as it was; no master is
+/// published.
+#[test]
+fn a_taken_staging_name_is_left_alone_and_reported() {
+    let path = temp_path("master.key");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let foreign = staging_path(&path, 7);
+    std::fs::write(&foreign, b"another writer's staging").unwrap();
+    let err = publish_master(&path, &RustCryptoPrimitives::new(), 7).unwrap_err();
+    assert!(
+        matches!(&err, FieldKeyError::Io { path: p, source }
+            if p == &foreign.display().to_string()
+                && source.kind() == std::io::ErrorKind::AlreadyExists),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read(&foreign).unwrap(),
+        b"another writer's staging"
+    );
+    assert!(!path.exists());
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
 /// A master file of the wrong length is refused rather than padded, cut or
 /// replaced.
 #[tokio::test]

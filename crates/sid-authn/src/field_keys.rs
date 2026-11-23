@@ -66,37 +66,66 @@ fn read_master(path: &Path) -> Result<Option<SecretBox<[u8; 32]>>, FieldKeyError
     Ok(Some(SecretBox::new(Box::new(master))))
 }
 
+/// The directory a master at `path` is published in.
+fn master_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
+}
+
 /// Publish a fresh master at `path` for a custody that has no key version
-/// yet, or read the one another starter published first. The whole secret is
-/// written and synced to a staging file beside `path` and then linked into
-/// place: the link fails when `path` exists, so a published master is never
-/// replaced and no reader ever sees a partial one.
+/// yet, or take the one another starter published first. Every caller is a
+/// starter that may record the custody's first version next, so whichever
+/// master it returns, the directory holding its name is synced first: the
+/// store never records a version whose master's name a power loss could
+/// still take away. A custody with versions never comes here, and its opens
+/// sync nothing.
 fn publish_or_read_master(
     path: &Path,
     crypto: &dyn CryptoPrimitives,
 ) -> Result<SecretBox<[u8; 32]>, FieldKeyError> {
+    let dir = master_dir(path);
+    let master = match read_master(path)? {
+        Some(master) => master,
+        None => {
+            let mut tag = [0u8; 8];
+            crypto.random_bytes(&mut tag)?;
+            publish_master(path, crypto, u64::from_le_bytes(tag))?;
+            read_master(path)?.ok_or_else(|| {
+                io_error(path)(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the published master is gone",
+                ))
+            })?
+        }
+    };
+    sync_dir(dir).map_err(io_error(path))?;
+    Ok(master)
+}
+
+/// Publish a fresh master at `path` through the staging file named by `tag`.
+/// The whole secret is written and synced to the staging file and then
+/// linked into place: the link fails when `path` exists, so a published
+/// master is never replaced and no reader sees a partial one. Losing the link
+/// to another starter is not an error: theirs is the master. A staging name
+/// already taken is an error, and that file is left alone: only the file
+/// this call created is removed.
+fn publish_master(
+    path: &Path,
+    crypto: &dyn CryptoPrimitives,
+    tag: u64,
+) -> Result<(), FieldKeyError> {
     use std::io::Write;
-    if let Some(master) = read_master(path)? {
-        return Ok(master);
-    }
-    let io = io_error(path);
     let mut bytes = zeroize::Zeroizing::new([0u8; MASTER_LEN]);
     crypto.random_bytes(bytes.as_mut())?;
-    let mut tag = [0u8; 8];
-    crypto.random_bytes(&mut tag)?;
-    let dir = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => Path::new("."),
-    };
+    let dir = master_dir(path);
     std::fs::create_dir_all(dir).map_err(io_error(path))?;
-    let name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("master"),
-        std::ffi::OsStr::to_os_string,
-    );
-    let mut staging_name = std::ffi::OsString::from(".");
-    staging_name.push(&name);
-    staging_name.push(format!(".{:016x}.staging", u64::from_le_bytes(tag)));
-    let staging = dir.join(staging_name);
+    let staging = staging_path(path, tag);
+    let staging_error = |source| FieldKeyError::Io {
+        path: staging.display().to_string(),
+        source,
+    };
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -105,39 +134,57 @@ fn publish_or_read_master(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let published = options
-        .open(&staging)
-        .and_then(|mut file| {
-            file.write_all(bytes.as_ref())?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::hard_link(&staging, path));
-    // The staging name is never read: it goes whether or not the link won.
+    let mut file = options.open(&staging).map_err(staging_error)?;
+    // From here the staging file is this call's own, and it goes whatever
+    // the outcome.
+    let written = file
+        .write_all(bytes.as_ref())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let linked =
+        written
+            .map_err(staging_error)
+            .and_then(|()| match std::fs::hard_link(&staging, path) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(io_error(path)(e)),
+            });
     let removed = std::fs::remove_file(&staging);
-    match published {
-        Ok(()) => {
-            removed.map_err(io_error(path))?;
-            sync_dir(dir).map_err(io_error(path))?;
-            tracing::warn!(
-                "Generated field-encryption master key at '{}': back it up outside the database",
-                path.display()
-            );
-        }
-        // Another starter published first: theirs is the master.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(io(e)),
+    let won = linked?;
+    removed.map_err(staging_error)?;
+    if won {
+        tracing::warn!(
+            "Generated field-encryption master key at '{}': back it up outside the database",
+            path.display()
+        );
     }
-    read_master(path)?.ok_or_else(|| {
-        io_error(path)(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "the published master is gone",
-        ))
-    })
+    Ok(())
 }
 
-/// Make the directory entries of `dir` durable, so a published master
-/// survives a crash right after its link.
+/// The staging file beside `path` a publication with `tag` writes first.
+fn staging_path(path: &Path, tag: u64) -> std::path::PathBuf {
+    let name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("master"),
+        std::ffi::OsStr::to_os_string,
+    );
+    let mut staging = std::ffi::OsString::from(".");
+    staging.push(&name);
+    staging.push(format!(".{tag:016x}.staging"));
+    master_dir(path).join(staging)
+}
+
+/// Directory syncs made, for the tests that check where the barrier falls.
+#[cfg(test)]
+static DIR_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Make the entries of `dir` durable, so a published master's name survives
+/// a power loss. On Unix (Linux, macOS, the BSDs) this is an fsync of the
+/// directory. Other platforms offer std no directory handle to flush: there
+/// the file's own sync is the whole promise, and the name's durability is
+/// the file system's.
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    DIR_SYNCS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()
