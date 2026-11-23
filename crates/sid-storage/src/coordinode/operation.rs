@@ -43,7 +43,8 @@ const FIELDS: &str = "o.slot AS slot, o.namespace AS namespace, o.key AS key,
     o.b_period AS b_period, o.b_resource AS b_resource, o.b_at AS b_at";
 
 /// Create the period state of an empty store: nothing issued yet, commands
-/// accepted for an hour, completions kept a day after, 64 KiB per result.
+/// accepted for an hour, completions kept a day after, 64 KiB per result. A
+/// store an earlier schema wrote is recreated, not recognized here.
 pub(super) fn init_state(tx: &Statements<'_>) -> SidResult<Decision<()>> {
     if !tx.run(STATE, Params::default())?.is_empty() {
         return Ok(Decision::Abandon(()));
