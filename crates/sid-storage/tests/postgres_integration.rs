@@ -228,37 +228,6 @@ mod operation_result_store {
     );
 }
 
-/// Run operation result conformance `scenario` against a host's store of its
-/// own with a period capacity of 8: the engine's tables are the same
-/// ([`host_operation_tables_match_the_engine_schema`]).
-macro_rules! small_capacity_operation_store {
-    ($($scenario:ident),* $(,)?) => {$(
-        #[tokio::test]
-        async fn $scenario() {
-            let (store, schema) = host_operation_store().await;
-            let pool = schema_pool(&schema).await;
-            sqlx::query("UPDATE operation_period_state SET capacity = 8")
-                .execute(&pool)
-                .await
-                .unwrap();
-            pool.close().await;
-            let outcome = tokio::spawn(async move {
-                sid_plugin::conformance::operation_result_store::$scenario(&store).await
-            })
-            .await;
-            drop_schema(&schema).await;
-            if let Err(panic) = outcome {
-                std::panic::resume_unwind(panic.into_panic());
-            }
-        }
-    )*};
-}
-
-small_capacity_operation_store!(
-    a_full_period_refuses_new_completions,
-    imported_completions_keep_the_period_bound,
-);
-
 /// A host's operation store in a schema of its own that holds nothing else,
 /// its tables created by its own `ensure_schema`, twice (as replicas starting
 /// together would). Dropped by [`drop_schema`] when the scenario ends.
@@ -435,6 +404,83 @@ async fn host_audit_tables_of_another_schema_are_refused() {
     assert!(kept, "the refused database was changed");
 }
 
+/// Regression: a new command under a key whose completion expired waited
+/// for a purge removing that completion and its binding, then checked the
+/// binding against the snapshot taken before the purge committed, found the
+/// old command's binding and was refused as reusing the key. It commits.
+#[tokio::test]
+async fn a_purge_racing_a_new_command_under_its_key_releases_the_key() {
+    use sid_core::models::{OperationCompletion, OperationKey, OperationResourceBinding};
+    use sid_plugin::OperationResultStore;
+
+    let (store, schema) = host_operation_store().await;
+    let pool = schema_pool(&schema).await;
+    let period = store
+        .current_operation_period(jiff::Timestamp::now(), jiff::SignedDuration::from_mins(5))
+        .await
+        .unwrap()
+        .period;
+    let key = OperationKey::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let command = |inputs: &[u8]| {
+        OperationCompletion::new(
+            "purge-race",
+            key.clone(),
+            "create",
+            inputs,
+            b"done".to_vec(),
+        )
+        .in_period(period)
+    };
+    // The old command bound the key and completed, its retention already over.
+    store
+        .bind_operation_resource(&OperationResourceBinding {
+            namespace: "purge-race".into(),
+            key: key.clone(),
+            method: "create".into(),
+            fingerprint: sid_core::models::operation::fingerprint(b"old"),
+            period: Some(period),
+            resource: uuid::Uuid::now_v7(),
+        })
+        .await
+        .unwrap();
+    let mut old = pool.begin().await.unwrap();
+    sid_storage::PgOperationStore::record_in_tx(
+        &mut old,
+        &command(b"old")
+            .retained_until(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    old.commit().await.unwrap();
+
+    // A purge holds both rows deleted while the new command consumes them.
+    let mut purge = pool.begin().await.unwrap();
+    for table in ["operation_results", "operation_resources"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE namespace = 'purge-race'"
+        )))
+        .execute(&mut *purge)
+        .await
+        .unwrap();
+    }
+    let new = tokio::spawn({
+        let (pool, completion) = (pool.clone(), command(b"new"));
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            sid_storage::PgOperationStore::record_in_tx(&mut tx, &completion).await?;
+            tx.commit()
+                .await
+                .map_err(|e| sid_core::Error::Storage(e.to_string()))
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    purge.commit().await.unwrap();
+    let outcome = new.await.unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    outcome.expect("the new command commits under the released key");
+}
+
 /// Regression: every keyed commit under a period counted into one row of
 /// that period and held it until its commit, so all keyed mutations of an
 /// installation, on every replica, committed one at a time. While one
@@ -558,23 +604,20 @@ async fn operation_tables(pool: &sqlx::PgPool) -> Vec<String> {
          FROM information_schema.columns
          WHERE table_schema = current_schema()
            AND table_name IN ('operation_period_state', 'operation_periods',
-                              'operation_period_places', 'operation_results',
-                              'operation_resources')
+                              'operation_results', 'operation_resources')
          UNION ALL
          SELECT format('%s %s %s', c.conrelid::regclass::text, c.conname,
                        pg_get_constraintdef(c.oid))
          FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
          WHERE t.relnamespace = current_schema()::regnamespace
            AND t.relname IN ('operation_period_state', 'operation_periods',
-                             'operation_period_places', 'operation_results',
-                             'operation_resources')
+                             'operation_results', 'operation_resources')
          UNION ALL
          SELECT format('%s %s', tablename, regexp_replace(indexdef, ' ON \\S+\\.', ' ON '))
          FROM pg_indexes
          WHERE schemaname = current_schema()
            AND tablename IN ('operation_period_state', 'operation_periods',
-                             'operation_period_places', 'operation_results',
-                             'operation_resources')
+                             'operation_results', 'operation_resources')
          ORDER BY 1",
     )
     .fetch_all(pool)

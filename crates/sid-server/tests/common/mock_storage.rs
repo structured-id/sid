@@ -2011,7 +2011,6 @@ impl sid_plugin::OperationResultStore for MockStorage {
         Ok(sid_core::models::OperationPeriodPolicy {
             acceptance: jiff::SignedDuration::from_hours(1),
             retention: jiff::SignedDuration::from_hours(24),
-            capacity: 100_000,
             result_bytes: 65_536,
         })
     }

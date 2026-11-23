@@ -126,26 +126,6 @@ mod operation_result_store {
         an_oversized_result_is_refused,
         concurrent_imports_under_one_period_all_land,
     );
-
-    /// Run `scenario` on a store of its own with a period capacity of 8.
-    macro_rules! small_capacity {
-        ($($scenario:ident),* $(,)?) => {$(
-            #[tokio::test]
-            async fn $scenario() {
-                let backend = setup().await;
-                sqlx::query("UPDATE operation_period_state SET capacity = 8 WHERE id = 1")
-                    .execute(backend.writer())
-                    .await
-                    .unwrap();
-                sid_plugin::conformance::operation_result_store::$scenario(&backend).await;
-            }
-        )*};
-    }
-
-    small_capacity!(
-        a_full_period_refuses_new_completions,
-        imported_completions_keep_the_period_bound,
-    );
 }
 
 // ─── Ceremony state conformance ───

@@ -17,19 +17,19 @@ fn reason(status: &Status) -> String {
     extract_error_info(status).expect("ErrorInfo").0
 }
 
-/// Regression: a command not committed for want of room answered INTERNAL.
-/// It is an explicit limit: RESOURCE_EXHAUSTED, QUOTA_EXCEEDED, with the
-/// limit named in QuotaFailure.
+/// Regression: a command not committed because its result exceeds the size
+/// kept answered INTERNAL. It is an explicit limit: RESOURCE_EXHAUSTED,
+/// QUOTA_EXCEEDED, with the limit named in QuotaFailure.
 #[test]
-fn test_exhausted_capacity_is_an_explicit_limit() {
+fn test_an_oversized_result_is_an_explicit_limit() {
     use tonic_types::StatusExt;
 
     let status =
-        OperationError::Exhausted("operation period full (8 completions)".into()).into_status();
+        OperationError::Exhausted("operation result larger than 65536 bytes".into()).into_status();
     assert_eq!(status.code(), tonic::Code::ResourceExhausted);
     assert_eq!(reason(&status), "QUOTA_EXCEEDED");
     let quota = status.get_details_quota_failure().expect("QuotaFailure");
-    assert_eq!(quota.violations[0].subject, "operation_capacity");
+    assert_eq!(quota.violations[0].subject, "operation_result_bytes");
 }
 
 /// The key is decoded from its Structured Field String, the period from its

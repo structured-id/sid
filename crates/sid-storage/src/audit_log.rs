@@ -119,11 +119,17 @@ impl PostgresAuditLog {
         };
         record.hash = compute_record_hash(&record);
 
-        // Insert audit record.
+        // The record, and the head this transaction holds locked advanced to
+        // it, in one round trip.
         sqlx::query(
-            "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, actor_type, \
-             action, resource, outcome, metadata, ip_address, device_id, prev_hash, hash) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            "WITH appended AS ( \
+                 INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id, \
+                 actor_type, action, resource, outcome, metadata, ip_address, device_id, \
+                 prev_hash, hash) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)) \
+             UPDATE audit_chain_heads \
+             SET last_record_id = $1, last_hash = $14, sequence = $4 \
+             WHERE chain_id = $3",
         )
         .bind(&record.id)
         .bind(record.timestamp.to_sqlx())
@@ -139,20 +145,6 @@ impl PostgresAuditLog {
         .bind(&record.device_id)
         .bind(record.prev_hash.as_bytes().as_slice())
         .bind(record.hash.as_bytes().as_slice())
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
-
-        // Advance the head this transaction holds locked.
-        sqlx::query(
-            "UPDATE audit_chain_heads \
-             SET last_record_id = $2, last_hash = $3, sequence = $4 \
-             WHERE chain_id = $1",
-        )
-        .bind(&record.chain_id)
-        .bind(&record.id)
-        .bind(record.hash.as_bytes().as_slice())
-        .bind(record.sequence as i64)
         .execute(&mut *conn)
         .await
         .map_err(|e| AuditError::WriteFailed(e.to_string()))?;

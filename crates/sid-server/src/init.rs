@@ -504,9 +504,16 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
                 s
             );
         }
-        let backend = sid_storage::PostgresBackend::new(&database_url, schema.clone())
-            .await
-            .expect("Failed to connect to database");
+        let max_connections = env_setting("SID_DATABASE_MAX_CONNECTIONS")?
+            .map(|n| {
+                n.parse::<u32>()
+                    .context("SID_DATABASE_MAX_CONNECTIONS must be a whole number")
+            })
+            .transpose()?;
+        let backend =
+            sid_storage::PostgresBackend::connect(&database_url, schema.clone(), max_connections)
+                .await
+                .context("connect to the database")?;
 
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),

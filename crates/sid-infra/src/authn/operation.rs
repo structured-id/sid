@@ -135,7 +135,7 @@ impl IntoStatus for OperationError {
             // failure the caller would retry with the same key.
             OperationError::Exhausted(why) => {
                 ApiError::new(ErrorReason::QuotaExceeded, "the command was not committed")
-                    .with_quota_violation("operation_capacity", why)
+                    .with_quota_violation("operation_result_bytes", why)
                     .into()
             }
             OperationError::Store(e) => {

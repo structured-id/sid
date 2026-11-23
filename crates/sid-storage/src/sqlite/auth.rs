@@ -266,7 +266,9 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         insert_auth_code(&mut tx, code).await?;
-        Self::commit_mutation(tx, &format!("auth_code:{}", code.client_id), audit).await
+        // On its authorizing session's chain, as on every store.
+        let chain = format!("session:{}", code.authentication.session);
+        Self::commit_mutation(tx, &chain, audit).await
     }
 
     pub(crate) async fn get_auth_code_by_hash_impl(

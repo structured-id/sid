@@ -571,15 +571,13 @@ CREATE TABLE operation_period_state (
     issued_through bigint DEFAULT 0 NOT NULL,
     acceptance_seconds bigint DEFAULT 3600 NOT NULL,
     retention_seconds bigint DEFAULT 86400 NOT NULL,
-    -- Completions one period holds, and the largest result one keeps.
-    capacity bigint DEFAULT 100000 NOT NULL,
+    -- The largest result one completion keeps.
     result_bytes bigint DEFAULT 65536 NOT NULL,
     CONSTRAINT operation_period_state_pkey PRIMARY KEY (id),
     CONSTRAINT operation_period_state_id_check CHECK (id),
     CONSTRAINT operation_period_state_issued_through_check CHECK (issued_through >= 0),
     CONSTRAINT operation_period_state_acceptance_check CHECK (acceptance_seconds > 0),
     CONSTRAINT operation_period_state_retention_check CHECK (retention_seconds >= 0),
-    CONSTRAINT operation_period_state_capacity_check CHECK (capacity > 0),
     CONSTRAINT operation_period_state_result_bytes_check CHECK (result_bytes > 0)
 );
 
@@ -591,19 +589,6 @@ CREATE TABLE operation_periods (
     accepted_until timestamp with time zone NOT NULL,
     CONSTRAINT operation_periods_pkey PRIMARY KEY (period),
     CONSTRAINT operation_periods_period_check CHECK (period > 0)
-);
-
--- Completions committed under a period, counted in places: concurrent
--- commits count into different rows, and the places' shares of the
--- capacity add up to it.
-CREATE TABLE operation_period_places (
-    period bigint NOT NULL,
-    place smallint NOT NULL,
-    recorded bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT operation_period_places_pkey PRIMARY KEY (period, place),
-    CONSTRAINT operation_period_places_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period),
-    CONSTRAINT operation_period_places_place_check CHECK (place >= 0),
-    CONSTRAINT operation_period_places_recorded_check CHECK (recorded >= 0)
 );
 
 CREATE TABLE operation_results (

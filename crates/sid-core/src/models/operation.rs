@@ -147,14 +147,14 @@ pub struct IssuedOperationPeriod {
 
 /// The policy a store issues and retires periods under, the same for every
 /// replica: a period accepts new commands for `acceptance` from its issue,
-/// and its commands are kept for retries `retention` past that. A period
-/// holds at most `capacity` completions and a completion's result at most
-/// `result_bytes`; a commit beyond either is refused before it takes effect.
+/// and its commands are kept for retries `retention` past that. A
+/// completion's result holds at most `result_bytes`; a larger one is refused
+/// before its commit takes effect. Growth is bounded by retention: the
+/// store's own expiry (a periodic sweep or a TTL index) removes what ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationPeriodPolicy {
     pub acceptance: SignedDuration,
     pub retention: SignedDuration,
-    pub capacity: u64,
     pub result_bytes: u64,
 }
 

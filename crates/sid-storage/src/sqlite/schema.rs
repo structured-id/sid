@@ -735,26 +735,23 @@ CREATE TABLE IF NOT EXISTS key_versions (
 -- no row in operation_periods is retired and never admitted again) and the
 -- policy every replica issues and retires periods under: how long a period
 -- accepts new commands, how long its commands are kept for retries after
--- that, how many completions one period holds and the largest result one
--- keeps.
+-- that, and the largest result one completion keeps.
 CREATE TABLE IF NOT EXISTS operation_period_state (
     id                 INTEGER PRIMARY KEY CHECK (id = 1),
     issued_through     INTEGER NOT NULL DEFAULT 0 CHECK (issued_through >= 0),
     acceptance_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (acceptance_seconds > 0),
     retention_seconds  INTEGER NOT NULL DEFAULT 86400 CHECK (retention_seconds >= 0),
-    capacity           INTEGER NOT NULL DEFAULT 100000 CHECK (capacity > 0),
     result_bytes       INTEGER NOT NULL DEFAULT 65536 CHECK (result_bytes > 0)
 ) STRICT;
 INSERT OR IGNORE INTO operation_period_state (id) VALUES (1);
 
 -- The periods keyed commands are admitted under: issued in increasing order
 -- at issued_at_ms, accepting new commands until accepted_until_ms (Unix
--- milliseconds), with the completions committed under each.
+-- milliseconds).
 CREATE TABLE IF NOT EXISTS operation_periods (
     period            INTEGER PRIMARY KEY CHECK (period > 0),
     issued_at_ms      INTEGER NOT NULL,
-    accepted_until_ms INTEGER NOT NULL,
-    recorded          INTEGER NOT NULL DEFAULT 0 CHECK (recorded >= 0)
+    accepted_until_ms INTEGER NOT NULL
 ) STRICT;
 
 -- The completion of a caller's keyed command, committed with its effect.
