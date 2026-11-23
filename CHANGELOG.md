@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.36](https://github.com/structured-id/sid/compare/v0.2.35...v0.2.36) - 2026-11-23
+
+### Added
+
+- *(authz)* withhold a group grant from its grantor ([#747](https://github.com/structured-id/sid/pull/747))
+
+### Fixed
+
+- *(identity)* carry primary contacts in ListProfiles ([#740](https://github.com/structured-id/sid/pull/740))
+
+### Other
+
+- *(storage)* serialize keyed commands only on their key ([#750](https://github.com/structured-id/sid/pull/750))
+- migrate the shared test databases once per run ([#743](https://github.com/structured-id/sid/pull/743))
+
 ## [0.2.35](https://github.com/structured-id/sid/compare/v0.2.34...v0.2.35) - 2026-11-22
 
 ### Added
