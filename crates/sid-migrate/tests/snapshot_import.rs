@@ -2442,7 +2442,19 @@ async fn administrative_assignments_survive_migration() {
             depends_on: None,
             ceiling: Some(envelope.permission_ceiling.clone()),
         });
-    for assignment in [&root, &delegated, &worked] {
+    // A grant to a group, withheld from its grantor: the exclusion moves
+    // with it, or the grantor would hold its own grant after a restore.
+    let team = sid_core::models::Group::new(ProjectId::SYSTEM, "team");
+    source.create_group(&team, ctx()).await.unwrap();
+    let mut to_team = RoleAssignment::new(RoleAssignmentPrincipal::Group(team.id), working.id)
+        .granted(AssignmentProvenance {
+            granted_by: format!("user:{}", holders[0]),
+            basis: Some(root.id),
+            depends_on: None,
+            ceiling: Some(envelope.permission_ceiling.clone()),
+        });
+    to_team.withheld_from = Some(holders[0]);
+    for assignment in [&root, &delegated, &worked, &to_team] {
         source
             .create_role_assignment(assignment, ctx())
             .await
@@ -2450,7 +2462,7 @@ async fn administrative_assignments_survive_migration() {
     }
 
     let mut snapshot = export(&source).await.unwrap();
-    assert_eq!(snapshot.role_assignments.len(), 3);
+    assert_eq!(snapshot.role_assignments.len(), 4);
     // The dependent first, as the export may list it.
     snapshot
         .role_assignments
@@ -2458,11 +2470,11 @@ async fn administrative_assignments_survive_migration() {
 
     let target = SqliteBackend::new_in_memory().await.unwrap();
     let first = import(&target, &snapshot).await.unwrap();
-    assert_eq!(first.role_assignments, 3);
+    assert_eq!(first.role_assignments, 4);
     let second = import(&target, &snapshot).await.unwrap();
     assert_eq!(second.role_assignments, 0, "a repeated import adds nothing");
 
-    for original in [&root, &delegated, &worked] {
+    for original in [&root, &delegated, &worked, &to_team] {
         let moved = target
             .get_role_assignment(original.id)
             .await
@@ -2470,6 +2482,7 @@ async fn administrative_assignments_survive_migration() {
             .expect("the assignment moved");
         assert_eq!(moved.admin, original.admin);
         assert_eq!(moved.provenance, original.provenance);
+        assert_eq!(moved.withheld_from, original.withheld_from);
     }
 
     // The dependency moved too: ending the source ends the redelegation.
