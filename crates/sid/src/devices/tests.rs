@@ -682,6 +682,7 @@ async fn a_signed_in_caller_enrolls_through_the_engine() {
     };
     let claims = sign_in
         .jwt()
+        .unwrap()
         .validate_access_token(token.expose_secret())
         .unwrap();
     let caller = KeyCaller::from(&sid_authn::caller::Caller::from_claims(&claims).unwrap());

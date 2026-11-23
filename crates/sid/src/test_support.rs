@@ -28,16 +28,28 @@ pub(crate) fn keys() -> Arc<dyn sid_keys::KeyManager> {
 }
 
 pub(crate) fn sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
-    use sid_plugin::crypto::OpaqueOperations;
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
     let jwt = sid_authn::jwt::JwtService::new(
         include_bytes!("../../sid-authn/tests/fixtures/test_ed25519_private.pem"),
         include_bytes!("../../sid-authn/tests/fixtures/test_ed25519_public.pem"),
         "https://sid.example.com".to_string(),
     )
     .unwrap();
+    sign_in_with(storage, Some(Arc::new(jwt)))
+}
+
+/// Sign-in of a host serving browsers alone: no token signer.
+pub(crate) fn browser_only_sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
+    sign_in_with(storage, None)
+}
+
+fn sign_in_with(
+    storage: Arc<dyn StorageBackend>,
+    jwt: Option<Arc<sid_authn::jwt::JwtService>>,
+) -> SignIn {
+    use sid_plugin::crypto::OpaqueOperations;
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
     let primary = Box::new(sid_authn::opaque::PallasOpaque::new());
     let setup = primary.create_setup(None).unwrap();
     let mut verifiers: std::collections::HashMap<
@@ -50,7 +62,7 @@ pub(crate) fn sign_in(storage: Arc<dyn StorageBackend>) -> SignIn {
     );
     SignIn::new(SignInParts {
         storage,
-        jwt: Arc::new(jwt),
+        jwt,
         revocation: Arc::new(sid_authn::revocation_cache::RevocationCache::new(
             std::time::Duration::from_secs(900),
             cache.clone(),

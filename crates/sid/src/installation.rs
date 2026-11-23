@@ -125,10 +125,8 @@ impl Installation {
             .host_str()
             .map(str::to_ascii_lowercase)
             .ok_or_else(|| InstallationError::IssuerHost(settings.issuer.clone()))?;
-        storage
-            .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
-            .await
-            .map_err(store("system project"))?;
+        // The field keys open before anything is written: a custody whose
+        // master is lost refuses the open with the installation unchanged.
         let key_manager = sid_authn::field_keys::field_key_manager(
             storage.as_ref(),
             &settings.master_key,
@@ -136,6 +134,10 @@ impl Installation {
         )
         .await
         .map_err(InstallationError::FieldKeys)?;
+        storage
+            .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
+            .await
+            .map_err(store("system project"))?;
         let captcha_pow_key =
             sid_authn::captcha::load_or_create_pow_key(storage.as_ref(), key_manager.as_ref())
                 .await

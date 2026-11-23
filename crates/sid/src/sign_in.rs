@@ -92,6 +92,11 @@ pub enum SignInError {
     /// The account no longer signs in; one answer whatever the reason.
     #[error("authentication failed")]
     AuthenticationFailed,
+    /// The host serves browsers alone: it was given no token signer, so a
+    /// native client's bearer delivery and a bearer token's step-up are not
+    /// part of it. Refused before anything commits.
+    #[error("bearer tokens are not served by this host")]
+    BearerNotServed,
     /// The sign-in's kept state could not be read or written.
     #[error(transparent)]
     Ceremony(#[from] ChallengeStoreError),
@@ -259,7 +264,11 @@ pub const ADMITTED_METHOD: &str = "admitted_sign_in";
 /// What signing in uses, handed over by the host.
 pub struct SignInParts {
     pub storage: Arc<dyn StorageBackend>,
-    pub jwt: Arc<JwtService>,
+    /// Signs the access tokens native clients receive and bearer step-ups
+    /// rotate. `None` for a host serving browsers alone: browsers sign in
+    /// with the session cookie and CSRF token, and a native client or a
+    /// bearer step-up is refused with [`SignInError::BearerNotServed`].
+    pub jwt: Option<Arc<JwtService>>,
     pub revocation: Arc<RevocationCache>,
     /// The issuer whose events announce sessions and security reactions.
     pub issuer: String,
@@ -293,7 +302,7 @@ struct Completing<'a> {
 /// Signing users in for one authority.
 pub struct SignIn {
     storage: Arc<dyn StorageBackend>,
-    jwt: Arc<JwtService>,
+    jwt: Option<Arc<JwtService>>,
     revocation: Arc<RevocationCache>,
     issuer: String,
     anomaly: Arc<AnomalyDetector>,
@@ -369,9 +378,22 @@ impl SignIn {
         &self.anomaly
     }
 
-    /// The tokens a sign-in's credential is issued with.
-    pub(crate) fn jwt(&self) -> &JwtService {
-        &self.jwt
+    /// The signer of the bearer tokens; refused on a host serving browsers
+    /// alone.
+    pub(crate) fn jwt(&self) -> Result<&JwtService, SignInError> {
+        self.jwt.as_deref().ok_or(SignInError::BearerNotServed)
+    }
+
+    /// Whether this host delivers to `client`: a browser always, a native
+    /// client only with a token signer. Checked before anything is spent or
+    /// rotated: before a native refresh looks up its generation, before a
+    /// second factor's code is judged, and again by the delivery before its
+    /// commit.
+    pub fn serves(&self, client: CeremonyClient) -> Result<(), SignInError> {
+        match client {
+            CeremonyClient::Browser => Ok(()),
+            CeremonyClient::Native => self.jwt().map(|_| ()),
+        }
     }
 
     /// The store the sign-ins read and commit to.
@@ -1272,7 +1294,7 @@ impl SignIn {
             return Ok(true);
         };
         let Ok(claims) = self
-            .jwt()
+            .jwt()?
             .validate_access_token(secrecy::ExposeSecret::expose_secret(token))
         else {
             return Ok(false);
@@ -1370,6 +1392,9 @@ impl SignIn {
                 Ok((credential.signed_in(&self.cookie, &session), csrf))
             }
             CeremonyClient::Native => {
+                // A host without a token signer commits no session it cannot
+                // deliver.
+                self.serves(client)?;
                 // Checked before anything commits: a policy that cannot shape
                 // a generation creates no session.
                 let first = native_key
@@ -1441,8 +1466,8 @@ impl SignIn {
         let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), profile)
             .await
             .map_err(|e| internal("read the account's roles", e))?;
-        let access_token = self
-            .jwt
+        let jwt = self.jwt()?;
+        let access_token = jwt
             .issue_access_token(
                 &sub,
                 Some(&sub),
@@ -1454,7 +1479,7 @@ impl SignIn {
             )
             .map_err(|e| internal("issue access token", e))?;
         // The token expires with the session when the session is shorter.
-        let expires_in = self.jwt.access_token_ttl_secs().min(
+        let expires_in = jwt.access_token_ttl_secs().min(
             session
                 .expires_at
                 .duration_since(Timestamp::now())

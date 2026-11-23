@@ -340,6 +340,9 @@ impl SignIn {
         proofs: &DPopValidator,
         request: RefreshRequest<'_>,
     ) -> Result<SignedIn, SignInError> {
+        // A host without a token signer rotates nothing it could not deliver:
+        // a retired generation would read as reuse on the next exchange.
+        self.serves(CeremonyClient::Native)?;
         let policy = NativePolicy::from_session_policy(&self.policy.session)
             .map_err(|e| internal("read the native session policy", e))?;
         let refreshed = sid_authn::native_session::refresh(
