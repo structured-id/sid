@@ -404,6 +404,18 @@ async fn host_audit_tables_of_another_schema_are_refused() {
     assert!(kept, "the refused database was changed");
 }
 
+/// A pool of no connections is refused before any is opened, rather than
+/// serving a store every query of which waits forever.
+#[tokio::test]
+async fn a_pool_of_no_connections_is_refused() {
+    let refused = PostgresBackend::connect(&database_url(), None, Some(0)).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Validation(_))),
+        "{:?}",
+        refused.err()
+    );
+}
+
 /// Regression: a new command under a key whose completion expired waited
 /// for a purge removing that completion and its binding, then checked the
 /// binding against the snapshot taken before the purge committed, found the
