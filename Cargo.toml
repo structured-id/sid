@@ -125,7 +125,7 @@ jiff-sqlx = { version = "1", features = ["postgres"] }
 # Cryptography (OPAQUE)
 # The OPAQUE and OPRF implementations, kept in this workspace on the current
 # RustCrypto releases and published from it.
-sid-opaque-ke = { path = "crates/sid-opaque-ke", version = "4.2", features = ["argon2"] }
+sid-opaque-ke = { version = "4.2", features = ["argon2"] }
 argon2 = "0.6"
 rand = "0.10"
 rand_core = "0.10"
@@ -163,7 +163,7 @@ fred = { version = "10", default-features = false, features = ["enable-rustls-ri
 # VOPRF / CipherSuite adapter (Pallas).
 # `danger` exposes `derive_key`, which the key-exchange group needs to derive
 # its key pair the way the built-in curves do.
-sid-voprf = { path = "crates/sid-voprf", version = "0.6", features = ["danger"] }
+sid-voprf = { version = "0.6", features = ["danger"] }
 sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
@@ -258,8 +258,9 @@ sid-infra = { path = "crates/sid-infra" }
 sid-serve = { path = "crates/sid-serve" }
 sid-i18n = { path = "crates/sid-i18n" }
 
-# The ZKPP submodule names the published OPAQUE crates; inside this workspace
-# it builds against their sources here, the same code the server uses.
+# The workspace and the ZKPP submodule name the published OPAQUE crates;
+# inside this workspace both build against their sources here, the same code
+# the server uses. A patch applies only here, never to a consumer.
 [patch.crates-io]
 sid-opaque-ke = { path = "crates/sid-opaque-ke" }
 sid-voprf = { path = "crates/sid-voprf" }
