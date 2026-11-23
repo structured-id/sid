@@ -234,11 +234,7 @@ impl XOAuth2TokenProvider for GoogleTokenProvider {
             sub: self.user_email.clone(),
         };
 
-        // The only RSA private-key operation in the workspace. Google requires
-        // RS256 here, and the pure-Rust `rsa` backend has no constant-time
-        // private-key path (RUSTSEC-2023-0071). Safe as written because the
-        // claims are ours and nobody outside can drive or time this signature;
-        // it stops being safe if an RSA key is ever signed with on request.
+        // Google requires RS256 for the service account's assertion.
         let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())?;
         let jwt = encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)?;
 

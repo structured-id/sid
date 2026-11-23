@@ -3,9 +3,6 @@
 
 [advisories]
 ignore = [
-    # rsa timing side-channel (Marvin Attack) — no fix available.
-    # Pulled in via sqlx-mysql (we use PostgreSQL only, mysql feature is transitive from sea-orm).
-    "RUSTSEC-2023-0071",
     # rustls-pemfile unmaintained — transitive via async-nats → rustls-native-certs.
     # No action needed until async-nats migrates.
     "RUSTSEC-2025-0134",

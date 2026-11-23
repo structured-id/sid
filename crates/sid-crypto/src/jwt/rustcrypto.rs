@@ -290,7 +290,7 @@ fn verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtVerif
     Ok(result)
 }
 
-fn rsa_key(key: &DecodingKey) -> Result<rsa::RsaPublicKey> {
+fn rsa_key(key: &DecodingKey) -> Result<rsa::PublicKey> {
     let result = match key.kind() {
         DecodingKeyKind::SecretOrDer(bytes) => crate::public_key::rsa_from_pkcs1(bytes),
         DecodingKeyKind::RsaModulusExponent { n, e } => {

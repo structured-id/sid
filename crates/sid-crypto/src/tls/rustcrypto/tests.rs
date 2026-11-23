@@ -222,7 +222,7 @@ fn x25519_valid_exchange_agrees() {
 fn rsa_private_keys_are_refused() {
     use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::pkcs8::EncodePrivateKey;
-    let key = rsa::RsaPrivateKey::new(
+    let key = rsa::PrivateKey::new(
         &mut getrandom::rand_core::UnwrapErr(getrandom::SysRng),
         2048,
     )
@@ -319,7 +319,7 @@ fn tls12_aes_export_preserves_nonce_and_algorithm() {
 fn rsa_verification_rejects_small_modulus() {
     use rsa::pkcs1::EncodeRsaPublicKey;
     use signature::{SignatureEncoding, Signer};
-    let key = rsa::RsaPrivateKey::new(
+    let key = rsa::PrivateKey::new(
         &mut getrandom::rand_core::UnwrapErr(getrandom::SysRng),
         1024,
     )

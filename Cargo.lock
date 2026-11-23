@@ -5352,14 +5352,16 @@ dependencies = [
 
 [[package]]
 name = "rsa"
-version = "0.10.0-rc.19"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33405e321e16ef941ca66e254f6904c3aafd3c7ff001fb88bf11c73eb75c2b85"
+checksum = "23e77fd77e0dea28b3011fd62d15445b7de7959333b0276d930e03be0f755699"
 dependencies = [
  "const-oid 0.10.3",
  "crypto-bigint",
+ "crypto-common 0.2.2",
  "crypto-primes",
  "digest 0.11.3",
+ "hmac",
  "pkcs1",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
@@ -7409,9 +7411,9 @@ dependencies = [
 
 [[package]]
 name = "structured-webauthn"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32da93c1e4d9e44c3754e0ce19e467d34deed7097a2bd64aa5a3dfbd020696cd"
+checksum = "aa41e15c67052886ea279a432531084cd5309dec7ea744980e506822d177c6f3"
 dependencies = [
  "base64url_nopad",
  "ed25519-dalek 3.0.0",
