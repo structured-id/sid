@@ -511,7 +511,8 @@ pub struct RoleAssignment {
     /// granted it on a basis that did not cover assigning to itself (D050 B
     /// point 4). That member may join the group, yet receives neither the
     /// role nor its administrative authority from this assignment, for as
-    /// long as the assignment exists.
+    /// long as the assignment exists. A snapshot carries it; an archive
+    /// written before it was recorded is of an older format and refused.
     #[serde(default)]
     pub withheld_from: Option<ProfileId>,
     /// Stored revision: 0 when created, moved on by every change, so a
