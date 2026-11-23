@@ -20,15 +20,7 @@ fn audit() -> MutationContext {
 }
 
 async fn postgres() -> Arc<dyn StorageBackend> {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".into());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
-    Arc::new(backend)
+    Arc::new(sid_storage::testing::prepared_postgres().await)
 }
 
 async fn sqlite() -> Arc<dyn StorageBackend> {

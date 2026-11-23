@@ -13,24 +13,16 @@ fn test_generate_id_is_valid_uuid() {
     assert!(uuid::Uuid::parse_str(&id).is_ok());
 }
 
-fn database_url() -> String {
-    std::env::var("SID_STORAGE_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid_storage_test".to_string())
-}
-
 /// A record stamped with a sub-microsecond clock (Linux) still verifies after
 /// the round trip through `timestamptz`, which keeps microseconds only. The
 /// hash was computed over nanoseconds the database never stored, so every
 /// chain written on such a clock read back as broken.
 #[tokio::test]
 async fn test_a_nanosecond_clock_keeps_the_chain_verifiable() {
-    let pool = PgPool::connect(&database_url())
+    let pool = crate::testing::prepared_storage_postgres()
         .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-    crate::migrator::run_migrations(&pool, None)
-        .await
-        .expect("Failed to run migrations");
+        .pool()
+        .clone();
     let chain_id = format!("profile:{}", uuid::Uuid::now_v7());
     let at = Timestamp::new(1_790_000_000, 123_456_789).expect("valid instant");
 

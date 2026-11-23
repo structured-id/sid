@@ -33,14 +33,7 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     common::adopt_operation_period(&backend).await;
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let jwt = test_jwt();

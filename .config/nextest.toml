@@ -1,6 +1,45 @@
 # nextest configuration for SID CE workspace
 # Docs: https://nexte.st/docs/configuration/
 
+experimental = ["setup-scripts"]
+
+# Each shared PostgreSQL test database is migrated once per run, before the
+# tests that use it; tests connect without migrating it. Each test runs in
+# its own process, so migrating per test repeated the whole migration check,
+# queued on the migrator's lock, in every test. Only the tests that reach a
+# shared database run its script, so suites on SQLite or no database stay
+# runnable without the compose stack. A test reaching a database its script
+# did not prepare fails, naming the cause: add its binary here.
+[scripts.setup.engine-database]
+command = "cargo run --locked --quiet -p sid-storage --features test-support --example prepare_test_database -- engine"
+
+[scripts.setup.storage-database]
+command = "cargo run --locked --quiet -p sid-storage --features test-support --example prepare_test_database -- storage"
+
+[[profile.default.scripts]]
+filter = """
+binary_id(sid-scim::scim_integration)
+| binary_id(structured-id::audit_partition) | binary_id(structured-id::closure_lifecycle)
+| binary_id(sid-server::anomaly_event_log) | binary_id(sid-server::authz_service_authz)
+| binary_id(sid-server::authz_service_errors) | binary_id(sid-server::device_location_integration)
+| binary_id(sid-server::email_handles) | binary_id(sid-server::enrollment_pg)
+| binary_id(sid-server::ip_allowlist_integration) | binary_id(sid-server::ip_reputation_integration)
+| binary_id(sid-server::keyed_assign_role) | binary_id(sid-server::keyed_store_conflicts)
+| binary_id(sid-server::machine_credential_pg) | binary_id(sid-server::magic_link_e2e)
+| binary_id(sid-server::mfa_enrollment) | binary_id(sid-server::new_ip_detection)
+| binary_id(sid-server::pat_admin_pg) | binary_id(sid-server::role_administration)
+| binary_id(sid-server::role_administration_api) | binary_id(sid-server::set_role_assignments)
+"""
+setup = "engine-database"
+
+[[profile.default.scripts]]
+filter = """
+binary_id(sid-storage::postgres_integration) | binary_id(sid-storage::field_encryption_pg)
+| (binary_id(sid-storage::host_mutation) & test(/^postgres::/))
+| (binary_id(sid-storage) & (test(/^audit_log::/) | test(/^postgres::work::/)))
+"""
+setup = "storage-database"
+
 [profile.default]
 # Default: 8 parallel test threads
 test-threads = 8

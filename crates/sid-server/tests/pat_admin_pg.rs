@@ -16,18 +16,8 @@ use std::sync::Arc;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
 async fn pg_storage() -> Arc<dyn StorageBackend> {
-    let backend = sid_storage::PostgresBackend::new(&database_url(), None)
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("Failed to run migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     common::adopt_operation_period(&backend).await;
     Arc::new(backend)
 }

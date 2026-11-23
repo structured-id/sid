@@ -7,14 +7,7 @@
 use sid::maintenance::{AuditRetention, RetentionAction, manage_audit_partitions};
 
 async fn setup() -> (sid_storage::PostgresBackend, sqlx::PgPool) {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
-        .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
-        .await
-        .expect("migrations");
+    let backend = sid_storage::testing::prepared_postgres().await;
     let pool = backend.pool().clone();
     (backend, pool)
 }

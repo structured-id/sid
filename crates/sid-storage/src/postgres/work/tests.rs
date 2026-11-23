@@ -3,20 +3,11 @@ use std::time::Duration;
 
 use super::*;
 
-fn database_url() -> String {
-    std::env::var("SID_STORAGE_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid_storage_test".to_string())
-}
-
 async fn pool() -> PgPool {
-    let pool = PgPool::connect(&database_url())
+    crate::testing::prepared_storage_postgres()
         .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-    crate::migrator::run_migrations(&pool, None)
-        .await
-        .expect("Failed to run migrations");
-    pool
+        .pool()
+        .clone()
 }
 
 /// A kind no other test uses.
