@@ -45,9 +45,53 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-  test:
-    name: Test
+  # The workspace tests in groups of crates, each built and run on its own
+  # runner. In one job the build took 8.5 minutes and the run 21 (8,800
+  # test-seconds): half of it the CoordiNode storage contract, then the
+  # PostgreSQL one, the ZKPP password flows and the cryptographic cores. Each
+  # group builds only its own packages' tests (`-p`); `rest` is the workspace
+  # without the packages the groups above name, so a new crate lands there.
+  tests:
+    name: Tests (${{ matrix.group }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: storage coordinode 1/2
+            args: >-
+              -p sid-storage -E 'binary_id(sid-storage::coordinode_integration)'
+              --partition count:1/2
+          - group: storage coordinode 2/2
+            args: >-
+              -p sid-storage -E 'binary_id(sid-storage::coordinode_integration)'
+              --partition count:2/2
+          - group: storage
+            args: >-
+              -p sid-storage -p sid-authz
+              -E 'not binary_id(sid-storage::coordinode_integration)'
+          - group: crypto
+            args: >-
+              -p sid-authn -p sid-core -p sid-keys -p sid-opaque-ke -p sid-voprf
+              -p sid-crypto
+          - group: server flows
+            browser: true
+            args: >-
+              -p sid-server -E 'binary_id(sid-server::zkpp_password_change)
+              | binary_id(sid-server::packaged_password_client)
+              | binary_id(sid-server::zkpp_login)'
+          - group: server
+            args: >-
+              -p sid-server -E 'not (binary_id(sid-server::zkpp_password_change)
+              | binary_id(sid-server::packaged_password_client)
+              | binary_id(sid-server::zkpp_login))'
+          - group: rest
+            doc: true
+            args: >-
+              --workspace --exclude sid-storage --exclude sid-authz
+              --exclude sid-authn --exclude sid-core --exclude sid-keys
+              --exclude sid-opaque-ke --exclude sid-voprf --exclude sid-crypto
+              --exclude sid-server
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
@@ -66,6 +110,8 @@ jobs:
         with:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: tests-${{ matrix.group }}
       # PostgreSQL, Redis and NATS as the integration tests expect them locally.
       - name: Test services
         run: docker compose -f docker-compose.test.yml up -d --wait
@@ -77,26 +123,72 @@ jobs:
           sudo docker cp "$id":/usr/local/bin/nats-server /usr/local/bin/nats-server
           docker rm "$id"
           nats-server --version
+      # The published password client runs only in the group of its tests.
       - uses: actions/setup-node@v7
+        if: matrix.browser
         with:
           node-version: 24
       - name: Immutable published password client
+        if: matrix.browser
         run: npm ci --ignore-scripts --prefix ci/password-clients
       # The runner image carries Chromium's system libraries; no apt step, its
       # mirror is not always resolvable from the runners.
       - name: Browser for published client conformance
+        if: matrix.browser
         run: ci/password-clients/node_modules/.bin/playwright install chromium
       # The ZKPP circuit crate comes from the zkpp submodule as a dependency, not
       # a workspace member, and is tested in its own repository with optimized
       # builds; sid-crypto holds the server primitives and runs here.
       - name: Tests
-        run: cargo nextest run --locked --workspace --all-features --profile ci
+        env:
+          ARGS: ${{ matrix.args }}
+        run: eval cargo nextest run --locked --all-features --profile ci "$ARGS"
       - name: Doc tests
+        if: matrix.doc
         run: cargo test --locked --doc --workspace --all-features
 
-  dependency-isolation:
-    name: Dependency isolation
+  # The check the branch rules require: passes only when every group did.
+  test:
+    name: Test
+    if: always()
+    needs: tests
     runs-on: ubuntu-latest
+    steps:
+      - name: Every group passed
+        env:
+          RESULT: ${{ needs.tests.result }}
+        run: |
+          echo "test groups: $RESULT"
+          [[ "$RESULT" == "success" ]]
+
+  # The isolation checks in eight parallel clusters of similar length. Run
+  # in sequence on the hosted runner they took 44 minutes: the feature
+  # combinations 18, the per-feature checks 13, the server powerset 9, the
+  # rest 3; each cluster here holds at most about 6.5 minutes of that.
+  # Each cluster runs one or more parts of the script.
+  isolation:
+    name: Isolation (${{ matrix.cluster }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cluster: combos 1/3
+            parts: "combos:1/3"
+          - cluster: combos 2/3
+            parts: "combos:2/3"
+          - cluster: combos 3/3
+            parts: "combos:3/3"
+          - cluster: each feature 1/2
+            parts: "each-workspace:1/2"
+          - cluster: each feature 2/2
+            parts: "each-workspace:2/2"
+          - cluster: server powerset 1/2
+            parts: "each-server:1/2"
+          - cluster: server powerset 2/2
+            parts: "each-server:2/2"
+          - cluster: closures and consumers
+            parts: "closure crypto transport consumers each-migrate"
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
@@ -115,10 +207,37 @@ jobs:
         with:
           tool: cargo-hack
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: isolation-${{ matrix.parts }}
       # Each package builds with the features it declares itself: a workspace
       # build unifies features across packages and hides a missing declaration.
       # Client-facing packages also must not pull server or storage crates.
-      - run: ci/check-dependency-isolation.sh all
+      # Every part of the cluster runs, then the cluster fails if any did.
+      - name: Isolation checks
+        env:
+          PARTS: ${{ matrix.parts }}
+        run: |
+          status=0
+          for part in $PARTS; do
+            args=("${part%%:*}")
+            [[ "$part" == *:* ]] && args+=("${part#*:}")
+            ci/check-dependency-isolation.sh "${args[@]}" || status=1
+          done
+          exit "$status"
+
+  # The check the branch rules require: passes only when every cluster did.
+  dependency-isolation:
+    name: Dependency isolation
+    if: always()
+    needs: isolation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every cluster passed
+        env:
+          RESULT: ${{ needs.isolation.result }}
+        run: |
+          echo "isolation clusters: $RESULT"
+          [[ "$RESULT" == "success" ]]
 
   engine-package:
     name: Engine (packaged external consumer)
