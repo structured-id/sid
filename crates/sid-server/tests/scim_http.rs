@@ -71,30 +71,23 @@ struct Installation {
     directory: ProtectedResource,
     /// Keeps a SQLite database file for the installation's lifetime.
     _dir: tempfile::TempDir,
-}
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
+    /// Removes a PostgreSQL installation's database after every handle.
+    _postgres: Option<sid_storage::testing::IsolatedPostgres>,
 }
 
 async fn installation(engine: Engine) -> Installation {
     let dir = tempfile::tempdir().expect("data directory");
-    let (storage, history_keys): (
+    let (storage, history_keys, postgres): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
+        _,
     ) = match engine {
         Engine::Postgres => {
-            let schema = format!("scim_http_{}", Uuid::now_v7().simple());
-            let backend = sid_storage::PostgresBackend::new(&database_url(), Some(schema.clone()))
-                .await
-                .expect("test database (docker-compose.test.yml)");
-            sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-                .await
-                .expect("migrations");
+            let installation = sid_storage::testing::IsolatedPostgres::new().await;
+            let backend = installation.backend().clone();
             let keys = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
             keys.migrate().await.expect("history key migrations");
-            (Arc::new(backend), Arc::new(keys))
+            (Arc::new(backend), Arc::new(keys), Some(installation))
         }
         Engine::Sqlite => {
             let backend = sid_storage::sqlite::SqliteBackend::new(
@@ -103,7 +96,7 @@ async fn installation(engine: Engine) -> Installation {
             .await
             .expect("SQLite store");
             let keys = backend.history_keys();
-            (Arc::new(backend), Arc::new(keys))
+            (Arc::new(backend), Arc::new(keys), None)
         }
     };
     common::adopt_operation_period(storage.as_ref()).await;
@@ -140,6 +133,7 @@ async fn installation(engine: Engine) -> Installation {
         issuer,
         directory,
         _dir: dir,
+        _postgres: postgres,
     }
 }
 

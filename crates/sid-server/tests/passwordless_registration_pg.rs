@@ -20,7 +20,6 @@ use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use sid_server::grpc::auth_service::AuthServiceImpl;
-use sid_storage::PostgresBackend;
 use tonic::{Code, Request, Response, Status};
 use tonic_types::StatusExt;
 
@@ -28,12 +27,7 @@ use tonic_types::StatusExt;
 const WEBAUTHN_ORIGIN: &str = "https://sid.example.com";
 const RP: &str = "sid.example.com";
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
-/// An address no other scenario uses: the scenarios share one schema.
+/// An address no other scenario uses: the scenarios share one installation.
 fn address(tag: &str) -> String {
     format!("{tag}{}@sid.example.com", uuid::Uuid::now_v7().simple())
 }
@@ -341,30 +335,23 @@ async fn store_mode(storage: &dyn StorageBackend, mode: EnrollmentMode) {
         .unwrap();
 }
 
-/// The suite's database: one PostgreSQL schema of its own, migrated once.
-/// Each scenario runs on a new installation over it with data of its own;
-/// the schema is dropped at the end, also after a failed scenario.
+/// The suite's database: one PostgreSQL installation of its own, a copy of
+/// the run's template. Each scenario runs on a new installation over it with
+/// data of its own; the copy is removed at the end, also after a failed
+/// scenario.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passwordless_registration() {
-    let schema = format!("pwless_reg_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in an isolated schema");
-    common::adopt_operation_period(&backend).await;
-    let pool = backend.pool().clone();
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
-    // A claimed installation: self-registration follows its policy, not the
-    // instance claim.
-    let administrator = Profile::new(Some("pwless_admin"));
-    storage
-        .create_profile(&administrator, AuditEntry::system("test", "profile").into())
-        .await
-        .unwrap();
-    common::assign_administrator(storage.as_ref(), administrator.id).await;
-    let outcome = tokio::spawn(async move {
+    sid_storage::testing::in_isolated_postgres(|backend| async move {
+        common::adopt_operation_period(&backend).await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+        // A claimed installation: self-registration follows its policy, not
+        // the instance claim.
+        let administrator = Profile::new(Some("pwless_admin"));
+        storage
+            .create_profile(&administrator, AuditEntry::system("test", "profile").into())
+            .await
+            .unwrap();
+        common::assign_administrator(storage.as_ref(), administrator.id).await;
         the_page_registers_a_passkey_account_that_then_signs_in(installation(storage.clone()))
             .await;
         a_native_client_registers_with_its_bearer(installation(storage.clone())).await;
@@ -380,18 +367,6 @@ async fn passwordless_registration() {
         concurrent_finishes_commit_once(installation(storage)).await;
     })
     .await;
-    for statement in [
-        format!("DROP SCHEMA \"{schema}\" CASCADE"),
-        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
 }
 
 /// The page's whole registration: the code confirms the address, the

@@ -25,13 +25,7 @@ use sid_plugin::notification::{
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use sid_server::auth_mail::{MailTransport, TemplatedMail};
-use sid_storage::PostgresBackend;
 use tonic::Request;
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
 
 /// The email channel at the edge of the installation: records each mail
 /// instead of handing it to a provider.
@@ -303,52 +297,30 @@ fn code_in(message: &RenderedMessage) -> String {
         .unwrap_or_else(|| panic!("no code in the mail: {}", message.body))
 }
 
-/// The suite's database: one PostgreSQL schema of its own, migrated once, so
-/// the runner sees this suite's work alone. Each scenario runs on a new
-/// installation (service and engine) over it with data of its own; the
-/// schema is dropped once at the end, also after a failed scenario.
+/// The suite's database: one PostgreSQL installation of its own, a copy of
+/// the run's template, so the runner sees this suite's work alone. Each
+/// scenario runs on a new installation (service and engine) over it with
+/// data of its own; the copy is removed at the end, also after a failed
+/// scenario.
 #[tokio::test]
 async fn sign_in_codes_through_the_servers_work() {
-    let schema = format!("otp_mail_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in an isolated schema");
-    let pool = backend.pool().clone();
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
-    storage
-        .ensure_system_project(AuditEntry::system("test", "system").into())
-        .await
-        .unwrap();
-    let outcome = {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            requested_code_reaches_the_mailbox_and_signs_in(installation(
-                storage.clone(),
-                pool.clone(),
-            ))
-            .await;
-            resent_code_replaces_the_mail_of_the_first(installation(storage.clone(), pool.clone()))
-                .await;
-            the_sign_in_page_resends_a_code_and_signs_in_with_it(installation(storage, pool)).await;
-        })
-        .await
-    };
-    // The migrations also create the schema's database-wide reader role.
-    for statement in [
-        format!("DROP SCHEMA \"{schema}\" CASCADE"),
-        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
+    sid_storage::testing::in_isolated_postgres(|backend| async move {
+        let pool = backend.pool().clone();
+        let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+        storage
+            .ensure_system_project(AuditEntry::system("test", "system").into())
             .await
             .unwrap();
-    }
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
+        requested_code_reaches_the_mailbox_and_signs_in(installation(
+            storage.clone(),
+            pool.clone(),
+        ))
+        .await;
+        resent_code_replaces_the_mail_of_the_first(installation(storage.clone(), pool.clone()))
+            .await;
+        the_sign_in_page_resends_a_code_and_signs_in_with_it(installation(storage, pool)).await;
+    })
+    .await;
 }
 
 /// A requested code reaches the account's stored mailbox (spelled unlike the

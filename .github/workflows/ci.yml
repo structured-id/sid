@@ -46,11 +46,11 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   # The workspace tests in groups of crates, each built and run on its own
-  # runner. In one job the build took 8.5 minutes and the run 21 (8,800
-  # test-seconds): half of it the CoordiNode storage contract, then the
-  # PostgreSQL one, the ZKPP password flows and the cryptographic cores. Each
-  # group builds only its own packages' tests (`-p`); `rest` is the workspace
-  # without the packages the groups above name, so a new crate lands there.
+  # runner. In one job the build took 8.5 minutes and the run 21: the
+  # storage engines' tests, the ZKPP password flows and the cryptographic
+  # cores the longest of it. Each group builds only its own packages' tests
+  # (`-p`); `rest` is the workspace without the packages the groups above
+  # name, so a new crate lands there.
   tests:
     name: Tests (${{ matrix.group }})
     runs-on: ubuntu-latest
@@ -58,18 +58,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - group: storage coordinode 1/2
-            args: >-
-              -p sid-storage -E 'binary_id(sid-storage::coordinode_integration)'
-              --partition count:1/2
-          - group: storage coordinode 2/2
-            args: >-
-              -p sid-storage -E 'binary_id(sid-storage::coordinode_integration)'
-              --partition count:2/2
           - group: storage
-            args: >-
-              -p sid-storage -p sid-authz
-              -E 'not binary_id(sid-storage::coordinode_integration)'
+            args: -p sid-storage -p sid-authz
           - group: crypto
             args: >-
               -p sid-authn -p sid-core -p sid-keys -p sid-opaque-ke -p sid-voprf

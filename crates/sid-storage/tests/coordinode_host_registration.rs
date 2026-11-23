@@ -17,13 +17,13 @@ use sid_core::models::{AuditEntry, CredentialType, MutationContext, NewRegistrat
 use sid_plugin::conformance::backend::new_email_registration;
 use sid_plugin::{CredentialStore, StorageBackend};
 use sid_storage::coordinode::{CoordinodeBackend, HostTransaction, HostWriteError};
+use sid_storage::testing::{IsolatedCoordinode, isolated_coordinode};
 
-async fn store() -> (CoordinodeBackend, Arc<Database>) {
-    let db = Arc::new(Database::open_in_memory().expect("CoordiNode in memory"));
-    let backend = CoordinodeBackend::new(db.clone())
-        .await
-        .expect("SID's schema in CoordiNode");
-    (backend, db)
+/// A copy of the run's prepared store: SID's backend, the host's handle on
+/// the same database, and the copy itself, removed when the test ends.
+async fn store() -> (CoordinodeBackend, Arc<Database>, IsolatedCoordinode) {
+    let isolated = isolated_coordinode().await;
+    (isolated.backend.clone(), isolated.db.clone(), isolated)
 }
 
 fn audit() -> MutationContext {
@@ -66,7 +66,7 @@ async fn opaque_credentials(backend: &CoordinodeBackend, registration: &NewRegis
 /// The host's record and the registration commit as one.
 #[tokio::test]
 async fn the_host_record_and_the_registration_commit_together() {
-    let (backend, db) = store().await;
+    let (backend, db, _copy) = store().await;
     let registration = new_email_registration(&format!("{}@sid.example.com", uuid::Uuid::now_v7()));
     let (claim, registration) = tokio::task::spawn_blocking({
         let db = db.clone();
@@ -94,7 +94,7 @@ async fn the_host_record_and_the_registration_commit_together() {
 /// A host rolling its attempt back keeps neither its record nor the account.
 #[tokio::test]
 async fn a_rolled_back_attempt_leaves_nothing() {
-    let (backend, db) = store().await;
+    let (backend, db, _copy) = store().await;
     let registration = new_email_registration(&format!("{}@sid.example.com", uuid::Uuid::now_v7()));
     let registration = tokio::task::spawn_blocking({
         let db = db.clone();
@@ -124,7 +124,7 @@ async fn a_rolled_back_attempt_leaves_nothing() {
 /// leaving no credential and no host record.
 #[tokio::test]
 async fn of_two_competing_claims_one_commits_and_the_other_leaves_nothing() {
-    let (backend, db) = store().await;
+    let (backend, db, _copy) = store().await;
     let email = format!("{}@sid.example.com", uuid::Uuid::now_v7());
     let winner = new_email_registration(&email);
     let loser = new_email_registration(&email);

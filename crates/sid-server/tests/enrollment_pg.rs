@@ -13,8 +13,6 @@ use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 use std::sync::Arc;
 use tonic::Request;
 
-use sid_storage::testing::database_url;
-
 async fn setup_pg_storage() -> Arc<dyn StorageBackend> {
     let backend = sid_storage::testing::prepared_postgres().await;
     common::adopt_operation_period(&backend).await;
@@ -141,19 +139,13 @@ async fn test_pg_enrollment_create_list_revoke_lifecycle() {
 /// invite, oldest first, each with the Profile it created and the credential
 /// it installed (empty for one that installed none); an unknown invite
 /// is NOT_FOUND. The registrations run under an invite-only policy stored in
-/// a schema of their own, so no other test sees that policy.
+/// an installation of their own, so no other test sees that policy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_enrollment_lists_an_invites_redemptions() {
     use sid_proto::sid::v1::admin::{GetInviteRequest, ListInviteRedemptionsRequest};
-    let schema = format!("enrollment_{}", uuid::Uuid::now_v7().simple());
-    let backend = sid_storage::PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("test PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in the test's schema");
-    common::adopt_operation_period(&backend).await;
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let installation = sid_storage::testing::IsolatedPostgres::new().await;
+    common::adopt_operation_period(installation.backend()).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(installation.backend().clone());
     storage
         .set_enrollment_policy(
             &sid_core::models::EnrollmentPolicy {

@@ -28,10 +28,13 @@ use tonic::Request;
 
 const REDIRECT: &str = "https://sid.example.com/account/login/upstream";
 
-/// A schema of the test's own, so the enrollment mode it stores reaches no
-/// other test.
-async fn storage() -> Arc<dyn StorageBackend> {
-    common::pg_in_own_schema().await
+/// An installation of the test's own, removed when the guard drops, so the
+/// enrollment mode it stores reaches no other test.
+async fn storage() -> (
+    Arc<dyn StorageBackend>,
+    sid_storage::testing::IsolatedPostgres,
+) {
+    common::own_pg_installation().await
 }
 
 /// Store `mode` as the installation's enrollment mode, as an administrator
@@ -54,6 +57,8 @@ struct Setup {
     provider: Provider,
     provider_id: sid_core::models::UpstreamProviderId,
     service: UpstreamServiceImpl,
+    // Dropped last: the installation outlives every handle on it.
+    _installation: Option<sid_storage::testing::IsolatedPostgres>,
 }
 
 /// The upstream service over `storage`, completing sign-ins under `policy`.
@@ -76,11 +81,15 @@ fn service(
 /// A provider registered on PostgreSQL, and its upstream service admitting
 /// new accounts under `mode` with the CE security policy.
 async fn setup(mode: EnrollmentMode) -> Setup {
-    setup_on(storage().await, mode, None).await
+    let (storage, installation) = storage().await;
+    setup_on(storage, Some(installation), mode, None).await
 }
 
+/// [`setup`] over `storage`, keeping `installation` (the PostgreSQL copy
+/// `storage` is on, if any) until the setup drops.
 async fn setup_on(
     storage: Arc<dyn StorageBackend>,
+    installation: Option<sid_storage::testing::IsolatedPostgres>,
     mode: EnrollmentMode,
     policy: Option<SecurityPolicy>,
 ) -> Setup {
@@ -116,6 +125,7 @@ async fn setup_on(
         storage,
         provider,
         provider_id: id,
+        _installation: installation,
     }
 }
 
@@ -351,7 +361,14 @@ async fn a_suspended_profile_is_not_signed_in() {
 async fn the_security_policy_applies_to_an_upstream_sign_in() {
     let mut policy = SecurityPolicy::ce_default();
     policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    let s = setup_on(storage().await, EnrollmentMode::Open, Some(policy)).await;
+    let (storage, installation) = storage().await;
+    let s = setup_on(
+        storage,
+        Some(installation),
+        EnrollmentMode::Open,
+        Some(policy),
+    )
+    .await;
     let sub = format!("user-{}", uuid::Uuid::now_v7());
     let state = s.started(&sub).await;
     let answered = s
@@ -425,7 +442,7 @@ async fn a_linked_subject_signs_in_on_a_closed_installation() {
 #[tokio::test]
 async fn a_failed_email_lookup_provisions_nobody() {
     let mock = Arc::new(common::mock_storage::MockStorage::new());
-    let s = setup_on(mock.clone(), EnrollmentMode::Open, None).await;
+    let s = setup_on(mock.clone(), None, EnrollmentMode::Open, None).await;
     let sub = format!("user-{}", uuid::Uuid::now_v7());
     let state = s
         .started_as(

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The storage conformance scenarios against SID's CoordiNode backend, over
-//! a CoordiNode database in memory.
+//! The storage conformance scenarios against SID's CoordiNode backend, each
+//! over a copy of the store with SID's schema the run prepared once.
 //!
 //! Run with: cargo nextest run -p sid-storage --features storage-coordinode --test coordinode_integration
 #![cfg(feature = "storage-coordinode")]
@@ -8,22 +8,30 @@
 use std::sync::Arc;
 
 use sid_storage::coordinode::CoordinodeBackend;
+use sid_storage::testing::{coordinode_copy, isolated_coordinode, release_coordinode_copies};
 
+/// A fresh store for one scenario of the contract.
 async fn setup() -> CoordinodeBackend {
-    store().await.0
+    coordinode_copy().await
+}
+
+/// Remove the scenario's store once it ended, then report its outcome.
+async fn finish(backend: CoordinodeBackend, outcome: Result<(), tokio::task::JoinError>) {
+    drop(backend);
+    release_coordinode_copies();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
 }
 
 /// A fresh backend with the host's handle on its database.
 async fn store() -> harness::Store {
-    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
-    let backend = CoordinodeBackend::new(db.clone())
-        .await
-        .expect("SID's schema in CoordiNode");
-    harness::Store(backend, db)
+    let isolated = isolated_coordinode().await;
+    harness::Store(isolated.backend.clone(), isolated.db.clone(), isolated)
 }
 
 // The complete storage contract, one test per scenario.
-sid_plugin::storage_conformance!(setup);
+sid_plugin::storage_conformance!(setup, finish);
 
 /// The capability harnesses over this backend: registration goes through
 /// the administrative application API, owners are Profiles.
@@ -56,8 +64,14 @@ mod harness {
     };
     use sid_storage::coordinode::CoordinodeBackend;
 
-    /// The backend and the host's handle on the database it is in.
-    pub struct Store(pub CoordinodeBackend, pub Arc<coordinode_embed::Database>);
+    /// The backend and the host's handle on the database it is in, and the
+    /// copy both are on, removed after them.
+    pub struct Store(
+        pub CoordinodeBackend,
+        pub Arc<coordinode_embed::Database>,
+        #[expect(dead_code, reason = "held only to remove the copy after both handles")]
+        pub  sid_storage::testing::IsolatedCoordinode,
+    );
 
     #[async_trait]
     impl LoginPolicyHarness for Store {
@@ -466,7 +480,7 @@ macro_rules! work_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::work_store::$scenario(&setup().await).await;
+            sid_plugin::conformance::work_store::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -505,7 +519,7 @@ macro_rules! operation_result_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::operation_result_store::$scenario(&setup().await).await;
+            sid_plugin::conformance::operation_result_store::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -536,7 +550,7 @@ macro_rules! ceremony_state {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::ceremony_state::$scenario(&setup().await).await;
+            sid_plugin::conformance::ceremony_state::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -567,7 +581,7 @@ macro_rules! instance_secret_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::instance_secret_store::$scenario(&setup().await).await;
+            sid_plugin::conformance::instance_secret_store::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -594,7 +608,8 @@ async fn commits_racing_retirement_are_never_left_behind() {
     };
     use sid_plugin::OperationResultStore;
 
-    let store = setup().await;
+    let copy = store().await;
+    let store = &copy.0;
     let t0 = Timestamp::now() - Duration::from_hours(30 * 24);
     for round in 0..16 {
         let at = t0 + Duration::from_hours(2 * round);
@@ -659,7 +674,7 @@ macro_rules! history_key_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::history_key_store::$scenario(&setup().await.history_keys())
+            sid_plugin::conformance::history_key_store::$scenario(&store().await.0.history_keys())
                 .await;
         }
     )*};
@@ -694,7 +709,7 @@ macro_rules! entry_connection_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::entry_connection_store::$scenario(&setup().await).await;
+            sid_plugin::conformance::entry_connection_store::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -720,7 +735,7 @@ macro_rules! platform_ca_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            sid_plugin::conformance::platform_ca_store::$scenario(&setup().await).await;
+            sid_plugin::conformance::platform_ca_store::$scenario(&store().await.0).await;
         }
     )*};
 }
@@ -748,8 +763,8 @@ mod platform_ca_store {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_move_keeps_every_narrowing() {
         sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(
-            &setup().await,
-            &setup().await,
+            &store().await.0,
+            &store().await.0,
         )
         .await;
     }
@@ -768,9 +783,9 @@ macro_rules! principal_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test(flavor = "multi_thread")]
         async fn $scenario() {
-            let backend = setup().await;
+            let store = store().await;
             sid_plugin::conformance::principal_store::$scenario(
-                &common::principal_conformance::ProfilePrincipals(&backend),
+                &common::principal_conformance::ProfilePrincipals(&store.0),
             )
             .await;
         }
@@ -909,14 +924,14 @@ mod recovery {
     }
 }
 
-/// Two instances of SID on one host database, as two processes sharing it.
-async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend) {
-    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
-    let a = CoordinodeBackend::new(db.clone())
+/// Two instances of SID on one host database, as two processes sharing it,
+/// and the copy they are on.
+async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend, harness::Store) {
+    let store = store().await;
+    let b = CoordinodeBackend::new(store.1.clone())
         .await
-        .expect("first instance");
-    let b = CoordinodeBackend::new(db).await.expect("second instance");
-    (a, b)
+        .expect("second instance");
+    (store.0.clone(), b, store)
 }
 
 mod job_lock {
@@ -925,25 +940,25 @@ mod job_lock {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_job_lock_exclusive_across_instances() {
-        let (a, b) = two_instances().await;
+        let (a, b, _store) = two_instances().await;
         job_lock::test_job_lock_exclusive_across_instances(&a, &b).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dropped_job_lock_is_freed() {
-        let (a, b) = two_instances().await;
+        let (a, b, _store) = two_instances().await;
         job_lock::test_dropped_job_lock_is_freed(&a, &b).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_job_locks_are_per_job() {
-        let (a, b) = two_instances().await;
+        let (a, b, _store) = two_instances().await;
         job_lock::test_job_locks_are_per_job(&a, &b).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_job_lock_taken_once() {
-        let (a, b) = two_instances().await;
+        let (a, b, _store) = two_instances().await;
         job_lock::test_concurrent_job_lock_taken_once(&a, &b).await;
     }
 }
@@ -1012,7 +1027,7 @@ mod audit_retention {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_actor_types_round_trip() {
-        audit_retention::test_audit_actor_types_round_trip(&setup().await).await;
+        audit_retention::test_audit_actor_types_round_trip(&store().await.0).await;
     }
 }
 
@@ -1022,21 +1037,22 @@ mod audit_chain {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_chain_links_records() {
-        backend::audit_chain::test_audit_chain_links_records(&setup().await).await;
+        backend::audit_chain::test_audit_chain_links_records(&store().await.0).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_chains_are_independent() {
-        backend::audit_chain::test_audit_chains_are_independent(&setup().await).await;
+        backend::audit_chain::test_audit_chains_are_independent(&store().await.0).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_chain_moves_as_stored() {
-        backend::audit_chain::test_audit_chain_moves_as_stored(&setup().await).await;
+        backend::audit_chain::test_audit_chain_moves_as_stored(&store().await.0).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_audit_chain_concurrent_appends() {
-        backend::test_audit_chain_concurrent_appends(Arc::new(setup().await)).await;
+        let store = store().await;
+        backend::test_audit_chain_concurrent_appends(Arc::new(store.0.clone())).await;
     }
 }

@@ -13,24 +13,20 @@ use sid_proto::sid::v1::admin::{
     UpdateFlowActionRequest, WebhookConfig, create_flow_action_request,
 };
 use sid_server::grpc::flow_service::FlowActionServiceImpl;
-use sid_storage::PostgresBackend;
+use sid_storage::testing::IsolatedPostgres;
 use std::sync::Arc;
 use tonic::{Code, Request};
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
-async fn setup() -> (FlowActionServiceImpl, Arc<dyn StorageBackend>, String) {
-    let schema = format!("flow_action_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("Failed to run migrations");
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+/// The service over an installation of the test's own, removed when the
+/// returned guard drops.
+async fn setup() -> (
+    FlowActionServiceImpl,
+    Arc<dyn StorageBackend>,
+    String,
+    IsolatedPostgres,
+) {
+    let installation = IsolatedPostgres::new().await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(installation.backend().clone());
     storage
         .ensure_system_project(AuditEntry::system("test", "setup").into())
         .await
@@ -39,7 +35,7 @@ async fn setup() -> (FlowActionServiceImpl, Arc<dyn StorageBackend>, String) {
     let jwt = test_jwt();
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let svc = FlowActionServiceImpl::new(storage.clone(), jwt, common::test_revocation());
-    (svc, storage, token)
+    (svc, storage, token, installation)
 }
 
 /// `msg` from the bearer of `token`, named as a new command.
@@ -57,7 +53,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 /// there, and stays as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_action_is_found_only_under_its_own_project_and_flow_type() {
-    let (svc, storage, token) = setup().await;
+    let (svc, storage, token, _installation) = setup().await;
     let created = svc
         .create_flow_action(authed(
             CreateFlowActionRequest {

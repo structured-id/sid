@@ -53,32 +53,26 @@ struct Installation {
     issuer: OidcIssuer,
     /// Keeps a SQLite database file for the installation's lifetime.
     _dir: tempfile::TempDir,
-}
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
+    /// Removes a PostgreSQL installation's database after every handle.
+    _postgres: Option<sid_storage::testing::IsolatedPostgres>,
 }
 
 async fn installation(engine: Engine) -> Installation {
     let dir = tempfile::tempdir().expect("data directory");
-    let storage: Arc<dyn StorageBackend> = match engine {
+    let (storage, postgres): (Arc<dyn StorageBackend>, _) = match engine {
         Engine::Postgres => {
-            let schema = format!("operation_retry_{}", uuid::Uuid::now_v7().simple());
-            let backend = sid_storage::PostgresBackend::new(&database_url(), Some(schema.clone()))
-                .await
-                .expect("test database (docker-compose.test.yml)");
-            sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-                .await
-                .expect("migrations");
-            Arc::new(backend)
+            let installation = sid_storage::testing::IsolatedPostgres::new().await;
+            (Arc::new(installation.backend().clone()), Some(installation))
         }
-        Engine::Sqlite => Arc::new(
-            sid_storage::sqlite::SqliteBackend::new(
-                dir.path().join("sid.db").to_str().expect("UTF-8 path"),
-            )
-            .await
-            .expect("SQLite store"),
+        Engine::Sqlite => (
+            Arc::new(
+                sid_storage::sqlite::SqliteBackend::new(
+                    dir.path().join("sid.db").to_str().expect("UTF-8 path"),
+                )
+                .await
+                .expect("SQLite store"),
+            ),
+            None,
         ),
     };
     storage
@@ -101,6 +95,7 @@ async fn installation(engine: Engine) -> Installation {
         cache: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         issuer,
         _dir: dir,
+        _postgres: postgres,
     }
 }
 
