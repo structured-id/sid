@@ -10,6 +10,11 @@
 //!   all count into one period: per-command latency and the rate;
 //! - `hot`: `HOT_ATTEMPTS` attempts of one command at once, `HOT_ROUNDS`
 //!   times: per-attempt latency, and one project per round;
+//! - `amplified`: `parallel` again, each command sent with `RETRIES` more
+//!   attempts under its key at once (callers whose deadline lapsed while
+//!   the first was in flight): per-command latency until every attempt is
+//!   answered, the rate of distinct commands beside `parallel`'s, and one
+//!   project per command;
 //! - `growth`: the store's bytes per completed command;
 //!
 //! on file-backed SQLite (embedded) and PostgreSQL (a fresh schema on
@@ -36,6 +41,8 @@ const PER_WRITER: usize = 100;
 /// Concurrent attempts of one command for `hot`, and how many commands.
 const HOT_ATTEMPTS: usize = 64;
 const HOT_ROUNDS: usize = 50;
+/// Further attempts of each `amplified` command beside its first.
+const RETRIES: usize = 2;
 
 /// P50, P99 and P999 of `samples`.
 fn report(mode: &str, what: &str, mut samples: Vec<Duration>) {
@@ -243,6 +250,62 @@ async fn run(mode: &str, storage: Arc<dyn StorageBackend>, size: Size) {
         assert_eq!(ids.len(), 1, "one command answered with several projects");
     }
     report(mode, "hot", samples);
+
+    let started = Instant::now();
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let (projects, caller) = (projects.clone(), caller.clone());
+            tokio::spawn(async move {
+                let mut samples = Vec::with_capacity(PER_WRITER);
+                for i in 0..PER_WRITER {
+                    let context = command(period);
+                    let name = format!("a{w}-{i}");
+                    let started = Instant::now();
+                    let attempts: Vec<_> = (0..=RETRIES)
+                        .map(|_| {
+                            let (projects, caller, context, name) = (
+                                projects.clone(),
+                                caller.clone(),
+                                context.clone(),
+                                name.clone(),
+                            );
+                            tokio::spawn(async move {
+                                projects
+                                    .create_project(&caller, context, create(&name))
+                                    .await
+                            })
+                        })
+                        .collect();
+                    let mut ids = std::collections::HashSet::new();
+                    for attempt in attempts {
+                        let answer = attempt.await.unwrap();
+                        ids.insert(
+                            answer
+                                .expect("every attempt answers")
+                                .id
+                                .expect("project id")
+                                .value,
+                        );
+                    }
+                    samples.push(started.elapsed());
+                    assert_eq!(ids.len(), 1, "one command answered with several projects");
+                }
+                samples
+            })
+        })
+        .collect();
+    let mut samples = Vec::with_capacity(WRITERS * PER_WRITER);
+    for writer in writers {
+        samples.extend(writer.await.unwrap());
+    }
+    let took = started.elapsed();
+    report(mode, "amplified", samples);
+    println!(
+        "{mode:<9} amplified {} commands ({} attempts) by {WRITERS} writers in {took:.3?}: {:.0} commands/s",
+        WRITERS * PER_WRITER,
+        WRITERS * PER_WRITER * (RETRIES + 1),
+        (WRITERS * PER_WRITER) as f64 / took.as_secs_f64()
+    );
 }
 
 /// The PostgreSQL server, without a database.
