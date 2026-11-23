@@ -258,8 +258,9 @@ sid-infra = { path = "crates/sid-infra" }
 sid-serve = { path = "crates/sid-serve" }
 sid-i18n = { path = "crates/sid-i18n" }
 
-# The ZKPP submodule names the published OPAQUE crates; inside this workspace
-# it builds against their sources here, the same code the server uses.
+# The workspace and the ZKPP submodule name the published OPAQUE crates;
+# inside this workspace both build against their sources here, the same code
+# the server uses. A patch applies only here, never to a consumer.
 [patch.crates-io]
 sid-opaque-ke = { path = "crates/sid-opaque-ke" }
 sid-voprf = { path = "crates/sid-voprf" }
