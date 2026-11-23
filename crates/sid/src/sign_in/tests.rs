@@ -279,6 +279,30 @@ async fn a_browser_only_host_refuses_native_clients_and_commits_nothing() {
     ));
 }
 
+/// The bug: a browser-only host sharing a store with native sessions rotated
+/// a presented refresh generation before refusing to deliver its successor,
+/// so the client's next exchange read as reuse and ended the session. The
+/// refresh is now refused before the generation is even looked up.
+#[tokio::test]
+async fn a_browser_only_host_refuses_a_native_refresh_before_rotating() {
+    let storage = storage().await;
+    let sign_in = browser_only(storage.clone());
+    let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage;
+    let refused = sign_in
+        .refresh_native(
+            &sid_authn::dpop::DPopValidator::new(ceremonies),
+            sid_authn::native_session::RefreshRequest {
+                proof: "not-a-proof",
+                method: "POST",
+                url: "https://sid.example.com/v1/auth/refresh",
+                credential: "not-a-credential",
+                exchange: sid_core::models::NativeExchange::from_bytes(&[1; 16]).unwrap(),
+            },
+        )
+        .await;
+    assert!(matches!(refused, Err(SignInError::BearerNotServed)));
+}
+
 /// A sign-in whose proved credential changed before the session committed
 /// commits nothing and is refused as fenced, so it is started again.
 #[tokio::test]

@@ -307,14 +307,11 @@ async fn a_published_master_is_never_replaced() {
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
-fn dir_syncs() -> usize {
-    DIR_SYNCS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// A custody whose first version may be recorded only after the master's
-/// directory was synced in this process.
+/// A custody whose first version may be recorded only after its master's
+/// own directory was synced.
 struct RecordsAfterSync {
     versions: Versions,
+    dir: std::path::PathBuf,
     synced_before: usize,
 }
 
@@ -326,7 +323,7 @@ impl KeyVersionStore for RecordsAfterSync {
 
     async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool> {
         assert!(
-            dir_syncs() > self.synced_before,
+            dir_syncs_of(&self.dir) > self.synced_before,
             "the first version was recorded before the master's name was durable"
         );
         self.versions.insert(params, audit).await
@@ -346,9 +343,11 @@ async fn the_first_version_follows_a_durable_master_name() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, [9u8; MASTER_LEN]).unwrap();
         }
+        let dir = path.parent().unwrap().to_path_buf();
         let store = RecordsAfterSync {
             versions: Versions::default(),
-            synced_before: dir_syncs(),
+            synced_before: dir_syncs_of(&dir),
+            dir,
         };
         field_key_manager(&store, &path, rust_crypto())
             .await
@@ -367,11 +366,12 @@ async fn an_established_custody_opens_without_a_directory_sync() {
     field_key_manager(&store, &path, rust_crypto())
         .await
         .unwrap();
-    let before = dir_syncs();
+    let dir = path.parent().unwrap();
+    let before = dir_syncs_of(dir);
     field_key_manager(&store, &path, rust_crypto())
         .await
         .unwrap();
-    assert_eq!(dir_syncs(), before);
+    assert_eq!(dir_syncs_of(dir), before);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 

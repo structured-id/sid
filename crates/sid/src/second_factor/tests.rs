@@ -4,7 +4,9 @@ use sid_core::models::{AuditEntry, Credential, CredentialData};
 use sid_plugin::storage::StorageBackend;
 
 use super::*;
-use crate::test_support::{keys, sign_in, storage, stored_profile};
+use crate::test_support::{
+    browser_only_sign_in, keys, sign_in, sign_in as sign_in_with_signer, storage, stored_profile,
+};
 
 fn second_factors(storage: Arc<dyn StorageBackend>) -> SecondFactors {
     let origin = url::Url::parse("https://sid.example.com").unwrap();
@@ -187,6 +189,93 @@ async fn totp_seed_opens_sealed() {
         .expect("the enrolled authenticator");
     assert_eq!(found.id, totp.id);
     assert_eq!(opened.secret.as_slice(), secret.as_slice());
+}
+
+/// The bug: on a host without a token signer, a TOTP step-up and a native
+/// completion verified the code (spending its step) before being refused
+/// for the delivery they need. Both are refused first now, and the same
+/// code still completes what the host does serve.
+#[tokio::test]
+async fn an_unserved_totp_delivery_spends_no_code() {
+    let backend = storage().await;
+    let storage: Arc<dyn StorageBackend> = backend;
+    let sign_in = browser_only_sign_in(storage.clone());
+    let factors = second_factors(storage.clone());
+    let alice = stored_profile(storage.as_ref(), "alice").await;
+    let secret = sid_authn::generate_secret();
+    let sealed = sid_authn::sealed_secret::seal(
+        keys().as_ref(),
+        &sid_authn::sealed_secret::totp_context(alice),
+        &secret,
+    )
+    .await
+    .unwrap();
+    let totp = Credential::new(
+        alice,
+        CredentialType::Totp,
+        CredentialData::new(sealed),
+        None,
+    );
+    storage
+        .create_credential(&totp, AuditEntry::system("test", "totp").into())
+        .await
+        .unwrap();
+    let session = sign_in.new_session(alice, None);
+    storage
+        .create_session(&session, AuditEntry::system("test", "session").into())
+        .await
+        .unwrap();
+    // A native sign-in owing its second factor, started where native
+    // clients are served (another host on the same store).
+    let profile = storage.get_profile(alice).await.unwrap().unwrap();
+    let signer = sign_in_with_signer(storage.clone());
+    let (started, _) = signer
+        .sign_in_pending(
+            &profile,
+            Session::new_awaiting_second_factor(
+                alice,
+                None,
+                sid_core::models::session::AuthLevel::Basic,
+                vec!["pwd".to_string()],
+            ),
+            CeremonyClient::Native,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let pending = storage
+        .get_session(started.session_id)
+        .await
+        .unwrap()
+        .expect("the pending context");
+    let code = sid_authn::generate_current_totp(&secret);
+    let policy = sid_authn::login_policy::FixedLoginPolicy::of(
+        &sid_core::models::security_policy::SecurityPolicy::ce_default(),
+    );
+    for caller in [
+        FactorCaller::StepUp(session.clone()),
+        FactorCaller::Pending(pending, CeremonyClient::Native),
+    ] {
+        let refused = factors
+            .verify_totp(&sign_in, &policy, caller, None, None, &code)
+            .await;
+        let refusal = refused.err().map(|e| format!("{e:?}"));
+        assert_eq!(
+            refusal.as_deref(),
+            Some("SignIn(BearerNotServed)"),
+            "the refusal of an unserved delivery"
+        );
+    }
+    let stored = storage
+        .get_credential(totp.id)
+        .await
+        .unwrap()
+        .expect("the authenticator");
+    assert_eq!(
+        stored.last_used_at, totp.last_used_at,
+        "no TOTP step was spent"
+    );
 }
 
 /// A finish with no enrollment of the caller's own started answers as

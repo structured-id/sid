@@ -173,9 +173,21 @@ fn staging_path(path: &Path, tag: u64) -> std::path::PathBuf {
     master_dir(path).join(staging)
 }
 
-/// Directory syncs made, for the tests that check where the barrier falls.
+/// The directories synced, for the tests that check where the barrier
+/// falls: each test counts its own directory, whatever else runs beside it.
 #[cfg(test)]
-static DIR_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DIR_SYNCS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// How many times `dir` was synced.
+#[cfg(test)]
+fn dir_syncs_of(dir: &Path) -> usize {
+    DIR_SYNCS
+        .lock()
+        .expect("the sync record")
+        .iter()
+        .filter(|synced| synced.as_path() == dir)
+        .count()
+}
 
 /// Make the entries of `dir` durable, so a published master's name survives
 /// a power loss. On Unix (Linux, macOS, the BSDs) this is an fsync of the
@@ -184,7 +196,10 @@ static DIR_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 /// the file system's.
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(test)]
-    DIR_SYNCS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    DIR_SYNCS
+        .lock()
+        .expect("the sync record")
+        .push(dir.to_path_buf());
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()

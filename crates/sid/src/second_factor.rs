@@ -550,6 +550,13 @@ impl SecondFactors {
             Ok(live) => live,
             Err(completed) => return redelivered(sign_in, login_policy, &completed).await,
         };
+        // Verifying the code spends its TOTP step: a delivery this host cannot
+        // make (a bearer step-up or a native completion without a token
+        // signer) is refused before it.
+        match &caller {
+            LiveCaller::StepUp(_) => sign_in.jwt().map(|_| ())?,
+            LiveCaller::Pending(_, client) => sign_in.serves(*client)?,
+        }
         let profile_id = caller.profile_id();
         let identity = profile_id.to_string();
         sign_in.refuse_if_locked(&identity).await?;
