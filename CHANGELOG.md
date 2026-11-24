@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.41](https://github.com/structured-id/sid/compare/v0.2.40...v0.2.41) - 2026-11-24
+
+### Other
+
+- *(ui)* the account adapter calls its installation in process ([#775](https://github.com/structured-id/sid/pull/775))
+
 ## [0.2.40](https://github.com/structured-id/sid/compare/v0.2.39...v0.2.40) - 2026-11-24
 
 ### Fixed
