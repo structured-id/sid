@@ -138,7 +138,7 @@ fn the_callback_is_sent_as_registered() {
         connection.redirect_uri,
         "https://Account.SID.example.com/auth/callback"
     );
-    let url = connection.authorize_url("challenge", "state-1", "nonce-1");
+    let url = connection.authorize_url("challenge", "state-1", "nonce-1", SignInChoice::Ordinary);
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(
         query["redirect_uri"],
@@ -183,7 +183,7 @@ fn the_sign_in_binding_covers_the_callback() {
 #[test]
 fn the_authorization_request_asks_for_the_connection_resource() {
     let connection = Connection::accept(bundle()).unwrap();
-    let url = connection.authorize_url("challenge", "state-1", "nonce-1");
+    let url = connection.authorize_url("challenge", "state-1", "nonce-1", SignInChoice::Ordinary);
     assert_eq!(
         url.as_str().split('?').next().unwrap(),
         format!("{INSTALLATION}/i/{HANDLE}/oauth2/authorize")
@@ -201,4 +201,20 @@ fn the_authorization_request_asks_for_the_connection_resource() {
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["state"], "state-1");
     assert_eq!(query["nonce"], "nonce-1");
+    // The ordinary sign-in adds nothing to the request.
+    assert!(!query.contains_key("sign_in"));
+}
+
+/// The sign-in the user chose in the application is passed on by the name of
+/// its value, beside the same request.
+/// Bug prevented: an application's choice of the issuer's own sign-in lost
+/// between its page and the authorization request.
+#[test]
+fn the_authorization_request_passes_the_chosen_sign_in_on() {
+    let connection = Connection::accept(bundle()).unwrap();
+    let url = connection.authorize_url("challenge", "state-1", "nonce-1", SignInChoice::Local);
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["sign_in"], "SIGN_IN_ENTRY_LOCAL");
+    assert_eq!(query["client_id"], "account-web");
+    assert_eq!(query["state"], "state-1");
 }

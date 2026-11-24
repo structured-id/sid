@@ -24,7 +24,8 @@ use sid_core::models::{
     ResourceId, Session, SessionId,
 };
 use sid_proto::sid::v1::{
-    OAuth2AuthorizeRequest, OAuth2AuthorizeResponse, SignInContext, o_auth2_authorize_response,
+    OAuth2AuthorizeRequest, OAuth2AuthorizeResponse, SignInContext, SignInEntry,
+    o_auth2_authorize_response,
 };
 use tracing::info;
 
@@ -131,6 +132,27 @@ fn operation_request(
         prompt: None,
         max_age: None,
         request_uri: None,
+        // The operation is past its sign-in.
+        sign_in: None,
+    }
+}
+
+pub use sid_authn::relying_party::SignInChoice;
+
+/// The choice a request's `sign_in` states; a value this issuer does not
+/// know states none.
+pub fn requested_sign_in(sign_in: Option<i32>) -> SignInChoice {
+    match sign_in.map(SignInEntry::try_from) {
+        Some(Ok(SignInEntry::Local)) => SignInChoice::Local,
+        _ => SignInChoice::Ordinary,
+    }
+}
+
+/// `choice` as a request's `sign_in` carries it.
+fn wire_sign_in(choice: SignInChoice) -> Option<i32> {
+    match choice {
+        SignInChoice::Ordinary => None,
+        SignInChoice::Local => Some(SignInEntry::Local as i32),
     }
 }
 
@@ -169,6 +191,9 @@ pub struct PendingAuthorization {
     /// The account selection `prompt=select_account` asked for has been
     /// offered on the sign-in page.
     account_offered: bool,
+    /// The sign-in the user chose when the request arrived: what its
+    /// continuation carries does not replace it.
+    sign_in: SignInChoice,
 }
 
 impl PendingAuthorization {
@@ -190,7 +215,13 @@ impl PendingAuthorization {
             max_age: request.max_age,
             arrived_at: Timestamp::now(),
             account_offered: false,
+            sign_in: requested_sign_in(request.sign_in),
         }
+    }
+
+    /// The sign-in the user chose for this request.
+    pub fn sign_in(&self) -> SignInChoice {
+        self.sign_in
     }
 
     pub fn client_id(&self) -> &str {
@@ -251,6 +282,7 @@ impl PendingAuthorization {
             prompt: self.prompt.clone(),
             max_age: self.max_age,
             request_uri: None,
+            sign_in: wire_sign_in(self.sign_in),
         }
     }
 }
