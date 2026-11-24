@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.37](https://github.com/structured-id/sid/compare/v0.2.36...v0.2.37) - 2026-11-23
+
+### Fixed
+
+- *(embedded)* keep a lost master and serve browsers without a token signer ([#756](https://github.com/structured-id/sid/pull/756))
+
 ## [0.2.36](https://github.com/structured-id/sid/compare/v0.2.35...v0.2.36) - 2026-11-23
 
 ### Added

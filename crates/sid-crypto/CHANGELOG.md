@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/structured-id/sid/compare/sid-crypto-v0.1.3...sid-crypto-v0.1.4) - 2026-11-23
+
+### Fixed
+
+- *(deps)* move sid-crypto to rsa 0.10.0 ([#753](https://github.com/structured-id/sid/pull/753))
+
 ## [0.1.3](https://github.com/structured-id/sid/compare/sid-crypto-v0.1.2...sid-crypto-v0.1.3) - 2026-11-21
 
 ### Other
