@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.38](https://github.com/structured-id/sid/compare/v0.2.37...v0.2.38) - 2026-11-24
+
+### Added
+
+- *(engine)* ce work without required mail or site ([#763](https://github.com/structured-id/sid/pull/763))
+
+### Fixed
+
+- *(oidc)* keep the sign-in page's hints on the consent page ([#758](https://github.com/structured-id/sid/pull/758))
+
+### Other
+
+- run tests and isolation checks in parallel groups ([#762](https://github.com/structured-id/sid/pull/762))
+
 ## [0.2.37](https://github.com/structured-id/sid/compare/v0.2.36...v0.2.37) - 2026-11-23
 
 ### Fixed
