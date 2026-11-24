@@ -20,7 +20,7 @@ use sid_proto::sid::v1::{
 };
 use tokio::sync::OnceCell;
 
-use crate::deadline::IssuerChannel;
+use crate::deadline::{IssuerChannel, IssuerService};
 
 /// Why the adapter cannot act as its client right now.
 #[derive(Debug, thiserror::Error)]
@@ -63,19 +63,21 @@ fn answered(answer: AccountConnection, kid: &str) -> ClientConnection {
     }
 }
 
-/// The adapter as its web client: its key, its channel to the issuer, and
-/// the connection details, delivered or learned once per process.
-pub struct RpClient {
+/// The adapter as its web client: its key, the issuer's services it calls
+/// (`C`: a channel to them, or the services themselves in the issuer's own
+/// process), and the connection details, delivered or learned once per
+/// process.
+pub struct RpClient<C = IssuerChannel> {
     key: ClientKey,
     /// The key's id: what the client registered and what its connection
     /// proofs are issued by.
     kid: String,
     installation_url: String,
-    channel: IssuerChannel,
+    channel: C,
     connection: OnceCell<Connection>,
 }
 
-impl std::fmt::Debug for RpClient {
+impl<C> std::fmt::Debug for RpClient<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpClient")
             .field("kid", &self.kid)
@@ -85,13 +87,13 @@ impl std::fmt::Debug for RpClient {
     }
 }
 
-impl RpClient {
+impl<C: IssuerService> RpClient<C> {
     /// A client that learns its connection from the account API. The key
     /// must name itself: the registration lists it by `kid`.
     pub fn new(
         key: ClientKey,
         installation_url: String,
-        channel: IssuerChannel,
+        channel: C,
     ) -> Result<Self, RpClientError> {
         Self::with(key, installation_url, channel, OnceCell::new())
     }
@@ -101,7 +103,7 @@ impl RpClient {
     pub fn delivered(
         key: ClientKey,
         installation_url: String,
-        channel: IssuerChannel,
+        channel: C,
         connection: Connection,
     ) -> Result<Self, RpClientError> {
         Self::with(
@@ -115,7 +117,7 @@ impl RpClient {
     fn with(
         key: ClientKey,
         installation_url: String,
-        channel: IssuerChannel,
+        channel: C,
         connection: OnceCell<Connection>,
     ) -> Result<Self, RpClientError> {
         let kid = key
@@ -277,7 +279,7 @@ fn issued(answer: OAuth2TokenResponse) -> IssuedTokens {
 }
 
 #[async_trait::async_trait]
-impl ApplicationClient for RpClient {
+impl<C: IssuerService> ApplicationClient for RpClient<C> {
     async fn connection(&self) -> Result<&Connection, GrantFailure> {
         Ok(RpClient::connection(self).await?)
     }

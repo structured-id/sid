@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use sid_authn::application_session::{
-    AuthorizationAnswer, Bearer, BrowserRequest, BrowserSessions, GrantOutcome as Outcome,
-    LogoutReceipt, SessionFailure, SignInFailure, cookie_value,
+    ApplicationClient, AuthorizationAnswer, Bearer, BrowserRequest, BrowserSessions,
+    GrantOutcome as Outcome, LogoutReceipt, SessionFailure, SignInFailure, cookie_value,
 };
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::issuer_directory::IssuerDirectory;
@@ -38,17 +38,18 @@ pub const FORWARDED_HEADERS: [&str; 3] = ["cookie", CSRF_HEADER, "origin"];
 pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
 
 /// The adapter of one application: its browser sessions as the confidential
-/// web client the installation registered.
-pub struct ApplicationSessions {
-    sessions: BrowserSessions<RpClient>,
+/// web client the installation registered. `C` is how that client reaches
+/// the issuer: over a channel by default.
+pub struct ApplicationSessions<C: ApplicationClient = RpClient> {
+    sessions: BrowserSessions<C>,
 }
 
-impl ApplicationSessions {
+impl<C: ApplicationClient> ApplicationSessions<C> {
     /// The sessions of the application `client` is the client of. The
     /// session cookie's name is a `__Host-` name of its own, so applications
     /// sharing a host never read or replace each other's sessions.
     pub fn new(
-        client: Arc<RpClient>,
+        client: Arc<C>,
         issuers: Arc<IssuerDirectory>,
         sessions: Arc<BffSessionStore>,
         revocation: Arc<RevocationCache>,
@@ -125,7 +126,7 @@ impl ApplicationSessions {
 }
 
 #[tonic::async_trait]
-impl ApplicationSessionService for ApplicationSessions {
+impl<C: ApplicationClient + 'static> ApplicationSessionService for ApplicationSessions<C> {
     async fn start_sign_in(
         &self,
         request: Request<StartSignInRequest>,

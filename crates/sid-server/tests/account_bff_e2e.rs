@@ -43,6 +43,9 @@ struct Deployment {
     profile: Profile,
     /// The installation URL, the base of its issuers.
     installation: String,
+    /// This server's gRPC services themselves, as a host in the same process
+    /// calls them.
+    services: tonic::service::Routes,
     /// Where this server's gRPC answers.
     addr: SocketAddr,
     /// The adapter's private key, PKCS#8 PEM.
@@ -95,16 +98,16 @@ async fn deploy() -> Deployment {
         svc.storage.clone(),
         svc.authz.clone(),
     );
-    let identity = svc.identity.clone();
-    let auth = svc.auth.clone();
+    let services = tonic::service::Routes::new(AuthServiceServer::from_arc(svc.auth.clone()))
+        .add_service(SystemIntegrationServiceServer::new(integrations))
+        .add_service(OidcIssuerServiceServer::new(registry))
+        .add_service(IdentityServiceServer::from_arc(svc.identity.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let served = services.clone();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(AuthServiceServer::from_arc(auth))
-            .add_service(SystemIntegrationServiceServer::new(integrations))
-            .add_service(OidcIssuerServiceServer::new(registry))
-            .add_service(IdentityServiceServer::from_arc(identity))
+            .add_routes(served)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -115,6 +118,7 @@ async fn deploy() -> Deployment {
         svc,
         profile,
         installation,
+        services,
         addr,
         key_pem,
         bundle,
@@ -129,6 +133,41 @@ async fn replica(deployment: &Deployment) -> String {
     let channel = tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
         .unwrap()
         .connect_lazy();
+    hosted(
+        deployment,
+        sid_infra::deadline::issuer(channel.clone()),
+        channel,
+    )
+    .await
+}
+
+/// A UI host in this server's own process: it calls the server's services
+/// themselves, as its issuer and as its application's API, and connects to
+/// no port of the server's.
+async fn in_process_host(deployment: &Deployment) -> String {
+    hosted(
+        deployment,
+        sid_infra::deadline::in_process(deployment.services.clone()),
+        deployment.services.clone(),
+    )
+    .await
+}
+
+/// A UI host reaching its issuer through `issuer` and its application's API
+/// through `api`, serving on a local port of its own. Its URL.
+async fn hosted<I, A>(deployment: &Deployment, issuer: I, api: A) -> String
+where
+    I: sid_infra::deadline::IssuerService,
+    A: tower::Service<
+            tonic::codegen::http::Request<tonic::body::Body>,
+            Response = tonic::codegen::http::Response<tonic::body::Body>,
+        > + Clone
+        + Send
+        + Sync
+        + 'static,
+    A::Error: std::fmt::Display,
+    A::Future: Send,
+{
     let installation = deployment.installation.clone();
     let key =
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
@@ -136,7 +175,6 @@ async fn replica(deployment: &Deployment) -> String {
     let revocation =
         sid_authn::revocation_cache::RevocationCache::receiver_view(deployment.svc.cache.clone());
     let listening = revocation.listen().await;
-    let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
         Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),
         Arc::new(IssuerDirectory::new(Arc::new(GrpcIssuerSource::new(
@@ -162,7 +200,7 @@ async fn replica(deployment: &Deployment) -> String {
     .unwrap()
     .with_grpc_web_translation(true)
     .with_extra_routes(asset_routes(sid_ui_host::standalone(bundle).unwrap()));
-    let upstream = HostUpstream::new(Arc::new(adapter), Some(channel));
+    let upstream = HostUpstream::new(Arc::new(adapter), Some(api));
     tokio::spawn(async move {
         // The replica receives revocations as long as it serves.
         let _listening = listening;
@@ -698,6 +736,88 @@ async fn a_user_signs_in_and_reads_their_account() {
     assert_eq!(
         page.text().await.unwrap(),
         "<!doctype html><base href=\"/\">"
+    );
+}
+
+/// A host in the issuer's own process, with no port of the issuer's to
+/// connect to, carries a whole session: the user signs in (the code redeemed
+/// with the client's key assertion), reads their account, an expired token
+/// is refreshed and rotated, and sign-out revokes the grant, which the
+/// issuer then refuses over its port too.
+/// Bug prevented: an adapter that works only through a TCP connection to
+/// its own issuer, so a host with one listener cannot serve the account
+/// pages at all.
+#[tokio::test]
+async fn a_host_in_the_issuers_process_carries_a_session_without_its_port() {
+    let deployment = deploy().await;
+    let host = in_process_host(&deployment).await;
+    let browser = sign_in(&deployment, &host).await;
+
+    let (id, status) = current_profile(&host, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(id.unwrap(), deployment.profile.id.to_string());
+
+    // Expired by its claims: the next call refreshes first.
+    let session = browser.cookie.split_once('=').unwrap().1.to_owned();
+    let store = sessions(&deployment);
+    let before = store.get_session(&session).await.unwrap().unwrap();
+    let mut expired = before.claims.clone();
+    expired.exp = 0;
+    let held = before.refresh_token.clone().expect("a refresh token");
+    assert!(matches!(
+        store
+            .replace_tokens(
+                &session,
+                &held,
+                before.access_token.clone(),
+                before.refresh_token.clone(),
+                expired,
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    let (id, status) = current_profile(&host, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(id.unwrap(), deployment.profile.id.to_string());
+    let after = store.get_session(&session).await.unwrap().unwrap();
+    assert!(!after.holds_refresh_token(&held));
+    let rotated = after
+        .refresh_token
+        .clone()
+        .expect("a rotated refresh token");
+
+    let (answer, status) = grpc_web(
+        &host,
+        &format!("/{ADAPTER}/EndApplicationSession"),
+        Vec::new(),
+        Some(&browser.cookie),
+        Some(&browser.csrf),
+    )
+    .await;
+    assert_eq!(status, "0");
+    let ended = EndApplicationSessionResponse::decode(&answer.unwrap()[..]).unwrap();
+    assert_eq!(ended.grant, GrantOutcome::Revoked as i32);
+    let (_, signed_out) = current_profile(&host, &browser, true).await;
+    assert_eq!(signed_out, "16");
+
+    // The same issuer over its port: the grant is revoked there too.
+    let link = RpClient::new(
+        ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
+            .unwrap(),
+        deployment.installation.clone(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
+                .unwrap()
+                .connect_lazy(),
+        ),
+    )
+    .unwrap();
+    let connection = link.connection().await.unwrap();
+    assert!(
+        link.refresh(connection, rotated.expose_secret().to_owned())
+            .await
+            .is_err()
     );
 }
 

@@ -8,21 +8,22 @@ use sid_authn::issuer_directory::{
 use sid_proto::sid::v1::oidc_issuer_service_client::OidcIssuerServiceClient;
 use sid_proto::sid::v1::{GetOidcIssuerRequest, GetProtectedResourceRequest};
 
-use crate::deadline::IssuerChannel;
+use crate::deadline::{IssuerChannel, IssuerService};
 
-/// The registry of the SID server, over gRPC.
-pub struct GrpcIssuerSource {
-    channel: IssuerChannel,
+/// The registry of the SID server, over its gRPC services (`C`: a channel
+/// to them, or the services themselves in the server's own process).
+pub struct GrpcIssuerSource<C = IssuerChannel> {
+    channel: C,
 }
 
-impl GrpcIssuerSource {
-    pub fn new(channel: IssuerChannel) -> Self {
+impl<C: IssuerService> GrpcIssuerSource<C> {
+    pub fn new(channel: C) -> Self {
         Self { channel }
     }
 }
 
 #[async_trait::async_trait]
-impl IssuerSource for GrpcIssuerSource {
+impl<C: IssuerService> IssuerSource for GrpcIssuerSource<C> {
     async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable> {
         let answer = match OidcIssuerServiceClient::new(self.channel.clone())
             .get_oidc_issuer(GetOidcIssuerRequest {
