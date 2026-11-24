@@ -154,43 +154,54 @@ pub struct Provisioned {
     pub use_return: Option<String>,
 }
 
-/// Which StructuredID platforms' issuers this build signs in through: the
-/// platform it was made for, and no other. A site is registered at each
-/// platform separately, so a connection to a platform the build was not made
-/// for is another environment's registration: a build made for the
-/// development platform never sends a browser to production, whatever
-/// connections its store holds. Issuers that are no platform's (an
-/// organization's own installation, an identity provider configured
-/// separately) are outside this and always in scope.
+/// The StructuredID platform this build was made for, as the sign-in through
+/// the platform reads it. A site is registered at each platform separately,
+/// so the registration at another platform is another environment's: the
+/// entry that names no connection goes through the registration at this
+/// build's platform and never falls back to another's. It restricts nothing
+/// else: a connection the browser names is entered by its own registration,
+/// whatever origin its issuer is at, and a build made for no platform reads
+/// its connections as stored.
 #[derive(Debug, Clone, Default)]
 pub struct PlatformScope {
-    /// The origins of the platforms this build was not made for.
-    other_platforms: Vec<url::Origin>,
+    /// The origin of the platform this build was made for.
+    build: Option<url::Origin>,
+    /// The origins of the platforms it was not made for.
+    others: Vec<url::Origin>,
 }
 
 impl PlatformScope {
     /// The scope of a build made for the platform at `build` (none for a
     /// build made for no platform), among the `platforms` there are.
     pub fn new(build: Option<&url::Url>, platforms: &[&str]) -> Self {
-        let build = build.map(url::Url::origin);
+        let Some(build) = build.map(url::Url::origin) else {
+            return Self::default();
+        };
         Self {
-            other_platforms: platforms
+            others: platforms
                 .iter()
                 .filter_map(|platform| url::Url::parse(platform).ok())
                 .map(|platform| platform.origin())
-                .filter(|platform| Some(platform) != build.as_ref())
+                .filter(|platform| *platform != build)
                 .collect(),
+            build: Some(build),
         }
     }
 
-    /// Whether a connection to `issuer` is in scope: its origin is not a
-    /// platform this build was not made for. An issuer identifier that is
-    /// no URL is no platform's.
-    pub fn admits(&self, issuer: &str) -> bool {
-        url::Url::parse(issuer)
-            .map(|issuer| !self.other_platforms.contains(&issuer.origin()))
-            .unwrap_or(true)
+    /// Whether `issuer` is at this build's platform.
+    fn at_build(&self, issuer: &str) -> bool {
+        self.build.is_some() && origin_of(issuer) == self.build
     }
+
+    /// Whether `issuer` is at a platform this build was not made for.
+    fn at_another(&self, issuer: &str) -> bool {
+        origin_of(issuer).is_some_and(|origin| self.others.contains(&origin))
+    }
+}
+
+/// The origin of `issuer`; none for an identifier that is no URL.
+fn origin_of(issuer: &str) -> Option<url::Origin> {
+    url::Url::parse(issuer).ok().map(|issuer| issuer.origin())
 }
 
 /// The entry connections of one installation.
@@ -480,8 +491,7 @@ impl EntryConnections {
     /// The enabled connections of the installation issuer whose route
     /// `issuer_handle` names ([`IssuerRegistry::routed`]), as its sign-in
     /// page offers them: public, the user is not signed in yet. An unknown
-    /// issuer offers none, and a connection to a platform this build was not
-    /// made for is not offered.
+    /// issuer offers none.
     pub async fn sign_in_connections(
         &self,
         issuer_handle: &str,
@@ -493,9 +503,7 @@ impl EntryConnections {
         Ok(ListSignInConnectionsResponse {
             connections: connections
                 .iter()
-                .filter(|c| {
-                    c.enabled && c.recipient_issuer == issuer.id && self.platform.admits(&c.issuer)
-                })
+                .filter(|c| c.enabled && c.recipient_issuer == issuer.id)
                 .map(|c| SignInConnection {
                     handle: c.handle.to_string(),
                     name: c.name.clone(),
@@ -506,9 +514,8 @@ impl EntryConnections {
 
     /// The enabled connection `handle` of installation issuer `issuer`, with
     /// the client it authenticates as there, for one entry step; `None` when
-    /// the handle names no connection, another issuer's, a disabled one, or
-    /// one to a platform this build was not made for: nothing is started or
-    /// completed through it.
+    /// the handle names no connection, another issuer's, or a disabled one:
+    /// nothing is started or completed through it.
     pub async fn for_entry(
         &self,
         issuer: &OidcIssuer,
@@ -517,10 +524,7 @@ impl EntryConnections {
         let Some(connection) = self.storage.entry_connection(handle).await? else {
             return Ok(None);
         };
-        if !connection.enabled
-            || connection.recipient_issuer != issuer.id
-            || !self.platform.admits(&connection.issuer)
-        {
+        if !connection.enabled || connection.recipient_issuer != issuer.id {
             return Ok(None);
         }
         let ClientCredential::SecretBasic(sealed) = &connection.credential;
@@ -537,6 +541,35 @@ impl EntryConnections {
             client_secret: SecretString::from(secret),
         };
         Ok(Some((connection, trusted)))
+    }
+
+    /// The connection an entry at installation issuer `issuer` goes through
+    /// when the browser names none: the sign-in through the installation's
+    /// authority, never the first connection of some list.
+    ///
+    /// It is the provisioned authority, unless that is a registration at a
+    /// platform this build was not made for. Then, and when no authority is
+    /// provisioned, a build made for a platform uses the issuer's one enabled
+    /// registration at its own platform. With none there, or more than one,
+    /// there is no such entry: it does not fall back to another environment
+    /// and does not choose among several.
+    pub async fn unnamed_entry(
+        &self,
+        issuer: &OidcIssuer,
+    ) -> Result<Option<EntryHandle>, EntryConnectionError> {
+        if let Some(provisioned) = self.provisioned(issuer).await?
+            && !self.platform.at_another(&provisioned.issuer)
+        {
+            return Ok(Some(provisioned.handle));
+        }
+        let connections = self.storage.list_entry_connections().await?;
+        let mut at_platform = connections.iter().filter(|c| {
+            c.enabled && c.recipient_issuer == issuer.id && self.platform.at_build(&c.issuer)
+        });
+        Ok(match (at_platform.next(), at_platform.next()) {
+            (Some(only), None) => Some(only.handle),
+            _ => None,
+        })
     }
 
     /// The provisioned authority of installation issuer `issuer`, once set.
