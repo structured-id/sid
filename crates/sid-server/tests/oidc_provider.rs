@@ -3157,6 +3157,61 @@ async fn the_continuation_keeps_the_requested_assurance() {
     assert!(!location.contains("code="), "{location}");
 }
 
+/// The consent page reads its context by the continuation it was sent with,
+/// as the sign-in page does by its own: the issuer confirms the operation it
+/// holds for that client and names itself and the client, before and after
+/// the decision. A continuation naming another client, an unknown operation,
+/// the same path on another host or one addressed to another issuer is
+/// refused like any request the issuer is not waiting to complete.
+/// Bug prevented: a signed-in browser sent to the consent page got no
+/// confirmed issuer for its calls, so the page showed the request as ended
+/// and the review was never offered.
+#[tokio::test]
+async fn the_consent_page_reads_its_context_by_the_operations_continuation() {
+    use sid::oauth::authorization::operation_continuation;
+    let browser = browser_reviewing(LOGIN_URL).await;
+    let got = browser
+        .get(&with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .await;
+    let (operation, _) = consent_redirect(&browser, &got);
+    let svc = &browser.user.svc;
+    let issuer = svc.issuer.canonical_url.clone();
+    let rd = operation_continuation(&issuer, "test-client", operation)
+        .unwrap()
+        .to_string();
+
+    for addressed in [None, Some(&svc.issuer)] {
+        let context = sign_in_context(svc, &rd, addressed).await.unwrap();
+        assert_eq!(context.issuer, issuer);
+    }
+
+    let unknown = sid_core::models::AuthorizationOperationId::generate();
+    let elsewhere = issuer.replacen("https://", "https://other.", 1);
+    for refused in [
+        operation_continuation(&issuer, "another-client", operation).unwrap(),
+        operation_continuation(&issuer, "test-client", unknown).unwrap(),
+        operation_continuation(&elsewhere, "test-client", operation).unwrap(),
+    ] {
+        assert!(
+            sign_in_context(svc, refused.as_str(), None).await.is_err(),
+            "{refused}"
+        );
+    }
+
+    // A decided operation is still the one this issuer holds: the page
+    // follows it to its end.
+    decide(
+        &browser,
+        operation,
+        sid_core::models::AuthorizationDecision::Approve { choices: vec![] },
+    )
+    .await;
+    assert!(sign_in_context(svc, &rd, None).await.is_ok());
+}
+
 /// A submission without this review's CSRF value, one for another revision,
 /// a call from another origin or without one, another session's call and an
 /// approval naming a claim the review did not offer are refused, and none
