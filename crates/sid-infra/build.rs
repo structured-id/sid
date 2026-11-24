@@ -22,9 +22,6 @@ use std::process::Command;
 #[path = "build_platform.rs"]
 mod build_platform;
 
-/// Where a platform publishes its admitted CA set, below its origin.
-const PUBLICATION_PATH: &str = "/.well-known/sid-ca/index.json";
-
 fn main() {
     for name in [
         "SID_BUILD_PLATFORM",
@@ -67,31 +64,44 @@ fn main() {
 /// followed and only the publication's JSON is taken. Empty when the
 /// platform answers and publishes no set yet.
 fn fetched(platform: &str, file: &std::path::Path) -> Vec<u8> {
-    let publication = format!("{platform}{PUBLICATION_PATH}");
-    let answer = Command::new("curl")
+    let publication = build_platform::publication_of(platform);
+    let fetch = Command::new("curl")
+        // First, so the builder's curl configuration is not read: it could
+        // follow a redirect or skip certificate verification for the set
+        // this build will trust.
+        .arg("--disable")
         .args(["--fail", "--silent", "--show-error", "--max-time", "30"])
         .arg("--output")
         .arg(file)
-        .args(["--write-out", "%{content_type}"])
+        .args(["--write-out", "%{http_code} %{content_type}"])
         .arg(&publication)
         .output()
         .unwrap_or_else(|e| {
             panic!("this build is made for {platform}: curl cannot run to fetch its CA set: {e}")
         });
-    if !answer.status.success() {
+    if !fetch.status.success() {
         panic!(
             "this build is made for {platform} and its CA set cannot be fetched from \
              {publication}: {}",
-            String::from_utf8_lossy(&answer.stderr).trim()
+            String::from_utf8_lossy(&fetch.stderr).trim()
         );
     }
-    let content_type = String::from_utf8_lossy(&answer.stdout);
-    if !content_type.starts_with("application/json") {
-        println!(
-            "cargo:warning={platform} publishes no platform CA set yet (answered \
-             {content_type:?}): this build carries none"
-        );
-        return Vec::new();
+    let written = String::from_utf8_lossy(&fetch.stdout);
+    let (status, content_type) = written.split_once(' ').unwrap_or((&written, ""));
+    match build_platform::answer(status, content_type) {
+        Ok(build_platform::Answer::Set) => {
+            std::fs::read(file).unwrap_or_else(|e| panic!("the fetched platform CA set: {e}"))
+        }
+        Ok(build_platform::Answer::NoSetYet) => {
+            println!(
+                "cargo:warning={platform} publishes no platform CA set yet (answered \
+                 {content_type:?}): this build carries none"
+            );
+            Vec::new()
+        }
+        Err(why) => panic!(
+            "this build is made for {platform} and {publication} is no publication to build \
+             on: {why}"
+        ),
     }
-    std::fs::read(file).unwrap_or_else(|e| panic!("the fetched platform CA set: {e}"))
 }

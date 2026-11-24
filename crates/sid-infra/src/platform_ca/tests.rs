@@ -30,6 +30,40 @@ fn loopback(endpoint: &str) -> PlatformCaPublication {
 #[path = "../../build_platform.rs"]
 mod build_platform;
 
+/// The build asks the same publication the installation later refreshes
+/// from, whether or not the origin was written with a trailing slash.
+/// Bug prevented: an origin ending in `/` asked at `//.well-known/...`,
+/// where a platform answers 404 or its page and the build carries no set.
+#[test]
+fn the_build_asks_the_published_path() {
+    for origin in ["https://sid.example.com", "https://sid.example.com/"] {
+        assert_eq!(
+            build_platform::publication_of(origin),
+            publication_of(origin).unwrap().as_str()
+        );
+    }
+}
+
+/// Only a 200 with the publication's JSON is a set to carry; a 200 with
+/// anything else is a platform that publishes none yet; any other status
+/// stops the build.
+/// Bug prevented: a redirect's JSON error body compiled in as the platform
+/// CA set, giving a binary that fails at start.
+#[test]
+fn only_an_ok_json_answer_is_a_set() {
+    use build_platform::{Answer, answer};
+    assert_eq!(answer("200", "application/json"), Ok(Answer::Set));
+    assert_eq!(
+        answer("200", "application/json; charset=utf-8"),
+        Ok(Answer::Set)
+    );
+    assert_eq!(answer("200", "text/html"), Ok(Answer::NoSetYet));
+    assert_eq!(answer("200", ""), Ok(Answer::NoSetYet));
+    for status in ["302", "301", "204", "000"] {
+        assert!(answer(status, "application/json").is_err(), "{status}");
+    }
+}
+
 /// The one flag of a local publication selects the platform: off is
 /// production, on is the development platform, absent is no platform. Both
 /// origins are ones a build can name, and an origin given beside the flag

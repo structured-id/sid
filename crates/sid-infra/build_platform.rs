@@ -8,6 +8,39 @@ pub const PRODUCTION: &str = "https://structured.id";
 /// The development platform's public origin.
 pub const DEVELOPMENT: &str = "https://dev.structured.id";
 
+/// Where a platform publishes its admitted CA set, below its origin.
+const PUBLICATION_PATH: &str = "/.well-known/sid-ca/index.json";
+
+/// The publication of the platform at `origin`, which may end in a slash as
+/// an origin written as a URL does.
+pub fn publication_of(origin: &str) -> String {
+    format!("{}{PUBLICATION_PATH}", origin.trim_end_matches('/'))
+}
+
+/// What a platform's answer to the publication request is.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The published set: the body is carried.
+    Set,
+    /// The platform answers and publishes no set yet: nothing is carried.
+    NoSetYet,
+}
+
+/// What the answer with HTTP `status` and `content_type` is. Only a 200
+/// carrying the publication's JSON is a set; a 200 carrying anything else is
+/// a platform that does not publish yet. Any other status is no answer to
+/// build on: a redirect is not followed, and its body is not a publication.
+pub fn answer(status: &str, content_type: &str) -> Result<Answer, String> {
+    if status != "200" {
+        return Err(format!("it answered HTTP {status}"));
+    }
+    if content_type.starts_with("application/json") {
+        Ok(Answer::Set)
+    } else {
+        Ok(Answer::NoSetYet)
+    }
+}
+
 /// The platform origin a build is made for.
 ///
 /// `origin` is `SID_BUILD_PLATFORM`, the origin itself, as the build of an
