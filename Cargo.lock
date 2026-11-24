@@ -6150,7 +6150,6 @@ version = "0.2.37"
 dependencies = [
  "async-trait",
  "cedar-policy",
- "coordinode-embed",
  "dashmap",
  "jiff 1.0.2",
  "serde",
@@ -6158,7 +6157,6 @@ dependencies = [
  "sid-core",
  "sid-plugin",
  "sid-storage",
- "sqlx",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

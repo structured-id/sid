@@ -27,14 +27,11 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# The benchmarks and the decision scenarios run against every storage engine.
-sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite", "storage-coordinode"] }
+# The benchmarks and the decision scenarios run against every storage engine;
+# each scenario on a copy of the store the run prepared once (test-support).
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite", "storage-coordinode", "test-support"] }
 # The registration helpers the decision scenarios store resources with.
 sid-plugin = { workspace = true, features = ["conformance"] }
-# A CoordiNode database in memory for the decision scenarios.
-coordinode-embed = "0.10"
-# Each PostgreSQL decision scenario drops the schema it ran in.
-sqlx = { workspace = true, features = ["postgres"] }
 
 # P50/P99 of role administration on both engines; percentiles need a
 # harness of its own.

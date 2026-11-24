@@ -127,19 +127,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # A static name: a job skipped by its own `if` (every pull request) is never
+  # expanded, so an expression in its name would show unexpanded; a release
+  # run appends the variant itself, as "Publish (ce)".
   publish:
-    name: Publish ${{ matrix.variant }}
+    name: Publish
     if: github.repository_owner == 'structured-id' && github.event_name != 'pull_request'
     needs: build
     strategy:
       matrix:
-        include:
-          - variant: embedded
-            suffix: -embedded
-            floating: embedded
-          - variant: ce
-            suffix: ""
-            floating: latest
+        variant: [embedded, ce]
     runs-on: ubuntu-latest
     # No concurrency group: GitHub keeps one pending run per group and cancels
     # the rest, which would drop a release's own tag. Every run publishes its
@@ -169,8 +166,12 @@ jobs:
       - name: Manifest
         working-directory: ${{ runner.temp }}/digests
         env:
-          SUFFIX: ${{ matrix.suffix }}
+          VARIANT: ${{ matrix.variant }}
         run: |
+          # CE carries no suffix. Chosen here: in an expression the empty
+          # string is false, so `ce && '' || '-embedded'` gives the suffix.
+          SUFFIX=-embedded
+          [[ "$VARIANT" == ce ]] && SUFFIX=''
           version="${GITHUB_REF_NAME#v}"
           versioned="${IMAGE}:${version//+/_}${SUFFIX}"
           set -- -t "$versioned"
@@ -184,9 +185,10 @@ jobs:
       # image again.
       - name: Floating tag
         env:
-          SUFFIX: ${{ matrix.suffix }}
-          FLOATING: ${{ matrix.floating }}
+          VARIANT: ${{ matrix.variant }}
         run: |
+          SUFFIX=-embedded FLOATING=embedded
+          [[ "$VARIANT" == ce ]] && SUFFIX='' FLOATING=latest
           git fetch --tags --force --quiet origin
           for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*' --sort=-v:refname); do
             case "${tag%%+*}" in *-*) continue ;; esac

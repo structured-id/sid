@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The account integration provisioned on PostgreSQL by replicas starting
 //! together: one integration, one client, its access, whatever the race.
-//! Each run gets a schema of its own, since the integration is a singleton of
-//! the database it lives in.
+//! Each run gets an installation of its own, since the integration is a
+//! singleton of the database it lives in.
 
 mod common;
 
@@ -18,22 +18,6 @@ use sid_plugin::IssuerStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 use std::sync::Arc;
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
-/// A migrated store in the fresh schema `schema`.
-async fn store(schema: &str) -> Arc<PostgresBackend> {
-    let backend = PostgresBackend::new(&database_url(), Some(schema.to_owned()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(schema))
-        .await
-        .expect("Failed to run migrations");
-    Arc::new(backend)
-}
 
 /// The installation organization's local issuer in `storage`.
 async fn issuer(storage: &PostgresBackend) -> OidcIssuer {
@@ -70,8 +54,13 @@ async fn issuer(storage: &PostgresBackend) -> OidcIssuer {
 /// and one client, and the client has its access.
 #[tokio::test]
 async fn replicas_starting_together_provision_one_integration() {
-    let schema = format!("acct_{}", uuid::Uuid::now_v7().simple());
-    let storage = store(&schema).await;
+    sid_storage::testing::in_isolated_postgres(|storage| {
+        replicas_provision_one_integration(Arc::new(storage))
+    })
+    .await;
+}
+
+async fn replicas_provision_one_integration(storage: Arc<PostgresBackend>) {
     let issuer = issuer(&storage).await;
     let keys = ClientKeySet::from_json(
         r#"{"keys":[{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","kid":"bff"}]}"#,
@@ -112,11 +101,4 @@ async fn replicas_starting_together_provision_one_integration() {
     assert!(stored.is_ready());
     assert_eq!(stored.application.system, Some(SystemIntegration::Account));
     assert_eq!(storage.list_oauth2_clients(0, 100).await.unwrap().len(), 1);
-
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA \"{schema}\" CASCADE"
-    )))
-    .execute(storage.pool())
-    .await
-    .unwrap();
 }

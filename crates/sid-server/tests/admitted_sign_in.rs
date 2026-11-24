@@ -17,10 +17,14 @@ use sid_plugin::storage::StorageBackend;
 /// The application each sign-in continues to.
 const CLIENT: Option<&str> = Some("an-application");
 
-/// A schema of the test's own: its enrollment policy is the open default,
-/// whatever other tests store in theirs.
-async fn storage() -> Arc<dyn StorageBackend> {
-    common::pg_in_own_schema().await
+/// An installation of the test's own, removed when the guard drops: its
+/// enrollment policy is the open default, whatever other tests store in
+/// theirs.
+async fn storage() -> (
+    Arc<dyn StorageBackend>,
+    sid_storage::testing::IsolatedPostgres,
+) {
+    common::own_pg_installation().await
 }
 
 /// The authority over `storage` under a policy requiring `min_acr`.
@@ -81,7 +85,7 @@ fn evidence(acr: &str, amr: &[&str], age: Duration) -> AcceptedEvidence {
 // level, methods and authentication time.
 #[tokio::test]
 async fn sufficient_evidence_signs_in_with_the_cookie() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Standard);
     let profile = profile(storage.as_ref()).await;
     let accepted = evidence(
@@ -130,7 +134,7 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
 // does not pass as MFA.
 #[tokio::test]
 async fn insufficient_evidence_is_refused() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Standard);
     let profile = profile(storage.as_ref()).await;
     let authentication = evidence("urn:sid:acr:basic", &["pwd"], Duration::from_mins(1))
@@ -162,7 +166,7 @@ async fn insufficient_evidence_is_refused() {
 // for the organization, and none is needed.
 #[tokio::test]
 async fn a_sign_in_for_no_application_is_weighed_by_the_organization() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Standard);
     let profile = profile(storage.as_ref()).await;
     let short = evidence("urn:sid:acr:basic", &["pwd"], Duration::from_mins(1))
@@ -221,7 +225,7 @@ async fn a_sign_in_for_no_application_is_weighed_by_the_organization() {
 // the same evidence admitted later is refused.
 #[tokio::test]
 async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Elevated);
     let profile = profile(storage.as_ref()).await;
 
@@ -282,7 +286,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
 // Regression guard: a suspended Profile is not signed in on any evidence.
 #[tokio::test]
 async fn a_suspended_profile_is_not_signed_in() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let mut profile = profile(storage.as_ref()).await;
     profile.status = sid_core::models::ProfileStatus::Suspended;
@@ -355,7 +359,7 @@ fn basic() -> sid_core::models::session::SessionAuthentication {
 // session is created, its authentication time is unchanged.
 #[tokio::test]
 async fn a_repeated_operation_gets_the_same_session_again() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
@@ -398,7 +402,7 @@ async fn a_repeated_operation_gets_the_same_session_again() {
 // until a general retention long after any repeat could use it.
 #[tokio::test]
 async fn the_retained_delivery_ends_with_its_operation() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
@@ -434,7 +438,7 @@ async fn the_retained_delivery_ends_with_its_operation() {
 // nothing held at the commit.
 #[tokio::test]
 async fn a_retired_or_foreign_assignment_admits_nothing() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let other = profile(storage.as_ref()).await;
     let profile = profile(storage.as_ref()).await;
@@ -493,7 +497,7 @@ async fn a_retired_or_foreign_assignment_admits_nothing() {
 // admitted under still holds: once retired, the repeat gets nothing.
 #[tokio::test]
 async fn a_repeat_after_the_assignment_was_retired_is_refused() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
@@ -545,7 +549,7 @@ async fn a_repeat_after_the_assignment_was_retired_is_refused() {
 // session of the retired assignment is handed out again.
 #[tokio::test]
 async fn a_repeat_under_a_relinked_assignment_is_refused() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
@@ -615,7 +619,7 @@ async fn a_repeat_under_a_relinked_assignment_is_refused() {
 // succeeds names it.
 #[tokio::test]
 async fn concurrent_repeats_commit_one_session() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let profile = profile(storage.as_ref()).await;
     let op = operation();
@@ -655,7 +659,7 @@ async fn concurrent_repeats_commit_one_session() {
 // Before, the retained cookie of the first Profile was delivered.
 #[tokio::test]
 async fn a_repeat_for_another_profile_gets_nothing() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let first = profile(storage.as_ref()).await;
     let other = profile(storage.as_ref()).await;
@@ -703,7 +707,7 @@ async fn a_repeat_for_another_profile_gets_nothing() {
 // while the evicted tokens stayed live all the same.
 #[tokio::test]
 async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let mut policy = SecurityPolicy::ce_default();
     policy.session.max_concurrent_sessions = 1;
     let outage = Arc::new(common::RevocationOutage {
@@ -791,7 +795,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
 // the sign-in rules and got the cookie.
 #[tokio::test]
 async fn a_repeat_after_a_lockout_is_refused() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let mut policy = SecurityPolicy::ce_default();
@@ -844,7 +848,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
 // since, or after the operation's deadline; no replacement session appears.
 #[tokio::test]
 async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
-    let storage = storage().await;
+    let (storage, _installation) = storage().await;
     let auth = authority(storage.clone(), AuthLevel::Basic);
     let request = tonic::Request::new(());
 

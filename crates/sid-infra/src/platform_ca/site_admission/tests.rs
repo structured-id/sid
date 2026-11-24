@@ -24,7 +24,11 @@ fn answers_read_as_the_publication_needs_them() {
     use reqwest::StatusCode;
     assert_eq!(answer(StatusCode::OK, b"{}").unwrap(), Published::Held);
     assert_eq!(
-        answer(StatusCode::BAD_REQUEST, &refusal(SUPERSEDED)).unwrap(),
+        answer(
+            StatusCode::BAD_REQUEST,
+            &refusal("SITE_ADMISSION_SUPERSEDED")
+        )
+        .unwrap(),
         Published::Superseded
     );
     for away in [

@@ -15,7 +15,8 @@ use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 
 use sid_storage::testing::{
-    COMPOSE_STORAGE_DATABASE_URL as COMPOSE_DATABASE_URL, storage_database_url as database_url,
+    COMPOSE_STORAGE_DATABASE_URL as COMPOSE_DATABASE_URL, in_isolated_postgres,
+    storage_database_url as database_url,
 };
 
 async fn setup() -> PostgresBackend {
@@ -82,21 +83,21 @@ async fn a_first_primary_contact_waits_for_a_held_profile() {
 
 // ─── The storage contract ───
 
-// Every scenario runs in a migrated schema of its own, dropped afterwards: a
-// scenario about the installation as a whole (a cleanup deleting every expired
-// row, its first administrator) cannot share the schema of the tests beside it.
+// Every scenario runs in an installation of its own, copied from the run's
+// template and dropped afterwards: a scenario about the installation as a
+// whole (a cleanup deleting every expired row, its first administrator)
+// cannot share the database of the tests beside it.
 sid_plugin::storage_conformance!(contract_setup, contract_finish);
 
 async fn contract_setup() -> PostgresBackend {
-    isolated("contract").await.0
+    sid_storage::testing::isolated_postgres().await
 }
 
 async fn contract_finish(backend: PostgresBackend, outcome: Result<(), tokio::task::JoinError>) {
-    let schema: String = sqlx::query_scalar("SELECT current_schema()")
-        .fetch_one(backend.pool())
-        .await
-        .unwrap();
-    finish_isolated(&backend, &schema, outcome).await;
+    sid_storage::testing::drop_isolated_postgres(&backend).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
 }
 
 #[tokio::test]
@@ -138,23 +139,17 @@ async fn test_reset_history_is_compare_and_swap() {
     common::password_history::test_reset_history_is_compare_and_swap(&setup().await).await;
 }
 
-// The history write cutoff is database-wide: these scenarios run in a schema
-// of their own so the cutoff they raise reaches no scenario beside them.
+// The history write cutoff is database-wide: these scenarios run in an
+// installation of their own so the cutoff they raise reaches no scenario
+// beside them.
 
 #[tokio::test]
 async fn test_history_write_cutoff_fences_registration_and_reset() {
-    let (backend, schema) = isolated("cutoff_reg").await;
-    let outcome = tokio::spawn({
-        let backend = backend.clone();
-        async move {
-            common::password_history::test_history_write_cutoff_fences_registration_and_reset(
-                &backend,
-            )
+    in_isolated_postgres(|backend| async move {
+        common::password_history::test_history_write_cutoff_fences_registration_and_reset(&backend)
             .await
-        }
     })
     .await;
-    finish_isolated(&backend, &schema, outcome).await;
 }
 
 // ─── Credential store conformance ───
@@ -173,24 +168,19 @@ macro_rules! credential_store {
     )*};
 }
 
-/// Run credential store conformance `scenario` in a schema of its own: it
-/// raises the database-wide history write cutoff.
+/// Run credential store conformance `scenario` in an installation of its
+/// own: it raises the database-wide history write cutoff.
 macro_rules! credential_store_isolated {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let (backend, schema) = isolated("cred_cutoff").await;
-            let outcome = tokio::spawn({
-                let backend = backend.clone();
-                async move {
-                    sid_plugin::conformance::credential_store::$scenario(
-                        &common::credential_conformance::ProfileCredentials(&backend),
-                    )
-                    .await
-                }
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::credential_store::$scenario(
+                    &common::credential_conformance::ProfileCredentials(&backend),
+                )
+                .await
             })
             .await;
-            finish_isolated(&backend, &schema, outcome).await;
         }
     )*};
 }
@@ -838,21 +828,16 @@ async fn test_admission_taken_behind_a_row_lock_stays_live() {
 
 // ─── Instance secret conformance ───
 
-/// Run instance secret conformance `scenario` in a schema of its own:
-/// instance secrets are database-wide.
+/// Run instance secret conformance `scenario` in an installation of its
+/// own: instance secrets are database-wide.
 macro_rules! instance_secret_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let (backend, schema) = isolated("instance_secret").await;
-            let outcome = tokio::spawn({
-                let backend = backend.clone();
-                async move {
-                    sid_plugin::conformance::instance_secret_store::$scenario(&backend).await
-                }
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::instance_secret_store::$scenario(&backend).await
             })
             .await;
-            finish_isolated(&backend, &schema, outcome).await;
         }
     )*};
 }
@@ -1006,17 +991,12 @@ mod credential_store {
 
 #[tokio::test]
 async fn write_cutoff_only_rises() {
-    let (backend, schema) = isolated("key_cutoff").await;
-    let outcome = tokio::spawn({
-        let pool = backend.pool().clone();
-        async move {
-            let keys = sid_storage::PgHistoryKeyStore::new(pool);
-            keys.migrate().await.expect("history key migrations");
-            sid_plugin::conformance::history_key_store::write_cutoff_only_rises(&keys).await
-        }
+    in_isolated_postgres(|backend| async move {
+        let keys = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
+        keys.migrate().await.expect("history key migrations");
+        sid_plugin::conformance::history_key_store::write_cutoff_only_rises(&keys).await
     })
     .await;
-    finish_isolated(&backend, &schema, outcome).await;
 }
 
 // ─── History evaluator's key store ───
@@ -1187,27 +1167,16 @@ macro_rules! grant_store {
     )*};
 }
 
-/// A backend over a schema of its own: the installation's login-policy epoch
-/// is one per database, and no other scenario advances it.
-async fn setup_isolated() -> PostgresBackend {
-    let schema = format!("grants_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("Failed to run migrations");
-    backend
-}
-
-/// Run entry connection store conformance `scenario` against a schema of its
-/// own: every scenario starts from a store that holds no connection.
+/// Run entry connection store conformance `scenario` in an installation of
+/// its own: every scenario starts from a store that holds no connection.
 macro_rules! entry_connection_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            sid_plugin::conformance::entry_connection_store::$scenario(&setup_isolated().await)
-                .await;
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::entry_connection_store::$scenario(&backend).await
+            })
+            .await;
         }
     )*};
 }
@@ -1223,14 +1192,17 @@ entry_connection_store!(
     concurrent_writers_end_at_one_state,
 );
 
-/// Run platform CA store conformance `scenario` against a schema of its own:
-/// the admitted set is one per database, and every scenario starts from a
-/// store that holds none.
+/// Run platform CA store conformance `scenario` in an installation of its
+/// own: the admitted set is one per database, and every scenario starts from
+/// a store that holds none.
 macro_rules! platform_ca_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            sid_plugin::conformance::platform_ca_store::$scenario(&setup_isolated().await).await;
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::platform_ca_store::$scenario(&backend).await
+            })
+            .await;
         }
     )*};
 }
@@ -1254,10 +1226,13 @@ platform_ca_store!(
 
 #[tokio::test]
 async fn a_move_keeps_every_narrowing() {
-    sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(
-        &setup_isolated().await,
-        &setup_isolated().await,
-    )
+    in_isolated_postgres(|from| async move {
+        in_isolated_postgres(|to| async move {
+            sid_plugin::conformance::platform_ca_store::a_move_keeps_every_narrowing(&from, &to)
+                .await
+        })
+        .await
+    })
     .await;
 }
 
@@ -1385,16 +1360,19 @@ async fn a_replacement_never_deadlocks_with_a_removal_of_its_assignment() {
     );
 }
 
-/// Run grant store conformance `scenario` against this backend in a schema
-/// of its own.
+/// Run grant store conformance `scenario` against this backend in an
+/// installation of its own: the login-policy epoch is one per database, and
+/// no other scenario advances it.
 macro_rules! grant_store_isolated {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let backend = setup_isolated().await;
-            sid_plugin::conformance::grant_store::$scenario(
-                &common::grant_conformance::ProfileGrants::postgres(&backend),
-            )
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::grant_store::$scenario(
+                    &common::grant_conformance::ProfileGrants::postgres(&backend),
+                )
+                .await
+            })
             .await;
         }
     )*};
@@ -1553,53 +1531,48 @@ async fn test_audit_actor_types_round_trip() {
 
 #[tokio::test]
 async fn test_audit_retention_keeps_chains_verifiable() {
-    // Retention drops every month of its schema that ended before the cut,
-    // whoever wrote it: in the shared schema it would race the scenarios
-    // that create and drop months there, so it runs in its own.
-    let (backend, schema) = isolated("retention").await;
-    let outcome = tokio::spawn({
-        let backend = backend.clone();
-        async move {
-            let pool = backend.pool().clone();
-            let log = sid_storage::audit_log::PostgresAuditLog::new(pool.clone());
-            common::audit_retention::test_audit_retention_keeps_chains_verifiable(
-                &backend,
-                &log,
-                |r: sid_core::models::audit::AuditRecord| {
-                    let pool = pool.clone();
-                    async move {
-                        sqlx::query(
-                            "INSERT INTO audit_records (id, timestamp, chain_id, sequence,
+    // Retention drops every month of its installation that ended before the
+    // cut, whoever wrote it: in the shared database it would race the
+    // scenarios that create and drop months there, so it runs in its own.
+    in_isolated_postgres(|backend| async move {
+        let pool = backend.pool().clone();
+        let log = sid_storage::audit_log::PostgresAuditLog::new(pool.clone());
+        common::audit_retention::test_audit_retention_keeps_chains_verifiable(
+            &backend,
+            &log,
+            |r: sid_core::models::audit::AuditRecord| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query(
+                        "INSERT INTO audit_records (id, timestamp, chain_id, sequence,
                                 actor_id, actor_type, action, resource, outcome, metadata,
                                 ip_address, device_id, prev_hash, hash)
                              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                                 $14)",
-                        )
-                        .bind(&r.id)
-                        .bind(jiff_sqlx::ToSqlx::to_sqlx(r.timestamp))
-                        .bind(&r.chain_id)
-                        .bind(r.sequence as i64)
-                        .bind(&r.actor_id)
-                        .bind(r.actor_type.to_string())
-                        .bind(&r.action)
-                        .bind(&r.resource)
-                        .bind(r.outcome.to_string())
-                        .bind(&r.metadata)
-                        .bind(r.ip_address)
-                        .bind(&r.device_id)
-                        .bind(r.prev_hash.as_bytes().as_slice())
-                        .bind(r.hash.as_bytes().as_slice())
-                        .execute(&pool)
-                        .await
-                        .unwrap();
-                    }
-                },
-            )
-            .await;
-        }
+                    )
+                    .bind(&r.id)
+                    .bind(jiff_sqlx::ToSqlx::to_sqlx(r.timestamp))
+                    .bind(&r.chain_id)
+                    .bind(r.sequence as i64)
+                    .bind(&r.actor_id)
+                    .bind(r.actor_type.to_string())
+                    .bind(&r.action)
+                    .bind(&r.resource)
+                    .bind(r.outcome.to_string())
+                    .bind(&r.metadata)
+                    .bind(r.ip_address)
+                    .bind(&r.device_id)
+                    .bind(r.prev_hash.as_bytes().as_slice())
+                    .bind(r.hash.as_bytes().as_slice())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            },
+        )
+        .await;
     })
     .await;
-    finish_isolated(&backend, &schema, outcome).await;
 }
 
 /// Retention works on the installation's own schema: an expired partition
@@ -1609,8 +1582,8 @@ async fn test_audit_retention_keeps_chains_verifiable() {
 /// other schema's month was counted in this one's and the run failed.
 #[tokio::test]
 async fn test_audit_retention_stays_in_its_schema() {
-    let (own, own_schema) = isolated("retention_own").await;
-    let (other, other_schema) = isolated("retention_other").await;
+    let (own, own_schema) = schema_installation("retention_own").await;
+    let (other, other_schema) = schema_installation("retention_other").await;
     let outcome = tokio::spawn({
         let (own, other, other_schema) = (own.clone(), other.clone(), other_schema.clone());
         async move {
@@ -1632,8 +1605,8 @@ async fn test_audit_retention_stays_in_its_schema() {
         }
     })
     .await;
-    finish_isolated(&other, &other_schema, Ok(())).await;
-    finish_isolated(&own, &own_schema, outcome).await;
+    drop_schema_installation(&other, &other_schema, Ok(())).await;
+    drop_schema_installation(&own, &own_schema, outcome).await;
 }
 
 /// A month's partition is created in the installation's own schema even when
@@ -1642,8 +1615,8 @@ async fn test_audit_retention_stays_in_its_schema() {
 /// so this installation got no partition for the month.
 #[tokio::test]
 async fn test_audit_partition_is_created_in_its_schema() {
-    let (own, own_schema) = isolated("partition_own").await;
-    let (other, other_schema) = isolated("partition_other").await;
+    let (own, own_schema) = schema_installation("partition_own").await;
+    let (other, other_schema) = schema_installation("partition_other").await;
     let outcome = tokio::spawn({
         let (own, other, own_schema) = (own.clone(), other.clone(), own_schema.clone());
         async move {
@@ -1665,8 +1638,8 @@ async fn test_audit_partition_is_created_in_its_schema() {
         }
     })
     .await;
-    finish_isolated(&other, &other_schema, Ok(())).await;
-    finish_isolated(&own, &own_schema, outcome).await;
+    drop_schema_installation(&other, &other_schema, Ok(())).await;
+    drop_schema_installation(&own, &own_schema, outcome).await;
 }
 
 /// A month's partition is created in the installation's own schema even when
@@ -1676,7 +1649,7 @@ async fn test_audit_partition_is_created_in_its_schema() {
 #[tokio::test]
 async fn test_audit_partition_ignores_public_on_the_search_path() {
     let shared = setup().await;
-    let (own, own_schema) = isolated("partition_public").await;
+    let (own, own_schema) = schema_installation("partition_public").await;
     let outcome = tokio::spawn({
         let (own, own_schema, shared) = (own.clone(), own_schema.clone(), shared.clone());
         async move {
@@ -1700,13 +1673,14 @@ async fn test_audit_partition_ignores_public_on_the_search_path() {
         }
     })
     .await;
-    finish_isolated(&own, &own_schema, outcome).await;
+    drop_schema_installation(&own, &own_schema, outcome).await;
 }
 
-/// A migrated schema of its own, for a scenario about the installation as a
-/// whole (its first administrator, its organization) that the shared schema,
-/// used by concurrent tests, cannot give.
-async fn isolated(prefix: &str) -> (PostgresBackend, String) {
+/// An installation in a migrated schema of its own on the shared database,
+/// for a scenario about installations sharing one database (shared-database
+/// mode): what one does in its schema must not reach another's. A scenario
+/// about one installation as a whole uses [`in_isolated_postgres`] instead.
+async fn schema_installation(prefix: &str) -> (PostgresBackend, String) {
     let schema = format!("{prefix}_{}", uuid::Uuid::now_v7().simple());
     let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
         .await
@@ -1717,8 +1691,8 @@ async fn isolated(prefix: &str) -> (PostgresBackend, String) {
     (backend, schema)
 }
 
-/// Drop an [`isolated`] schema, then report the scenario's outcome.
-async fn finish_isolated(
+/// Drop a [`schema_installation`], then report the scenario's outcome.
+async fn drop_schema_installation(
     backend: &PostgresBackend,
     schema: &str,
     outcome: Result<(), tokio::task::JoinError>,
@@ -1739,24 +1713,19 @@ async fn finish_isolated(
 
 // ─── Issuer store conformance ───
 
-/// Run issuer store conformance `scenario`, each in its own schema: the
-/// installation organization has exactly one local issuer.
+/// Run issuer store conformance `scenario`, each in an installation of its
+/// own: the installation organization has exactly one local issuer.
 macro_rules! issuer_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let (backend, schema) = isolated("issuer").await;
-            let outcome = tokio::spawn({
-                let backend = backend.clone();
-                async move {
-                    sid_plugin::conformance::issuer_store::$scenario(
-                        &common::issuer_conformance::InstanceIssuers(&backend),
-                    )
-                    .await
-                }
+            in_isolated_postgres(|backend| async move {
+                sid_plugin::conformance::issuer_store::$scenario(
+                    &common::issuer_conformance::InstanceIssuers(&backend),
+                )
+                .await
             })
             .await;
-            finish_isolated(&backend, &schema, outcome).await;
         }
     )*};
 }
@@ -1774,22 +1743,17 @@ mod issuer_store {
     );
 }
 
-/// Runs in its own schema: it makes the installation invite-only.
+/// Runs in an installation of its own: it makes the installation invite-only.
 #[tokio::test]
 async fn test_invite_spent_once_by_concurrent_registrations() {
-    let (backend, schema) = isolated("enrollinvite").await;
-    let outcome = tokio::spawn({
-        let backend = backend.clone();
-        async move {
-            let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
-            common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(
-                &backend, &log,
-            )
-            .await
-        }
+    in_isolated_postgres(|backend| async move {
+        let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+        common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(
+            &backend, &log,
+        )
+        .await
     })
     .await;
-    finish_isolated(&backend, &schema, outcome).await;
 }
 
 /// A self-registration of a fresh username under the stored policy.
@@ -1813,8 +1777,8 @@ fn self_registration(name: &str) -> sid_core::models::NewRegistration {
 /// installation's signups behind any one's policy change).
 #[tokio::test]
 async fn test_enrollment_policy_lock_is_per_installation() {
-    let (own, own_schema) = isolated("enrolllock_own").await;
-    let (other, other_schema) = isolated("enrolllock_other").await;
+    let (own, own_schema) = schema_installation("enrolllock_own").await;
+    let (other, other_schema) = schema_installation("enrolllock_other").await;
     let outcome = tokio::spawn({
         let (own, other) = (own.clone(), other.clone());
         async move {
@@ -1852,20 +1816,19 @@ async fn test_enrollment_policy_lock_is_per_installation() {
         }
     })
     .await;
-    finish_isolated(&other, &other_schema, Ok(())).await;
-    finish_isolated(&own, &own_schema, outcome).await;
+    drop_schema_installation(&other, &other_schema, Ok(())).await;
+    drop_schema_installation(&own, &own_schema, outcome).await;
 }
 
 /// A replica of an older build inserting the first claim while the adoption
 /// runs (no claim row exists yet to lock): the adoption waits for that
 /// insertion and removes the claim, so none is left usable beside the
-/// central policy. Runs in its own schema: an installation's first claim.
+/// central policy. Runs in an installation of its own: an installation's
+/// first claim.
 #[tokio::test]
 async fn test_adoption_serializes_with_first_claim_insertion() {
     use sid_core::models::{BootstrapPolicy, CentralAdoption, InstanceSecret};
-    let (backend, schema) = isolated("adoptfirst").await;
-    let outcome = tokio::spawn({
-        let backend = backend.clone();
+    in_isolated_postgres(|backend| {
         async move {
             // The older replica's insertion, held open.
             let mut older = backend.pool().begin().await.unwrap();
@@ -1898,7 +1861,6 @@ async fn test_adoption_serializes_with_first_claim_insertion() {
         }
     })
     .await;
-    finish_isolated(&backend, &schema, outcome).await;
 }
 
 // ─── Durable work ───
@@ -2831,20 +2793,16 @@ async fn test_profile_without_username_round_trip() {
 // ─── Email policy revisions ───
 
 /// Keys written under a revision that is no longer active are kept,
-/// quarantined with a recorded reason, and can be repaired. In a schema of its
-/// own: the test moves the installation's active revision.
+/// quarantined with a recorded reason, and can be repaired. In an
+/// installation of its own: the test moves the installation's active revision.
 #[tokio::test]
 async fn test_stale_email_keys_are_quarantined_and_reconciled() {
+    in_isolated_postgres(stale_email_keys_are_quarantined_and_reconciled).await;
+}
+
+async fn stale_email_keys_are_quarantined_and_reconciled(backend: PostgresBackend) {
     use common::email_policy::{STALE_REVISION, stale_rows};
     use sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION;
-
-    let schema = format!("email_stale_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is the database running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("the schema");
 
     let domain = "stale.sid.example.com";
     let activate = |revision: i64| {
@@ -2922,14 +2880,6 @@ async fn test_stale_email_keys_are_quarantined_and_reconciled() {
     .await
     .unwrap();
     assert_eq!(migrated, 2, "the repaired key and the race winner");
-
-    // The scratch schema goes with the test; the shared database stays clean.
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA \"{schema}\" CASCADE"
-    )))
-    .execute(backend.pool())
-    .await
-    .unwrap();
 }
 
 /// A contact row of a stale key.

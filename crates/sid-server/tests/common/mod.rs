@@ -106,21 +106,17 @@ pub async fn adopt_operation_period(storage: &dyn sid_plugin::OperationResultSto
     assert_eq!(*OPERATION_PERIOD.get_or_init(|| period), period);
 }
 
-/// A PostgreSQL backend in a schema of its own on the test database
-/// (54399, `DATABASE_URL`): the installation policies it reads start unset,
-/// so policies other tests store in the shared schema never reach it.
+/// A PostgreSQL installation of the test's own, a copy of the template the
+/// run migrated once, removed when the returned guard drops: the
+/// installation policies it reads start unset, so policies other tests store
+/// in the shared database never reach it.
 #[allow(dead_code)]
-pub async fn pg_in_own_schema() -> Arc<dyn StorageBackend> {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let schema = format!("own_{}", uuid::Uuid::now_v7().simple());
-    let backend = sid_storage::PostgresBackend::new(&url, Some(schema.clone()))
-        .await
-        .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in the test's schema");
-    Arc::new(backend)
+pub async fn own_pg_installation() -> (
+    Arc<dyn StorageBackend>,
+    sid_storage::testing::IsolatedPostgres,
+) {
+    let installation = sid_storage::testing::IsolatedPostgres::new().await;
+    (Arc::new(installation.backend().clone()), installation)
 }
 
 /// A new command's operation context: a fresh key under the adopted period.

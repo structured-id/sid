@@ -15,11 +15,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
-
 const KIND: &str = "test.shared_replica";
 
 const RETRY: RetrySchedule = RetrySchedule::new(&[Duration::from_secs(1)]);
@@ -58,10 +53,11 @@ impl WorkHandler for Counting {
     }
 }
 
-/// One replica: its own connection pool to the shared schema and its runner.
-async fn replica(schema: &str) -> Arc<PostgresBackend> {
+/// One replica: its own connection pool to the shared database and its
+/// runner.
+async fn replica(url: &str) -> Arc<PostgresBackend> {
     Arc::new(
-        PostgresBackend::new(&database_url(), Some(schema.to_string()))
+        PostgresBackend::new(url, None)
             .await
             .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?"),
     )
@@ -114,8 +110,8 @@ async fn wait_completed(store: &PostgresBackend, ids: &[WorkId]) {
     }
 }
 
-async fn replicas_share_the_database(schema: String) {
-    let (a, b) = (replica(&schema).await, replica(&schema).await);
+async fn replicas_share_the_database(url: String) {
+    let (a, b) = (replica(&url).await, replica(&url).await);
     let attempts = Arc::new(Mutex::new(HashMap::new()));
     let (stop_a, run_a) = start(a.clone(), "a", &attempts);
     let (stop_b, run_b) = start(b.clone(), "b", &attempts);
@@ -165,24 +161,11 @@ async fn replicas_share_the_database(schema: String) {
 /// while the other is down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replicas_without_a_broker_do_each_work_once() {
-    let schema = format!("shared_replicas_{}", uuid::Uuid::now_v7().simple());
-    let setup = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(setup.pool(), Some(&schema))
-        .await
-        .expect("migrations in an isolated schema");
-    let pool = setup.pool().clone();
-    let outcome = tokio::spawn(replicas_share_the_database(schema.clone())).await;
-    for statement in [
-        format!("DROP SCHEMA \"{schema}\" CASCADE"),
-        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
+    // An installation of its own: the runners claim every piece of work of
+    // the kind in their database. Removed when the guard drops.
+    let installation = sid_storage::testing::IsolatedPostgres::new().await;
+    let outcome = tokio::spawn(replicas_share_the_database(installation.url())).await;
+    drop(installation);
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic.into_panic());
     }

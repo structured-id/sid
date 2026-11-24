@@ -22,8 +22,10 @@ required-features = ["test-support"]
 [features]
 default = ["storage-pg"]
 
-# The shared PostgreSQL test database a test run migrates once (tests only).
-test-support = ["storage-pg"]
+# The test stores a test run prepares once (tests only): the shared
+# PostgreSQL databases, the template isolated installations are copied from,
+# and, with storage-coordinode, the CoordiNode template each test copies.
+test-support = ["storage-pg", "dep:tempfile"]
 
 # PostgreSQL backend (full deployment)
 storage-pg = ["dep:sqlx", "sqlx?/postgres", "sid-ids/sqlx-postgres", "dep:jiff-sqlx"]
@@ -83,6 +85,9 @@ jiff-sqlx = { workspace = true, optional = true }
 
 # Secrets — needed for EmailProviderConfig SecretBox fields
 secrecy = { workspace = true }
+
+# A test's copy of the CoordiNode template (test-support only).
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 # The integration tests connect to the test databases the run prepared once.

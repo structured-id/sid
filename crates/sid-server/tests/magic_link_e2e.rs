@@ -11,8 +11,6 @@ mod common;
 use sid_authn::magic_link::{MagicLinkService, MagicLinkVerifyResult};
 use sid_core::models::{AuditEntry, MagicLinkSession};
 use sid_plugin::StorageBackend;
-use sid_storage::PostgresBackend;
-use sid_storage::testing::database_url;
 use std::sync::Arc;
 
 /// An address no other run has used: the test database outlives a run, and an
@@ -221,33 +219,14 @@ async fn test_magic_link_rate_limiting() {
 }
 
 /// The cleanup deletes every expired link of the installation, so it runs in
-/// a schema of its own: on the shared schema it would remove the expired link
-/// `test_magic_link_expired` is verifying beside it.
+/// an installation of its own: on the shared database it would remove the
+/// expired link `test_magic_link_expired` is verifying beside it.
 #[tokio::test]
 async fn test_magic_link_cleanup_removes_expired() {
-    let schema = format!("magic_link_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in an isolated schema");
-    let pool = backend.pool().clone();
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
-    let outcome = tokio::spawn(cleanup_removes_expired(storage)).await;
-    // The migrations also create the schema's database-wide reader role.
-    for statement in [
-        format!("DROP SCHEMA \"{schema}\" CASCADE"),
-        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
+    sid_storage::testing::in_isolated_postgres(|backend| {
+        cleanup_removes_expired(Arc::new(backend))
+    })
+    .await;
 }
 
 async fn cleanup_removes_expired(storage: Arc<dyn StorageBackend>) {
@@ -385,31 +364,13 @@ fn delivery_of(id: uuid::Uuid) -> ClaimedWork {
 /// Requesting a link commits, with its session, one piece of work emailing
 /// it: the work names only the session and expires with the link, and
 /// neither it nor the stored session holds the token in the clear. Runs in
-/// a schema of its own so the claim sees this request's work alone.
+/// an installation of its own so the claim sees this request's work alone.
 #[tokio::test]
 async fn test_requested_link_owes_its_email() {
-    let schema = format!("magic_link_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("migrations in an isolated schema");
-    let pool = backend.pool().clone();
-    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
-    let outcome = tokio::spawn(requested_link_owes_its_email(storage)).await;
-    for statement in [
-        format!("DROP SCHEMA \"{schema}\" CASCADE"),
-        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
+    sid_storage::testing::in_isolated_postgres(|backend| {
+        requested_link_owes_its_email(Arc::new(backend))
+    })
+    .await;
 }
 
 async fn requested_link_owes_its_email(storage: Arc<dyn StorageBackend>) {

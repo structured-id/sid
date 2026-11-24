@@ -7,14 +7,27 @@
 #
 #   closure     client-facing packages: no server/storage crate in their normal
 #               dependency graph, for each supported feature set and target
-#   combos      each supported feature combination of each package, built alone
+#   combos [M/N]
+#               each supported feature combination of each package, built
+#               alone; with M/N only every N-th combination from the M-th
 #   each        every feature of every package on its own (cargo-hack), in a
-#               copy of the checkout because cargo-hack rewrites manifests
+#               copy of the checkout because cargo-hack rewrites manifests;
+#               the three parts below together
+#   each-workspace [M/N]
+#               every feature of the workspace packages but the server and the
+#               migration tool; with M/N only cargo-hack's partition M of N
+#   each-server [M/N]
+#               the server's feature powerset to depth 2 with a backend; with
+#               M/N only cargo-hack's partition M of N
+#   each-migrate
+#               the migration tool's feature powerset with a backend
 #   consumers   sid-proto, sid-core and both together as dependencies of
 #               projects outside this workspace
 #   crypto      sid-crypto feature sets without native or foreign primitives
 #   transport   the engine and message-only packages without the gRPC transport
 #   all         everything above
+#
+# The parts run as separate CI jobs; `all` runs them one after another.
 #
 # Server and storage packages keep their database, broker and cache
 # dependencies; only the client-facing closure is restricted.
@@ -114,8 +127,12 @@ check_closure() {
 }
 
 check_combos() {
-  local entry pkg flags targets
+  local part="${1:-1/1}" entry pkg flags targets index=0
+  local m="${part%%/*}" n="${part#*/}"
   for entry in "${COMBOS[@]}"; do
+    index=$((index + 1))
+    # Interleaved, so each part gets light and heavy packages alike.
+    (( (index - m) % n == 0 )) || continue
     pkg="${entry%%|*}"
     flags="${entry#*|}"
     # Tests and benches are written for the default features, so they are
@@ -132,31 +149,59 @@ check_combos() {
   done
 }
 
-check_each() {
+# Download every locked dependency: the offline steps below run in a job of
+# their own, with no earlier step that resolved the graph.
+fetch_locked() {
+  (cd "$ROOT" && cargo fetch --locked)
+}
+
+# Run cargo-hack with `$@` in a copy of the checkout: --no-dev-deps rewrites
+# manifests while it runs. Dropping dev-dependencies rewrites the copy's
+# lockfile, so no --locked; --offline keeps the versions the checkout locked.
+hack_in_copy() {
   command -v cargo-hack >/dev/null || { echo "cargo-hack is required"; exit 2; }
+  fetch_locked
   local copy
   copy="$(mktemp -d)"
-  trap 'rm -rf "$copy"' RETURN
-  # A copy, not the checkout: --no-dev-deps rewrites manifests while it runs.
   rsync -a --exclude target --exclude .git "$ROOT/" "$copy/"
   (
     cd "$copy"
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}/isolation-each"
-    # Dropping dev-dependencies rewrites the copy's lockfile, so no --locked;
-    # --offline keeps the versions the checkout already locked.
-    cargo hack check --offline --workspace --each-feature --no-dev-deps \
-      --exclude sid-server --exclude sid-migrate
-    # A server or migration build without a storage backend is not a product:
-    # every other feature is checked together with one of the backends.
-    cargo hack check --offline -p sid-server --feature-powerset --depth 2 \
-      --no-dev-deps --at-least-one-of storage-pg,embedded-dev
-    cargo hack check --offline -p sid-migrate --feature-powerset --depth 2 \
-      --no-dev-deps --at-least-one-of storage-pg,storage-sqlite
+    cargo hack check --offline --no-dev-deps "$@"
   ) || fail=1
+  rm -rf "$copy"
+}
+
+check_each_workspace() {
+  local partition=()
+  [[ -n "${1:-}" ]] && partition=(--partition "$1")
+  hack_in_copy --workspace --each-feature --exclude sid-server --exclude sid-migrate \
+    "${partition[@]}"
+}
+
+# A server or migration build without a storage backend is not a product:
+# every other feature is checked together with one of the backends.
+check_each_server() {
+  local partition=()
+  [[ -n "${1:-}" ]] && partition=(--partition "$1")
+  hack_in_copy -p sid-server --feature-powerset --depth 2 \
+    --at-least-one-of storage-pg,embedded-dev "${partition[@]}"
+}
+
+check_each_migrate() {
+  hack_in_copy -p sid-migrate --feature-powerset --depth 2 \
+    --at-least-one-of storage-pg,storage-sqlite
+}
+
+check_each() {
+  check_each_workspace
+  check_each_server
+  check_each_migrate
 }
 
 check_consumers() {
   local work name flags
+  fetch_locked
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
   # Each consumer resolves outside the workspace with the workspace's pinned
@@ -259,13 +304,16 @@ check_crypto_closures() {
 
 case "${1:-all}" in
   closure) check_closure ;;
-  combos) check_combos ;;
+  combos) check_combos "${2:-1/1}" ;;
   each) check_each ;;
+  each-workspace) check_each_workspace "${2:-}" ;;
+  each-server) check_each_server "${2:-}" ;;
+  each-migrate) check_each_migrate ;;
   consumers) check_consumers ;;
   crypto) check_crypto_closures ;;
   transport) check_transport_closures ;;
   all) check_closure; check_combos; check_each; check_consumers; check_crypto_closures; check_transport_closures ;;
-  *) echo "usage: $0 [closure|combos|each|consumers|crypto|transport|all]"; exit 2 ;;
+  *) echo "usage: $0 [closure|combos [M/N]|each|each-workspace [M/N]|each-server [M/N]|each-migrate|consumers|crypto|transport|all]"; exit 2 ;;
 esac
 
 exit "$fail"

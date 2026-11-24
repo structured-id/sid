@@ -19,30 +19,21 @@ use sid_core::models::{
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::admin::security_service_server::SecurityService;
 use sid_server::grpc::security_service::SecurityServiceImpl;
-use sid_storage::PostgresBackend;
+use sid_storage::testing::IsolatedPostgres;
 use std::sync::Arc;
 use tonic::Request;
-
-fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
-}
 
 async fn setup() -> (
     SecurityServiceImpl,
     Arc<dyn StorageBackend>,
     Arc<JwtService>,
+    IsolatedPostgres,
 ) {
-    // Its own schema: the integrity check covers every record of the store,
-    // so in the shared schema it would scan, and race, every other test's.
-    let schema = format!("security_{}", uuid::Uuid::now_v7().simple());
-    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
-        .await
-        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
-
-    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
-        .await
-        .expect("Failed to run migrations");
+    // Its own installation: the integrity check covers every record of the
+    // store, so in the shared database it would scan, and race, every other
+    // test's. Removed when the returned guard drops.
+    let installation = IsolatedPostgres::new().await;
+    let backend = installation.backend().clone();
 
     let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
         sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),
@@ -62,7 +53,7 @@ async fn setup() -> (
         audit_log,
         no_cache,
     );
-    (svc, storage, jwt)
+    (svc, storage, jwt, installation)
 }
 
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
@@ -124,7 +115,7 @@ fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2C
 
 #[tokio::test]
 async fn test_pg_get_security_policy() {
-    let (svc, _storage, jwt) = setup().await;
+    let (svc, _storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::GetSecurityPolicyRequest {},
@@ -144,7 +135,7 @@ async fn test_pg_get_security_policy() {
 
 #[tokio::test]
 async fn test_pg_get_security_policy_passkey_satisfies_mfa_in_effective_policy() {
-    let (svc, storage, jwt) = setup().await;
+    let (svc, storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     storage
@@ -176,7 +167,7 @@ async fn test_pg_get_security_policy_passkey_satisfies_mfa_in_effective_policy()
 
 #[tokio::test]
 async fn test_pg_list_application_overrides_empty() {
-    let (svc, _storage, jwt) = setup().await;
+    let (svc, _storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::ListApplicationOverridesRequest {},
@@ -189,7 +180,7 @@ async fn test_pg_list_application_overrides_empty() {
 
 #[tokio::test]
 async fn test_pg_get_effective_policy_with_client_override() {
-    let (svc, storage, jwt) = setup().await;
+    let (svc, storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     // Ensure system project exists.
@@ -223,7 +214,7 @@ async fn test_pg_get_effective_policy_with_client_override() {
 
 #[tokio::test]
 async fn test_pg_get_effective_policy_nonexistent_client_returns_defaults() {
-    let (svc, _storage, jwt) = setup().await;
+    let (svc, _storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::GetEffectivePolicyRequest {
@@ -239,7 +230,7 @@ async fn test_pg_get_effective_policy_nonexistent_client_returns_defaults() {
 
 #[tokio::test]
 async fn test_pg_evaluate_enforcement_allow_for_basic_user() {
-    let (svc, storage, jwt) = setup().await;
+    let (svc, storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     storage
@@ -286,7 +277,7 @@ async fn test_pg_evaluate_enforcement_allow_for_basic_user() {
 
 #[tokio::test]
 async fn test_pg_evaluate_enforcement_step_up_for_elevated_client() {
-    let (svc, storage, jwt) = setup().await;
+    let (svc, storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     storage
@@ -347,7 +338,7 @@ async fn test_pg_evaluate_enforcement_step_up_for_elevated_client() {
 
 #[tokio::test]
 async fn test_pg_run_integrity_check_all_layers() {
-    let (svc, storage, jwt) = setup().await;
+    let (svc, storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     // Seed some audit data: create a profile (triggers audit chain).
@@ -406,7 +397,7 @@ async fn test_pg_run_integrity_check_all_layers() {
 
 #[tokio::test]
 async fn test_pg_run_integrity_check_specific_layer() {
-    let (svc, _storage, jwt) = setup().await;
+    let (svc, _storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
 
     // Run only graph_consistency layer.
@@ -426,7 +417,7 @@ async fn test_pg_run_integrity_check_specific_layer() {
 
 #[tokio::test]
 async fn test_pg_evaluate_enforcement_profile_not_found() {
-    let (svc, _storage, jwt) = setup().await;
+    let (svc, _storage, jwt, _installation) = setup().await;
     let token = issue_admin_token(&jwt, ProfileId::generate());
     let req = authed_request(
         sid_proto::sid::v1::admin::EvaluateEnforcementRequest {

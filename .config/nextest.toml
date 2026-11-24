@@ -16,6 +16,17 @@ command = "cargo run --locked --quiet -p sid-storage --features test-support --e
 [scripts.setup.storage-database]
 command = "cargo run --locked --quiet -p sid-storage --features test-support --example prepare_test_database -- storage"
 
+# A test about the installation as a whole runs in a database of its own,
+# copied from this template (CREATE DATABASE ... TEMPLATE), not migrated per
+# test.
+[scripts.setup.template-database]
+command = "cargo run --locked --quiet -p sid-storage --features test-support --example prepare_test_database -- template"
+
+# Each CoordiNode test opens a copy of one store with SID's schema declared;
+# declaring it per test (every constraint and index) took seconds each.
+[scripts.setup.coordinode-template]
+command = "cargo run --locked --quiet -p sid-storage --features test-support,storage-coordinode --example prepare_test_database -- coordinode"
+
 [[profile.default.scripts]]
 filter = """
 binary_id(sid-scim::scim_integration)
@@ -39,6 +50,25 @@ binary_id(sid-storage::postgres_integration) | binary_id(sid-storage::field_encr
 | (binary_id(sid-storage) & (test(/^audit_log::/) | test(/^postgres::work::/)))
 """
 setup = "storage-database"
+
+[[profile.default.scripts]]
+filter = """
+binary_id(sid-storage::postgres_integration) | binary_id(sid-authz::postgres_decisions)
+| binary_id(sid-server::account_integration_pg) | binary_id(sid-server::admitted_sign_in)
+| binary_id(sid-server::upstream_sign_in) | binary_id(sid-server::enrollment_pg)
+| binary_id(sid-server::flow_action_pg) | binary_id(sid-server::magic_link_e2e)
+| binary_id(sid-server::operation_retry_transports) | binary_id(sid-server::otp_mail_pg)
+| binary_id(sid-server::passwordless_registration_pg) | binary_id(sid-server::scim_http)
+| binary_id(sid-server::security_service_pg) | binary_id(sid-server::shared_database_replicas)
+"""
+setup = "template-database"
+
+[[profile.default.scripts]]
+filter = """
+binary_id(sid-storage::coordinode_integration) | binary_id(sid-storage::coordinode_host_registration)
+| binary_id(sid-authz::coordinode_decisions)
+"""
+setup = "coordinode-template"
 
 [profile.default]
 # Default: 8 parallel test threads

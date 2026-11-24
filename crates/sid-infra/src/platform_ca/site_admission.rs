@@ -17,8 +17,11 @@ use super::{CONNECT_TIMEOUT, PublicationError, TIMEOUT, build_platform};
 /// Where below the platform's origin statements are published.
 const PUBLISH_PATH: &str = "/v1/federation/site-admissions";
 
-/// The reason of a refusal because a newer revision already stands.
-const SUPERSEDED: &str = crate::grpc_error::ErrorReason::SiteAdmissionSuperseded.as_str();
+/// The reason of a refusal because a newer revision already stands, as the
+/// CE proto names it: this transport reads JSON, not the gRPC error model.
+fn superseded() -> &'static str {
+    sid_proto::sid::v1::common::ErrorReason::SiteAdmissionSuperseded.as_str_name()
+}
 
 /// The longest refusal read for its reason.
 const MAX_ERROR_BODY: usize = 1 << 16;
@@ -69,7 +72,7 @@ fn answer(status: reqwest::StatusCode, body: &[u8]) -> Result<Published, Publish
         return Ok(Published::Held);
     }
     let reason = refusal_reason(body);
-    if reason.as_deref() == Some(SUPERSEDED) {
+    if reason.as_deref() == Some(superseded()) {
         return Ok(Published::Superseded);
     }
     let described = format!(
