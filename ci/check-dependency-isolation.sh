@@ -149,11 +149,18 @@ check_combos() {
   done
 }
 
+# Download every locked dependency: the offline steps below run in a job of
+# their own, with no earlier step that resolved the graph.
+fetch_locked() {
+  (cd "$ROOT" && cargo fetch --locked)
+}
+
 # Run cargo-hack with `$@` in a copy of the checkout: --no-dev-deps rewrites
 # manifests while it runs. Dropping dev-dependencies rewrites the copy's
 # lockfile, so no --locked; --offline keeps the versions the checkout locked.
 hack_in_copy() {
   command -v cargo-hack >/dev/null || { echo "cargo-hack is required"; exit 2; }
+  fetch_locked
   local copy
   copy="$(mktemp -d)"
   rsync -a --exclude target --exclude .git "$ROOT/" "$copy/"
@@ -194,6 +201,7 @@ check_each() {
 
 check_consumers() {
   local work name flags
+  fetch_locked
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
   # Each consumer resolves outside the workspace with the workspace's pinned
