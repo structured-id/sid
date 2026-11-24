@@ -2505,6 +2505,28 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<Option<Vec<Session>>>;
 
+    /// Change a profile's own password and replace its sessions in one
+    /// transaction: replace the active password credential `id` as
+    /// [`crate::credential_store::CredentialStore::change_password`] does
+    /// (only while its data is still `expected`, with `history`), end every
+    /// session of its profile under `end` (each owes what `end` says), the
+    /// changing one included, and store `replacement`, the session the
+    /// changing browser continues in, when there is one. `replacement`
+    /// belongs to the credential's profile. Returns the ended sessions, or
+    /// `None` with nothing written when another change came first, the
+    /// credential is no longer active or the history moved past
+    /// `history.expected_revision`.
+    async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        end: &SessionEnd,
+        replacement: Option<&Session>,
+        ctx: MutationContext,
+    ) -> Result<Option<Vec<Session>>>;
+
     /// Count active (pending/verified, non-expired) reset sessions for a profile.
     async fn count_active_reset_sessions(&self, profile_id: ProfileId) -> Result<u32>;
 

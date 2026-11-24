@@ -9988,6 +9988,39 @@ impl StorageBackend for PostgresBackend {
         Ok(Some(sessions))
     }
 
+    async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        end: &SessionEnd,
+        replacement: Option<&Session>,
+        mut ctx: MutationContext,
+    ) -> SidResult<Option<Vec<Session>>> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("change password: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let Some(owner) =
+            credentials::replace_password(&mut tx, id, expected, new, history).await?
+        else {
+            return Ok(None);
+        };
+        let profile_id = ProfileId::from_uuid(owner)
+            .map_err(|e| SidError::Storage(format!("credential owner: {e}")))?;
+        if replacement.is_some_and(|session| session.profile_id != profile_id) {
+            return Err(SidError::Validation(
+                "the replacement session belongs to the credential's profile".into(),
+            ));
+        }
+        let sessions = directory::end_sessions(&mut tx, profile_id, end, &mut ctx).await?;
+        if let Some(replacement) = replacement {
+            session::write(&mut tx, replacement).await?;
+        }
+        Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(Some(sessions))
+    }
+
     async fn count_active_reset_sessions(&self, profile_id: ProfileId) -> SidResult<u32> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM password_reset_sessions

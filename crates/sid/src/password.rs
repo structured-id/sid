@@ -161,6 +161,16 @@ fn own_change(
 
 /// Password replacement over one installation's sign-ins and password
 /// operations.
+/// A password change that passed its checks: what its commit writes.
+struct ReadyChange {
+    credential: sid_core::models::CredentialId,
+    /// The password data the change applies over.
+    current: Vec<u8>,
+    new: Credential,
+    history: Option<HistoryCommit>,
+    ctx: MutationContext,
+}
+
 pub struct Passwords<'a> {
     sign_in: &'a SignIn,
     operations: &'a PasswordOperations,
@@ -404,6 +414,110 @@ impl<'a> Passwords<'a> {
         caller: &Caller,
         request: PasswordChangeFinishRequest,
     ) -> Result<(), PasswordError> {
+        let Some(change) = self.ready_change(zkpp, caller, request).await? else {
+            return Ok(());
+        };
+        // Applies only over the password just read, and only while it is
+        // active: a revocation or another change in between is not undone.
+        let changed = self
+            .sign_in
+            .storage()
+            .change_password(
+                change.credential,
+                &change.current,
+                &change.new,
+                change.history.as_ref(),
+                change.ctx,
+            )
+            .await
+            .map_err(|e| {
+                sid_authn::password_operation::commit_refusal(e, PasswordError::Store).refusal()
+            })?;
+        if !changed {
+            return Err(PasswordError::ChangedConcurrently);
+        }
+        info!("Password changed for credential {}", change.credential.0);
+        Ok(())
+    }
+
+    /// [`Self::change_finish`] for a host whose signed-in browser changes
+    /// its own password and continues: the commit that replaces the password
+    /// also ends every session of the profile, the changing one included
+    /// (each owing its client's logout), and stores the session the browser
+    /// continues in. That session keeps what `browser`'s session
+    /// authenticated with and when, under a fresh secret delivered in
+    /// `cookie`: the change is no new sign-in. Returns `None`, ending and
+    /// delivering nothing, for a repeated finish of a completed change: a
+    /// session opened since is not ended, and after a lost reply the owner
+    /// signs in with the new password.
+    pub async fn change_finish_replacing_sessions(
+        &self,
+        zkpp: Arc<ZkppOpaqueServer>,
+        browser: &sid_authn::caller::BrowserCaller,
+        cookie: &sid_authn::browser_session::BrowserCookie,
+        request: PasswordChangeFinishRequest,
+    ) -> Result<Option<sid_authn::sign_in_delivery::SignedIn>, PasswordError> {
+        let Some(change) = self.ready_change(zkpp, &browser.caller, request).await? else {
+            return Ok(None);
+        };
+        let mut replacement = browser.session.clone();
+        replacement.id = sid_core::models::SessionId::generate();
+        replacement.created_at = jiff::Timestamp::now();
+        replacement.last_activity_at = None;
+        let credential = sid_authn::sign_in_delivery::BrowserCredential::bind(&mut replacement);
+        let end = SessionEnd::new(
+            sid_core::models::RevocationReason::UserRequested,
+            browser.caller.profile_id.to_string(),
+        );
+        let ended = self
+            .sign_in
+            .storage()
+            .change_password_replacing_sessions(
+                change.credential,
+                &change.current,
+                &change.new,
+                change.history.as_ref(),
+                &end,
+                Some(&replacement),
+                change.ctx,
+            )
+            .await
+            .map_err(|e| {
+                sid_authn::password_operation::commit_refusal(e, PasswordError::Store).refusal()
+            })?
+            .ok_or(PasswordError::ChangedConcurrently)?;
+        // The ended sessions' access tokens stop in every process. Their
+        // sessions and refresh tokens are already gone; a failed propagation
+        // leaves only access tokens until they expire.
+        for ended in &ended {
+            if let Err(e) = self
+                .sign_in
+                .revocation()
+                .revoke_session(ended.id.to_string())
+                .await
+            {
+                warn!(
+                    "Revocation of session {} after password change not propagated: {}",
+                    ended.id, e
+                );
+            }
+        }
+        info!(
+            "Password changed for credential {}, {} sessions replaced",
+            change.credential.0,
+            ended.len()
+        );
+        Ok(Some(credential.signed_in(cookie, &replacement)))
+    }
+
+    /// The change `request` finishes, checked and ready to commit; `None`
+    /// when it already completed.
+    async fn ready_change(
+        &self,
+        zkpp: Arc<ZkppOpaqueServer>,
+        caller: &Caller,
+        request: PasswordChangeFinishRequest,
+    ) -> Result<Option<ReadyChange>, PasswordError> {
         // Rechecked at the commit: time may have run out since the challenge.
         let required = self.change_authority(caller).await?;
         let caller = caller.profile_id;
@@ -432,7 +546,7 @@ impl<'a> Passwords<'a> {
             .await
             .map_err(StepError::refusal)?
         {
-            Finish::Completed(_) => return Ok(()),
+            Finish::Completed(_) => return Ok(None),
             Finish::Ready(done) => *done,
         };
 
@@ -452,22 +566,13 @@ impl<'a> Passwords<'a> {
         // The change answers with nothing; its retry finds the same.
         .with_operation(done.completion(Vec::new()));
 
-        // Applies only over the password just read, and only while it is
-        // active: a revocation or another change in between is not undone.
-        let history = self.with_history_age(done.history);
-        let changed = self
-            .sign_in
-            .storage()
-            .change_password(credential.id, &current, &new, history.as_ref(), ctx)
-            .await
-            .map_err(|e| {
-                sid_authn::password_operation::commit_refusal(e, PasswordError::Store).refusal()
-            })?;
-        if !changed {
-            return Err(PasswordError::ChangedConcurrently);
-        }
-        info!("Password changed for credential {}", credential.id.0);
-        Ok(())
+        Ok(Some(ReadyChange {
+            credential: credential.id,
+            current,
+            new,
+            history: self.with_history_age(done.history),
+            ctx,
+        }))
     }
 
     /// How long, by this server's clock, `caller`'s session may still change

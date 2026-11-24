@@ -2819,6 +2819,29 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::complete_password_reset(self, id, credential, history, end, ctx).await
     }
 
+    async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        end: &SessionEnd,
+        replacement: Option<&Session>,
+        ctx: MutationContext,
+    ) -> Result<Option<Vec<Session>>> {
+        CoordinodeBackend::change_password_replacing_sessions(
+            self,
+            id,
+            expected,
+            new,
+            history,
+            end,
+            replacement,
+            ctx,
+        )
+        .await
+    }
+
     async fn count_active_reset_sessions(&self, profile_id: ProfileId) -> Result<u32> {
         CoordinodeBackend::count_active_reset_sessions(self, profile_id).await
     }
