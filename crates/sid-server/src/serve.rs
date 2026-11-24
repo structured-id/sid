@@ -550,85 +550,38 @@ pub async fn serve_on(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let grpc_addr = listener.local_addr()?;
-    let drain = sid_serve::shutdown::drain_interval_from_env()?;
-    let (stopper, stopped) = sid_serve::stop_signal();
-
-    // The HTTP form of the annotated RPCs; a configured one that cannot be
-    // built stops startup.
     #[cfg(feature = "http")]
-    let http_proxy = http_transcoder_with(
-        crate::init::env_setting("SID_BIND")?.as_deref(),
-        crate::init::env_setting("SID_HTTP_CONFIG")?.as_deref(),
-        // The ceremonies' page, not the authorization endpoint's target a
-        // host may have replaced: the auth service admits ceremonies from it.
-        c.ceremony_page.as_ref(),
-        &services.transcoded,
-    )?
-    .map(|proxy| {
-        let proxy = proxy.with_extra_routes(services.extra_routes.clone());
-        // The console's origin joins credentialed CORS only where that
-        // policy is in force (origins are listed): with none listed the
-        // transcoder answers every origin without credentials, which
-        // browser relying parties fetching discovery and keys depend on, and
-        // the hook would replace that with the credentialed policy.
-        if proxy.config().cors.origins.is_empty() {
-            proxy
-        } else {
-            proxy.with_cors_origins(std::sync::Arc::new(ConsoleOrigin(c.web_settings.clone())))
-        }
-    });
-    // The settings CORS reads synchronously follow the store within a
-    // second, whatever the traffic; the task ends with the server.
+    let assembled = assemble(
+        c,
+        services,
+        http_config(
+            crate::init::env_setting("SID_BIND")?.as_deref(),
+            crate::init::env_setting("SID_HTTP_CONFIG")?.as_deref(),
+        )?,
+    )?;
+    #[cfg(not(feature = "http"))]
+    let assembled = assemble(c, services)?;
+    let Assembled {
+        routes,
+        http,
+        background,
+        stopped,
+        drain,
+    } = assembled;
+
+    // The HTTP form stops with the gRPC listener and drains in the same
+    // interval.
     #[cfg(feature = "http")]
-    {
-        let web = c.web_settings.clone();
-        let stop = stopped.clone().wait();
-        tokio::spawn(async move {
-            let mut every = tokio::time::interval(sid::web_settings::RECENT_FOR);
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tokio::pin!(stop);
-            loop {
-                tokio::select! {
-                    () = &mut stop => break,
-                    _ = every.tick() => {
-                        if let Err(e) = web.recent().await {
-                            tracing::warn!(error = %e, "web settings unavailable");
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    let engine = crate::init::engine(&c, &services.receivers)?.start();
-    let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
-
-    let (routes, health) = services.services.into_parts();
-
-    // The transcoder calls these same services in process: REST, native gRPC
-    // and gRPC-Web on its port reach them with no hop to the gRPC listener.
-    // It stops with the gRPC listener and drains in the same interval.
-    #[cfg(feature = "http")]
-    let mut http = http_proxy.map(|proxy| {
-        info!(bind = %proxy.config().listen.http, "HTTP transcoder listening");
-        let mounts = services
-            .mounts
-            .into_iter()
-            .map(|(prefix, build)| (prefix, build(routes.clone())))
-            .collect();
-        // The installation cookie reaches as far as its scope setting says.
-        let upstream = crate::cookie_scope::CookieScopeEdge::new(
-            transcoder_upstream(routes.clone(), c.issuers.clone(), mounts),
-            c.web_settings.clone(),
-            c.auth_svc.browser_cookie().clone(),
-        );
+    let mut http = http.map(|form| {
+        info!(bind = %form.proxy.config().listen.http, "HTTP transcoder listening");
         let http_stopped = stopped.clone().wait();
-        tokio::spawn(
-            async move { sid_infra::http::serve(&proxy, upstream, http_stopped, drain).await },
-        )
+        tokio::spawn(async move {
+            sid_infra::http::serve(&form.proxy, form.upstream, http_stopped, drain).await
+        })
     });
     #[cfg(not(feature = "http"))]
-    let mut http: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    let mut http: Option<tokio::task::JoinHandle<anyhow::Result<()>>> =
+        http.map(|never| match never {});
 
     // The gRPC port is a direct path unless a proxy in front of it is named:
     // its own trust, since other callers than the HTTP port's reach it.
@@ -668,32 +621,249 @@ pub async fn serve_on(
             () = transcoder_ended => {}
         }
     };
-    let served = sid_serve::run(server, shutdown, &health, &stopper, drain).await;
+    let served = sid_serve::run(
+        server,
+        shutdown,
+        &background.health,
+        &background.stopper,
+        drain,
+    )
+    .await;
     // Calls still open after the drain interval end with their connections;
     // every other listener stops too.
-    stopper.stop();
+    background.stopper.stop();
 
     // The HTTP listener drains within the same interval.
     let http_drained = match http.as_mut() {
         Some(_) => finished(&mut http).await,
         None => Ok(()),
     };
-    // Attempts and maintenance runs in flight record their outcome before
-    // the process ends.
-    let drained = engine.drain().await;
-    // A settlement being recorded finishes; an unacknowledged one is
-    // delivered again.
-    if let Some(settlements) = settlements {
-        settlements.await?;
-    }
+    let finished = background.finish().await;
     served?;
     http_drained?;
-    drained?;
+    finished?;
     if let Some(ended) = http_ended {
         ended?;
         anyhow::bail!("the HTTP transcoder stopped");
     }
     Ok(())
+}
+
+/// The installation assembled with no listener: its services, the HTTP form
+/// over them where one is configured, and the background work they owe,
+/// already running.
+struct Assembled<H> {
+    routes: tonic::service::Routes,
+    http: Option<H>,
+    background: Background,
+    stopped: sid_serve::Stopped,
+    drain: std::time::Duration,
+}
+
+/// The HTTP form of an assembled installation: the transcoder and the
+/// services it calls in process, so REST, native gRPC and gRPC-Web reach
+/// them with no hop to a gRPC listener.
+#[cfg(feature = "http")]
+struct HttpForm<U> {
+    proxy: structured_proxy::ProxyServer,
+    upstream: U,
+}
+
+/// The work an assembled installation runs beside its calls: the durable
+/// work runner with its maintenance, the cleanup settlements and the settings
+/// refresh. It runs until [`Background::drain`].
+pub struct Background {
+    /// Held until the work ends: the services and the work share its parts.
+    _components: CeComponents,
+    health: sid_serve::Health,
+    engine: sid::Running,
+    settlements: Option<tokio::task::JoinHandle<()>>,
+    stopper: sid_serve::Stopper,
+}
+
+impl Background {
+    /// The health service turns NOT_SERVING and the work stops, as on the
+    /// server's own shutdown. The host stops accepting calls and lets the
+    /// ones in flight finish before it calls this.
+    pub async fn drain(self) -> anyhow::Result<()> {
+        self.health.not_serving().await;
+        self.stopper.stop();
+        self.finish().await
+    }
+
+    /// Attempts and maintenance runs in flight record their outcome before
+    /// the process ends; a settlement being recorded finishes, and an
+    /// unacknowledged one is delivered again.
+    async fn finish(self) -> anyhow::Result<()> {
+        let drained = self.engine.drain().await;
+        if let Some(settlements) = self.settlements {
+            settlements.await?;
+        }
+        drained?;
+        Ok(())
+    }
+}
+
+/// Starts the background work of `c` owed to `receivers`.
+fn start_background(
+    c: CeComponents,
+    receivers: &[sid_core::models::RequiredReceiver],
+    health: sid_serve::Health,
+    stopper: sid_serve::Stopper,
+    stopped: &sid_serve::Stopped,
+) -> anyhow::Result<Background> {
+    let engine = crate::init::engine(&c, receivers)?.start();
+    let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
+    Ok(Background {
+        _components: c,
+        health,
+        engine,
+        settlements,
+        stopper,
+    })
+}
+
+/// `services` over `c` with their background work started and, with a
+/// `config` (a structured-proxy configuration tree), their HTTP form. A
+/// configured HTTP form that cannot be built stops startup.
+#[cfg(feature = "http")]
+fn assemble(
+    c: CeComponents,
+    services: CeServices,
+    config: Option<serde_json::Value>,
+) -> anyhow::Result<Assembled<HttpForm<impl structured_proxy::upstream::Upstream>>> {
+    let drain = sid_serve::shutdown::drain_interval_from_env()?;
+    let (stopper, stopped) = sid_serve::stop_signal();
+    let CeServices {
+        services,
+        receivers,
+        transcoded,
+        extra_routes,
+        mounts,
+        ..
+    } = services;
+
+    let proxy = config
+        .map(|config| {
+            // The ceremonies' page, not the authorization endpoint's target a
+            // host may have replaced: the auth service admits ceremonies
+            // from it.
+            transcoder_over(config, c.ceremony_page.as_ref(), &transcoded)
+        })
+        .transpose()?
+        .map(|proxy| {
+            let proxy = proxy.with_extra_routes(extra_routes);
+            // The console's origin joins credentialed CORS only where that
+            // policy is in force (origins are listed): with none listed the
+            // transcoder answers every origin without credentials, which
+            // browser relying parties fetching discovery and keys depend on,
+            // and the hook would replace that with the credentialed policy.
+            if proxy.config().cors.origins.is_empty() {
+                proxy
+            } else {
+                proxy.with_cors_origins(std::sync::Arc::new(ConsoleOrigin(c.web_settings.clone())))
+            }
+        });
+    // The settings CORS reads synchronously follow the store within a
+    // second, whatever the traffic; the task ends with the work.
+    {
+        let web = c.web_settings.clone();
+        let stop = stopped.clone().wait();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(sid::web_settings::RECENT_FOR);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tokio::pin!(stop);
+            loop {
+                tokio::select! {
+                    () = &mut stop => break,
+                    _ = every.tick() => {
+                        if let Err(e) = web.recent().await {
+                            tracing::warn!(error = %e, "web settings unavailable");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let (issuers, web_settings, cookie) = (
+        c.issuers.clone(),
+        c.web_settings.clone(),
+        c.auth_svc.browser_cookie().clone(),
+    );
+    let (routes, health) = services.into_parts();
+    let background = start_background(c, &receivers, health, stopper, &stopped)?;
+
+    let http = proxy.map(|proxy| {
+        let mounts = mounts
+            .into_iter()
+            .map(|(prefix, build)| (prefix, build(routes.clone())))
+            .collect();
+        // The installation cookie reaches as far as its scope setting says.
+        let upstream = crate::cookie_scope::CookieScopeEdge::new(
+            transcoder_upstream(routes.clone(), issuers, mounts),
+            web_settings,
+            cookie,
+        );
+        HttpForm { proxy, upstream }
+    });
+    Ok(Assembled {
+        routes,
+        http,
+        background,
+        stopped,
+        drain,
+    })
+}
+
+/// `services` over `c` with their background work started.
+#[cfg(not(feature = "http"))]
+fn assemble(c: CeComponents, services: CeServices) -> anyhow::Result<Assembled<Infallible>> {
+    let drain = sid_serve::shutdown::drain_interval_from_env()?;
+    let (stopper, stopped) = sid_serve::stop_signal();
+    let (routes, health) = services.services.into_parts();
+    let background = start_background(c, &services.receivers, health, stopper, &stopped)?;
+    Ok(Assembled {
+        routes,
+        http: None,
+        background,
+        stopped,
+        drain,
+    })
+}
+
+/// An installation a host serves on a listener of its own.
+#[cfg(feature = "http")]
+pub struct Hosted<S> {
+    /// Everything the server's HTTP port answers, as one service: the
+    /// annotated RPCs' HTTP form, native gRPC and gRPC-Web, the mounted
+    /// applications and the browser routes. The host calls it from its own
+    /// handlers; a request carrying the peer address as
+    /// `axum::extract::ConnectInfo<SocketAddr>` is served as that client's.
+    pub http: S,
+    /// The work running beside the calls; drained when the host stops.
+    pub background: Background,
+}
+
+/// `services` over `c` for a host with a listener of its own: nothing is
+/// bound here. `config` is a structured-proxy configuration tree (CORS, rate
+/// limits, forwarded headers); its listen address is not used. Called inside
+/// the runtime the work runs on.
+#[cfg(feature = "http")]
+pub fn hosted(
+    c: CeComponents,
+    services: CeServices,
+    config: serde_json::Value,
+) -> anyhow::Result<Hosted<structured_proxy::ProxyService<impl structured_proxy::upstream::Upstream>>>
+{
+    let Assembled {
+        http, background, ..
+    } = assemble(c, services, Some(config))?;
+    let form = http.ok_or_else(|| anyhow::anyhow!("the hosted HTTP form was not assembled"))?;
+    Ok(Hosted {
+        http: form.proxy.service(form.upstream)?,
+        background,
+    })
 }
 
 /// A service the HTTP port serves under a path prefix of its own, ahead of
@@ -875,7 +1045,20 @@ pub fn http_transcoder_with(
     sign_in: Option<&url::Url>,
     added: &[&[u8]],
 ) -> anyhow::Result<Option<structured_proxy::ProxyServer>> {
-    let mut config = match (config_file, bind) {
+    http_config(bind, config_file)?
+        .map(|config| transcoder_over(config, sign_in, added))
+        .transpose()
+}
+
+/// The HTTP form's configuration: the structured-proxy configuration in
+/// `config_file`, else one listening on `bind` and nothing else; neither
+/// means no HTTP form.
+#[cfg(feature = "http")]
+fn http_config(
+    bind: Option<&str>,
+    config_file: Option<&str>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    Ok(Some(match (config_file, bind) {
         (Some(path), _) => serde_saphyr::from_str(
             &std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("SID_HTTP_CONFIG {path}: {e}"))?,
@@ -883,7 +1066,16 @@ pub fn http_transcoder_with(
         .map_err(|e| anyhow::anyhow!("SID_HTTP_CONFIG {path}: {e}"))?,
         (None, Some(bind)) => sid_infra::http::listening_on(bind),
         (None, None) => return Ok(None),
-    };
+    }))
+}
+
+/// The transcoder `config` describes, as [`http_transcoder_with`] makes it.
+#[cfg(feature = "http")]
+fn transcoder_over(
+    mut config: serde_json::Value,
+    sign_in: Option<&url::Url>,
+    added: &[&[u8]],
+) -> anyhow::Result<structured_proxy::ProxyServer> {
     if let Some(sign_in) = sign_in {
         allow_sign_in_origin(&mut config, &sign_in.origin())?;
     }
@@ -904,7 +1096,6 @@ pub fn http_transcoder_with(
         |name| name != sid_proto::FORWARD_AUTH_PROTO && name != sid_proto::PLATFORM_CA_PROTO,
         added,
     )
-    .map(Some)
 }
 
 /// `config` with the sign-in page's `origin` among its CORS origins and the
