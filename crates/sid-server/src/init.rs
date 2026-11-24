@@ -481,6 +481,10 @@ pub struct HostStore {
     /// The password history evaluator's keys in the same store, read only
     /// when the evaluator runs in this process.
     pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
+    /// The SQLite file the store is, when it is one: every server on the
+    /// file holds its bus lock, so an in-process bus never runs beside
+    /// another server on it.
+    pub sqlite_file: Option<std::path::PathBuf>,
 }
 
 /// The store an installation runs over.
@@ -590,7 +594,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             storage: store.storage,
             audit_log: store.audit_log,
             local_history_keys: LocalHistoryKeys::Host(store.history_keys),
-            sqlite_file: None,
+            sqlite_file: store.sqlite_file,
         },
         None => open_store().await?,
     };
