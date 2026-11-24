@@ -132,9 +132,18 @@ pub const ISSUING_METHODS: &[&str] = &[
 /// and delivers the session.
 pub const PENDING_COMPLETING_METHOD: &str = "/sid.v1.authn.AuthService/VerifyTotp";
 
+/// The consent interaction: the sign-in page reviews and decides, for the
+/// browser's session, the operation the authorization endpoint raised.
+pub const CONSENT_METHODS: &[&str] = &[
+    "/sid.v1.authn.AuthFlowService/GetConsent",
+    "/sid.v1.authn.AuthFlowService/SubmitConsent",
+    "/sid.v1.authn.AuthFlowService/GetFlowState",
+];
+
 /// The cookies of its issuer the CE endpoint `endpoint` (the path below
 /// `/i/{handle}`) receives and sets: authorization reads the session for
-/// single sign-on, end-session reads and clears it, the sign-in ceremonies
+/// single sign-on, the consent interaction reads it for the operation
+/// authorization raised, end-session reads and clears it, the sign-in ceremonies
 /// that complete a session set it, and a second factor completing a pending
 /// sign-in reads that context first. A federated entry's start sets the
 /// correlation cookie of the entry it starts and reads none; its return
@@ -172,6 +181,7 @@ pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
         _ => match api_method(endpoint) {
             Some(PENDING_COMPLETING_METHOD) => Some(SessionCookieUse::ReadAndIssue),
             Some(method) if ISSUING_METHODS.contains(&method) => Some(SessionCookieUse::Issue),
+            Some(method) if CONSENT_METHODS.contains(&method) => Some(SessionCookieUse::Read),
             _ => None,
         },
     };

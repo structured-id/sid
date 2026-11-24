@@ -119,6 +119,48 @@ fn each_endpoint_gets_its_own_cookie_capability() {
     }
 }
 
+/// The consent interaction acts for the browser's session on the operation
+/// the authorization endpoint raised for it: each of its methods reads the
+/// session cookie and sets none.
+/// Bug prevented: an edge in front of several issuers dropping the session
+/// cookie on the way to the consent review, so the installation sees no
+/// session, answers that there is no operation to read, and a sign-in that
+/// needs consent never completes.
+#[test]
+fn the_consent_interaction_reads_the_session() {
+    for method in CONSENT_METHODS {
+        let cookies = issuer_cookies(&format!("/api{method}"));
+        assert_eq!(
+            cookies,
+            IssuerCookies {
+                session: Some(SessionCookieUse::Read),
+                ..IssuerCookies::default()
+            },
+            "{method}"
+        );
+        assert!(cookies.receives_session() && !cookies.sets_session());
+    }
+}
+
+/// Every method of the consent interaction service is one of those: a method
+/// added to it gets a cookie decision here, not silence at the edge.
+#[cfg(feature = "issuer-routes")]
+#[test]
+fn every_consent_interaction_method_is_listed() {
+    let pool = prost_reflect::DescriptorPool::decode(sid_proto::FILE_DESCRIPTOR_SET).unwrap();
+    let service = pool
+        .get_service_by_name("sid.v1.authn.AuthFlowService")
+        .expect("the consent interaction service is in the descriptor set");
+    let mut published: Vec<String> = service
+        .methods()
+        .map(|method| format!("/{}/{}", service.full_name(), method.name()))
+        .collect();
+    published.sort();
+    let mut listed: Vec<String> = CONSENT_METHODS.iter().map(|m| (*m).to_owned()).collect();
+    listed.sort();
+    assert_eq!(listed, published);
+}
+
 /// A federated entry's start sets the correlation cookie of the entry it
 /// starts and reads nothing; its return reads that cookie and sets the
 /// session it admits. Bug prevented: an edge that drops the correlation
