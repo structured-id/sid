@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.45](https://github.com/structured-id/sid/compare/v0.2.44...v0.2.45) - 2026-11-24
+
+### Added
+
+- *(password)* replace a profile's sessions with its changed password ([#792](https://github.com/structured-id/sid/pull/792))
+
 ## [0.2.44](https://github.com/structured-id/sid/compare/v0.2.43...v0.2.44) - 2026-11-24
 
 ### Added
