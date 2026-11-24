@@ -64,12 +64,14 @@ jobs:
             args: >-
               -p sid-authn -p sid-core -p sid-keys -p sid-opaque-ke -p sid-voprf
               -p sid-crypto
+          # Named as test targets, not filtered: a filter still builds and
+          # links every test binary of the server (over a hundred, five
+          # minutes) to run these three.
           - group: server flows
             browser: true
             args: >-
-              -p sid-server -E 'binary_id(sid-server::zkpp_password_change)
-              | binary_id(sid-server::packaged_password_client)
-              | binary_id(sid-server::zkpp_login)'
+              -p sid-server --test zkpp_password_change
+              --test packaged_password_client --test zkpp_login
           - group: server
             args: >-
               -p sid-server -E 'not (binary_id(sid-server::zkpp_password_change)
