@@ -402,7 +402,8 @@ macro_rules! __storage_shared_scenarios {
             test_access_request_approval_grants_the_role test_device_attestation_roundtrip
             test_revoked_key_clears_hardware_attestation test_security_signals_persist
             test_login_history_signals test_integrity_counts_ignore_group_assignments
-            test_password_reset_completes_once test_scim_outbound_roundtrip
+            test_password_reset_completes_once test_password_change_replaces_sessions
+            test_scim_outbound_roundtrip
             test_notification_preferences_roundtrip test_invite_single_use_under_concurrency
             test_session_delete_by_profile test_session_get_nonexistent test_ensure_system_project
             test_cannot_delete_system_project test_oauth2_client_save_and_get
