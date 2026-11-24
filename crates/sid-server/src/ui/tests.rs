@@ -13,21 +13,38 @@ fn host_name_drops_the_port() {
     assert_eq!(host_name("[::1]"), "[::1]");
 }
 
-// The account adapter reaches the gRPC listener where it actually listens:
-// a wildcard bind on the loopback of its own family, a specific address as
-// it is. Bug prevented: an adapter dialing 127.0.0.1 while the server
-// listens only on [::1] or on one interface, so sign-in fails at run time.
-#[test]
-fn the_adapter_reaches_the_bound_grpc_address() {
-    for (bound, reached) in [
-        ("0.0.0.0:50051", "http://127.0.0.1:50051"),
-        ("[::]:50051", "http://[::1]:50051"),
-        ("127.0.0.1:50051", "http://127.0.0.1:50051"),
-        ("[::1]:50051", "http://[::1]:50051"),
-        ("10.0.0.5:50051", "http://10.0.0.5:50051"),
-    ] {
-        assert_eq!(reachable(bound.parse().unwrap()), reached, "{bound}");
-    }
+/// The account adapter calls the installation's services in this process,
+/// through a generated client, with no listener: before the services are
+/// placed a call is answered UNAVAILABLE, as a starting server answers, and
+/// afterwards it reaches them. The first placement stays.
+/// Bug prevented: an adapter that needs the gRPC port to be bound and
+/// reachable from its own process, which a host with one listener of its own
+/// does not have.
+#[tokio::test]
+async fn the_adapter_calls_the_installations_services_in_process() {
+    use tonic_health::pb::health_check_response::ServingStatus;
+    use tonic_health::pb::health_client::HealthClient;
+    use tonic_health::pb::{HealthCheckRequest, health_server::HealthServer};
+
+    let own = OwnServices::default();
+    let mut client = HealthClient::new(sid_infra::deadline::in_process(own.clone()));
+    let check = HealthCheckRequest {
+        service: String::new(),
+    };
+
+    let starting = client.check(check.clone()).await.unwrap_err();
+    assert_eq!(starting.code(), tonic::Code::Unavailable);
+
+    let (reporter, health) = tonic_health::server::health_reporter();
+    let _: &HealthServer<_> = &health;
+    own.place(tonic::service::Routes::new(health));
+    let answered = client.check(check.clone()).await.unwrap().into_inner();
+    assert_eq!(answered.status(), ServingStatus::Serving);
+
+    // Another placement does not replace the services already called.
+    own.place(tonic::service::Routes::default());
+    assert!(client.check(check).await.is_ok());
+    drop(reporter);
 }
 
 /// A console over a store whose settings are `stored`, with a bundle in a

@@ -26,7 +26,7 @@ use sid_infra::issuer_client::RpClient;
 use sid_infra::issuer_registry::GrpcIssuerSource;
 use sid_ui_host::UiBundle;
 use sid_ui_host::application_session::ApplicationSessions;
-use sid_ui_host::host::{HostUpstream, issuer_channel};
+use sid_ui_host::host::HostUpstream;
 use structured_proxy::hooks::{ExtraRoute, ExtraRouteHandler, RouteRequest, RouteResponse};
 use tokio::sync::Mutex;
 use tonic::codegen::http;
@@ -91,18 +91,56 @@ fn bundle_config(extra: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&config).expect("a JSON object encodes")
 }
 
-/// Where this process's gRPC listener bound at `bound` is reached: a
-/// wildcard bind on the loopback of its own address family, a specific
-/// address as it is.
-fn reachable(bound: std::net::SocketAddr) -> String {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    let ip = match bound.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        ip => ip,
-    };
-    format!("http://{}", std::net::SocketAddr::new(ip, bound.port()))
+/// The installation's own gRPC services, as the account adapter calls them
+/// in process: its web client's token calls and issuer lookups go to the
+/// same services a caller on the gRPC port reaches, with no listener between
+/// them. The adapter is one of those services, so it is built first and the
+/// services are placed here once they all exist; a call before that is
+/// answered UNAVAILABLE, as a server still starting answers.
+#[derive(Clone, Default)]
+pub struct OwnServices(Arc<std::sync::OnceLock<MountedService>>);
+
+impl OwnServices {
+    /// Place the installation's `services`, behind the operation context
+    /// every call to them carries. The first placement stays.
+    fn place(&self, services: tonic::service::Routes) {
+        let services = tower::ServiceBuilder::new()
+            .layer(sid_infra::authn::operation::OperationContextLayer)
+            .service(services);
+        // A second placement would be the same services of the same server.
+        let _ = self.0.set(MountedService::new(services));
+    }
 }
+
+impl tower::Service<http::Request<tonic::body::Body>> for OwnServices {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        // The placed services are cloned per call and polled there.
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        match self.0.get() {
+            Some(services) => Box::pin(services.clone().oneshot(request)),
+            None => Box::pin(async {
+                Ok(
+                    tonic::Status::unavailable("the installation's services are starting")
+                        .into_http(),
+                )
+            }),
+        }
+    }
+}
+
+/// The account adapter's web client and issuer registry over
+/// [`OwnServices`].
+type OwnClient = RpClient<sid_infra::deadline::Deadline<OwnServices>>;
 
 /// What the UI adds to the server.
 pub struct Started {
@@ -111,7 +149,7 @@ pub struct Started {
     /// The account adapter's service, served among the server's own so its
     /// sign-in callback and back-channel logout at the origin's root reach
     /// it in process.
-    pub adapter: Arc<ApplicationSessions>,
+    pub adapter: Arc<ApplicationSessions<OwnClient>>,
     /// The account pages' calls (`/account/api/...`), served in process with
     /// the session's bearer.
     pub account_api: MountFactory,
@@ -119,13 +157,15 @@ pub struct Started {
 
 /// Set up the account adapter and return what the server serves of the UI.
 pub async fn start(c: &CeComponents, prepared: Prepared) -> anyhow::Result<Started> {
-    let grpc = reachable(c.grpc_addr);
     // The installation provisioned the pages' web client with its own key.
     let key = c
         .account_client_key
         .clone()
         .context("the installation provisioned no account client key")?;
-    let channel = issuer_channel(&grpc)?;
+    // The client calls the installation's services in this process: no port
+    // of its own carries them.
+    let own = OwnServices::default();
+    let channel = sid_infra::deadline::in_process(own.clone());
     let client = RpClient::new(key, c.issuer.clone(), channel.clone())?;
     // The account sessions live in the installation's own store, in its
     // schema: replicas sharing the store share them, and the installation's
@@ -150,6 +190,7 @@ pub async fn start(c: &CeComponents, prepared: Prepared) -> anyhow::Result<Start
     // bearer.
     let host_sessions = sessions.clone();
     let account_api: MountFactory = Box::new(move |routes| {
+        own.place(routes.clone());
         let api = tower::ServiceBuilder::new()
             .layer(sid_infra::authn::operation::OperationContextLayer)
             .service(routes);

@@ -44,6 +44,42 @@ pub fn issuer(channel: tonic::transport::Channel) -> IssuerChannel {
     Deadline::new(channel, ISSUER_CALL_TIMEOUT)
 }
 
+/// The issuer's gRPC services as a client calls them: a network channel in
+/// a deployment, or the services themselves when the issuer is in the same
+/// process. The client, its authentication and the call's bound are the
+/// same over both; a caller in the issuer's process needs no listener.
+pub trait IssuerService:
+    tower::Service<
+        http::Request<Body>,
+        Response = http::Response<Body>,
+        Error = BoxError,
+        Future: Send,
+    > + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<S> IssuerService for S where
+    S: tower::Service<
+            http::Request<Body>,
+            Response = http::Response<Body>,
+            Error = BoxError,
+            Future: Send,
+        > + Clone
+        + Send
+        + Sync
+        + 'static
+{
+}
+
+/// The issuer's own `services`, called in process, every call bounded by
+/// [`ISSUER_CALL_TIMEOUT`] as a call over a channel is.
+pub fn in_process<S>(services: S) -> Deadline<S> {
+    Deadline::new(services, ISSUER_CALL_TIMEOUT)
+}
+
 /// The channel to `address`, every call ending within `limit`; connecting
 /// is bounded by it too.
 pub fn bounded_channel(

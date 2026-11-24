@@ -17,8 +17,10 @@ use std::time::Duration;
 
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
+use sid_authn::application_session::ApplicationClient;
 use sid_infra::deadline::IssuerChannel;
 use sid_infra::grpc_error::refuse;
+use sid_infra::issuer_client::RpClient;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionServiceServer;
 use structured_proxy::hooks::{ExtraRoute, ExtraRouteHandler, RouteRequest, RouteResponse};
 use tonic::metadata::MetadataMap;
@@ -58,11 +60,11 @@ fn bounded_channel(address: &str, timeout: Duration) -> anyhow::Result<IssuerCha
 }
 
 /// The gRPC services of one hosted application. `A` is its API: a remote
-/// [`tonic::transport::Channel`] in a deployment.
-#[derive(Clone)]
-pub struct HostUpstream<A = tonic::transport::Channel> {
+/// [`tonic::transport::Channel`] in a deployment. `C` is how the adapter
+/// reaches the issuer as the application's client.
+pub struct HostUpstream<A = tonic::transport::Channel, C: ApplicationClient = RpClient> {
     adapter: tonic::service::Routes,
-    sessions: Arc<ApplicationSessions>,
+    sessions: Arc<ApplicationSessions<C>>,
     /// The application's API; without one, only the adapter answers.
     api: Option<A>,
     /// Services of the API's resource served by processes of their own, by
@@ -70,8 +72,20 @@ pub struct HostUpstream<A = tonic::transport::Channel> {
     services: Vec<(String, A)>,
 }
 
-impl<A> HostUpstream<A> {
-    pub fn new(sessions: Arc<ApplicationSessions>, api: Option<A>) -> Self {
+// Not derived: the sessions are shared, so a clone needs no `C: Clone`.
+impl<A: Clone, C: ApplicationClient> Clone for HostUpstream<A, C> {
+    fn clone(&self) -> Self {
+        Self {
+            adapter: self.adapter.clone(),
+            sessions: self.sessions.clone(),
+            api: self.api.clone(),
+            services: self.services.clone(),
+        }
+    }
+}
+
+impl<A, C: ApplicationClient + 'static> HostUpstream<A, C> {
+    pub fn new(sessions: Arc<ApplicationSessions<C>>, api: Option<A>) -> Self {
         let adapter = tonic::service::Routes::new(ApplicationSessionServiceServer::from_arc(
             sessions.clone(),
         ));
@@ -94,8 +108,9 @@ impl<A> HostUpstream<A> {
 
 type Answer = http::Response<tonic::body::Body>;
 
-impl<A> tower::Service<http::Request<tonic::body::Body>> for HostUpstream<A>
+impl<A, C> tower::Service<http::Request<tonic::body::Body>> for HostUpstream<A, C>
 where
+    C: ApplicationClient + 'static,
     A: tower::Service<http::Request<tonic::body::Body>, Response = Answer>
         + Clone
         + Send
