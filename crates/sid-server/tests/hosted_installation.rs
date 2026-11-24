@@ -37,6 +37,92 @@ fn free_address() -> std::net::SocketAddr {
         .unwrap()
 }
 
+/// The test PostgreSQL (docker-compose.test.yml).
+fn database_url() -> String {
+    std::env::var("SID_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".into())
+}
+
+/// The process settings `settings` name. Called first in a test, on its only
+/// thread: the runtime starts afterwards.
+fn configure(settings: &[(&str, String)]) {
+    for (name, value) in settings {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var(name, value) };
+    }
+    // Ignored when another test of this process installed them already.
+    let _ = sid_crypto::tls::aws_lc::provider().install_default();
+    sid_crypto::jwt::install_jwt_provider().unwrap();
+}
+
+/// A host opens the database itself, prepares its schema and hands the open
+/// store to the installation: with no storage setting in the process, the
+/// installation is opened over that store, answers through the hosted
+/// service, and its records are in the host's schema.
+/// Bug prevented: an installation that can only connect to a database it is
+/// told the address of, so a host cannot keep SID's records in the store it
+/// already holds.
+#[test]
+fn a_host_opens_the_installation_over_its_own_store() {
+    use std::sync::Arc;
+
+    let data = tempfile::tempdir().unwrap();
+    configure(&[
+        ("SID_DATA_DIR", data.path().to_str().unwrap().to_owned()),
+        ("SID_ISSUER", ISSUER.to_owned()),
+        ("SID_GRPC_BIND", free_address().to_string()),
+        ("SID_NATS_URL", "in-process".to_owned()),
+    ]);
+    assert!(std::env::var_os("SID_DATABASE_URL").is_none());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let schema = format!("hosted_{}", uuid::Uuid::new_v4().simple());
+        let backend =
+            sid_storage::PostgresBackend::connect(&database_url(), Some(schema.clone()), None)
+                .await
+                .expect("the test PostgreSQL is running");
+        sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+            .await
+            .unwrap();
+        let history = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
+        history.migrate().await.unwrap();
+        let pool = backend.pool().clone();
+
+        let c = sid_server::init::init_ce_with(sid_server::init::CeHost {
+            store: Some(sid_server::init::HostStore {
+                audit_log: Arc::new(sid_storage::audit_log::PostgresAuditLog::new(pool.clone())),
+                history_keys: Arc::new(history),
+                storage: Arc::new(backend),
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let services = sid_server::serve::CeServices::new(&c, Default::default())
+            .await
+            .unwrap();
+        let hosted = sid_server::serve::hosted(c, services, serde_json::json!({})).unwrap();
+
+        let discovery = get(&hosted.http, "/.well-known/openid-configuration").await;
+        assert_eq!(discovery["issuer"], ISSUER);
+        // The installation's issuer is recorded in the host's schema, which
+        // the host's pool resolves unqualified names in.
+        let (resolved, issuers): (String, i64) =
+            sqlx::query_as("SELECT current_schema()::text, (SELECT count(*) FROM oidc_issuers)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(resolved, schema);
+        assert!(issuers > 0);
+        hosted.background.drain().await.unwrap();
+    });
+    runtime.shutdown_background();
+}
+
 /// A host assembles the installation from its settings and gets its HTTP
 /// surface as one service: discovery and the issuer's keys answer through it
 /// in process, nothing listens on the addresses the server would have bound,
@@ -48,12 +134,8 @@ fn free_address() -> std::net::SocketAddr {
 fn a_host_serves_the_installation_on_no_listener_of_the_installations() {
     let data = tempfile::tempdir().unwrap();
     let (grpc, http_port) = (free_address(), free_address());
-    let settings = [
-        (
-            "SID_DATABASE_URL",
-            std::env::var("SID_TEST_DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".into()),
-        ),
+    configure(&[
+        ("SID_DATABASE_URL", database_url()),
         // A schema of this run's own: the installation is opened from empty.
         (
             "SID_STORAGE_POSTGRESQL_SCHEMA",
@@ -62,14 +144,7 @@ fn a_host_serves_the_installation_on_no_listener_of_the_installations() {
         ("SID_DATA_DIR", data.path().to_str().unwrap().to_owned()),
         ("SID_ISSUER", ISSUER.to_owned()),
         ("SID_GRPC_BIND", grpc.to_string()),
-    ];
-    for (name, value) in settings {
-        // SAFETY: the test's only thread so far; the runtime starts below.
-        unsafe { std::env::set_var(name, value) };
-    }
-    // Ignored when another test of this process installed them already.
-    let _ = sid_crypto::tls::aws_lc::provider().install_default();
-    sid_crypto::jwt::install_jwt_provider().unwrap();
+    ]);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
