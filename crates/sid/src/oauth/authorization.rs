@@ -106,6 +106,34 @@ pub fn operation_continuation(
     Some(url)
 }
 
+/// The authorization request `operation` holds, at the issuer whose handle
+/// is `handle`, for `resource`: what its client and redirect URI are judged
+/// by again wherever the operation is read or continued.
+fn operation_request(
+    operation: &AuthorizationOperation,
+    handle: &str,
+    resource: &sid_core::models::ProtectedResource,
+) -> OAuth2AuthorizeRequest {
+    OAuth2AuthorizeRequest {
+        client_id: operation.client_id.clone(),
+        redirect_uri: operation.redirect_uri.clone(),
+        response_type: operation.response_type.clone(),
+        scope: Some(operation.scopes.join(" ")),
+        state: operation.state.clone(),
+        code_challenge: operation.code_challenge.clone(),
+        code_challenge_method: operation.code_challenge_method.clone(),
+        nonce: operation.nonce.clone(),
+        // The level the relying party asked for is judged again: an
+        // elevation that lapsed during the review issues no code.
+        acr_values: operation.acr_values.clone(),
+        issuer_handle: handle.to_owned(),
+        resource: vec![resource.indicator.to_string()],
+        prompt: None,
+        max_age: None,
+        request_uri: None,
+    }
+}
+
 /// How long a kept authorization request waits for the user to sign in.
 const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -663,6 +691,43 @@ impl OAuth {
         Ok(operation.id)
     }
 
+    /// The issuer and client of the authorization operation `id` that the
+    /// continuation of `client_id` at the issuer routed by `handle` names:
+    /// the operation is this issuer's and this client's and has not expired,
+    /// and its client is still established with its redirect URI. Read only:
+    /// whether a browser may review or continue it is its session's matter,
+    /// judged where it does. Anything else is
+    /// [`AuthorizationError::NotWaiting`].
+    async fn operation_context(
+        &self,
+        handle: &str,
+        client_id: &str,
+        id: AuthorizationOperationId,
+        addressed: Option<&AddressedIssuer>,
+    ) -> Result<(OAuth2Client, OidcIssuer), AuthorizationError> {
+        let refused = || AuthorizationError::NotWaiting;
+        let operation = self
+            .storage
+            .authorization_operation(id)
+            .await?
+            .filter(|op| op.client_id == client_id && !op.is_expired_at(Timestamp::now()))
+            .ok_or_else(refused)?;
+        let resource = self
+            .storage
+            .get_protected_resource(operation.resource_id)
+            .await?
+            .ok_or_else(refused)?;
+        let request = operation_request(&operation, handle, &resource);
+        let (client, issuer) = self
+            .authorize_client(&request, addressed)
+            .await
+            .map_err(|_| refused())?;
+        if operation.issuer_id != issuer.id {
+            return Err(refused());
+        }
+        Ok((client, issuer))
+    }
+
     /// Continue the decided operation `id` at `issuer`, the issuer whose
     /// endpoint the browser returned to, with `session`, the browser's IdP
     /// session (authz/consent-flow.md, resume at the issuer). Only the
@@ -695,24 +760,7 @@ impl OAuth {
             .get_protected_resource(operation.resource_id)
             .await?
             .ok_or(AuthorizationError::NotWaiting)?;
-        let request = OAuth2AuthorizeRequest {
-            client_id: operation.client_id.clone(),
-            redirect_uri: operation.redirect_uri.clone(),
-            response_type: operation.response_type.clone(),
-            scope: Some(operation.scopes.join(" ")),
-            state: operation.state.clone(),
-            code_challenge: operation.code_challenge.clone(),
-            code_challenge_method: operation.code_challenge_method.clone(),
-            nonce: operation.nonce.clone(),
-            // The level the relying party asked for is judged again: an
-            // elevation that lapsed during the review issues no code.
-            acr_values: operation.acr_values.clone(),
-            issuer_handle: issuer.handle.to_string(),
-            resource: vec![resource.indicator.to_string()],
-            prompt: None,
-            max_age: None,
-            request_uri: None,
-        };
+        let request = operation_request(&operation, &issuer.handle.to_string(), &resource);
         // An inactive client or a redirect no longer registered is answered
         // by no redirect at all (RFC 6749 §4.1.2.1).
         let (client, issuer) = self.authorize_client(&request, None).await?;
@@ -901,20 +949,41 @@ impl Authorizations {
         Ok(self.continuations.take(reference).await?)
     }
 
-    /// The context of the kept request `authorization_request` continues
+    /// The context of the request `authorization_request` continues
     /// (`<issuer>/oauth2/authorize?client_id=..&request_uri=..`): its issuer
-    /// and its client's name. The kept request is read, not taken, and must
-    /// belong to that issuer, at its canonical URL, and to that client, which
-    /// must be active with the request's redirect URI registered; a call
-    /// `addressed` to an issuer by its path must name the same one. Anything
-    /// else is [`AuthorizationError::NotWaiting`], the same for every cause.
+    /// and its client's name. The continuation names what this issuer holds
+    /// for the browser: a request kept while the user signs in, or the
+    /// authorization operation the user reviews once signed in. Either is
+    /// read, not taken, and must belong to that issuer, at its canonical
+    /// URL, and to that client, which must be active with the request's
+    /// redirect URI registered; a call `addressed` to an issuer by its path
+    /// must name the same one. Anything else is
+    /// [`AuthorizationError::NotWaiting`], the same for every cause.
     pub async fn sign_in_context(
         &self,
         oauth: &OAuth,
         authorization_request: &str,
         addressed: Option<&AddressedIssuer>,
     ) -> Result<SignInContext, AuthorizationError> {
-        let (_, _, client, issuer) = self.kept(oauth, authorization_request, addressed).await?;
+        let named = named(oauth, authorization_request).await?;
+        let (client, issuer) = match named.request_uri.strip_prefix(OPERATION_URI_PREFIX) {
+            Some(operation) => {
+                let id = AuthorizationOperationId::parse(operation)
+                    .map_err(|_| AuthorizationError::NotWaiting)?;
+                let held = oauth
+                    .operation_context(&named.handle, &named.client_id, id, addressed)
+                    .await?;
+                if !at_issuer(authorization_request, &held.1) {
+                    return Err(AuthorizationError::NotWaiting);
+                }
+                held
+            }
+            None => {
+                let (_, _, client, issuer) =
+                    self.kept(oauth, authorization_request, addressed).await?;
+                (client, issuer)
+            }
+        };
         Ok(SignInContext {
             issuer: issuer.canonical_url,
             client_name: client.client_name,
@@ -962,29 +1031,11 @@ impl Authorizations {
         addressed: Option<&AddressedIssuer>,
     ) -> Result<(String, PendingAuthorization, OAuth2Client, OidcIssuer), AuthorizationError> {
         let refused = || AuthorizationError::NotWaiting;
-        let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
-        // The authorization endpoint's route: the root for the root-addressed
-        // base issuer, `/i/<handle>` for a scoped one; the request was kept
-        // under the handle of the issuer that route reached.
-        let route = match url.path() {
-            "/oauth2/authorize" => "",
-            path => path
-                .strip_prefix("/i/")
-                .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
-                .ok_or_else(refused)?,
-        };
-        let handle = oauth
-            .routed_issuer(route)
-            .await?
-            .ok_or_else(refused)?
-            .handle
-            .to_string();
-        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-        let (Some(client_id), Some(request_uri)) =
-            (query.get("client_id"), query.get("request_uri"))
-        else {
-            return Err(refused());
-        };
+        let Named {
+            handle,
+            client_id,
+            request_uri,
+        } = named(oauth, authorization_request).await?;
         let reference = request_uri
             .strip_prefix(REQUEST_URI_PREFIX)
             .ok_or_else(refused)?;
@@ -998,14 +1049,68 @@ impl Authorizations {
             .authorize_client(&kept.request(), addressed)
             .await
             .map_err(|_| refused())?;
-        // The request must be at the issuer's own canonical URL, not the same
-        // path on another host.
-        let at = format!("{}/oauth2/authorize", issuer.canonical_url);
-        if authorization_request.split('?').next() != Some(at.as_str()) {
+        if !at_issuer(authorization_request, &issuer) {
             return Err(refused());
         }
         Ok((reference.to_owned(), kept, client, issuer))
     }
+}
+
+/// What a continuation URL names: the issuer its route reaches, the client
+/// and the reference of what that issuer holds.
+struct Named {
+    /// The handle of the issuer the route reached.
+    handle: String,
+    client_id: String,
+    request_uri: String,
+}
+
+/// What `authorization_request` names, its route resolved at `oauth`;
+/// [`AuthorizationError::NotWaiting`] when it is no continuation of an
+/// issuer here.
+async fn named(oauth: &OAuth, authorization_request: &str) -> Result<Named, AuthorizationError> {
+    let refused = || AuthorizationError::NotWaiting;
+    let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
+    // The authorization endpoint's route: the root for the root-addressed
+    // base issuer, `/i/<handle>` for a scoped one; what is held is held
+    // under the handle of the issuer that route reached.
+    let route = match url.path() {
+        "/oauth2/authorize" => "",
+        path => path
+            .strip_prefix("/i/")
+            .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
+            .ok_or_else(refused)?,
+    };
+    let handle = oauth
+        .routed_issuer(route)
+        .await?
+        .ok_or_else(refused)?
+        .handle
+        .to_string();
+    let mut client_id = None;
+    let mut request_uri = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "client_id" => client_id = Some(value.into_owned()),
+            "request_uri" => request_uri = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    match (client_id, request_uri) {
+        (Some(client_id), Some(request_uri)) => Ok(Named {
+            handle,
+            client_id,
+            request_uri,
+        }),
+        _ => Err(refused()),
+    }
+}
+
+/// Whether `authorization_request` is at `issuer`'s own canonical URL, not
+/// the same path on another host.
+fn at_issuer(authorization_request: &str, issuer: &OidcIssuer) -> bool {
+    let at = format!("{}/oauth2/authorize", issuer.canonical_url);
+    authorization_request.split('?').next() == Some(at.as_str())
 }
 
 #[cfg(test)]
