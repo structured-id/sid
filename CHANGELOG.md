@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.43](https://github.com/structured-id/sid/compare/v0.2.42...v0.2.43) - 2026-11-24
+
+### Added
+
+- *(init)* open the installation over a store the host opened ([#783](https://github.com/structured-id/sid/pull/783))
+
 ## [0.2.42](https://github.com/structured-id/sid/compare/v0.2.41...v0.2.42) - 2026-11-24
 
 ### Fixed
