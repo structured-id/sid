@@ -282,16 +282,16 @@ async fn test_magic_link_token_uniqueness() {
 // ── Delivery of the link ────────────────────────────────────────────────────
 
 use sid::auth_mail::{AuthMailDelivery, MagicLinkMail};
+use sid::auth_mail::{MailTransport, StandardMail};
 use sid_authn::work_runner::{WorkHandler, WorkOutcome};
 use sid_core::models::{ClaimedWork, MAGIC_LINK_EMAIL_KIND, WorkKind};
 use sid_plugin::notification::{
     ChannelHealth, DeliveryError, DeliveryReceipt, NotificationChannel, Recipient, RenderedMessage,
 };
-use sid_server::auth_mail::{MailTransport, TemplatedMail};
 
-/// The server's templated mail over `transport`.
+/// The standard mail over `transport`.
 fn templated(transport: Transport) -> Arc<dyn AuthMailDelivery> {
-    Arc::new(TemplatedMail::new(Arc::new(transport)))
+    Arc::new(StandardMail::new(Arc::new(transport)))
 }
 
 /// The account UI page links open in these tests.
@@ -435,7 +435,8 @@ async fn test_link_mail_sends_the_same_link_on_every_attempt() {
         .append_pair("token", &token);
     for (to, message) in sent.iter() {
         assert_eq!(to, &email);
-        assert!(message.body.contains(expected.as_str()), "{}", message.body);
+        let text = message.body_text.as_deref().unwrap_or_default();
+        assert!(text.contains(expected.as_str()), "{text}");
     }
     assert_eq!(sent[0].1.body, sent[1].1.body);
 }

@@ -14,7 +14,7 @@ use group::GroupEncoding;
 use pasta_curves::pallas;
 use secrecy::{ExposeSecret, SecretString};
 use sid::admin::Admin;
-use sid::auth_mail::{AuthMailDelivery, MailError, OwedMail};
+use sid::auth_mail::StandardMail;
 use sid::authorization::{Authorization, InstallationAdministrator};
 use sid::devices::DeviceKeyError;
 use sid::devices::{DeviceKeys, KeyCaller, LocalAccess};
@@ -53,6 +53,9 @@ use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_pake_core::prover::ZkppProver;
 use sid_pake_core::types::CE_DEFAULT_POLICY;
 use sid_plugin::history_keys::HistoryKeyStore;
+use sid_plugin::notification::{
+    ChannelHealth, DeliveryError, DeliveryReceipt, NotificationChannel, Recipient, RenderedMessage,
+};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::attestation::{
     AttestationStatus as DeviceAttestationStatus, DeviceEnrollmentChallenge,
@@ -75,6 +78,8 @@ const RP_ID: &str = "id.sid.example.com";
 const WORK_KIND: &str = "host_probe";
 const ROOT: &str = "root@sid.example.com";
 const GUEST: &str = "guest@sid.example.com";
+/// The mailbox a code requested for the guest is bound to.
+const MAILBOX: &str = "guest.mail@sid.example.com";
 /// The redirect URI of the host's own single-page application.
 const REDIRECT: &str = "https://app.sid.example.com/callback";
 /// The host application's own API, the resource its tokens are for.
@@ -680,6 +685,17 @@ impl Served {
             .await
     }
 
+    /// The installation's one-time codes, over its store and keys: what
+    /// requests a code and what mails it read the same sessions.
+    fn codes(&self) -> sid_authn::otp::OtpService {
+        sid_authn::otp::OtpService::new(
+            self.installation.storage.clone(),
+            sid_authn::otp::CodeDelivery {
+                keys: self.installation.key_manager.clone(),
+            },
+        )
+    }
+
     /// Stop serving: every part lets go of the store, then the installation
     /// stops what it runs itself.
     async fn close(self) {
@@ -927,36 +943,88 @@ impl WorkHandler for Probe {
     }
 }
 
-/// The host's mail: it records what the engine owes instead of sending it.
+/// The host's mail transport: it records each message the engine hands it
+/// instead of passing it to a provider.
 #[derive(Default)]
-struct HostMail {
-    sent: std::sync::Mutex<Vec<(sid::auth_mail::AuthMessage, String)>>,
+struct HostChannel {
+    sent: std::sync::Mutex<Vec<(String, RenderedMessage)>>,
 }
 
 #[async_trait::async_trait]
-impl AuthMailDelivery for HostMail {
-    async fn deliver(&self, mail: &OwedMail) -> Result<String, MailError> {
+impl NotificationChannel for HostChannel {
+    fn channel_id(&self) -> &str {
+        "email"
+    }
+
+    async fn deliver(
+        &self,
+        recipient: &Recipient,
+        message: &RenderedMessage,
+    ) -> Result<DeliveryReceipt, DeliveryError> {
         self.sent
             .lock()
             .expect("the mail record")
-            .push((mail.message, mail.destination.clone()));
-        Ok(uuid::Uuid::now_v7().to_string())
+            .push((recipient.email.clone().unwrap_or_default(), message.clone()));
+        Ok(DeliveryReceipt {
+            message_id: uuid::Uuid::now_v7().to_string(),
+            channel: "email".into(),
+            timestamp: jiff::Timestamp::now(),
+            provider: "host".into(),
+        })
+    }
+
+    async fn health(&self) -> Result<ChannelHealth, DeliveryError> {
+        Ok(ChannelHealth {
+            healthy: true,
+            message: None,
+            last_success: None,
+        })
     }
 }
 
-/// The installation's engine: the CE work it owes, assembled by the
-/// engine library with its in-process history evaluator, and the host's own
-/// `extra` handlers.
-fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, Failure> {
+/// What the host turns on, each independently of the other.
+#[derive(Default, Clone)]
+struct Capabilities {
+    /// The host's mail transport; none for a host that sends no mail.
+    mail: Option<Arc<HostChannel>>,
+    /// Whether the host runs a federation site.
+    site: bool,
+}
+
+/// The installation's engine: the CE work it owes with the host's
+/// `capabilities`, assembled by the engine library with its in-process
+/// history evaluator, and the host's own `extra` handlers.
+fn engine(
+    served: &Served,
+    capabilities: Capabilities,
+    extra: Vec<Arc<dyn WorkHandler>>,
+) -> Result<Engine, Failure> {
     let installation = &served.installation;
     let storage = installation.storage.clone();
-    let mail: Arc<dyn AuthMailDelivery> = Arc::new(HostMail::default());
-    let codes = Arc::new(sid_authn::otp::OtpService::new(
-        storage.clone(),
-        sid_authn::otp::CodeDelivery {
-            keys: installation.key_manager.clone(),
-        },
-    ));
+    let mail = capabilities.mail.map(|channel| CeMail {
+        codes: Arc::new(sid::auth_mail::CodeMail::new(
+            Arc::new(served.codes()),
+            Arc::new(StandardMail::over(channel)),
+        )),
+        magic_links: None,
+        resets: None,
+    });
+    // The host serves no platform: its site's admission has nobody to be
+    // delivered to, and the owed work ends without a call.
+    let site_admissions = capabilities.site.then(|| {
+        Arc::new(sid::federation_site::AdmissionPublications::new(
+            Arc::new(sid::federation_site::FederationSite::new(
+                storage.clone(),
+                installation.key_manager.clone(),
+                Arc::new(sid_fed::recipient::Recipient::new(
+                    storage.clone(),
+                    sid_fed::recipient::ClassicalVerdict,
+                )),
+                installation.organization.id,
+            )),
+            None,
+        ))
+    });
     let cascade = Arc::new(
         sid_authn::revocation_cascade::RevocationCascadeService::new(
             storage.clone(),
@@ -979,25 +1047,8 @@ fn engine(served: &Served, extra: Vec<Arc<dyn WorkHandler>>) -> Result<Engine, F
             storage.clone(),
             cascade,
         )),
-        mail: CeMail {
-            codes: Arc::new(sid::auth_mail::CodeMail::new(codes, mail)),
-            magic_links: None,
-            resets: None,
-        },
-        // The host serves no platform: its site's admission has nobody to
-        // be delivered to, and the owed work ends without a call.
-        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
-            Arc::new(sid::federation_site::FederationSite::new(
-                storage.clone(),
-                installation.key_manager.clone(),
-                Arc::new(sid_fed::recipient::Recipient::new(
-                    storage.clone(),
-                    sid_fed::recipient::ClassicalVerdict,
-                )),
-                installation.organization.id,
-            )),
-            None,
-        )),
+        mail,
+        site_admissions,
         audit_retention: sid::AuditRetention::default(),
         migration_deadline_days: sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
         source: "engine-package-consumer".into(),
@@ -2074,7 +2125,9 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         due_work(storage.as_ref()).await?.len() > 1,
         "the installation owes CE work besides the host's",
     )?;
-    let running = engine(&served, vec![])?.start();
+    // The first start sends no mail and runs no federation site: the CE work
+    // assembles without either and settles everything owed so far.
+    let running = engine(&served, Capabilities::default(), vec![])?.start();
     if tokio::time::timeout(Duration::from_secs(10), async {
         while due_work(storage.as_ref()).await.map(|w| w.len()).ok() != Some(1) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2154,7 +2207,55 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         work_state(source.backend().as_ref(), &work).await? == WorkState::Pending,
         "pending work survives the restart",
     )?;
-    let drained: Drained = engine(&reopened, vec![])?.start().drain().await?;
+    // Mail turned on alone: a requested sign-in code goes out as SID's
+    // standard message on the host's own channel, to the bound mailbox.
+    let channel = Arc::new(HostChannel::default());
+    let (_, code) = reopened
+        .codes()
+        .request_otp(
+            sid_authn::otp::OtpPurpose::SignIn,
+            GUEST,
+            sid_authn::otp::CodeDestination::Email(MAILBOX),
+        )
+        .await?;
+    let running = engine(
+        &reopened,
+        Capabilities {
+            mail: Some(channel.clone()),
+            site: false,
+        },
+        vec![],
+    )?
+    .start();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while channel
+            .sent
+            .lock()
+            .map(|sent| sent.is_empty())
+            .unwrap_or(true)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the engine hands the owed code mail to the host's channel")?;
+    let drained: Drained = running.drain().await?;
+    {
+        let sent = channel.sent.lock().expect("the mail record");
+        let [(to, message)] = sent.as_slice() else {
+            return Err(format!("one code mail was owed, {} sent", sent.len()).into());
+        };
+        check(
+            to == MAILBOX
+                && message.subject.as_deref() == Some(format!("Your code: {code}").as_str())
+                && message.body.contains(&code)
+                && message
+                    .body_text
+                    .as_deref()
+                    .is_some_and(|t| t.contains(&code)),
+            "the host's channel receives SID's standard code mail for the bound mailbox",
+        )?;
+    }
 
     // Snapshot: exported from the drained engine, imported into an
     // uninitialized store without serving, verified and opened as the same
@@ -2192,7 +2293,17 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // starts, its administrator signs in with the same password, and a keyed
     // command repeated there answers with what the source recorded.
     let target_storage = target.backend();
-    let running = engine(&restored, vec![Arc::new(Probe(kind))])?.start();
+    // The federation site turned on alone: the work assembles with it and
+    // settles what the installation owes.
+    let running = engine(
+        &restored,
+        Capabilities {
+            mail: None,
+            site: true,
+        },
+        vec![Arc::new(Probe(kind))],
+    )?
+    .start();
     tokio::time::timeout(Duration::from_secs(10), async {
         while work_state(target_storage.as_ref(), &work).await.ok() != Some(WorkState::Completed) {
             tokio::time::sleep(Duration::from_millis(10)).await;

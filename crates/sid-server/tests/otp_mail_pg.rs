@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Email sign-in codes through the installation as it runs: the RPCs commit
 //! the code and its mail work in PostgreSQL, the engine's work runner with
-//! the CE work handlers the server registers sends the mail through the
-//! templated mail to the email channel, and the code read from that mail
+//! the CE work handlers the server registers sends the standard mail to the
+//! email channel, and the code read from that mail
 //! signs in through VerifyOtp.
 //!
 //! Requires sid-test-postgres on port 54399.
@@ -12,7 +12,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sid::auth_mail::CodeMail;
+use sid::auth_mail::{CodeMail, StandardMail};
 use sid::work::{CeMail, CeWork, CeWorkParts};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{
@@ -24,7 +24,6 @@ use sid_plugin::notification::{
 };
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
-use sid_server::auth_mail::{MailTransport, TemplatedMail};
 use tonic::Request;
 
 /// The email channel at the edge of the installation: records each mail
@@ -59,16 +58,6 @@ impl NotificationChannel for Recorded {
 
     async fn health(&self) -> Result<ChannelHealth, DeliveryError> {
         unreachable!("the mail handler never probes its channel")
-    }
-}
-
-/// The configured provider's channel, here the recording one.
-struct Transport(Arc<Recorded>);
-
-#[async_trait::async_trait]
-impl MailTransport for Transport {
-    async fn channel(&self) -> Result<Arc<dyn NotificationChannel>, String> {
-        Ok(self.0.clone())
     }
 }
 
@@ -138,26 +127,15 @@ fn installation(storage: Arc<dyn StorageBackend>, pool: sqlx::PgPool) -> Install
         required_receivers: Vec::new(),
         history_evaluation: None,
         issuer: "https://sid.example.com".into(),
-        mail: CeMail {
+        mail: Some(CeMail {
             codes: Arc::new(CodeMail::new(
                 codes,
-                Arc::new(TemplatedMail::new(Arc::new(Transport(recorded.clone())))),
+                Arc::new(StandardMail::over(recorded.clone())),
             )),
             magic_links: None,
             resets: None,
-        },
-        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
-            Arc::new(sid::federation_site::FederationSite::new(
-                storage.clone(),
-                keys.clone(),
-                Arc::new(sid_fed::recipient::Recipient::new(
-                    storage.clone(),
-                    sid_fed::recipient::ClassicalVerdict,
-                )),
-                sid_core::models::OrgId::generate(),
-            )),
-            None,
-        )),
+        }),
+        site_admissions: None,
         audit_retention: sid::AuditRetention::default(),
         migration_deadline_days: sid::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
         source: "test".into(),

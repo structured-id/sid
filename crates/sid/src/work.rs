@@ -54,9 +54,13 @@ pub struct CeWorkParts {
     /// This credential authority, as a relayed settlement names it.
     pub issuer: String,
     pub closures: Arc<AccountClosureService>,
-    pub mail: CeMail,
-    /// Delivers the site's admission statements to the build's platform.
-    pub site_admissions: Arc<crate::federation_site::AdmissionPublications>,
+    /// The authentication mail, when the host sends mail; without it no
+    /// sign-in code, link or reset is ever owed.
+    pub mail: Option<CeMail>,
+    /// Delivers the site's admission statements to the build's platform,
+    /// when the host runs a federation site. Without one the publications
+    /// the login settings owe still end, publishing nothing.
+    pub site_admissions: Option<Arc<crate::federation_site::AdmissionPublications>>,
     pub audit_retention: AuditRetention,
     pub migration_deadline_days: i64,
     /// The source the maintenance's alerts name.
@@ -114,14 +118,19 @@ impl CeWork {
             Arc::new(SessionRevocationHandler::new(revocation)),
             Arc::new(EnrollmentHandler::new(storage.clone(), evaluator.clone())),
             Arc::new(OwnerPurgeHandler::new(storage.clone(), evaluator)),
-            mail.codes,
-            site_admissions,
+            site_admissions.unwrap_or_else(|| {
+                Arc::new(crate::federation_site::AdmissionPublications::without_site())
+            }),
         ];
-        if let Some(links) = mail.magic_links {
-            handlers.push(links);
-        }
-        if let Some(resets) = mail.resets {
-            handlers.push(resets);
+        if let Some(CeMail {
+            codes,
+            magic_links,
+            resets,
+        }) = mail
+        {
+            handlers.push(codes);
+            handlers.extend(magic_links.map(|links| links as Arc<dyn WorkHandler>));
+            handlers.extend(resets.map(|resets| resets as Arc<dyn WorkHandler>));
         }
         let mail_purge = {
             // Ended authentication mail records. Idempotent, so no job lock.

@@ -368,19 +368,30 @@ impl FederationSite {
 /// Delivery never gates the site: it enforces its own settings meanwhile.
 pub struct AdmissionPublications {
     kind: WorkKind,
-    site: Arc<FederationSite>,
-    /// The transport; none for a build that names no platform, which has
-    /// nobody to tell.
-    publisher: Option<Arc<dyn AdmissionPublisher>>,
+    /// The site and the transport to its platform; none for a host that
+    /// runs no federation site, whose owed publications have nobody to tell.
+    site: Option<(Arc<FederationSite>, Arc<dyn AdmissionPublisher>)>,
 }
 
 impl AdmissionPublications {
+    /// Publications of `site`'s statements over `publisher`; none for a
+    /// build that names no platform.
     pub fn new(site: Arc<FederationSite>, publisher: Option<Arc<dyn AdmissionPublisher>>) -> Self {
+        Self::with(publisher.map(|publisher| (site, publisher)))
+    }
+
+    /// The publications of a host that runs no federation site: every login
+    /// settings change still owes one, and each ends publishing nothing. A
+    /// site enrolled later owes its own publication with its certificate.
+    pub fn without_site() -> Self {
+        Self::with(None)
+    }
+
+    fn with(site: Option<(Arc<FederationSite>, Arc<dyn AdmissionPublisher>)>) -> Self {
         Self {
             kind: WorkKind::new(SITE_ADMISSION_PUBLICATION_KIND)
                 .expect("the publication kind is valid"),
             site,
-            publisher,
         }
     }
 }
@@ -410,10 +421,10 @@ impl WorkHandler for AdmissionPublications {
     }
 
     async fn handle(&self, _work: &ClaimedWork) -> WorkOutcome {
-        let Some(publisher) = &self.publisher else {
-            return WorkOutcome::Done(Some("this build names no platform".into()));
+        let Some((site, publisher)) = &self.site else {
+            return WorkOutcome::Done(Some("no platform to publish to".into()));
         };
-        let statements = match self.site.statements().await {
+        let statements = match site.statements().await {
             Ok(statements) => statements,
             Err(e) if e.undecided() => return WorkOutcome::Retry(e.to_string()),
             // A certificate that no longer stands has nothing to state; a
