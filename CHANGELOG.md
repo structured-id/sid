@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.42](https://github.com/structured-id/sid/compare/v0.2.41...v0.2.42) - 2026-11-24
+
+### Fixed
+
+- *(authn)* a connection asks for what its client uses ([#782](https://github.com/structured-id/sid/pull/782))
+
+### Other
+
+- *(serve)* assemble the installation apart from its listeners ([#778](https://github.com/structured-id/sid/pull/778))
+
 ## [0.2.41](https://github.com/structured-id/sid/compare/v0.2.40...v0.2.41) - 2026-11-24
 
 ### Other
