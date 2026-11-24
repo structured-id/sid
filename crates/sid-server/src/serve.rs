@@ -671,8 +671,8 @@ struct HttpForm<U> {
 
 /// The work an assembled installation runs beside its calls: the durable
 /// work runner with its maintenance, the cleanup settlements and the settings
-/// refresh. It runs until [`Background::drain`].
-pub struct Background {
+/// refresh. It runs until the server stops.
+struct Background {
     /// Held until the work ends: the services and the work share its parts.
     _components: CeComponents,
     health: sid_serve::Health,
@@ -682,15 +682,6 @@ pub struct Background {
 }
 
 impl Background {
-    /// The health service turns NOT_SERVING and the work stops, as on the
-    /// server's own shutdown. The host stops accepting calls and lets the
-    /// ones in flight finish before it calls this.
-    pub async fn drain(self) -> anyhow::Result<()> {
-        self.health.not_serving().await;
-        self.stopper.stop();
-        self.finish().await
-    }
-
     /// Attempts and maintenance runs in flight record their outcome before
     /// the process ends; a settlement being recorded finishes, and an
     /// unacknowledged one is delivered again.
@@ -829,40 +820,6 @@ fn assemble(c: CeComponents, services: CeServices) -> anyhow::Result<Assembled<I
         background,
         stopped,
         drain,
-    })
-}
-
-/// An installation a host serves on a listener of its own.
-#[cfg(feature = "http")]
-pub struct Hosted<S> {
-    /// Everything the server's HTTP port answers, as one service: the
-    /// annotated RPCs' HTTP form, native gRPC and gRPC-Web, the mounted
-    /// applications and the browser routes. The host calls it from its own
-    /// handlers; a request carrying the peer address as
-    /// `axum::extract::ConnectInfo<SocketAddr>` is served as that client's.
-    pub http: S,
-    /// The work running beside the calls; drained when the host stops.
-    pub background: Background,
-}
-
-/// `services` over `c` for a host with a listener of its own: nothing is
-/// bound here. `config` is a structured-proxy configuration tree (CORS, rate
-/// limits, forwarded headers); its listen address is not used. Called inside
-/// the runtime the work runs on.
-#[cfg(feature = "http")]
-pub fn hosted(
-    c: CeComponents,
-    services: CeServices,
-    config: serde_json::Value,
-) -> anyhow::Result<Hosted<structured_proxy::ProxyService<impl structured_proxy::upstream::Upstream>>>
-{
-    let Assembled {
-        http, background, ..
-    } = assemble(c, services, Some(config))?;
-    let form = http.ok_or_else(|| anyhow::anyhow!("the hosted HTTP form was not assembled"))?;
-    Ok(Hosted {
-        http: form.proxy.service(form.upstream)?,
-        background,
     })
 }
 
