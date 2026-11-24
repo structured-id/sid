@@ -7011,6 +7011,60 @@ impl StorageBackend for MockStorage {
         Ok(Some(ended))
     }
 
+    async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
+        mut ctx: MutationContext,
+    ) -> SidResult<Option<Vec<Session>>> {
+        let (end, replacement) = (sessions.end, sessions.replacement);
+        let mut inner = self.inner.lock().unwrap();
+        let Some(profile_id) = inner
+            .credentials
+            .get(&id.0)
+            .filter(|c| c.status.is_active() && c.data.expose() == expected)
+            .map(|c| c.profile_id)
+        else {
+            return Ok(None);
+        };
+        if history.is_some_and(|h| h.owner != profile_id)
+            || replacement.is_some_and(|s| s.profile_id != profile_id)
+        {
+            return Err(sid_core::Error::Validation(
+                "the history and the replacement session belong to the credential's profile".into(),
+            ));
+        }
+        if let Some(history) = history
+            && !inner.apply_history(history)?
+        {
+            return Ok(None);
+        }
+        let ended: Vec<Session> = inner
+            .sessions
+            .values()
+            .filter(|s| s.profile_id == profile_id)
+            .cloned()
+            .collect();
+        for session in &ended {
+            ctx.work.extend(end.owed_by(session));
+        }
+        inner.owe(&ctx)?;
+        inner.sessions.retain(|_, s| s.profile_id != profile_id);
+        if let Some(replacement) = replacement {
+            inner.sessions.insert(replacement.id, replacement.clone());
+        }
+        if let Some(credential) = inner.credentials.get_mut(&id.0) {
+            credential.data = new.data.clone();
+            credential.policy_evidence = new.policy_evidence;
+            credential.opaque_credential_identifier = new.opaque_credential_identifier;
+            credential.last_used_at = Some(jiff::Timestamp::now());
+        }
+        Ok(Some(ended))
+    }
+
     async fn delete_expired_reset_sessions(&self, ctx: MutationContext) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
         let before = inner.reset_sessions.len();

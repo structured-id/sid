@@ -236,6 +236,18 @@ async fn password_first_factor(
         .await?)
 }
 
+/// The secret in the session cookie a browser sign-in delivered.
+fn cookie_secret(
+    delivery: sid_authn::sign_in_delivery::Delivery,
+) -> Result<sid_authn::browser_session::BrowserSecret, Failure> {
+    let sid_authn::sign_in_delivery::Delivery::Cookie(set) = delivery else {
+        return Err("a browser sign-in delivers a session cookie".into());
+    };
+    sid_authn::browser_session::BrowserCookie::default()
+        .secret([set.as_str()])
+        .ok_or_else(|| "the session cookie holds its secret".into())
+}
+
 /// What a host serves an installation with: sign-in, registration,
 /// administration and authorization management over its parts.
 struct Served {
@@ -518,6 +530,56 @@ impl Served {
             uuid::Uuid::from_bytes(*operation.as_bytes()),
             array32(&context.owner_domain, "owner domain")?,
         );
+        let proof = match proof {
+            Proof::Made => Some(
+                self.proof(client, &context, password, started.blind(), &request)
+                    .await?,
+            ),
+            Proof::Omitted => None,
+        };
+        let record = started
+            .state
+            .finish(
+                &mut rng,
+                password,
+                sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(
+                    &start.registration_response,
+                )?,
+                sid_opaque_ke::ClientRegistrationFinishParameters::default(),
+            )?
+            .message
+            .serialize()
+            .to_vec();
+        self.registration
+            .finish(
+                &self.passwords,
+                zkpp.clone(),
+                OpaqueZkppRegistrationFinishRequest {
+                    operation_id: context.operation_id,
+                    registration_record: record,
+                    proof,
+                },
+                SecurityPolicy::ce_default().password.history_max_age_days,
+                enabled,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The client's proof for `password`, whose registration started with
+    /// `blind` and sent `request`, in the password operation `context`
+    /// names: the history evaluation by the installation's evaluator, and
+    /// the proof bound to the operation and its request.
+    async fn proof(
+        &self,
+        client: &mut Client,
+        context: &sid_proto::sid::v1::PasswordHistoryContext,
+        password: &[u8],
+        blind: pallas::Scalar,
+        request: &[u8],
+    ) -> Result<PasswordRegistrationProof, Failure> {
+        let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+        let operation = sid_authn::password_operation::operation_id(context.operation_id.as_ref())?;
         let asked = sid_pake_core::client::history_request(
             &mut rng,
             base(&context.owner_domain, "owner domain")?,
@@ -558,53 +620,250 @@ impl Served {
             &domains,
             &evaluated,
         )?;
-        let proof = match proof {
-            Proof::Made => {
-                let bound = client.prover(domains.len())?.prove(
-                    password,
-                    started.blind(),
-                    &operation_context(operation.as_bytes(), &request),
-                    &history,
-                )?;
-                Some(PasswordRegistrationProof {
-                    zkpp_proof: bound.snark_proof.0,
-                    instances: bound
-                        .instances
-                        .iter()
-                        .map(|i| i.to_repr().to_vec())
-                        .collect(),
-                    evaluation_proofs: answers.into_iter().filter_map(|a| a.proof).collect(),
-                })
-            }
-            Proof::Omitted => None,
-        };
+        let bound = client.prover(domains.len())?.prove(
+            password,
+            blind,
+            &operation_context(operation.as_bytes(), request),
+            &history,
+        )?;
+        Ok(PasswordRegistrationProof {
+            zkpp_proof: bound.snark_proof.0,
+            instances: bound
+                .instances
+                .iter()
+                .map(|i| i.to_repr().to_vec())
+                .collect(),
+            evaluation_proofs: answers.into_iter().filter_map(|a| a.proof).collect(),
+        })
+    }
+
+    /// `principal` signed in with `password` in a browser: the secret its
+    /// session cookie holds.
+    async fn browser_sign_in(
+        &self,
+        principal: &str,
+        password: &[u8],
+    ) -> Result<sid_authn::browser_session::BrowserSecret, Failure> {
+        let policy = sid_authn::login_policy::FixedLoginPolicy::of(&SecurityPolicy::ce_default());
+        let signed_in = password_first_factor(
+            &self.sign_in,
+            &policy,
+            principal,
+            password,
+            sid_authn::sign_in_delivery::CeremonyClient::Browser,
+        )
+        .await?;
+        cookie_secret(signed_in.signed_in.delivery)
+    }
+
+    /// The caller the session cookie `secret` stands for, as the host's
+    /// browser adapter admits it after its Origin and CSRF checks.
+    async fn admitted(
+        &self,
+        secret: &sid_authn::browser_session::BrowserSecret,
+    ) -> Result<sid_authn::caller::BrowserCaller, sid_authn::caller::BrowserSessionRefusal> {
+        sid_authn::caller::authenticate_browser_session(
+            self.installation.storage.as_ref(),
+            secret,
+            None::<[&str; 0]>,
+        )
+        .await
+    }
+
+    /// `caller`'s change of its password from `current` to `password`, as
+    /// its client makes it, up to the finish: the request that finishes it.
+    async fn prepared_change(
+        &self,
+        client: &mut Client,
+        zkpp: &Arc<ZkppOpaqueServer>,
+        caller: &Caller,
+        current: &[u8],
+        password: &[u8],
+    ) -> Result<sid_proto::sid::v1::PasswordChangeFinishRequest, Failure> {
+        use sha2::Digest;
+        let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+        let passwords = sid::password::Passwords::new(&self.sign_in, &self.passwords);
+        let stored = self
+            .installation
+            .storage
+            .get_credentials_by_profile(
+                caller.profile_id,
+                Some(sid_core::models::CredentialType::Opaque),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or("the account has a password")?;
+        let credential_id: Option<sid_ids_proto::CredentialId> =
+            Some(sid_ids::CredentialId::from_uuid(stored.id.0)?.into());
+        let started = sid_pake_core::client::start_registration(&mut rng, password)?;
+        let request = started.request.serialize().to_vec();
+        let login = sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut rng, current)?;
+        let challenge = passwords
+            .change_challenge(
+                zkpp,
+                caller,
+                sid_proto::sid::v1::PasswordChangeChallengeRequest {
+                    credential_id: credential_id.clone(),
+                    credential_request: login.message.serialize().to_vec(),
+                    registration_request: request.clone(),
+                },
+            )
+            .await?;
+        let context = challenge.history.ok_or("the change names its operation")?;
+        let operation = sid_authn::password_operation::operation_id(context.operation_id.as_ref())?;
+        // The current password is confirmed for this change alone: ASCII
+        // "SID-PASSWORD-CHANGE-v1", the operation id, SHA-256 of the new
+        // password's registration request.
+        let mut confirms = b"SID-PASSWORD-CHANGE-v1".to_vec();
+        confirms.extend_from_slice(operation.as_bytes());
+        confirms.extend_from_slice(&sha2::Sha256::digest(&request));
+        let confirmed = login.state.finish(
+            &mut rng,
+            current,
+            sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(
+                &challenge.credential_response,
+            )?,
+            sid_opaque_ke::ClientLoginFinishParameters {
+                context: Some(&confirms),
+                ..sid_opaque_ke::ClientLoginFinishParameters::default()
+            },
+        )?;
+        let executed = passwords
+            .change_execute(
+                zkpp,
+                caller,
+                None,
+                sid_proto::sid::v1::PasswordChangeExecuteRequest {
+                    operation_id: context.operation_id.clone(),
+                    credential_id: credential_id.clone(),
+                    credential_finalization: confirmed.message.serialize().to_vec(),
+                },
+            )
+            .await?;
+        let proof = self
+            .proof(client, &context, password, started.blind(), &request)
+            .await?;
         let record = started
             .state
             .finish(
                 &mut rng,
                 password,
                 sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(
-                    &start.registration_response,
+                    &executed.registration_response,
                 )?,
                 sid_opaque_ke::ClientRegistrationFinishParameters::default(),
             )?
             .message
             .serialize()
             .to_vec();
-        self.registration
-            .finish(
-                &self.passwords,
+        Ok(sid_proto::sid::v1::PasswordChangeFinishRequest {
+            operation_id: context.operation_id,
+            credential_id,
+            registration_record: record,
+            proof: Some(proof),
+        })
+    }
+
+    /// A signed-in owner changes their password and the host replaces their
+    /// sessions: the changing browser's old cookie and another earlier
+    /// session's cookie lose access with the commit, and only the fresh
+    /// secret continues. A change whose reply was lost is recovered by
+    /// signing in with the new password, and repeating the original finish
+    /// afterwards neither changes the password again nor ends that session.
+    async fn password_change_replaces_sessions(
+        &self,
+        client: &mut Client,
+        zkpp: &Arc<ZkppOpaqueServer>,
+    ) -> Result<(), Failure> {
+        const OWNER: &str = "owner@sid.example.com";
+        const FIRST: &[u8] = b"Correct-Horse-Battery-1";
+        const SECOND: &[u8] = b"Correct-Horse-Battery-2";
+        const THIRD: &[u8] = b"Correct-Horse-Battery-3";
+        let cookie = sid_authn::browser_session::BrowserCookie::default();
+        let passwords = sid::password::Passwords::new(&self.sign_in, &self.passwords);
+        self.register(client, zkpp, OWNER, FIRST, None, true, Proof::Made)
+            .await?;
+
+        let (changing, copied) = (
+            self.browser_sign_in(OWNER, FIRST).await?,
+            self.browser_sign_in(OWNER, FIRST).await?,
+        );
+        let browser = self.admitted(&changing).await?;
+        let lost = self
+            .prepared_change(client, zkpp, &browser.caller, FIRST, THIRD)
+            .await?;
+        let finish = self
+            .prepared_change(client, zkpp, &browser.caller, FIRST, SECOND)
+            .await?;
+        check(
+            self.admitted(&copied).await.is_ok(),
+            "a second session of the owner is open before the change",
+        )?;
+
+        let continued = passwords
+            .change_finish_replacing_sessions(zkpp.clone(), &browser, &cookie, finish.clone())
+            .await?
+            .ok_or("the change commits once")?;
+        let fresh = cookie_secret(continued.delivery)?;
+        check(
+            self.admitted(&changing).await.is_err(),
+            "the changing browser's old cookie opens no session after the change",
+        )?;
+        check(
+            self.admitted(&copied).await.is_err(),
+            "another earlier session's cookie opens no session after the change",
+        )?;
+        let after = self.admitted(&fresh).await?;
+        check(
+            after.session.authenticated_at == browser.session.authenticated_at
+                && after.session.amr == browser.session.amr
+                && after.session.id != browser.session.id,
+            "the replacement session keeps when and how the browser authenticated",
+        )?;
+        check(
+            self.browser_sign_in(OWNER, FIRST).await.is_err(),
+            "the replaced password no longer signs in",
+        )?;
+        // The change prepared over the replaced password cannot commit: the
+        // password and the open session stay as they were.
+        check(
+            passwords
+                .change_finish_replacing_sessions(zkpp.clone(), &after, &cookie, lost)
+                .await
+                .is_err()
+                && self.admitted(&fresh).await.is_ok()
+                && self.browser_sign_in(OWNER, THIRD).await.is_err(),
+            "a change whose commit is refused leaves the password and the sessions",
+        )?;
+
+        // The reply was lost: the owner signs in with the new password, and
+        // the original finish repeated from there ends nothing.
+        let recovered = self.browser_sign_in(OWNER, SECOND).await?;
+        let again = passwords
+            .change_finish_replacing_sessions(
                 zkpp.clone(),
-                OpaqueZkppRegistrationFinishRequest {
-                    operation_id: context.operation_id,
-                    registration_record: record,
-                    proof,
-                },
-                SecurityPolicy::ce_default().password.history_max_age_days,
-                enabled,
+                &self.admitted(&recovered).await?,
+                &cookie,
+                finish.clone(),
             )
             .await?;
-        Ok(())
+        check(
+            again.is_none(),
+            "a repeated finish of a completed change delivers no session",
+        )?;
+        check(
+            self.admitted(&recovered).await.is_ok() && self.admitted(&fresh).await.is_ok(),
+            "a repeated finish ends no session opened since the change",
+        )?;
+        check(
+            self.admitted(&changing).await.is_err(),
+            "a repeated finish cannot be made with the retired cookie",
+        )?;
+        check(
+            self.browser_sign_in(OWNER, SECOND).await.is_ok(),
+            "the changed password still signs in after the repeated finish",
+        )
     }
 
     /// `principal` signed in natively with `password`; the caller its
@@ -1380,6 +1639,9 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
                 .all(|c| c.policy_evidence != sid_core::models::PolicyEvidence::Unverified),
         "each installed password carries the evidence of its verified proof",
     )?;
+    served
+        .password_change_replaces_sessions(&mut client, &zkpp)
+        .await?;
     let (guest, guest_token) = served.password_sign_in(GUEST, PASSWORD).await?;
     check(
         served
@@ -2152,8 +2414,13 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
     // operation can no longer commit; until then it is scheduled, and it
     // travels with the installation.
     check(
-        client.operations.len() == 3 && scheduled.iter().eq(client.operations.keys()),
-        "each registration operation leaves exactly its enrollment admission scheduled",
+        client.operations.len() == 4 && scheduled.iter().eq(client.operations.keys()),
+        &format!(
+            "each registration operation leaves exactly its enrollment admission scheduled \
+             ({} operations, {} scheduled)",
+            client.operations.len(),
+            scheduled.len()
+        ),
     )?;
     check(
         work_state(storage.as_ref(), &work).await? == WorkState::Pending,

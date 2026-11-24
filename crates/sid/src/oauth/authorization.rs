@@ -192,7 +192,10 @@ pub struct PendingAuthorization {
     /// offered on the sign-in page.
     account_offered: bool,
     /// The sign-in the user chose when the request arrived: what its
-    /// continuation carries does not replace it.
+    /// continuation carries does not replace it. Required, like every other
+    /// field: a kept request that does not state it was not written by this
+    /// build, is not read as one, and its sign-in starts again within the
+    /// minutes such a request lives.
     sign_in: SignInChoice,
 }
 

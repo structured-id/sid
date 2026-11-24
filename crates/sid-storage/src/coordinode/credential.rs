@@ -18,7 +18,7 @@ use sid_core::models::{
     Credential, CredentialData, CredentialId, CredentialRevocation, CredentialType, HistoryArchive,
     HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId,
     HistoryEpochUse, HistoryEvidence, HistoryKsf, HistorySuite, MutationContext, PasswordHistory,
-    Profile, ProfileId, StoredUserHandle, WebAuthnUserHandle,
+    Profile, ProfileId, Session, SessionEnd, StoredUserHandle, WebAuthnUserHandle,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -746,12 +746,35 @@ impl CoordinodeBackend {
         history: Option<HistoryCommit>,
         ctx: MutationContext,
     ) -> SidResult<bool> {
+        self.update_credential_and_sessions(id, update, history, None, ctx)
+            .await
+            .map(|applied| applied.is_some())
+    }
+
+    /// [`Self::update_credential`], which with `sessions` also ends every
+    /// session of the credential's profile and stores the one that replaces
+    /// them, in the same commit; returns the ended sessions when it applied.
+    async fn update_credential_and_sessions(
+        &self,
+        id: CredentialId,
+        update: Update,
+        history: Option<HistoryCommit>,
+        sessions: Option<(SessionEnd, Option<Session>)>,
+        ctx: MutationContext,
+    ) -> SidResult<Option<Vec<Session>>> {
         self.transaction(move |tx| {
             let Some(stored) = get(tx, id)? else {
-                return Ok(Decision::Abandon(false));
+                return Ok(Decision::Abandon(None));
             };
             if !update.when.holds(&stored) {
-                return Ok(Decision::Abandon(false));
+                return Ok(Decision::Abandon(None));
+            }
+            if let Some((_, Some(replacement))) = &sessions
+                && replacement.profile_id != stored.profile_id
+            {
+                return Err(SidError::Validation(
+                    "the replacement session belongs to the credential's profile".into(),
+                ));
             }
             tx.run(
                 &format!(
@@ -767,11 +790,19 @@ impl CoordinodeBackend {
                     ));
                 }
                 if !apply_history(tx, history)? {
-                    return Ok(Decision::Abandon(false));
+                    return Ok(Decision::Abandon(None));
                 }
             }
-            finalize(tx, &format!("profile:{}", stored.profile_id), ctx.clone())?;
-            Ok(Decision::Commit(true))
+            let mut ctx = ctx.clone();
+            let mut ended = Vec::new();
+            if let Some((end, replacement)) = &sessions {
+                ended = super::session::end_profile_sessions(tx, stored.profile_id, end, &mut ctx)?;
+                if let Some(replacement) = replacement {
+                    super::session::insert(tx, replacement)?;
+                }
+            }
+            finalize(tx, &format!("profile:{}", stored.profile_id), ctx)?;
+            Ok(Decision::Commit(Some(ended)))
         })
         .await
     }
@@ -798,9 +829,32 @@ impl CoordinodeBackend {
         history: Option<&HistoryCommit>,
         ctx: MutationContext,
     ) -> SidResult<bool> {
+        let update = Self::password_update(expected, new)?;
+        self.update_credential(id, update, history.cloned(), ctx)
+            .await
+    }
+
+    pub(super) async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
+        ctx: MutationContext,
+    ) -> SidResult<Option<Vec<Session>>> {
+        let update = Self::password_update(expected, new)?;
+        let sessions = Some((sessions.end.clone(), sessions.replacement.cloned()));
+        self.update_credential_and_sessions(id, update, history.cloned(), sessions, ctx)
+            .await
+    }
+
+    /// The replacement of an active password still holding `expected` by
+    /// `new`'s data and policy evidence.
+    fn password_update(expected: &[u8], new: &Credential) -> SidResult<Update> {
         let (verified, policy_version, artifact) =
             crate::policy_evidence::columns(&new.policy_evidence)?;
-        let update = Update {
+        Ok(Update {
             when: When::ActiveHolding(expected.to_vec()),
             set: "c.data = $data, c.policy_version = $policy_version, c.zkpp_verified = $verified,
              c.opaque_credential_identifier = $identifier, c.zkpp_artifact = $artifact,
@@ -819,9 +873,7 @@ impl CoordinodeBackend {
                 )
                 .with("artifact", artifact.map_or(Value::Null, Value::Binary))
                 .with("now", time(Timestamp::now())),
-        };
-        self.update_credential(id, update, history.cloned(), ctx)
-            .await
+        })
     }
 
     pub(super) async fn reseal_credential_data(

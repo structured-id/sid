@@ -3622,6 +3622,19 @@ impl StorageBackend for SqliteBackend {
         self.complete_password_reset_impl(id, credential, history, end, ctx)
             .await
     }
+    async fn change_password_replacing_sessions(
+        &self,
+        id: sid_core::models::CredentialId,
+        expected: &[u8],
+        new: &sid_core::models::Credential,
+        history: Option<&sid_core::models::HistoryCommit>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
+        ctx: MutationContext,
+    ) -> SidResult<Option<Vec<sid_core::models::Session>>> {
+        let sessions = Some((sessions.end, sessions.replacement));
+        self.change_password_and_sessions(id, expected, new, history, sessions, ctx)
+            .await
+    }
     async fn count_active_reset_sessions(
         &self,
         profile_id: sid_core::models::ProfileId,

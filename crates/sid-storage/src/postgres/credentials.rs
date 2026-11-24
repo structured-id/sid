@@ -41,6 +41,52 @@ pub(super) async fn spend_in_tx(
     }
 }
 
+/// Replace the active password credential `id` by `new` in `tx`, only while
+/// its data is still `expected`, and apply `history` to its owner's history.
+/// Returns the owner, or `None` when another change came first, the
+/// credential is no longer active or the history moved past
+/// `history.expected_revision`; the caller then abandons `tx`.
+pub(super) async fn replace_password(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: CredentialId,
+    expected: &[u8],
+    new: &Credential,
+    history: Option<&HistoryCommit>,
+) -> SidResult<Option<Uuid>> {
+    let (verified, policy_version, artifact) =
+        crate::policy_evidence::columns(&new.policy_evidence)?;
+    let profile_id: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE credentials SET data = $3,
+            policy_version = $4, zkpp_verified = $5,
+            opaque_credential_identifier = $6, zkpp_artifact = $7, last_used_at = NOW()
+         WHERE id = $1 AND status = 'active' AND data = $2 RETURNING profile_id",
+    )
+    .bind(id.0)
+    .bind(expected)
+    .bind(new.data.expose())
+    .bind(policy_version)
+    .bind(verified)
+    .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
+    .bind(artifact)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("change password: {e}")))?;
+    let Some(profile_id) = profile_id else {
+        return Ok(None);
+    };
+    if let Some(history) = history {
+        if history.owner.into_uuid() != profile_id {
+            return Err(SidError::Validation(
+                "password history belongs to the credential's profile".into(),
+            ));
+        }
+        if !password_history::apply_in_tx(tx, history).await? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(profile_id))
+}
+
 #[async_trait]
 impl CredentialStore for PostgresBackend {
     type Owner = ProfileId;
@@ -147,37 +193,9 @@ impl CredentialStore for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let (verified, policy_version, artifact) =
-            crate::policy_evidence::columns(&new.policy_evidence)?;
-        let profile_id: Option<Uuid> = sqlx::query_scalar(
-            "UPDATE credentials SET data = $3,
-                policy_version = $4, zkpp_verified = $5,
-                opaque_credential_identifier = $6, zkpp_artifact = $7, last_used_at = NOW()
-             WHERE id = $1 AND status = 'active' AND data = $2 RETURNING profile_id",
-        )
-        .bind(id.0)
-        .bind(expected)
-        .bind(new.data.expose())
-        .bind(policy_version)
-        .bind(verified)
-        .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
-        .bind(artifact)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("change password: {e}")))?;
-        let Some(profile_id) = profile_id else {
+        let Some(profile_id) = replace_password(&mut tx, id, expected, new, history).await? else {
             return Ok(false);
         };
-        if let Some(history) = history {
-            if history.owner.into_uuid() != profile_id {
-                return Err(SidError::Validation(
-                    "password history belongs to the credential's profile".into(),
-                ));
-            }
-            if !password_history::apply_in_tx(&mut tx, history).await? {
-                return Ok(false);
-            }
-        }
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), audit).await?;
         tx.commit()
             .await
