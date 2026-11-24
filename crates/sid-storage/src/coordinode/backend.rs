@@ -2825,19 +2825,11 @@ impl StorageBackend for CoordinodeBackend {
         expected: &[u8],
         new: &Credential,
         history: Option<&HistoryCommit>,
-        end: &SessionEnd,
-        replacement: Option<&Session>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
         ctx: MutationContext,
     ) -> Result<Option<Vec<Session>>> {
         CoordinodeBackend::change_password_replacing_sessions(
-            self,
-            id,
-            expected,
-            new,
-            history,
-            end,
-            replacement,
-            ctx,
+            self, id, expected, new, history, sessions, ctx,
         )
         .await
     }

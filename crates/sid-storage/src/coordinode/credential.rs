@@ -840,12 +840,11 @@ impl CoordinodeBackend {
         expected: &[u8],
         new: &Credential,
         history: Option<&HistoryCommit>,
-        end: &SessionEnd,
-        replacement: Option<&Session>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
         ctx: MutationContext,
     ) -> SidResult<Option<Vec<Session>>> {
         let update = Self::password_update(expected, new)?;
-        let sessions = Some((end.clone(), replacement.cloned()));
+        let sessions = Some((sessions.end.clone(), sessions.replacement.cloned()));
         self.update_credential_and_sessions(id, update, history.cloned(), sessions, ctx)
             .await
     }

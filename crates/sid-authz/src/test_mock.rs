@@ -2816,8 +2816,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: &[u8],
         _: &Credential,
         _: Option<&sid_core::models::HistoryCommit>,
-        _: &SessionEnd,
-        _: Option<&Session>,
+        _: sid_plugin::storage::SessionReplacement<'_>,
         _: MutationContext,
     ) -> Result<Option<Vec<Session>>> {
         unimplemented!("password changes are not used by the authz unit tests")

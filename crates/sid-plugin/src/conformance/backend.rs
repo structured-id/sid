@@ -1848,6 +1848,14 @@ pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend
     let mut next = password.clone();
     next.data = vec![2u8; 8].into();
     let end = test_session_end();
+    let (unwritten, foreign_session) = (
+        browser_session(profile.id, 0x44),
+        browser_session(other.id, 0x55),
+    );
+    let replaced_by = |replacement| crate::storage::SessionReplacement {
+        end: &end,
+        replacement,
+    };
 
     // Over a password that is not the stored one: nothing is written.
     let stale = backend
@@ -1856,8 +1864,7 @@ pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend
             b"not the stored password",
             &next,
             None,
-            &end,
-            Some(&browser_session(profile.id, 0x44)),
+            replaced_by(Some(&unwritten)),
             test_audit(),
         )
         .await
@@ -1876,8 +1883,7 @@ pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend
             password.data.expose(),
             &next,
             None,
-            &end,
-            Some(&browser_session(other.id, 0x55)),
+            replaced_by(Some(&foreign_session)),
             test_audit(),
         )
         .await;
@@ -1897,8 +1903,7 @@ pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend
             password.data.expose(),
             &next,
             None,
-            &end,
-            Some(&replacement),
+            replaced_by(Some(&replacement)),
             test_audit(),
         )
         .await
@@ -1924,8 +1929,7 @@ pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend
             password.data.expose(),
             &next,
             None,
-            &end,
-            None,
+            replaced_by(None),
             test_audit(),
         )
         .await

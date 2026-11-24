@@ -477,8 +477,10 @@ impl<'a> Passwords<'a> {
                 &change.current,
                 &change.new,
                 change.history.as_ref(),
-                &end,
-                Some(&replacement),
+                sid_plugin::storage::SessionReplacement {
+                    end: &end,
+                    replacement: Some(&replacement),
+                },
                 change.ctx,
             )
             .await

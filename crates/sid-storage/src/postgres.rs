@@ -9994,10 +9994,10 @@ impl StorageBackend for PostgresBackend {
         expected: &[u8],
         new: &Credential,
         history: Option<&HistoryCommit>,
-        end: &SessionEnd,
-        replacement: Option<&Session>,
+        sessions: sid_plugin::storage::SessionReplacement<'_>,
         mut ctx: MutationContext,
     ) -> SidResult<Option<Vec<Session>>> {
+        let (end, replacement) = (sessions.end, sessions.replacement);
         let storage = |e: sqlx::Error| SidError::Storage(format!("change password: {e}"));
         let mut tx = self.pool.begin().await.map_err(storage)?;
         let Some(owner) =
