@@ -5,20 +5,80 @@ use sid_proto::sid::v1::federation::platform_ca_service_server::{
 use sid_proto::sid::v1::{GetPlatformCasRequest, PlatformCa, PlatformCaState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// A client without TLS for the loopback servers of these tests, with the
-/// redirect policy of [`PlatformCaPublication::new`].
-fn loopback(endpoint: &str) -> PlatformCaPublication {
+/// The TLS provider an HTTPS client is built with, selected as a host
+/// selects it.
+fn select_tls() {
     static PROVIDER: std::sync::Once = std::sync::Once::new();
     PROVIDER.call_once(|| {
         sid_crypto::tls::aws_lc::provider()
             .install_default()
             .expect("the test process's only TLS provider");
     });
+}
+
+/// A client without TLS for the loopback servers of these tests, with the
+/// redirect policy of [`PlatformCaPublication::new`].
+fn loopback(endpoint: &str) -> PlatformCaPublication {
+    select_tls();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
     PlatformCaPublication::with_client(client, endpoint.parse().unwrap()).unwrap()
+}
+
+#[path = "../../build_platform.rs"]
+mod build_platform;
+
+/// The one flag of a local publication selects the platform: off is
+/// production, on is the development platform, absent is no platform. Both
+/// origins are ones a build can name, and an origin given beside the flag
+/// must be the one the flag selects.
+/// Bug prevented: a closed test build signing its site in to production, a
+/// flag left unset inventing a platform, or a build naming two platforms.
+#[test]
+fn the_dev_flag_selects_the_platform() {
+    use build_platform::{DEVELOPMENT, PRODUCTION, selected};
+    assert_eq!(selected(None, None).unwrap(), None);
+    assert_eq!(
+        selected(None, Some("false")).unwrap().as_deref(),
+        Some(PRODUCTION)
+    );
+    assert_eq!(
+        selected(None, Some("true")).unwrap().as_deref(),
+        Some(DEVELOPMENT)
+    );
+    assert_eq!(PRODUCTION, "https://structured.id");
+    assert_eq!(DEVELOPMENT, "https://dev.structured.id");
+    for origin in [PRODUCTION, DEVELOPMENT] {
+        let host = url::Url::parse(origin)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            publication_of(origin).unwrap().as_str(),
+            format!("https://{host}/.well-known/sid-ca/index.json")
+        );
+    }
+    // An official build names the origin itself, with or without the flag.
+    assert_eq!(
+        selected(Some("https://sid.example.com"), None)
+            .unwrap()
+            .as_deref(),
+        Some("https://sid.example.com")
+    );
+    assert_eq!(
+        selected(Some(DEVELOPMENT), Some("true"))
+            .unwrap()
+            .as_deref(),
+        Some(DEVELOPMENT)
+    );
+    assert!(selected(Some(PRODUCTION), Some("true")).is_err());
+    assert!(selected(Some(DEVELOPMENT), Some("false")).is_err());
+    for other in ["1", "yes", "TRUE", "dev"] {
+        assert!(selected(None, Some(other)).is_err(), "{other}");
+    }
 }
 
 /// The platform a build names is its public https origin, and its
@@ -115,9 +175,26 @@ fn a_build_carries_the_publication_it_fetched() {
 /// this is the check that the fetched publication is one.
 #[test]
 fn what_this_build_carries_is_a_set() {
-    if let Some(set) = build_platform_cas().unwrap() {
+    select_tls();
+    let platform = build_platform().unwrap();
+    let carried = build_platform_cas().unwrap();
+    // The run's record of which platform this very build was made for.
+    eprintln!(
+        "build platform: {}; publication: {}; site admissions: {}; carried generations: {}",
+        platform.as_ref().map_or("none", |p| p.as_str()),
+        build_publication()
+            .unwrap()
+            .as_ref()
+            .map_or("none", |p| p.as_str()),
+        site_admission::PlatformAdmissions::of_build()
+            .unwrap()
+            .as_ref()
+            .map_or("none", |p| p.endpoint()),
+        carried.as_ref().map_or(0, |set| set.generations.len()),
+    );
+    if let Some(set) = carried {
         assert!(!set.generations.is_empty());
-        assert!(build_publication().unwrap().is_some());
+        assert!(platform.is_some());
     }
 }
 

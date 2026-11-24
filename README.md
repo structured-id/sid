@@ -217,6 +217,32 @@ SCIM bearer or with an OAuth client-credentials token from the installation's
 issuer (`GetScimInboundConfig` returns the token endpoint and `client_id`).
 Logins it provisions are federated usernames `userName#<organization domain>`.
 
+### A build made for a platform
+
+Which StructuredID platform an installation federates with is fixed when it is
+built, not configured at run time: that platform's CA set is compiled in, the
+installation refreshes it from that platform only and tells that platform whom
+its site admits. A build given nothing is made for no platform and serves
+local sign-in alone.
+
+A local publication made for the platform takes one flag in its ordinary
+build command:
+
+```bash
+SID_BUILD_PLATFORM_DEV=true cargo build --release -p sid-server    # https://dev.structured.id
+SID_BUILD_PLATFORM_DEV=false cargo build --release -p sid-server   # https://structured.id
+```
+
+The same variable selects the platform when an application builds SID as a
+dependency. The build fetches the platform's CA set itself
+(`{platform}/.well-known/sid-ca/index.json`, no redirect followed): a platform
+that cannot be reached stops the build, and one that publishes no set yet
+gives a build that carries none and fetches it once the platform publishes.
+The flag turns no federation on, leaves the installation's own issuer as it is
+and does not touch identity providers configured separately. An official
+delivery names the origin itself (`SID_BUILD_PLATFORM`) and the set its build
+fetched (`SID_BUILD_PLATFORM_CAS`).
+
 ## Password client conformance
 
 [The installed-client suite](ci/password-clients/README.md) exercises the

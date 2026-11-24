@@ -52,6 +52,11 @@ impl PlatformAdmissions {
             .map_err(|e| PublicationError::Client(e.to_string()))?;
         Ok(Self { client, endpoint })
     }
+
+    /// Where the statements go.
+    pub fn endpoint(&self) -> &str {
+        self.endpoint.as_str()
+    }
 }
 
 /// Where the platform at the public origin `platform` takes statements: its
