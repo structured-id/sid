@@ -25,8 +25,20 @@ struct Registration {
 }
 
 impl Registration {
+    /// The connection of the account pages' client.
     fn connection(&self) -> SidResult<ClientConnection> {
-        ClientConnection::of(&self.issuer, &self.client, &self.resource, &self.access)
+        self.asking(&crate::system_integration::SIGN_IN_SCOPES)
+    }
+
+    /// The connection of a client that signs in with `sign_in`.
+    fn asking(&self, sign_in: &[&str]) -> SidResult<ClientConnection> {
+        ClientConnection::of(
+            &self.issuer,
+            &self.client,
+            &self.resource,
+            &self.access,
+            sign_in,
+        )
     }
 }
 
@@ -97,6 +109,33 @@ async fn the_connection_is_the_stored_registration() {
     );
     assert_eq!(connection.token_endpoint_auth_method, "private_key_jwt");
     assert_eq!(connection.key_ids, ["bff-1"]);
+}
+
+/// A client registered with more than it uses asks for what it uses: signing
+/// in with `openid` alone, its connection carries `openid` and the scopes of
+/// its access, not the `profile` and `email` its registration also allows.
+/// Bug prevented: a console that reads no profile field asking every user
+/// for their names and email because its registration permits it.
+#[tokio::test]
+async fn the_connection_asks_for_what_the_client_uses_not_all_it_may() {
+    let r = registration().await;
+    assert!(r.client.allowed_scopes.iter().any(|s| s == "profile"));
+    let connection = r.asking(&["openid"]).unwrap();
+    let mut expected = vec!["openid".to_owned()];
+    expected.extend(r.access.scopes.iter().cloned());
+    assert_eq!(connection.scopes, expected);
+}
+
+/// A scope the client may not request is not asked for on its behalf: of a
+/// sign-in scope or of its access, the registration gets no connection.
+#[tokio::test]
+async fn a_scope_the_client_may_not_request_is_refused() {
+    let r = registration().await;
+    assert!(refused(r.asking(&["openid", "phone"])));
+
+    let mut r = registration().await;
+    r.access.scopes.push("orders.read".into());
+    assert!(refused(r.connection()));
 }
 
 /// A resource of another issuer would send the BFF's tokens to an API that

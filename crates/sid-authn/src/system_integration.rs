@@ -21,8 +21,11 @@ use sid_plugin::storage::StorageBackend;
 /// another set is not this schema's and is recreated, never converted.
 pub const ACCOUNT_SCOPES: [&str; 2] = ["account.read", "account.write"];
 
-/// Scopes the account web client may request: sign-in (OIDC Core 1.0 §3.1.2.1)
-/// and the account API.
+/// Scopes the account web client signs users in with (OIDC Core 1.0
+/// §3.1.2.1, §5.4): its pages show the user's name and email.
+pub const SIGN_IN_SCOPES: [&str; 3] = ["openid", "profile", "email"];
+
+/// Scopes the account web client may request: sign-in and the account API.
 const CLIENT_SCOPES: [&str; 5] = [
     "openid",
     "profile",

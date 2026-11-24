@@ -102,9 +102,14 @@ impl SystemIntegrationService for SystemIntegrationServiceImpl {
                 ))
             })?;
         let access = integration.access.as_ref().ok_or_else(unavailable)?;
-        let connection =
-            ClientConnection::of(&issuer, &integration.client, &integration.resource, access)
-                .map_err(|_| unavailable())?;
+        let connection = ClientConnection::of(
+            &issuer,
+            &integration.client,
+            &integration.resource,
+            access,
+            &sid_authn::system_integration::SIGN_IN_SCOPES,
+        )
+        .map_err(|_| unavailable())?;
         Ok(Response::new(AccountConnection {
             issuer: connection.issuer,
             client_id: connection.client_id,
