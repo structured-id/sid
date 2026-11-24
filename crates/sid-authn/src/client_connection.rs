@@ -38,12 +38,15 @@ pub struct ClientConnection {
 
 impl ClientConnection {
     /// The connection of `client` under `issuer` for `resource`, which it
-    /// reaches through `access`, as stored. A registration that cannot serve
+    /// reaches through `access`, as stored. It asks for `sign_in`, the
+    /// scopes the client signs users in with (`openid` among them), and the
+    /// scopes of its access; what else the registration allows is not
+    /// requested. A registration that cannot serve
     /// this BFF's sign-ins is never a connection: a disabled client, one the
     /// issuer does not serve, one that does not authenticate with registered
     /// keys (`private_key_jwt`), is not a web client, may not request
-    /// `openid` or holds a malformed scope, one without the
-    /// code or refresh grant, a
+    /// `openid` or another scope asked for, or holds a malformed scope, one
+    /// without the code or refresh grant, a
     /// resource that is not a target or is another issuer's, access that is
     /// not this client's to this resource, or a client without exactly one
     /// callback.
@@ -52,6 +55,7 @@ impl ClientConnection {
         client: &OAuth2Client,
         resource: &ProtectedResource,
         access: &ResourceAccess,
+        sign_in: &[&str],
     ) -> SidResult<Self> {
         let unusable = |why: &str| Err(SidError::InvalidState(why.into()));
         // The issuer refuses a disabled client and issues no token for a
@@ -73,14 +77,29 @@ impl ClientConnection {
         }
         // The BFF's callback needs an ID token, issued only for `openid`
         // (OIDC Core 1.0 §3.1.2.1).
-        if !client.allowed_scopes.iter().any(|s| s == "openid") {
+        if !sign_in.contains(&"openid") || !client.allowed_scopes.iter().any(|s| s == "openid") {
             return unusable("the client may not request openid");
         }
         // An entry that is not one scope token would reach the issuer as
         // several, none of them a registered scope (RFC 6749 §3.3).
-        let Ok(scopes) = scope_list(&client.allowed_scopes) else {
+        if scope_list(&client.allowed_scopes).is_err() {
             return unusable("a scope of the client is not a scope token");
-        };
+        }
+        // What the client uses, each once: the issuer refuses a request
+        // naming a scope outside the registration.
+        let mut scopes: Vec<String> = Vec::with_capacity(sign_in.len() + access.scopes.len());
+        for scope in sign_in
+            .iter()
+            .copied()
+            .chain(access.scopes.iter().map(String::as_str))
+        {
+            if !client.allowed_scopes.iter().any(|s| s == scope) {
+                return unusable("the client may not request a scope it asks for");
+            }
+            if !scopes.iter().any(|s| s == scope) {
+                scopes.push(scope.to_owned());
+            }
+        }
         if !resource.is_target() {
             return unusable("the resource is not a token target");
         }
