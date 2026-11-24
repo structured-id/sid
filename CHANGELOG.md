@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.44](https://github.com/structured-id/sid/compare/v0.2.43...v0.2.44) - 2026-11-24
+
+### Added
+
+- *(oauth)* sign a request in where its user chose ([#789](https://github.com/structured-id/sid/pull/789))
+
+### Other
+
+- *(server)* drop the host entries no embedding host can use ([#786](https://github.com/structured-id/sid/pull/786))
+
 ## [0.2.43](https://github.com/structured-id/sid/compare/v0.2.42...v0.2.43) - 2026-11-24
 
 ### Added
