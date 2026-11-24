@@ -26,7 +26,7 @@ use crate::bff_session::{
     BffSession, BffSessionStore, RefreshClaim, SessionClaims, TokenReplacement,
 };
 use crate::issuer_directory::{IssuedTokenRefusal, IssuerDirectory};
-use crate::relying_party::{Connection, sign_in_cookie};
+use crate::relying_party::{Connection, SignInChoice, sign_in_cookie};
 use crate::revocation_cache::RevocationCache;
 
 /// An access token this close to expiry is refreshed before use, so it does
@@ -340,8 +340,19 @@ impl<C: ApplicationClient> BrowserSessions<C> {
     }
 
     /// Start a sign-in that returns to `requested` when it is a path on this
-    /// origin, else to the root.
+    /// origin, else to the root, at the issuer's ordinary sign-in.
     pub async fn start_sign_in(&self, requested: &str) -> Result<SignInStart, SignInFailure> {
+        self.start_sign_in_at(requested, SignInChoice::Ordinary)
+            .await
+    }
+
+    /// [`Self::start_sign_in`], asking the issuer for the sign-in the user
+    /// chose on the application's page.
+    pub async fn start_sign_in_at(
+        &self,
+        requested: &str,
+        sign_in: SignInChoice,
+    ) -> Result<SignInStart, SignInFailure> {
         let connection = self
             .connection()
             .await
@@ -367,7 +378,7 @@ impl<C: ApplicationClient> BrowserSessions<C> {
             .await
             .map_err(|e| SignInFailure::Unavailable(e.to_string()))?;
         Ok(SignInStart {
-            authorize_url: connection.authorize_url(&challenge, &state, &nonce),
+            authorize_url: connection.authorize_url(&challenge, &state, &nonce, sign_in),
             state,
             browser_secret,
         })

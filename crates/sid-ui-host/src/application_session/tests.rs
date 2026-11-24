@@ -282,6 +282,7 @@ async fn sign_in_redirects_to_the_issuer() {
         .adapter
         .start_sign_in(Request::new(StartSignInRequest {
             rd: "/organizations".into(),
+            sign_in: None,
         }))
         .await
         .unwrap();
@@ -332,6 +333,49 @@ async fn sign_in_redirects_to_the_issuer() {
             pending.code_verifier.expose_secret().as_bytes()
         ))
     );
+    // The page chose no sign-in: the request names none.
+    assert!(!query.contains_key("sign_in"));
+}
+
+/// The sign-in the page chose reaches the issuer in the authorization
+/// request this adapter makes, and a value the adapter does not know is
+/// passed on as no choice.
+/// Bug prevented: an application offering the issuer's own sign-in whose
+/// choice never leaves the application.
+#[tokio::test]
+async fn the_pages_chosen_sign_in_reaches_the_issuer() {
+    let f = fixture(memory(), true);
+    let sign_in_of = |chosen: Option<i32>| {
+        let adapter = &f.adapter;
+        async move {
+            let response = adapter
+                .start_sign_in(Request::new(StartSignInRequest {
+                    rd: "/".into(),
+                    sign_in: chosen,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(status(&response), "302");
+            let location: url::Url = response
+                .metadata()
+                .get("location")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            location
+                .query_pairs()
+                .find(|(name, _)| name == "sign_in")
+                .map(|(_, value)| value.into_owned())
+        }
+    };
+    assert_eq!(
+        sign_in_of(Some(SignInEntry::Local as i32)).await.as_deref(),
+        Some("SIGN_IN_ENTRY_LOCAL")
+    );
+    assert_eq!(sign_in_of(None).await, None);
+    assert_eq!(sign_in_of(Some(99)).await, None);
 }
 
 /// Before the client is provisioned there is no sign-in: 503, nothing
@@ -341,7 +385,10 @@ async fn sign_in_without_a_connection_is_unavailable() {
     let f = fixture(memory(), false);
     let response = f
         .adapter
-        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .start_sign_in(Request::new(StartSignInRequest {
+            rd: "/".into(),
+            sign_in: None,
+        }))
         .await
         .unwrap();
     assert_eq!(status(&response), "503");
@@ -353,7 +400,10 @@ async fn sign_in_with_the_store_down_is_unavailable() {
     let f = fixture(Arc::new(Down), true);
     let response = f
         .adapter
-        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .start_sign_in(Request::new(StartSignInRequest {
+            rd: "/".into(),
+            sign_in: None,
+        }))
         .await
         .unwrap();
     assert_eq!(status(&response), "503");
@@ -373,7 +423,10 @@ async fn started(f: &Fixture) -> (String, String) {
 async fn started_at(f: &Fixture, rd: &str) -> (String, String) {
     let response = f
         .adapter
-        .start_sign_in(Request::new(StartSignInRequest { rd: rd.into() }))
+        .start_sign_in(Request::new(StartSignInRequest {
+            rd: rd.into(),
+            sign_in: None,
+        }))
         .await
         .unwrap();
     assert_eq!(status(&response), "302");
@@ -428,7 +481,10 @@ async fn a_sign_in_binds_its_browser() {
     let f = fixture(memory(), true);
     let response = f
         .adapter
-        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .start_sign_in(Request::new(StartSignInRequest {
+            rd: "/".into(),
+            sign_in: None,
+        }))
         .await
         .unwrap();
     let set = response
