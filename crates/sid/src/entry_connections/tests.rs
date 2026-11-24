@@ -172,56 +172,53 @@ impl Installed {
     }
 }
 
-/// The sign-in through the platform (an entry that names no connection)
-/// goes through the registration at the platform the build was made for and
-/// never falls back to another environment's: a development build holding
-/// only the production registration has no such entry. With registrations at
-/// both platforms each build takes its own, and it does not choose among
-/// several at its platform. An authority that is no platform's, and a build
-/// made for no platform, are read as stored.
-/// Bug prevented: a closed test build sending its users to production with
-/// production client credentials because the store held that registration.
+/// An entry that names no connection goes through the installation's
+/// provisioned authority and nothing else. An administrator's connection is
+/// never taken for it by where its issuer is hosted or by being the only
+/// one: several issuers share a platform's origin. A build made for a
+/// platform refuses an authority provisioned at another platform and falls
+/// back to nothing; an authority that is no platform's, and a build made for
+/// no platform, are read as stored.
+/// Bug prevented: an independent connection to another issuer on the
+/// platform's host chosen silently as the installation's authority; a
+/// provisioned authority no longer chosen because a connection sits beside
+/// it; a closed test build sending its users to production.
 #[tokio::test]
-async fn the_platform_sign_in_goes_through_the_builds_platform() {
+async fn the_unnamed_entry_is_the_provisioned_authority_only() {
     let prod_issuer = organization_at(PRODUCTION);
     let dev_issuer = organization_at(DEVELOPMENT);
     let other_dev_issuer = organization_at(DEVELOPMENT);
 
-    // Only the production registration, as the provisioned authority: a
-    // development build has no sign-in through the platform.
+    // No authority provisioned: one administrator's connection at the
+    // build's platform, or several, are no unnamed entry.
     let i = installed_for(Some(DEVELOPMENT)).await;
-    i.provisioned_at(&prod_issuer).await;
+    i.create("only", &dev_issuer).await;
     assert_eq!(i.unnamed().await, None);
-
-    // The production registration provisioned and the development one
-    // registered: the development build enters through its own.
-    let i = installed_for(Some(DEVELOPMENT)).await;
-    i.provisioned_at(&prod_issuer).await;
-    i.create("dev", &dev_issuer).await;
-    assert_eq!(i.unnamed().await.as_deref(), Some(dev_issuer.as_str()));
-
-    // Both registered by an administrator, none provisioned: each build
-    // takes its own, not whichever is listed first.
-    for (build, own) in [(DEVELOPMENT, &dev_issuer), (PRODUCTION, &prod_issuer)] {
-        let i = installed_for(Some(build)).await;
-        i.create("prod", &prod_issuer).await;
-        i.create("dev", &dev_issuer).await;
-        assert_eq!(i.unnamed().await.as_deref(), Some(own.as_str()), "{build}");
-    }
-
-    // Two registrations at the build's platform and none provisioned: the
-    // entry does not choose between them.
-    let i = installed_for(Some(DEVELOPMENT)).await;
-    i.create("dev", &dev_issuer).await;
     i.create("other", &other_dev_issuer).await;
+    i.create("prod", &prod_issuer).await;
     assert_eq!(i.unnamed().await, None);
 
-    // The provisioned authority at the build's platform is the entry,
-    // whatever else is registered there.
+    // The provisioned authority is the entry, whatever is registered beside
+    // it at the same origin.
     let i = installed_for(Some(DEVELOPMENT)).await;
     i.provisioned_at(&dev_issuer).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(dev_issuer.as_str()));
     i.create("other", &other_dev_issuer).await;
     assert_eq!(i.unnamed().await.as_deref(), Some(dev_issuer.as_str()));
+
+    // An authority provisioned at production: a development build has no
+    // unnamed entry, and a connection registered at development does not
+    // stand in for it.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.provisioned_at(&prod_issuer).await;
+    assert_eq!(i.unnamed().await, None);
+    i.create("dev", &dev_issuer).await;
+    assert_eq!(i.unnamed().await, None);
+
+    // The production build enters through the same authority.
+    let i = installed_for(Some(PRODUCTION)).await;
+    i.provisioned_at(&prod_issuer).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(prod_issuer.as_str()));
 
     // An authority that is no platform's (an organization's own installation)
     // is the entry in every build.
