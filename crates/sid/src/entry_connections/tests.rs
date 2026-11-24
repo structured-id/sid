@@ -22,6 +22,30 @@ async fn installed() -> Installed {
 
 /// [`installed`], its issuer the root-addressed base issuer when `root`.
 async fn installed_with(root: bool) -> Installed {
+    installed_on(root, PlatformScope::default()).await
+}
+
+/// The two platforms of these tests.
+const PRODUCTION: &str = "https://platform.sid.example.com";
+const DEVELOPMENT: &str = "https://dev.platform.sid.example.com";
+
+/// The issuer of some organization at `platform`: the platform's origin and
+/// that organization's own issuer handle, as the platform assigns one.
+fn organization_at(platform: &str) -> String {
+    format!("{platform}/i/{}", IssuerHandle::generate())
+}
+
+/// [`installed`], in a build made for the platform at `build`.
+async fn installed_for(build: Option<&str>) -> Installed {
+    let build = build.map(|origin| url::Url::parse(origin).unwrap());
+    installed_on(
+        false,
+        PlatformScope::new(build.as_ref(), &[PRODUCTION, DEVELOPMENT]),
+    )
+    .await
+}
+
+async fn installed_on(root: bool, platform: PlatformScope) -> Installed {
     let storage: Arc<dyn StorageBackend> = storage().await;
     let org = Organization::implicit_community("sid.example.com");
     let ctx = || MutationContext::from(AuditEntry::system("test", "installation"));
@@ -64,6 +88,7 @@ async fn installed_with(root: bool) -> Installed {
             storage.clone(),
             keys(),
             Arc::new(IssuerRegistry::new(storage.clone(), keys()).with_base_issuer(&issuer)),
+            platform,
         ),
         storage,
         issuer,
@@ -118,6 +143,141 @@ impl Installed {
             client_secret: SecretString::from("provisioned secret".to_owned()),
             use_return: Some(USE_RETURN.into()),
         }
+    }
+}
+
+impl Installed {
+    /// Provision the authority at `issuer` for this installation's issuer.
+    async fn provisioned_at(&self, issuer: &str) {
+        self.connections
+            .provision("provisioning", &self.issuer, self.authority(issuer))
+            .await
+            .unwrap();
+    }
+
+    /// The issuer of the connection an entry naming none goes through.
+    async fn unnamed(&self) -> Option<String> {
+        let handle = self
+            .connections
+            .unnamed_entry(&self.issuer)
+            .await
+            .unwrap()?;
+        let (connection, _) = self
+            .connections
+            .for_entry(&self.issuer, handle)
+            .await
+            .unwrap()
+            .expect("the entry's connection is enabled");
+        Some(connection.issuer)
+    }
+}
+
+/// The sign-in through the platform (an entry that names no connection)
+/// goes through the registration at the platform the build was made for and
+/// never falls back to another environment's: a development build holding
+/// only the production registration has no such entry. With registrations at
+/// both platforms each build takes its own, and it does not choose among
+/// several at its platform. An authority that is no platform's, and a build
+/// made for no platform, are read as stored.
+/// Bug prevented: a closed test build sending its users to production with
+/// production client credentials because the store held that registration.
+#[tokio::test]
+async fn the_platform_sign_in_goes_through_the_builds_platform() {
+    let prod_issuer = organization_at(PRODUCTION);
+    let dev_issuer = organization_at(DEVELOPMENT);
+    let other_dev_issuer = organization_at(DEVELOPMENT);
+
+    // Only the production registration, as the provisioned authority: a
+    // development build has no sign-in through the platform.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.provisioned_at(&prod_issuer).await;
+    assert_eq!(i.unnamed().await, None);
+
+    // The production registration provisioned and the development one
+    // registered: the development build enters through its own.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.provisioned_at(&prod_issuer).await;
+    i.create("dev", &dev_issuer).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(dev_issuer.as_str()));
+
+    // Both registered by an administrator, none provisioned: each build
+    // takes its own, not whichever is listed first.
+    for (build, own) in [(DEVELOPMENT, &dev_issuer), (PRODUCTION, &prod_issuer)] {
+        let i = installed_for(Some(build)).await;
+        i.create("prod", &prod_issuer).await;
+        i.create("dev", &dev_issuer).await;
+        assert_eq!(i.unnamed().await.as_deref(), Some(own.as_str()), "{build}");
+    }
+
+    // Two registrations at the build's platform and none provisioned: the
+    // entry does not choose between them.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.create("dev", &dev_issuer).await;
+    i.create("other", &other_dev_issuer).await;
+    assert_eq!(i.unnamed().await, None);
+
+    // The provisioned authority at the build's platform is the entry,
+    // whatever else is registered there.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.provisioned_at(&dev_issuer).await;
+    i.create("other", &other_dev_issuer).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(dev_issuer.as_str()));
+
+    // An authority that is no platform's (an organization's own installation)
+    // is the entry in every build.
+    let i = installed_for(Some(DEVELOPMENT)).await;
+    i.provisioned_at(PROVISIONED_ISSUER).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(PROVISIONED_ISSUER));
+
+    // A build made for no platform reads its authority as stored.
+    let i = installed_for(None).await;
+    i.provisioned_at(&prod_issuer).await;
+    assert_eq!(i.unnamed().await.as_deref(), Some(prod_issuer.as_str()));
+}
+
+/// A connection the browser names is entered by its own registration: the
+/// build's platform restricts only the entry that names none. Several
+/// issuers share an origin, so an issuer at another platform's origin, or
+/// another issuer at the build's, registered on its own stays offered and
+/// usable, and an administrator reads every connection.
+/// Bug prevented: a separately configured connection disappearing from the
+/// sign-in page because its issuer shares a host with a platform.
+#[tokio::test]
+async fn a_named_connection_is_entered_by_its_own_registration() {
+    let at_prod_origin = organization_at(PRODUCTION);
+    let at_dev_origin = organization_at(DEVELOPMENT);
+    for build in [Some(DEVELOPMENT), Some(PRODUCTION), None] {
+        let i = installed_for(build).await;
+        let registered = [
+            i.create("a", &at_prod_origin).await,
+            i.create("b", &at_dev_origin).await,
+            i.create("c", OUTSIDE).await,
+        ];
+        let offered = i
+            .connections
+            .sign_in_connections(&i.issuer.handle.to_string())
+            .await
+            .unwrap()
+            .connections;
+        assert_eq!(offered.len(), 3, "build {build:?}");
+        for connection in &registered {
+            let handle = EntryHandle::parse(&connection.handle).unwrap();
+            let entered = i.connections.for_entry(&i.issuer, handle).await.unwrap();
+            assert_eq!(
+                entered.map(|(c, _)| c.issuer),
+                Some(connection.issuer.clone()),
+                "build {build:?}"
+            );
+        }
+        assert_eq!(
+            i.connections
+                .list(&i.admin)
+                .await
+                .unwrap()
+                .connections
+                .len(),
+            3
+        );
     }
 }
 

@@ -143,9 +143,9 @@ impl FederatedEntryServiceImpl {
     }
 
     /// The step at the installation issuer `issuer_handle` names, through
-    /// the connection `connection` names. No name is the authority the
-    /// installation's provisioning set for that issuer, never the first
-    /// connection of some list.
+    /// the connection `connection` names. No name is the installation's
+    /// authority for that issuer ([`EntryConnections::unnamed_entry`]), never
+    /// the first connection of some list.
     async fn step(&self, issuer_handle: &str, connection: &str) -> Result<Step, NoStep> {
         let unavailable = |e: &dyn std::fmt::Display, what: &'static str| {
             warn!(error = %e, "{what}");
@@ -162,11 +162,10 @@ impl FederatedEntryServiceImpl {
             .ok_or(NoStep::UnknownIssuer)?;
         let handle = if connection.is_empty() {
             self.connections
-                .provisioned(&issuer)
+                .unnamed_entry(&issuer)
                 .await
-                .map_err(|e| unavailable(&e, "provisioned authority"))?
+                .map_err(|e| unavailable(&e, "the installation's authority"))?
                 .ok_or(NoStep::NoConnection)?
-                .handle
         } else {
             EntryHandle::parse(connection).map_err(|_| NoStep::NoConnection)?
         };
