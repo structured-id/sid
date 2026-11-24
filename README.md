@@ -238,8 +238,13 @@ dependency. The build fetches the platform's CA set itself
 (`{platform}/.well-known/sid-ca/index.json`, no redirect followed): a platform
 that cannot be reached stops the build, and one that publishes no set yet
 gives a build that carries none and fetches it once the platform publishes.
-The flag turns no federation on, leaves the installation's own issuer as it is
-and does not touch identity providers configured separately. An official
+Sign-in through the platform uses the site's registration at that platform:
+its entry connection there, registered or provisioned as any other. A build
+offers and enters only through the connection to its own platform, so a build
+made for the development platform never sends a browser to production; with no
+registration at its platform it offers no platform sign-in. The flag turns no
+federation on, leaves the installation's own issuer as it is and does not
+touch identity providers configured separately. An official
 delivery names the origin itself (`SID_BUILD_PLATFORM`) and the set its build
 fetched (`SID_BUILD_PLATFORM_CAS`).
 

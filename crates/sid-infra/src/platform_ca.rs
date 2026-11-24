@@ -37,6 +37,11 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// admits. A build given neither names no platform.
 const BUILD_PLATFORM: Option<&str> = option_env!("SID_BUILD_PLATFORM");
 
+/// The public origins of the StructuredID platforms: production and the
+/// development platform, the two the flag of a local publication selects
+/// between. A site is registered at each separately.
+pub const PLATFORMS: [&str; 2] = ["https://structured.id", "https://dev.structured.id"];
+
 /// Where a platform publishes its admitted CA set, below its origin.
 const PUBLICATION_PATH: &str = "/.well-known/sid-ca/index.json";
 

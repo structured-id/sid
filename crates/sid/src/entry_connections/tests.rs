@@ -22,6 +22,24 @@ async fn installed() -> Installed {
 
 /// [`installed`], its issuer the root-addressed base issuer when `root`.
 async fn installed_with(root: bool) -> Installed {
+    installed_on(root, PlatformScope::default()).await
+}
+
+/// The two platforms of these tests.
+const PRODUCTION: &str = "https://platform.sid.example.com";
+const DEVELOPMENT: &str = "https://dev.platform.sid.example.com";
+
+/// [`installed`], in a build made for the platform at `build`.
+async fn installed_for(build: Option<&str>) -> Installed {
+    let build = build.map(|origin| url::Url::parse(origin).unwrap());
+    installed_on(
+        false,
+        PlatformScope::new(build.as_ref(), &[PRODUCTION, DEVELOPMENT]),
+    )
+    .await
+}
+
+async fn installed_on(root: bool, platform: PlatformScope) -> Installed {
     let storage: Arc<dyn StorageBackend> = storage().await;
     let org = Organization::implicit_community("sid.example.com");
     let ctx = || MutationContext::from(AuditEntry::system("test", "installation"));
@@ -64,6 +82,7 @@ async fn installed_with(root: bool) -> Installed {
             storage.clone(),
             keys(),
             Arc::new(IssuerRegistry::new(storage.clone(), keys()).with_base_issuer(&issuer)),
+            platform,
         ),
         storage,
         issuer,
@@ -119,6 +138,123 @@ impl Installed {
             use_return: Some(USE_RETURN.into()),
         }
     }
+}
+
+impl Installed {
+    /// The issuers the sign-in page offers, and whether an entry can start
+    /// through the connection of each of `registered`.
+    async fn offered(&self, registered: &[&v1::EntryConnection]) -> (Vec<String>, Vec<bool>) {
+        let offered = self
+            .connections
+            .sign_in_connections(&self.issuer.handle.to_string())
+            .await
+            .unwrap()
+            .connections;
+        let all = self.storage.list_entry_connections().await.unwrap();
+        let names = offered
+            .iter()
+            .map(|o| {
+                all.iter()
+                    .find(|c| c.handle.to_string() == o.handle)
+                    .unwrap()
+                    .issuer
+                    .clone()
+            })
+            .collect();
+        let mut enters = Vec::new();
+        for connection in registered {
+            let handle = EntryHandle::parse(&connection.handle).unwrap();
+            enters.push(
+                self.connections
+                    .for_entry(&self.issuer, handle)
+                    .await
+                    .unwrap()
+                    .is_some(),
+            );
+        }
+        (names, enters)
+    }
+}
+
+/// A build made for one platform signs in through that platform's
+/// registration and never through the other's: with connections to both
+/// stored, the page offers and an entry starts only the build's, and an
+/// outside issuer is offered by every build. A build made for the
+/// development platform holding only the production registration offers no
+/// platform sign-in; it does not fall back to production.
+/// Bug prevented: a closed test build sending its users to production with
+/// production client credentials because the store held that registration.
+#[tokio::test]
+async fn a_build_enters_only_through_its_own_platform() {
+    let prod_issuer = format!("{PRODUCTION}/i/0123456789abcdef0123456789abcdef");
+    let dev_issuer = format!("{DEVELOPMENT}/i/0123456789abcdef0123456789abcdef");
+    for (build, expected) in [
+        (
+            Some(DEVELOPMENT),
+            vec![dev_issuer.clone(), OUTSIDE.to_owned()],
+        ),
+        (
+            Some(PRODUCTION),
+            vec![prod_issuer.clone(), OUTSIDE.to_owned()],
+        ),
+        // A build made for no platform federates with neither.
+        (None, vec![OUTSIDE.to_owned()]),
+    ] {
+        let i = installed_for(build).await;
+        let prod = i.create("prod", &prod_issuer).await;
+        let dev = i.create("dev", &dev_issuer).await;
+        let outside = i.create("outside", OUTSIDE).await;
+        let (mut offered, enters) = i.offered(&[&prod, &dev, &outside]).await;
+        offered.sort();
+        let mut expected_sorted = expected.clone();
+        expected_sorted.sort();
+        assert_eq!(offered, expected_sorted, "build {build:?}");
+        assert_eq!(
+            enters,
+            vec![
+                expected.contains(&prod_issuer),
+                expected.contains(&dev_issuer),
+                true
+            ],
+            "build {build:?}"
+        );
+        // An administrator still reads and manages every connection.
+        assert_eq!(
+            i.connections
+                .list(&i.admin)
+                .await
+                .unwrap()
+                .connections
+                .len(),
+            3
+        );
+    }
+
+    let only_prod = installed_for(Some(DEVELOPMENT)).await;
+    let prod = only_prod.create("prod", &prod_issuer).await;
+    let (offered, enters) = only_prod.offered(&[&prod]).await;
+    assert!(offered.is_empty(), "{offered:?}");
+    assert_eq!(enters, vec![false]);
+}
+
+/// The scope compares origins: a platform's issuer is its origin with any
+/// path, another host or port is not that platform, and an issuer that is
+/// no URL is no platform's.
+/// Bug prevented: an organization's own issuer on a look-alike host or the
+/// same host's other port taken for the platform and blocked.
+#[test]
+fn the_scope_is_by_origin() {
+    let build = url::Url::parse(DEVELOPMENT).unwrap();
+    let scope = PlatformScope::new(Some(&build), &[PRODUCTION, DEVELOPMENT]);
+    assert!(!scope.admits(PRODUCTION));
+    assert!(!scope.admits(&format!("{PRODUCTION}/i/abc")));
+    assert!(scope.admits(DEVELOPMENT));
+    assert!(scope.admits(&format!("{DEVELOPMENT}/i/abc")));
+    assert!(scope.admits("https://platform.sid.example.com:8443/i/abc"));
+    assert!(scope.admits("https://x.platform.sid.example.com/i/abc"));
+    assert!(scope.admits("not a url"));
+    // A build that knows no platforms restricts nothing.
+    assert!(PlatformScope::default().admits(PRODUCTION));
 }
 
 /// Where the provisioned authority resumes a holder's use.

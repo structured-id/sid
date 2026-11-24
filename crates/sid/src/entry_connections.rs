@@ -154,6 +154,45 @@ pub struct Provisioned {
     pub use_return: Option<String>,
 }
 
+/// Which StructuredID platforms' issuers this build signs in through: the
+/// platform it was made for, and no other. A site is registered at each
+/// platform separately, so a connection to a platform the build was not made
+/// for is another environment's registration: a build made for the
+/// development platform never sends a browser to production, whatever
+/// connections its store holds. Issuers that are no platform's (an
+/// organization's own installation, an identity provider configured
+/// separately) are outside this and always in scope.
+#[derive(Debug, Clone, Default)]
+pub struct PlatformScope {
+    /// The origins of the platforms this build was not made for.
+    other_platforms: Vec<url::Origin>,
+}
+
+impl PlatformScope {
+    /// The scope of a build made for the platform at `build` (none for a
+    /// build made for no platform), among the `platforms` there are.
+    pub fn new(build: Option<&url::Url>, platforms: &[&str]) -> Self {
+        let build = build.map(url::Url::origin);
+        Self {
+            other_platforms: platforms
+                .iter()
+                .filter_map(|platform| url::Url::parse(platform).ok())
+                .map(|platform| platform.origin())
+                .filter(|platform| Some(platform) != build.as_ref())
+                .collect(),
+        }
+    }
+
+    /// Whether a connection to `issuer` is in scope: its origin is not a
+    /// platform this build was not made for. An issuer identifier that is
+    /// no URL is no platform's.
+    pub fn admits(&self, issuer: &str) -> bool {
+        url::Url::parse(issuer)
+            .map(|issuer| !self.other_platforms.contains(&issuer.origin()))
+            .unwrap_or(true)
+    }
+}
+
 /// The entry connections of one installation.
 pub struct EntryConnections {
     storage: Arc<dyn StorageBackend>,
@@ -161,6 +200,8 @@ pub struct EntryConnections {
     keys: Arc<dyn KeyManager>,
     /// The installation's issuers, by handle and by route.
     issuers: Arc<IssuerRegistry>,
+    /// The platform connections this build offers and enters through.
+    platform: PlatformScope,
 }
 
 impl EntryConnections {
@@ -168,11 +209,13 @@ impl EntryConnections {
         storage: Arc<dyn StorageBackend>,
         keys: Arc<dyn KeyManager>,
         issuers: Arc<IssuerRegistry>,
+        platform: PlatformScope,
     ) -> Self {
         Self {
             storage,
             keys,
             issuers,
+            platform,
         }
     }
 
@@ -437,7 +480,8 @@ impl EntryConnections {
     /// The enabled connections of the installation issuer whose route
     /// `issuer_handle` names ([`IssuerRegistry::routed`]), as its sign-in
     /// page offers them: public, the user is not signed in yet. An unknown
-    /// issuer offers none.
+    /// issuer offers none, and a connection to a platform this build was not
+    /// made for is not offered.
     pub async fn sign_in_connections(
         &self,
         issuer_handle: &str,
@@ -449,7 +493,9 @@ impl EntryConnections {
         Ok(ListSignInConnectionsResponse {
             connections: connections
                 .iter()
-                .filter(|c| c.enabled && c.recipient_issuer == issuer.id)
+                .filter(|c| {
+                    c.enabled && c.recipient_issuer == issuer.id && self.platform.admits(&c.issuer)
+                })
                 .map(|c| SignInConnection {
                     handle: c.handle.to_string(),
                     name: c.name.clone(),
@@ -460,8 +506,9 @@ impl EntryConnections {
 
     /// The enabled connection `handle` of installation issuer `issuer`, with
     /// the client it authenticates as there, for one entry step; `None` when
-    /// the handle names no connection, another issuer's, or a disabled one:
-    /// nothing is started or completed through it.
+    /// the handle names no connection, another issuer's, a disabled one, or
+    /// one to a platform this build was not made for: nothing is started or
+    /// completed through it.
     pub async fn for_entry(
         &self,
         issuer: &OidcIssuer,
@@ -470,7 +517,10 @@ impl EntryConnections {
         let Some(connection) = self.storage.entry_connection(handle).await? else {
             return Ok(None);
         };
-        if !connection.enabled || connection.recipient_issuer != issuer.id {
+        if !connection.enabled
+            || connection.recipient_issuer != issuer.id
+            || !self.platform.admits(&connection.issuer)
+        {
             return Ok(None);
         }
         let ClientCredential::SecretBasic(sealed) = &connection.credential;

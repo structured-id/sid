@@ -1077,10 +1077,18 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         auth_svc.clone(),
     ));
 
+    // Platform sign-in goes through the registration at the platform this
+    // build was made for, never another environment's.
+    let build_platform =
+        sid_infra::platform_ca::build_platform().context("the build's platform")?;
     let entry_connections = Arc::new(sid::entry_connections::EntryConnections::new(
         storage.clone(),
         key_manager.clone(),
         issuers.clone(),
+        sid::entry_connections::PlatformScope::new(
+            build_platform.as_ref(),
+            &sid_infra::platform_ca::PLATFORMS,
+        ),
     ));
 
     let project_svc = Arc::new(ProjectServiceImpl::new(

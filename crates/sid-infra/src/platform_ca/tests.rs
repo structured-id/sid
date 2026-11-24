@@ -82,8 +82,8 @@ fn the_dev_flag_selects_the_platform() {
         selected(None, Some("true")).unwrap().as_deref(),
         Some(DEVELOPMENT)
     );
-    assert_eq!(PRODUCTION, "https://structured.id");
-    assert_eq!(DEVELOPMENT, "https://dev.structured.id");
+    // The platforms the flag selects between are the ones the crate names.
+    assert_eq!(PLATFORMS, [PRODUCTION, DEVELOPMENT]);
     for origin in [PRODUCTION, DEVELOPMENT] {
         let host = url::Url::parse(origin)
             .unwrap()
