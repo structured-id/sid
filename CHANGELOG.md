@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.39](https://github.com/structured-id/sid/compare/v0.2.38...v0.2.39) - 2026-11-24
+
+### Added
+
+- *(infra)* one flag selects a local publication's platform ([#765](https://github.com/structured-id/sid/pull/765))
+
 ## [0.2.38](https://github.com/structured-id/sid/compare/v0.2.37...v0.2.38) - 2026-11-24
 
 ### Added
