@@ -252,15 +252,13 @@ pub fn magic_link_mail(
     ))))
 }
 
-/// Authentication mail rendered with the CE templates and sent through the
-/// installation's stored email provider.
+/// The standard authentication mail, sent through the installation's stored
+/// email provider.
 pub fn stored_mail(
     storage: &Arc<dyn StorageBackend>,
     keys: &Arc<dyn sid_keys::KeyManager>,
 ) -> Arc<dyn sid::auth_mail::AuthMailDelivery> {
-    Arc::new(crate::auth_mail::TemplatedMail::new(Arc::new(
-        crate::auth_mail::StoredProvider::new(storage.clone(), keys.clone()),
-    )))
+    Arc::new(crate::auth_mail::stored_mail(storage.clone(), keys.clone()))
 }
 
 /// Password resets and the mail of their links, when account pages served
@@ -1442,12 +1440,12 @@ pub fn engine(
         history_evaluation: c.auth_svc.history_evaluation(),
         issuer: c.issuer.clone(),
         closures: c.closure_service.clone(),
-        mail: sid::work::CeMail {
+        mail: Some(sid::work::CeMail {
             codes: c.code_mail.clone(),
             magic_links: c.magic_link_mail.clone(),
             resets: c.reset_mail.clone(),
-        },
-        site_admissions: Arc::new(sid::federation_site::AdmissionPublications::new(
+        }),
+        site_admissions: Some(Arc::new(sid::federation_site::AdmissionPublications::new(
             Arc::new(sid::federation_site::FederationSite::new(
                 c.storage.clone(),
                 c.key_manager.clone(),
@@ -1455,7 +1453,7 @@ pub fn engine(
                 c.organization.id,
             )),
             build_platform_admissions()?,
-        )),
+        ))),
         audit_retention: c.audit_retention,
         migration_deadline_days: c.migration_deadline_days,
         source: "sid-server".into(),

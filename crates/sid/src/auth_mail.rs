@@ -342,5 +342,8 @@ impl WorkHandler for ResetMail {
     }
 }
 
+mod standard;
+pub use standard::{HostChannel, MailTransport, StandardMail};
+
 #[cfg(test)]
 mod tests;

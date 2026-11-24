@@ -73,18 +73,20 @@ fn parts(storage: Arc<dyn StorageBackend>, links: bool) -> CeWorkParts {
         required_receivers: Vec::new(),
         history_evaluation: None,
         issuer: "https://id.sid.example.com".into(),
-        mail,
-        site_admissions: Arc::new(crate::federation_site::AdmissionPublications::new(
-            Arc::new(crate::federation_site::FederationSite::new(
-                storage.clone(),
-                keys(),
-                Arc::new(sid_fed::recipient::Recipient::new(
+        mail: Some(mail),
+        site_admissions: Some(Arc::new(
+            crate::federation_site::AdmissionPublications::new(
+                Arc::new(crate::federation_site::FederationSite::new(
                     storage.clone(),
-                    sid_fed::recipient::ClassicalVerdict,
+                    keys(),
+                    Arc::new(sid_fed::recipient::Recipient::new(
+                        storage.clone(),
+                        sid_fed::recipient::ClassicalVerdict,
+                    )),
+                    sid_core::models::OrgId::generate(),
                 )),
-                sid_core::models::OrgId::generate(),
-            )),
-            None,
+                None,
+            ),
         )),
         audit_retention: AuditRetention::default(),
         migration_deadline_days: crate::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
@@ -131,6 +133,49 @@ async fn every_owed_kind_has_its_handler() {
     all.insert(PASSWORD_RESET_EMAIL_KIND.into());
     assert_eq!(kinds(&with), all);
     assert_eq!(with.handlers.len(), all.len(), "a kind has two handlers");
+}
+
+/// A host that sends no mail and runs no federation site assembles the
+/// work without either: no mail is ever owed to it, and the site admission
+/// publication each login settings change owes still has a handler, which
+/// ends it publishing nothing.
+/// Bug prevented: an embedding application forced to build mail and a
+/// federation site it does not have, or a settings change leaving work owed
+/// forever on a host without a site.
+#[tokio::test]
+async fn a_host_without_mail_or_site_owes_neither() {
+    use sid_core::models::*;
+    select_tls();
+    let storage: Arc<dyn StorageBackend> = storage().await;
+    let mut bare = parts(storage, false);
+    bare.mail = None;
+    bare.site_admissions = None;
+    let work = CeWork::assemble(bare).unwrap();
+    let owed = kinds(&work);
+    assert!(!owed.contains(sid_authn::otp::OTP_EMAIL_KIND));
+    assert!(owed.contains(SITE_ADMISSION_PUBLICATION_KIND));
+
+    let publications = work
+        .handlers
+        .iter()
+        .find(|h| h.kind().as_str() == SITE_ADMISSION_PUBLICATION_KIND)
+        .unwrap();
+    let settings_change = AdmissionPublication::Settings(7).work();
+    let claimed = ClaimedWork {
+        id: settings_change.id,
+        kind: settings_change.kind,
+        payload: settings_change.payload,
+        attempt: 1,
+        max_attempts: 1,
+        generation: 1,
+        expires_at: None,
+        created_at: jiff::Timestamp::now(),
+        due_at: jiff::Timestamp::now(),
+    };
+    assert!(matches!(
+        publications.handle(&claimed).await,
+        sid_authn::work_runner::WorkOutcome::Done(_)
+    ));
 }
 
 /// The maintenance is the CE maintenance with the purge of ended
