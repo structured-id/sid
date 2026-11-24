@@ -465,6 +465,104 @@ pub struct CeHost {
     /// their web client is provisioned with the installation's own key,
     /// shared by every replica, in place of any other account settings.
     pub served_account: Option<String>,
+    /// The store the host opened for the installation; none opens the one
+    /// the storage settings name.
+    pub store: Option<HostStore>,
+}
+
+/// A store the host opened itself, which the installation keeps its records
+/// in: the host connects it and prepares its schema, and closes it after the
+/// installation's work has drained.
+pub struct HostStore {
+    /// The installation's records.
+    pub storage: Arc<dyn StorageBackend>,
+    /// The audit trail in the same store.
+    pub audit_log: Arc<dyn sid_plugin::audit::AuditLog>,
+    /// The password history evaluator's keys in the same store, read only
+    /// when the evaluator runs in this process.
+    pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
+    /// The SQLite file the store is, when it is one: every server on the
+    /// file holds its bus lock, so an in-process bus never runs beside
+    /// another server on it.
+    pub sqlite_file: Option<std::path::PathBuf>,
+}
+
+/// The store an installation runs over.
+struct OpenedStore {
+    storage: Arc<dyn StorageBackend>,
+    audit_log: Arc<dyn sid_plugin::audit::AuditLog>,
+    /// The history evaluator's own store over the same database, for a
+    /// standalone installation that runs the evaluator in process; its
+    /// tables are created only when it does.
+    local_history_keys: LocalHistoryKeys,
+    /// The SQLite file this process serves, if any: every server on it holds
+    /// its bus lock (see `hold_database`).
+    sqlite_file: Option<std::path::PathBuf>,
+}
+
+/// The PostgreSQL database the storage settings name, migrated.
+#[cfg(feature = "storage-pg")]
+async fn open_store() -> anyhow::Result<OpenedStore> {
+    let database_url = env_setting("SID_DATABASE_URL")?.context("SID_DATABASE_URL must be set")?;
+    let schema = env_setting("SID_STORAGE_POSTGRESQL_SCHEMA")?;
+    if let Some(ref s) = schema {
+        info!(
+            "Schema isolation enabled: tables will be created in schema '{}'",
+            s
+        );
+    }
+    let max_connections = env_setting("SID_DATABASE_MAX_CONNECTIONS")?
+        .map(|n| {
+            n.parse::<u32>()
+                .context("SID_DATABASE_MAX_CONNECTIONS must be a whole number")
+        })
+        .transpose()?;
+    let backend =
+        sid_storage::PostgresBackend::connect(&database_url, schema.clone(), max_connections)
+            .await
+            .context("connect to the database")?;
+
+    let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
+        sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),
+    );
+
+    // A refused migration changed nothing; its reason is the error's cause.
+    sid_storage::migrator::run_migrations(backend.pool(), schema.as_deref())
+        .await
+        .context("database migrations")?;
+
+    let local_history_keys =
+        LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
+    Ok(OpenedStore {
+        storage: Arc::new(backend),
+        audit_log,
+        local_history_keys,
+        sqlite_file: None,
+    })
+}
+
+/// The SQLite file the storage setting names, migrated.
+#[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+async fn open_store() -> anyhow::Result<OpenedStore> {
+    let sqlite_setting = env_setting("SID_STORAGE_SQLITE_PATH")?
+        .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
+    let backend = sid_storage::sqlite::SqliteBackend::new(&sqlite_setting)
+        .await
+        .context("SQLite storage and its migrations")?;
+    let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
+        sid_storage::sqlite::SqliteAuditLog::new(backend.writer().clone()),
+    );
+    let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
+    let sqlite_file = Some(
+        sid_storage::sqlite::SqliteBackend::database_file(&sqlite_setting)
+            .context("the SQLite file")?,
+    );
+    Ok(OpenedStore {
+        storage: Arc::new(backend),
+        audit_log,
+        local_history_keys,
+        sqlite_file,
+    })
 }
 
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
@@ -484,76 +582,22 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
 
     refuse_renamed_setting(env_setting("SID_SQLITE_PATH")?.as_deref())?;
 
-    // The history evaluator's own store over the same database, for a
-    // standalone installation that runs the evaluator in process; its tables
-    // are created only when it does (`local_history_keys`).
-    #[cfg(feature = "storage-pg")]
-    let (storage, audit_log, local_history_keys): (
-        Arc<dyn StorageBackend>,
-        Arc<dyn sid_plugin::audit::AuditLog>,
-        LocalHistoryKeys,
-    ) = {
-        let database_url =
-            env_setting("SID_DATABASE_URL")?.context("SID_DATABASE_URL must be set")?;
-        let schema = env_setting("SID_STORAGE_POSTGRESQL_SCHEMA")?;
-        if let Some(ref s) = schema {
-            info!(
-                "Schema isolation enabled: tables will be created in schema '{}'",
-                s
-            );
-        }
-        let max_connections = env_setting("SID_DATABASE_MAX_CONNECTIONS")?
-            .map(|n| {
-                n.parse::<u32>()
-                    .context("SID_DATABASE_MAX_CONNECTIONS must be a whole number")
-            })
-            .transpose()?;
-        let backend =
-            sid_storage::PostgresBackend::connect(&database_url, schema.clone(), max_connections)
-                .await
-                .context("connect to the database")?;
-
-        let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
-            sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),
-        );
-
-        // A refused migration changed nothing; its reason is the error's cause.
-        sid_storage::migrator::run_migrations(backend.pool(), schema.as_deref())
-            .await
-            .context("database migrations")?;
-
-        let local_history_keys =
-            LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
-        (Arc::new(backend), audit_log, local_history_keys)
+    let OpenedStore {
+        storage,
+        audit_log,
+        local_history_keys,
+        sqlite_file,
+    } = match host.store {
+        // The host's store, as it opened it: nothing is connected, created
+        // or migrated here, and no storage setting is read.
+        Some(store) => OpenedStore {
+            storage: store.storage,
+            audit_log: store.audit_log,
+            local_history_keys: LocalHistoryKeys::Host(store.history_keys),
+            sqlite_file: store.sqlite_file,
+        },
+        None => open_store().await?,
     };
-    // The SQLite file this process serves, if any: every server on it holds
-    // its bus lock (see `hold_database`).
-    #[cfg(feature = "storage-pg")]
-    let sqlite_file: Option<std::path::PathBuf> = None;
-
-    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let sqlite_setting = env_setting("SID_STORAGE_SQLITE_PATH")?
-        .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
-    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let (storage, audit_log, local_history_keys): (
-        Arc<dyn StorageBackend>,
-        Arc<dyn sid_plugin::audit::AuditLog>,
-        LocalHistoryKeys,
-    ) = {
-        let backend = sid_storage::sqlite::SqliteBackend::new(&sqlite_setting)
-            .await
-            .context("SQLite storage and its migrations")?;
-        let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
-            sid_storage::sqlite::SqliteAuditLog::new(backend.writer().clone()),
-        );
-        let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
-        (Arc::new(backend), audit_log, local_history_keys)
-    };
-    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let sqlite_file = Some(
-        sid_storage::sqlite::SqliteBackend::database_file(&sqlite_setting)
-            .context("the SQLite file")?,
-    );
 
     // ── JWT keys ──
     let data_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| "/var/lib/sid".into());
@@ -1654,6 +1698,8 @@ pub(crate) enum LocalHistoryKeys {
     Postgres(sid_storage::PgHistoryKeyStore),
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
     Sqlite(sid_storage::sqlite::SqliteHistoryKeyStore),
+    /// The store of a host's own database, prepared by the host.
+    Host(Arc<dyn sid_plugin::history_keys::HistoryKeyStore>),
 }
 
 impl LocalHistoryKeys {
@@ -1670,6 +1716,7 @@ impl LocalHistoryKeys {
             }
             #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
             Self::Sqlite(store) => Arc::new(store),
+            Self::Host(store) => store,
         })
     }
 }

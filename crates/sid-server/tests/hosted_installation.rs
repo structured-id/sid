@@ -4,38 +4,10 @@
 //! binds nothing.
 #![cfg(all(feature = "ui", feature = "storage-pg"))]
 
-use http_body_util::BodyExt as _;
-use tonic::codegen::http;
-use tower::ServiceExt as _;
+#[path = "common/hosted.rs"]
+mod hosted;
 
-const ISSUER: &str = "https://sid.example.com";
-
-/// The body of the answer to `GET path`, which must be 200.
-async fn get<S>(surface: &S, path: &str) -> serde_json::Value
-where
-    S: tower::Service<
-            http::Request<tonic::body::Body>,
-            Response = http::Response<axum::body::Body>,
-            Error = std::convert::Infallible,
-        > + Clone,
-{
-    let request = http::Request::get(path)
-        .header("host", "sid.example.com")
-        .body(tonic::body::Body::empty())
-        .unwrap();
-    let Ok(answer) = surface.clone().oneshot(request).await;
-    assert_eq!(answer.status(), http::StatusCode::OK, "GET {path}");
-    let body = answer.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// An address nothing listens on: bound once, then released.
-fn free_address() -> std::net::SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-}
+use hosted::{ISSUER, configure, database_url, free_address, get};
 
 /// A host assembles the installation from its settings and gets its HTTP
 /// surface as one service: discovery and the issuer's keys answer through it
@@ -48,12 +20,8 @@ fn free_address() -> std::net::SocketAddr {
 fn a_host_serves_the_installation_on_no_listener_of_the_installations() {
     let data = tempfile::tempdir().unwrap();
     let (grpc, http_port) = (free_address(), free_address());
-    let settings = [
-        (
-            "SID_DATABASE_URL",
-            std::env::var("SID_TEST_DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".into()),
-        ),
+    configure(&[
+        ("SID_DATABASE_URL", database_url()),
         // A schema of this run's own: the installation is opened from empty.
         (
             "SID_STORAGE_POSTGRESQL_SCHEMA",
@@ -62,14 +30,7 @@ fn a_host_serves_the_installation_on_no_listener_of_the_installations() {
         ("SID_DATA_DIR", data.path().to_str().unwrap().to_owned()),
         ("SID_ISSUER", ISSUER.to_owned()),
         ("SID_GRPC_BIND", grpc.to_string()),
-    ];
-    for (name, value) in settings {
-        // SAFETY: the test's only thread so far; the runtime starts below.
-        unsafe { std::env::set_var(name, value) };
-    }
-    // Ignored when another test of this process installed them already.
-    let _ = sid_crypto::tls::aws_lc::provider().install_default();
-    sid_crypto::jwt::install_jwt_provider().unwrap();
+    ]);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
