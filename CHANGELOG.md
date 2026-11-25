@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.46](https://github.com/structured-id/sid/compare/v0.2.45...v0.2.46) - 2026-11-25
+
+### Added
+
+- *(oauth)* choose the issuer's trusted authority for sign-in ([#795](https://github.com/structured-id/sid/pull/795))
+
 ## [0.2.45](https://github.com/structured-id/sid/compare/v0.2.44...v0.2.45) - 2026-11-24
 
 ### Added
