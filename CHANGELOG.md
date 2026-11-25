@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.49](https://github.com/structured-id/sid/compare/v0.2.48...v0.2.49) - 2026-11-25
+
+### Added
+
+- *(server)* serve the public UI settings from the engine ([#805](https://github.com/structured-id/sid/pull/805))
+
 ## [0.2.48](https://github.com/structured-id/sid/compare/v0.2.47...v0.2.48) - 2026-11-25
 
 ### Added
