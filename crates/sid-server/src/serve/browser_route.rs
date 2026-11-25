@@ -85,6 +85,9 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthFlowService/GetFlowState",
     "/sid.v1.admin.EnrollmentService/GetInstanceStatus",
     "/sid.v1.admin.EnrollmentService/GetEnrollmentPolicy",
+    // What the page shows before anyone signs in: the choices of the issuer
+    // its request is addressed to, not of whoever serves the page.
+    "/sid.v1.ui.PublicUiSettingsService/GetPublicUiSettings",
 ];
 
 /// The handle and the gRPC path of a call to `/i/{handle}/api/...`; `None`

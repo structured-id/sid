@@ -64,6 +64,15 @@ fn the_consent_review_is_published() {
     }
 }
 
+/// A sign-in page on a shared origin renders the choices of the issuer its
+/// request is addressed to: that issuer's public settings are on its
+/// surface, or the page can only show another authority's.
+#[test]
+fn the_public_settings_are_published() {
+    let method = "/sid.v1.ui.PublicUiSettingsService/GetPublicUiSettings";
+    assert!(BROWSER_METHODS.contains(&method), "{method}");
+}
+
 /// Anything else is no addressed call: no handle, no `api` segment, a longer
 /// segment that only starts with it, the transport-named mount the API path
 /// replaced, another issuer endpoint, a root gRPC path.
