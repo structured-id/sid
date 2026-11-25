@@ -207,14 +207,14 @@ fn the_authorization_request_asks_for_the_connection_resource() {
 
 /// The sign-in the user chose in the application is passed on by the name of
 /// its value, beside the same request.
-/// Bug prevented: an application's choice of the issuer's own sign-in lost
-/// between its page and the authorization request.
+/// Bug prevented: an application's choice of the issuer's trusted authority
+/// lost between its page and the authorization request.
 #[test]
 fn the_authorization_request_passes_the_chosen_sign_in_on() {
     let connection = Connection::accept(bundle()).unwrap();
-    let url = connection.authorize_url("challenge", "state-1", "nonce-1", SignInChoice::Local);
+    let url = connection.authorize_url("challenge", "state-1", "nonce-1", SignInChoice::Authority);
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    assert_eq!(query["sign_in"], "SIGN_IN_ENTRY_LOCAL");
+    assert_eq!(query["sign_in"], "SIGN_IN_ENTRY_AUTHORITY");
     assert_eq!(query["client_id"], "account-web");
     assert_eq!(query["state"], "state-1");
 }

@@ -135,7 +135,7 @@ impl<C: ApplicationClient + 'static> ApplicationSessionService for ApplicationSe
         let asked = request.get_ref();
         // A value this adapter does not know states no choice.
         let sign_in = match asked.sign_in.map(SignInEntry::try_from) {
-            Some(Ok(SignInEntry::Local)) => SignInChoice::Local,
+            Some(Ok(SignInEntry::Authority)) => SignInChoice::Authority,
             _ => SignInChoice::Ordinary,
         };
         let start = match self.sessions.start_sign_in_at(&asked.rd, sign_in).await {
