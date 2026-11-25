@@ -559,6 +559,7 @@ async fn public_settings_follow_the_stored_mode() {
     let public = PublicSettings::open(
         svc.storage.clone(),
         Served {
+            registration: true,
             password_reset: false,
         },
     )

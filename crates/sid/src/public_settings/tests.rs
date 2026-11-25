@@ -4,6 +4,7 @@ use super::*;
 use sid_core::models::{AuditEntry, InviteConfig, MutationContext};
 
 const SERVED: Served = Served {
+    registration: true,
     password_reset: true,
 };
 
@@ -55,6 +56,32 @@ fn test_registration_is_open_only_to_modes_a_visitor_can_use() {
     }
 }
 
+/// The registration types named are the ones the mode admits: every type
+/// where a visitor or an invited registrant may use any, the email alone
+/// where the mode decides by the email's domain, none where only an
+/// administrator creates accounts. Sign-in keeps every type under each mode.
+/// Bug prevented: a page offering a phone or username registration that a
+/// domain-restricted installation always refuses.
+#[test]
+fn test_registration_types_follow_the_mode() {
+    let email = PrincipalType::Email as i32;
+    let all = principal_types();
+    for (mode, registration, minimum) in [
+        (EnrollmentMode::Open, all.clone(), 3),
+        (EnrollmentMode::InviteOnly, all.clone(), 3),
+        (EnrollmentMode::DomainRestricted, vec![email], 0),
+        (EnrollmentMode::AdminOnly, vec![], 0),
+    ] {
+        let served = projection(&policy(mode), 1, SERVED);
+        assert_eq!(
+            served.registration_principal_types, registration,
+            "{mode:?}"
+        );
+        assert_eq!(served.registration_username_min_length, minimum, "{mode:?}");
+        assert_eq!(served.sign_in_principal_types, all, "{mode:?}");
+    }
+}
+
 /// The projection names the methods the sign-in API offers after an
 /// identifier, and the reset only where the composition serves it.
 #[test]
@@ -64,19 +91,49 @@ fn test_projection_names_what_the_engine_serves() {
     assert_eq!(served.sign_in_methods, ["opaque", "webauthn"]);
     assert!(served.password_reset_open);
     assert_eq!(served.registration_username_min_length, 3);
-    assert_eq!(
-        served.registration_principal_types,
-        served.sign_in_principal_types
-    );
 
     let without_reset = projection(
         &policy(EnrollmentMode::Open),
         7,
         Served {
+            registration: true,
             password_reset: false,
         },
     );
     assert!(!without_reset.password_reset_open);
+}
+
+/// The host's own registration switch closes the page under a mode that is
+/// open, at once and at a newer revision; turned on again it opens it. The
+/// same statement twice changes nothing.
+/// Bug prevented: a registration the API refuses still advertised as open.
+#[tokio::test]
+async fn test_the_hosts_registration_switch_is_projected() {
+    let storage = crate::test_support::storage().await;
+    store(storage.as_ref(), EnrollmentMode::Open).await;
+    let settings = PublicSettings::open(storage, SERVED).await.unwrap();
+    let mut reader = settings.subscribe();
+    let open = settings.current();
+    assert!(open.registration_open);
+
+    let off = Served {
+        registration: false,
+        ..SERVED
+    };
+    settings.serve(off);
+    let closed = settings.current();
+    assert!(!closed.registration_open);
+    assert!(closed.revision > open.revision);
+    reader.changed().await.unwrap();
+    assert_eq!(*reader.borrow_and_update(), closed);
+
+    settings.serve(off);
+    assert!(!reader.has_changed().unwrap());
+
+    settings.serve(SERVED);
+    let reopened = settings.current();
+    assert!(reopened.registration_open);
+    assert!(reopened.revision > closed.revision);
 }
 
 /// Before any policy is stored the installation's default is projected at

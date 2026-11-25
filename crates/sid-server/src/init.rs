@@ -1081,10 +1081,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let resets = password_resets(mailed_pages.as_ref(), &storage, &key_manager);
     // What the pages follow before anyone signs in: read once here, then
     // kept current by the policy's own commits and a periodic read.
+    let password_reset = resets.is_some();
     let public_settings = sid::public_settings::PublicSettings::open(
         storage.clone(),
         sid::public_settings::Served {
-            password_reset: resets.is_some(),
+            registration: feature_flags.is_registration_enabled().await,
+            password_reset,
         },
     )
     .await
@@ -1093,6 +1095,25 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Arc::downgrade(&public_settings),
         sid::public_settings::DEFAULT_FOLLOW_INTERVAL,
     ));
+    // The registration switch is a feature flag the registration API reads
+    // at each request: the pages follow it too, until the settings are gone.
+    {
+        let settings = Arc::downgrade(&public_settings);
+        let flags = feature_flags.clone();
+        tokio::spawn(async move {
+            let mut turns = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                turns.tick().await;
+                let Some(settings) = settings.upgrade() else {
+                    return;
+                };
+                settings.serve(sid::public_settings::Served {
+                    registration: flags.is_registration_enabled().await,
+                    password_reset,
+                });
+            }
+        });
+    }
     let (auth_svc, reset_mail) = match resets {
         Some((resets, mail)) => (auth_svc.with_password_resets(resets), Some(mail)),
         None => (auth_svc, None),
