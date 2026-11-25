@@ -151,6 +151,8 @@ fn projection(revision: u64, registration: &[PrincipalType], minimum: u32) -> Pu
         registration_username_min_length: minimum,
         sign_in_principal_types: vec![PrincipalType::Email as i32, PrincipalType::Username as i32],
         registration_open: true,
+        sign_in_methods: vec!["opaque".into(), "webauthn".into()],
+        password_reset_open: true,
     }
 }
 
@@ -184,14 +186,26 @@ async fn test_live_config_carries_the_settings() {
             "registrationPrincipalTypes": ["email", "username"],
             "registrationUsernameMinLength": 6,
             "signInPrincipalTypes": ["email", "username"],
+            "signInMethods": ["opaque", "webauthn"],
+            "passwordResetOpen": true,
         })
     );
     // A closed registration reaches the page, with its types still named.
+    // So do the local methods the installation stopped offering and a reset
+    // it no longer serves: a method this host does not render, or one named
+    // twice, is not passed on.
     let mut closed = projection(2, &[PrincipalType::Email], 0);
     closed.registration_open = false;
+    closed.sign_in_methods = vec!["webauthn".into(), "sms".into(), "webauthn".into()];
+    closed.password_reset_open = false;
     sink.stream().apply(&closed).unwrap();
     let config = config_json(&app).await;
     assert_eq!(config["settings"]["registrationOpen"], false);
+    assert_eq!(
+        config["settings"]["signInMethods"],
+        serde_json::json!(["webauthn"])
+    );
+    assert_eq!(config["settings"]["passwordResetOpen"], false);
     // Without usernames in registration there is no minimum to state.
     assert_eq!(
         config["settings"]["registrationPrincipalTypes"],
