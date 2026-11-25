@@ -17,6 +17,7 @@ use sid_authn::application_session::{
 };
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::issuer_directory::IssuerDirectory;
+use sid_authn::relying_party::SignInChoice;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::grpc_error::{ApiError, ErrorReason, refuse};
 use sid_infra::issuer_client::RpClient;
@@ -25,7 +26,7 @@ use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSe
 use sid_proto::sid::v1::authn::{
     ApplicationSession, BackChannelLogoutRequest, CompleteSignInRequest,
     EndApplicationSessionRequest, EndApplicationSessionResponse, GetApplicationSessionRequest,
-    GrantOutcome, StartSignInRequest,
+    GrantOutcome, SignInEntry, StartSignInRequest,
 };
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Request, Response, Status};
@@ -131,7 +132,13 @@ impl<C: ApplicationClient + 'static> ApplicationSessionService for ApplicationSe
         &self,
         request: Request<StartSignInRequest>,
     ) -> Result<Response<HttpBody>, Status> {
-        let start = match self.sessions.start_sign_in(&request.get_ref().rd).await {
+        let asked = request.get_ref();
+        // A value this adapter does not know states no choice.
+        let sign_in = match asked.sign_in.map(SignInEntry::try_from) {
+            Some(Ok(SignInEntry::Authority)) => SignInChoice::Authority,
+            _ => SignInChoice::Ordinary,
+        };
+        let start = match self.sessions.start_sign_in_at(&asked.rd, sign_in).await {
             Ok(start) => start,
             Err(failure) => return Ok(sign_in_page(&failure)),
         };

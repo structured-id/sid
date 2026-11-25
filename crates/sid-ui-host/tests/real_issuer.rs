@@ -154,7 +154,10 @@ fn header(response: &Response<HttpBody>, name: &str) -> String {
 /// is sent to and the `name=value` of the correlation cookie it keeps.
 async fn start(replica: &ApplicationSessions) -> (HashMap<String, String>, String) {
     let response = replica
-        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .start_sign_in(Request::new(StartSignInRequest {
+            rd: "/".into(),
+            sign_in: None,
+        }))
         .await
         .unwrap();
     assert_eq!(status(&response), "302");

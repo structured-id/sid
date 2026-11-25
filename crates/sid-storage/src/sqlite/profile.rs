@@ -1540,6 +1540,26 @@ impl SqliteBackend {
         history: Option<&HistoryCommit>,
         audit: MutationContext,
     ) -> SidResult<bool> {
+        self.change_password_and_sessions(id, expected, new, history, None, audit)
+            .await
+            .map(|applied| applied.is_some())
+    }
+
+    /// [`Self::change_password_impl`], which with `sessions` also ends every
+    /// session of the credential's profile and stores the one that replaces
+    /// them, in the same commit; returns the ended sessions when it applied.
+    pub(crate) async fn change_password_and_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        sessions: Option<(
+            &sid_core::models::SessionEnd,
+            Option<&sid_core::models::Session>,
+        )>,
+        mut audit: MutationContext,
+    ) -> SidResult<Option<Vec<sid_core::models::Session>>> {
         let (verified, policy_version, artifact) =
             crate::policy_evidence::columns(&new.policy_evidence)?;
         let mut tx = self.begin_write().await?;
@@ -1561,7 +1581,7 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         let Some(profile_id) = profile_id else {
-            return Ok(false);
+            return Ok(None);
         };
         if let Some(history) = history {
             if history.owner != profile_id {
@@ -1570,11 +1590,23 @@ impl SqliteBackend {
                 ));
             }
             if !super::password_history::apply_in_tx(&mut tx, history).await? {
-                return Ok(false);
+                return Ok(None);
+            }
+        }
+        let mut ended = Vec::new();
+        if let Some((end, replacement)) = sessions {
+            if replacement.is_some_and(|session| session.profile_id != profile_id) {
+                return Err(SidError::Validation(
+                    "the replacement session belongs to the credential's profile".into(),
+                ));
+            }
+            ended = super::directory::end_sessions(&mut tx, profile_id, end, &mut audit).await?;
+            if let Some(replacement) = replacement {
+                super::session::insert_session(&mut *tx, replacement).await?;
             }
         }
         Self::commit_mutation(tx, &format!("profile:{profile_id}"), audit).await?;
-        Ok(true)
+        Ok(Some(ended))
     }
 
     pub(crate) async fn reseal_credential_data_impl(

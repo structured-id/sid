@@ -1799,6 +1799,145 @@ fn opaque_password(profile_id: ProfileId, byte: u8) -> sid_core::models::Credent
     )
 }
 
+/// A session of `profile_id` a browser signed in with, holding the cookie
+/// secret whose hash is `secret`.
+fn browser_session(profile_id: ProfileId, secret: u8) -> Session {
+    let mut session = create_test_session(profile_id);
+    session.browser_secret_hash = Some(sid_core::models::BrowserSecretHash::from_bytes(
+        [secret; 32],
+    ));
+    session
+}
+
+/// A password change that replaces sessions commits the new password, the
+/// end of every session of the profile (the changing one included) and the
+/// session that replaces them together: afterwards neither earlier cookie
+/// opens a session and the fresh one does. A change over a password that is
+/// no longer the stored one writes none of it, and another profile's
+/// sessions are never touched.
+/// Bug prevented: a cookie copied before the change, or the changing
+/// browser's own, still opening the account under the replaced password.
+pub async fn test_password_change_replaces_sessions(backend: &dyn StorageBackend) {
+    use sid_core::models::BrowserSecretHash;
+
+    let profile = create_test_profile("changes");
+    let other = create_test_profile("bystander");
+    for created in [&profile, &other] {
+        backend.create_profile(created, test_audit()).await.unwrap();
+    }
+    let password = opaque_password(profile.id, 1);
+    backend
+        .create_credential(&password, test_audit())
+        .await
+        .unwrap();
+    let (changing, copied, bystander) = (
+        browser_session(profile.id, 0x11),
+        browser_session(profile.id, 0x22),
+        browser_session(other.id, 0x33),
+    );
+    for session in [&changing, &copied, &bystander] {
+        backend.create_session(session, test_audit()).await.unwrap();
+    }
+    let opens = |secret: u8| async move {
+        backend
+            .get_session_by_browser_secret(&BrowserSecretHash::from_bytes([secret; 32]))
+            .await
+            .unwrap()
+            .map(|session| session.id)
+    };
+    let mut next = password.clone();
+    next.data = vec![2u8; 8].into();
+    let end = test_session_end();
+    let (unwritten, foreign_session) = (
+        browser_session(profile.id, 0x44),
+        browser_session(other.id, 0x55),
+    );
+    let replaced_by = |replacement| crate::storage::SessionReplacement {
+        end: &end,
+        replacement,
+    };
+
+    // Over a password that is not the stored one: nothing is written.
+    let stale = backend
+        .change_password_replacing_sessions(
+            password.id,
+            b"not the stored password",
+            &next,
+            None,
+            replaced_by(Some(&unwritten)),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert!(stale.is_none(), "a stale change writes nothing");
+    assert_eq!(opens(0x11).await, Some(changing.id));
+    assert_eq!(opens(0x22).await, Some(copied.id));
+    assert_eq!(opens(0x44).await, None);
+    let stored = backend.get_credential(password.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), password.data.expose());
+
+    // A replacement of another profile's is refused whole.
+    let foreign = backend
+        .change_password_replacing_sessions(
+            password.id,
+            password.data.expose(),
+            &next,
+            None,
+            replaced_by(Some(&foreign_session)),
+            test_audit(),
+        )
+        .await;
+    assert!(
+        matches!(foreign, Err(sid_core::Error::Validation(_))),
+        "{foreign:?}"
+    );
+    assert_eq!(opens(0x11).await, Some(changing.id));
+    assert_eq!(opens(0x55).await, None);
+    let stored = backend.get_credential(password.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), password.data.expose());
+
+    let replacement = browser_session(profile.id, 0x66);
+    let ended = backend
+        .change_password_replacing_sessions(
+            password.id,
+            password.data.expose(),
+            &next,
+            None,
+            replaced_by(Some(&replacement)),
+            test_audit(),
+        )
+        .await
+        .unwrap()
+        .expect("the change applies over the stored password");
+    let mut ended: Vec<_> = ended.iter().map(|session| session.id).collect();
+    ended.sort();
+    let mut expected = vec![changing.id, copied.id];
+    expected.sort();
+    assert_eq!(ended, expected);
+    assert_eq!(opens(0x11).await, None, "the changing cookie is retired");
+    assert_eq!(opens(0x22).await, None, "its copy is retired");
+    assert_eq!(opens(0x66).await, Some(replacement.id));
+    assert_eq!(opens(0x33).await, Some(bystander.id));
+    let stored = backend.get_credential(password.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), next.data.expose());
+
+    // The same change again finds another password stored: the session
+    // opened since, here the replacement, is not ended.
+    let again = backend
+        .change_password_replacing_sessions(
+            password.id,
+            password.data.expose(),
+            &next,
+            None,
+            replaced_by(None),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert!(again.is_none());
+    assert_eq!(opens(0x66).await, Some(replacement.id));
+}
+
 /// A password reset is verified once and completed once, each only while it
 /// is in the right state and unexpired. Of concurrent completions exactly
 /// one installs its password; the completion ends every session of the

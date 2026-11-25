@@ -34,6 +34,7 @@ use super::auth_service::{
 };
 use super::client_metadata;
 use super::project_service::ProjectServiceImpl;
+pub use sid::oauth::authorization::SignInChoice;
 use sid::oauth::authorization::{OPERATION_URI_PREFIX, operation_continuation};
 use sid_infra::oauth_http::{self, Form};
 
@@ -49,21 +50,32 @@ const NO_ISSUER: &str = "-";
 const GET_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/GetUserInfo";
 const POST_USER_INFO_RPC: &str = "/sid.v1.authn.OidcProviderService/PostUserInfo";
 
-/// Where the authorization endpoint sends a user who must sign in, asked each
-/// time one must: a host's interactive branch can open after the server
-/// started. `None` sends the client `login_required`.
+/// Where the authorization endpoint sends a user who must sign in or review
+/// a request, asked each time one must: a host's interactive branch can open
+/// after the server started. It is asked only for a request whose client and
+/// redirect URI the issuer established.
 #[tonic::async_trait]
 pub trait SignInPage: Send + Sync {
-    /// The page now; an error refuses the request instead of answering
-    /// `login_required` for a page that may exist.
-    async fn sign_in_page(&self) -> Result<Option<url::Url>, Status>;
+    /// Where a request whose user chose `sign_in` signs in now. `None` sends
+    /// the client `login_required`; an error refuses the request instead of
+    /// answering that for a page that may exist.
+    async fn sign_in_page(&self, sign_in: SignInChoice) -> Result<Option<url::Url>, Status>;
+
+    /// The consent page now, on the issuer's own UI wherever its sign-in
+    /// starts. `None` sends the client `interaction_required`.
+    async fn consent_page(&self) -> Result<Option<url::Url>, Status>;
 }
 
-/// A deployment's fixed page, or none.
+/// A deployment's fixed page, or none: every request signs in there, and the
+/// consent page is beside it.
 #[tonic::async_trait]
 impl SignInPage for Option<url::Url> {
-    async fn sign_in_page(&self) -> Result<Option<url::Url>, Status> {
+    async fn sign_in_page(&self, _sign_in: SignInChoice) -> Result<Option<url::Url>, Status> {
         Ok(self.clone())
+    }
+
+    async fn consent_page(&self) -> Result<Option<url::Url>, Status> {
+        Ok(self.as_ref().and_then(oauth_http::consent_page))
     }
 }
 
@@ -179,6 +191,7 @@ impl OidcProviderServiceImpl {
         }
 
         let client_id = pending.client_id().to_string();
+        let chosen = pending.sign_in();
         match self.auth.browser_authorize(&metadata, pending).await {
             Ok(BrowserAuthorization::Answer(response)) => {
                 // An answer means the core established the client and URI.
@@ -195,13 +208,13 @@ impl OidcProviderServiceImpl {
             Ok(BrowserAuthorization::NoInteraction(error)) => Ok(answer(&[("error", error)])),
             Ok(BrowserAuthorization::Denied) => Ok(answer(&[("error", "access_denied")])),
             Ok(BrowserAuthorization::Consent { operation }) => {
-                let login = match self.sign_in_page.sign_in_page().await {
-                    Ok(login) => login,
+                let page = match self.sign_in_page.consent_page().await {
+                    Ok(page) => page,
                     Err(status) => return Ok(refused(status)),
                 };
                 Ok(
                     match (
-                        login.and_then(|login| oauth_http::consent_page(&login)),
+                        page,
                         operation_continuation(&issuer.canonical_url, &client_id, operation),
                     ) {
                         (Some(page), Some(back)) => oauth_http::consent(&page, operation, &back),
@@ -210,7 +223,7 @@ impl OidcProviderServiceImpl {
                 )
             }
             Ok(BrowserAuthorization::SignIn { reference }) => {
-                let login = match self.sign_in_page.sign_in_page().await {
+                let login = match self.sign_in_page.sign_in_page(chosen).await {
                     Ok(login) => login,
                     Err(status) => return Ok(refused(status)),
                 };
@@ -385,6 +398,12 @@ fn form_authorize_request(
         prompt: form.take("prompt"),
         max_age,
         request_uri: form.take("request_uri"),
+        // By its name, as the GET form carries it; a value this issuer does
+        // not know states no choice.
+        sign_in: form
+            .take("sign_in")
+            .and_then(|value| sid_proto::sid::v1::SignInEntry::from_str_name(&value))
+            .map(|entry| entry as i32),
     })
 }
 

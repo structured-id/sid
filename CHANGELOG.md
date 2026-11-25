@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.46](https://github.com/structured-id/sid/compare/v0.2.45...v0.2.46) - 2026-11-25
+
+### Added
+
+- *(oauth)* choose the issuer's trusted authority for sign-in ([#795](https://github.com/structured-id/sid/pull/795))
+
+## [0.2.45](https://github.com/structured-id/sid/compare/v0.2.44...v0.2.45) - 2026-11-24
+
+### Added
+
+- *(password)* replace a profile's sessions with its changed password ([#792](https://github.com/structured-id/sid/pull/792))
+
+## [0.2.44](https://github.com/structured-id/sid/compare/v0.2.43...v0.2.44) - 2026-11-24
+
+### Added
+
+- *(oauth)* sign a request in where its user chose ([#789](https://github.com/structured-id/sid/pull/789))
+
+### Other
+
+- *(server)* drop the host entries no embedding host can use ([#786](https://github.com/structured-id/sid/pull/786))
+
+## [0.2.43](https://github.com/structured-id/sid/compare/v0.2.42...v0.2.43) - 2026-11-24
+
+### Added
+
+- *(init)* open the installation over a store the host opened ([#783](https://github.com/structured-id/sid/pull/783))
+
 ## [0.2.42](https://github.com/structured-id/sid/compare/v0.2.41...v0.2.42) - 2026-11-24
 
 ### Fixed

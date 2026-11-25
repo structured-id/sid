@@ -465,26 +465,6 @@ pub struct CeHost {
     /// their web client is provisioned with the installation's own key,
     /// shared by every replica, in place of any other account settings.
     pub served_account: Option<String>,
-    /// The store the host opened for the installation; none opens the one
-    /// the storage settings name.
-    pub store: Option<HostStore>,
-}
-
-/// A store the host opened itself, which the installation keeps its records
-/// in: the host connects it and prepares its schema, and closes it after the
-/// installation's work has drained.
-pub struct HostStore {
-    /// The installation's records.
-    pub storage: Arc<dyn StorageBackend>,
-    /// The audit trail in the same store.
-    pub audit_log: Arc<dyn sid_plugin::audit::AuditLog>,
-    /// The password history evaluator's keys in the same store, read only
-    /// when the evaluator runs in this process.
-    pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
-    /// The SQLite file the store is, when it is one: every server on the
-    /// file holds its bus lock, so an in-process bus never runs beside
-    /// another server on it.
-    pub sqlite_file: Option<std::path::PathBuf>,
 }
 
 /// The store an installation runs over.
@@ -587,17 +567,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         audit_log,
         local_history_keys,
         sqlite_file,
-    } = match host.store {
-        // The host's store, as it opened it: nothing is connected, created
-        // or migrated here, and no storage setting is read.
-        Some(store) => OpenedStore {
-            storage: store.storage,
-            audit_log: store.audit_log,
-            local_history_keys: LocalHistoryKeys::Host(store.history_keys),
-            sqlite_file: store.sqlite_file,
-        },
-        None => open_store().await?,
-    };
+    } = open_store().await?;
 
     // ── JWT keys ──
     let data_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| "/var/lib/sid".into());
@@ -1698,8 +1668,6 @@ pub(crate) enum LocalHistoryKeys {
     Postgres(sid_storage::PgHistoryKeyStore),
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
     Sqlite(sid_storage::sqlite::SqliteHistoryKeyStore),
-    /// The store of a host's own database, prepared by the host.
-    Host(Arc<dyn sid_plugin::history_keys::HistoryKeyStore>),
 }
 
 impl LocalHistoryKeys {
@@ -1716,7 +1684,6 @@ impl LocalHistoryKeys {
             }
             #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
             Self::Sqlite(store) => Arc::new(store),
-            Self::Host(store) => store,
         })
     }
 }

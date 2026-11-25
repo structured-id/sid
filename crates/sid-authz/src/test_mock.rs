@@ -2810,6 +2810,17 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<Option<Vec<Session>>> {
         unimplemented!("password resets are not used by the authz unit tests")
     }
+    async fn change_password_replacing_sessions(
+        &self,
+        _: CredentialId,
+        _: &[u8],
+        _: &Credential,
+        _: Option<&sid_core::models::HistoryCommit>,
+        _: sid_plugin::storage::SessionReplacement<'_>,
+        _: MutationContext,
+    ) -> Result<Option<Vec<Session>>> {
+        unimplemented!("password changes are not used by the authz unit tests")
+    }
     async fn count_active_reset_sessions(&self, _: ProfileId) -> Result<u32> {
         unimplemented!("password resets are not used by the authz unit tests")
     }

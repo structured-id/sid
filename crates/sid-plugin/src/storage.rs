@@ -73,6 +73,15 @@ impl JobLock {
     }
 }
 
+/// What becomes of a profile's sessions when its own password is changed:
+/// every one of them ends under `end`, and `replacement` is the session the
+/// changing browser continues in, when it continues.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionReplacement<'a> {
+    pub end: &'a SessionEnd,
+    pub replacement: Option<&'a Session>,
+}
+
 /// Storage backend plugin trait.
 ///
 /// Implement this trait to add new storage backends to StructuredID.
@@ -2502,6 +2511,27 @@ pub trait StorageBackend:
         credential: &Credential,
         history: Option<&HistoryCommit>,
         end: &SessionEnd,
+        ctx: MutationContext,
+    ) -> Result<Option<Vec<Session>>>;
+
+    /// Change a profile's own password and replace its sessions in one
+    /// transaction: replace the active password credential `id` as
+    /// [`crate::credential_store::CredentialStore::change_password`] does
+    /// (only while its data is still `expected`, with `history`), end every
+    /// session of its profile under `sessions.end` (each owes what it says),
+    /// the changing one included, and store `sessions.replacement`, the
+    /// session the changing browser continues in, when there is one. It
+    /// belongs to the credential's profile. Returns the ended sessions, or
+    /// `None` with nothing written when another change came first, the
+    /// credential is no longer active or the history moved past
+    /// `history.expected_revision`.
+    async fn change_password_replacing_sessions(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        sessions: SessionReplacement<'_>,
         ctx: MutationContext,
     ) -> Result<Option<Vec<Session>>>;
 

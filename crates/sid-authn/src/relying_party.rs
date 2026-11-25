@@ -166,20 +166,60 @@ impl Connection {
     /// code flow with S256 PKCE (RFC 7636 §4.3) for the connection's API
     /// (RFC 8707 §2), with the `nonce` its ID token must carry back (OIDC
     /// Core 1.0 §3.1.2.1).
-    pub fn authorize_url(&self, code_challenge: &str, state: &str, nonce: &str) -> url::Url {
+    /// `sign_in` passes on the issuer's sign-in the user chose in the
+    /// application; the ordinary one adds nothing to the request.
+    pub fn authorize_url(
+        &self,
+        code_challenge: &str,
+        state: &str,
+        nonce: &str,
+        sign_in: SignInChoice,
+    ) -> url::Url {
         let mut url = url::Url::parse(&format!("{}/oauth2/authorize", self.issuer))
             .expect("an issuer URL takes a path");
-        url.query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &self.client_id)
-            .append_pair("redirect_uri", &self.redirect_uri)
-            .append_pair("scope", &self.scopes.join(" "))
-            .append_pair("resource", &self.resource)
-            .append_pair("code_challenge", code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("state", state)
-            .append_pair("nonce", nonce);
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("response_type", "code")
+                .append_pair("client_id", &self.client_id)
+                .append_pair("redirect_uri", &self.redirect_uri)
+                .append_pair("scope", &self.scopes.join(" "))
+                .append_pair("resource", &self.resource)
+                .append_pair("code_challenge", code_challenge)
+                .append_pair("code_challenge_method", "S256")
+                .append_pair("state", state)
+                .append_pair("nonce", nonce);
+            if let Some(entry) = sign_in.parameter() {
+                query.append_pair("sign_in", entry);
+            }
+        }
         url
+    }
+}
+
+/// Which of the issuer's sign-ins the user chose for one authorization
+/// request, when it needs one. A preference: it enables no method and grants
+/// nothing, and the issuer follows it only where its policy admits that
+/// sign-in for the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SignInChoice {
+    /// The issuer's ordinary sign-in for the client: its own ceremony, or
+    /// the authority it trusts, as its installation decides.
+    #[default]
+    Ordinary,
+    /// The sign-in through the authority the issuer trusts, for a user who
+    /// holds an account there and no login the issuer assigned.
+    Authority,
+}
+
+impl SignInChoice {
+    /// The `sign_in` parameter of an authorization request stating this
+    /// choice, by the name of its value; none for the ordinary sign-in.
+    pub fn parameter(self) -> Option<&'static str> {
+        match self {
+            Self::Ordinary => None,
+            Self::Authority => Some("SIGN_IN_ENTRY_AUTHORITY"),
+        }
     }
 }
 
