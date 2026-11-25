@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.47](https://github.com/structured-id/sid/compare/v0.2.46...v0.2.47) - 2026-11-25
+
+### Added
+
+- *(engine)* run the account client in the installation's process ([#797](https://github.com/structured-id/sid/pull/797))
+
 ## [0.2.46](https://github.com/structured-id/sid/compare/v0.2.45...v0.2.46) - 2026-11-25
 
 ### Added
