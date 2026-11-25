@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.48](https://github.com/structured-id/sid/compare/v0.2.47...v0.2.48) - 2026-11-25
+
+### Added
+
+- *(ui-host)* serve offered sign-in methods and password reset ([#802](https://github.com/structured-id/sid/pull/802))
+
 ## [0.2.47](https://github.com/structured-id/sid/compare/v0.2.46...v0.2.47) - 2026-11-25
 
 ### Added
