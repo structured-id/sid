@@ -1,0 +1,54 @@
+# The published integration recipes, walked as their README says, in a real
+# browser against the published image: when a recipe changes, and after each
+# image publication, so a release that breaks the instructions is seen.
+name: Recipes
+
+on:
+  pull_request:
+    paths:
+      - "examples/**"
+      - ".github/workflows/recipes.yml"
+  workflow_run:
+    workflows: [Image]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recipes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compose-web-app:
+    name: Compose web application
+    # After an image run: only a publication (a release tag) that succeeded.
+    if: >-
+      github.repository_owner == 'structured-id' &&
+      (github.event_name == 'pull_request' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # The complete example compiles, not only the fragments the page shows.
+      - name: Type-check the example
+        working-directory: examples/compose-web-app
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+      - name: Every snippet the page names exists
+        working-directory: examples/compose-web-app
+        run: node check/snippets.ts
+      - name: Browser driver
+        working-directory: examples/compose-web-app/check
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install chromium
+      - name: Walk the recipe
+        working-directory: examples/compose-web-app/check
+        run: node walk.ts

@@ -1,0 +1,49 @@
+{
+  "id": "ce-compose-web-app",
+  "version": 1,
+  "title": "Sign users in to a web application with StructuredID in Docker Compose",
+  "owner": "structured-id/sid",
+  "edition": "community",
+  "mode": "separate service",
+  "identity": "local accounts of the application's own installation",
+  "artifacts": {
+    "installation": "ghcr.io/structured-id/sid:embedded",
+    "client": "openid-client@^6",
+    "runtime": "node>=24"
+  },
+  "prerequisites": [
+    "Docker with Compose v2",
+    "localhost ports 8080 and 3000"
+  ],
+  "files": [
+    "README.md",
+    "compose.yaml",
+    "Dockerfile",
+    ".env.example",
+    "package.json",
+    "package-lock.json",
+    "server.ts",
+    "check/walk.ts",
+    "check/snippets.ts"
+  ],
+  "snippets": [
+    {
+      "file": "server.ts",
+      "markers": ["configuration", "discovery", "sign-in", "permission"]
+    }
+  ],
+  "checks": {
+    "build": "npm run typecheck",
+    "snippets": "node check/snippets.ts",
+    "execution": "node check/walk.ts"
+  },
+  "outcomes": [
+    "sign-in from the application's own link returns to its registered callback",
+    "the owner reads its note: 200",
+    "another signed-in account reads that note: 403",
+    "a request with no session reads that note: 401",
+    "after the application's sign-out the note: 401"
+  ],
+  "recorded_by_execution": ["installation image digest", "client library version"],
+  "cleanup": "the walk removes the Compose project, its volume, the built application image and the .env it wrote"
+}
