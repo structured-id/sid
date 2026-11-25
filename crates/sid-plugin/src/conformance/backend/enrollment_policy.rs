@@ -428,6 +428,51 @@ pub async fn test_enrollment_policy_stored_and_replaced(backend: &dyn StorageBac
     assert_eq!(backend.enrollment_policy().await.unwrap(), Some(admin_only));
 }
 
+/// The revision counts committed changes: 0 until a policy is set, one more
+/// with each change that commits, also when it stores the same policy again;
+/// a refused change leaves it. Two writers at once never take the same
+/// revision: after both, it stands at the number of changes that committed.
+/// Bug prevented: a reader holding a revision serving a replaced policy as
+/// current because the change did not move the revision.
+pub async fn test_enrollment_policy_revision_counts_committed_changes(
+    backend: &dyn StorageBackend,
+) {
+    assert_eq!(backend.enrollment_policy_revision().await.unwrap(), 0);
+
+    let open = policy(EnrollmentMode::Open, &[]);
+    backend
+        .set_enrollment_policy(&open, test_audit())
+        .await
+        .unwrap();
+    assert_eq!(backend.enrollment_policy_revision().await.unwrap(), 1);
+    backend
+        .set_enrollment_policy(&open, test_audit())
+        .await
+        .unwrap();
+    assert_eq!(backend.enrollment_policy_revision().await.unwrap(), 2);
+
+    assert!(
+        backend
+            .set_enrollment_policy(&policy(EnrollmentMode::DomainRestricted, &[]), test_audit())
+            .await
+            .is_err()
+    );
+    assert_eq!(backend.enrollment_policy_revision().await.unwrap(), 2);
+
+    let invite_only = policy(EnrollmentMode::InviteOnly, &[]);
+    let admin_only = policy(EnrollmentMode::AdminOnly, &[]);
+    let (one, other) = tokio::join!(
+        backend.set_enrollment_policy(&invite_only, test_audit()),
+        backend.set_enrollment_policy(&admin_only, test_audit()),
+    );
+    let committed = u64::from(one.is_ok()) + u64::from(other.is_ok());
+    assert!(committed >= 1, "one of two concurrent changes commits");
+    assert_eq!(
+        backend.enrollment_policy_revision().await.unwrap(),
+        2 + committed
+    );
+}
+
 /// The invite defaults keep their full unsigned range: the largest value a
 /// field can hold is stored and read back unchanged.
 pub async fn test_enrollment_policy_keeps_invite_range(backend: &dyn StorageBackend) {

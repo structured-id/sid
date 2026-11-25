@@ -78,6 +78,13 @@ impl EnrollmentServiceImpl {
         }
     }
 
+    /// Serve `public` each enrollment policy this service commits at once.
+    #[must_use]
+    pub fn projected_to(mut self, public: Arc<sid::public_settings::PublicSettings>) -> Self {
+        self.enrollment = Enrollment::new(self.storage.clone()).projected_to(public);
+        self
+    }
+
     /// Also admit to the invite RPCs the services `services` describes.
     pub fn with_invite_services(mut self, services: InviteServices) -> Self {
         self.invite_services = Some(services);

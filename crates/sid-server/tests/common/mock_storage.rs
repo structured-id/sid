@@ -64,6 +64,7 @@ pub struct MockStorageInner {
     /// The installation was recorded centrally managed.
     centrally_managed: bool,
     enrollment_policy: Option<sid_core::models::EnrollmentPolicy>,
+    enrollment_policy_revision: u64,
     invites: Vec<sid_core::models::Invite>,
     instance_organization: Option<sid_core::models::Organization>,
     oidc_issuers: Vec<sid_core::models::OidcIssuer>,
@@ -4389,6 +4390,10 @@ impl StorageBackend for MockStorage {
         Ok(self.inner.lock().unwrap().enrollment_policy.clone())
     }
 
+    async fn enrollment_policy_revision(&self) -> SidResult<u64> {
+        Ok(self.inner.lock().unwrap().enrollment_policy_revision)
+    }
+
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
@@ -4404,6 +4409,7 @@ impl StorageBackend for MockStorage {
             ));
         }
         inner.enrollment_policy = Some(stored);
+        inner.enrollment_policy_revision += 1;
         Ok(())
     }
 

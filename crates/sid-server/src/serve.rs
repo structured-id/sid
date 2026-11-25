@@ -234,6 +234,14 @@ impl CeServices {
             .await
             .add(EnrollmentServiceServer::from_arc(c.enrollment_svc.clone()))
             .await
+            .add(
+                sid_proto::sid::v1::ui::public_ui_settings_service_server::PublicUiSettingsServiceServer::new(
+                    crate::grpc::public_ui_settings_service::PublicUiSettingsServiceImpl::new(
+                        c.public_settings.clone(),
+                    ),
+                ),
+            )
+            .await
             .add(SecurityServiceServer::from_arc(c.security_svc.clone()))
             .await
             .add(GovernanceServiceServer::new(

@@ -52,6 +52,12 @@ use sid_proto::sid::v1::StepUpMethod;
 use sid_proto::sid::v1::authn::NativeCredentialSet;
 use tracing::{info, warn};
 
+/// The local sign-in methods the engine always serves, by the names the
+/// sign-in API uses: the password and a passkey through the discoverable
+/// flow. One list for what a page shows before an identifier is typed and
+/// for what is offered after it.
+pub const LOCAL_SIGN_IN_METHODS: [&str; 2] = ["opaque", "webauthn"];
+
 /// Why a sign-in is refused or failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SignInError {
@@ -862,7 +868,10 @@ impl SignIn {
     ) -> Result<sid_proto::sid::v1::ResolvePrincipalResponse, SignInError> {
         let handle = sid_authn::normalize::normalize_principal(principal)
             .map_err(|e| SignInError::InvalidIdentifier(e.to_string()))?;
-        let mut available_methods = vec!["opaque".to_string(), "webauthn".to_string()];
+        let mut available_methods: Vec<String> = LOCAL_SIGN_IN_METHODS
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect();
         if magic_links
             && handle.principal_type.to_principal_type()
                 == sid_core::models::principal::PrincipalType::Email

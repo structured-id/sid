@@ -58,7 +58,7 @@ fn count(value: i64, name: &str) -> SidResult<u32> {
 pub(super) fn init_policies(tx: &Statements<'_>) -> SidResult<Decision<()>> {
     let mut created = false;
     for (label, properties) in [
-        ("SidEnrollmentPolicy", "stored: false"),
+        ("SidEnrollmentPolicy", "stored: false, revision: 0"),
         ("SidBootstrapPolicy", "central: false"),
     ] {
         let found = tx.run(
@@ -110,6 +110,22 @@ fn held_enrollment_policy(tx: &Statements<'_>) -> SidResult<Option<EnrollmentPol
         allowed_domains: get_texts(row, "allowed_domains")?,
         track_source: get_bool(row, "track_source")?,
     }))
+}
+
+/// How many times the enrollment policy was committed, held for the open
+/// transaction: a change committed meanwhile refuses the one counting on it,
+/// so two changes never take the same revision.
+fn held_enrollment_policy_revision(tx: &Statements<'_>) -> SidResult<u64> {
+    let rows = tx.run(
+        "MATCH (p:SidEnrollmentPolicy) WHERE p.scope = $scope
+         RETURN id(p) AS node, p.revision AS revision",
+        Params::default().with("scope", scope()),
+    )?;
+    if !hold_first(tx, &rows)? {
+        return Err(SidError::Storage("enrollment policy node missing".into()));
+    }
+    u64::try_from(get_int(&rows[0], "revision")?)
+        .map_err(|e| SidError::Storage(format!("stored enrollment policy revision: {e}")))
 }
 
 /// Whether the installation is centrally managed, held for the open
@@ -522,6 +538,10 @@ impl CoordinodeBackend {
         self.read(held_enrollment_policy).await
     }
 
+    pub(super) async fn enrollment_policy_revision(&self) -> SidResult<u64> {
+        self.read(held_enrollment_policy_revision).await
+    }
+
     pub(super) async fn set_enrollment_policy(
         &self,
         policy: &EnrollmentPolicy,
@@ -539,13 +559,21 @@ impl CoordinodeBackend {
             "installation:enrollment_policy".to_owned(),
             ctx,
             move |tx| {
+                let revision = held_enrollment_policy_revision(tx)?
+                    .checked_add(1)
+                    .and_then(|next| i64::try_from(next).ok())
+                    .ok_or_else(|| {
+                        SidError::Storage("enrollment policy revision out of range".into())
+                    })?;
                 tx.run(
                     "MATCH (p:SidEnrollmentPolicy) WHERE p.scope = $scope
                  SET p.stored = true, p.mode = $mode, p.allowed_domains = $domains,
                      p.track_source = $track_source, p.invite_default_max_uses = $max_uses,
-                     p.invite_default_expiry_hours = $expiry_hours, p.updated_at = $now",
+                     p.invite_default_expiry_hours = $expiry_hours, p.revision = $revision,
+                     p.updated_at = $now",
                     Params::default()
                         .with("scope", scope())
+                        .with("revision", Value::Int(revision))
                         .with("mode", Value::String(policy.mode.as_str().into()))
                         .with("domains", texts(&policy.allowed_domains))
                         .with("track_source", Value::Bool(policy.track_source))

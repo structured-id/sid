@@ -84,7 +84,8 @@ subtle = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
-tokio-stream = "0.1.19"
+# `sync`: the public UI settings stream follows a watch channel.
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 # HTTP form of the annotated RPCs through the embedded transcoder (`http`).
 structured-proxy = { version = "8.1.4", default-features = false, optional = true }
 # The installation configuration file and the transcoder's settings.
