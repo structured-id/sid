@@ -6,6 +6,7 @@
 //! parts.
 
 pub mod account;
+pub mod account_client;
 pub mod admin;
 pub mod auth_mail;
 pub mod authorization;

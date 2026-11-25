@@ -82,6 +82,8 @@ const GUEST: &str = "guest@sid.example.com";
 const MAILBOX: &str = "guest.mail@sid.example.com";
 /// The redirect URI of the host's own single-page application.
 const REDIRECT: &str = "https://app.sid.example.com/callback";
+/// Where the host serves the installation's account pages.
+const ACCOUNT_PAGES: &str = "https://account.sid.example.com";
 /// The host application's own API, the resource its tokens are for.
 const API: &str = "https://api.sid.example.com/orders";
 
@@ -263,7 +265,8 @@ struct Served {
     history: Arc<HistoryEvaluation>,
     projects: Projects,
     machines: Machines,
-    oauth: OAuth,
+    /// Shared with the account client the host runs in this process.
+    oauth: Arc<OAuth>,
     devices: DeviceKeys,
     factors: SecondFactors,
     passkeys: Passkeys,
@@ -436,7 +439,7 @@ impl Served {
                 installation.revocation_cache.clone(),
             ),
         );
-        let oauth = OAuth::new(OAuthParts {
+        let oauth = Arc::new(OAuth::new(OAuthParts {
             storage: storage.clone(),
             oauth2: Arc::new(sid_authn::oauth2::OAuth2Server::new(jwt.clone())),
             jwt: jwt.clone(),
@@ -450,7 +453,7 @@ impl Served {
                 &SecurityPolicy::ce_default(),
             )),
             installation_url: ISSUER.to_owned(),
-        });
+        }));
         // One relying party serves second factors and passkey sign-in.
         let webauthn = Arc::new(sid_authn::webauthn::WebAuthnServer::new(
             RP_ID,
@@ -1045,6 +1048,16 @@ impl Served {
             resource: vec![API.into()],
             ..Default::default()
         };
+        self.authorized(caller, request).await
+    }
+
+    /// The authorization code `caller`'s sign-in grants for `request`, the
+    /// user approving every claim the review shows a value for.
+    async fn authorized(
+        &self,
+        caller: &Caller,
+        request: sid_proto::sid::v1::OAuth2AuthorizeRequest,
+    ) -> Result<String, Failure> {
         let (client, issuer) = self.oauth.authorize_client(&request, None).await?;
         let session = self
             .installation
@@ -1076,11 +1089,18 @@ impl Served {
                         id,
                     )
                     .await?;
+                // One choice per claim the review shows: its value where the
+                // profile has one, nothing where it has none.
                 let choices = review
                     .shown
                     .iter()
-                    .filter(|(_, value)| value.is_some())
-                    .map(|(name, _)| (name.clone(), sid_core::models::ClaimSharing::Static))
+                    .map(|(name, value)| {
+                        let sharing = match value {
+                            Some(_) => sid_core::models::ClaimSharing::Static,
+                            None => sid_core::models::ClaimSharing::None,
+                        };
+                        (name.clone(), sharing)
+                    })
                     .collect();
                 self.oauth
                     .submit_consent(
@@ -1113,6 +1133,159 @@ impl Served {
             )) => Ok(code),
             other => Err(format!("no authorization code: {other:?}").into()),
         }
+    }
+
+    /// The host's own account pages sign `caller` in through the account
+    /// client it runs in this process: the registered confidential client,
+    /// authenticating each token call with its key, over the installation's
+    /// token and revocation operations, with no listener and no transport.
+    /// The browser session it keeps is redeemed, refreshed and ended as one
+    /// served over the network is.
+    async fn account_pages_sign_in_in_process(&self, caller: &Caller) -> Result<(), Failure> {
+        use sid::account_client::{AccountClient, InstallationIssuers};
+        use sid_authn::application_session::{
+            ApplicationClient, AuthorizationAnswer, BrowserRequest, BrowserSessions, GrantOutcome,
+        };
+        const PAGES: &str = ACCOUNT_PAGES;
+        let storage = self.installation.storage.clone();
+
+        // The installation registers the account client for the host's key.
+        let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519()?;
+        let keys = sid_core::models::ClientKeySet::try_from(
+            key.public_jwks()
+                .ok_or("the client key has a public form")?,
+        )?;
+        sid_authn::system_integration::ensure_account_integration(
+            storage.as_ref(),
+            &self.installation.issuer,
+            ISSUER,
+            &sid_authn::system_integration::AccountSettings::new(PAGES, keys)?,
+        )
+        .await?;
+
+        let client = Arc::new(AccountClient::new(
+            key,
+            self.oauth.clone(),
+            storage.clone(),
+        )?);
+        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
+        let sessions = BrowserSessions::new(
+            client.clone(),
+            Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(Arc::new(
+                InstallationIssuers::new(self.installation.issuers.clone(), storage.clone()),
+            ))),
+            Arc::new(sid_authn::bff_session::BffSessionStore::new(
+                ceremonies,
+                Duration::from_secs(3600),
+                Duration::from_secs(900),
+                Duration::from_secs(300),
+            )),
+            self.installation.revocation_cache.clone(),
+            "__Host-account".to_owned(),
+        );
+
+        // The page starts a sign-in; the browser carries the authorization
+        // request to the issuer, where the signed-in user approves it.
+        let start = sessions.start_sign_in("/security").await?;
+        let asked: BTreeMap<String, String> =
+            start.authorize_url.query_pairs().into_owned().collect();
+        let field = |name: &str| asked.get(name).cloned();
+        let connection = client.connection().await?;
+        let code = self
+            .authorized(
+                caller,
+                sid_proto::sid::v1::OAuth2AuthorizeRequest {
+                    client_id: field("client_id").ok_or("client_id")?,
+                    redirect_uri: field("redirect_uri").ok_or("redirect_uri")?,
+                    response_type: field("response_type").ok_or("response_type")?,
+                    scope: field("scope"),
+                    state: field("state"),
+                    nonce: field("nonce"),
+                    code_challenge: field("code_challenge"),
+                    code_challenge_method: field("code_challenge_method"),
+                    issuer_handle: connection.issuer_handle.clone(),
+                    resource: field("resource").into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // A callback without the browser's correlation secret completes
+        // nothing; the browser that started the sign-in is signed in.
+        let answer = |code: &str| AuthorizationAnswer {
+            state: start.state.clone(),
+            code: Some(code.to_owned()),
+            error: None,
+            iss: Some(connection.issuer.clone()),
+        };
+        check(
+            sessions
+                .complete_sign_in(None, answer(&code))
+                .await
+                .is_err(),
+            "another browser's callback does not complete the account pages' sign-in",
+        )?;
+        let signed_in = sessions
+            .complete_sign_in(Some(&start.browser_secret), answer(&code))
+            .await?;
+        check(
+            signed_in.return_to == "/security",
+            "the account pages' sign-in completes in process and returns where it started",
+        )?;
+
+        /// A request of the account pages for session `id`: a read, or a
+        /// change echoing the session's CSRF token.
+        fn page<'a>(id: &str, change: Option<&'a [u8]>) -> BrowserRequest<'a> {
+            BrowserRequest {
+                session: Some(id.to_owned()),
+                origins: vec![PAGES.as_bytes()],
+                csrf: change.into_iter().collect(),
+                safe: change.is_none(),
+            }
+        }
+        let id = signed_in.session_id.as_str();
+        let session = sessions.read(&page(id, None)).await?;
+        check(
+            session.claims.sub == caller.profile_id.to_string(),
+            "the account pages' session names the signed-in user",
+        )?;
+
+        // The grant refreshes through the same client; once the client
+        // revokes it, its newest refresh token is refused.
+        let held = session
+            .refresh_token
+            .clone()
+            .ok_or("the session holds a refresh token")?;
+        let refreshed = client
+            .refresh(connection, held.expose_secret().to_owned())
+            .await?;
+        let newest = refreshed
+            .refresh_token
+            .clone()
+            .ok_or("a refresh answers with the next refresh token")?;
+        check(
+            refreshed.access_token != session.access_token.expose_secret(),
+            "the account client refreshes its grant in process",
+        )?;
+        client.revoke(connection, newest.clone()).await?;
+        check(
+            client.refresh(connection, newest).await.is_err(),
+            "a grant the account client revoked refreshes no more",
+        )?;
+
+        // Ending the session leaves nothing to read, whatever became of the
+        // grant already revoked.
+        let outcome = sessions
+            .end(&page(id, Some(session.csrf_token.as_bytes())))
+            .await?;
+        check(
+            !matches!(outcome, GrantOutcome::None),
+            "ending the account pages' session settles the grant it held",
+        )?;
+        check(
+            sessions.read(&page(id, None)).await.is_err(),
+            "an ended account pages' session reads nothing",
+        )
     }
 
     /// `client_id` redeems `code` with its PKCE `verifier`.
@@ -1346,6 +1519,7 @@ async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> 
         .filter(|w| {
             matches!(w.record.state, WorkState::Pending | WorkState::Claimed)
                 && w.record.not_before <= now
+                && !owed_to_account_pages(w)
         })
         .map(|w| format!("{} ({:?})", w.record.kind.as_str(), w.record.state))
         .collect())
@@ -1354,6 +1528,20 @@ async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> 
 /// Whether `work` is the enrollment admission of one of `operations` as the
 /// engine records it: its kind, the operation's id, the operation and its
 /// owner domain in the payload, and the due time the admission sets.
+/// Whether `work` is the logout the issuer owes this host's account pages.
+/// They have no listener here, so after their grant ended it stays owed and
+/// is retried, as for any relying party that is down; when its next attempt
+/// falls due depends on the retry schedule, not on the scenario.
+fn owed_to_account_pages(work: &sid_core::models::WorkSnapshot) -> bool {
+    let record = &work.record;
+    record.state == WorkState::Pending
+        && record.kind.as_str() == "logout.backchannel"
+        && record
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains(ACCOUNT_PAGES))
+}
+
 fn is_admission(
     work: &sid_core::models::WorkSnapshot,
     operations: &BTreeMap<uuid::Uuid, [u8; 32]>,
@@ -1400,6 +1588,7 @@ async fn ce_work_settled(
             WorkState::Pending if record.not_before > now && is_admission(&work, operations) => {
                 scheduled.insert(record.id.0);
             }
+            WorkState::Pending if owed_to_account_pages(&work) => {}
             state => {
                 return Err(format!(
                     "CE work {} ({}) stands {state:?}: {:?}",
@@ -1643,6 +1832,7 @@ async fn run<S: HostStore>() -> Result<(), Failure> {
         .password_change_replaces_sessions(&mut client, &zkpp)
         .await?;
     let (guest, guest_token) = served.password_sign_in(GUEST, PASSWORD).await?;
+    served.account_pages_sign_in_in_process(&guest).await?;
     check(
         served
             .authorization
