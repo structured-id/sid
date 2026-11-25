@@ -34,6 +34,7 @@ pub mod password_operation;
 pub mod pats;
 pub mod projects;
 pub mod provisioning;
+pub mod public_settings;
 pub mod rate_limit;
 pub mod registration;
 pub mod second_factor;

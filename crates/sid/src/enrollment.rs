@@ -278,11 +278,24 @@ fn next_page(offset: u64, limit: u64, returned: usize) -> String {
 /// The enrollment of one installation.
 pub struct Enrollment {
     storage: Arc<dyn StorageBackend>,
+    /// The public projection that follows the policy, when the host serves one.
+    public: Option<Arc<crate::public_settings::PublicSettings>>,
 }
 
 impl Enrollment {
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            public: None,
+        }
+    }
+
+    /// The same enrollment, serving `public` each policy it commits at once
+    /// rather than at that projection's next periodic read.
+    #[must_use]
+    pub fn projected_to(mut self, public: Arc<crate::public_settings::PublicSettings>) -> Self {
+        self.public = Some(public);
+        self
     }
 
     /// The policy in force, as the API reports it.
@@ -358,6 +371,12 @@ impl Enrollment {
             Err(e) => return Err(e.into()),
         }
         info!(mode = %policy.mode, "enrollment policy updated");
+        if let Some(public) = &self.public
+            && let Err(e) = public.refresh().await
+        {
+            // The policy is committed; the projection's periodic read serves it.
+            tracing::warn!("public UI settings not refreshed after the policy update: {e}");
+        }
         Ok(response)
     }
 
