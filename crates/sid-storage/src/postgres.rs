@@ -4524,6 +4524,14 @@ impl StorageBackend for PostgresBackend {
         stored_enrollment_policy(&mut conn).await
     }
 
+    async fn enrollment_policy_revision(&self) -> SidResult<u64> {
+        let stored: Option<i64> = sqlx::query_scalar(crate::ENROLLMENT_POLICY_REVISION_SQL)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("enrollment policy revision: {e}")))?;
+        crate::enrollment_policy_revision(stored)
+    }
+
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
@@ -4541,14 +4549,15 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
         sqlx::query(
             "INSERT INTO enrollment_policy (scope, mode, allowed_domains, track_source,
-                 invite_default_max_uses, invite_default_expiry_hours, updated_at)
-             VALUES ('installation', $1, $2, $3, $4, $5, NOW())
+                 invite_default_max_uses, invite_default_expiry_hours, revision, updated_at)
+             VALUES ('installation', $1, $2, $3, $4, $5, 1, NOW())
              ON CONFLICT (scope) DO UPDATE SET
                  mode = EXCLUDED.mode,
                  allowed_domains = EXCLUDED.allowed_domains,
                  track_source = EXCLUDED.track_source,
                  invite_default_max_uses = EXCLUDED.invite_default_max_uses,
                  invite_default_expiry_hours = EXCLUDED.invite_default_expiry_hours,
+                 revision = enrollment_policy.revision + 1,
                  updated_at = NOW()",
         )
         .bind(policy.mode.as_str())

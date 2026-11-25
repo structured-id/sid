@@ -916,6 +916,15 @@ pub trait StorageBackend:
     /// The installation's stored enrollment policy; `None` until one is set.
     async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>>;
 
+    /// How many times the installation's enrollment policy was committed: 0
+    /// until one is set, then one more with every
+    /// [`Self::set_enrollment_policy`] that commits, in that same
+    /// transaction. Two committed changes never share a revision, and a
+    /// change that did not commit (a refused one, a replayed command) leaves
+    /// it as it was, so a reader holding a revision knows whether the policy
+    /// it projected is still the stored one.
+    async fn enrollment_policy_revision(&self) -> Result<u64>;
+
     /// Store `policy` as the installation's enrollment policy, replacing the
     /// one stored, with its audit entry in the same transaction. A
     /// domain-restricted mode without an allowed domain is refused

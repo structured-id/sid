@@ -203,6 +203,22 @@ const ENROLLMENT_POLICY_SQL: &str = "SELECT mode, allowed_domains, track_source,
      invite_default_max_uses, invite_default_expiry_hours \
      FROM enrollment_policy WHERE scope = 'installation'";
 
+/// The revision of the installation's enrollment policy row.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+const ENROLLMENT_POLICY_REVISION_SQL: &str =
+    "SELECT revision FROM enrollment_policy WHERE scope = 'installation'";
+
+/// A stored policy revision as the contract counts it; the schema keeps it
+/// at 1 or more.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn enrollment_policy_revision(stored: Option<i64>) -> sid_core::Result<u64> {
+    stored.map_or(Ok(0), |revision| {
+        u64::try_from(revision).map_err(|e| {
+            sid_core::Error::Storage(format!("stored enrollment policy revision: {e}"))
+        })
+    })
+}
+
 /// The PostgreSQL lock a registration takes on the policy table: registrations
 /// share it, and a policy change (`LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL`)
 /// conflicts with it, so a registration committed after a change was decided

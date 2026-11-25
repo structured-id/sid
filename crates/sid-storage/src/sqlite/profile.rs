@@ -1428,6 +1428,14 @@ impl SqliteBackend {
         stored_enrollment_policy(&mut conn).await
     }
 
+    pub(crate) async fn enrollment_policy_revision_impl(&self) -> SidResult<u64> {
+        let stored: Option<i64> = sqlx::query_scalar(crate::ENROLLMENT_POLICY_REVISION_SQL)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("enrollment policy revision: {e}")))?;
+        crate::enrollment_policy_revision(stored)
+    }
+
     pub(crate) async fn set_enrollment_policy_impl(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
@@ -1438,14 +1446,15 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO enrollment_policy (scope, mode, allowed_domains, track_source,
-                 invite_default_max_uses, invite_default_expiry_hours, updated_at)
-             VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 invite_default_max_uses, invite_default_expiry_hours, revision, updated_at)
+             VALUES ('installation', ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (scope) DO UPDATE SET
                  mode = excluded.mode,
                  allowed_domains = excluded.allowed_domains,
                  track_source = excluded.track_source,
                  invite_default_max_uses = excluded.invite_default_max_uses,
                  invite_default_expiry_hours = excluded.invite_default_expiry_hours,
+                 revision = enrollment_policy.revision + 1,
                  updated_at = excluded.updated_at",
         )
         .bind(policy.mode.as_str())

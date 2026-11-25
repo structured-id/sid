@@ -1826,6 +1826,10 @@ impl StorageBackend for SqliteBackend {
         self.enrollment_policy_impl().await
     }
 
+    async fn enrollment_policy_revision(&self) -> SidResult<u64> {
+        self.enrollment_policy_revision_impl().await
+    }
+
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,

@@ -1176,6 +1176,10 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::enrollment_policy(self).await
     }
 
+    async fn enrollment_policy_revision(&self) -> Result<u64> {
+        CoordinodeBackend::enrollment_policy_revision(self).await
+    }
+
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,

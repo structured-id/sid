@@ -214,6 +214,7 @@ macro_rules! __storage_conformance {
                 test_admission_records_its_source
                 test_invite_creator_and_redemptions
                 test_enrollment_policy_stored_and_replaced
+                test_enrollment_policy_revision_counts_committed_changes
                 test_enrollment_policy_keeps_invite_range
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],login_settings:
