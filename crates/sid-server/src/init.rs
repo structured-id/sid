@@ -172,6 +172,9 @@ pub struct CeComponents {
     pub flow_config_svc: Arc<crate::grpc::flow_service::FlowConfigServiceImpl>,
     pub flow_action_svc: Arc<crate::grpc::flow_service::FlowActionServiceImpl>,
     pub enrollment_svc: Arc<crate::grpc::enrollment_service::EnrollmentServiceImpl>,
+    /// The installation's public UI settings, in memory: what the pages
+    /// follow before anyone signs in.
+    pub public_settings: Arc<sid::public_settings::PublicSettings>,
     pub security_svc: Arc<crate::grpc::security_service::SecurityServiceImpl>,
     pub account_svc: Arc<crate::grpc::account_service::AccountServiceImpl>,
     pub upstream_svc: Arc<crate::grpc::upstream_service::UpstreamServiceImpl>,
@@ -1076,6 +1079,20 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         None => auth_svc,
     };
     let resets = password_resets(mailed_pages.as_ref(), &storage, &key_manager);
+    // What the pages follow before anyone signs in: read once here, then
+    // kept current by the policy's own commits and a periodic read.
+    let public_settings = sid::public_settings::PublicSettings::open(
+        storage.clone(),
+        sid::public_settings::Served {
+            password_reset: resets.is_some(),
+        },
+    )
+    .await
+    .context("the installation's public UI settings")?;
+    tokio::spawn(sid::public_settings::follow_while_held(
+        Arc::downgrade(&public_settings),
+        sid::public_settings::DEFAULT_FOLLOW_INTERVAL,
+    ));
     let (auth_svc, reset_mail) = match resets {
         Some((resets, mail)) => (auth_svc.with_password_resets(resets), Some(mail)),
         None => (auth_svc, None),
@@ -1216,7 +1233,8 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             jwt.clone(),
             revocation_cache.clone(),
         )
-        .with_invite_services(invite_services),
+        .with_invite_services(invite_services)
+        .projected_to(public_settings.clone()),
     );
     let security_svc = Arc::new(crate::grpc::security_service::SecurityServiceImpl::new(
         storage.clone(),
@@ -1293,6 +1311,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         flow_config_svc,
         flow_action_svc,
         enrollment_svc,
+        public_settings,
         security_svc,
         account_svc,
         upstream_svc,

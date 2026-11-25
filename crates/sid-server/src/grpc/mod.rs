@@ -30,6 +30,7 @@ pub mod pat_service;
 pub mod project_service;
 #[cfg(feature = "scim")]
 pub mod provisioning_service;
+pub mod public_ui_settings_service;
 pub mod realm_service;
 pub mod security_service;
 pub mod system_integration_service;

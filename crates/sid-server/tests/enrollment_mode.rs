@@ -540,3 +540,61 @@ async fn new_invites_take_the_stored_defaults() {
     .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+/// The public UI settings follow the stored mode: the policy an
+/// administrator commits is what the pages read next, with no restart and no
+/// wait for the periodic read; a new subscriber starts with the current
+/// projection and then receives the next one.
+/// Bug prevented: the registration link shown under a mode that admits no
+/// visitor, because the projection was never told of the change.
+#[tokio::test]
+async fn public_settings_follow_the_stored_mode() {
+    use sid::public_settings::{PublicSettings, Served};
+    use sid_proto::sid::v1::ui::public_ui_settings_service_server::PublicUiSettingsService;
+    use sid_server::grpc::public_ui_settings_service::PublicUiSettingsServiceImpl;
+    use tokio_stream::StreamExt;
+
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let public = PublicSettings::open(
+        svc.storage.clone(),
+        Served {
+            password_reset: false,
+        },
+    )
+    .await
+    .unwrap();
+    let service = enrollment(&svc).projected_to(public.clone());
+    let pages = PublicUiSettingsServiceImpl::new(public);
+    let read = || async {
+        pages
+            .get_public_ui_settings(Request::new(()))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+
+    update(&svc, &service, &admin, policy(ProtoMode::Open, &[]))
+        .await
+        .unwrap();
+    let open = read().await;
+    assert!(open.registration_open);
+    assert_eq!(open.sign_in_methods, ["opaque", "webauthn"]);
+    // This composition serves no reset mail.
+    assert!(!open.password_reset_open);
+
+    let mut watched = pages
+        .watch_public_ui_settings(Request::new(()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(watched.next().await.unwrap().unwrap(), open);
+
+    update(&svc, &service, &admin, policy(ProtoMode::InviteOnly, &[]))
+        .await
+        .unwrap();
+    let closed = read().await;
+    assert!(!closed.registration_open);
+    assert!(closed.revision > open.revision);
+    assert_eq!(watched.next().await.unwrap().unwrap(), closed);
+}

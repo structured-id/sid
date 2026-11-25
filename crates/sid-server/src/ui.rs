@@ -199,11 +199,14 @@ pub async fn start(c: &CeComponents, prepared: Prepared) -> anyhow::Result<Start
         )
     });
 
-    let account = UiBundle::new(
+    // The account pages follow the installation's public settings: served
+    // with their configuration, in process, from the engine's projection.
+    let (account, settings) = UiBundle::live(
         &prepared.account_dir,
         ACCOUNT_MOUNT,
         &bundle_config(serde_json::json!({})),
     )?;
+    serve_settings(settings, c.public_settings.subscribe())?;
     let account: Arc<dyn ExtraRouteHandler> = Arc::new(AccountPages {
         bundle: sid_ui_host::router(account),
     });
@@ -225,6 +228,39 @@ pub async fn start(c: &CeComponents, prepared: Prepared) -> anyhow::Result<Start
         adapter: sessions,
         account_api,
     })
+}
+
+/// Serve `projections` through `sink`: the current one before this returns,
+/// so the bundle's configuration is complete from its first request, and
+/// each newer one as the engine commits it, until the bundle is gone or the
+/// engine's settings are.
+fn serve_settings(
+    sink: sid_ui_host::SettingsSink,
+    mut projections: tokio::sync::watch::Receiver<sid_proto::sid::v1::ui::PublicUiSettings>,
+) -> anyhow::Result<()> {
+    let current = projections.borrow_and_update().clone();
+    sink.stream()
+        .apply(&current)
+        .map_err(|e| anyhow::anyhow!("the installation's public UI settings: {e}"))?;
+    tokio::spawn(async move {
+        // A new stream: the projection applied above is its starting point.
+        let mut stream = sink.stream();
+        let mut served = current.revision;
+        while projections.changed().await.is_ok() {
+            if sink.is_closed() {
+                return;
+            }
+            let next = projections.borrow_and_update().clone();
+            if next.revision <= served {
+                continue;
+            }
+            match stream.apply(&next) {
+                Ok(()) => served = next.revision,
+                Err(e) => tracing::warn!("public UI settings not served to the pages: {e}"),
+            }
+        }
+    });
+    Ok(())
 }
 
 /// The account pages: the bundle, and the adapter's sign-in start sent to

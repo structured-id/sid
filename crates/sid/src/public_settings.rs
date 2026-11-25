@@ -156,6 +156,23 @@ impl PublicSettings {
     }
 }
 
+/// [`PublicSettings::follow`] for a host without a stop signal of its own:
+/// refreshes `settings` every `every` for as long as anything else holds
+/// them, and ends once the last holder dropped them.
+pub async fn follow_while_held(settings: std::sync::Weak<PublicSettings>, every: Duration) {
+    let mut turns = tokio::time::interval(every);
+    turns.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        turns.tick().await;
+        let Some(held) = settings.upgrade() else {
+            return;
+        };
+        if let Err(e) = held.refresh().await {
+            tracing::warn!("public UI settings not refreshed: {e}");
+        }
+    }
+}
+
 /// The stored policy with the revision it was stored at: read again when a
 /// change lands between the two reads. `None` when it kept changing.
 async fn stored(
