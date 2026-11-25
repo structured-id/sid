@@ -203,11 +203,13 @@ impl Connection {
 /// sign-in for the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SignInChoice {
-    /// The issuer's ordinary sign-in for the client.
+    /// The issuer's ordinary sign-in for the client: its own ceremony, or
+    /// the authority it trusts, as its installation decides.
     #[default]
     Ordinary,
-    /// The issuer's own ceremony, with a login the issuer assigned.
-    Local,
+    /// The sign-in through the authority the issuer trusts, for a user who
+    /// holds an account there and no login the issuer assigned.
+    Authority,
 }
 
 impl SignInChoice {
@@ -216,7 +218,7 @@ impl SignInChoice {
     pub fn parameter(self) -> Option<&'static str> {
         match self {
             Self::Ordinary => None,
-            Self::Local => Some("SIGN_IN_ENTRY_LOCAL"),
+            Self::Authority => Some("SIGN_IN_ENTRY_AUTHORITY"),
         }
     }
 }

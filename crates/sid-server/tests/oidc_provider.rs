@@ -3409,24 +3409,24 @@ impl SignInPage for Unanswered {
     }
 }
 
-/// Where the ordinary sign-in of [`TwoEntries`] continues: another
-/// authority's entry, no page of the issuer's UI.
-const ORDINARY_ENTRY: &str = "https://sid.example.com/auth/federation/start";
-/// The issuer's own ceremony of [`TwoEntries`].
-const LOCAL_CEREMONY: &str = "https://login.sid.example.com/sign-in?route=%2Fi%2Fown";
+/// The issuer's own ceremony of [`TwoEntries`]: its ordinary sign-in.
+const OWN_CEREMONY: &str = "https://login.sid.example.com/sign-in?route=%2Fi%2Fown";
+/// Where a sign-in of [`TwoEntries`] through its trusted authority starts:
+/// that authority's entry, no page of the issuer's UI.
+const AUTHORITY_ENTRY: &str = "https://sid.example.com/auth/federation/start";
 /// The issuer's consent page of [`TwoEntries`], on its own UI.
 const OWN_CONSENT: &str = "https://login.sid.example.com/consent?route=%2Fi%2Fown";
 
-/// An issuer whose ordinary sign-in continues at another authority and which
-/// opens its own ceremony for a request whose user chose it.
+/// An issuer whose ordinary sign-in is its own ceremony and which continues
+/// at the authority it trusts for a request whose user chose that.
 struct TwoEntries;
 
 #[tonic::async_trait]
 impl SignInPage for TwoEntries {
     async fn sign_in_page(&self, chosen: SignInChoice) -> Result<Option<url::Url>, tonic::Status> {
         let page = match chosen {
-            SignInChoice::Ordinary => ORDINARY_ENTRY,
-            SignInChoice::Local => LOCAL_CEREMONY,
+            SignInChoice::Ordinary => OWN_CEREMONY,
+            SignInChoice::Authority => AUTHORITY_ENTRY,
         };
         Ok(Some(url::Url::parse(page).unwrap()))
     }
@@ -3443,12 +3443,13 @@ async fn anonymous_at_two_entries() -> Browser {
     browser
 }
 
-/// The request's own choice decides where it signs in: one whose user chose
-/// the issuer's own sign-in reaches that ceremony, one without the choice
-/// reaches the ordinary entry, and a value the issuer does not know states
-/// no choice. Both keep the same request for their return.
+/// The request's own choice decides where it signs in: one without a choice
+/// reaches the issuer's own ceremony, one whose user chose the trusted
+/// authority reaches that authority's entry, and a value the issuer does not
+/// know states no choice. Both keep the same request for their return.
 /// Bug prevented: an issuer with two sign-ins showing one page that offers
-/// both to every request, whatever its user chose in the application.
+/// both to every request, whatever its user chose in the application; and an
+/// application that cannot be entered while the authority is unavailable.
 #[tokio::test]
 async fn a_request_signs_in_where_its_user_chose() {
     let browser = anonymous_at_two_entries().await;
@@ -3462,21 +3463,22 @@ async fn a_request_signs_in_where_its_user_chose() {
             .send()
     };
 
-    let ordinary = redirect_query(&ask(None).await.unwrap(), ORDINARY_ENTRY);
-    browser.continuation(&ordinary["rd"]);
-
-    let local = ask(Some("SIGN_IN_ENTRY_LOCAL")).await.unwrap();
-    let query = redirect_query(&local, "https://login.sid.example.com/sign-in?");
+    let ordinary = ask(None).await.unwrap();
+    let query = redirect_query(&ordinary, "https://login.sid.example.com/sign-in?");
     assert_eq!(query["route"], "/i/own");
     browser.continuation(&query["rd"]);
 
+    let through_authority = ask(Some("SIGN_IN_ENTRY_AUTHORITY")).await.unwrap();
+    let query = redirect_query(&through_authority, AUTHORITY_ENTRY);
+    browser.continuation(&query["rd"]);
+
     let unknown = ask(Some("SIGN_IN_ENTRY_UNSPECIFIED")).await.unwrap();
-    redirect_query(&unknown, ORDINARY_ENTRY);
+    redirect_query(&unknown, "https://login.sid.example.com/sign-in?");
 }
 
 /// The choice is the one the request arrived with: a request kept without it
 /// and continued with the choice added to its continuation still signs in at
-/// the ordinary entry, and one kept with it keeps it.
+/// the issuer's own ceremony, and one kept with it keeps it.
 /// Bug prevented: a browser adding the parameter on return to turn a kept
 /// request into one for another sign-in.
 #[tokio::test]
@@ -3487,24 +3489,24 @@ async fn a_kept_requests_choice_is_not_replaced_on_return() {
         .post_cross_site(&authorize_query(REDIRECT_URI))
         .await;
     let anonymous = |url: String| no_redirects().get(url).send();
-    let altered = format!("{kept}&sign_in=SIGN_IN_ENTRY_LOCAL");
-    redirect_query(&anonymous(altered).await.unwrap(), ORDINARY_ENTRY);
-
-    let mut chosen = authorize_query(REDIRECT_URI);
-    chosen.push(("sign_in", "SIGN_IN_ENTRY_LOCAL".into()));
-    let kept = browser.post_cross_site(&chosen).await;
+    let altered = format!("{kept}&sign_in=SIGN_IN_ENTRY_AUTHORITY");
     redirect_query(
-        &anonymous(kept).await.unwrap(),
+        &anonymous(altered).await.unwrap(),
         "https://login.sid.example.com/sign-in?",
     );
+
+    let mut chosen = authorize_query(REDIRECT_URI);
+    chosen.push(("sign_in", "SIGN_IN_ENTRY_AUTHORITY".into()));
+    let kept = browser.post_cross_site(&chosen).await;
+    redirect_query(&anonymous(kept).await.unwrap(), AUTHORITY_ENTRY);
 }
 
 /// The review of a request goes to the issuer's consent page on its own UI,
 /// whichever sign-in the request chose: never to an address derived from
 /// where sign-in starts.
-/// Bug prevented: an issuer whose ordinary sign-in is another authority's
-/// entry sending the review to a `consent` sibling of that entry, which is
-/// no page.
+/// Bug prevented: a request that signs in at another authority's entry
+/// having its review sent to a `consent` sibling of that entry, which is no
+/// page.
 #[tokio::test]
 async fn the_review_goes_to_the_issuers_consent_page_whatever_the_entry() {
     let browser = browser_from(
@@ -3513,7 +3515,7 @@ async fn the_review_goes_to_the_issuers_consent_page_whatever_the_entry() {
         common::test_client(),
     )
     .await;
-    for chosen in [None, Some("SIGN_IN_ENTRY_LOCAL")] {
+    for chosen in [None, Some("SIGN_IN_ENTRY_AUTHORITY")] {
         let mut query = authorize_query(REDIRECT_URI);
         if let Some(value) = chosen {
             query.push(("sign_in", value.into()));

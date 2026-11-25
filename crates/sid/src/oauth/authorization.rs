@@ -143,7 +143,7 @@ pub use sid_authn::relying_party::SignInChoice;
 /// know states none.
 pub fn requested_sign_in(sign_in: Option<i32>) -> SignInChoice {
     match sign_in.map(SignInEntry::try_from) {
-        Some(Ok(SignInEntry::Local)) => SignInChoice::Local,
+        Some(Ok(SignInEntry::Authority)) => SignInChoice::Authority,
         _ => SignInChoice::Ordinary,
     }
 }
@@ -152,7 +152,7 @@ pub fn requested_sign_in(sign_in: Option<i32>) -> SignInChoice {
 fn wire_sign_in(choice: SignInChoice) -> Option<i32> {
     match choice {
         SignInChoice::Ordinary => None,
-        SignInChoice::Local => Some(SignInEntry::Local as i32),
+        SignInChoice::Authority => Some(SignInEntry::Authority as i32),
     }
 }
 

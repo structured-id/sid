@@ -340,8 +340,8 @@ async fn sign_in_redirects_to_the_issuer() {
 /// The sign-in the page chose reaches the issuer in the authorization
 /// request this adapter makes, and a value the adapter does not know is
 /// passed on as no choice.
-/// Bug prevented: an application offering the issuer's own sign-in whose
-/// choice never leaves the application.
+/// Bug prevented: an application offering the sign-in through the issuer's
+/// trusted authority whose choice never leaves the application.
 #[tokio::test]
 async fn the_pages_chosen_sign_in_reaches_the_issuer() {
     let f = fixture(memory(), true);
@@ -371,8 +371,10 @@ async fn the_pages_chosen_sign_in_reaches_the_issuer() {
         }
     };
     assert_eq!(
-        sign_in_of(Some(SignInEntry::Local as i32)).await.as_deref(),
-        Some("SIGN_IN_ENTRY_LOCAL")
+        sign_in_of(Some(SignInEntry::Authority as i32))
+            .await
+            .as_deref(),
+        Some("SIGN_IN_ENTRY_AUTHORITY")
     );
     assert_eq!(sign_in_of(None).await, None);
     assert_eq!(sign_in_of(Some(99)).await, None);
