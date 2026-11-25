@@ -1519,6 +1519,7 @@ async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> 
         .filter(|w| {
             matches!(w.record.state, WorkState::Pending | WorkState::Claimed)
                 && w.record.not_before <= now
+                && !owed_to_account_pages(w)
         })
         .map(|w| format!("{} ({:?})", w.record.kind.as_str(), w.record.state))
         .collect())
@@ -1527,6 +1528,20 @@ async fn due_work(storage: &dyn StorageBackend) -> Result<Vec<String>, Failure> 
 /// Whether `work` is the enrollment admission of one of `operations` as the
 /// engine records it: its kind, the operation's id, the operation and its
 /// owner domain in the payload, and the due time the admission sets.
+/// Whether `work` is the logout the issuer owes this host's account pages.
+/// They have no listener here, so after their grant ended it stays owed and
+/// is retried, as for any relying party that is down; when its next attempt
+/// falls due depends on the retry schedule, not on the scenario.
+fn owed_to_account_pages(work: &sid_core::models::WorkSnapshot) -> bool {
+    let record = &work.record;
+    record.state == WorkState::Pending
+        && record.kind.as_str() == "logout.backchannel"
+        && record
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains(ACCOUNT_PAGES))
+}
+
 fn is_admission(
     work: &sid_core::models::WorkSnapshot,
     operations: &BTreeMap<uuid::Uuid, [u8; 32]>,
@@ -1573,15 +1588,7 @@ async fn ce_work_settled(
             WorkState::Pending if record.not_before > now && is_admission(&work, operations) => {
                 scheduled.insert(record.id.0);
             }
-            // The account pages of this host have no listener: the logout
-            // the issuer owes them after their grant ended stays owed and is
-            // retried, as for any relying party that is down.
-            WorkState::Pending
-                if record.kind.as_str() == "logout.backchannel"
-                    && record
-                        .last_error
-                        .as_deref()
-                        .is_some_and(|e| e.contains(ACCOUNT_PAGES)) => {}
+            WorkState::Pending if owed_to_account_pages(&work) => {}
             state => {
                 return Err(format!(
                     "CE work {} ({}) stands {state:?}: {:?}",
