@@ -137,7 +137,33 @@ fn projection(settings: &PublicUiSettings) -> Result<Value, SettingsRejected> {
         "signInPrincipalTypes".into(),
         type_names(&settings.sign_in_principal_types).into(),
     );
+    object.insert(
+        "signInMethods".into(),
+        method_names(&settings.sign_in_methods).into(),
+    );
+    object.insert(
+        "passwordResetOpen".into(),
+        settings.password_reset_open.into(),
+    );
     Ok(Value::Object(object))
+}
+
+/// The local sign-in methods a page renders before an identifier is typed.
+fn method_names(methods: &[String]) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for method in methods {
+        let name = match method.as_str() {
+            "opaque" => "opaque",
+            "webauthn" => "webauthn",
+            // No page renders another method before an identifier is typed;
+            // an unknown name is newer than this host.
+            _ => continue,
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn type_names(types: &[i32]) -> Vec<&'static str> {
