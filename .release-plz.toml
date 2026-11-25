@@ -10,6 +10,13 @@ publish = false
 release = false
 semver_check = false
 changelog_update = false
+# The edition's crates are on no registry: what a crate released last is read
+# from the server's v{{ version }} tag, which the crates sharing the workspace
+# version have in common. Only the server creates that tag and its release.
+git_only = true
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
 pr_name = "chore: release"
 pr_branch_prefix = "release-plz-"
 # Publish only when the release PR is merged, not on every push.
@@ -56,10 +63,104 @@ changelog_include = [
   "structured-id",
 ]
 
+# The edition's library crates. They are processed so that a commit touching
+# only one of them is found: release-plz gathers the commits a package
+# includes (changelog_include above) from processed packages alone. None of
+# them is published, tagged or released on its own.
+[[package]]
+name = "sid-admin"
+release = true
+
+[[package]]
+name = "sid-attestation"
+release = true
+
+[[package]]
+name = "sid-auth"
+release = true
+
+[[package]]
+name = "sid-auth-proxy"
+release = true
+
+[[package]]
+name = "sid-authn"
+release = true
+
+[[package]]
+name = "sid-authz"
+release = true
+
+[[package]]
+name = "sid-core"
+release = true
+
+[[package]]
+name = "sid-fed"
+release = true
+
+[[package]]
+name = "sid-i18n"
+release = true
+
+[[package]]
+name = "sid-infra"
+release = true
+
+[[package]]
+name = "sid-keys"
+release = true
+
+[[package]]
+name = "sid-migrate"
+release = true
+
+[[package]]
+name = "sid-notify"
+release = true
+
+[[package]]
+name = "sid-org-crypto"
+release = true
+
+[[package]]
+name = "sid-plugin"
+release = true
+
+[[package]]
+name = "sid-proto"
+release = true
+
+[[package]]
+name = "sid-proto-build"
+release = true
+
+[[package]]
+name = "sid-scim"
+release = true
+
+[[package]]
+name = "sid-serve"
+release = true
+
+[[package]]
+name = "sid-storage"
+release = true
+
+[[package]]
+name = "sid-ui-host"
+release = true
+
+[[package]]
+name = "structured-id"
+release = true
+
 [[package]]
 name = "sid-crypto"
 release = true
 publish = true
+# On crates.io: its released state is the registry's, not a git tag.
+git_only = false
 semver_check = true
 changelog_update = true
 changelog_path = "crates/sid-crypto/CHANGELOG.md"
@@ -74,6 +175,7 @@ git_release_name = "{{ package }} v{{ version }}"
 name = "sid-voprf"
 release = true
 publish = true
+git_only = false
 semver_check = true
 changelog_update = true
 changelog_path = "crates/sid-voprf/CHANGELOG.md"
@@ -86,6 +188,7 @@ git_release_name = "{{ package }} v{{ version }}"
 name = "sid-opaque-ke"
 release = true
 publish = true
+git_only = false
 semver_check = true
 changelog_update = true
 changelog_path = "crates/sid-opaque-ke/CHANGELOG.md"
