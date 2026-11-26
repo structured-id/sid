@@ -187,6 +187,13 @@ try {
     () => compose("logs", "sid").match(/sidclaim_[A-Za-z0-9_-]+/)?.[0],
     60,
   );
+  // README, step 2: a password is registered once the installation has
+  // prepared the keys it checks passwords with on its first start.
+  await until(
+    "the password keys in the installation's log",
+    () => (compose("logs", "sid").includes("ZKPP verifying keys ready") ? true : undefined),
+    300,
+  );
 
   browser = await chromium.launch({
     executablePath: process.env.CHROME_PATH || undefined,

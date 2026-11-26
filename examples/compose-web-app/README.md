@@ -49,8 +49,11 @@ docker compose logs sid
 ```
 
 Find the line "No administrator yet" and copy the token that starts with
-`sidclaim_`. Open <http://localhost:8080/account/register>, enter the token,
-a login and a password, and create the account.
+`sidclaim_`. On its first start the installation also prepares the keys it
+checks passwords with, which takes some seconds; the line "ZKPP verifying
+keys ready" in the same log says it has. Then open
+<http://localhost:8080/account/register>, enter the token, a login and a
+password, and create the account.
 
 Expected result: you are signed in to your account, and that account
 administers the installation.
@@ -157,6 +160,7 @@ complete.
 
 | What you see | Cause | Correction |
 |---|---|---|
+| Creating the account in step 2 does not complete right after the first start | The installation is still preparing the keys it checks passwords with | Wait for "ZKPP verifying keys ready" in `docker compose logs sid`, then create the account again |
 | The installation answers `invalid_target` | The application has access to no resource, or no default target | On the application's page in the console open **Access**, add **OIDC UserInfo** with `openid`, press **Make default**. Sign in again |
 | The log says `invalid_client: authentication failed` | The client secret in `.env` is not this client's, or the library sends it in the request body | Check `SID_CLIENT_ID` and `SID_CLIENT_SECRET`; keep `oidc.ClientSecretBasic` in `snippet:discovery`. Then `docker compose up -d app` |
 | The installation refuses the redirect URI | The callback the application sends differs from the registered one | Make the registered redirect URI equal to `APP_URL` followed by `/callback`, to the character |
