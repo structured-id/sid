@@ -155,7 +155,7 @@ structured-email-address = { version = "0.0.22", default-features = false, featu
 cedar-policy = { version = "4", default-features = false, features = ["ipaddr", "decimal"] }
 
 # NATS JetStream (event bus)
-async-nats = "0.52"
+async-nats = "0.53"
 futures = "0.3"
 hex = "0.4"
 fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub", "i-scripts"] }
