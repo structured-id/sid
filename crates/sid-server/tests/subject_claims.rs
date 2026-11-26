@@ -74,6 +74,76 @@ async fn subjects(client: OAuth2Client, profile: &Profile) -> Vec<String> {
     subjects
 }
 
+/// The account an application keeps for the user of an ID token: the pair
+/// (issuer, subject), as OIDC Core 5.7 has it keyed.
+async fn account(svc: &TestServices, profile: &Profile) -> (String, String) {
+    let code = authorize_code(svc, profile).await;
+    let issued = svc
+        .auth
+        .o_auth2_token(code_exchange(svc, &code))
+        .await
+        .unwrap()
+        .into_inner();
+    let claims = claims(&issued.id_token.expect("id_token for the openid scope"));
+    (
+        claims["iss"].as_str().expect("iss").to_string(),
+        claims["sub"].as_str().expect("sub").to_string(),
+    )
+}
+
+/// Moving the address browsers sign in at changes neither the issuer nor the
+/// subject: an application that keyed its account by (issuer, subject) finds
+/// the same record at the user's next sign-in, with no migration. Bug
+/// prevented: an issuer identity that follows the installation's current
+/// sign-in address, so every application loses its accounts when an
+/// administrator moves that address.
+#[tokio::test]
+async fn a_moved_sign_in_address_keeps_the_applications_account() {
+    use sid_proto::sid::v1::admin::UpdateInstallationAddressesRequest;
+    use sid_proto::sid::v1::admin::realm_service_server::RealmService;
+
+    let profile = test_profile();
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_client(test_client())
+            .with_profile(profile.clone()),
+    );
+    let before = account(&svc, &profile).await;
+    assert_eq!(before.0, svc.issuer.canonical_url);
+    // The application's own store of accounts.
+    let accounts = std::collections::HashMap::from([(before.clone(), "the user's record")]);
+
+    let realm = sid_server::grpc::realm_service::RealmServiceImpl::new(
+        svc.mock_storage.clone(),
+        common::test_jwt(),
+        common::test_revocation(),
+        common::test_key_manager(),
+        common::test_web_settings(svc.mock_storage.clone()),
+    );
+    let mut moving = Request::new(UpdateInstallationAddressesRequest {
+        public_url: Some("https://login.example.com/".to_string()),
+        console_url: None,
+    });
+    let administrator =
+        common::issue_admin_token(&common::test_jwt(), sid_core::models::ProfileId::generate());
+    moving.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {administrator}").parse().unwrap(),
+    );
+    common::name_new_command(moving.metadata_mut());
+    let moved = realm
+        .update_installation_addresses(moving)
+        .await
+        .expect("the address moves")
+        .into_inner();
+    assert_eq!(moved.public_url, "https://login.example.com/");
+    assert!(moved.public_url_overridden);
+
+    let after = account(&svc, &profile).await;
+    assert_eq!(after, before, "the issuer and subject after the move");
+    assert_eq!(accounts.get(&after), Some(&"the user's record"));
+}
+
 /// A local Profile at an application of the installation's own organization
 /// gets its local ProfileId in every token of the code exchange and refresh.
 #[tokio::test]

@@ -160,10 +160,6 @@ futures = "0.3"
 hex = "0.4"
 fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub", "i-scripts"] }
 
-# VOPRF / CipherSuite adapter (Pallas).
-# `danger` exposes `derive_key`, which the key-exchange group needs to derive
-# its key pair the way the built-in curves do.
-sid-voprf = { version = "0.6", features = ["danger"] }
 sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
