@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.52](https://github.com/structured-id/sid/compare/v0.2.51...v0.2.52) - 2026-11-26
+
+### Added
+
+- *(ui)* console chooses the session domain ([#821](https://github.com/structured-id/sid/pull/821))
+
+### Other
+
+- *(oidc)* account survives a moved sign-in address ([#818](https://github.com/structured-id/sid/pull/818))
+
 ## [0.2.51](https://github.com/structured-id/sid/compare/v0.2.50...v0.2.51) - 2026-11-26
 
 ### Added
