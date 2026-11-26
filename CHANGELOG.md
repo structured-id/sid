@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.51](https://github.com/structured-id/sid/compare/v0.2.50...v0.2.51) - 2026-11-26
+
+### Added
+
+- *(ui)* account pages add a passkey ([#815](https://github.com/structured-id/sid/pull/815))
+
 ## [0.2.50](https://github.com/structured-id/sid/compare/v0.2.49...v0.2.50) - 2026-11-26
 
 ### Fixed
