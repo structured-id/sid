@@ -4,10 +4,13 @@
 // read a note as its owner, as the other account and with no session.
 //
 // Run from this directory: `npm ci`, `npx playwright install chromium`,
-// `node walk.ts`. It starts the Compose project of the parent directory and
-// removes it, with its volume, when it ends. An `.env` already present in
-// the parent directory is somebody's connection: the walk refuses to start
-// rather than overwrite it.
+// `node walk.ts`. It starts the parent directory's Compose file as a project
+// of its own and removes that project, with its volume, when it ends: a
+// reader's installation started from the same directory is another project,
+// whose containers and data volume the walk never touches (its published
+// ports then make the walk fail to start, which removes nothing of it). An
+// `.env` already present in the parent directory is somebody's connection:
+// the walk refuses to start rather than overwrite it.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -20,8 +23,11 @@ const envFile = resolve(recipe, ".env");
 const SID = "http://localhost:8080";
 const APP = "http://localhost:3000";
 
+/** The walk's own Compose project: never the one a reader's `docker compose up` made. */
+const PROJECT = "compose-web-app-walk";
+
 const compose = (...args: string[]) =>
-  execFileSync("docker", ["compose", ...args], {
+  execFileSync("docker", ["compose", "--project-name", PROJECT, ...args], {
     cwd: recipe,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],

@@ -35,7 +35,9 @@ const ISSUER = new URL(required("SID_ISSUER"));
 const CLIENT_ID = required("SID_CLIENT_ID");
 const CLIENT_SECRET = required("SID_CLIENT_SECRET");
 const APP_URL = new URL(required("APP_URL"));
-const PORT = Number(process.env.PORT ?? APP_URL.port ?? 3000);
+// An address on its scheme's default port has an empty port, not an absent
+// one: empty values fall through to the next choice.
+const PORT = Number(process.env.PORT || APP_URL.port || 3000);
 /** The one callback registered for the client, to the character. */
 const CALLBACK = new URL("/callback", APP_URL).toString();
 // end:configuration
@@ -67,6 +69,8 @@ interface Session {
   account: Account;
   /** Sent back by every form of this session; a request without it is refused. */
   csrf: string;
+  /** After this moment the server no longer accepts the session. */
+  expiresAt: number;
 }
 interface PendingSignIn {
   state: string;
@@ -89,6 +93,7 @@ const SESSION_COOKIE = "notes_session";
 /** Ties a started sign-in to the browser that started it. */
 const SIGN_IN_COOKIE = "notes_sign_in";
 const SIGN_IN_LIFETIME_MS = 10 * 60 * 1000;
+const SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 const MAX_FORM_BYTES = 16 * 1024;
 
 const token = () => randomBytes(32).toString("base64url");
@@ -107,9 +112,20 @@ function setCookie(name: string, value: string, maxAgeSeconds: number): string {
   return `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
+/**
+ * The request's session while the server still accepts it. The cookie's
+ * `Max-Age` only tells a browser when to forget the cookie; a copied cookie
+ * is refused here, by the lifetime the server recorded.
+ */
 function sessionOf(request: IncomingMessage): Session | undefined {
   const id = cookies(request).get(SESSION_COOKIE);
-  return id ? sessions.get(id) : undefined;
+  const session = id ? sessions.get(id) : undefined;
+  if (!id || !session) return undefined;
+  if (Date.now() >= session.expiresAt) {
+    sessions.delete(id);
+    return undefined;
+  }
+  return session;
 }
 
 function sameText(a: string, b: string): boolean {
@@ -243,9 +259,10 @@ async function finishSignIn(
   sessions.set(id, {
     account: accountOf(subject.iss, subject.sub),
     csrf: token(),
+    expiresAt: Date.now() + SESSION_LIFETIME_MS,
   });
   redirect(response, "/", [
-    setCookie(SESSION_COOKIE, id, 8 * 60 * 60),
+    setCookie(SESSION_COOKIE, id, SESSION_LIFETIME_MS / 1000),
     setCookie(SIGN_IN_COOKIE, "", 0),
   ]);
 }
