@@ -90,7 +90,9 @@ async fn test_config_is_served_for_revalidation() {
         Some("application/json")
     );
     let tag = header_of(&response, header::ETAG).expect("an ETag");
-    assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+    // A weak tag: a proxy that compresses the body on the way drops a strong
+    // one, and the browser then never revalidates.
+    assert!(tag.starts_with("W/\"") && tag.ends_with('"'), "{tag}");
     assert_eq!(body(response).await.as_bytes(), CONFIG);
 }
 
@@ -103,10 +105,12 @@ async fn test_unchanged_config_is_not_modified() {
     let app = app("configetag");
     let (_, first) = get_path(&app, Method::GET, "/account/config.json").await;
     let tag = header_of(&first, header::ETAG).expect("an ETag");
+    let opaque = tag.strip_prefix("W/").expect("a weak tag");
     for tags in [
         tag.clone(),
         format!("\"other\", {tag}"),
-        format!("W/{tag}"),
+        // The strong form of the same tag, as a proxy or client may send it.
+        opaque.to_owned(),
         "*".to_owned(),
     ] {
         let response = get_if_none_match(&app, "/account/config.json", &tags).await;
