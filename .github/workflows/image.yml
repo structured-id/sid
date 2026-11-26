@@ -70,21 +70,25 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      # No redirect is followed and only the publication's JSON is taken. A
-      # platform that does not publish its set yet gives an image that carries
-      # none (an empty file): it serves local sign-in and verifies no
-      # federated identity until its platform publishes, then the server
-      # fetches the set itself. An unreachable platform still stops the build.
+      # No redirect is followed and only the publication's JSON is taken: a
+      # 200 answer of type application/json. Anything else (a platform that
+      # does not publish its set yet, an error answer, no answer) gives an
+      # image that carries none (an empty file), with a warning that names
+      # what was answered: it serves local sign-in and verifies no federated
+      # identity until its platform publishes, then the server fetches the
+      # set itself. A release that must carry the set is made again.
       - name: Platform CA set
         if: steps.scope.outputs.run == 'true' && env.SID_BUILD_PLATFORM != ''
         run: |
-          type="$(curl --fail --silent --show-error --max-time 30 \
-            --output "$SID_BUILD_PLATFORM_CAS" --write-out '%{content_type}' \
-            "$SID_BUILD_PLATFORM/.well-known/sid-ca/index.json")"
-          case "$type" in
-            application/json*) ;;
+          if ! answered="$(curl --silent --show-error --max-time 30 \
+            --output "$SID_BUILD_PLATFORM_CAS" --write-out '%{http_code} %{content_type}' \
+            "$SID_BUILD_PLATFORM/.well-known/sid-ca/index.json")"; then
+            answered="no answer"
+          fi
+          case "$answered" in
+            "200 application/json"*) ;;
             *)
-              echo "::warning::$SID_BUILD_PLATFORM publishes no platform CA set yet (answered $type): the image carries none"
+              echo "::warning::$SID_BUILD_PLATFORM gave no platform CA set (answered: $answered): the image carries none"
               : > "$SID_BUILD_PLATFORM_CAS"
               ;;
           esac

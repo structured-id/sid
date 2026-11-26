@@ -249,10 +249,8 @@ sid-pake-core = { path = "zkpp/crates/sid-pake-core", version = "0.1" }
 sid-crypto = { path = "crates/sid-crypto", version = "0.1", default-features = false }
 sid-notify = { path = "crates/sid-notify" }
 sid-auth = { path = "crates/sid-auth" }
-sid-auth-proxy = { path = "crates/sid-auth-proxy" }
 sid-infra = { path = "crates/sid-infra" }
 sid-serve = { path = "crates/sid-serve" }
-sid-i18n = { path = "crates/sid-i18n" }
 
 # The workspace and the ZKPP submodule name the published OPAQUE crates;
 # inside this workspace both build against their sources here, the same code
