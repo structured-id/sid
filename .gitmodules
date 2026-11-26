@@ -4,6 +4,3 @@
 [submodule "zkpp"]
 	path = zkpp
 	url = https://github.com/structured-id/zkpp.git
-[submodule "ui-core"]
-	path = ui-core
-	url = https://github.com/structured-id/ui-core.git
