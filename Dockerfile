@@ -49,13 +49,14 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
 # The account pages and the administration console, built the way the UI
 # workspace's own CI builds them, from the released revision of that workspace
 # the server package names: this file is the one source of the UI revision,
-# and only an image build reads it or fetches the UI.
+# and only an image build reads it or fetches the UI. The file names a release
+# tag, fetched as a tag so a branch of the same name is never taken for it.
 FROM docker.io/library/node:26-trixie AS ui
 
 WORKDIR /ui
 COPY crates/sid-server/packaging/ui-core.rev /ui-core.rev
 RUN git init -q . \
-    && git fetch -q --depth 1 https://github.com/structured-id/ui-core.git "$(cat /ui-core.rev)" \
+    && git fetch -q --depth 1 https://github.com/structured-id/ui-core.git "refs/tags/$(cat /ui-core.rev)" \
     && git checkout -q FETCH_HEAD
 # Node no longer ships corepack; it is installed from npm, then fetches the
 # Yarn the workspace's packageManager names.
