@@ -1,0 +1,20 @@
+{
+  "name": "sid-example-compose-web-app",
+  "private": true,
+  "description": "Example: a server-side web application signing its users in at a StructuredID installation.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openid-client": "^6"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^6"
+  }
+}

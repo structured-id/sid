@@ -1,0 +1,35 @@
+# StructuredID beside one web application.
+#
+# The installation keeps its data (SQLite, keys) on the `sid-data` volume;
+# there is no database to configure. The application shares the
+# installation's network namespace, so `http://localhost:8080` is the same
+# installation for the browser and for the application: the issuer is one
+# address everywhere, as OpenID Connect requires.
+services:
+  sid:
+    image: ghcr.io/structured-id/sid:embedded
+    environment:
+      SID_ISSUER: http://localhost:8080
+    volumes:
+      - sid-data:/var/lib/sid
+    ports:
+      - "8080:8080" # the installation: account pages, console, OIDC
+      - "3000:3000" # the application below (it shares this namespace)
+
+  app:
+    build: .
+    network_mode: "service:sid"
+    depends_on:
+      - sid
+    environment:
+      SID_ISSUER: http://localhost:8080
+      APP_URL: http://localhost:3000
+    # SID_CLIENT_ID and SID_CLIENT_SECRET, written in "Connect the
+    # application". The secret stays in this file on the server side and
+    # never reaches a browser.
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  sid-data:
