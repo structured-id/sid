@@ -6,7 +6,3 @@ target/
 .vscode/
 .idea/
 docker-compose*.yml
-# The web UI builds inside the image from the ui-core sources alone.
-ui-core/**/node_modules/
-ui-core/**/dist/
-ui-core/**/.quasar/
