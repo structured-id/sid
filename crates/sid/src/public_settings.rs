@@ -73,7 +73,14 @@ const fn open_to_visitors(mode: EnrollmentMode) -> bool {
 /// The projection, at `revision`, of `policy` in a composition that serves
 /// `served`.
 pub fn projection(policy: &EnrollmentPolicy, revision: u64, served: Served) -> PublicUiSettings {
-    let registration = registration_types(policy.mode);
+    // A host that takes no self-registration admits none under any mode: a
+    // new account registering with an invitation is a self-registration
+    // too, refused at its start and at its commit.
+    let registration = if served.registration {
+        registration_types(policy.mode)
+    } else {
+        Vec::new()
+    };
     let usernames = registration.contains(&(PrincipalType::Username as i32));
     PublicUiSettings {
         revision,
