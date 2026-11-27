@@ -82,6 +82,39 @@ fn test_registration_types_follow_the_mode() {
     }
 }
 
+/// A host that takes no self-registration publishes none: no type and no
+/// username minimum, under whatever mode, an invitation included (a new
+/// account registering with a code is a self-registration, which the
+/// registration API refuses at its start and at its commit while the switch
+/// is off). With the switch on, an invite-only mode keeps its types and
+/// stays closed to a visitor. Sign-in is the holders' and does not follow it.
+/// Bug prevented: an invite form shown where the first request is refused.
+#[test]
+fn test_a_host_without_self_registration_publishes_no_types() {
+    let off = Served {
+        registration: false,
+        ..SERVED
+    };
+    let all = principal_types();
+    for mode in [
+        EnrollmentMode::Open,
+        EnrollmentMode::InviteOnly,
+        EnrollmentMode::DomainRestricted,
+        EnrollmentMode::AdminOnly,
+    ] {
+        let served = projection(&policy(mode), 1, off);
+        assert!(!served.registration_open, "{mode:?}");
+        assert!(served.registration_principal_types.is_empty(), "{mode:?}");
+        assert_eq!(served.registration_username_min_length, 0, "{mode:?}");
+        assert_eq!(served.sign_in_principal_types, all, "{mode:?}");
+    }
+
+    let invite_only = projection(&policy(EnrollmentMode::InviteOnly), 1, SERVED);
+    assert!(!invite_only.registration_open);
+    assert_eq!(invite_only.registration_principal_types, all);
+    assert_eq!(invite_only.registration_username_min_length, 3);
+}
+
 /// The projection names the methods the sign-in API offers after an
 /// identifier, and the reset only where the composition serves it.
 #[test]
