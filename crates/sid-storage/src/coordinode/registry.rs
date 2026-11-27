@@ -24,9 +24,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 use super::{
     CoordinodeBackend, Decision, Params, Row, Statements, claim_first, finalize, get_bool,
-    get_bytes, get_count, get_id, get_int, get_opt_bytes, get_opt_id, get_opt_parsed, get_opt_text,
-    get_opt_time, get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid, hold_first,
-    key, opt_text, opt_time, opt_uuid, page, sorted_page, texts, time, uuid,
+    get_bytes, get_count, get_id, get_int, get_opt_bool, get_opt_bytes, get_opt_id, get_opt_parsed,
+    get_opt_text, get_opt_time, get_opt_uuid, get_parsed, get_text, get_texts, get_time, get_uuid,
+    hold_first, key, opt_text, opt_time, opt_uuid, page, sorted_page, texts, time, uuid,
 };
 
 const ISSUER: &str = "i.id AS id, i.handle AS handle, i.canonical_url AS canonical_url,
@@ -988,11 +988,15 @@ impl CoordinodeBackend {
                 )?;
                 if let Some(row) = rows.first() {
                     // Held already: a reference stays, the instance is none.
-                    return Ok(Decision::Abandon(Some(get_bool(row, "instance")?)));
+                    return Ok(Decision::Abandon(Some(
+                        get_opt_bool(row, "instance")?.unwrap_or(false),
+                    )));
                 }
+                // A reference carries no instance flag: the flag is unique,
+                // so that there is one instance organization, and any number
+                // of references are held beside it.
                 tx.create_absent(
-                    "CREATE (o:SidOrganization {id: $id, is_instance: false,
-                        created_at: $created_at})",
+                    "CREATE (o:SidOrganization {id: $id, created_at: $created_at})",
                     Params::default()
                         .with("id", uuid(org.as_uuid()))
                         .with("created_at", time(reference.created_at)),
@@ -1014,8 +1018,11 @@ impl CoordinodeBackend {
         &self,
     ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
         self.read(|tx| {
+            // A reference is stored without the instance flag, never with a
+            // false one: the flag is unique, so a false flag could mark one
+            // reference only.
             let rows = tx.run(
-                "MATCH (o:SidOrganization) WHERE o.is_instance = false
+                "MATCH (o:SidOrganization) WHERE o.is_instance IS NULL
                  RETURN o.id AS id, o.created_at AS created_at",
                 Params::default(),
             )?;
