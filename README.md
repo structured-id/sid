@@ -1,25 +1,65 @@
-# StructuredID
+# StructuredID Community Edition
 
-StructuredID is person-centric trust infrastructure for portable identities and privacy-preserving relationships.
+StructuredID signs users in to your applications and checks what they may
+do there. You run it yourself: your installation manages its own local
+accounts and their access.
 
-Identity belongs to the person. Trust is independently verifiable. Relationships are scoped to the relying party.
+- **For a developer:** add sign-in and access checks to an application
+  without writing an account system.
+- **For an administrator:** manage the users of your installation, their
+  sign-in methods and their roles from a web console.
 
-## Features
+One installation serves your applications. Local sign-in works on its own:
+it needs no account at structured.id and no outside service. Federation is
+optional, in a delivery that supports the platform you choose.
 
-- **OAuth 2.0 / OpenID Connect** - Standard-compliant identity flows
-- **WebAuthn / Passkeys** - Passwordless authentication
-- **OPAQUE** - Zero-knowledge password authentication
-- **Federation** - Progressive enrollment (OIDC → DNS + X.509 → Enterprise CA)
-- **Plugin Architecture** - Extensible via plugins
+What an installation gives you:
 
-## Quick Start
+- an OpenID Connect and OAuth 2.0 provider your applications sign users in
+  with, through any conforming client library;
+- password sign-in in which the server never receives the password (OPAQUE),
+  and passkeys;
+- an account page where users manage their own sign-in methods and sessions;
+- an administration console for users, applications, roles and settings;
+- permission checks for your applications and their APIs;
+- user provisioning from an HR system or identity manager over SCIM 2.0;
+- sign-in links and one-time codes by email, where an administrator has
+  enabled them and configured a mail provider.
 
-The embedded image runs a complete installation on SQLite, with no database
-or broker to set up. It serves the account pages and the administration
-console from the same address:
+## Two ways to use it
+
+**A server beside your application.** Run the published image and point your
+application at it as an OpenID Connect provider. The application needs only a
+client library; it does not embed anything. Two images are published:
+
+| Image | Storage |
+|---|---|
+| `ghcr.io/structured-id/sid:embedded` | SQLite on its own volume; nothing else to run |
+| `ghcr.io/structured-id/sid:latest` | Your PostgreSQL server |
+
+Both run as a separate process; `embedded` names the image that carries its
+own database, not a library.
+
+**The engine inside a Rust application.** The `structured-id` crate
+([crates/sid](crates/sid), library name `sid`) opens an installation over the
+storage you give it and offers sign-in, accounts, OAuth and administration as
+a Rust API, with no network transport and no web UI of its own; the UI is
+optional. Use it from this repository at a release tag; it is not published
+on crates.io. It is licensed as the rest of the repository (see
+[License](#license)).
+
+The authorization core can be tried by itself, without opening an
+installation: `cargo run -p sid-authz --example role_administration` walks
+through granting a role, using it, the refusals and the revocation.
+
+## Quick start
+
+The embedded image runs a complete installation with no database or broker
+to set up. It serves the account pages and the administration console from
+the same address. The port is published on this machine only:
 
 ```bash
-docker run -d --name sid -p 8080:8080 \
+docker run -d --name sid -p 127.0.0.1:8080:8080 \
   -e SID_ISSUER=http://localhost:8080 \
   -v sid-data:/var/lib/sid \
   ghcr.io/structured-id/sid:embedded
@@ -35,230 +75,46 @@ docker run -d --name sid -p 8080:8080 \
    rights on every call: an account that does not administer the
    installation is refused (`the caller may not perform this operation`).
 
-The console's address is an installation setting (Settings, Addresses):
-another path on the public URL (`/console/`) or a host of the same site
-(`https://admin.example.com/`). The account pages stay at `/account/`.
+Next, sign users in to an application of your own:
+[examples/compose-web-app](examples/compose-web-app/README.md) adds an
+installation to a Compose project, registers a web application in the
+console and signs in from the application's own link, with the checks that
+another account and a request with no session are refused.
 
-For a public deployment set `SID_ISSUER` to its `https://` URL. The
-PostgreSQL image (`ghcr.io/structured-id/sid:latest`) takes
-`SID_DATABASE_URL` instead of the volume.
+## Running it for real
 
-From source:
+- **Issuer.** `SID_ISSUER` is the installation's issuer. An application
+  recognises an account by the pair of issuer and subject, and takes the
+  issuer from its own registration, so keep the issuer stable. A public
+  installation needs an `https://` issuer. Where the sign-in pages or the
+  console are shown can change without changing it.
+- **Data with SQLite.** The volume at `/var/lib/sid` holds the
+  installation's database and its keys. Back them up together.
+- **Data with PostgreSQL.** The `latest` image takes `SID_DATABASE_URL` and
+  keeps the installation's keys on the same volume. A restore needs both a
+  backup of the database and those keys; neither restores the installation
+  alone ([sid-migrate](crates/sid-migrate/README.md) describes the archive
+  and the keys). The image does not fall back to SQLite when the database
+  cannot be reached.
+- **Who may register.** Decide it before the address is public (console,
+  enrollment settings).
+- **Where the console is.** The console's address is an installation setting
+  (Settings, Addresses): another path on the installation's address or a host
+  of the same site. The account pages stay at `/account/`.
 
-```bash
-cargo build --release
-./target/release/sid
-```
-
-## Architecture
-
-```
-crates/
-├── sid-core/      # Domain models (Profile, Credential, Session), errors
-├── sid-proto/     # gRPC service definitions (generated from proto/)
-├── sid-plugin/    # Plugin API traits (StorageBackend, AuthProvider)
-├── sid-authn/     # Authentication (OPAQUE, WebAuthn, OAuth2/OIDC, MFA) — consumable lib
-├── sid-auth/      # Auth decision service (PDP): forward-auth, JWT validation, route policy
-├── sid-auth-proxy/# Application forward-proxy (PEP) for legacy apps
-├── sid-authz/     # Authorization (RBAC, Cedar policies)
-├── sid-fed/       # Federation (X.509 certificate chains, instance discovery)
-├── sid-admin/     # Admin ops library + CLI (backup, integrity, bulk import)
-├── sid-storage/   # Storage backends (PostgreSQL, SQLite)
-└── sid-server/    # Main binary (HTTP + gRPC servers)
-```
-
-**Note:** Profile IS the user in CE (no separate User entity).
-CE instance IS the organization (implicit).
-
-## Configuration
-
-Environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SID_ISSUER` | - (required) | Public base URL of the installation; its host is the installation organization's domain |
-| `SID_DATABASE_URL` | - (required) | PostgreSQL connection string |
-| `SID_STORAGE_POSTGRESQL_SCHEMA` | - | Schema holding this installation's tables; unset uses the account's default schema (see below) |
-| `SID_DATABASE_MAX_CONNECTIONS` | `20` | Most connections one process holds open to PostgreSQL; every replica opens its own, so the server must admit replicas times this |
-| `SID_GRPC_BIND` | `127.0.0.1:50051` | gRPC listen address |
-| `SID_BIND` | - | HTTP listen address of the embedded transcoder (OIDC endpoints, SCIM); unset serves no HTTP |
-| `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |
-| `SID_AUTHZ_REQUEST_VERIFIERS_FILE` | - | JSON file naming the services trusted to confirm sender proofs of original requests (see below); unset trusts none |
-| `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
-| `SID_ZKPP_SKIP_PROOF` | `false` | Every password setup requires a password-policy proof unless this is `true` or `1`, which explicitly permits policy-unverified setup. An empty or other value stops startup. Required to be `true` when `SID_ZKPP_ENABLED` is `false` |
-| `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
-| `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: no history entry is written under a key created before it (a suspected key compromise), and such keys are replaced at their owner's next password operation. Raised at start into this server's history store and the in-process evaluator's; an older or unset value lowers nothing. A malformed or future value stops startup |
-| `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator's internal listener, which the deployment keeps reachable by this server alone over its protected internal transport; unset runs the evaluator in this server (see below) |
-| `SID_NATS_URL` | `embedded` | Event bus: `embedded` runs a bundled NATS server under the data directory, a `nats://` or `tls://` URL connects to an external cluster, `in-process` runs without a broker (see below) |
-| `SID_EVENT_RECEIVERS` | none on `embedded` and `in-process`; required on an external bus | Comma-separated receivers every committed fact is owed to (for example `sid-notify`), or `none` |
-| `SID_ACCOUNT_URL` | - | Public URL of the account UI, including the path it is mounted under (such as `https://sid.example.com/account/`), set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its UI host's public JWK Set); its `/login` page runs browser sign-in, its `/verify` page opens emailed sign-in links and its `/reset/new` page emailed password reset links. The UI host's sign-in endpoints (`/auth/callback`, `/auth/backchannel-logout`) are registered at the root of that URL's origin. A host composition that serves its account cabinet client apart from these pages, on a closed host, takes this URL as the mount of the shared ceremony pages alone: password resets and emailed links stay off, and its account client is configured by `SID_ACCOUNT_CLIENT_URL` (that closed host's public URL, its sign-in endpoints registered under the URL's path, such as `https://ops.sid.example.com/account/auth/callback`) together with `SID_ACCOUNT_CLIENT_JWKS`; with neither, no account client is provisioned. Without it, and without an email provider configured by an administrator, password reset requests are refused as not configured |
-| `SID_UI_DIR` | - (`/usr/share/sid/ui` in the images) | Directory holding the built web UI: `account/` served at `/account/`, `admin/` at the console address; unset serves no web UI |
-| `SID_MAGIC_LINKS_ENABLED` | `false` | Email sign-in links to Corporate accounts; requires `SID_ACCOUNT_URL` |
+| Variable | Default in the images | Meaning |
+|---|---|---|
+| `SID_ISSUER` | none, required | The installation's issuer |
+| `SID_DATABASE_URL` | none, required by the `latest` image | PostgreSQL connection string |
+| `SID_DATABASE_MAX_CONNECTIONS` | `20` | Most connections one process opens to PostgreSQL; each replica opens its own |
+| `SID_BIND` | `0.0.0.0:8080` | HTTP address: sign-in, the account pages, the console, SCIM |
+| `SID_GRPC_BIND` | `0.0.0.0:50051` | gRPC address of the API |
 | `RUST_LOG` | `sid=info` | Log level |
 
-### An installation in a schema of its own
+## Security
 
-With `SID_STORAGE_POSTGRESQL_SCHEMA` several installations share one database, each in its own schema. The migration creates the schema if it is missing and a read-only role `<schema>_reader` (`-` becomes `_`) that may read `<schema>.profiles_view`, for host applications joining their own data with profiles.
-
-To keep each installation's records out of another's reach, give it a login role that owns its schema and holds no right on the others: PostgreSQL then refuses that role any read, listing or change of another installation's tables. Such a role has no `CREATE` on the database and no `CREATEROLE`, so prepare both beforehand as an administrator; the migration uses them as they are:
-
-```sql
-CREATE ROLE sid_a LOGIN PASSWORD '...';
-CREATE SCHEMA sid_a AUTHORIZATION sid_a;
-CREATE ROLE sid_a_reader NOLOGIN;
-```
-
-### Event delivery without a broker
-
-With `SID_NATS_URL=in-process` the server needs no NATS: every replica's work
-runner claims the work committed in the shared database under leases, so
-several replicas over one PostgreSQL database each take part and every piece of
-work is done once. The bus then only wakes this process's workers and feeds its
-live event streams, which see only the facts this replica handled; there are no
-addressed receivers and no historical replay. A SQLite file serves one process
-in this mode. An installation that ever owed work to a receiver over a durable
-bus cannot switch to it: that work may still wait in the old bus.
-
-### Authentication mail
-
-Sign-in links and one-time codes are emailed through the email provider an
-administrator configures (`RealmService.UpdateEmailSettings`, tested with
-`TestEmailConnection`). Each request commits durable work naming only its
-link or code session; the token or code stays sealed in that session and is
-sent to the address bound at the request. Until a provider is configured the
-mail waits and is retried; it is never sent after the link or code was used,
-expired or replaced, and a resent code goes out in the same session.
-
-Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
-every submitted proof; it never accepts an invalid proof as policy-unverified.
-Verifier keys must enforce the configured policy, with one key per history-domain
-count. A pending password operation whose policy is no longer accepted must be
-restarted before it can install a password. Ordinary password login does not
-generate a new policy proof.
-
-A password's policy evidence names the verifying key (artifact) that accepted its
-proof. Upgrading demotes verdicts stored before artifacts were recorded to
-policy-unverified and keeps what they claimed in `credential_policy_evidence_legacy`;
-the next proved password change records a new verdict. Ordinary login and other
-factors are unaffected.
-
-A replaced password-history key takes no new entries, but the passwords already
-retained under it are still compared until retention removes them; the key is
-then destroyed. Replacement does not make previously copied keys or entries
-secret again.
-
-Password history has two authorities: the evaluator holds the per-owner history
-keys and answers blinded requests; the checker, in this server, receives each
-proved password's tag, runs the history KSF and compares it with the retained
-entries. This server runs both and seals history keys with its field keys, so
-whoever controls it holds both: a tag together with its key lets that password
-be guessed without the KSF. A deployment that keeps them apart runs the
-evaluator as its own service, with its own database and keys, and points this
-server's `SID_PASSWORD_HISTORY_EVALUATOR` at it; this server then holds no
-history key, and the evaluator never receives a tag or a retained entry. The
-evaluator takes preparation only on an internal listener that the deployment
-keeps reachable by this server alone (mesh mTLS and network isolation), and
-serves clients' evaluation on a listener that refuses preparation. The client
-relays the evaluator's proofs, which this server verifies itself.
-
-### Trusted request verifiers
-
-A permission checker asking about an original request's subject may hand
-over its confirmation that it verified the request's DPoP proof. The
-authorization API accepts it only from a service this file names for the
-target resource and proof kind, and only while that service also holds the
-checker role there:
-
-```json
-{"verifiers": [{"subject": "oauth_client:<client_id>",
-                "resources": ["https://orders.example.com"],
-                "profiles": ["dpop"]}]}
-```
-
-`subject` is `oauth_client:<client_id>` or `machine:<machine user id>`;
-`resources` are registered resource indicators. Without a matching entry, a
-DPoP-bound token gets no decision. The deployment still has to deliver the
-verifier's calls over its authenticated transport (for example mesh mTLS);
-a file that cannot be read or parsed stops start-up.
-
-### Role administration
-
-Using a role and managing who holds it are separate rights. The installation's
-administrator manages every role; anyone else administers only through an
-administrative assignment: an ordinary `AssignRole` whose `admin` envelope names
-the permitted operations (assign, revoke, edit role, redelegate), the roles, the
-permissions those roles may hold at most, the eligible recipient kinds (and
-optionally one group) and the longest validity it may give. Holding the role
-alone administers nothing, and an administrator does not need the roles it
-assigns.
-
-- One envelope must cover the whole change; envelopes are never combined.
-- Nobody assigns to themselves, directly or through a group they belong to,
-  and a Profile that granted a group a role cannot join that group.
-- Every administered assignment expires within the envelope and its source.
-- Each assignment records who granted it and on what authority
-  (`provenance`); one an envelope approved keeps that envelope's permission
-  ceiling, and `UpdateRole` never widens its role past it
-  (`FAILED_PRECONDITION`, `APPROVED_CEILING`) until it is reauthorized.
-- A redelegated administrative assignment ends with its source; ordinary
-  grants outlive the administrator who made them.
-
-Embedding applications call the same core, `sid_authz::admin::RoleAdministration`;
-`cargo run -p sid-authz --example role_administration` walks through a grant,
-its use, the refusals and the revocation.
-
-### SCIM 2.0 inbound
-
-With the default `scim` feature, `{SID_SCIM_BASE_URL}/scim/v2` serves RFC 7644
-(`application/scim+json`) to HR systems and identity managers. Each source is a
-provisioning connector registered through `sid.v1.admin.ProvisioningService`
-and granted a role on the SCIM directory resource; it authenticates with its
-SCIM bearer or with an OAuth client-credentials token from the installation's
-issuer (`GetScimInboundConfig` returns the token endpoint and `client_id`).
-Logins it provisions are federated usernames `userName#<organization domain>`.
-
-### A build made for a platform
-
-Which StructuredID platform an installation federates with is fixed when it is
-built, not configured at run time: that platform's CA set is compiled in, the
-installation refreshes it from that platform only and tells that platform whom
-its site admits. A build given nothing is made for no platform and serves
-local sign-in alone.
-
-A local publication made for the platform takes one flag in its ordinary
-build command:
-
-```bash
-SID_BUILD_PLATFORM_DEV=true cargo build --release -p sid-server    # https://dev.structured.id
-SID_BUILD_PLATFORM_DEV=false cargo build --release -p sid-server   # https://structured.id
-```
-
-The same variable selects the platform when an application builds SID as a
-dependency. The build fetches the platform's CA set itself
-(`{platform}/.well-known/sid-ca/index.json`, no redirect followed): a platform
-that cannot be reached stops the build, and one that publishes no set yet
-gives a build that carries none and fetches it once the platform publishes.
-Sign-in through the platform uses the site's registration at that platform:
-its entry connection there, registered or provisioned as any other. The
-sign-in that names no connection goes through the installation's provisioned
-authority and nothing else; a build made for one platform refuses an authority
-provisioned at another, so that sign-in in a build made for the development
-platform does not go to production. A connection the user picks by name is
-entered as registered, whatever host its issuer is at: the build's platform
-does not restrict it. The flag turns no
-federation on, leaves the installation's own issuer as it is and does not
-touch identity providers configured separately. An official
-delivery names the origin itself (`SID_BUILD_PLATFORM`) and the set its build
-fetched (`SID_BUILD_PLATFORM_CAS`).
-
-## Password client conformance
-
-[The installed-client suite](ci/password-clients/README.md) exercises the
-immutable published TypeScript package in Node and Chromium against real gRPC registration, login,
-password change and reset. It checks mandatory proofs, evaluator authenticity,
-operation binding, retained-password refusal and durable registration retries.
-The test adapter is separate from the product and uses the client's actual KSF
-and prover; it does not replace them with reduced-cost fixtures.
+Report a vulnerability privately, as [SECURITY.md](SECURITY.md) describes,
+not in a public issue.
 
 ## License
 
