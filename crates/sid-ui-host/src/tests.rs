@@ -833,6 +833,134 @@ async fn test_responses_are_cross_origin_isolated() {
     );
 }
 
+/// The directives of the policy `response` carries, by name.
+fn directives(response: &Response) -> std::collections::BTreeMap<String, String> {
+    header_of(response, header::CONTENT_SECURITY_POLICY)
+        .expect("a content security policy")
+        .split(';')
+        .map(|directive| {
+            let directive = directive.trim();
+            let (name, sources) = directive.split_once(' ').unwrap_or((directive, ""));
+            (name.to_owned(), sources.to_owned())
+        })
+        .collect()
+}
+
+/// Bug prevented: pages served with no content security policy, so a script
+/// injected into a sign-in or account page could load code from anywhere,
+/// evaluate strings, post a form to another origin or run inside another
+/// site's frame. Scripts come from the page's origin only, with WebAssembly
+/// compilation for the password client and nothing wider.
+#[tokio::test]
+async fn test_pages_carry_an_enforced_content_security_policy() {
+    let (_, response) = get_path(&app("csp"), Method::GET, "/account/login").await;
+    let policy = directives(&response);
+    assert_eq!(policy["default-src"], "'none'");
+    assert_eq!(policy["script-src"], "'self' 'wasm-unsafe-eval'");
+    assert_eq!(policy["style-src"], "'self'");
+    assert_eq!(policy["worker-src"], "'self'");
+    assert_eq!(policy["connect-src"], "'self'");
+    assert_eq!(policy["object-src"], "'none'");
+    assert_eq!(policy["base-uri"], "'self'");
+    assert_eq!(policy["form-action"], "'self'");
+    assert_eq!(policy["frame-ancestors"], "'none'");
+    // Enforced, not reported only.
+    assert!(
+        response
+            .headers()
+            .get("content-security-policy-report-only")
+            .is_none()
+    );
+    assert_eq!(
+        header_of(&response, header::REFERRER_POLICY).as_deref(),
+        Some("strict-origin-when-cross-origin")
+    );
+}
+
+/// The policy is the response's, whatever it answers: a worker script takes
+/// the policy of its own response, and an error page is a page too.
+#[tokio::test]
+async fn test_every_response_carries_the_policy() {
+    let app = app("cspall");
+    let (_, config) = get_path(&app, Method::GET, "/account/config.json").await;
+    let tag = header_of(&config, header::ETAG).expect("an ETag");
+    let expected = header_of(&config, header::CONTENT_SECURITY_POLICY).expect("a policy");
+    for path in [
+        "/account/login",
+        "/account/assets/app-abc123.js",
+        "/account/assets/missing.js",
+        "/account/favicon.ico",
+    ] {
+        let (_, response) = get_path(&app, Method::GET, path).await;
+        assert_eq!(
+            header_of(&response, header::CONTENT_SECURITY_POLICY).as_deref(),
+            Some(expected.as_str()),
+            "{path}"
+        );
+    }
+    let unchanged = get_if_none_match(&app, "/account/config.json", &tag).await;
+    assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        header_of(&unchanged, header::CONTENT_SECURITY_POLICY).as_deref(),
+        Some(expected.as_str())
+    );
+    let (status, refused) = get_path(&app, Method::POST, "/account/login").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        header_of(&refused, header::CONTENT_SECURITY_POLICY).as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+/// A console on a sibling host calls the installation its configuration
+/// names: that origin, and no other, joins the page's own in `connect-src`.
+/// The origin is what is allowed, not the path under it.
+#[tokio::test]
+async fn test_the_named_installation_may_be_called() {
+    let config = br#"{"environment":"dev","release":"1","installationUrl":"https://sid.example.com/i/acme/"}"#;
+    let app = router(UiBundle::new(&bundle_dir("cspinstallation"), "/", config).unwrap());
+    let (_, response) = get_path(&app, Method::GET, "/users").await;
+    let policy = directives(&response);
+    assert_eq!(policy["connect-src"], "'self' https://sid.example.com");
+    // Nothing else of the policy widens with it.
+    assert_eq!(policy["script-src"], "'self' 'wasm-unsafe-eval'");
+    assert_eq!(policy["form-action"], "'self'");
+
+    // A live bundle derives the same from its deployment's configuration.
+    let (live, _sink) = UiBundle::live(&bundle_dir("cspinstallationlive"), "/", config).unwrap();
+    let (_, response) = get_path(&router(live), Method::GET, "/users").await;
+    assert_eq!(
+        directives(&response)["connect-src"],
+        "'self' https://sid.example.com"
+    );
+}
+
+/// An installation address the policy cannot name is refused with the
+/// bundle: served anyway, the page could not call its installation, or the
+/// value would be written into the policy as given.
+#[test]
+fn test_an_unusable_installation_address_is_refused() {
+    let dir = bundle_dir("cspbadinstallation");
+    for installation in [
+        r#""not a url""#,
+        r#""javascript:alert(1)""#,
+        r#""ftp://sid.example.com/""#,
+        r#""https://sid.example.com; script-src *""#,
+        r#""""#,
+        "42",
+    ] {
+        let config =
+            format!(r#"{{"environment":"dev","release":"1","installationUrl":{installation}}}"#);
+        assert!(
+            matches!(
+                UiBundle::new(&dir, "/", config.as_bytes()),
+                Err(BundleError::Config(_))
+            ),
+            "{installation}"
+        );
+    }
+}
+
 /// A bundle or configuration that cannot be served is refused at start.
 #[test]
 fn test_unusable_bundles_are_refused() {

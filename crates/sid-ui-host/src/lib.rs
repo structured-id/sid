@@ -19,6 +19,10 @@
 //!
 //! Paths outside the mount are not this router's, so protocol endpoints,
 //! callbacks and APIs never turn into `200 text/html`.
+//!
+//! Every response carries the bundle's content security policy: code only
+//! from the page's own origin, connections to it and to the installation the
+//! configuration names (`installationUrl`), no framing.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,6 +75,8 @@ pub struct UiBundle {
     /// The configuration served now; `None` before a live bundle's first
     /// settings projection.
     config: ServedConfig,
+    /// The content security policy of every response ([`policy`]).
+    policy: HeaderValue,
 }
 
 impl UiBundle {
@@ -82,8 +88,9 @@ impl UiBundle {
     /// must name its `environment` and `release`; it is served as given, so
     /// it must hold only public values.
     pub fn new(dir: &Path, mount: &str, config: &[u8]) -> Result<Self, BundleError> {
-        let (dir, _) = Self::checked(dir, mount, config)?;
+        let (dir, base) = Self::checked(dir, mount, config)?;
         let shell = shell(&dir, mount)?;
+        let policy = policy(&base)?;
         // The sender goes: the configuration never changes, and a receiver
         // keeps the last value.
         let (_, served) = tokio::sync::watch::channel(Some(Served::of(config.to_vec())));
@@ -92,6 +99,7 @@ impl UiBundle {
             mount: mount.to_owned(),
             shell,
             config: served,
+            policy,
         })
     }
 
@@ -113,6 +121,7 @@ impl UiBundle {
             )));
         }
         let shell = shell(&dir, mount)?;
+        let policy = policy(&base)?;
         let (sink, served) = SettingsSink::new(base);
         Ok((
             Self {
@@ -120,6 +129,7 @@ impl UiBundle {
                 mount: mount.to_owned(),
                 shell,
                 config: served,
+                policy,
             },
             sink,
         ))
@@ -156,6 +166,43 @@ impl UiBundle {
         }
         Ok((dir, object))
     }
+}
+
+/// The key of the deployment's configuration naming the installation the
+/// page calls when that is not the page's own origin (a console on a sibling
+/// host).
+const INSTALLATION_KEY: &str = "installationUrl";
+
+/// The content security policy of a bundle with the deployment's
+/// configuration `config`, enforced on every response.
+///
+/// Code, styles, fonts and workers come from the page's own origin; nothing
+/// inline and no string evaluation, so markup that reaches the page cannot
+/// run. `'wasm-unsafe-eval'` lets the password client compile its
+/// WebAssembly and allows no JavaScript evaluation. The page connects to its
+/// own origin and to the origin of the installation its configuration names,
+/// posts forms nowhere else and is framed by no one.
+fn policy(config: &Map<String, Value>) -> Result<HeaderValue, BundleError> {
+    let mut connect = String::from("'self'");
+    if let Some(named) = config.get(INSTALLATION_KEY) {
+        let unusable = || BundleError::Config(format!("{INSTALLATION_KEY} is not an http(s) URL"));
+        let url = named
+            .as_str()
+            .and_then(|named| url::Url::parse(named).ok())
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .ok_or_else(unusable)?;
+        // The serialized origin of an http(s) URL is scheme, host and port
+        // in ASCII: nothing in it ends the directive or starts another.
+        connect.push(' ');
+        connect.push_str(&url.origin().ascii_serialization());
+    }
+    HeaderValue::try_from(format!(
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+         img-src 'self' data: blob:; font-src 'self'; connect-src {connect}; \
+         worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; \
+         form-action 'self'; frame-ancestors 'none'"
+    ))
+    .map_err(|_| BundleError::Config(format!("{INSTALLATION_KEY} cannot be named in a header")))
 }
 
 /// The bundle's `index.html` in `dir` with `<base href="{mount}">` as the
@@ -245,7 +292,7 @@ async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Respons
     if response.status() == StatusCode::NOT_MODIFIED {
         without_length(&mut response);
     }
-    isolate(&mut response);
+    protect(&bundle, &mut response);
     response
 }
 
@@ -433,10 +480,19 @@ fn with_cache(mut response: Response, value: &'static str) -> Response {
     response
 }
 
-/// Cross-origin isolation, which the password client's threaded WebAssembly
-/// (shared memory) needs, and no content sniffing.
-fn isolate(response: &mut Response) {
+/// What every response of `bundle` states to the browser: its content
+/// security policy (a worker script takes the policy of its own response),
+/// cross-origin isolation, which the password client's threaded WebAssembly
+/// (shared memory) needs, no content sniffing, and a referrer that leaves
+/// the origin as the origin alone, so a sign-in link or a flow's address is
+/// never sent to another site.
+fn protect(bundle: &UiBundle, response: &mut Response) {
     let headers = response.headers_mut();
+    headers.insert(header::CONTENT_SECURITY_POLICY, bundle.policy.clone());
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
     headers.insert(
         "cross-origin-opener-policy",
         HeaderValue::from_static("same-origin"),
