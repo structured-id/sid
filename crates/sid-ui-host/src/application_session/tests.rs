@@ -1303,3 +1303,20 @@ async fn a_logout_the_store_cannot_record_is_retried() {
         .unwrap();
     assert_eq!(status(&answer), "503");
 }
+
+/// The correlation cookie lives as long as the started sign-in, so the host
+/// cannot tell a callback without it from an expired sign-in of this very
+/// browser. Bug prevented: a user who left the sign-in page open told that
+/// the sign-in was started in another browser, with no way on. The page
+/// names no cause and says what to do; the refusal stays a 400.
+#[test]
+fn a_callback_without_its_cookie_is_told_how_to_continue() {
+    let answer = sign_in_page(&SignInFailure::OtherBrowser);
+    assert_eq!(status(&answer), "400");
+    let text = String::from_utf8(answer.into_inner().data).unwrap();
+    assert!(!text.contains("another browser"), "{text}");
+    assert!(
+        text.contains("Start it again from the application"),
+        "{text}"
+    );
+}
