@@ -803,6 +803,65 @@ async fn test_impersonation_scopes_stay_within_the_user_token() {
     assert_eq!(body.scope.as_deref(), Some("openid"));
 }
 
+/// An installation that withholds impersonation does not take the token
+/// exchange grant at all: a machine user with a valid secret, a grant for
+/// the target and the target's live token is answered as for any grant type
+/// the endpoint does not support, and no impersonation session is recorded.
+/// The same request is served where impersonation is offered, and the
+/// machine's own credentials still get it a token where it is withheld.
+/// Bug prevented: a withheld capability refused only to callers who lack
+/// the rights or the data to use it.
+#[tokio::test]
+async fn test_withheld_impersonation_takes_no_token_exchange() {
+    let profile = test_profile();
+    let storage = MockStorage::new().with_profile(profile.clone());
+    let (storage, secret) = setup_machine_user_for_exchange(storage, &profile);
+    let svc = TestServices::new(storage);
+    orders_api(&svc, Some(&["orders.read"])).await;
+    let subject_token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+
+    let withholding = std::sync::Arc::into_inner(common::auth_service_over(
+        svc.storage.clone(),
+        svc.cache.clone(),
+        None,
+    ))
+    .expect("the service is not shared yet")
+    .without_impersonation();
+
+    let refused = withholding
+        .o_auth2_token(exchange(&svc, &secret, subject_token.clone(), "openid"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{refused:?}");
+    assert_eq!(
+        common::oauth_error(&refused).as_deref(),
+        Some("unsupported_grant_type")
+    );
+    assert!(
+        !svc.mock_storage
+            .session_audits()
+            .iter()
+            .any(|a| a.action == "sid.token.impersonation.v1"),
+        "the refused exchange recorded an impersonation"
+    );
+
+    let own = withholding
+        .o_auth2_token(machine_credentials(
+            &secret,
+            svc.issuer.handle.to_string(),
+            &[ORDERS],
+        ))
+        .await
+        .expect("a client acting for itself is not concerned")
+        .into_inner();
+    assert_eq!(own.token_type, "Bearer");
+
+    svc.auth
+        .o_auth2_token(exchange(&svc, &secret, subject_token, "openid"))
+        .await
+        .expect("the same request is served where impersonation is offered");
+}
+
 /// The impersonation is recorded as a session of the target and audited with
 /// it; the token belongs to that session, so the target's revocation (which
 /// revokes every session of the profile) ends it.

@@ -161,6 +161,8 @@ pub struct CeComponents {
     /// The issuer whose tokens the SCIM resource accepts.
     #[cfg(feature = "scim")]
     pub scim_issuer: sid_core::models::OidcIssuer,
+    /// The optional capabilities the host's installation does not offer.
+    pub withheld: Withheld,
 
     // CE gRPC service implementations
     pub identity_svc: Arc<IdentityServiceImpl>,
@@ -468,6 +470,51 @@ pub struct CeHost {
     /// their web client is provisioned with the installation's own key,
     /// shared by every replica, in place of any other account settings.
     pub served_account: Option<String>,
+    /// The optional capabilities this installation does not offer; none by
+    /// default.
+    pub withheld: Withheld,
+}
+
+/// Optional capabilities a host's installation does not offer. The choice is
+/// made once, when the process starts, and decides both what is served and
+/// what the shared endpoints accept; whoever holds the rights and the data a
+/// capability needs still cannot use one that is withheld.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Withheld {
+    /// SCIM provisioning: its services and its outbound worker.
+    pub scim_provisioning: bool,
+    /// The event stream served to callers outside the installation. Events,
+    /// audit and their delivery inside it are not concerned.
+    pub external_event_stream: bool,
+    /// Impersonation of a user through token exchange (RFC 8693). A client
+    /// acting for itself is not concerned.
+    pub impersonation: bool,
+    /// Sign-in with a password imported from another system.
+    pub imported_password_sign_in: bool,
+}
+
+impl Withheld {
+    /// The capabilities a comma-separated list names: `scim-provisioning`,
+    /// `external-event-stream`, `impersonation`,
+    /// `imported-password-sign-in`. An unknown name is an error: a
+    /// misspelled capability must not stay offered unnoticed.
+    pub fn parse_list(list: &str) -> Result<Self, String> {
+        let mut withheld = Self::default();
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match name {
+                "scim-provisioning" => withheld.scim_provisioning = true,
+                "external-event-stream" => withheld.external_event_stream = true,
+                "impersonation" => withheld.impersonation = true,
+                "imported-password-sign-in" => withheld.imported_password_sign_in = true,
+                other => {
+                    return Err(format!(
+                        "{other:?} is not a capability an installation can withhold"
+                    ));
+                }
+            }
+        }
+        Ok(withheld)
+    }
 }
 
 /// The store an installation runs over.
@@ -1068,6 +1115,16 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(presentations) => auth_svc.with_own_presentations(presentations),
         None => auth_svc,
     };
+    let auth_svc = if host.withheld.impersonation {
+        auth_svc.without_impersonation()
+    } else {
+        auth_svc
+    };
+    let auth_svc = if host.withheld.imported_password_sign_in {
+        auth_svc.without_imported_password_sign_in()
+    } else {
+        auth_svc
+    };
     // The recipient side verifies what other installations present, and
     // the admissions their sites were registered on as clients here.
     let recipient = classical_recipient(storage.clone())?;
@@ -1301,6 +1358,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         scim_resource,
         #[cfg(feature = "scim")]
         scim_issuer,
+        withheld: host.withheld,
         storage,
         jwt,
         oauth2,

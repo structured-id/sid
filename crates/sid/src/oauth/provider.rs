@@ -62,8 +62,18 @@ const CLIENT_ASSERTION_ALGORITHMS: &[&str] = &[
     "EdDSA", "ES256", "ES384", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
 ];
 
-/// The metadata of the issuer at `issuer`: every endpoint under its URL.
-pub fn metadata(issuer: &str) -> ProviderMetadata {
+/// The metadata of the issuer at `issuer`: every endpoint under its URL,
+/// and the token exchange grant only where `impersonation` is offered.
+pub fn metadata(issuer: &str, impersonation: bool) -> ProviderMetadata {
+    let mut grant_types = strings(&[
+        "authorization_code",
+        "refresh_token",
+        "client_credentials",
+        super::DEVICE_CODE_GRANT,
+    ]);
+    if impersonation {
+        grant_types.push(super::TOKEN_EXCHANGE_GRANT.to_string());
+    }
     ProviderMetadata {
         issuer: issuer.to_string(),
         authorization_endpoint: format!("{issuer}/oauth2/authorize"),
@@ -75,13 +85,7 @@ pub fn metadata(issuer: &str) -> ProviderMetadata {
         revocation_endpoint: Some(format!("{issuer}/oauth2/revoke")),
         device_authorization_endpoint: Some(format!("{issuer}/oauth2/device")),
         response_types_supported: strings(&["code"]),
-        grant_types_supported: strings(&[
-            "authorization_code",
-            "refresh_token",
-            "client_credentials",
-            "urn:ietf:params:oauth:grant-type:device_code",
-            "urn:ietf:params:oauth:grant-type:token-exchange",
-        ]),
+        grant_types_supported: grant_types,
         // OIDC Core §8: `public` is issuer-relative. Within this issuer every
         // client of the organization gets the same permitted subject for a
         // user; other organizations and contours are other issuers.
@@ -188,6 +192,7 @@ impl OAuth {
     pub async fn provider_metadata(&self, handle: &str) -> Result<ProviderMetadata, ProviderError> {
         Ok(metadata(
             &self.issuer_by_handle(handle).await?.canonical_url,
+            self.impersonation,
         ))
     }
 

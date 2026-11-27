@@ -396,6 +396,10 @@ pub struct AuthServiceImpl {
     second_factors: sid::second_factor::SecondFactors,
     /// Upgrades of imported password hashes between their steps.
     imported_passwords: sid::password::ImportedPasswordUpgrades,
+    /// Whether this installation offers sign-in with an imported password;
+    /// where it does not, both migration steps refuse before any password
+    /// work.
+    imported_password_sign_in: bool,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -561,6 +565,7 @@ impl AuthServiceImpl {
                 ceremonies.clone(),
                 key_manager.clone(),
             ),
+            imported_password_sign_in: true,
             authorizations: sid::oauth::authorization::Authorizations::new(
                 ceremonies.clone(),
                 key_manager.clone(),
@@ -747,6 +752,31 @@ impl AuthServiceImpl {
     ) -> Self {
         self.oauth.set_own_presentations(presentations);
         self
+    }
+
+    /// Offer no impersonation through token exchange: the grant leaves the
+    /// issuers' metadata and the token endpoint.
+    pub fn without_impersonation(mut self) -> Self {
+        self.oauth.withhold_impersonation();
+        self
+    }
+
+    /// Offer no sign-in with an imported password.
+    pub fn without_imported_password_sign_in(mut self) -> Self {
+        self.imported_password_sign_in = false;
+        self
+    }
+
+    /// Refuses a step of an imported password's migration where the
+    /// installation does not offer it.
+    fn imported_password_sign_in_offered(&self) -> Result<(), Status> {
+        if self.imported_password_sign_in {
+            Ok(())
+        } else {
+            Err(sid_infra::grpc_error::refuse::not_configured(
+                "imported password sign-in",
+            ))
+        }
     }
 
     /// Verify the admissions other organizations' federation sites were
@@ -1855,6 +1885,7 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<LegacyMigrateStartRequest>,
     ) -> Result<Response<LegacyMigrateStartResponse>, Status> {
+        self.imported_password_sign_in_offered()?;
         self.check_maintenance().await?;
         let client_ip = self.client_ip(&request)?;
         self.imported_passwords
@@ -1870,6 +1901,7 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<LegacyMigrateFinishRequest>,
     ) -> Result<Response<LegacyMigrateFinishResponse>, Status> {
+        self.imported_password_sign_in_offered()?;
         self.check_maintenance().await?;
         // Refused before the migration is consumed.
         let client = self.ceremony_client(request.metadata())?;

@@ -30,6 +30,8 @@ use super::{OAuth, OAuthError, internal};
 
 /// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
 pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// The grant type of a token exchange (RFC 8693 §2.1).
+pub const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
 /// The token type identifier of an access token (RFC 8693 §3).
 pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
@@ -328,7 +330,10 @@ impl OAuth {
                 self.client_credentials(req, &client()?, client_ip, proof_target)
                     .await
             }
-            "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            // An installation that offers no impersonation answers the grant
+            // as any grant type it does not support (RFC 6749 §5.2), before
+            // the client is authenticated.
+            TOKEN_EXCHANGE_GRANT if self.impersonation => {
                 self.token_exchange(req, &client()?, client_ip).await
             }
             DEVICE_CODE_GRANT => self.device_code(req, &client()?).await,

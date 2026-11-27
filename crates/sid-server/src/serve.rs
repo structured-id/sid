@@ -125,9 +125,10 @@ pub struct CeServices {
 }
 
 impl CeServices {
-    /// Every CE service over `c`, with the SCIM outbound worker when targets
-    /// are configured, and the guard enforcing also the access rules of the
-    /// host's own services `host` names.
+    /// Every CE service over `c` except those of a capability its host
+    /// withholds, with the SCIM outbound worker when SCIM is offered and
+    /// targets are configured, and the guard enforcing also the access rules
+    /// of the host's own services `host` names.
     pub async fn new(c: &CeComponents, host: HostServices<'_>) -> anyhow::Result<Self> {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(sid_proto::FILE_DESCRIPTOR_SET)
@@ -252,14 +253,6 @@ impl CeServices {
                 ),
             ))
             .await
-            .add(EventStreamServiceServer::new(
-                crate::grpc::event_stream_service::EventStreamServiceImpl::new(
-                    c.event_bus.clone(),
-                    c.jwt.clone(),
-                    c.revocation_cache.clone(),
-                ),
-            ))
-            .await
             .add(AccountServiceServer::from_arc(c.account_svc.clone()))
             .await
             .add(UpstreamServiceServer::from_arc(c.upstream_svc.clone()))
@@ -329,8 +322,22 @@ impl CeServices {
                 .await;
         }
 
+        // The event stream for callers outside the installation; its events,
+        // audit and delivery inside do not pass through this service.
+        if !c.withheld.external_event_stream {
+            services
+                .add(EventStreamServiceServer::new(
+                    crate::grpc::event_stream_service::EventStreamServiceImpl::new(
+                        c.event_bus.clone(),
+                        c.jwt.clone(),
+                        c.revocation_cache.clone(),
+                    ),
+                ))
+                .await;
+        }
+
         #[cfg(feature = "scim")]
-        {
+        if !c.withheld.scim_provisioning {
             // One SCIM service: typed for gRPC callers, and behind the RFC 7644
             // HTTP endpoint SCIM clients use.
             let scim = std::sync::Arc::new(scim_service(c).await?);

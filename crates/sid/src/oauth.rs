@@ -43,7 +43,7 @@ pub mod device_approval;
 pub mod end_session;
 mod grants;
 pub mod provider;
-pub use grants::{ACCESS_TOKEN_TYPE, DEVICE_CODE_GRANT};
+pub use grants::{ACCESS_TOKEN_TYPE, DEVICE_CODE_GRANT, TOKEN_EXCHANGE_GRANT};
 
 /// Why an OAuth endpoint refused or failed a request. Each refusal names the
 /// RFC 6749 §5.2 (or RFC 8628 §3.5, RFC 9449 §7.1) error the host answers
@@ -243,6 +243,10 @@ pub struct OAuth {
     /// again at each use; none in an installation that verifies no
     /// federation evidence, which then serves no such client.
     site_evidence: Option<Arc<dyn sid_fed::recipient::PresentedIdentities>>,
+    /// Whether a machine may exchange a user's token for an impersonation
+    /// session (RFC 8693). An installation that does not offer it neither
+    /// advertises the grant nor accepts it.
+    impersonation: bool,
 }
 
 impl OAuth {
@@ -265,7 +269,15 @@ impl OAuth {
             installation_url: parts.installation_url,
             presentations: None,
             site_evidence: None,
+            impersonation: true,
         }
+    }
+
+    /// Offer no impersonation through token exchange from now on: the grant
+    /// leaves the issuers' metadata and the token endpoint answers it as a
+    /// grant type it does not support.
+    pub fn withhold_impersonation(&mut self) {
+        self.impersonation = false;
     }
 
     /// Verify the admissions federation sites' clients were registered on

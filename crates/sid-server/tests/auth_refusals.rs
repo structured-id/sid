@@ -156,6 +156,116 @@ async fn test_legacy_migration_guesses_reach_the_lockout() {
     );
 }
 
+/// The authentication service over `svc`'s store and cache, as an
+/// installation that offers no sign-in with an imported password builds it.
+fn withholding_imported_passwords(
+    svc: &TestServices,
+) -> sid_server::grpc::auth_service::AuthServiceImpl {
+    std::sync::Arc::into_inner(common::auth_service_over(
+        svc.storage.clone(),
+        svc.cache.clone(),
+        None,
+    ))
+    .expect("the service is not shared yet")
+    .without_imported_password_sign_in()
+}
+
+fn assert_not_offered(status: &Status) {
+    assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+    assert_eq!(
+        error_reason(status).as_deref(),
+        Some("FEATURE_NOT_CONFIGURED")
+    );
+}
+
+/// An installation that withholds sign-in with an imported password refuses
+/// its start before any password work: wrong guesses past the lockout limit
+/// are not counted, so the account still signs in where the capability is
+/// offered over the same store.
+/// Bug prevented: a withheld sign-in route that still verifies a guess and
+/// counts it against the account.
+#[tokio::test]
+async fn test_withheld_imported_password_start_counts_no_guess() {
+    let profile = test_profile();
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_login_profile(profile.clone())
+            .with_credential(with_legacy_password(&profile)),
+    );
+    let withholding = withholding_imported_passwords(&svc);
+
+    for password in ["wrong", "wrong", "wrong", "wrong", "wrong", "wrong", RIGHT] {
+        let err = withholding
+            .legacy_migrate_start(legacy_start("alice", password))
+            .await
+            .unwrap_err();
+        assert_not_offered(&err);
+    }
+    let err = svc
+        .auth
+        .legacy_migrate_start(legacy_start("alice", RIGHT))
+        .await
+        .unwrap_err();
+    assert_password_accepted(&err);
+}
+
+/// A migration started before the capability was withheld is not finished
+/// either: the finish is refused before the migration is consumed, the
+/// account keeps its imported password, and the same finish completes where
+/// the capability is offered.
+/// Bug prevented: a withheld route closed at its first step only, so a
+/// migration already under way still replaces the credential.
+#[tokio::test]
+async fn test_withheld_imported_password_finish_changes_nothing() {
+    use sid_core::models::CredentialType;
+
+    let profile = test_profile();
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_login_profile(profile.clone())
+            .with_credential(with_legacy_password(&profile)),
+    );
+    let client = common::zkpp_client::start(RIGHT.as_bytes());
+    let started = svc
+        .auth
+        .legacy_migrate_start(Request::new(LegacyMigrateStartRequest {
+            principal: "alice".to_string(),
+            password: RIGHT.to_string(),
+            opaque_registration_request: client.request.clone(),
+        }))
+        .await
+        .expect("the migration starts where it is offered")
+        .into_inner();
+    let record = common::zkpp_client::finish(
+        client,
+        RIGHT.as_bytes(),
+        &started.opaque_registration_response,
+    );
+    let finish = || {
+        Request::new(LegacyMigrateFinishRequest {
+            upgrade_id: started.upgrade_id.clone(),
+            opaque_registration_record: record.clone(),
+        })
+    };
+
+    let err = withholding_imported_passwords(&svc)
+        .legacy_migrate_finish(finish())
+        .await
+        .unwrap_err();
+    assert_not_offered(&err);
+    let imported = svc
+        .storage
+        .get_credentials_by_profile(profile.id, Some(CredentialType::LegacyHash))
+        .await
+        .unwrap();
+    assert_eq!(imported.len(), 1, "the imported password was replaced");
+
+    svc.auth
+        .legacy_migrate_finish(finish())
+        .await
+        .expect("the same migration finishes where it is offered");
+}
+
 /// Regression: an account without passkeys was answered NOT_FOUND at the
 /// start of a passkey sign-in, an unknown account AUTHENTICATION_FAILED, so
 /// the answer told the account exists. Both now read the same.

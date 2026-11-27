@@ -908,6 +908,37 @@ fn management_setting_names_central_or_self() {
     }
 }
 
+/// A list names the capabilities an installation withholds; nothing named
+/// withholds nothing, and a name that is not a capability is an error.
+/// Bug prevented: a misspelled capability staying offered without a word.
+#[test]
+fn a_withheld_list_names_capabilities_or_is_refused() {
+    assert_eq!(Withheld::parse_list("").unwrap(), Withheld::default());
+    assert_eq!(
+        Withheld::parse_list("scim-provisioning, impersonation").unwrap(),
+        Withheld {
+            scim_provisioning: true,
+            impersonation: true,
+            ..Withheld::default()
+        }
+    );
+    assert_eq!(
+        Withheld::parse_list(
+            "scim-provisioning,external-event-stream,impersonation,imported-password-sign-in"
+        )
+        .unwrap(),
+        Withheld {
+            scim_provisioning: true,
+            external_event_stream: true,
+            impersonation: true,
+            imported_password_sign_in: true,
+        }
+    );
+    for list in ["scim", "impersonation,token-exchange", "Impersonation"] {
+        assert!(Withheld::parse_list(list).is_err(), "{list:?}");
+    }
+}
+
 /// Without settings the WebAuthn relying party is the issuer's host and
 /// origin, so an installation reached at its issuer runs passkeys with no
 /// further configuration; before, it defaulted to localhost and every

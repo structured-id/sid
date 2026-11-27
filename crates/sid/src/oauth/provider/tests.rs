@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn test_metadata_endpoints_are_under_the_issuer() {
     let issuer = "https://sid.example.com/auth/i/0123456789abcdef0123456789abcdef";
-    let m = metadata(issuer);
+    let m = metadata(issuer, true);
     assert_eq!(m.issuer, issuer);
     let optional = [
         ("userinfo", &m.userinfo_endpoint),
@@ -36,7 +36,7 @@ fn test_metadata_endpoints_are_under_the_issuer() {
 /// DPoP algorithms are the ones proofs are verified with.
 #[test]
 fn test_metadata_advertises_what_is_served() {
-    let m = metadata("https://sid.example.com/i/x");
+    let m = metadata("https://sid.example.com/i/x", true);
     assert_eq!(m.response_types_supported, ["code"]);
     assert_eq!(m.code_challenge_methods_supported, ["S256"]);
     assert_eq!(m.subject_types_supported, ["public"]);
@@ -46,6 +46,20 @@ fn test_metadata_advertises_what_is_served() {
     );
     assert!(m.backchannel_logout_supported);
     assert!(m.backchannel_logout_session_supported);
+}
+
+/// The token exchange grant is advertised only by an installation that
+/// offers impersonation; every other grant type is advertised either way.
+/// Bug prevented: metadata naming a grant the token endpoint refuses.
+#[test]
+fn test_metadata_names_token_exchange_only_where_offered() {
+    let exchange = crate::oauth::TOKEN_EXCHANGE_GRANT;
+    let offered = metadata("https://sid.example.com/i/x", true).grant_types_supported;
+    let withheld = metadata("https://sid.example.com/i/x", false).grant_types_supported;
+    assert!(offered.iter().any(|g| g == exchange));
+    assert!(!withheld.iter().any(|g| g == exchange));
+    let others: Vec<_> = offered.iter().filter(|g| *g != exchange).collect();
+    assert_eq!(others, withheld.iter().collect::<Vec<_>>());
 }
 
 /// The holder's consent sharing `given_name` and `email` with their
