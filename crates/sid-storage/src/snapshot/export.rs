@@ -78,6 +78,14 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         offset += batch.len() as u64;
         snapshot.profiles.extend(batch);
     }
+    // Of the exported accounts only: one created since the pages were read
+    // is not in this snapshot.
+    snapshot.directory_users = backend
+        .export_directory_users()
+        .await?
+        .into_iter()
+        .filter(|r| snapshot.profiles.iter().any(|p| p.id == r.profile_id))
+        .collect();
 
     info!("exporting per-profile entities...");
     let installation = snapshot.metadata.installation_org;

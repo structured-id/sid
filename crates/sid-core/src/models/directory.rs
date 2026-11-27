@@ -8,6 +8,56 @@ use super::{
     ProfileMetadata, ProfilePhone, ProfilePhoneId, SessionEnd,
 };
 
+/// The identifier the directory assigns to a user resource (RFC 7643 3.1):
+/// what a SCIM client knows the user by. It is not the account's identifier
+/// and is never given to another resource, also after a deletion.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct DirectoryUserId(pub uuid::Uuid);
+
+impl DirectoryUserId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    /// The identifier written as a SCIM `id`; `None` for anything else.
+    pub fn parse(id: &str) -> Option<Self> {
+        uuid::Uuid::parse_str(id).ok().map(Self)
+    }
+}
+
+impl Default for DirectoryUserId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Display for DirectoryUserId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A user resource of the directory: the resource a client addresses, apart
+/// from the account it stands for. A deleted resource stays stored, so its
+/// identifier is never reused, and is served by no read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectoryResource {
+    pub id: DirectoryUserId,
+    /// The local account the resource stands for.
+    pub profile_id: ProfileId,
+    /// Moved on by every change of the resource itself.
+    pub revision: u64,
+    pub deleted_at: Option<jiff::Timestamp>,
+}
+
+impl DirectoryResource {
+    pub fn is_live(&self) -> bool {
+        self.deleted_at.is_none()
+    }
+}
+
 /// Whether a directory write creates its resource or changes an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryWriteMode {
@@ -38,6 +88,15 @@ pub struct DirectoryUserWrite {
     /// Deprovisioning: every session of the account ends and every active
     /// personal access token is revoked, in the same transaction.
     pub end_access: Option<SessionEnd>,
+    /// The directory resource an update is made through: the write applies
+    /// only while that resource is live and stands for this account, and
+    /// refuses with `NotFound` otherwise. `None` on create and for a write
+    /// that is not a directory client's.
+    pub resource: Option<DirectoryUserId>,
+    /// Delete `resource`: it is served by no read afterwards and its
+    /// identifier is never given out again. The account itself stays, as
+    /// the rest of the write leaves it.
+    pub delete_resource: bool,
 }
 
 impl DirectoryUserWrite {
@@ -55,7 +114,15 @@ impl DirectoryUserWrite {
             set_metadata: Vec::new(),
             remove_metadata: Vec::new(),
             end_access: None,
+            resource: None,
+            delete_resource: false,
         }
+    }
+
+    /// An update made through the live directory resource `resource`.
+    pub fn through(mut self, resource: DirectoryUserId) -> Self {
+        self.resource = Some(resource);
+        self
     }
 
     pub fn profile_id(&self) -> ProfileId {

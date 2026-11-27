@@ -409,6 +409,272 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
     );
 }
 
+/// The live resource of `profile`.
+async fn resource_of(
+    backend: &dyn StorageBackend,
+    profile: &Profile,
+) -> sid_core::models::DirectoryResource {
+    let found = backend.directory_users_of(&[profile.id]).await.unwrap();
+    assert_eq!(found.len(), 1, "an account has one live resource");
+    found[0]
+}
+
+/// Every account gets a directory resource of its own when it is created,
+/// whatever path creates it: an identifier that is not the account's, found
+/// by itself, and the one the directory lists the user under.
+pub async fn test_directory_resource_assigned_with_the_account(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let listed = add_user(backend, &domain, "listed", &[], &[]).await;
+    let plain = Profile::new(None::<String>);
+    backend.create_profile(&plain, test_audit()).await.unwrap();
+
+    for profile in [&listed, &plain] {
+        let resource = resource_of(backend, profile).await;
+        assert_ne!(resource.id.0, profile.id.into_uuid());
+        assert_eq!(resource.profile_id, profile.id);
+        assert!(resource.is_live());
+        assert_eq!(
+            backend.find_directory_user(resource.id).await.unwrap(),
+            Some(resource)
+        );
+    }
+    assert_ne!(
+        resource_of(backend, &listed).await.id,
+        resource_of(backend, &plain).await.id
+    );
+    let page = backend
+        .query_directory(&query(&domain, F::Present(Attr::UserName), 0, 10))
+        .await
+        .unwrap();
+    assert_eq!(page.users.len(), 1);
+    assert_eq!(page.users[0].id, resource_of(backend, &listed).await.id);
+    assert_eq!(
+        backend
+            .find_directory_user(sid_core::models::DirectoryUserId::new())
+            .await
+            .unwrap(),
+        None,
+        "an identifier never assigned names nothing"
+    );
+}
+
+/// A deletion through the resource commits with the rest of its write: the
+/// resource is kept, deleted, and found by no directory read; the account
+/// stays as the write left it. Nothing is written through a resource that
+/// is deleted, unknown or another account's, and a repeat of the deletion is
+/// not found.
+pub async fn test_directory_resource_deletion(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let kept = add_user(backend, &domain, "kept", &[], &[]).await;
+    let mut gone = add_user(backend, &domain, "gone", &[], &[]).await;
+    let kept_resource = resource_of(backend, &kept).await;
+    let resource = resource_of(backend, &gone).await;
+
+    // Another account's resource opens no write on this one.
+    let mut stolen = gone.clone();
+    stolen.given_name = Some("Stolen".into());
+    let refused = backend
+        .write_directory_user(
+            &DirectoryUserWrite::new(DirectoryWriteMode::Update, stolen).through(kept_resource.id),
+            test_audit(),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::NotFound(_))),
+        "{refused:?}"
+    );
+    assert_eq!(backend.get_profile(gone.id).await.unwrap().unwrap(), gone);
+
+    gone.status = ProfileStatus::Suspended;
+    let mut delete =
+        DirectoryUserWrite::new(DirectoryWriteMode::Update, gone.clone()).through(resource.id);
+    delete.delete_resource = true;
+    backend
+        .write_directory_user(&delete, test_audit())
+        .await
+        .expect("the resource is deleted");
+
+    let stored = backend
+        .find_directory_user(resource.id)
+        .await
+        .unwrap()
+        .expect("a deleted resource is kept");
+    assert!(!stored.is_live());
+    assert_eq!(stored.profile_id, gone.id);
+    assert!(stored.revision > resource.revision);
+    assert!(
+        backend
+            .directory_users_of(&[gone.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let account = backend.get_profile(gone.id).await.unwrap().expect("kept");
+    assert_eq!(account.status, ProfileStatus::Suspended);
+    let (total, listed) = names(backend, &query(&domain, F::Present(Attr::UserName), 0, 10)).await;
+    assert_eq!((total, listed), (1, vec!["kept".to_string()]));
+
+    // Through the deleted resource nothing is written: neither a change nor
+    // a second deletion (the account is read again at its new revision).
+    for delete_again in [false, true] {
+        let mut later = account.clone();
+        later.status = ProfileStatus::Active;
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, later).through(resource.id);
+        write.delete_resource = delete_again;
+        let refused = backend.write_directory_user(&write, test_audit()).await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::NotFound(_))),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        backend.get_profile(gone.id).await.unwrap().unwrap().status,
+        ProfileStatus::Suspended
+    );
+    assert_eq!(
+        backend.find_directory_user(resource.id).await.unwrap(),
+        Some(stored)
+    );
+
+    // A deletion names its resource, and a create is given none.
+    let mut unnamed = DirectoryUserWrite::new(DirectoryWriteMode::Update, account.clone());
+    unnamed.delete_resource = true;
+    assert!(matches!(
+        backend.write_directory_user(&unnamed, test_audit()).await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    let created = DirectoryUserWrite::new(DirectoryWriteMode::Create, Profile::new(None::<String>))
+        .through(kept_resource.id);
+    assert!(matches!(
+        backend.write_directory_user(&created, test_audit()).await,
+        Err(sid_core::Error::Validation(_))
+    ));
+}
+
+/// Of a deletion and a change read from the same state, made at once, the
+/// resource ends deleted and the change either committed before it or wrote
+/// nothing: it is never applied through the deleted resource.
+pub async fn test_directory_resource_deletion_races_a_change(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let user = add_user(backend, &domain, "raced", &[], &[]).await;
+    let resource = resource_of(backend, &user).await;
+
+    let mut suspended = user.clone();
+    suspended.status = ProfileStatus::Suspended;
+    let mut delete =
+        DirectoryUserWrite::new(DirectoryWriteMode::Update, suspended).through(resource.id);
+    delete.delete_resource = true;
+    let mut renamed = user.clone();
+    renamed.given_name = Some("Renamed".into());
+    let change = DirectoryUserWrite::new(DirectoryWriteMode::Update, renamed).through(resource.id);
+
+    let (deleted, changed) = tokio::join!(
+        backend.write_directory_user(&delete, test_audit()),
+        backend.write_directory_user(&change, test_audit()),
+    );
+    // Both read one revision of the account: one of them wins it.
+    assert!(
+        deleted.is_ok() != changed.is_ok(),
+        "{deleted:?} {changed:?}"
+    );
+    let stored = backend
+        .find_directory_user(resource.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let account = backend.get_profile(user.id).await.unwrap().unwrap();
+    if deleted.is_ok() {
+        assert!(!stored.is_live());
+        assert_eq!(account.given_name, user.given_name);
+        assert_eq!(account.status, ProfileStatus::Suspended);
+    } else {
+        assert!(stored.is_live());
+        assert_eq!(account.given_name.as_deref(), Some("Renamed"));
+    }
+}
+
+/// A restored account keeps the identifiers its clients know: the resources
+/// it had replace the one assigned when it was created, deleted ones
+/// included, a repeat changes nothing, and an identifier of another account
+/// is refused.
+pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryResource, DirectoryUserId};
+    let domain = domain();
+    let user = add_user(backend, &domain, "restored", &[], &[]).await;
+    let other = add_user(backend, &domain, "other", &[], &[]).await;
+    let assigned = resource_of(backend, &user).await;
+    let carried = [
+        DirectoryResource {
+            id: DirectoryUserId::new(),
+            profile_id: user.id,
+            revision: 3,
+            deleted_at: Some(Timestamp::from_second(1_700_000_000).unwrap()),
+        },
+        DirectoryResource {
+            id: DirectoryUserId::new(),
+            profile_id: user.id,
+            revision: 0,
+            deleted_at: None,
+        },
+    ];
+    for _ in 0..2 {
+        backend
+            .import_directory_users(user.id, &carried, test_audit())
+            .await
+            .expect("the account takes its resources");
+    }
+    assert_eq!(
+        backend.find_directory_user(assigned.id).await.unwrap(),
+        None
+    );
+    for resource in carried {
+        assert_eq!(
+            backend.find_directory_user(resource.id).await.unwrap(),
+            Some(resource)
+        );
+    }
+    assert_eq!(resource_of(backend, &user).await, carried[1]);
+    let exported = backend.export_directory_users().await.unwrap();
+    for resource in carried {
+        assert!(exported.contains(&resource), "{resource:?} is exported");
+    }
+
+    // Another account's identifier, or two live resources, write nothing.
+    let foreign = [resource_of(backend, &other).await];
+    assert!(
+        backend
+            .import_directory_users(user.id, &foreign, test_audit())
+            .await
+            .is_err()
+    );
+    let taken = [DirectoryResource {
+        profile_id: user.id,
+        ..resource_of(backend, &other).await
+    }];
+    assert!(matches!(
+        backend
+            .import_directory_users(user.id, &taken, test_audit())
+            .await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    let two_live = [
+        carried[1],
+        DirectoryResource {
+            id: DirectoryUserId::new(),
+            ..carried[1]
+        },
+    ];
+    assert!(matches!(
+        backend
+            .import_directory_users(user.id, &two_live, test_audit())
+            .await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    assert_eq!(resource_of(backend, &user).await, carried[1]);
+    assert_eq!(resource_of(backend, &other).await.profile_id, other.id);
+}
+
 /// Closed and purged profiles are retired records, not directory users.
 pub async fn test_directory_omits_retired_profiles(backend: &dyn StorageBackend) {
     let domain = domain();

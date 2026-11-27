@@ -12,9 +12,9 @@
 
 use jiff::Timestamp;
 use sid_core::models::{
-    Group, GroupId, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId,
-    ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, ProfileStatus, ProfileType,
-    ProfileVisibility, profile_email::EmailLabel, profile_phone::PhoneLabel,
+    DirectoryUserId, Group, GroupId, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail,
+    ProfileEmailId, ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, ProfileStatus,
+    ProfileType, ProfileVisibility, profile_email::EmailLabel, profile_phone::PhoneLabel,
 };
 use sid_proto::sid::v1 as proto;
 
@@ -246,20 +246,33 @@ pub fn phone_digits(value: &str) -> Result<u64, MappingError> {
         .map_err(|_| MappingError::InvalidPhone(value.to_string()))
 }
 
+/// Where a user resource is rendered: the organization domain its corporate
+/// login ends with and the base address its location is under.
+#[derive(Debug, Clone, Copy)]
+pub struct ScimPlace<'a> {
+    pub org_domain: &'a str,
+    pub base_url: &'a str,
+}
+
 /// Map SID Profile + Principals + email contacts + Metadata + Groups to SCIM
 /// User response. `emails` come from the contacts, in the spelling the
-/// directory gave: a principal holds only the login key.
+/// directory gave: a principal holds only the login key. `id` is the
+/// directory resource's identifier, never the account's.
 pub fn sid_to_scim_user(
+    id: DirectoryUserId,
     profile: &Profile,
     principals: &[Principal],
     emails: &[ProfileEmail],
     metadata: &[ProfileMetadata],
     group_memberships: &[(GroupId, String)], // (group_id, group_display_name)
-    org_domain: &str,
-    base_url: &str,
+    place: ScimPlace<'_>,
 ) -> proto::ScimUser {
+    let ScimPlace {
+        org_domain,
+        base_url,
+    } = place;
     let mut user = proto::ScimUser {
-        id: profile.id.to_string(),
+        id: id.to_string(),
         display_name: profile.formatted_name().unwrap_or_default(),
         active: !matches!(profile.status, ProfileStatus::Suspended),
         ..Default::default()
@@ -325,7 +338,7 @@ pub fn sid_to_scim_user(
         resource_type: "User".into(),
         created: timestamp_to_proto(profile.created_at),
         last_modified: timestamp_to_proto(profile.updated_at),
-        location: format!("{}/scim/v2/Users/{}", base_url, profile.id),
+        location: format!("{}/scim/v2/Users/{}", base_url, id),
         ..Default::default()
     });
 
@@ -343,7 +356,7 @@ pub fn scim_create_group_to_sid(
 /// Map SID Group + Members to SCIM Group response.
 pub fn sid_to_scim_group(
     group: &Group,
-    members: &[(ProfileId, String)], // (profile_id, display_name)
+    members: &[(DirectoryUserId, String)], // (the member's resource id, display name)
     base_url: &str,
 ) -> proto::ScimGroup {
     proto::ScimGroup {

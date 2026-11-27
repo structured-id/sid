@@ -11,10 +11,10 @@ use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
 use sid_core::models::{
-    AuditEntry, DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode, Group, GroupId,
-    GroupMember, MutationContext, OrgId, Principal, PrincipalType, ProfileId, ProfileMetadata,
-    ProfileStatus, ResourceId, RevocationReason, SCIM_GROUP_CREATE, SCIM_GROUP_DELETE,
-    SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_USER_CREATE,
+    AuditEntry, DirectoryGroupWrite, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode,
+    Group, GroupId, GroupMember, MutationContext, OrgId, Principal, PrincipalType, ProfileId,
+    ProfileMetadata, ProfileStatus, ResourceId, RevocationReason, SCIM_GROUP_CREATE,
+    SCIM_GROUP_DELETE, SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_USER_CREATE,
     SCIM_USER_DEACTIVATE, SCIM_USER_READ, SCIM_USER_UPDATE, SessionEnd,
     event::{Event, event_types},
 };
@@ -69,6 +69,14 @@ impl ScimServiceImpl {
         }
     }
 
+    /// Where this directory renders its user resources.
+    fn place(&self) -> crate::mapping::ScimPlace<'_> {
+        crate::mapping::ScimPlace {
+            org_domain: &self.org_ctx.org_domain,
+            base_url: &self.base_url,
+        }
+    }
+
     /// Also accept the directory resource's access tokens `tokens` verifies.
     pub fn with_access_tokens(mut self, tokens: Arc<ResourceTokenVerifier>) -> Self {
         self.tokens = Some(tokens);
@@ -88,7 +96,12 @@ impl ScimServiceImpl {
             .storage
             .write_directory_user(write, ctx)
             .await
-            .map_err(|e| refusal::user_write(write.profile_id(), e))?;
+            // A refusal names the user as the client knows it, never by the
+            // account's identifier.
+            .map_err(|e| match write.resource {
+                Some(resource) => refusal::user_write(resource, e),
+                None => refusal::user_write("", e),
+            })?;
         for session in &ended {
             if let Err(e) = self.revocation.revoke_session(session.id.to_string()).await {
                 warn!(
@@ -189,12 +202,6 @@ fn deprovision() -> SessionEnd {
 
 // ── Helpers ──
 
-/// The user identifier in `attribute` (`id`, or a group member's `value`).
-#[allow(clippy::result_large_err)]
-fn parse_profile_id(attribute: &str, id: &str) -> Result<ProfileId, Status> {
-    ProfileId::parse(id).map_err(|_| refusal::invalid_id(attribute))
-}
-
 #[allow(clippy::result_large_err)]
 fn parse_group_id(id: &str) -> Result<GroupId, Status> {
     GroupId::parse(id).map_err(|_| refusal::invalid_id("id"))
@@ -247,15 +254,16 @@ impl ScimService for ScimServiceImpl {
         audit.metadata["external_id"] = serde_json::json!(req.external_id);
         self.write_user(&write, audited(&caller, audit, &event))
             .await?;
+        let resource = self.resource_of(profile.id).await?;
 
         Ok(Response::new(sid_to_scim_user(
+            resource,
             &profile,
             &principals,
             &write.add_emails,
             &metadata,
             &[],
-            &self.org_ctx.org_domain,
-            &self.base_url,
+            self.place(),
         )))
     }
 
@@ -266,14 +274,14 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<proto::ScimUser>, Status> {
         self.provisioner(&request, SCIM_USER_READ).await?;
         let req = request.into_inner();
-        let profile_id = parse_profile_id("id", &req.id)?;
+        let (resource, profile_id) = self.user(&req.id).await?;
 
         let profile = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| refusal::user_not_found(profile_id))?;
+            .ok_or_else(|| refusal::user_not_found(resource))?;
 
         let identifiers = self
             .storage
@@ -301,13 +309,13 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?;
 
         let scim_user = sid_to_scim_user(
+            resource,
             &profile,
             &identifiers,
             &emails,
             &metadata,
             &group_refs,
-            &self.org_ctx.org_domain,
-            &self.base_url,
+            self.place(),
         );
 
         Ok(Response::new(scim_user))
@@ -355,13 +363,13 @@ impl ScimService for ScimServiceImpl {
             .iter()
             .map(|user| {
                 sid_to_scim_user(
+                    user.id,
                     &user.profile,
                     &user.principals,
                     &user.emails,
                     &user.metadata,
                     &[], // Groups are read per user, not for a list.
-                    &self.org_ctx.org_domain,
-                    &self.base_url,
+                    self.place(),
                 )
             })
             .collect();
@@ -382,14 +390,14 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<proto::ScimUser>, Status> {
         let caller = self.provisioner(&request, SCIM_USER_UPDATE).await?;
         let req = request.into_inner();
-        let profile_id = parse_profile_id("id", &req.id)?;
+        let (resource, profile_id) = self.user(&req.id).await?;
 
         let mut profile = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| refusal::user_not_found(profile_id))?;
+            .ok_or_else(|| refusal::user_not_found(resource))?;
 
         let profile_id_str = profile.id.to_string();
 
@@ -412,7 +420,8 @@ impl ScimService for ScimServiceImpl {
 
         check_single_primary(&req.emails, &req.phone_numbers).map_err(refusal::mapping)?;
         let now = jiff::Timestamp::now();
-        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone());
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
 
         // Replace contact emails and phones (profile_emails, profile_phones).
         write.remove_emails = self
@@ -564,13 +573,13 @@ impl ScimService for ScimServiceImpl {
             .await
             .map_err(storage_failure)?;
         Ok(Response::new(sid_to_scim_user(
+            resource,
             &profile,
             &all_identifiers,
             &emails,
             &new_metadata,
             &group_refs,
-            &self.org_ctx.org_domain,
-            &self.base_url,
+            self.place(),
         )))
     }
 
@@ -581,14 +590,14 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<proto::ScimUser>, Status> {
         let caller = self.provisioner(&request, SCIM_USER_UPDATE).await?;
         let req = request.into_inner();
-        let profile_id = parse_profile_id("id", &req.id)?;
+        let (resource, profile_id) = self.user(&req.id).await?;
 
         let mut profile = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| refusal::user_not_found(profile_id))?;
+            .ok_or_else(|| refusal::user_not_found(resource))?;
 
         let profile_id_str = profile.id.to_string();
 
@@ -643,7 +652,8 @@ impl ScimService for ScimServiceImpl {
             .list_profile_phones(profile_id)
             .await
             .map_err(storage_failure)?;
-        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone());
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
         if profile.status == ProfileStatus::Suspended {
             write.end_access = Some(deprovision());
         }
@@ -799,19 +809,20 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?;
 
         Ok(Response::new(sid_to_scim_user(
+            resource,
             &profile,
             &identifiers,
             &emails,
             &metadata,
             &group_refs,
-            &self.org_ctx.org_domain,
-            &self.base_url,
+            self.place(),
         )))
     }
 
-    /// SCIM DELETE = **deactivate** (soft delete), NOT hard delete: the profile
-    /// is suspended, every live sign-in ends, downstream apps receive
-    /// `active=false` via SCIM outbound.
+    /// SCIM DELETE deletes the user resource (RFC 7644 3.6): one commit
+    /// marks it deleted, suspends the account it stands for and ends every
+    /// live sign-in. The resource is served by no read afterwards and a
+    /// repeat is not found; the account's record stays for the installation.
     #[instrument(skip_all, fields(id = %request.get_ref().id))]
     async fn delete_user(
         &self,
@@ -819,17 +830,15 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.provisioner(&request, SCIM_USER_DEACTIVATE).await?;
         let req = request.into_inner();
-        let profile_id = parse_profile_id("id", &req.id)?;
+        let (resource, profile_id) = self.user(&req.id).await?;
 
         let mut profile = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| refusal::user_not_found(profile_id))?;
+            .ok_or_else(|| refusal::user_not_found(resource))?;
 
-        // Soft delete: deactivate, don't destroy.
-        // Arch doc: "deactivate, not delete — downstream retains audit"
         profile.status = ProfileStatus::Suspended;
 
         let profile_id_str = profile_id.to_string();
@@ -840,7 +849,9 @@ impl ScimService for ScimServiceImpl {
                 "profile_id": profile_id_str,
                 "trigger": "scim_delete",
             }));
-        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile);
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, profile).through(resource);
+        write.delete_resource = true;
         write.end_access = Some(deprovision());
         self.write_user(
             &write,
@@ -878,7 +889,7 @@ impl ScimService for ScimServiceImpl {
 
         let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
         for member_ref in &req.members {
-            let pid = parse_profile_id("members", &member_ref.value)?;
+            let pid = self.member(&member_ref.value).await?;
             write.add_members.push(GroupMember::new(group.id, pid));
         }
         let event = Event::new("sid-scim", event_types::SCIM_GROUP_CREATED)
@@ -998,21 +1009,23 @@ impl ScimService for ScimServiceImpl {
             group.name = new_name.clone();
         }
         let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone());
+        // Members are named by their user resources; the write and the
+        // event carry the accounts they stand for.
         for member_id in &patch_result.add_members {
-            let pid = parse_profile_id("members", member_id)?;
+            let pid = self.member(member_id).await?;
             write.add_members.push(GroupMember::new(group.id, pid));
         }
         for member_id in &patch_result.remove_members {
-            write
-                .remove_members
-                .push(parse_profile_id("members", member_id)?);
+            write.remove_members.push(self.member(member_id).await?);
         }
+        let accounts = |ids: &[ProfileId]| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let added: Vec<ProfileId> = write.add_members.iter().map(|m| m.profile_id).collect();
         let event = Event::new("sid-scim", event_types::SCIM_GROUP_UPDATED)
             .with_subject(format!("group/{}", group_id_str))
             .with_data(serde_json::json!({
                 "group_id": group_id_str,
-                "add_members": patch_result.add_members,
-                "remove_members": patch_result.remove_members,
+                "add_members": accounts(&added),
+                "remove_members": accounts(&write.remove_members),
                 "display_name_changed": patch_result.display_name.is_some(),
             }));
         self.storage
@@ -1188,18 +1201,29 @@ impl ScimServiceImpl {
         Ok(groups.iter().map(|g| (g.id, g.name.clone())).collect())
     }
 
+    /// A group's members as the directory serves them: by their resource
+    /// identifiers, a member whose resource was deleted left out.
     async fn load_member_refs(
         &self,
         group_id: GroupId,
-    ) -> Result<Vec<(ProfileId, String)>, Status> {
+    ) -> Result<Vec<(DirectoryUserId, String)>, Status> {
         let members = self
             .storage
             .list_group_members(group_id)
             .await
             .map_err(storage_failure)?;
+        let accounts: Vec<ProfileId> = members.iter().map(|gm| gm.profile_id).collect();
+        let resources = self
+            .storage
+            .directory_users_of(&accounts)
+            .await
+            .map_err(storage_failure)?;
 
-        let mut refs = Vec::with_capacity(members.len());
+        let mut refs = Vec::with_capacity(resources.len());
         for gm in &members {
+            let Some(resource) = resources.iter().find(|r| r.profile_id == gm.profile_id) else {
+                continue;
+            };
             let display = if let Some(profile) = self
                 .storage
                 .get_profile(gm.profile_id)
@@ -1210,9 +1234,60 @@ impl ScimServiceImpl {
             } else {
                 String::new()
             };
-            refs.push((gm.profile_id, display));
+            refs.push((resource.id, display));
         }
         Ok(refs)
+    }
+
+    /// The live user resource a client names by `id` and the account it
+    /// stands for. An identifier that is malformed is the client's mistake;
+    /// one never assigned or deleted is not found (RFC 7644 3.6).
+    #[allow(clippy::result_large_err)]
+    async fn user(&self, id: &str) -> Result<(DirectoryUserId, ProfileId), Status> {
+        let resource = DirectoryUserId::parse(id).ok_or_else(|| refusal::invalid_id("id"))?;
+        match self
+            .storage
+            .find_directory_user(resource)
+            .await
+            .map_err(storage_failure)?
+        {
+            Some(found) if found.is_live() => Ok((found.id, found.profile_id)),
+            _ => Err(refusal::user_not_found(resource)),
+        }
+    }
+
+    /// The account of the group member a client names by its user resource.
+    #[allow(clippy::result_large_err)]
+    async fn member(&self, value: &str) -> Result<ProfileId, Status> {
+        let resource =
+            DirectoryUserId::parse(value).ok_or_else(|| refusal::invalid_id("members"))?;
+        match self
+            .storage
+            .find_directory_user(resource)
+            .await
+            .map_err(storage_failure)?
+        {
+            Some(found) if found.is_live() => Ok(found.profile_id),
+            _ => Err(refusal::not_a_user()),
+        }
+    }
+
+    /// The resource identifier the directory assigned to the account it has
+    /// just created.
+    #[allow(clippy::result_large_err)]
+    async fn resource_of(&self, account: ProfileId) -> Result<DirectoryUserId, Status> {
+        self.storage
+            .directory_users_of(&[account])
+            .await
+            .map_err(storage_failure)?
+            .first()
+            .map(|r| r.id)
+            .ok_or_else(|| {
+                sid_infra::grpc_error::refuse::internal(
+                    "scim user",
+                    "a created user has no resource",
+                )
+            })
     }
 }
 

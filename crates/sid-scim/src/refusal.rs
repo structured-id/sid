@@ -4,7 +4,7 @@
 //! rendering can produce the SCIM error body from the status alone.
 
 use sid_core::Error as SidError;
-use sid_core::models::{GroupId, ProfileId};
+use sid_core::models::GroupId;
 use sid_infra::grpc_error::refuse::{
     authority_changed, changed_concurrently, internal, not_found, storage_failure,
 };
@@ -100,8 +100,9 @@ pub(crate) fn patch(e: PatchError) -> Status {
     )
 }
 
-/// The user `id` does not exist (404).
-pub(crate) fn user_not_found(id: ProfileId) -> Status {
+/// The user `id` (as the client named it) does not exist, or was deleted
+/// (404, RFC 7644 3.6).
+pub(crate) fn user_not_found(id: impl core::fmt::Display) -> Status {
     not_found(ErrorReason::ProfileNotFound, "User", id.to_string())
 }
 
@@ -113,7 +114,7 @@ pub(crate) fn group_not_found(id: GroupId) -> Status {
 /// A user write refused by storage. The only unique attribute a user write
 /// can collide on is its login handle, `userName` (RFC 7644 §3.3,
 /// `uniqueness`).
-pub(crate) fn user_write(id: ProfileId, e: SidError) -> Status {
+pub(crate) fn user_write(id: impl core::fmt::Display, e: SidError) -> Status {
     match e {
         SidError::Conflict(_) => ApiError::new(
             ErrorReason::UsernameAlreadyTaken,
@@ -142,15 +143,20 @@ pub(crate) fn group_write(id: GroupId, e: SidError) -> Status {
         .with_metadata(SCIM_TYPE, "uniqueness")
         .into(),
         SidError::NotFound(_) => group_not_found(id),
-        // A member that is no existing user.
-        SidError::Validation(_) => invalid(
-            ErrorReason::InvalidFieldValue,
-            "invalidValue",
-            "members",
-            "not an existing user",
-        ),
+        SidError::Validation(_) => not_a_user(),
         other => shared_write(other),
     }
+}
+
+/// A group member that is no existing user of the directory (never
+/// assigned, or deleted): `invalidValue`.
+pub(crate) fn not_a_user() -> Status {
+    invalid(
+        ErrorReason::InvalidFieldValue,
+        "invalidValue",
+        "members",
+        "not an existing user",
+    )
 }
 
 /// Write refusals common to users and groups.

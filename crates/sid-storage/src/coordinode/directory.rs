@@ -13,8 +13,9 @@ use sid_core::models::directory_query::metadata_keys;
 use sid_core::models::pat::{PatId, PatStatus, PersonalAccessToken};
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter, DirectoryGroupWrite, DirectoryOperator as Op,
-    DirectoryPage, DirectoryQuery, DirectoryUserWrite, DirectoryWriteMode, MutationContext,
-    PrincipalType, Profile, ProfileId, ProfileMetadata, ProfileStatus, Session,
+    DirectoryPage, DirectoryQuery, DirectoryResource, DirectoryUserId, DirectoryUserWrite,
+    DirectoryWriteMode, MutationContext, PrincipalType, Profile, ProfileId, ProfileMetadata,
+    ProfileStatus, Session,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -164,9 +165,113 @@ fn revoke_active(tx: &Statements<'_>, profile: ProfileId, revoked_by: &str) -> S
     u64::try_from(active.len()).map_err(|_| SidError::Storage("revoked count".into()))
 }
 
-/// Delete in `tx` the metadata and tokens of `profile`.
+// === Directory user resources ===
+
+const RESOURCE: &str = "d.id AS id, d.profile_id AS profile_id, d.revision AS revision,
+    d.deleted_at AS deleted_at";
+
+fn resource(row: &Row) -> SidResult<DirectoryResource> {
+    let revision = get_int(row, "revision")?;
+    Ok(DirectoryResource {
+        id: DirectoryUserId(super::get_uuid(row, "id")?),
+        profile_id: get_id(row, "profile_id")?,
+        revision: u64::try_from(revision)
+            .map_err(|_| SidError::Storage(format!("directory resource revision: {revision}")))?,
+        deleted_at: get_opt_time(row, "deleted_at")?,
+    })
+}
+
+fn resources_where(
+    tx: &Statements<'_>,
+    filter: &str,
+    value: Value,
+) -> SidResult<Vec<DirectoryResource>> {
+    let rows = tx.run(
+        &format!("MATCH (d:SidDirectoryUser) WHERE {filter} RETURN {RESOURCE}"),
+        Params::default().with("value", value),
+    )?;
+    rows.iter().map(resource).collect()
+}
+
+/// The live resource of `profile` in `tx`, if it has one.
+fn live_resource(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Option<DirectoryResource>> {
+    Ok(
+        resources_where(tx, "d.profile_id = $value", bin(profile.as_bytes()))?
+            .into_iter()
+            .find(DirectoryResource::is_live),
+    )
+}
+
+fn create_resource(tx: &Statements<'_>, r: &DirectoryResource) -> SidResult<()> {
+    let revision = i64::try_from(r.revision)
+        .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
+    tx.run(
+        "CREATE (d:SidDirectoryUser {id: $id, profile_id: $profile, revision: $revision,
+            deleted_at: $deleted_at})",
+        Params::default()
+            .with("id", uuid(&r.id.0))
+            .with("profile", bin(r.profile_id.as_bytes()))
+            .with("revision", Value::Int(revision))
+            .with("deleted_at", opt_time(r.deleted_at)),
+    )?;
+    Ok(())
+}
+
+/// Assign the new account `profile` its directory resource in `tx`.
+pub(super) fn assign_resource(tx: &Statements<'_>, profile: &Profile) -> SidResult<()> {
+    create_resource(
+        tx,
+        &DirectoryResource {
+            id: DirectoryUserId::new(),
+            profile_id: profile.id,
+            revision: 0,
+            deleted_at: None,
+        },
+    )
+}
+
+/// Require the live resource `id` of `profile` in `tx`, deleting it when
+/// `delete`; anything else (unknown, deleted, another account's) is
+/// `NotFound`. The matched node is written either way, so a concurrent
+/// deletion conflicts with this transaction.
+fn hold_resource(
+    tx: &Statements<'_>,
+    id: DirectoryUserId,
+    profile: ProfileId,
+    delete: bool,
+) -> SidResult<()> {
+    let held = resources_where(tx, "d.id = $value", uuid(&id.0))?
+        .into_iter()
+        .find(|r| r.profile_id == profile && r.is_live());
+    let Some(held) = held else {
+        return Err(SidError::NotFound(format!("directory user {id}")));
+    };
+    let (revision, deleted_at) = if delete {
+        let next = held
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| SidError::Validation("directory resource revision exhausted".into()))?;
+        (next, Some(Timestamp::now()))
+    } else {
+        (held.revision, None)
+    };
+    let revision = i64::try_from(revision)
+        .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
+    tx.run(
+        "MATCH (d:SidDirectoryUser) WHERE d.id = $id
+         SET d.revision = $revision, d.deleted_at = $deleted_at",
+        Params::default()
+            .with("id", uuid(&id.0))
+            .with("revision", Value::Int(revision))
+            .with("deleted_at", opt_time(deleted_at)),
+    )?;
+    Ok(())
+}
+
+/// Delete in `tx` the metadata, tokens and directory resources of `profile`.
 pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
     for query in [
+        "MATCH (d:SidDirectoryUser) WHERE d.profile_id = $id DETACH DELETE d",
         "MATCH (m:SidProfileMetadata) WHERE m.profile_id = $id DETACH DELETE m",
         "MATCH (t:SidPat) WHERE t.profile_id = $id DETACH DELETE t",
     ] {
@@ -331,6 +436,7 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     // carry a userName, the suffix stripped.
     let suffix = format!("#{}", query.org_domain);
     let mut matching = Vec::new();
+    let mut resources = Vec::new();
     for profile in super::profile::profiles(tx, "", Params::default())? {
         // Retired profiles (closed, purged) are never part of the directory.
         if matches!(
@@ -339,6 +445,12 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
         ) {
             continue;
         }
+        // A user is served while its directory resource is live: a deleted
+        // resource is in no query (RFC 7644 3.6).
+        let Some(live) = live_resource(tx, profile.id)? else {
+            continue;
+        };
+        resources.push(live);
         let principals = super::principal::held_by(tx, profile.id)?;
         let candidate = Candidate {
             usernames: principals
@@ -383,7 +495,7 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     }
     Ok(DirectoryPage {
         total,
-        users: crate::directory_query::assemble(profiles, principals, emails, metadata),
+        users: crate::directory_query::assemble(profiles, resources, principals, emails, metadata)?,
     })
 }
 
@@ -395,9 +507,26 @@ fn write_user(
     ctx: &mut MutationContext,
 ) -> SidResult<Vec<Session>> {
     let profile_id = write.profile_id();
+    if write.delete_resource && write.resource.is_none() {
+        return Err(SidError::Validation(
+            "a directory deletion names its resource".into(),
+        ));
+    }
     match write.mode {
-        DirectoryWriteMode::Create => super::profile::insert(tx, &write.profile)?,
+        DirectoryWriteMode::Create => {
+            if write.resource.is_some() {
+                return Err(SidError::Validation(
+                    "a directory create is given no resource".into(),
+                ));
+            }
+            super::profile::insert(tx, &write.profile)?
+        }
         DirectoryWriteMode::Update => {
+            // The resource first: a deletion that committed since the caller
+            // read it refuses the write as not found.
+            if let Some(resource) = write.resource {
+                hold_resource(tx, resource, profile_id, write.delete_resource)?;
+            }
             // A missing account or one changed since it was read refuses
             // the whole write.
             if !super::profile::update(tx, &write.profile)? {
@@ -506,6 +635,85 @@ impl CoordinodeBackend {
         let write = write.clone();
         self.mutate(format!("group:{}", write.group.id), ctx, move |tx| {
             write_group(tx, &write)
+        })
+        .await
+    }
+
+    pub(super) async fn find_directory_user(
+        &self,
+        id: DirectoryUserId,
+    ) -> SidResult<Option<DirectoryResource>> {
+        self.read(move |tx| Ok(resources_where(tx, "d.id = $value", uuid(&id.0))?.pop()))
+            .await
+    }
+
+    pub(super) async fn directory_users_of(
+        &self,
+        profiles: &[ProfileId],
+    ) -> SidResult<Vec<DirectoryResource>> {
+        let profiles = profiles.to_vec();
+        self.read(move |tx| {
+            let mut found = Vec::new();
+            for profile in &profiles {
+                found.extend(live_resource(tx, *profile)?);
+            }
+            Ok(found)
+        })
+        .await
+    }
+
+    pub(super) async fn export_directory_users(&self) -> SidResult<Vec<DirectoryResource>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (d:SidDirectoryUser) RETURN {RESOURCE}"),
+                Params::default(),
+            )?;
+            let mut all = rows.iter().map(resource).collect::<SidResult<Vec<_>>>()?;
+            all.sort_by_key(|r| (r.profile_id, r.id));
+            Ok(all)
+        })
+        .await
+    }
+
+    pub(super) async fn import_directory_users(
+        &self,
+        profile_id: ProfileId,
+        resources: &[DirectoryResource],
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        if resources.iter().any(|r| r.profile_id != profile_id)
+            || resources.iter().filter(|r| r.is_live()).count() > 1
+        {
+            return Err(SidError::Validation(
+                "an account's directory resources are its own, one of them live at most".into(),
+            ));
+        }
+        let resources = resources.to_vec();
+        self.mutate(format!("profile:{profile_id}"), ctx, move |tx| {
+            // The resource assigned when the account was restored gives way
+            // to the ones the account had.
+            if super::profile::get(tx, profile_id)?.is_none() {
+                return Err(SidError::NotFound(format!("profile {profile_id}")));
+            }
+            for r in &resources {
+                if resources_where(tx, "d.id = $value", uuid(&r.id.0))?
+                    .iter()
+                    .any(|held| held.profile_id != profile_id)
+                {
+                    return Err(SidError::Conflict(format!(
+                        "directory user {} stands for another account",
+                        r.id
+                    )));
+                }
+            }
+            tx.run(
+                "MATCH (d:SidDirectoryUser) WHERE d.profile_id = $id DETACH DELETE d",
+                Params::default().with("id", bin(profile_id.as_bytes())),
+            )?;
+            for r in &resources {
+                create_resource(tx, r)?;
+            }
+            Ok(())
         })
         .await
     }

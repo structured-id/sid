@@ -220,6 +220,24 @@ fn unique_username() -> String {
     format!("scim_test_{}", Uuid::now_v7().simple())
 }
 
+/// The account behind the user a client knows as `scim_id`. The SCIM id is
+/// the directory resource's own identifier, never the account's.
+async fn account_of(storage: &Arc<dyn StorageBackend>, scim_id: &str) -> ProfileId {
+    let resource = sid_core::models::DirectoryUserId::parse(scim_id).expect("a resource id");
+    if let Ok(as_account) = ProfileId::parse(scim_id) {
+        assert!(
+            storage.get_profile(as_account).await.unwrap().is_none(),
+            "the SCIM id names an account"
+        );
+    }
+    storage
+        .find_directory_user(resource)
+        .await
+        .unwrap()
+        .expect("the user's resource is stored")
+        .profile_id
+}
+
 fn create_user_request(user_name: &str) -> proto::ScimCreateUserRequest {
     proto::ScimCreateUserRequest {
         external_id: format!("EMP-{}", user_name),
@@ -280,7 +298,7 @@ async fn test_create_user_stores_profile_and_identifiers() {
     assert!(user.meta.is_some());
 
     // Verify persisted profile
-    let profile_id = ProfileId::parse(&user.id).unwrap();
+    let profile_id = account_of(&storage, &user.id).await;
     let profile = storage
         .get_profile(profile_id)
         .await
@@ -699,7 +717,7 @@ async fn test_replace_user_updates_all_fields() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Replace with updated data
     let replaced = service
@@ -819,7 +837,7 @@ async fn test_patch_user_deactivate_and_reactivate() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Deactivate
     let patched = service
@@ -876,7 +894,7 @@ async fn test_patch_user_add_primary_email_demotes_current() {
         .await
         .unwrap()
         .into_inner();
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     let new_primary = format!("primary-{}@acme.example.com", Uuid::now_v7().simple());
     service
@@ -919,7 +937,7 @@ async fn test_patch_user_add_email() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Add a second email (unique per test run)
     let second_email = format!("second-{}@acme.example.com", Uuid::now_v7().simple());
@@ -969,7 +987,7 @@ async fn test_patch_user_remove_email() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
     let email_value = format!("{}@acme.example.com", username);
 
     // Remove the email
@@ -1034,7 +1052,11 @@ async fn test_patch_user_immutable_field_rejected() {
 // ─── DeleteUser ───
 
 #[tokio::test]
-async fn test_delete_user_deactivates_profile() {
+/// Regression: DELETE only suspended the account, so the deleted user was
+/// still read, listed, changed and deleted again. RFC 7644 3.6: after the
+/// first DELETE every operation on the id is not found and the user is in no
+/// query; the account's record stays, suspended.
+async fn test_delete_user_removes_the_resource() {
     let (service, storage) = setup().await;
     let username = unique_username();
 
@@ -1043,10 +1065,21 @@ async fn test_delete_user_deactivates_profile() {
         .await
         .unwrap()
         .into_inner();
+    let profile_id = account_of(&storage, &created.id).await;
+    let group = service
+        .create_group(provisioned(proto::ScimCreateGroupRequest {
+            display_name: format!("DeleteGroup_{}", Uuid::now_v7().simple()),
+            members: vec![proto::ScimMemberRef {
+                value: created.id.clone(),
+                display: String::new(),
+            }],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(group.members.len(), 1);
+    assert_eq!(group.members[0].value, created.id);
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
-
-    // SCIM DELETE = soft delete (deactivate), per arch doc
     service
         .delete_user(provisioned(proto::ScimDeleteUserRequest {
             id: created.id.clone(),
@@ -1054,25 +1087,130 @@ async fn test_delete_user_deactivates_profile() {
         .await
         .expect("delete_user failed");
 
-    // Profile should still exist but be Suspended
-    let profile = storage.get_profile(profile_id).await.unwrap();
-    assert!(
-        profile.is_some(),
-        "profile should still exist after SCIM DELETE"
+    let not_found = |status: tonic::Status| {
+        assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+        assert!(
+            !format!("{status:?}").contains(&profile_id.to_string()),
+            "a refusal names the account: {status:?}"
+        );
+    };
+    not_found(
+        service
+            .get_user(provisioned(proto::ScimGetUserRequest {
+                id: created.id.clone(),
+            }))
+            .await
+            .expect_err("a deleted user is read"),
     );
-    let profile = profile.unwrap();
-    assert_eq!(
-        profile.status,
-        ProfileStatus::Suspended,
-        "SCIM DELETE should deactivate (Suspended), not hard delete"
+    not_found(
+        service
+            .replace_user(provisioned(proto::ScimReplaceUserRequest {
+                id: created.id.clone(),
+                user_name: username.clone(),
+                active: true,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("a deleted user is replaced"),
+    );
+    not_found(
+        service
+            .patch_user(provisioned(proto::ScimPatchUserRequest {
+                id: created.id.clone(),
+                operations: vec![proto::ScimPatchOp {
+                    op: "replace".into(),
+                    path: "active".into(),
+                    value: "true".into(),
+                }],
+            }))
+            .await
+            .expect_err("a deleted user is patched"),
+    );
+    not_found(
+        service
+            .delete_user(provisioned(proto::ScimDeleteUserRequest {
+                id: created.id.clone(),
+            }))
+            .await
+            .expect_err("a deleted user is deleted again"),
     );
 
-    // Principals should still exist (preserved for audit trail)
-    let principals = storage.get_principals_by_profile(profile_id).await.unwrap();
-    assert!(
-        !principals.is_empty(),
-        "principals preserved after soft delete"
-    );
+    // In no query, and no longer a member the directory serves.
+    let listed = service
+        .list_users(provisioned(proto::ScimListUsersRequest {
+            filter: format!("userName eq \"{username}\""),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.total_results, 0);
+    assert!(listed.resources.is_empty());
+    let read = service
+        .get_group(provisioned(proto::ScimGetGroupRequest {
+            id: group.id.clone(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(read.members.is_empty(), "{:?}", read.members);
+    // Nor can it be made a member again.
+    let readded = service
+        .create_group(provisioned(proto::ScimCreateGroupRequest {
+            display_name: format!("DeleteGroup_{}", Uuid::now_v7().simple()),
+            members: vec![proto::ScimMemberRef {
+                value: created.id.clone(),
+                display: String::new(),
+            }],
+        }))
+        .await
+        .expect_err("a deleted user is added to a group");
+    assert_eq!(readded.code(), tonic::Code::InvalidArgument);
+
+    // The account's record stays, suspended, with its access ended.
+    let profile = storage
+        .get_profile(profile_id)
+        .await
+        .unwrap()
+        .expect("the account's record stays");
+    assert_eq!(profile.status, ProfileStatus::Suspended);
+    let resource = storage
+        .find_directory_user(sid_core::models::DirectoryUserId::parse(&created.id).unwrap())
+        .await
+        .unwrap()
+        .expect("a deleted resource is kept");
+    assert!(!resource.is_live());
+}
+
+/// `active=false` is not a deletion: the user stays addressable, inactive.
+#[tokio::test]
+async fn test_deactivated_user_stays_addressable() {
+    let (service, _storage) = setup().await;
+    let created = service
+        .create_user(provisioned(create_user_request(&unique_username())))
+        .await
+        .unwrap()
+        .into_inner();
+    service
+        .patch_user(provisioned(proto::ScimPatchUserRequest {
+            id: created.id.clone(),
+            operations: vec![proto::ScimPatchOp {
+                op: "replace".into(),
+                path: "active".into(),
+                value: "false".into(),
+            }],
+        }))
+        .await
+        .expect("deactivation");
+    let read = service
+        .get_user(provisioned(proto::ScimGetUserRequest {
+            id: created.id.clone(),
+        }))
+        .await
+        .expect("a deactivated user is read")
+        .into_inner();
+    assert_eq!(read.id, created.id);
+    assert!(!read.active);
 }
 
 #[tokio::test]
@@ -1290,7 +1428,7 @@ async fn test_joiner_mover_leaver_lifecycle() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Verify: Provisioned, Corporate, identifiers correct
     let profile = storage.get_profile(profile_id).await.unwrap().unwrap();
@@ -1360,7 +1498,7 @@ async fn test_provisioned_suspend_reactivate_returns_to_provisioned() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Verify starts Provisioned
     let profile = storage.get_profile(profile_id).await.unwrap().unwrap();
@@ -1416,7 +1554,7 @@ async fn test_provisioned_suspend_reactivate_via_put_returns_to_provisioned() {
         .unwrap()
         .into_inner();
 
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(&storage, &created.id).await;
 
     // Suspend via PUT active=false
     service
@@ -1642,18 +1780,20 @@ async fn test_scim_membership_needs_its_own_grant() {
 /// used, never to "system".
 #[tokio::test]
 async fn test_scim_writes_are_attributed_to_the_connector() {
-    let (service, _) = setup().await;
+    let (service, storage) = setup().await;
     let created = service
         .create_user(provisioned(create_user_request(&unique_username())))
         .await
         .unwrap()
         .into_inner();
+    // The installation's audit names the account the write changed.
+    let account = account_of(&storage, &created.id).await.to_string();
     let pool = storage_pool().await;
     let (actor_type, actor_id, metadata): (String, String, serde_json::Value) = sqlx::query_as(
         "SELECT actor_type, actor_id, metadata FROM audit_records \
          WHERE action = 'scim.user.create' AND resource = $1",
     )
-    .bind(&created.id)
+    .bind(&account)
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -1681,7 +1821,7 @@ async fn signed_in_employee(
         .await
         .unwrap()
         .into_inner();
-    let profile_id = ProfileId::parse(&created.id).unwrap();
+    let profile_id = account_of(storage, &created.id).await;
     let session = Session::new(
         profile_id,
         None,

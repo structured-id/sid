@@ -3525,6 +3525,34 @@ impl StorageBackend for PostgresBackend {
         self.write_directory_user_impl(write, ctx).await
     }
 
+    async fn find_directory_user(
+        &self,
+        id: sid_core::models::DirectoryUserId,
+    ) -> SidResult<Option<sid_core::models::DirectoryResource>> {
+        self.find_directory_user_impl(id).await
+    }
+
+    async fn directory_users_of(
+        &self,
+        profiles: &[ProfileId],
+    ) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        self.directory_users_of_impl(profiles).await
+    }
+
+    async fn export_directory_users(&self) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        self.export_directory_users_impl().await
+    }
+
+    async fn import_directory_users(
+        &self,
+        profile_id: ProfileId,
+        resources: &[sid_core::models::DirectoryResource],
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.import_directory_users_impl(profile_id, resources, ctx)
+            .await
+    }
+
     async fn write_directory_group(
         &self,
         write: &sid_core::models::DirectoryGroupWrite,
@@ -4079,11 +4107,24 @@ impl StorageBackend for PostgresBackend {
             .into_iter()
             .map(|r| r.into_domain())
             .collect();
+        let resources = sqlx::query(
+            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+             WHERE profile_id = ANY($1) AND deleted_at IS NULL",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failed)?
+        .iter()
+        .map(directory::resource)
+        .collect::<SidResult<Vec<_>>>()?;
         tx.commit().await.map_err(failed)?;
 
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
-            users: crate::directory_query::assemble(profiles, principals, emails, metadata),
+            users: crate::directory_query::assemble(
+                profiles, resources, principals, emails, metadata,
+            )?,
         })
     }
 

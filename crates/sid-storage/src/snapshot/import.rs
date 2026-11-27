@@ -635,6 +635,28 @@ pub async fn import(
             Err(e) => return Err(e.into()),
         }
     }
+    // Each account takes the directory resources it had, in place of the
+    // one assigned when it was created just above.
+    for profile in &snapshot.profiles {
+        let resources: Vec<_> = snapshot
+            .directory_users
+            .iter()
+            .filter(|r| r.profile_id == profile.id)
+            .copied()
+            .collect();
+        // Every stored account has a resource, deleted or not: none in the
+        // archive means nothing to restore, and the assigned one stays.
+        if resources.is_empty() {
+            continue;
+        }
+        backend
+            .import_directory_users(
+                profile.id,
+                &resources,
+                audit("import_directory_users", &profile.id.to_string()),
+            )
+            .await?;
+    }
 
     info!(count = snapshot.projects.len(), "importing projects...");
     for project in &snapshot.projects {

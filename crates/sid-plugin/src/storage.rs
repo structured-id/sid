@@ -161,13 +161,47 @@ pub trait StorageBackend:
     /// Apply one directory write to a user account in one transaction, with
     /// its audit entry and owed work. On create, an existing account or a
     /// login handle already held refuses everything with `Error::Conflict`;
-    /// on update, a missing account refuses with `Error::NotFound`. Returns
-    /// the sessions a deprovisioning ended, so their tokens can be revoked.
+    /// on update, a missing account refuses with `Error::NotFound`. An
+    /// update made through a directory resource (`write.resource`) applies
+    /// only while that resource is live and stands for the account, and is
+    /// `Error::NotFound` otherwise; with `write.delete_resource` the same
+    /// commit deletes the resource. Every created account gets a resource of
+    /// its own. Returns the sessions a deprovisioning ended, so their tokens
+    /// can be revoked.
     async fn write_directory_user(
         &self,
         write: &DirectoryUserWrite,
         ctx: MutationContext,
     ) -> Result<Vec<Session>>;
+
+    /// The directory user resource `id`, deleted or not; `None` for an
+    /// identifier never assigned.
+    async fn find_directory_user(
+        &self,
+        id: sid_core::models::DirectoryUserId,
+    ) -> Result<Option<sid_core::models::DirectoryResource>>;
+
+    /// The live directory resources of `profiles`, one at most each, in one
+    /// read: an account whose resource was deleted has none.
+    async fn directory_users_of(
+        &self,
+        profiles: &[ProfileId],
+    ) -> Result<Vec<sid_core::models::DirectoryResource>>;
+
+    /// Every directory user resource, deleted ones included, by account.
+    async fn export_directory_users(&self) -> Result<Vec<sid_core::models::DirectoryResource>>;
+
+    /// Give the account `profile_id` exactly `resources` (its own, one live
+    /// at most), replacing the resource assigned when it was created: a
+    /// restored account keeps the identifiers its clients know. A repeat
+    /// changes nothing; an identifier that stands for another account is
+    /// `Error::Conflict`.
+    async fn import_directory_users(
+        &self,
+        profile_id: ProfileId,
+        resources: &[sid_core::models::DirectoryResource],
+        ctx: MutationContext,
+    ) -> Result<()>;
 
     /// Apply one directory write to a group in one transaction, with its
     /// audit entry and owed work (`Error::Conflict` on create over an

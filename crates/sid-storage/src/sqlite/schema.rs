@@ -1198,6 +1198,23 @@ CREATE TABLE IF NOT EXISTS profile_metadata (
 CREATE INDEX IF NOT EXISTS idx_profile_metadata_profile_id ON profile_metadata(profile_id);
 
 --------------------------------------------------------------------------------
+-- directory_users: the user resources of the directory (SCIM). A resource has
+-- an identifier of its own, apart from the account it stands for; a deleted
+-- one stays, so its identifier is never given out again.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS directory_users (
+    id          BLOB PRIMARY KEY CHECK (length(id) = 16),
+    profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    revision    INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    deleted_at  TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_users_live_profile
+    ON directory_users(profile_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_directory_users_profile ON directory_users(profile_id);
+
+--------------------------------------------------------------------------------
 -- profile_grants
 --------------------------------------------------------------------------------
 

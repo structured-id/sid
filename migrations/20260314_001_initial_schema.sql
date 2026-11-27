@@ -963,6 +963,19 @@ CREATE TABLE profile_metadata (
     CONSTRAINT profile_metadata_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 );
 
+-- A user resource of the directory (SCIM): the identifier a client knows the
+-- user by, apart from the account it stands for. A deleted resource stays, so
+-- its identifier is never given out again; an account has one live resource.
+CREATE TABLE directory_users (
+    id uuid NOT NULL,
+    profile_id uuid NOT NULL,
+    revision bigint DEFAULT 0 NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT directory_users_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT directory_users_pkey PRIMARY KEY (id),
+    CONSTRAINT directory_users_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+
 CREATE TABLE profile_phones (
     id uuid NOT NULL,
     profile_id uuid NOT NULL,
@@ -1969,6 +1982,8 @@ CREATE UNIQUE INDEX idx_profile_phones_primary ON profile_phones USING btree (pr
 CREATE UNIQUE INDEX idx_profile_phones_profile_e164 ON profile_phones USING btree (profile_id, e164);
 
 CREATE INDEX idx_profile_phones_profile_id ON profile_phones USING btree (profile_id);
+
+CREATE UNIQUE INDEX idx_directory_users_live_profile ON directory_users USING btree (profile_id) WHERE (deleted_at IS NULL);
 
 CREATE INDEX idx_profiles_created_id ON profiles USING btree (created_at, id);
 

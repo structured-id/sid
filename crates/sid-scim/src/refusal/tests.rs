@@ -81,7 +81,7 @@ fn test_patch_errors_carry_their_scim_type() {
 #[test]
 fn test_taken_user_name_is_uniqueness() {
     let status = user_write(
-        ProfileId::generate(),
+        sid_core::models::DirectoryUserId::new(),
         SidError::Conflict("login handle".into()),
     );
     assert_eq!(
@@ -109,7 +109,7 @@ fn test_taken_group_name_is_uniqueness() {
 
 #[test]
 fn test_missing_resources_are_typed_not_found() {
-    let id = ProfileId::generate();
+    let id = sid_core::models::DirectoryUserId::new();
     assert_eq!(
         shape(&user_write(id, SidError::NotFound("p".into()))).1,
         "PROFILE_NOT_FOUND"
@@ -125,7 +125,7 @@ fn test_missing_resources_are_typed_not_found() {
 /// nothing about its cause.
 #[test]
 fn test_stale_and_failed_writes() {
-    let id = ProfileId::generate();
+    let id = sid_core::models::DirectoryUserId::new();
     assert_eq!(
         shape(&user_write(id, SidError::InvalidState("stale".into()))).1,
         "CONCURRENT_MODIFICATION"
