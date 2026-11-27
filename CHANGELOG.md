@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.55](https://github.com/structured-id/sid/compare/v0.2.54...v0.2.55) - 2026-11-27
+
+### Fixed
+
+- *(settings)* registration page admits what the installation admits ([#832](https://github.com/structured-id/sid/pull/832))
+
 ## [0.2.54](https://github.com/structured-id/sid/compare/v0.2.53...v0.2.54) - 2026-11-27
 
 ### Fixed
