@@ -69,6 +69,17 @@ fn start(binary: &str, data_dir: &std::path::Path, port: u16, env: &[(&str, &str
         }
     }
     let schema = format!("served_{}", uuid::Uuid::now_v7().simple());
+    // The server is built with its web UI and does not start without both
+    // applications' entry pages: this machine has no delivery's bundles, so
+    // the server is given a directory holding the two pages.
+    let ui = data_dir.join("ui");
+    for application in ["account", "admin"] {
+        let bundle = ui.join(application);
+        std::fs::create_dir_all(&bundle).expect("a bundle directory");
+        std::fs::write(bundle.join("index.html"), "<!doctype html><html></html>")
+            .expect("an entry page");
+    }
+    cmd.env("SID_UI_DIR", &ui);
     cmd.env(
         "SID_DATABASE_URL",
         "postgres://sid:sid_dev@localhost:54399/sid",

@@ -31,11 +31,12 @@ async fn run() -> anyhow::Result<()> {
 
     info!("Starting StructuredID v{}", env!("CARGO_PKG_VERSION"));
 
-    // The installation's own web UI, when the image carries its bundles: its
-    // account pages, whose web client the installation provisions itself.
+    // The installation's own web UI, from the bundles its delivery carries:
+    // its account pages, whose web client the installation provisions itself.
+    // Without an issuer the start is refused below, before anything is served.
     #[cfg(feature = "ui")]
     let ui = match sid_server::init::env_setting("SID_ISSUER")? {
-        Some(issuer) => sid_server::ui::prepare(&issuer)?,
+        Some(issuer) => Some(sid_server::ui::prepare(&issuer)?),
         None => None,
     };
     #[cfg(feature = "ui")]

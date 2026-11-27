@@ -108,7 +108,8 @@ default = ["telemetry", "storage-pg", "scim", "http", "ui"]
 http = ["dep:structured-proxy", "sid-infra/http"]
 
 # Serve the installation's own web UI (account pages, administration
-# console) from the bundles in SID_UI_DIR, on the HTTP port.
+# console) on the HTTP port, from the bundles a delivery places in
+# /usr/share/sid/ui or the directory SID_UI_DIR names.
 ui = ["http", "dep:sid-ui-host", "dep:axum", "dep:http-body-util"]
 
 # PostgreSQL storage backend (default for a full deployment).
