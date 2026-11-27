@@ -6771,6 +6771,7 @@ dependencies = [
  "bytes",
  "hex",
  "http",
+ "http-body",
  "http-body-util",
  "jiff 1.0.2",
  "jsonwebtoken",

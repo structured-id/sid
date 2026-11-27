@@ -544,6 +544,40 @@ async fn test_conditional_requests_keep_their_status() {
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
 }
 
+/// Regression: a 304 for the configuration and for a bundle file declared
+/// `Content-Length: 0`, a length the 200 to the same request does not have.
+/// A 304 either omits the field or names the selected representation's
+/// length (RFC 9110 §8.6); behind a proxy that compresses the 200 the host
+/// does not know that length, so it sends none.
+#[tokio::test]
+async fn test_not_modified_declares_no_length() {
+    let app = app("notmodifiedlength");
+    let config = get_if_none_match(&app, "/account/config.json", "*").await;
+    assert_eq!(config.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header_of(&config, header::CONTENT_LENGTH), None);
+
+    let file = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account/assets/app-abc123.js")
+                .header(header::IF_MODIFIED_SINCE, "Fri, 31 Dec 2100 23:59:59 GMT")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(file.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header_of(&file, header::CONTENT_LENGTH), None);
+
+    // The answers with a body keep their length.
+    let (_, full) = get_path(&app, Method::GET, "/account/config.json").await;
+    assert_eq!(
+        header_of(&full, header::CONTENT_LENGTH),
+        Some(CONFIG.len().to_string())
+    );
+}
+
 /// A symlink in the bundle never leads outside it.
 #[cfg(unix)]
 #[tokio::test]
