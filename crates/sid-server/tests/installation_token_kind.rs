@@ -83,7 +83,16 @@ fn foreign_kinds() -> Vec<(&'static str, String)> {
     wider.aud.push("https://app.example.com".to_string());
     let mut requested = administrator();
     requested.client_id = Some("app".to_string());
+    // What an exchange of a personal access token would carry: nothing
+    // served here issues one, and one presented is no caller credential.
+    let mut exchanged = administrator();
+    exchanged.acr = "urn:sid:acr:pat".to_string();
+    exchanged.amr = vec!["pat".to_string()];
     vec![
+        (
+            "a token exchanged from a personal access token",
+            signed(None, &exchanged),
+        ),
         (
             "an application's access token",
             signed(Some("at+jwt"), &claims),
