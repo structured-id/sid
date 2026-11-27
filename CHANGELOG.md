@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.56](https://github.com/structured-id/sid/compare/v0.2.55...v0.2.56) - 2026-11-27
+
+### Fixed
+
+- *(ui-host)* a 304 declares no length ([#835](https://github.com/structured-id/sid/pull/835))
+
 ## [0.2.55](https://github.com/structured-id/sid/compare/v0.2.54...v0.2.55) - 2026-11-27
 
 ### Fixed
