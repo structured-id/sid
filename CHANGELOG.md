@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.59](https://github.com/structured-id/sid/compare/v0.2.58...v0.2.59) - 2026-11-27
+
+### Added
+
+- *(server)* find the web UI at its default path ([#853](https://github.com/structured-id/sid/pull/853))
+
+### Fixed
+
+- *(storage)* hold more than one organization reference in CoordiNode ([#849](https://github.com/structured-id/sid/pull/849))
+- *(ui-host)* say how to continue when a sign-in cannot complete ([#851](https://github.com/structured-id/sid/pull/851))
+
 ## [0.2.58](https://github.com/structured-id/sid/compare/v0.2.57...v0.2.58) - 2026-11-27
 
 ### Fixed
