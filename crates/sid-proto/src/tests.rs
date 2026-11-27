@@ -243,3 +243,47 @@ fn files_follow_their_imports() {
         seen.insert(file.name());
     }
 }
+
+/// The login policy value types file declares only its two enums and imports
+/// nothing, so a schema stating a policy value imports no service with it;
+/// and the values keep the numbers other schemas' fields carry.
+#[test]
+fn the_login_policy_value_types_file_is_types_only() {
+    use crate::sid::v1::admin::{AssuranceLevel, EnforcementMode};
+
+    let set = prost_types::FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).unwrap();
+    let file = set
+        .file
+        .iter()
+        .find(|file| file.name() == "sid/v1/admin/login_policy_types.proto")
+        .expect("the value types file");
+    assert!(file.dependency.is_empty(), "{:?}", file.dependency);
+    assert!(file.message_type.is_empty());
+    assert!(file.service.is_empty());
+    assert!(file.extension.is_empty());
+    let mut enums: Vec<&str> = file.enum_type.iter().map(|e| e.name()).collect();
+    enums.sort_unstable();
+    assert_eq!(enums, ["AssuranceLevel", "EnforcementMode"]);
+
+    assert_eq!(
+        [
+            AssuranceLevel::Unspecified,
+            AssuranceLevel::Basic,
+            AssuranceLevel::Standard,
+            AssuranceLevel::Elevated,
+            AssuranceLevel::Critical,
+        ]
+        .map(|level| level as i32),
+        [0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        [
+            EnforcementMode::Unspecified,
+            EnforcementMode::Hard,
+            EnforcementMode::Soft,
+            EnforcementMode::Audit,
+        ]
+        .map(|mode| mode as i32),
+        [0, 1, 2, 3]
+    );
+}
