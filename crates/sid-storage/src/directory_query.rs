@@ -37,7 +37,12 @@ pub(crate) struct Condition {
 pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<Condition> {
     let mut out = Writer {
         dialect,
-        sql: String::from("p.status NOT IN ('closed', 'purged')"),
+        // A user is served while its directory resource is live: a deleted
+        // resource is in no query (RFC 7644 3.6).
+        sql: String::from(
+            "p.status NOT IN ('closed', 'purged') AND p.id IN \
+             (SELECT d.profile_id FROM directory_users d WHERE d.deleted_at IS NULL)",
+        ),
         binds: Vec::new(),
         suffix: format!("#{}", query.org_domain),
     };
@@ -52,15 +57,23 @@ pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<C
     })
 }
 
-/// The page's users in their order, each with its own principals, emails and
-/// metadata from the batch reads.
+/// The page's users in their order, each with its live resource and its own
+/// principals, emails and metadata from the batch reads. A profile whose
+/// resource is not among `resources` is a storage fault: the page was
+/// selected by its live resource in the same snapshot.
 pub(crate) fn assemble(
     profiles: Vec<sid_core::models::Profile>,
+    resources: Vec<sid_core::models::DirectoryResource>,
     principals: Vec<sid_core::models::Principal>,
     emails: Vec<sid_core::models::ProfileEmail>,
     metadata: Vec<sid_core::models::ProfileMetadata>,
-) -> Vec<sid_core::models::DirectoryUser> {
+) -> sid_core::Result<Vec<sid_core::models::DirectoryUser>> {
     use std::collections::HashMap;
+    let resource_of: HashMap<_, _> = resources
+        .into_iter()
+        .filter(|r| r.is_live())
+        .map(|r| (r.profile_id, r.id))
+        .collect();
     let mut principals_of: HashMap<_, Vec<_>> = HashMap::new();
     for principal in principals {
         principals_of
@@ -78,11 +91,20 @@ pub(crate) fn assemble(
     }
     profiles
         .into_iter()
-        .map(|profile| sid_core::models::DirectoryUser {
-            principals: principals_of.remove(&profile.id).unwrap_or_default(),
-            emails: emails_of.remove(&profile.id).unwrap_or_default(),
-            metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
-            profile,
+        .map(|profile| {
+            let id = *resource_of.get(&profile.id).ok_or_else(|| {
+                sid_core::Error::Storage(format!(
+                    "directory user of profile {} has no live resource",
+                    profile.id
+                ))
+            })?;
+            Ok(sid_core::models::DirectoryUser {
+                id,
+                principals: principals_of.remove(&profile.id).unwrap_or_default(),
+                emails: emails_of.remove(&profile.id).unwrap_or_default(),
+                metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
+                profile,
+            })
         })
         .collect()
 }
@@ -185,10 +207,12 @@ impl Writer {
                         ));
                     }
                 };
+                // `ProfileStatus::is_in_use`: an account in use or waiting
+                // for its user is active, every other state is not.
                 self.sql.push_str(if wanted {
-                    "p.status <> 'suspended'"
+                    "p.status IN ('active', 'provisioned')"
                 } else {
-                    "p.status = 'suspended'"
+                    "p.status NOT IN ('active', 'provisioned')"
                 });
             }
             Attr::UserName | Attr::Email | Attr::Phone => {

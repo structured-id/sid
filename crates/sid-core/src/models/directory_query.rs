@@ -94,6 +94,8 @@ pub struct DirectoryQuery {
 /// A user of the directory with what its SCIM resource is built from.
 #[derive(Debug, Clone)]
 pub struct DirectoryUser {
+    /// The resource's identifier: the SCIM `id`.
+    pub id: super::DirectoryUserId,
     pub profile: Profile,
     pub principals: Vec<Principal>,
     pub emails: Vec<ProfileEmail>,

@@ -2932,6 +2932,33 @@ impl StorageBackend for MockStorage {
         unimplemented!("directory writes are exercised by the storage conformance suite")
     }
 
+    async fn find_directory_user(
+        &self,
+        _: sid_core::models::DirectoryUserId,
+    ) -> SidResult<Option<sid_core::models::DirectoryResource>> {
+        unimplemented!("directory resources are exercised by the storage conformance suite")
+    }
+
+    async fn directory_users_of(
+        &self,
+        _: &[ProfileId],
+    ) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        unimplemented!("directory resources are exercised by the storage conformance suite")
+    }
+
+    async fn export_directory_users(&self) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        unimplemented!("directory resources are exercised by the storage conformance suite")
+    }
+
+    async fn import_directory_users(
+        &self,
+        _: ProfileId,
+        _: &[sid_core::models::DirectoryResource],
+        _: MutationContext,
+    ) -> SidResult<()> {
+        unimplemented!("directory resources are exercised by the storage conformance suite")
+    }
+
     async fn write_directory_group(
         &self,
         _: &sid_core::models::DirectoryGroupWrite,
@@ -4220,6 +4247,11 @@ impl StorageBackend for MockStorage {
             .take(query.limit as usize)
         {
             users.push(sid_core::models::DirectoryUser {
+                // The mock keeps no directory resources: an identifier that
+                // is stable per account and is not the account's own.
+                id: sid_core::models::DirectoryUserId(uuid::Uuid::from_u128(
+                    profile.id.into_uuid().as_u128() ^ 1,
+                )),
                 principals: self.get_principals_by_profile(profile.id).await?,
                 emails: self.list_profile_emails(profile.id).await?,
                 metadata: self.list_profile_metadata(profile.id).await?,

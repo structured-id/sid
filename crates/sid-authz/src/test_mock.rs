@@ -805,6 +805,29 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<Vec<Session>> {
         unimplemented!()
     }
+    async fn find_directory_user(
+        &self,
+        _: sid_core::models::DirectoryUserId,
+    ) -> Result<Option<sid_core::models::DirectoryResource>> {
+        unimplemented!()
+    }
+    async fn directory_users_of(
+        &self,
+        _: &[ProfileId],
+    ) -> Result<Vec<sid_core::models::DirectoryResource>> {
+        unimplemented!()
+    }
+    async fn export_directory_users(&self) -> Result<Vec<sid_core::models::DirectoryResource>> {
+        unimplemented!()
+    }
+    async fn import_directory_users(
+        &self,
+        _: ProfileId,
+        _: &[sid_core::models::DirectoryResource],
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
     async fn write_directory_group(
         &self,
         _: &DirectoryGroupWrite,

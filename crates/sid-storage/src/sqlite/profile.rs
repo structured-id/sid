@@ -1944,8 +1944,20 @@ impl SqliteBackend {
         let mut principals = Vec::new();
         let mut emails = Vec::new();
         let mut metadata = Vec::new();
+        let mut resources = Vec::new();
         for page in profiles.chunks(super::rbac::IN_LIST_CHUNK) {
             let ids = super::rbac::placeholders(page.len());
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {} FROM directory_users
+                 WHERE deleted_at IS NULL AND profile_id IN ({ids})",
+                super::directory::RESOURCE
+            )));
+            for profile in page {
+                read = read.bind(profile.id);
+            }
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                resources.push(super::directory::resource(&row)?);
+            }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pr.*,
                         pb.profile_id AS pb_profile_id,
@@ -1986,7 +1998,9 @@ impl SqliteBackend {
 
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
-            users: crate::directory_query::assemble(profiles, principals, emails, metadata),
+            users: crate::directory_query::assemble(
+                profiles, resources, principals, emails, metadata,
+            )?,
         })
     }
 

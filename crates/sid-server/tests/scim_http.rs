@@ -502,9 +502,17 @@ async fn lifecycle(replica: &Replica, storage: &dyn StorageBackend, bearer: &str
     assert_eq!(status, 201, "create user: {user}");
     assert_eq!(user["userName"], json!(user_name));
     let id = user["id"].as_str().expect("user id").to_owned();
-    // The other end: the directory now holds the profile.
+    // The other end: the directory holds the user's resource, which stands
+    // for an account under an identifier of its own.
+    let resource = storage
+        .find_directory_user(sid_core::models::DirectoryUserId::parse(&id).unwrap())
+        .await
+        .unwrap()
+        .expect("the user's directory resource");
+    let account = resource.profile_id;
+    assert_ne!(account.to_string(), id, "the SCIM id is the account's");
     let profile = storage
-        .get_profile(sid_core::models::ProfileId::parse(&id).unwrap())
+        .get_profile(account)
         .await
         .unwrap()
         .expect("provisioned profile");
@@ -593,14 +601,14 @@ async fn lifecycle(replica: &Replica, storage: &dyn StorageBackend, bearer: &str
         .await;
     assert_eq!(status, 200, "deactivate user: {deactivated}");
     assert_eq!(deactivated["active"], json!(false));
-    let stored = |id: &str| {
-        let id = sid_core::models::ProfileId::parse(id).unwrap();
-        async move { storage.get_profile(id).await.unwrap().unwrap().status }
-    };
-    assert_eq!(
-        stored(&id).await,
-        sid_core::models::ProfileStatus::Suspended
-    );
+    let stored = || async move { storage.get_profile(account).await.unwrap().unwrap().status };
+    assert_eq!(stored().await, sid_core::models::ProfileStatus::Suspended);
+    // It is still read, inactive (RFC 7644 3.6 concerns deletion only).
+    let (status, read) = replica
+        .send(Method::GET, &format!("/Users/{id}"), Some(bearer), None)
+        .await;
+    assert_eq!(status, 200, "read deactivated user: {read}");
+    assert_eq!(read["active"], json!(false));
 
     let (status, _) = replica
         .send(
@@ -621,15 +629,50 @@ async fn lifecycle(replica: &Replica, storage: &dyn StorageBackend, bearer: &str
         .await;
     assert_eq!(status, 404, "a deleted group is gone");
 
-    // A deletion ends the account's access.
+    // A deletion ends the account's access and removes the resource: every
+    // later operation on its id is not found (RFC 7644 3.6), also a repeat
+    // of the deletion, and the user is in no query.
     let (status, _) = replica
         .send(Method::DELETE, &format!("/Users/{id}"), Some(bearer), None)
         .await;
     assert_eq!(status, 204, "delete user");
     assert!(!matches!(
-        stored(&id).await,
+        stored().await,
         sid_core::models::ProfileStatus::Active | sid_core::models::ProfileStatus::Provisioned
     ));
+    for (method, body) in [
+        (Method::GET, None),
+        (Method::PUT, Some(new_user(&user_name))),
+        (
+            Method::PATCH,
+            Some(patch(
+                json!([{ "op": "replace", "path": "active", "value": true }]),
+            )),
+        ),
+        (Method::DELETE, None),
+    ] {
+        let (status, answer) = replica
+            .send(method.clone(), &format!("/Users/{id}"), Some(bearer), body)
+            .await;
+        assert_eq!(status, 404, "{method} of a deleted user: {answer}");
+        assert!(
+            !answer.to_string().contains(&account.to_string()),
+            "a refusal names the account: {answer}"
+        );
+    }
+    let (status, listed) = list_users(
+        replica,
+        bearer,
+        &[("filter", &format!("userName eq \"{user_name}\""))],
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["totalResults"], json!(0), "{listed}");
+    assert_eq!(
+        stored().await,
+        sid_core::models::ProfileStatus::Suspended,
+        "a refused operation revived the account"
+    );
 }
 
 /// An HR system provisions users and groups with its SCIM bearer and with an
@@ -1005,7 +1048,13 @@ async fn refuses_before_effects(engine: Engine) {
         )
         .await;
     assert_eq!(status, 201, "{group}");
-    let profile = sid_core::models::ProfileId::parse(&id).unwrap();
+    let profile = installation
+        .storage
+        .find_directory_user(sid_core::models::DirectoryUserId::parse(&id).unwrap())
+        .await
+        .unwrap()
+        .expect("the user's directory resource")
+        .profile_id;
     let assignments = installation
         .storage
         .list_role_assignments_for_profile(profile)

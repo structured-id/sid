@@ -178,7 +178,9 @@ pub(super) fn insert(tx: &Statements<'_>, profile: &Profile) -> SidResult<()> {
             created_at: $created_at, updated_at: $updated_at})",
         profile_params(profile)?,
     )?;
-    Ok(())
+    // Every account is a user of the directory: its resource is assigned
+    // with it, under an identifier of its own.
+    super::directory::assign_resource(tx, profile)
 }
 
 /// Write `profile` over the stored one while it is still at

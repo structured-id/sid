@@ -149,7 +149,9 @@ pub use device_authorization::{
     DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode, DeviceCodeRedemption,
     DevicePoll, USER_CODE_LENGTH,
 };
-pub use directory::{DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode};
+pub use directory::{
+    DirectoryGroupWrite, DirectoryResource, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode,
+};
 pub use directory_query::{
     DirectoryAttribute, DirectoryFilter, DirectoryOperator, DirectoryPage, DirectoryQuery,
     DirectoryUser,

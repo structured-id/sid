@@ -1302,6 +1302,34 @@ impl StorageBackend for SqliteBackend {
         self.write_directory_user_impl(write, ctx).await
     }
 
+    async fn find_directory_user(
+        &self,
+        id: sid_core::models::DirectoryUserId,
+    ) -> SidResult<Option<sid_core::models::DirectoryResource>> {
+        self.find_directory_user_impl(id).await
+    }
+
+    async fn directory_users_of(
+        &self,
+        profiles: &[sid_core::models::ProfileId],
+    ) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        self.directory_users_of_impl(profiles).await
+    }
+
+    async fn export_directory_users(&self) -> SidResult<Vec<sid_core::models::DirectoryResource>> {
+        self.export_directory_users_impl().await
+    }
+
+    async fn import_directory_users(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        resources: &[sid_core::models::DirectoryResource],
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.import_directory_users_impl(profile_id, resources, ctx)
+            .await
+    }
+
     async fn write_directory_group(
         &self,
         write: &sid_core::models::DirectoryGroupWrite,

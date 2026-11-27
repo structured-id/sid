@@ -31,6 +31,9 @@ pub struct UserPatchResult {
     /// - Provisioned (if never claimed — no verified login identifiers)
     /// - Active (if previously claimed — has verified login identifiers)
     pub needs_reactivation: bool,
+    /// Whether the request leaves the user deactivated (`active=false`):
+    /// the account's access ends, whatever state the account keeps.
+    pub deactivated: bool,
     /// Identifiers to add.
     pub add_identifiers: Vec<PatchIdentifier>,
     /// Identifiers to remove (by value).
@@ -98,9 +101,19 @@ fn apply_replace(
                     reason: "expected boolean".into(),
                 })?;
             if !active {
-                profile.status = ProfileStatus::Suspended;
+                // Only an account in use is suspended: a closure under way,
+                // a terminal state or a legal hold is not the directory's to
+                // rewrite. Its access ends all the same.
+                if profile.status.is_in_use() {
+                    profile.status = ProfileStatus::Suspended;
+                }
+                result.deactivated = true;
+                // A later `active=true` in the same request starts from
+                // this state, not from a pending reactivation.
+                result.needs_reactivation = false;
                 result.profile_changed = true;
             } else if profile.status == ProfileStatus::Suspended {
+                result.deactivated = false;
                 // Mark for reactivation — grpc handler resolves the target state
                 // (Provisioned if never claimed, Active if previously claimed).
                 result.needs_reactivation = true;

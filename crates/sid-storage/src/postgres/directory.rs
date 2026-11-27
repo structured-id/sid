@@ -4,9 +4,10 @@
 //! request's changes commit together with its audit entry and owed work.
 
 use sid_core::models::{
-    DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode, Group, GroupId, GroupMember,
-    MutationContext, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId,
-    ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, Session, SessionEnd,
+    DirectoryGroupWrite, DirectoryResource, DirectoryUserId, DirectoryUserWrite,
+    DirectoryWriteMode, Group, GroupId, GroupMember, MutationContext, Principal, PrincipalId,
+    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileId, ProfileMetadata, ProfilePhone,
+    ProfilePhoneId, Session, SessionEnd,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -75,7 +76,68 @@ pub(super) async fn insert_profile(tx: &mut Tx<'_>, profile: &Profile) -> SidRes
         .map_err(|e| SidError::Validation(format!("profile revision: {e}")))?;
     write_profile(tx, profile, revision, profile_insert!(""))
         .await
-        .map_err(|e| insert_error("profile", e))
+        .map_err(|e| insert_error("profile", e))?;
+    // Every account is a user of the directory: its resource is assigned
+    // with it, under an identifier of its own.
+    sqlx::query("INSERT INTO directory_users (id, profile_id) VALUES ($1, $2)")
+        .bind(Uuid::now_v7())
+        .bind(profile.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("directory resource"))?;
+    Ok(())
+}
+
+pub(super) fn resource(row: &sqlx::postgres::PgRow) -> SidResult<DirectoryResource> {
+    use sqlx::Row;
+    let read = |e: sqlx::Error| SidError::Storage(format!("directory resource row: {e}"));
+    let revision: i64 = row.try_get("revision").map_err(read)?;
+    let deleted_at: Option<crate::pg_time::PgTime> = row.try_get("deleted_at").map_err(read)?;
+    Ok(DirectoryResource {
+        id: DirectoryUserId(row.try_get("id").map_err(read)?),
+        profile_id: row.try_get("profile_id").map_err(read)?,
+        revision: u64::try_from(revision)
+            .map_err(|e| SidError::Storage(format!("directory resource revision: {e}")))?,
+        deleted_at: deleted_at.map(Into::into),
+    })
+}
+
+/// Hold the live resource `id` of `profile_id` for the rest of the write,
+/// deleting it when `delete`; anything else (unknown, deleted, another
+/// account's) is `NotFound`.
+async fn hold_resource(
+    tx: &mut Tx<'_>,
+    id: DirectoryUserId,
+    profile_id: ProfileId,
+    delete: bool,
+) -> SidResult<()> {
+    let held = if delete {
+        sqlx::query(
+            "UPDATE directory_users SET deleted_at = now(), revision = revision + 1
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(id.0)
+        .bind(profile_id)
+        .execute(&mut **tx)
+        .await
+        .map(|r| r.rows_affected() == 1)
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM directory_users
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR SHARE",
+        )
+        .bind(id.0)
+        .bind(profile_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map(|found| found.is_some())
+    }
+    .map_err(storage("directory resource"))?;
+    if held {
+        Ok(())
+    } else {
+        Err(SidError::NotFound(format!("directory user {id}")))
+    }
 }
 
 /// Write `profile` over the stored row while it is still at
@@ -650,10 +712,27 @@ impl PostgresBackend {
         mut ctx: MutationContext,
     ) -> SidResult<Vec<Session>> {
         let profile_id = write.profile_id();
+        if write.delete_resource && write.resource.is_none() {
+            return Err(SidError::Validation(
+                "a directory deletion names its resource".into(),
+            ));
+        }
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
         match write.mode {
-            DirectoryWriteMode::Create => insert_profile(&mut tx, &write.profile).await?,
+            DirectoryWriteMode::Create => {
+                if write.resource.is_some() {
+                    return Err(SidError::Validation(
+                        "a directory create is given no resource".into(),
+                    ));
+                }
+                insert_profile(&mut tx, &write.profile).await?
+            }
             DirectoryWriteMode::Update => {
+                // The resource first: a deletion that committed since the
+                // caller read it refuses the write as not found.
+                if let Some(resource) = write.resource {
+                    hold_resource(&mut tx, resource, profile_id, write.delete_resource).await?;
+                }
                 // The update locks the row for the rest of the write; a missing
                 // account or one changed since it was read refuses the whole write.
                 if !update_profile(&mut tx, &write.profile).await? {
@@ -714,6 +793,105 @@ impl PostgresBackend {
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(ended)
+    }
+
+    pub(super) async fn find_directory_user_impl(
+        &self,
+        id: DirectoryUserId,
+    ) -> SidResult<Option<DirectoryResource>> {
+        sqlx::query(
+            "SELECT id, profile_id, revision, deleted_at FROM directory_users WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage("directory resource"))?
+        .as_ref()
+        .map(resource)
+        .transpose()
+    }
+
+    pub(super) async fn directory_users_of_impl(
+        &self,
+        profiles: &[ProfileId],
+    ) -> SidResult<Vec<DirectoryResource>> {
+        let ids: Vec<Uuid> = profiles.iter().map(|p| Uuid::from(*p)).collect();
+        sqlx::query(
+            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+             WHERE profile_id = ANY($1) AND deleted_at IS NULL ORDER BY profile_id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage("directory resources"))?
+        .iter()
+        .map(resource)
+        .collect()
+    }
+
+    pub(super) async fn export_directory_users_impl(&self) -> SidResult<Vec<DirectoryResource>> {
+        sqlx::query(
+            "SELECT id, profile_id, revision, deleted_at FROM directory_users ORDER BY profile_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage("directory resources"))?
+        .iter()
+        .map(resource)
+        .collect()
+    }
+
+    pub(super) async fn import_directory_users_impl(
+        &self,
+        profile_id: ProfileId,
+        resources: &[DirectoryResource],
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        if resources.iter().any(|r| r.profile_id != profile_id)
+            || resources.iter().filter(|r| r.is_live()).count() > 1
+        {
+            return Err(SidError::Validation(
+                "an account's directory resources are its own, one of them live at most".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The resource assigned when the account was restored gives way to
+        // the ones the account had.
+        let ids: Vec<Uuid> = resources.iter().map(|r| r.id.0).collect();
+        sqlx::query("DELETE FROM directory_users WHERE profile_id = $1 AND NOT (id = ANY($2))")
+            .bind(profile_id)
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("replace directory resources"))?;
+        for r in resources {
+            let revision = i64::try_from(r.revision)
+                .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
+            let written = sqlx::query(
+                "INSERT INTO directory_users (id, profile_id, revision, deleted_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (id) DO UPDATE SET revision = EXCLUDED.revision,
+                    deleted_at = EXCLUDED.deleted_at
+                 WHERE directory_users.profile_id = EXCLUDED.profile_id",
+            )
+            .bind(r.id.0)
+            .bind(profile_id)
+            .bind(revision)
+            .bind(r.deleted_at.pg())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("directory resource", e))?
+            .rows_affected();
+            if written != 1 {
+                return Err(SidError::Conflict(format!(
+                    "directory user {} stands for another account",
+                    r.id
+                )));
+            }
+        }
+        Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(())
     }
 
     pub(super) async fn write_directory_group_impl(

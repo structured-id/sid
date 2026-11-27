@@ -204,6 +204,11 @@ macro_rules! __storage_conformance {
                 test_directory_folds_unicode_case
                 test_directory_users_carry_their_attributes
                 test_directory_omits_retired_profiles
+                test_directory_active_follows_use
+                test_directory_resource_assigned_with_the_account
+                test_directory_resource_deletion
+                test_directory_resource_deletion_races_a_change
+                test_directory_resources_are_carried
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],email_policy:
                 test_email_key_written_only_under_the_active_revision

@@ -173,16 +173,27 @@ fn test_sid_to_scim_user_roundtrip() {
     let ctx = test_org_ctx();
     let mapping = mapped(&test_create_request());
 
+    let resource = DirectoryUserId::new();
     let scim_user = sid_to_scim_user(
+        resource,
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
         &mapping.metadata,
         &[],
-        &ctx.org_domain,
-        "https://sid.example.com",
+        ScimPlace {
+            org_domain: &ctx.org_domain,
+            base_url: "https://sid.example.com",
+        },
     );
 
+    // The user is known by its resource, never by its account.
+    assert_eq!(scim_user.id, resource.to_string());
+    assert_ne!(scim_user.id, mapping.profile.id.to_string());
+    assert_eq!(
+        scim_user.meta.as_ref().unwrap().location,
+        format!("https://sid.example.com/scim/v2/Users/{resource}")
+    );
     assert_eq!(scim_user.user_name, "alice.smith");
     assert_eq!(scim_user.display_name, "Alice Smith");
     assert_eq!(scim_user.external_id, "EMP-42");
@@ -223,13 +234,16 @@ fn test_suspended_user_active_false() {
     mapping.profile.status = ProfileStatus::Suspended;
 
     let scim_user = sid_to_scim_user(
+        DirectoryUserId::new(),
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
         &mapping.metadata,
         &[],
-        &ctx.org_domain,
-        "https://sid.example.com",
+        ScimPlace {
+            org_domain: &ctx.org_domain,
+            base_url: "https://sid.example.com",
+        },
     );
     assert!(!scim_user.active);
 }
@@ -250,12 +264,13 @@ fn test_group_mapping() {
 fn test_group_to_scim_with_members() {
     let project_id = sid_core::models::ProjectId::generate();
     let group = Group::new(project_id, "Engineering");
-    let pid = ProfileId::generate();
-    let members = vec![(pid, "Alice Smith".to_string())];
+    let member = DirectoryUserId::new();
+    let members = vec![(member, "Alice Smith".to_string())];
 
     let scim_group = sid_to_scim_group(&group, &members, "https://sid.example.com");
     assert_eq!(scim_group.display_name, "Engineering");
     assert_eq!(scim_group.members.len(), 1);
+    assert_eq!(scim_group.members[0].value, member.to_string());
     assert_eq!(scim_group.members[0].display, "Alice Smith");
     assert!(scim_group.meta.is_some());
 }
