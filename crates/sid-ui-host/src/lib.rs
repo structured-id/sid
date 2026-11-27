@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, header};
@@ -242,8 +242,38 @@ const REVALIDATE: &str = "no-cache";
 /// included (`test_head_has_no_body`).
 async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Response {
     let mut response = respond(&bundle, request).await;
+    if response.status() == StatusCode::NOT_MODIFIED {
+        without_length(&mut response);
+    }
     isolate(&mut response);
     response
+}
+
+/// A 304 names no length. Sent, the field must be the selected
+/// representation's length (RFC 9110 §8.6), which a proxy compressing the 200
+/// changes; an empty body of known size would be declared as 0 by the router.
+fn without_length(response: &mut Response) {
+    response.headers_mut().remove(header::CONTENT_LENGTH);
+    *response.body_mut() = Body::new(Unsized);
+}
+
+/// A finished body that states no size, so nothing derives a length from it.
+struct Unsized;
+
+impl HttpBody for Unsized {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        std::task::Poll::Ready(None)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        true
+    }
 }
 
 async fn respond(bundle: &UiBundle, request: Request) -> Response {
