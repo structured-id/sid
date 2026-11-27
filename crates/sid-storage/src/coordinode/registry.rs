@@ -1018,6 +1018,9 @@ impl CoordinodeBackend {
         &self,
     ) -> SidResult<Vec<sid_core::models::OrganizationReference>> {
         self.read(|tx| {
+            // A reference is stored without the instance flag, never with a
+            // false one: the flag is unique, so a false flag could mark one
+            // reference only.
             let rows = tx.run(
                 "MATCH (o:SidOrganization) WHERE o.is_instance IS NULL
                  RETURN o.id AS id, o.created_at AS created_at",
