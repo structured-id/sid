@@ -118,6 +118,21 @@ pub async fn test_instance_organization_and_clients(backend: &dyn StorageBackend
         backend.organization_references().await.unwrap(),
         vec![reference]
     );
+    // An installation issues to as many organizations as register with it:
+    // a further reference is held beside the first, listed by identifier.
+    let further = sid_core::models::OrganizationReference {
+        id: sid_core::models::OrgId::generate(),
+        created_at: crate::conformance::trunc(jiff::Timestamp::now(), jiff::Unit::Microsecond),
+    };
+    assert!(
+        backend
+            .insert_organization_reference(&further, test_audit())
+            .await
+            .unwrap()
+    );
+    let mut both = vec![reference, further];
+    both.sort_unstable_by_key(|held| held.id.into_uuid());
+    assert_eq!(backend.organization_references().await.unwrap(), both);
     // The instance organization is unchanged by its references.
     assert_eq!(backend.instance_organization().await.unwrap(), Some(stored));
     // A client may belong to the referenced organization.

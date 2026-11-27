@@ -21,6 +21,14 @@ pub trait IssuerHarness: Send + Sync {
     /// yet. A store that keeps a single installation organization gives it,
     /// so its harness runs each scenario on a fresh store.
     async fn organization(&self) -> OrgId;
+
+    /// A further recipient organization, without an issuer yet and apart
+    /// from every one given before: a recipient registered beside the
+    /// installation's own. A store whose `organization` is new at every
+    /// call needs nothing else.
+    async fn other_organization(&self) -> OrgId {
+        self.organization().await
+    }
 }
 
 fn ctx() -> MutationContext {
@@ -301,12 +309,14 @@ pub async fn issuer_restore_never_replaces<H: IssuerHarness>(h: &H) {
 /// A stored handle and a stored canonical URL stay their issuer's: no issuer
 /// is ever deleted, so neither is free again. Another issuer carrying one of
 /// them is stored neither by provisioning nor by a restore, and the stored
-/// issuer keeps its handle, URL and keys. A store that keeps a single
-/// organization refuses the newcomer for that organization's context; one
-/// with several refuses it for the handle or the URL alone.
+/// issuer keeps its handle, URL and keys. Each newcomer is for a recipient of
+/// its own that has no issuer, so the handle or the URL is all it shares with
+/// the stored issuer: the refusal is not the recipient's, which takes an
+/// issuer of its own right after.
 pub async fn a_handle_and_url_stay_their_issuers<H: IssuerHarness>(h: &H) {
     let store = h.store();
-    let (stored, key) = issuer(h.organization().await);
+    let org = h.organization().await;
+    let (stored, key) = issuer(org);
     assert!(
         store
             .insert_oidc_issuer(&stored, &key, ctx())
@@ -314,25 +324,30 @@ pub async fn a_handle_and_url_stay_their_issuers<H: IssuerHarness>(h: &H) {
             .unwrap()
     );
 
-    let (mut same_handle, handle_key) = issuer(h.organization().await);
+    let handle_org = h.other_organization().await;
+    let url_org = h.other_organization().await;
+    assert!(org != handle_org && org != url_org && handle_org != url_org);
+    let (mut same_handle, handle_key) = issuer(handle_org);
     same_handle.handle = stored.handle.clone();
-    let (mut same_url, url_key) = issuer(h.organization().await);
+    let (mut same_url, url_key) = issuer(url_org);
     same_url.canonical_url = stored.canonical_url.clone();
 
     for (newcomer, newcomer_key) in [(&same_handle, &handle_key), (&same_url, &url_key)] {
+        // Not `Ok(false)` either: that answer is for a context that already
+        // has an issuer, and this recipient has none.
         let provisioned = store
             .insert_oidc_issuer(newcomer, newcomer_key, ctx())
             .await;
         assert!(
-            !matches!(provisioned, Ok(true)),
-            "provisioned beside the stored issuer: {newcomer:?}"
+            provisioned.is_err(),
+            "provisioned beside the stored issuer: {provisioned:?}"
         );
+        let restored = store
+            .import_oidc_issuer(newcomer, std::slice::from_ref(newcomer_key), ctx())
+            .await;
         assert!(
-            store
-                .import_oidc_issuer(newcomer, std::slice::from_ref(newcomer_key), ctx())
-                .await
-                .is_err(),
-            "restored beside the stored issuer: {newcomer:?}"
+            matches!(restored, Err(sid_core::Error::Conflict(_))),
+            "restored beside the stored issuer: {restored:?}"
         );
         assert!(
             store
@@ -340,6 +355,23 @@ pub async fn a_handle_and_url_stay_their_issuers<H: IssuerHarness>(h: &H) {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+        assert!(
+            store
+                .oidc_issuer_for(IssuerAuthority::Local, newcomer.recipient_org)
+                .await
+                .unwrap()
+                .is_none(),
+            "the refused newcomer left its recipient an issuer"
+        );
+        // The recipient itself is one the store serves: an issuer that
+        // shares nothing with the stored one is provisioned for it.
+        let (own, own_key) = issuer(newcomer.recipient_org);
+        assert!(
+            store
+                .insert_oidc_issuer(&own, &own_key, ctx())
+                .await
+                .unwrap()
         );
     }
 
