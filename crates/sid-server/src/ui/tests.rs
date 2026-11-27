@@ -13,6 +13,55 @@ fn host_name_drops_the_port() {
     assert_eq!(host_name("[::1]"), "[::1]");
 }
 
+/// A directory holding the entry pages of the applications named.
+fn bundles(applications: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for application in applications {
+        let at = dir.path().join(application);
+        std::fs::create_dir(&at).unwrap();
+        std::fs::write(at.join("index.html"), "<!doctype html><html></html>").unwrap();
+    }
+    dir
+}
+
+/// An installed server finds its bundles without being told where: the
+/// default directory is the one a delivery places them in, and a setting
+/// names another.
+#[test]
+fn the_bundles_are_at_the_default_path_unless_another_is_named() {
+    assert_eq!(bundle_dir(None), PathBuf::from("/usr/share/sid/ui"));
+    assert_eq!(
+        bundle_dir(Some("/opt/sid/ui".into())),
+        PathBuf::from("/opt/sid/ui")
+    );
+}
+
+/// Bug prevented: a delivery whose bundles are missing starting as if it had
+/// no UI. Both applications' entry pages are checked before anything is
+/// served, and a missing one stops the start, naming where it was looked for.
+#[test]
+fn a_missing_entry_page_stops_the_start() {
+    let issuer = "https://sid.example.com";
+    let whole = bundles(&["account", "admin"]);
+    let prepared = Prepared::at(whole.path().to_owned(), issuer).unwrap();
+    assert_eq!(prepared.account_url(), "https://sid.example.com/account/");
+
+    for (present, missing) in [("account", "admin"), ("admin", "account")] {
+        let partial = bundles(&[present]);
+        let refused = Prepared::at(partial.path().to_owned(), issuer)
+            .err()
+            .unwrap_or_else(|| panic!("started without {missing}"))
+            .to_string();
+        let looked_for = partial.path().join(missing);
+        assert!(
+            refused.contains(&looked_for.display().to_string()),
+            "{refused}"
+        );
+    }
+    let none = tempfile::tempdir().unwrap();
+    assert!(Prepared::at(none.path().join("absent"), issuer).is_err());
+}
+
 /// The account adapter calls the installation's services in this process,
 /// through a generated client, with no listener: before the services are
 /// placed a call is answered UNAVAILABLE, as a starting server answers, and
