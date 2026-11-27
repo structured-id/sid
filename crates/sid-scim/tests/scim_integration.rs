@@ -1400,6 +1400,28 @@ async fn test_deactivation_keeps_a_hold_and_a_closure() {
                 "a deactivation (PUT: {by_put}) rewrote the account's state"
             );
             assert_access_ended(&storage, &revocation, &session, &pat).await;
+            // The client reads back what it asked for: the user is inactive,
+            // in its representation and for a filter alike.
+            let read = service
+                .get_user(provisioned(proto::ScimGetUserRequest {
+                    id: created.id.clone(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!read.active, "a deactivated {held} account reads as active");
+            let listed = service
+                .list_users(provisioned(proto::ScimListUsersRequest {
+                    filter: format!(r#"userName eq "{}" and active eq false"#, read.user_name),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(
+                listed.total_results, 1,
+                "a deactivated {held} account is not found inactive"
+            );
         }
     }
 }

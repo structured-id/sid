@@ -465,11 +465,9 @@ impl ScimService for ScimServiceImpl {
         if !req.active {
             // Only an account in use is suspended: a closure under way, a
             // terminal state or a legal hold is not the directory's to
-            // rewrite. Its access ends below all the same.
-            if matches!(
-                profile.status,
-                ProfileStatus::Active | ProfileStatus::Provisioned
-            ) {
+            // rewrite. Its access ends below all the same, and it reads
+            // back inactive either way.
+            if profile.status.is_in_use() {
                 profile.status = ProfileStatus::Suspended;
             }
         } else if profile.status == ProfileStatus::Suspended {
@@ -851,10 +849,7 @@ impl ScimService for ScimServiceImpl {
         // Ending local access suspends an account that is in use. A closure
         // under way, a terminal state or a legal hold is not the directory's
         // to rewrite: it stays, and the access ends all the same.
-        if matches!(
-            profile.status,
-            ProfileStatus::Active | ProfileStatus::Provisioned
-        ) {
+        if profile.status.is_in_use() {
             profile.status = ProfileStatus::Suspended;
         }
 

@@ -274,7 +274,7 @@ pub fn sid_to_scim_user(
     let mut user = proto::ScimUser {
         id: id.to_string(),
         display_name: profile.formatted_name().unwrap_or_default(),
-        active: !matches!(profile.status, ProfileStatus::Suspended),
+        active: profile.status.is_in_use(),
         ..Default::default()
     };
 

@@ -104,10 +104,7 @@ fn apply_replace(
                 // Only an account in use is suspended: a closure under way,
                 // a terminal state or a legal hold is not the directory's to
                 // rewrite. Its access ends all the same.
-                if matches!(
-                    profile.status,
-                    ProfileStatus::Active | ProfileStatus::Provisioned
-                ) {
+                if profile.status.is_in_use() {
                     profile.status = ProfileStatus::Suspended;
                 }
                 result.deactivated = true;

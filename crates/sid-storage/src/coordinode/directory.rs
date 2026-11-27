@@ -394,7 +394,7 @@ impl Candidate {
                         ));
                     }
                 };
-                Ok((self.profile.status != ProfileStatus::Suspended) == wanted)
+                Ok(self.profile.status.is_in_use() == wanted)
             }
             Attr::UserName | Attr::Email | Attr::Phone => Ok(self
                 .values(attr)

@@ -112,6 +112,14 @@ impl ProfileStatus {
         matches!(self, Self::Active)
     }
 
+    /// Whether the account can be used or is waiting for its user: what a
+    /// directory reports as `active` (RFC 7643 4.1.1). A suspended account,
+    /// one under a hold and one being or already closed are not, whatever a
+    /// deactivation found them in.
+    pub fn is_in_use(&self) -> bool {
+        matches!(self, Self::Active | Self::Provisioned)
+    }
+
     /// Whether the profile is provisioned but not yet claimed by its user.
     pub fn is_provisioned(&self) -> bool {
         matches!(self, Self::Provisioned)

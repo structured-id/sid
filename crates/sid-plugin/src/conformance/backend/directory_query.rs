@@ -409,6 +409,46 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
     );
 }
 
+/// `active` tells whether the account can be used: an account in use or
+/// provisioned is active; a suspended one, one under a hold and one being
+/// closed are not, whichever of them a deactivation found it in.
+pub async fn test_directory_active_follows_use(backend: &dyn StorageBackend) {
+    let domain = domain();
+    for (name, status) in [
+        ("in-use", ProfileStatus::Active),
+        ("provisioned", ProfileStatus::Provisioned),
+        ("suspended", ProfileStatus::Suspended),
+        ("held", ProfileStatus::LegalHold),
+        ("closing", ProfileStatus::ClosureRequested),
+    ] {
+        let mut profile = add_user(backend, &domain, name, &[], &[]).await;
+        if profile.status != status {
+            profile.status = status;
+            backend
+                .write_directory_user(
+                    &DirectoryUserWrite::new(DirectoryWriteMode::Update, profile),
+                    test_audit(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let (_, mut active) = names(
+        backend,
+        &query(&domain, compare(Attr::Active, Op::Eq, "true"), 0, 10),
+    )
+    .await;
+    active.sort();
+    assert_eq!(active, vec!["in-use", "provisioned"]);
+    let (_, mut inactive) = names(
+        backend,
+        &query(&domain, compare(Attr::Active, Op::Eq, "false"), 0, 10),
+    )
+    .await;
+    inactive.sort();
+    assert_eq!(inactive, vec!["closing", "held", "suspended"]);
+}
+
 /// The live resource of `profile`.
 async fn resource_of(
     backend: &dyn StorageBackend,

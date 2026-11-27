@@ -204,6 +204,7 @@ macro_rules! __storage_conformance {
                 test_directory_folds_unicode_case
                 test_directory_users_carry_their_attributes
                 test_directory_omits_retired_profiles
+                test_directory_active_follows_use
                 test_directory_resource_assigned_with_the_account
                 test_directory_resource_deletion
                 test_directory_resource_deletion_races_a_change

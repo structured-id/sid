@@ -207,10 +207,12 @@ impl Writer {
                         ));
                     }
                 };
+                // `ProfileStatus::is_in_use`: an account in use or waiting
+                // for its user is active, every other state is not.
                 self.sql.push_str(if wanted {
-                    "p.status <> 'suspended'"
+                    "p.status IN ('active', 'provisioned')"
                 } else {
-                    "p.status = 'suspended'"
+                    "p.status NOT IN ('active', 'provisioned')"
                 });
             }
             Attr::UserName | Attr::Email | Attr::Phone => {
