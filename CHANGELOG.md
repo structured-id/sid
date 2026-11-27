@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.57](https://github.com/structured-id/sid/compare/v0.2.56...v0.2.57) - 2026-11-27
+
+### Other
+
+- *(proto)* the login policy value types stay types-only ([#840](https://github.com/structured-id/sid/pull/840))
+
 ## [0.2.56](https://github.com/structured-id/sid/compare/v0.2.55...v0.2.56) - 2026-11-27
 
 ### Fixed
