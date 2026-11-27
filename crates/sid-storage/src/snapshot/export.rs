@@ -80,11 +80,12 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
     }
     // Of the exported accounts only: one created since the pages were read
     // is not in this snapshot.
+    let exported: std::collections::BTreeSet<_> = snapshot.profiles.iter().map(|p| p.id).collect();
     snapshot.directory_users = backend
         .export_directory_users()
         .await?
         .into_iter()
-        .filter(|r| snapshot.profiles.iter().any(|p| p.id == r.profile_id))
+        .filter(|r| exported.contains(&r.profile_id))
         .collect();
 
     info!("exporting per-profile entities...");

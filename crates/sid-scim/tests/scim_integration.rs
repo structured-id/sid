@@ -1182,6 +1182,228 @@ async fn test_delete_user_removes_the_resource() {
     assert!(!resource.is_live());
 }
 
+/// Regression: DELETE wrote `Suspended` over whatever state the account was
+/// in, so a deletion released a legal hold and reopened a closed account to
+/// reactivation. Ending local access keeps a hold and a terminal state; the
+/// resource is deleted all the same.
+#[tokio::test]
+async fn test_delete_user_keeps_a_hold_and_a_terminal_state() {
+    let (service, storage) = setup().await;
+    for held in [
+        ProfileStatus::LegalHold,
+        ProfileStatus::ClosureRequested,
+        ProfileStatus::Closed,
+    ] {
+        let created = service
+            .create_user(provisioned(create_user_request(&unique_username())))
+            .await
+            .unwrap()
+            .into_inner();
+        let profile_id = account_of(&storage, &created.id).await;
+        let mut profile = storage.get_profile(profile_id).await.unwrap().unwrap();
+        profile.status = held;
+        assert!(
+            storage
+                .update_profile(
+                    &profile,
+                    sid_core::models::AuditEntry::system("test.state", profile_id.to_string())
+                        .into(),
+                )
+                .await
+                .unwrap()
+        );
+
+        service
+            .delete_user(provisioned(proto::ScimDeleteUserRequest {
+                id: created.id.clone(),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("delete of a {held} account: {e:?}"));
+
+        assert_eq!(
+            storage
+                .get_profile(profile_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            held,
+            "a deletion rewrote the account's state"
+        );
+        let resource = storage
+            .find_directory_user(sid_core::models::DirectoryUserId::parse(&created.id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !resource.is_live(),
+            "the resource of a {held} account stays"
+        );
+    }
+}
+
+/// Regression: a client that deletes a user and then removes it from its
+/// groups was refused, with every other change of that PATCH: a member was
+/// accepted only while its resource was live. A removal names a deleted
+/// user too, and withdraws the membership; an id never assigned is still no
+/// user, and a deleted user is still not added.
+#[tokio::test]
+async fn test_group_removal_of_a_deleted_user() {
+    let (service, storage) = setup().await;
+    let created = service
+        .create_user(provisioned(create_user_request(&unique_username())))
+        .await
+        .unwrap()
+        .into_inner();
+    let group = service
+        .create_group(provisioned(proto::ScimCreateGroupRequest {
+            display_name: format!("RemovalGroup_{}", Uuid::now_v7().simple()),
+            members: vec![proto::ScimMemberRef {
+                value: created.id.clone(),
+                display: String::new(),
+            }],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let group_id = GroupId::parse(&group.id).unwrap();
+    service
+        .delete_user(provisioned(proto::ScimDeleteUserRequest {
+            id: created.id.clone(),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(storage.list_group_members(group_id).await.unwrap().len(), 1);
+
+    let remove = |id: String| proto::ScimPatchOp {
+        op: "remove".into(),
+        path: format!(r#"members[value eq "{id}"]"#),
+        value: String::new(),
+    };
+    let renamed = format!("Renamed_{}", Uuid::now_v7().simple());
+    let patched = service
+        .patch_group(provisioned(proto::ScimPatchGroupRequest {
+            id: group.id.clone(),
+            operations: vec![
+                remove(created.id.clone()),
+                proto::ScimPatchOp {
+                    op: "replace".into(),
+                    path: "displayName".into(),
+                    value: renamed.clone(),
+                },
+            ],
+        }))
+        .await
+        .expect("a deleted user is removed from its group")
+        .into_inner();
+    assert_eq!(patched.display_name, renamed);
+    assert!(patched.members.is_empty());
+    assert!(
+        storage
+            .list_group_members(group_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the membership of the deleted user stays"
+    );
+    // A repeat changes nothing and succeeds.
+    service
+        .patch_group(provisioned(proto::ScimPatchGroupRequest {
+            id: group.id.clone(),
+            operations: vec![remove(created.id.clone())],
+        }))
+        .await
+        .expect("a repeated removal");
+
+    // An identifier the directory never assigned names no user.
+    let unknown = service
+        .patch_group(provisioned(proto::ScimPatchGroupRequest {
+            id: group.id.clone(),
+            operations: vec![remove(Uuid::now_v7().to_string())],
+        }))
+        .await
+        .expect_err("an unknown member is removed");
+    assert_eq!(unknown.code(), tonic::Code::InvalidArgument);
+    // And a deleted user is still not added.
+    let added = service
+        .patch_group(provisioned(proto::ScimPatchGroupRequest {
+            id: group.id.clone(),
+            operations: vec![proto::ScimPatchOp {
+                op: "add".into(),
+                path: "members".into(),
+                value: format!(r#"[{{"value":"{}"}}]"#, created.id),
+            }],
+        }))
+        .await
+        .expect_err("a deleted user is added");
+    assert_eq!(added.code(), tonic::Code::InvalidArgument);
+}
+
+/// Regression: `active=false` by PUT or PATCH wrote `Suspended` over a legal
+/// hold or a closure under way, as DELETE did. A deactivation keeps such a
+/// state, and ends the account's access all the same.
+#[tokio::test]
+async fn test_deactivation_keeps_a_hold_and_a_closure() {
+    let (service, storage, revocation) = setup_with_revocation().await;
+    for held in [ProfileStatus::LegalHold, ProfileStatus::ClosureRequested] {
+        for by_put in [true, false] {
+            let (id, profile_id, session, pat) = signed_in_employee(&service, &storage).await;
+            let created = proto::ScimUser {
+                id,
+                ..Default::default()
+            };
+            let username = unique_username();
+            let mut profile = storage.get_profile(profile_id).await.unwrap().unwrap();
+            profile.status = held;
+            assert!(
+                storage
+                    .update_profile(
+                        &profile,
+                        sid_core::models::AuditEntry::system("test.state", profile_id.to_string())
+                            .into(),
+                    )
+                    .await
+                    .unwrap()
+            );
+
+            if by_put {
+                service
+                    .replace_user(provisioned(proto::ScimReplaceUserRequest {
+                        id: created.id.clone(),
+                        user_name: username.clone(),
+                        active: false,
+                        ..Default::default()
+                    }))
+                    .await
+                    .unwrap_or_else(|e| panic!("PUT on a {held} account: {e:?}"));
+            } else {
+                service
+                    .patch_user(provisioned(proto::ScimPatchUserRequest {
+                        id: created.id.clone(),
+                        operations: vec![proto::ScimPatchOp {
+                            op: "replace".into(),
+                            path: "active".into(),
+                            value: "false".into(),
+                        }],
+                    }))
+                    .await
+                    .unwrap_or_else(|e| panic!("PATCH on a {held} account: {e:?}"));
+            }
+            assert_eq!(
+                storage
+                    .get_profile(profile_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                held,
+                "a deactivation (PUT: {by_put}) rewrote the account's state"
+            );
+            assert_access_ended(&storage, &revocation, &session, &pat).await;
+        }
+    }
+}
+
 /// `active=false` is not a deletion: the user stays addressable, inactive.
 #[tokio::test]
 async fn test_deactivated_user_stays_addressable() {

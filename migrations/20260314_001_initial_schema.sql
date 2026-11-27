@@ -1985,6 +1985,10 @@ CREATE INDEX idx_profile_phones_profile_id ON profile_phones USING btree (profil
 
 CREATE UNIQUE INDEX idx_directory_users_live_profile ON directory_users USING btree (profile_id) WHERE (deleted_at IS NULL);
 
+-- Every resource of an account, deleted ones included: the account's
+-- deletion cascades through it, and an import replaces the account's set.
+CREATE INDEX idx_directory_users_profile ON directory_users USING btree (profile_id);
+
 CREATE INDEX idx_profiles_created_id ON profiles USING btree (created_at, id);
 
 CREATE INDEX idx_profiles_migration_pending ON profiles USING btree (migration_pending) WHERE (migration_pending = true);

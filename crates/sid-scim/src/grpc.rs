@@ -463,7 +463,15 @@ impl ScimService for ScimServiceImpl {
         //   Provisioned profiles MUST NOT transition to Active via SCIM —
         //   only via secure channel claim (the user binds an OPAQUE password).
         if !req.active {
-            profile.status = ProfileStatus::Suspended;
+            // Only an account in use is suspended: a closure under way, a
+            // terminal state or a legal hold is not the directory's to
+            // rewrite. Its access ends below all the same.
+            if matches!(
+                profile.status,
+                ProfileStatus::Active | ProfileStatus::Provisioned
+            ) {
+                profile.status = ProfileStatus::Suspended;
+            }
         } else if profile.status == ProfileStatus::Suspended {
             // Reactivate: if profile was previously Provisioned (never claimed),
             // go back to Provisioned — not Active.
@@ -654,7 +662,8 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?;
         let mut write =
             DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
-        if profile.status == ProfileStatus::Suspended {
+        // A deactivation ends the access whatever state the account keeps.
+        if patch_result.deactivated || profile.status == ProfileStatus::Suspended {
             write.end_access = Some(deprovision());
         }
 
@@ -839,7 +848,15 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::user_not_found(resource))?;
 
-        profile.status = ProfileStatus::Suspended;
+        // Ending local access suspends an account that is in use. A closure
+        // under way, a terminal state or a legal hold is not the directory's
+        // to rewrite: it stays, and the access ends all the same.
+        if matches!(
+            profile.status,
+            ProfileStatus::Active | ProfileStatus::Provisioned
+        ) {
+            profile.status = ProfileStatus::Suspended;
+        }
 
         let profile_id_str = profile_id.to_string();
 
@@ -889,7 +906,7 @@ impl ScimService for ScimServiceImpl {
 
         let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
         for member_ref in &req.members {
-            let pid = self.member(&member_ref.value).await?;
+            let pid = self.member(&member_ref.value, false).await?;
             write.add_members.push(GroupMember::new(group.id, pid));
         }
         let event = Event::new("sid-scim", event_types::SCIM_GROUP_CREATED)
@@ -1012,11 +1029,13 @@ impl ScimService for ScimServiceImpl {
         // Members are named by their user resources; the write and the
         // event carry the accounts they stand for.
         for member_id in &patch_result.add_members {
-            let pid = self.member(member_id).await?;
+            let pid = self.member(member_id, false).await?;
             write.add_members.push(GroupMember::new(group.id, pid));
         }
         for member_id in &patch_result.remove_members {
-            write.remove_members.push(self.member(member_id).await?);
+            write
+                .remove_members
+                .push(self.member(member_id, true).await?);
         }
         let accounts = |ids: &[ProfileId]| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
         let added: Vec<ProfileId> = write.add_members.iter().map(|m| m.profile_id).collect();
@@ -1257,8 +1276,12 @@ impl ScimServiceImpl {
     }
 
     /// The account of the group member a client names by its user resource.
+    /// A member is added by a live resource only. A removal also names a
+    /// deleted one: a client deletes a user and then withdraws its
+    /// memberships, which the deletion left in place. An identifier never
+    /// assigned names no user either way.
     #[allow(clippy::result_large_err)]
-    async fn member(&self, value: &str) -> Result<ProfileId, Status> {
+    async fn member(&self, value: &str, removal: bool) -> Result<ProfileId, Status> {
         let resource =
             DirectoryUserId::parse(value).ok_or_else(|| refusal::invalid_id("members"))?;
         match self
@@ -1267,7 +1290,7 @@ impl ScimServiceImpl {
             .await
             .map_err(storage_failure)?
         {
-            Some(found) if found.is_live() => Ok(found.profile_id),
+            Some(found) if removal || found.is_live() => Ok(found.profile_id),
             _ => Err(refusal::not_a_user()),
         }
     }
