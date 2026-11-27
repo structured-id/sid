@@ -341,9 +341,14 @@ fn config(bundle: &UiBundle, request: &Parts) -> Response {
 }
 
 /// `If-None-Match` uses the weak comparison (RFC 9110 §13.1.2): `*` or the
-/// same opaque tag, with or without `W/`.
+/// same opaque tag, with or without `W/` on either side.
 fn tag_matches(tag: &str, ours: &HeaderValue) -> bool {
-    tag == "*" || tag.strip_prefix("W/").unwrap_or(tag).as_bytes() == ours.as_bytes()
+    tag == "*" || opaque(tag.as_bytes()) == opaque(ours.as_bytes())
+}
+
+/// The opaque part of an entity tag: without the weakness indicator.
+fn opaque(tag: &[u8]) -> &[u8] {
+    tag.strip_prefix(b"W/").unwrap_or(tag)
 }
 
 /// A 404 nothing keeps: a later release may add the file.
