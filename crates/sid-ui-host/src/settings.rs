@@ -24,19 +24,22 @@ pub(crate) const SETTINGS_KEY: &str = "settings";
 /// The longest username an installation admits, in code points.
 const USERNAME_MAX_LENGTH: u32 = 32;
 
-/// One configuration as served: its bytes and their strong entity tag.
+/// One configuration as served: its bytes and their entity tag.
 #[derive(Debug)]
 pub(crate) struct Served {
     pub(crate) bytes: Arc<[u8]>,
-    /// Quoted (RFC 9110 §8.8.3), derived from the bytes.
+    /// Weak, derived from the bytes. A proxy that compresses the body on the
+    /// way may not forward a strong tag (RFC 9110 §8.8.1: a strong validator
+    /// changes with the content coding) and drops it, after which a browser
+    /// has nothing to revalidate with; a weak one is shared by the encodings.
     pub(crate) tag: HeaderValue,
 }
 
 impl Served {
     pub(crate) fn of(bytes: Vec<u8>) -> Arc<Self> {
         let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
-        let tag = HeaderValue::from_str(&format!("\"{}\"", hex::encode(digest)))
-            .expect("a quoted hex digest is a valid header value");
+        let tag = HeaderValue::from_str(&format!("W/\"{}\"", hex::encode(digest)))
+            .expect("a weak quoted hex digest is a valid header value");
         Arc::new(Self {
             bytes: bytes.into(),
             tag,
