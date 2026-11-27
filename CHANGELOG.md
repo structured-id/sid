@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.54](https://github.com/structured-id/sid/compare/v0.2.53...v0.2.54) - 2026-11-27
+
+### Fixed
+
+- *(ui-host)* weak entity tag for the configuration ([#829](https://github.com/structured-id/sid/pull/829))
+
 ## [0.2.53](https://github.com/structured-id/sid/compare/v0.2.52...v0.2.53) - 2026-11-26
 
 ### Fixed
