@@ -298,6 +298,79 @@ pub async fn issuer_restore_never_replaces<H: IssuerHarness>(h: &H) {
     );
 }
 
+/// A stored handle and a stored canonical URL stay their issuer's: no issuer
+/// is ever deleted, so neither is free again. Another issuer carrying one of
+/// them is stored neither by provisioning nor by a restore, and the stored
+/// issuer keeps its handle, URL and keys. A store that keeps a single
+/// organization refuses the newcomer for that organization's context; one
+/// with several refuses it for the handle or the URL alone.
+pub async fn a_handle_and_url_stay_their_issuers<H: IssuerHarness>(h: &H) {
+    let store = h.store();
+    let (stored, key) = issuer(h.organization().await);
+    assert!(
+        store
+            .insert_oidc_issuer(&stored, &key, ctx())
+            .await
+            .unwrap()
+    );
+
+    let (mut same_handle, handle_key) = issuer(h.organization().await);
+    same_handle.handle = stored.handle.clone();
+    let (mut same_url, url_key) = issuer(h.organization().await);
+    same_url.canonical_url = stored.canonical_url.clone();
+
+    for (newcomer, newcomer_key) in [(&same_handle, &handle_key), (&same_url, &url_key)] {
+        let provisioned = store
+            .insert_oidc_issuer(newcomer, newcomer_key, ctx())
+            .await;
+        assert!(
+            !matches!(provisioned, Ok(true)),
+            "provisioned beside the stored issuer: {newcomer:?}"
+        );
+        assert!(
+            store
+                .import_oidc_issuer(newcomer, std::slice::from_ref(newcomer_key), ctx())
+                .await
+                .is_err(),
+            "restored beside the stored issuer: {newcomer:?}"
+        );
+        assert!(
+            store
+                .oidc_issuer_signing_keys(newcomer.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    assert_eq!(
+        store
+            .oidc_issuer_by_handle(&stored.handle)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&stored)
+    );
+    assert!(
+        store
+            .oidc_issuer_by_handle(&same_url.handle)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.oidc_issuer_signing_keys(stored.id).await.unwrap(),
+        [key]
+    );
+    let listed = store.list_oidc_issuers().await.unwrap();
+    assert!(listed.contains(&stored));
+    assert!(
+        listed
+            .iter()
+            .all(|issuer| issuer.id != same_handle.id && issuer.id != same_url.id)
+    );
+}
+
 /// An issuer serves an organization the store knows.
 pub async fn unknown_organization_refused<H: IssuerHarness>(h: &H) {
     let store = h.store();

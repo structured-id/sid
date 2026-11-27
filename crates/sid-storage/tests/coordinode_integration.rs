@@ -473,6 +473,7 @@ capability!(issuer_store:
     unknown_organization_refused,
     issuer_restored_as_stored,
     issuer_restore_never_replaces,
+    a_handle_and_url_stay_their_issuers,
 );
 
 /// Run work store conformance `scenario` against this backend.
