@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.53](https://github.com/structured-id/sid/compare/v0.2.52...v0.2.53) - 2026-11-26
+
+### Fixed
+
+- *(ui)* console saves the registration mode ([#827](https://github.com/structured-id/sid/pull/827))
+
+### Other
+
+- update Cargo.lock dependencies
+- *(deps)* bump the cargo group with 7 updates ([#824](https://github.com/structured-id/sid/pull/824))
+- update Cargo.toml dependencies
+
 ## [0.2.52](https://github.com/structured-id/sid/compare/v0.2.51...v0.2.52) - 2026-11-26
 
 ### Added
