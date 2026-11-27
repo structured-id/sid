@@ -80,7 +80,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=builder /out/sid /usr/local/bin/sid
 # The bundles the server serves: account pages at /account/, the console
-# where the installation settings place it (/admin/ by default).
+# where the installation settings place it (/admin/ by default). This is the
+# directory the server looks in by itself.
 COPY --from=ui /ui/apps/ui-profile/dist/spa /usr/share/sid/ui/account
 COPY --from=ui /ui/apps/ui-admin/dist/spa /usr/share/sid/ui/admin
 
@@ -91,7 +92,6 @@ VOLUME /var/lib/sid
 ENV SID_BIND=0.0.0.0:8080
 ENV SID_GRPC_BIND=0.0.0.0:50051
 ENV SID_DATA_DIR=/var/lib/sid
-ENV SID_UI_DIR=/usr/share/sid/ui
 EXPOSE 8080 50051
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \

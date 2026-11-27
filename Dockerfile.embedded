@@ -94,7 +94,8 @@ FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=builder /out/sid /usr/local/bin/sid
 # The bundles the server serves: account pages at /account/, the console
-# where the installation settings place it (/admin/ by default).
+# where the installation settings place it (/admin/ by default). This is the
+# directory the server looks in by itself.
 COPY --from=ui /ui/apps/ui-profile/dist/spa /usr/share/sid/ui/account
 COPY --from=ui /ui/apps/ui-admin/dist/spa /usr/share/sid/ui/admin
 
@@ -112,7 +113,6 @@ ENV SID_STORAGE_SQLITE_PATH=/var/lib/sid/auth.db
 # No history replay and no addressed work for separate receivers; a
 # deployment that needs them sets a NATS URL.
 ENV SID_NATS_URL=in-process
-ENV SID_UI_DIR=/usr/share/sid/ui
 
 EXPOSE 8080 50051
 

@@ -10,10 +10,12 @@
 //!   site), followed from the next request on. The console acts in the
 //!   installation's own browser session against its API at `/api`.
 //!
-//! `SID_UI_DIR` names the directory of the compiled bundles (`account/`,
-//! `admin/`); unset, no UI is served. The account client's key is the
-//! installation's own, created once in its store and read by every replica,
-//! so the image needs no configuration of its own.
+//! The compiled bundles (`account/`, `admin/`) are in [`DEFAULT_UI_DIR`],
+//! where a delivery places them, unless `SID_UI_DIR` names another
+//! directory. A server built with the UI does not start without the entry
+//! page of both. The account client's key is the installation's own, created
+//! once in its store and read by every replica, so the image needs no
+//! configuration of its own.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,22 +59,51 @@ pub struct Prepared {
     account_url: String,
 }
 
-/// The UI `SID_UI_DIR` names, its account pages under the issuer's origin.
-/// None when `SID_UI_DIR` is unset.
-pub fn prepare(issuer: &str) -> anyhow::Result<Option<Prepared>> {
-    let Some(dir) = crate::init::env_setting("SID_UI_DIR")? else {
-        return Ok(None);
-    };
-    let dir = PathBuf::from(dir);
-    let issuer = url::Url::parse(issuer).context("SID_ISSUER is not a URL")?;
-    Ok(Some(Prepared {
-        account_dir: dir.join("account"),
-        console_dir: dir.join("admin"),
-        account_url: format!("{}{ACCOUNT_MOUNT}", issuer.origin().ascii_serialization()),
-    }))
+/// Where a delivery places the bundles.
+pub const DEFAULT_UI_DIR: &str = "/usr/share/sid/ui";
+
+/// The directory of the bundles: `named` (`SID_UI_DIR`) when set, the
+/// delivery's own otherwise.
+fn bundle_dir(named: Option<String>) -> PathBuf {
+    named.map_or_else(|| PathBuf::from(DEFAULT_UI_DIR), PathBuf::from)
+}
+
+/// The installation's UI from its bundle directory, its account pages under
+/// the issuer's origin. A bundle that cannot be served is an error.
+pub fn prepare(issuer: &str) -> anyhow::Result<Prepared> {
+    Prepared::at(bundle_dir(crate::init::env_setting("SID_UI_DIR")?), issuer)
 }
 
 impl Prepared {
+    /// The UI whose bundles are under `dir`. Both applications' entry pages
+    /// are read here, before anything is served: a delivery without one does
+    /// not start as if it had no UI.
+    fn at(dir: PathBuf, issuer: &str) -> anyhow::Result<Self> {
+        let issuer = url::Url::parse(issuer).context("SID_ISSUER is not a URL")?;
+        let prepared = Self {
+            account_dir: dir.join("account"),
+            console_dir: dir.join("admin"),
+            account_url: format!("{}{ACCOUNT_MOUNT}", issuer.origin().ascii_serialization()),
+        };
+        // The console's mount follows the installation's settings; its entry
+        // page is the same file wherever it is mounted.
+        for (application, bundle, mount) in [
+            ("account pages", &prepared.account_dir, ACCOUNT_MOUNT),
+            ("administration console", &prepared.console_dir, "/admin/"),
+        ] {
+            UiBundle::new(bundle, mount, &bundle_config(serde_json::json!({}))).with_context(
+                || {
+                    format!(
+                        "the web UI's {application} in {}: set SID_UI_DIR to the directory \
+                         holding the built `account` and `admin` bundles",
+                        bundle.display()
+                    )
+                },
+            )?;
+        }
+        Ok(prepared)
+    }
+
     /// Where the account pages are served: their web client's URL.
     pub fn account_url(&self) -> &str {
         &self.account_url
