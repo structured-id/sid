@@ -299,7 +299,12 @@ fn sign_in_page(failure: &SignInFailure) -> Response<HttpBody> {
     match failure {
         SignInFailure::NotProvisioned(_) => page(503, "The sign-in is not available yet."),
         SignInFailure::EndedAtIssuer => page(403, "The sign-in was ended at the issuer."),
-        SignInFailure::OtherBrowser => page(400, "This sign-in was started in another browser."),
+        // Without the correlation cookie the cause is unknown: another
+        // browser, or this one after the started sign-in expired with it.
+        SignInFailure::OtherBrowser => page(
+            400,
+            "The sign-in could not be completed. Start it again from the application.",
+        ),
         SignInFailure::ExpiredOrUsed => page(400, "This sign-in has expired or was already used."),
         SignInFailure::WrongIssuer => page(400, "The sign-in answer did not come from the issuer."),
         SignInFailure::Refused { error, return_to } => sid_infra::oauth_http::link_page(
