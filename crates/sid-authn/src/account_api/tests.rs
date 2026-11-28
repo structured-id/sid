@@ -43,6 +43,61 @@ async fn token(
         .unwrap()
 }
 
+/// An installation whose base issuer lives at its root origin signs both its
+/// own session tokens and the account API's tokens under one `iss`: its
+/// services still accept each as what it is.
+/// Bug prevented: the verifier was picked by `iss` alone, so such an
+/// installation handed its own session token to the account API verifier,
+/// which refused it, and no service accepted a sign-in's token.
+#[tokio::test]
+async fn an_issuer_at_the_root_origin_keeps_its_session_tokens() {
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let issuers = Arc::new(issuers);
+    let account = AccountApiVerifier::new(
+        issuers.clone(),
+        issuer.clone(),
+        ResourceIndicator::parse(ACCOUNT_API).unwrap(),
+    )
+    .await
+    .unwrap();
+    let (private, public) = crate::jwt::generate_signing_key_pem().unwrap();
+    let jwt = crate::jwt::JwtService::new(
+        private.as_bytes(),
+        public.as_bytes(),
+        issuer.canonical_url.clone(),
+    )
+    .unwrap()
+    .with_account_api(Arc::new(account));
+
+    let profile = ProfileId::generate();
+    let session = sid_core::models::Session::new(
+        profile,
+        None,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1),
+    );
+    let own = jwt
+        .issue_access_token(
+            &profile.to_string(),
+            Some(&profile.to_string()),
+            &[],
+            &session,
+            &["openid".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(
+        jwt.verifier().verify(&own).await,
+        Ok(crate::jwt::VerifiedAccess::Session(_))
+    ));
+
+    let account_api = token(&issuers, &issuer, Some(IssuedCredential::AccountApi)).await;
+    assert!(matches!(
+        jwt.verifier().verify(&account_api).await,
+        Ok(crate::jwt::VerifiedAccess::AccountApi(_))
+    ));
+}
+
 /// The account API admits only what its issuer stated to be an account API
 /// credential: a token signed by the right key for the right resource but
 /// stating no kind, a delegated or a client kind is refused, so another
