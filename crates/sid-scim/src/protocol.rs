@@ -275,6 +275,41 @@ impl ScimProtocolService for ScimProtocolServiceImpl {
         )
     }
 
+    async fn replace_group(&self, request: Request<proto::ScimHttpRequest>) -> Answer {
+        let (metadata, extensions, http) = request.into_parts();
+        let id = http.id;
+        let typed = match read_resource(http.body.as_ref(), GROUP_SCHEMA).and_then(|group| {
+            Ok(proto::ScimReplaceGroupRequest {
+                id,
+                display_name: string(&group, "displayName")?,
+                // A request that leaves `members` out states no list and
+                // keeps the caller's; one that states it, an empty array
+                // or null included (RFC 7643 §2.5: equivalent in state),
+                // replaces the caller's with it.
+                members: match group.get("members") {
+                    None => None,
+                    stated => Some(proto::ScimGroupMembers {
+                        values: members(stated)?,
+                    }),
+                },
+            })
+        }) {
+            Ok(typed) => typed,
+            Err(refused) => return Ok(refused.answer()),
+        };
+        let presented = bearer_presented(&metadata);
+        Ok(
+            match self
+                .scim
+                .replace_group(Request::from_parts(metadata, extensions, typed))
+                .await
+            {
+                Ok(group) => scim_json(200, &group_json(&group.into_inner())),
+                Err(status) => refusal(&status, presented),
+            },
+        )
+    }
+
     async fn patch_group(&self, request: Request<proto::ScimHttpRequest>) -> Answer {
         let (metadata, extensions, http) = request.into_parts();
         let operations = match read_patch(http.body.as_ref()) {

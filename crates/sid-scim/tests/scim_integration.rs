@@ -1624,6 +1624,126 @@ async fn test_group_members_are_each_sources_own() {
     assert_eq!(effective().await, 1);
 }
 
+/// A replacement of a group (RFC 7644 3.5.1) renames it and, when it states
+/// a member list, makes that list the calling source's own assignments: a
+/// request that states none keeps them, an empty list clears them, and the
+/// members another source assigned stay through all of it.
+#[tokio::test]
+async fn test_group_replacement_sets_the_callers_members() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let other = connector_secret(&storage, directory, &SCIM_ACTIONS).await;
+    let user = async || {
+        service
+            .create_user(provisioned(create_user_request(&unique_username())))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let (first, second, third) = (user().await, user().await, user().await);
+    let member = |id: &str| proto::ScimMemberRef {
+        value: id.into(),
+        display: String::new(),
+    };
+    let group = service
+        .create_group(provisioned(proto::ScimCreateGroupRequest {
+            display_name: format!("Replaced_{}", Uuid::now_v7().simple()),
+            members: vec![member(&first.id), member(&second.id)],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let group_id = GroupId::parse(&group.id).unwrap();
+    // The other source assigns the third user.
+    service
+        .patch_group(with_token(
+            proto::ScimPatchGroupRequest {
+                id: group.id.clone(),
+                operations: vec![proto::ScimPatchOp {
+                    op: "add".into(),
+                    path: "members".into(),
+                    value: format!(r#"[{{"value":"{}"}}]"#, third.id),
+                }],
+            },
+            &other,
+        ))
+        .await
+        .unwrap();
+    let replace = |name: &str, members: Option<Vec<&str>>| proto::ScimReplaceGroupRequest {
+        id: group.id.clone(),
+        display_name: name.into(),
+        members: members.map(|ids| proto::ScimGroupMembers {
+            values: ids.into_iter().map(member).collect(),
+        }),
+    };
+    let shown = |answer: proto::ScimGroup| {
+        let mut ids: Vec<String> = answer.members.into_iter().map(|m| m.value).collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |ids: &[&str]| {
+        let mut ids: Vec<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        ids.sort();
+        ids
+    };
+    let effective = async || storage.list_group_members(group_id).await.unwrap().len();
+
+    // No member list stated: renamed, the caller's assignments kept.
+    let renamed = format!("Renamed_{}", Uuid::now_v7().simple());
+    let answer = service
+        .replace_group(provisioned(replace(&renamed, None)))
+        .await
+        .expect("a group is replaced")
+        .into_inner();
+    assert_eq!(answer.display_name, renamed);
+    assert_eq!(shown(answer), sorted(&[&first.id, &second.id]));
+    assert_eq!(effective().await, 3);
+
+    // A list: exactly the caller's assignments, the other source's kept.
+    let answer = service
+        .replace_group(provisioned(replace(&renamed, Some(vec![&second.id]))))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(shown(answer), sorted(&[&second.id]));
+    assert_eq!(
+        effective().await,
+        2,
+        "the other source's member was replaced"
+    );
+
+    // The same replacement again leaves the same group.
+    service
+        .replace_group(provisioned(replace(&renamed, Some(vec![&second.id]))))
+        .await
+        .unwrap();
+    assert_eq!(effective().await, 2);
+
+    // An empty list clears the caller's assignments only.
+    let answer = service
+        .replace_group(provisioned(replace(&renamed, Some(Vec::new()))))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(answer.members.is_empty());
+    assert_eq!(effective().await, 1);
+
+    // A name is required, and an unknown group is not found.
+    let nameless = service
+        .replace_group(provisioned(replace("", None)))
+        .await
+        .expect_err("a replacement states the group's name");
+    assert_eq!(nameless.code(), tonic::Code::InvalidArgument);
+    let missing = service
+        .replace_group(provisioned(proto::ScimReplaceGroupRequest {
+            id: GroupId::generate().to_string(),
+            display_name: "Missing".into(),
+            members: None,
+        }))
+        .await
+        .expect_err("an unknown group");
+    assert_eq!(missing.code(), tonic::Code::NotFound);
+}
+
 /// Regression: a client that deletes a user and then removes it from its
 /// groups was refused, with every other change of that PATCH: a member was
 /// accepted only while its resource was live. A removal names a deleted

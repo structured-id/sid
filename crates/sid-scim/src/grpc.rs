@@ -1459,6 +1459,74 @@ impl ScimService for ScimServiceImpl {
         )))
     }
 
+    /// RFC 7644 §3.5.1: the request carries the group and replaces it. Its
+    /// member list, when stated, becomes the calling connector's own
+    /// assignments exactly, an empty one clearing them; a request that
+    /// states none leaves them. Other origins' members are never the
+    /// caller's to replace.
+    #[instrument(skip_all, fields(id = %request.get_ref().id))]
+    async fn replace_group(
+        &self,
+        request: Request<proto::ScimReplaceGroupRequest>,
+    ) -> Result<Response<proto::ScimGroup>, Status> {
+        let caller = self.provisioner(&request, SCIM_GROUP_UPDATE).await?;
+        let req = request.into_inner();
+        let group_id = parse_group_id(&req.id)?;
+        if req.display_name.is_empty() {
+            return Err(refusal::required("displayName"));
+        }
+        let mut group = self
+            .storage
+            .get_group(group_id)
+            .await
+            .map_err(storage_failure)?
+            .ok_or_else(|| refusal::group_not_found(group_id))?;
+        let renamed = group.name != req.display_name;
+        group.name = req.display_name;
+        let group_id_str = group.id.to_string();
+
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone())
+            .by_source(caller.connector.id);
+        if let Some(stated) = &req.members {
+            self.authorize(&caller, SCIM_GROUP_MEMBERSHIP).await?;
+            for member in &stated.values {
+                let account = self.member(&member.value, false).await?;
+                if !write.add_members.iter().any(|m| m.profile_id == account) {
+                    write.add_members.push(GroupMember::new(group.id, account));
+                }
+            }
+            self.withdraw_unlisted(&caller, &mut write).await?;
+        }
+        let accounts = |ids: &[ProfileId]| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let added: Vec<ProfileId> = write.add_members.iter().map(|m| m.profile_id).collect();
+        let event = Event::new("sid-scim", event_types::SCIM_GROUP_UPDATED)
+            .with_subject(format!("group/{}", group_id_str))
+            .with_data(serde_json::json!({
+                "group_id": group_id_str,
+                "add_members": accounts(&added),
+                "remove_members": accounts(&write.remove_members),
+                "display_name_changed": renamed,
+            }));
+        self.storage
+            .write_directory_group(
+                &write,
+                audited(
+                    &caller,
+                    by_connector(&caller, "scim.group.replace", &group_id_str),
+                    &event,
+                ),
+            )
+            .await
+            .map_err(|e| refusal::group_write(group.id, e))?;
+
+        let members = self.load_member_refs(&caller, group_id).await?;
+        Ok(Response::new(sid_to_scim_group(
+            &group,
+            &members,
+            &self.base_url,
+        )))
+    }
+
     #[instrument(skip_all, fields(id = %request.get_ref().id))]
     async fn delete_group(
         &self,

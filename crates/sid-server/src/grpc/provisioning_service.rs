@@ -67,6 +67,9 @@ fn refusal(e: ProvisioningError) -> Status {
         )
         .into(),
         ProvisioningError::ChangedConcurrently => changed_concurrently(),
+        ProvisioningError::UserNotFound(id) => {
+            not_found(ErrorReason::ProfileNotFound, "User", id.to_string())
+        }
     }
 }
 
@@ -168,6 +171,42 @@ impl ProvisioningService for ProvisioningServiceImpl {
         let operation = context(&request)?;
         self.provisioning
             .change_connector_state(&caller, operation, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(refusal)
+    }
+
+    async fn set_directory_management(
+        &self,
+        request: Request<pb::SetDirectoryManagementRequest>,
+    ) -> Result<Response<pb::ProvisioningConnector>, Status> {
+        let caller = self.admin(&request).await?;
+        self.provisioning
+            .set_directory_management(&caller, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(refusal)
+    }
+
+    async fn assign_directory_user(
+        &self,
+        request: Request<pb::AssignDirectoryUserRequest>,
+    ) -> Result<Response<pb::ProvisioningConnector>, Status> {
+        let caller = self.admin(&request).await?;
+        self.provisioning
+            .assign_directory_user(&caller, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(refusal)
+    }
+
+    async fn withdraw_directory_user(
+        &self,
+        request: Request<pb::WithdrawDirectoryUserRequest>,
+    ) -> Result<Response<pb::ProvisioningConnector>, Status> {
+        let caller = self.admin(&request).await?;
+        self.provisioning
+            .withdraw_directory_user(&caller, request.into_inner())
             .await
             .map(Response::new)
             .map_err(refusal)
