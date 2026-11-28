@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.60](https://github.com/structured-id/sid/compare/v0.2.59...v0.2.60) - 2026-11-28
+
+### Added
+
+- *(scim)* externalId per provisioning client ([#859](https://github.com/structured-id/sid/pull/859))
+
+### Fixed
+
+- *(projects)* validate administrator-registered clients ([#866](https://github.com/structured-id/sid/pull/866))
+- *(oauth)* match and validate redirect URIs per contract ([#864](https://github.com/structured-id/sid/pull/864))
+- *(scim)* delete the user resource on DELETE ([#857](https://github.com/structured-id/sid/pull/857))
+- *(oauth)* accept only a private-use native scheme ([#868](https://github.com/structured-id/sid/pull/868))
+
+### Other
+
+- *(oauth)* redirect URIs through authorize and token ([#870](https://github.com/structured-id/sid/pull/870))
+- *(server)* walk the access rules of the served server ([#862](https://github.com/structured-id/sid/pull/862))
+
 ## [0.2.59](https://github.com/structured-id/sid/compare/v0.2.58...v0.2.59) - 2026-11-27
 
 ### Added
