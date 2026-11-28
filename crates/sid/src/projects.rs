@@ -705,6 +705,7 @@ impl Projects {
             revision: 0,
             created_at: now,
         };
+        check_registered_metadata(&client)?;
         Ok((client, client_secret))
     }
 
@@ -2090,6 +2091,12 @@ impl Projects {
             }
         }
 
+        // An edit of the registered metadata leaves a client a registration
+        // would accept; a change of activity alone is not held to it.
+        if edits_settings {
+            check_registered_metadata(&client)?;
+        }
+
         // The application as this edit leaves it: the store applies the edit
         // only to the revision it was read at.
         let app = self
@@ -2267,19 +2274,7 @@ impl Projects {
             return Err(metadata_refusal("token_endpoint_auth_method", problem));
         }
 
-        let request = dcr::ClientRegistrationRequest {
-            client_name: updated.client_name.clone(),
-            redirect_uris: updated.redirect_uris.clone(),
-            grant_types: updated.grant_types.clone(),
-            response_types: updated.response_types.clone(),
-            token_endpoint_auth_method: updated.token_endpoint_auth_method,
-            application_type: updated.application_type,
-            subject_type: updated.subject_type,
-            sector_identifier_uri: updated.sector_identifier_uri.clone(),
-            contacts: updated.contacts.clone(),
-            scope: updated.allowed_scopes.clone(),
-            post_logout_redirect_uris: updated.post_logout_redirect_uris.clone(),
-        };
+        let request = registration_of(updated);
         dcr::validate_client_metadata(&request)
             .map_err(|e| dcr_refusal(e, RegistrationCheck::Metadata))?;
 
@@ -2345,6 +2340,31 @@ impl Projects {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// `client`'s metadata as the registration request the shared validator
+/// reads: every registration path checks the same rules on it.
+fn registration_of(client: &OAuth2Client) -> dcr::ClientRegistrationRequest {
+    dcr::ClientRegistrationRequest {
+        client_name: client.client_name.clone(),
+        redirect_uris: client.redirect_uris.clone(),
+        grant_types: client.grant_types.clone(),
+        response_types: client.response_types.clone(),
+        token_endpoint_auth_method: client.token_endpoint_auth_method,
+        application_type: client.application_type,
+        subject_type: client.subject_type,
+        sector_identifier_uri: client.sector_identifier_uri.clone(),
+        contacts: client.contacts.clone(),
+        scope: client.allowed_scopes.clone(),
+        post_logout_redirect_uris: client.post_logout_redirect_uris.clone(),
+    }
+}
+
+/// The metadata rules of a registration, applied to a client an
+/// administrator creates or edits.
+fn check_registered_metadata(client: &OAuth2Client) -> Result<(), ProjectError> {
+    dcr::validate_client_metadata(&registration_of(client))
+        .map_err(|e| dcr_refusal(e, RegistrationCheck::Metadata))
+}
 
 /// The audit of `caller`'s administrative `action` on `target`.
 fn admin_ctx(caller: &Caller, action: &str, target: String) -> MutationContext {
