@@ -267,6 +267,7 @@ fn hold_resource(
     )?;
     if delete {
         // Its sources keep their provenance and give their identifiers up.
+        release_identifiers(tx, id)?;
         tx.run(
             "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id SET s.retired = true",
             Params::default().with("id", uuid(&id.0)),
@@ -340,7 +341,62 @@ fn check_identifier(
     Ok(())
 }
 
+/// Hold `external_id` as the identifier `connector` gives one live resource:
+/// a node of its own, unique by connector and identifier. A check of the
+/// correlations only reads, so of concurrent writers naming two resources
+/// by one identifier it is this node that lets one commit and refuses the
+/// rest.
+fn reserve_identifier(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+    external_id: Option<&str>,
+) -> SidResult<()> {
+    let Some(external_id) = external_id else {
+        return Ok(());
+    };
+    tx.run(
+        "CREATE (i:SidDirectoryIdentifier {key: $key})",
+        Params::default().with(
+            "key",
+            key(&[connector.into_uuid().as_bytes(), external_id.as_bytes()])?,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Give `external_id` of `connector` up, for another resource to take.
+fn release_identifier(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+    external_id: Option<&str>,
+) -> SidResult<()> {
+    let Some(external_id) = external_id else {
+        return Ok(());
+    };
+    tx.run(
+        "MATCH (i:SidDirectoryIdentifier) WHERE i.key = $key DETACH DELETE i",
+        Params::default().with(
+            "key",
+            key(&[connector.into_uuid().as_bytes(), external_id.as_bytes()])?,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Give up the identifiers the live correlations of `resource` hold.
+fn release_identifiers(tx: &Statements<'_>, resource: DirectoryUserId) -> SidResult<()> {
+    for held in sources_where(tx, "s.resource_id = $value", uuid(&resource.0))? {
+        if !held.retired {
+            release_identifier(tx, held.connector, held.external_id.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
 fn create_source(tx: &Statements<'_>, s: &DirectorySource) -> SidResult<()> {
+    if !s.retired {
+        reserve_identifier(tx, s.connector, s.external_id.as_deref())?;
+    }
     tx.run(
         "CREATE (s:SidDirectorySource {pair: $pair, resource_id: $resource,
             connector_id: $connector, external_id: $external_id, retired: $retired})",
@@ -382,10 +438,14 @@ fn update_source(
 ) -> SidResult<()> {
     let pair = source_pair(resource, write.connector)?;
     let held = sources_where(tx, "s.pair = $value", pair.clone())?;
-    if !held.iter().any(|s| !s.retired) {
+    let Some(held) = held.iter().find(|s| !s.retired) else {
         return Ok(());
-    }
+    };
     check_identifier(tx, write.connector, resource, write.external_id.as_deref())?;
+    if held.external_id != write.external_id {
+        release_identifier(tx, write.connector, held.external_id.as_deref())?;
+        reserve_identifier(tx, write.connector, write.external_id.as_deref())?;
+    }
     tx.run(
         "MATCH (s:SidDirectorySource) WHERE s.pair = $pair SET s.external_id = $external_id",
         Params::default()
@@ -399,6 +459,7 @@ fn update_source(
 /// with the correlations of those resources.
 pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
     for resource in resources_where(tx, "d.profile_id = $value", bin(profile.as_bytes()))? {
+        release_identifiers(tx, resource.id)?;
         tx.run(
             "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id DETACH DELETE s",
             Params::default().with("id", uuid(&resource.id.0)),
@@ -881,6 +942,7 @@ impl CoordinodeBackend {
                 .map(|r| r.id)
                 .chain(resources.iter().map(|r| r.id))
             {
+                release_identifiers(tx, id)?;
                 tx.run(
                     "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id DETACH DELETE s",
                     Params::default().with("id", uuid(&id.0)),

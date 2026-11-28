@@ -177,6 +177,7 @@ const UNIQUE: &[(&str, &str, &str)] = &[
     ("sid_profile_metadata", "SidProfileMetadata", "pair"),
     ("sid_directory_user_id", "SidDirectoryUser", "id"),
     ("sid_directory_source", "SidDirectorySource", "pair"),
+    ("sid_directory_identifier", "SidDirectoryIdentifier", "key"),
     ("sid_pat_id", "SidPat", "id"),
     ("sid_pat_hash", "SidPat", "token_hash"),
     ("sid_closure_request", "SidClosureRequest", "profile_id"),
