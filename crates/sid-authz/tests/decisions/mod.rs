@@ -276,6 +276,76 @@ pub async fn a_group_grants_its_members_while_they_belong(storage: Store) {
     assert!(!w.cancels().await, "removed");
 }
 
+/// A group's role reaches a member through each assignment of it. One a
+/// directory source made rests on the member's directory relationship:
+/// while that is inactive or deleted it grants nothing, an assignment made
+/// locally still does, and reactivating the relationship grants again only
+/// through the assignments that still exist.
+pub async fn a_source_assignment_grants_while_its_relationship_is_active(storage: Store) {
+    use sid_core::models::{
+        DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode, OrgId, Profile, ProfileStatus,
+        ProfileType, ProvisioningConnector, ProvisioningDirection,
+    };
+    let w = world(storage).await;
+    // An identity that signs in elsewhere, known here by its relationship.
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    w.storage.create_profile(&identity, audit()).await.unwrap();
+    let resource = w.storage.directory_users_of(&[identity.id]).await.unwrap()[0];
+    let source =
+        ProvisioningConnector::new(OrgId::generate(), ProvisioningDirection::Inbound, "source");
+    let group = Group::new(w.project, format!("cancellers {}", uuid::Uuid::now_v7()));
+    w.storage.create_group(&group, audit()).await.unwrap();
+    w.assign(RoleAssignmentPrincipal::Group(group.id), true)
+        .await;
+    let cancels = async || {
+        w.allowed(&w.engine, &w.on_resource(identity.id, "orders.cancel"))
+            .await
+    };
+    let relationship = async |active: Option<bool>, delete: bool| {
+        let account = w.storage.get_profile(identity.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        write.delete_resource = delete;
+        w.storage
+            .write_directory_user(&write, audit())
+            .await
+            .unwrap();
+    };
+
+    assert!(!cancels().await, "not assigned");
+    let mut assign =
+        DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone()).by_source(source.id);
+    assign
+        .add_members
+        .push(GroupMember::new(group.id, identity.id));
+    w.storage
+        .write_directory_group(&assign, audit())
+        .await
+        .unwrap();
+    assert!(cancels().await, "assigned by the source");
+
+    relationship(Some(false), false).await;
+    assert!(!cancels().await, "an inactive relationship still granted");
+    w.storage
+        .add_to_group(&GroupMember::new(group.id, identity.id), audit())
+        .await
+        .unwrap();
+    assert!(cancels().await, "a local assignment is independent");
+    w.storage
+        .remove_from_group(group.id, identity.id, audit())
+        .await
+        .unwrap();
+    assert!(!cancels().await, "the local assignment was withdrawn");
+
+    relationship(Some(true), false).await;
+    assert!(cancels().await, "the reactivated relationship grants again");
+    relationship(None, true).await;
+    assert!(!cancels().await, "a deleted relationship still granted");
+}
+
 /// Two engines over one store, as two replicas: a policy stored after both
 /// decided changes both decisions.
 pub async fn another_engine_over_the_store_decides_the_same(storage: Store) {
@@ -399,6 +469,7 @@ macro_rules! decision_scenarios {
             scopes_apply_only_where_they_belong,
             a_revoked_or_expired_assignment_grants_nothing,
             a_group_grants_its_members_while_they_belong,
+            a_source_assignment_grants_while_its_relationship_is_active,
             another_engine_over_the_store_decides_the_same,
             malformed_questions_are_errors,
             a_batch_answers_in_order,
