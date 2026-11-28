@@ -100,17 +100,20 @@ pub(super) fn resource(row: &sqlx::postgres::PgRow) -> SidResult<DirectoryResour
         revision: u64::try_from(revision)
             .map_err(|e| SidError::Storage(format!("directory resource revision: {e}")))?,
         deleted_at: deleted_at.map(Into::into),
+        active: row.try_get("active").map_err(read)?,
     })
 }
 
 /// Hold the live resource `id` of `profile_id` for the rest of the write,
-/// deleting it when `delete`; anything else (unknown, deleted, another
-/// account's) is `NotFound`.
+/// deleting it when `delete` and setting the relationship's activity when
+/// `active` is given; anything else (unknown, deleted, another account's) is
+/// `NotFound`.
 async fn hold_resource(
     tx: &mut Tx<'_>,
     id: DirectoryUserId,
     profile_id: ProfileId,
     delete: bool,
+    active: Option<bool>,
 ) -> SidResult<()> {
     let held = if delete {
         sqlx::query(
@@ -144,6 +147,17 @@ async fn hold_resource(
             .execute(&mut **tx)
             .await
             .map_err(storage("directory sources"))?;
+    } else if let Some(active) = active {
+        // A change of the relationship's state is a change of the resource.
+        sqlx::query(
+            "UPDATE directory_users SET active = $2, revision = revision + 1
+             WHERE id = $1 AND active <> $2",
+        )
+        .bind(id.0)
+        .bind(active)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("directory resource activity"))?;
     }
     Ok(())
 }
@@ -816,7 +830,14 @@ impl PostgresBackend {
                 // The resource first: a deletion that committed since the
                 // caller read it refuses the write as not found.
                 if let Some(resource) = write.resource {
-                    hold_resource(&mut tx, resource, profile_id, write.delete_resource).await?;
+                    hold_resource(
+                        &mut tx,
+                        resource,
+                        profile_id,
+                        write.delete_resource,
+                        write.resource_active,
+                    )
+                    .await?;
                     if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
                         update_source(&mut tx, resource, source).await?;
                     }
@@ -888,7 +909,7 @@ impl PostgresBackend {
         id: DirectoryUserId,
     ) -> SidResult<Option<DirectoryResource>> {
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users WHERE id = $1",
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -905,7 +926,7 @@ impl PostgresBackend {
     ) -> SidResult<Vec<DirectoryResource>> {
         let ids: Vec<Uuid> = profiles.iter().map(|p| Uuid::from(*p)).collect();
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users
              WHERE profile_id = ANY($1) AND deleted_at IS NULL ORDER BY profile_id",
         )
         .bind(ids)
@@ -972,7 +993,7 @@ impl PostgresBackend {
 
     pub(super) async fn export_directory_users_impl(&self) -> SidResult<Vec<DirectoryResource>> {
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users ORDER BY profile_id, id",
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users ORDER BY profile_id, id",
         )
         .fetch_all(&self.pool)
         .await
@@ -1018,16 +1039,17 @@ impl PostgresBackend {
             let revision = i64::try_from(r.revision)
                 .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
             let written = sqlx::query(
-                "INSERT INTO directory_users (id, profile_id, revision, deleted_at)
-                 VALUES ($1, $2, $3, $4)
+                "INSERT INTO directory_users (id, profile_id, revision, deleted_at, active)
+                 VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT (id) DO UPDATE SET revision = EXCLUDED.revision,
-                    deleted_at = EXCLUDED.deleted_at
+                    deleted_at = EXCLUDED.deleted_at, active = EXCLUDED.active
                  WHERE directory_users.profile_id = EXCLUDED.profile_id",
             )
             .bind(r.id.0)
             .bind(profile_id)
             .bind(revision)
             .bind(r.deleted_at.pg())
+            .bind(r.active)
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("directory resource", e))?

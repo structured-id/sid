@@ -3,7 +3,7 @@
 //!
 //! Applies add/remove/replace operations to SID profiles and groups.
 
-use sid_core::models::{PrincipalType, Profile, ProfileStatus};
+use sid_core::models::{PrincipalType, Profile};
 use sid_proto::sid::v1 as proto;
 
 /// Error applying a SCIM PATCH operation.
@@ -26,14 +26,10 @@ pub enum PatchError {
 pub struct UserPatchResult {
     /// Whether the Profile struct was modified.
     pub profile_changed: bool,
-    /// Whether the profile needs reactivation from Suspended.
-    /// The gRPC handler resolves the target state:
-    /// - Provisioned (if never claimed — no verified login identifiers)
-    /// - Active (if previously claimed — has verified login identifiers)
-    pub needs_reactivation: bool,
-    /// Whether the request leaves the user deactivated (`active=false`):
-    /// the account's access ends, whatever state the account keeps.
-    pub deactivated: bool,
+    /// The `active` the request asks the user to show, when it names it;
+    /// the last operation stands. What that changes depends on what the
+    /// resource stands for, which the caller of this module decides.
+    pub active: Option<bool>,
     /// Identifiers to add.
     pub add_identifiers: Vec<PatchIdentifier>,
     /// Identifiers to remove (by value).
@@ -104,25 +100,7 @@ fn apply_replace(
                     path: path.into(),
                     reason: "expected boolean".into(),
                 })?;
-            if !active {
-                // Only an account in use is suspended: a closure under way,
-                // a terminal state or a legal hold is not the directory's to
-                // rewrite. Its access ends all the same.
-                if profile.status.is_in_use() {
-                    profile.status = ProfileStatus::Suspended;
-                }
-                result.deactivated = true;
-                // A later `active=true` in the same request starts from
-                // this state, not from a pending reactivation.
-                result.needs_reactivation = false;
-                result.profile_changed = true;
-            } else if profile.status == ProfileStatus::Suspended {
-                result.deactivated = false;
-                // Mark for reactivation — grpc handler resolves the target state
-                // (Provisioned if never claimed, Active if previously claimed).
-                result.needs_reactivation = true;
-                result.profile_changed = true;
-            }
+            result.active = Some(active);
         }
         "title" => {
             result
@@ -349,7 +327,7 @@ pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sid_core::models::ProfileType;
+    use sid_core::models::{ProfileStatus, ProfileType};
 
     fn test_profile() -> Profile {
         let mut p = Profile::new(Some("test"));
@@ -374,35 +352,27 @@ mod tests {
         assert_eq!(profile.given_name.as_deref(), Some("Alice Jones"));
     }
 
+    /// `active` is only recorded: whether it suspends an account or ends a
+    /// relationship is not this module's to decide, so the account's state
+    /// is left as it was. The last operation of a request stands.
     #[test]
-    fn test_replace_active_false_suspends() {
-        let mut profile = test_profile();
-        let ops = vec![proto::ScimPatchOp {
+    fn test_replace_active_is_recorded_not_applied() {
+        let op = |value: &str| proto::ScimPatchOp {
             op: "replace".into(),
             path: "active".into(),
-            value: "false".into(),
-        }];
-        let result = apply_user_patch(&mut profile, &ops).unwrap();
-        assert!(result.profile_changed);
-        assert_eq!(profile.status, ProfileStatus::Suspended);
-    }
+            value: value.into(),
+        };
+        let mut profile = test_profile();
+        let result = apply_user_patch(&mut profile, &[op("false")]).unwrap();
+        assert_eq!(result.active, Some(false));
+        assert_eq!(profile.status, ProfileStatus::Active);
 
-    #[test]
-    fn test_replace_active_true_reactivates() {
-        let mut profile = test_profile();
-        profile.status = ProfileStatus::Suspended;
-        let ops = vec![proto::ScimPatchOp {
-            op: "replace".into(),
-            path: "active".into(),
-            value: "true".into(),
-        }];
-        let result = apply_user_patch(&mut profile, &ops).unwrap();
-        // patch.rs doesn't resolve target state — it sets needs_reactivation.
-        // gRPC handler decides Provisioned vs Active based on verified identifiers.
-        assert!(result.needs_reactivation);
-        assert!(result.profile_changed);
-        // Profile status stays Suspended — grpc handler will change it.
-        assert_eq!(profile.status, ProfileStatus::Suspended);
+        let result = apply_user_patch(&mut profile, &[op("false"), op("true")]).unwrap();
+        assert_eq!(result.active, Some(true));
+        assert_eq!(profile.status, ProfileStatus::Active);
+
+        let result = apply_user_patch(&mut profile, &[]).unwrap();
+        assert_eq!(result.active, None);
     }
 
     #[test]

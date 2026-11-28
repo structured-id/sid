@@ -103,6 +103,9 @@ pub struct DirectoryUser {
     pub id: super::DirectoryUserId,
     /// The asking source's own identifier of the resource, if it has one.
     pub external_id: Option<String>,
+    /// Whether the user is active: SCIM `active`
+    /// ([`super::DirectoryResource::shows_active`]).
+    pub active: bool,
     pub profile: Profile,
     pub principals: Vec<Principal>,
     pub emails: Vec<ProfileEmail>,

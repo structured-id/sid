@@ -11,8 +11,9 @@ use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
 use sid_core::models::{
-    AuditEntry, DirectoryGroupWrite, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode,
-    Group, GroupId, GroupMember, MutationContext, OrgId, Principal, PrincipalType, ProfileId,
+    AuditEntry, DirectoryGroupWrite, DirectoryResource, DirectoryRight, DirectoryRights,
+    DirectorySource, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, Group, GroupId,
+    GroupMember, MutationContext, OrgId, Principal, PrincipalType, Profile, ProfileId,
     ProfileMetadata, ProfileStatus, ResourceId, RevocationReason, SCIM_GROUP_CREATE,
     SCIM_GROUP_DELETE, SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_USER_CREATE,
     SCIM_USER_DEACTIVATE, SCIM_USER_READ, SCIM_USER_UPDATE, SessionEnd,
@@ -69,14 +70,35 @@ impl ScimServiceImpl {
         }
     }
 
-    /// Where this directory renders a user resource, for a source that
-    /// knows the user as `external_id`.
-    fn place<'a>(&'a self, external_id: Option<&'a str>) -> crate::mapping::ScimPlace<'a> {
+    /// Where this directory renders a user resource that shows `active`,
+    /// for a source that knows the user as `external_id`.
+    fn place<'a>(
+        &'a self,
+        external_id: Option<&'a str>,
+        active: bool,
+    ) -> crate::mapping::ScimPlace<'a> {
         crate::mapping::ScimPlace {
             org_domain: &self.org_ctx.org_domain,
             base_url: &self.base_url,
             external_id,
+            active,
         }
+    }
+
+    /// The correlation `caller` itself has with the user `resource`, if any.
+    #[allow(clippy::result_large_err)]
+    async fn source_of(
+        &self,
+        caller: &ConnectorCaller,
+        resource: DirectoryUserId,
+    ) -> Result<Option<DirectorySource>, Status> {
+        Ok(self
+            .storage
+            .directory_sources(Some(caller.connector.id), &[resource])
+            .await
+            .map_err(storage_failure)?
+            .into_iter()
+            .next())
     }
 
     /// What `caller` itself calls the user `resource`, if anything: another
@@ -88,12 +110,81 @@ impl ScimServiceImpl {
         resource: DirectoryUserId,
     ) -> Result<Option<String>, Status> {
         Ok(self
+            .source_of(caller, resource)
+            .await?
+            .and_then(|source| source.external_id))
+    }
+
+    /// Refuse a request whose `effects` on a user exceed what `caller`
+    /// manages of it now: what it may change of every user of the directory
+    /// and what it was assigned of this one (`source`). Having created the
+    /// user or knowing it gives nothing. The connector is read at the
+    /// revision it authenticated at and the write is fenced on that
+    /// revision, so a selection or assignment changed since refuses the
+    /// commit.
+    #[allow(clippy::result_large_err)]
+    fn require_rights(
+        caller: &ConnectorCaller,
+        source: Option<&DirectorySource>,
+        effects: DirectoryRights,
+    ) -> Result<(), Status> {
+        let held = source.map_or(caller.connector.directory_rights, |source| {
+            caller.connector.directory_rights.union(source.managed)
+        });
+        if held.lacking(effects).is_empty() {
+            Ok(())
+        } else {
+            Err(refusal::not_managed())
+        }
+    }
+
+    /// The user `resource` as `caller` is shown it, read from the store.
+    #[allow(clippy::result_large_err)]
+    async fn shown(
+        &self,
+        caller: &ConnectorCaller,
+        resource: DirectoryUserId,
+        profile_id: ProfileId,
+    ) -> Result<proto::ScimUser, Status> {
+        let profile = self
             .storage
-            .directory_sources(Some(caller.connector.id), &[resource])
+            .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
-            .into_iter()
-            .find_map(|source| source.external_id))
+            .ok_or_else(|| refusal::user_not_found(resource))?;
+        let identifiers = self
+            .storage
+            .get_principals_by_profile(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        let metadata = self
+            .storage
+            .list_profile_metadata(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        let group_refs = self.load_group_refs(profile_id).await?;
+        let emails = self
+            .storage
+            .list_profile_emails(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        let external_id = self.external_id_of(caller, resource).await?;
+        let found = self
+            .storage
+            .find_directory_user(resource)
+            .await
+            .map_err(storage_failure)?
+            .filter(DirectoryResource::is_live)
+            .ok_or_else(|| refusal::user_not_found(resource))?;
+        Ok(sid_to_scim_user(
+            resource,
+            &profile,
+            &identifiers,
+            &emails,
+            &metadata,
+            &group_refs,
+            self.place(external_id.as_deref(), found.shows_active(&profile)),
+        ))
     }
 
     /// Also accept the directory resource's access tokens `tokens` verifies.
@@ -226,6 +317,120 @@ impl ScimServiceImpl {
     }
 }
 
+/// What a user resource stands for, which decides what deactivating or
+/// deleting it ends. Derived from the account as stored now, never from the
+/// request or from the rights the caller holds.
+enum Target {
+    /// A local account the directory's organization manages whole (admin
+    /// delegation): its own state is the user's state, and deactivating or
+    /// deleting the user is the account's local offboarding.
+    Account,
+    /// A relationship with an identity that signs in elsewhere and may hold
+    /// access here on other grounds: the directory ends the relationship
+    /// and what rests on it, not the identity's account.
+    Relationship,
+}
+
+impl Target {
+    fn of(account: &Profile) -> Self {
+        // A record without local credentials is this installation's
+        // reference to an identity another installation signs in.
+        if account.profile_type.is_local() {
+            Self::Account
+        } else {
+            Self::Relationship
+        }
+    }
+}
+
+/// The right that covers the account attribute stored under metadata `key`.
+#[allow(clippy::result_large_err)]
+fn metadata_right(key: &str) -> Result<DirectoryRight, Status> {
+    Ok(match key {
+        "title" => DirectoryRight::Title,
+        "department" => DirectoryRight::Department,
+        "employee_id" => DirectoryRight::EmployeeNumber,
+        "cost_center" => DirectoryRight::CostCenter,
+        "organization" => DirectoryRight::Organization,
+        "division" => DirectoryRight::Division,
+        // An attribute no right covers is not a connector's to write.
+        _ => return Err(refusal::not_managed()),
+    })
+}
+
+/// What a requested `active` changes of a user.
+enum Activity {
+    /// The user already shows it, or what holds it back is not the
+    /// directory's to lift.
+    Unchanged,
+    /// The relationship's own state; the account and its other grounds of
+    /// access are left as they are.
+    Relationship(bool),
+    /// Every access of the managed account ends; an account in use is
+    /// suspended with it.
+    Ended,
+    /// The managed account's suspension is lifted.
+    Restored,
+}
+
+impl Activity {
+    /// Record the change in `write` and the right it takes in `effects`;
+    /// whether it is a deactivation.
+    fn apply(&self, write: &mut DirectoryUserWrite, effects: &mut DirectoryRights) -> bool {
+        match self {
+            Self::Unchanged => return false,
+            Self::Relationship(active) => write.resource_active = Some(*active),
+            Self::Ended => write.end_access = Some(deprovision()),
+            Self::Restored => {}
+        }
+        *effects = effects.with(DirectoryRight::Active);
+        matches!(self, Self::Relationship(false) | Self::Ended)
+    }
+}
+
+/// Decide what the `wanted` SCIM `active` changes of the user `found`
+/// stands for, moving the status of `account` when the account itself is
+/// the target. `claimed`: the user has taken the account over.
+fn set_active(
+    wanted: bool,
+    found: &DirectoryResource,
+    before: &Profile,
+    claimed: bool,
+    account: &mut Profile,
+) -> Activity {
+    match (Target::of(before), wanted) {
+        (Target::Relationship, _) if wanted != found.active => Activity::Relationship(wanted),
+        // Restated; when the identity's own account is what holds the user
+        // inactive, that is no directory client's to lift.
+        (Target::Relationship, _) => Activity::Unchanged,
+        // The deactivation already stands: its access ended with it.
+        (Target::Account, false) if before.status == ProfileStatus::Suspended => {
+            Activity::Unchanged
+        }
+        // Only an account in use is suspended: a closure under way, a
+        // terminal state or a legal hold is not the directory's to rewrite.
+        // It stays, and the access ends all the same.
+        (Target::Account, false) => {
+            if before.status.is_in_use() {
+                account.status = ProfileStatus::Suspended;
+            }
+            Activity::Ended
+        }
+        // Only a suspension is lifted, for the same reason. An account
+        // never claimed returns to provisioned, not to active: activation
+        // is the user's own step.
+        (Target::Account, true) if before.status == ProfileStatus::Suspended => {
+            account.status = if claimed {
+                ProfileStatus::Active
+            } else {
+                ProfileStatus::Provisioned
+            };
+            Activity::Restored
+        }
+        (Target::Account, true) => Activity::Unchanged,
+    }
+}
+
 /// The directory a SCIM endpoint serves: its organization and the protected
 /// resource provisioning connectors hold their roles on.
 #[derive(Debug, Clone, Copy)]
@@ -327,7 +532,8 @@ impl ScimService for ScimServiceImpl {
             &write.add_emails,
             &metadata,
             &[],
-            self.place(external_id.as_deref()),
+            // A new resource's relationship is active.
+            self.place(external_id.as_deref(), profile.status.is_in_use()),
         )))
     }
 
@@ -339,51 +545,9 @@ impl ScimService for ScimServiceImpl {
         let caller = self.provisioner(&request, SCIM_USER_READ).await?;
         let req = request.into_inner();
         let (resource, profile_id) = self.user(&req.id).await?;
-
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| refusal::user_not_found(resource))?;
-
-        let identifiers = self
-            .storage
-            .get_principals_by_profile(profile_id)
-            .await
-            .map_err(storage_failure)?;
-
-        let metadata = self
-            .storage
-            .list_profile_metadata(profile_id)
-            .await
-            .map_err(storage_failure)?;
-
-        let groups = self
-            .storage
-            .list_groups_for_profile(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        let group_refs: Vec<(GroupId, String)> =
-            groups.iter().map(|g| (g.id, g.name.clone())).collect();
-        let emails = self
-            .storage
-            .list_profile_emails(profile_id)
-            .await
-            .map_err(storage_failure)?;
-
-        let external_id = self.external_id_of(&caller, resource).await?;
-        let scim_user = sid_to_scim_user(
-            resource,
-            &profile,
-            &identifiers,
-            &emails,
-            &metadata,
-            &group_refs,
-            self.place(external_id.as_deref()),
-        );
-
-        Ok(Response::new(scim_user))
+        Ok(Response::new(
+            self.shown(&caller, resource, profile_id).await?,
+        ))
     }
 
     #[instrument(skip_all, fields(filter = %request.get_ref().filter))]
@@ -436,7 +600,7 @@ impl ScimService for ScimServiceImpl {
                     &user.emails,
                     &user.metadata,
                     &[], // Groups are read per user, not for a list.
-                    self.place(user.external_id.as_deref()),
+                    self.place(user.external_id.as_deref(), user.active),
                 )
             })
             .collect();
@@ -457,14 +621,21 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<proto::ScimUser>, Status> {
         let caller = self.provisioner(&request, SCIM_USER_UPDATE).await?;
         let req = request.into_inner();
-        let (resource, profile_id) = self.user(&req.id).await?;
+        let found = self.found(&req.id).await?;
+        let (resource, profile_id) = (found.id, found.profile_id);
 
-        let mut profile = self
+        let before = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::user_not_found(resource))?;
+        let mut profile = before.clone();
+        // What the request changes of the user as it stands. A value the
+        // request repeats is no change: a client that manages one attribute
+        // sends the whole resource back (RFC 7644 §3.5.1) and changes that
+        // attribute alone.
+        let mut effects = DirectoryRights::NONE;
 
         let profile_id_str = profile.id.to_string();
 
@@ -485,27 +656,59 @@ impl ScimService for ScimServiceImpl {
             profile.family_name = None;
         }
 
+        if (
+            &profile.given_name,
+            &profile.family_name,
+            &profile.middle_name,
+        ) != (&before.given_name, &before.family_name, &before.middle_name)
+        {
+            effects = effects.with(DirectoryRight::Name);
+        }
+
         check_single_primary(&req.emails, &req.phone_numbers).map_err(refusal::mapping)?;
         let now = jiff::Timestamp::now();
-        // PUT replaces the caller's own identifier of the user with the one
-        // given, absent included; another source's is not its to touch.
-        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone())
-            .through(resource)
-            .by_source(
-                caller.connector.id,
-                (!req.external_id.is_empty()).then(|| req.external_id.clone()),
-            );
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
 
-        // Replace contact emails and phones (profile_emails, profile_phones).
-        write.remove_emails = self
+        // PUT replaces the caller's own identifier of the user with the one
+        // given, absent included; another source's is not its to touch. A
+        // connector that is no source of the user is made one only by its
+        // manager, never by naming the user in a request.
+        let source = self.source_of(&caller, resource).await?;
+        let requested_id = (!req.external_id.is_empty()).then(|| req.external_id.clone());
+        if requested_id != source.as_ref().and_then(|s| s.external_id.clone()) {
+            if source.is_none() {
+                return Err(refusal::not_managed());
+            }
+            effects = effects.with(DirectoryRight::ExternalId);
+            write = write.by_source(caller.connector.id, requested_id);
+        }
+
+        let old_identifiers = self
+            .storage
+            .get_principals_by_profile(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        let mut new_identifiers: Vec<Principal> = Vec::new();
+
+        // RFC 7644 3.5.1: the value given for an immutable attribute that
+        // is set must match it. `userName` is not case-exact (RFC 7643 4.1.1).
+        let suffix = format!("#{}", self.org_ctx.org_domain);
+        let held_name = old_identifiers
+            .iter()
+            .filter(|i| i.principal_type == PrincipalType::Username)
+            .find_map(|i| i.value.strip_suffix(&suffix));
+        if held_name.is_some_and(|held| held.to_lowercase() != req.user_name.to_lowercase()) {
+            return Err(refusal::immutable("userName"));
+        }
+
+        // Emails: the contacts and the login handles made of them are
+        // replaced only when the request states another set.
+        let held_emails = self
             .storage
             .list_profile_emails(profile_id)
             .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
-        // Each email's login handle and its contact, linked.
+            .map_err(storage_failure)?;
         let email_bindings: Vec<(Principal, sid_core::models::ProfileEmail)> = req
             .emails
             .iter()
@@ -513,81 +716,58 @@ impl ScimService for ScimServiceImpl {
             .map(|e| email_binding(profile_id, e, now))
             .collect::<Result<_, _>>()
             .map_err(refusal::mapping)?;
-        write.add_emails = email_bindings.iter().map(|(_, c)| c.clone()).collect();
-        write.remove_phones = self
+        let stated = |contacts: &mut dyn Iterator<Item = &sid_core::models::ProfileEmail>| {
+            let mut set: Vec<_> = contacts
+                .map(|c| (c.email.clone(), c.is_primary, format!("{:?}", c.label)))
+                .collect();
+            set.sort();
+            set
+        };
+        if stated(&mut held_emails.iter()) != stated(&mut email_bindings.iter().map(|(_, c)| c)) {
+            effects = effects.with(DirectoryRight::Emails);
+            write.remove_emails = held_emails.iter().map(|e| e.id).collect();
+            write.add_emails = email_bindings.iter().map(|(_, c)| c.clone()).collect();
+            write.unbind.extend(
+                old_identifiers
+                    .iter()
+                    .filter(|i| i.principal_type == PrincipalType::Email)
+                    .map(|i| i.id),
+            );
+            new_identifiers.extend(email_bindings.into_iter().map(|(principal, _)| principal));
+        }
+
+        // Phone numbers likewise.
+        let held_phones = self
             .storage
             .list_profile_phones(profile_id)
             .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
+            .map_err(storage_failure)?;
+        let mut phone_contacts = Vec::new();
         for phone in req.phone_numbers.iter().filter(|p| !p.value.is_empty()) {
-            write.add_phones.push(
+            phone_contacts.push(
                 phone_contact(profile_id, &phone.value, &phone.r#type, phone.primary, now)
                     .map_err(refusal::mapping)?,
             );
         }
-
-        // Update active status.
-        // SCIM active=false → Suspended.
-        // SCIM active=true + currently Suspended → reactivate to Provisioned or Active
-        //   depending on whether the user has claimed the profile.
-        //   Provisioned profiles MUST NOT transition to Active via SCIM —
-        //   only via secure channel claim (the user binds an OPAQUE password).
-        if !req.active {
-            // Only an account in use is suspended: a closure under way, a
-            // terminal state or a legal hold is not the directory's to
-            // rewrite. Its access ends below all the same, and it reads
-            // back inactive either way.
-            if profile.status.is_in_use() {
-                profile.status = ProfileStatus::Suspended;
-            }
-        } else if profile.status == ProfileStatus::Suspended {
-            // Reactivate: if profile was previously Provisioned (never claimed),
-            // go back to Provisioned — not Active.
-            // We use a heuristic: if no credentials exist, profile was never claimed.
-            // For now, check if profile has any login-enabled identifiers that are verified.
-            // Unverified = never claimed = restore to Provisioned.
-            let identifiers = self
-                .storage
-                .get_principals_by_profile(profile_id)
-                .await
-                .map_err(storage_failure)?;
-            let has_verified_login = identifiers.iter().any(|i| i.verified);
-            if has_verified_login {
-                profile.status = ProfileStatus::Active;
-            } else {
-                profile.status = ProfileStatus::Provisioned;
-            }
-        }
-
-        write.profile = profile.clone();
-        if !req.active {
-            write.end_access = Some(deprovision());
-        }
-
-        // Replace the contact principals the directory manages; the
-        // corporate login handle stays.
-        let old_identifiers = self
-            .storage
-            .get_principals_by_profile(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        write.unbind = old_identifiers
-            .iter()
-            .filter(|i| {
-                matches!(
-                    i.principal_type,
-                    PrincipalType::Email | PrincipalType::Phone
-                )
-            })
-            .map(|i| i.id)
-            .collect();
-        let new_identifiers: Vec<Principal> = email_bindings
-            .into_iter()
-            .map(|(principal, _)| principal)
-            .chain(
+        let numbers = |contacts: &[sid_core::models::ProfilePhone]| {
+            let mut set: Vec<_> = contacts
+                .iter()
+                .map(|c| (c.e164, c.is_primary, format!("{:?}", c.label)))
+                .collect();
+            set.sort();
+            set
+        };
+        if numbers(&held_phones) != numbers(&phone_contacts) {
+            effects = effects.with(DirectoryRight::PhoneNumbers);
+            write.remove_phones = held_phones.iter().map(|p| p.id).collect();
+            write.add_phones = phone_contacts;
+            write.unbind.extend(
+                old_identifiers
+                    .iter()
+                    .filter(|i| i.principal_type == PrincipalType::Phone)
+                    .map(|i| i.id),
+            );
+            new_identifiers.extend(
                 req.phone_numbers
                     .iter()
                     .filter(|p| !p.value.is_empty())
@@ -599,29 +779,65 @@ impl ScimService for ScimServiceImpl {
                             p.primary,
                         )
                     }),
-            )
-            .collect();
-        write.bind = new_identifiers.clone();
+            );
+        }
+        write.bind = new_identifiers;
+
+        // `active` is a change only when it differs from what the user
+        // shows. What the change does follows what the resource stands for.
+        let claimed = old_identifiers.iter().any(|i| i.verified);
+        let activity = set_active(req.active, &found, &before, claimed, &mut profile);
+        let deactivating = activity.apply(&mut write, &mut effects);
+        write.profile = profile.clone();
 
         // RFC 7644 §3.5.1: PUT replaces the resource, so an attribute the
         // request leaves empty is cleared.
-        let mut new_metadata = Vec::new();
-        for (key, value) in [
-            ("employee_id", &req.employee_number),
-            ("department", &req.department),
-            ("title", &req.title),
+        let held_metadata = self
+            .storage
+            .list_profile_metadata(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        for (key, right, value) in [
+            (
+                "employee_id",
+                DirectoryRight::EmployeeNumber,
+                &req.employee_number,
+            ),
+            ("department", DirectoryRight::Department, &req.department),
+            ("title", DirectoryRight::Title, &req.title),
         ] {
+            let held = held_metadata
+                .iter()
+                .find(|m| m.key == key)
+                .and_then(|m| m.value.as_str())
+                .unwrap_or_default();
+            if held == value {
+                continue;
+            }
+            effects = effects.with(right);
             if value.is_empty() {
                 write.remove_metadata.push(key.to_string());
             } else {
-                new_metadata.push(ProfileMetadata::new(
+                write.set_metadata.push(ProfileMetadata::new(
                     profile_id,
                     key,
                     serde_json::Value::String(value.clone()),
                 ));
             }
         }
-        write.set_metadata = new_metadata.clone();
+
+        // A request that restates the user changes nothing and writes
+        // nothing; one that changes anything is within what the connector
+        // manages of this user as a whole, or is refused as a whole.
+        if effects.is_empty() {
+            return Ok(Response::new(
+                self.shown(&caller, resource, profile_id).await?,
+            ));
+        }
+        Self::require_rights(&caller, source.as_ref(), effects)?;
+        if deactivating {
+            self.authorize(&caller, SCIM_USER_DEACTIVATE).await?;
+        }
 
         let event = Event::new("sid-scim", event_types::SCIM_USER_UPDATED)
             .with_subject(format!("profile/{}", profile_id_str))
@@ -640,28 +856,10 @@ impl ScimService for ScimServiceImpl {
         )
         .await?;
 
-        let all_identifiers: Vec<Principal> = old_identifiers
-            .into_iter()
-            .filter(|i| i.principal_type == PrincipalType::Username)
-            .chain(new_identifiers)
-            .collect();
-        let group_refs = self.load_group_refs(profile_id).await?;
-        let emails = self
-            .storage
-            .list_profile_emails(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        // As stored: a source that does not know the user has none.
-        let external_id = self.external_id_of(&caller, resource).await?;
-        Ok(Response::new(sid_to_scim_user(
-            resource,
-            &profile,
-            &all_identifiers,
-            &emails,
-            &new_metadata,
-            &group_refs,
-            self.place(external_id.as_deref()),
-        )))
+        // As stored.
+        Ok(Response::new(
+            self.shown(&caller, resource, profile_id).await?,
+        ))
     }
 
     #[instrument(skip_all, fields(id = %request.get_ref().id))]
@@ -671,14 +869,16 @@ impl ScimService for ScimServiceImpl {
     ) -> Result<Response<proto::ScimUser>, Status> {
         let caller = self.provisioner(&request, SCIM_USER_UPDATE).await?;
         let req = request.into_inner();
-        let (resource, profile_id) = self.user(&req.id).await?;
+        let found = self.found(&req.id).await?;
+        let (resource, profile_id) = (found.id, found.profile_id);
 
-        let mut profile = self
+        let before = self
             .storage
             .get_profile(profile_id)
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::user_not_found(resource))?;
+        let mut profile = before.clone();
 
         let profile_id_str = profile.id.to_string();
 
@@ -686,20 +886,16 @@ impl ScimService for ScimServiceImpl {
         let patch_result =
             patch::apply_user_patch(&mut profile, &req.operations).map_err(refusal::patch)?;
 
-        // Resolve reactivation target state.
-        // Provisioned profiles MUST NOT become Active via SCIM — only via secure channel claim.
-        if patch_result.needs_reactivation {
-            let identifiers = self
-                .storage
-                .get_principals_by_profile(profile_id)
-                .await
-                .map_err(storage_failure)?;
-            let has_verified_login = identifiers.iter().any(|i| i.verified);
-            profile.status = if has_verified_login {
-                ProfileStatus::Active
-            } else {
-                ProfileStatus::Provisioned
-            };
+        // What the request changes of the user as it stands: an operation
+        // that restates a value is no change and takes no right.
+        let mut effects = DirectoryRights::NONE;
+        if (
+            &profile.given_name,
+            &profile.family_name,
+            &profile.middle_name,
+        ) != (&before.given_name, &before.family_name, &before.middle_name)
+        {
+            effects = effects.with(DirectoryRight::Name);
         }
 
         // RFC 7643 §2.4: at most one added value per attribute is primary.
@@ -736,13 +932,41 @@ impl ScimService for ScimServiceImpl {
         let mut write =
             DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
         // Only a request that names externalId changes the caller's own
-        // identifier of the user.
-        if let Some(external_id) = &patch_result.external_id {
+        // identifier of the user, and only a source of the user has one: a
+        // connector is made a source by its manager, never by a request.
+        let source = self.source_of(&caller, resource).await?;
+        if let Some(external_id) = &patch_result.external_id
+            && *external_id != source.as_ref().and_then(|s| s.external_id.clone())
+        {
+            if source.is_none() {
+                return Err(refusal::not_managed());
+            }
+            effects = effects.with(DirectoryRight::ExternalId);
             write = write.by_source(caller.connector.id, external_id.clone());
         }
-        // A deactivation ends the access whatever state the account keeps.
-        if patch_result.deactivated || profile.status == ProfileStatus::Suspended {
-            write.end_access = Some(deprovision());
+        let mut deactivating = false;
+        if let Some(wanted) = patch_result.active {
+            let claimed = identifiers.iter().any(|i| i.verified);
+            deactivating = set_active(wanted, &found, &before, claimed, &mut profile)
+                .apply(&mut write, &mut effects);
+            write.profile = profile.clone();
+        }
+        for id_type in patch_result
+            .add_identifiers
+            .iter()
+            .map(|pi| pi.id_type)
+            .chain(
+                patch_result
+                    .remove_identifier_values
+                    .iter()
+                    .map(|(t, _)| *t),
+            )
+        {
+            match id_type {
+                PrincipalType::Email => effects = effects.with(DirectoryRight::Emails),
+                PrincipalType::Phone => effects = effects.with(DirectoryRight::PhoneNumbers),
+                _ => {}
+            }
         }
 
         // Remove identifiers and their contact records by value.
@@ -853,12 +1077,41 @@ impl ScimService for ScimServiceImpl {
             }
         }
 
-        write.set_metadata = patch_result
-            .set_metadata
-            .iter()
-            .map(|(key, value)| ProfileMetadata::new(profile_id, key, value.clone()))
-            .collect();
-        write.remove_metadata = patch_result.remove_metadata.clone();
+        let held_metadata = self
+            .storage
+            .list_profile_metadata(profile_id)
+            .await
+            .map_err(storage_failure)?;
+        let held = |key: &str| held_metadata.iter().find(|m| m.key == key);
+        for (key, value) in &patch_result.set_metadata {
+            if held(key).is_some_and(|m| m.value == *value) {
+                continue;
+            }
+            effects = effects.with(metadata_right(key)?);
+            write
+                .set_metadata
+                .push(ProfileMetadata::new(profile_id, key, value.clone()));
+        }
+        for key in &patch_result.remove_metadata {
+            if held(key).is_none() {
+                continue;
+            }
+            effects = effects.with(metadata_right(key)?);
+            write.remove_metadata.push(key.clone());
+        }
+
+        // A request that changes nothing writes nothing; one that changes
+        // anything is within what the connector manages of this user as a
+        // whole, or is refused as a whole.
+        if effects.is_empty() {
+            return Ok(Response::new(
+                self.shown(&caller, resource, profile_id).await?,
+            ));
+        }
+        Self::require_rights(&caller, source.as_ref(), effects)?;
+        if deactivating {
+            self.authorize(&caller, SCIM_USER_DEACTIVATE).await?;
+        }
 
         let event = Event::new("sid-scim", event_types::SCIM_USER_UPDATED)
             .with_subject(format!("profile/{}", profile_id_str))
@@ -877,34 +1130,10 @@ impl ScimService for ScimServiceImpl {
         )
         .await?;
 
-        // Build response with fresh data
-        let identifiers = self
-            .storage
-            .get_principals_by_profile(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        let metadata = self
-            .storage
-            .list_profile_metadata(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        let group_refs = self.load_group_refs(profile_id).await?;
-        let emails = self
-            .storage
-            .list_profile_emails(profile_id)
-            .await
-            .map_err(storage_failure)?;
-        let external_id = self.external_id_of(&caller, resource).await?;
-
-        Ok(Response::new(sid_to_scim_user(
-            resource,
-            &profile,
-            &identifiers,
-            &emails,
-            &metadata,
-            &group_refs,
-            self.place(external_id.as_deref()),
-        )))
+        // As stored.
+        Ok(Response::new(
+            self.shown(&caller, resource, profile_id).await?,
+        ))
     }
 
     /// SCIM DELETE deletes the user resource (RFC 7644 3.6): one commit
@@ -927,10 +1156,26 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::user_not_found(resource))?;
 
+        // What the deletion ends follows what the resource stands for. The
+        // whole of it is within what the connector manages of this user, or
+        // nothing is written.
+        let source = self.source_of(&caller, resource).await?;
+        let target = Target::of(&profile);
+        let needed = match target {
+            // The relationship alone: the identity's own sign-in and what
+            // it holds here on other grounds stay.
+            Target::Relationship => DirectoryRights::of(&[DirectoryRight::Delete]),
+            // The account's local offboarding: its access ends with it.
+            Target::Account => {
+                DirectoryRights::of(&[DirectoryRight::Delete, DirectoryRight::Active])
+            }
+        };
+        Self::require_rights(&caller, source.as_ref(), needed)?;
+
         // Ending local access suspends an account that is in use. A closure
         // under way, a terminal state or a legal hold is not the directory's
         // to rewrite: it stays, and the access ends all the same.
-        if profile.status.is_in_use() {
+        if matches!(target, Target::Account) && profile.status.is_in_use() {
             profile.status = ProfileStatus::Suspended;
         }
 
@@ -945,7 +1190,9 @@ impl ScimService for ScimServiceImpl {
         let mut write =
             DirectoryUserWrite::new(DirectoryWriteMode::Update, profile).through(resource);
         write.delete_resource = true;
-        write.end_access = Some(deprovision());
+        if matches!(target, Target::Account) {
+            write.end_access = Some(deprovision());
+        }
         self.write_user(
             &write,
             audited(
@@ -1358,6 +1605,13 @@ impl ScimServiceImpl {
     /// one never assigned or deleted is not found (RFC 7644 3.6).
     #[allow(clippy::result_large_err)]
     async fn user(&self, id: &str) -> Result<(DirectoryUserId, ProfileId), Status> {
+        let found = self.found(id).await?;
+        Ok((found.id, found.profile_id))
+    }
+
+    /// [`Self::user`], with the resource's own state.
+    #[allow(clippy::result_large_err)]
+    async fn found(&self, id: &str) -> Result<DirectoryResource, Status> {
         let resource = DirectoryUserId::parse(id).ok_or_else(|| refusal::invalid_id("id"))?;
         match self
             .storage
@@ -1365,7 +1619,7 @@ impl ScimServiceImpl {
             .await
             .map_err(storage_failure)?
         {
-            Some(found) if found.is_live() => Ok((found.id, found.profile_id)),
+            Some(found) if found.is_live() => Ok(found),
             _ => Err(refusal::user_not_found(resource)),
         }
     }
@@ -1413,7 +1667,8 @@ impl ScimServiceImpl {
 
 fn user_schema_attributes() -> Vec<proto::ScimSchemaAttribute> {
     vec![
-        schema_attr("userName", "string", true, false, "readWrite"),
+        // Given when the user is created and kept: it is the login handle.
+        schema_attr("userName", "string", true, false, "immutable"),
         schema_attr("displayName", "string", false, false, "readWrite"),
         schema_attr("name", "complex", false, false, "readWrite"),
         schema_attr("emails", "complex", false, true, "readWrite"),

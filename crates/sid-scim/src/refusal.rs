@@ -100,6 +100,17 @@ pub(crate) fn patch(e: PatchError) -> Status {
     )
 }
 
+/// A replacement that states another value for `attribute`, which is set
+/// once (RFC 7644 §3.5.1, `mutability`).
+pub(crate) fn immutable(attribute: &'static str) -> Status {
+    invalid(
+        ErrorReason::InvalidFieldValue,
+        "mutability",
+        attribute,
+        "the attribute is immutable",
+    )
+}
+
 /// The user `id` (as the client named it) does not exist, or was deleted
 /// (404, RFC 7644 3.6).
 pub(crate) fn user_not_found(id: impl core::fmt::Display) -> Status {
@@ -140,6 +151,17 @@ pub(crate) fn external_id_taken() -> Status {
     )
     .with_field_violation("externalId", "names another user of this client")
     .with_metadata(SCIM_TYPE, "uniqueness")
+    .into()
+}
+
+/// The request would change a part of the user the connector does not
+/// manage now, or end more than it has authority over: nothing is written
+/// (403). The refusal names no other source and no account.
+pub(crate) fn not_managed() -> Status {
+    ApiError::new(
+        ErrorReason::InsufficientPermissions,
+        "the connector does not manage what this request would change of the user",
+    )
     .into()
 }
 

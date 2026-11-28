@@ -490,6 +490,81 @@ pub async fn test_directory_active_follows_use(backend: &dyn StorageBackend) {
     assert_eq!(inactive, vec!["closing", "held", "suspended"]);
 }
 
+/// The directory relationship has a state of its own beside the account's:
+/// a user is active while both are, in the page and for the filter alike.
+/// Setting the state is a change of the resource (its revision moves), a
+/// repeat is none, and the account is left as it was either way.
+pub async fn test_directory_relationship_activity(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let user = add_user(backend, &domain, "related", &[], &[]).await;
+    let resource = resource_of(backend, &user).await;
+    assert!(resource.active, "a new relationship is active");
+    let set = async |active: Option<bool>, status: ProfileStatus| {
+        // The account as stored, in the state the write leaves it in.
+        let mut account = backend.get_profile(user.id).await.unwrap().unwrap();
+        account.status = status;
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+        backend
+            .find_directory_user(resource.id)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // What the directory shows of the user: the page's value, and which of
+    // the two `active` filters finds it.
+    let shown = async || {
+        let by = async |value: &str| {
+            names(
+                backend,
+                &query(&domain, compare(Attr::Active, Op::Eq, value), 0, 10),
+            )
+            .await
+            .1
+        };
+        let page = backend
+            .query_directory(&query(&domain, F::Present(Attr::UserName), 0, 10))
+            .await
+            .unwrap();
+        assert_eq!(page.users.len(), 1);
+        let active = page.users[0].active;
+        assert_eq!(by("true").await.len(), usize::from(active));
+        assert_eq!(by("false").await.len(), usize::from(!active));
+        active
+    };
+    assert!(shown().await);
+
+    // A write that names no state leaves it and the revision.
+    assert_eq!(set(None, user.status).await, resource);
+
+    let ended = set(Some(false), user.status).await;
+    assert!(!ended.active);
+    assert_eq!(ended.revision, resource.revision + 1);
+    assert!(!shown().await);
+    let account = backend.get_profile(user.id).await.unwrap().unwrap();
+    assert_eq!(account.status, user.status, "the account is not touched");
+    assert_eq!(
+        set(Some(false), user.status).await,
+        ended,
+        "a repeat changes nothing"
+    );
+
+    let restored = set(Some(true), user.status).await;
+    assert!(restored.active);
+    assert_eq!(restored.revision, ended.revision + 1);
+    assert!(shown().await);
+
+    // An active relationship with an account that cannot be used is not
+    // an active user.
+    assert!(set(None, ProfileStatus::Suspended).await.active);
+    assert!(!shown().await);
+}
+
 /// The live resource of `profile`.
 async fn resource_of(
     backend: &dyn StorageBackend,
@@ -691,12 +766,15 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
             profile_id: user.id,
             revision: 3,
             deleted_at: Some(Timestamp::from_second(1_700_000_000).unwrap()),
+            active: true,
         },
+        // The live one is carried with the state of its relationship.
         DirectoryResource {
             id: DirectoryUserId::new(),
             profile_id: user.id,
             revision: 0,
             deleted_at: None,
+            active: false,
         },
     ];
     for _ in 0..2 {

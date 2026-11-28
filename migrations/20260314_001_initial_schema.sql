@@ -974,6 +974,10 @@ CREATE TABLE directory_users (
     profile_id uuid NOT NULL,
     revision bigint DEFAULT 0 NOT NULL,
     deleted_at timestamp with time zone,
+    -- Whether the directory relationship itself is active: set false for a
+    -- relationship with an identity that signs in elsewhere. An account the
+    -- directory manages whole is deactivated through its own status.
+    active boolean DEFAULT true NOT NULL,
     CONSTRAINT directory_users_revision_check CHECK ((revision >= 0)),
     CONSTRAINT directory_users_pkey PRIMARY KEY (id),
     CONSTRAINT directory_users_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE

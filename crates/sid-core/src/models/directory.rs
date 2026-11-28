@@ -50,11 +50,25 @@ pub struct DirectoryResource {
     /// Moved on by every change of the resource itself.
     pub revision: u64,
     pub deleted_at: Option<jiff::Timestamp>,
+    /// Whether the directory relationship itself is active: one state of
+    /// the user, the same for every reader. A resource whose account the
+    /// directory manages whole is deactivated through the account's own
+    /// state and keeps this true; a relationship with an identity that
+    /// signs in elsewhere is deactivated here, and the identity's account
+    /// and its other grounds of access are left as they are.
+    pub active: bool,
 }
 
 impl DirectoryResource {
     pub fn is_live(&self) -> bool {
         self.deleted_at.is_none()
+    }
+
+    /// SCIM `active` of the user this resource serves for `account`: the
+    /// relationship is active and the account can be used. One definition
+    /// for a single read, a page and a filter.
+    pub fn shows_active(&self, account: &Profile) -> bool {
+        self.active && account.status.is_in_use()
     }
 }
 
@@ -78,11 +92,14 @@ pub enum DirectoryRight {
     Division = 1 << 8,
     /// The connector's own identifier of the user (`externalId`).
     ExternalId = 1 << 9,
-    /// Deactivate and reactivate the account: a deactivation ends every
-    /// sign-in and token of the account, whoever granted them.
+    /// Deactivate and reactivate the user. What that ends follows what the
+    /// resource stands for: an account the directory manages whole is
+    /// suspended with every sign-in and token of it, a relationship with an
+    /// identity that signs in elsewhere only changes its own state.
     Active = 1 << 10,
-    /// Delete the user resource. Alone it retires the resource and leaves
-    /// the account and its sign-ins.
+    /// Delete the user resource. For a relationship that is the whole of
+    /// it; deleting a managed account also ends its access, which takes
+    /// [`Self::Active`] as well.
     Delete = 1 << 11,
 }
 
@@ -284,6 +301,9 @@ pub struct DirectoryUserWrite {
     /// identifier is never given out again. The account itself stays, as
     /// the rest of the write leaves it.
     pub delete_resource: bool,
+    /// Set the activity of the relationship `resource` itself, moving the
+    /// resource's revision. `None` leaves it.
+    pub resource_active: Option<bool>,
     /// The provisioning source making the write. A create records its
     /// correlation with the new resource in the same commit. An update
     /// changes only a correlation that source already has with `resource`:
@@ -309,6 +329,7 @@ impl DirectoryUserWrite {
             end_access: None,
             resource: None,
             delete_resource: false,
+            resource_active: None,
             source: None,
         }
     }

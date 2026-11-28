@@ -169,7 +169,7 @@ fn revoke_active(tx: &Statements<'_>, profile: ProfileId, revoked_by: &str) -> S
 // === Directory user resources ===
 
 const RESOURCE: &str = "d.id AS id, d.profile_id AS profile_id, d.revision AS revision,
-    d.deleted_at AS deleted_at";
+    d.deleted_at AS deleted_at, d.active AS active";
 
 fn resource(row: &Row) -> SidResult<DirectoryResource> {
     let revision = get_int(row, "revision")?;
@@ -179,6 +179,7 @@ fn resource(row: &Row) -> SidResult<DirectoryResource> {
         revision: u64::try_from(revision)
             .map_err(|_| SidError::Storage(format!("directory resource revision: {revision}")))?,
         deleted_at: get_opt_time(row, "deleted_at")?,
+        active: super::get_bool(row, "active")?,
     })
 }
 
@@ -208,12 +209,13 @@ fn create_resource(tx: &Statements<'_>, r: &DirectoryResource) -> SidResult<()> 
         .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
     tx.run(
         "CREATE (d:SidDirectoryUser {id: $id, profile_id: $profile, revision: $revision,
-            deleted_at: $deleted_at})",
+            deleted_at: $deleted_at, active: $active})",
         Params::default()
             .with("id", uuid(&r.id.0))
             .with("profile", bin(r.profile_id.as_bytes()))
             .with("revision", Value::Int(revision))
-            .with("deleted_at", opt_time(r.deleted_at)),
+            .with("deleted_at", opt_time(r.deleted_at))
+            .with("active", Value::Bool(r.active)),
     )?;
     Ok(())
 }
@@ -227,19 +229,22 @@ pub(super) fn assign_resource(tx: &Statements<'_>, profile: &Profile) -> SidResu
             profile_id: profile.id,
             revision: 0,
             deleted_at: None,
+            active: true,
         },
     )
 }
 
 /// Require the live resource `id` of `profile` in `tx`, deleting it when
-/// `delete`; anything else (unknown, deleted, another account's) is
-/// `NotFound`. The matched node is written either way, so a concurrent
-/// deletion conflicts with this transaction.
+/// `delete` and setting the relationship's activity when `active` is given;
+/// anything else (unknown, deleted, another account's) is `NotFound`. The
+/// matched node is written either way, so a concurrent deletion conflicts
+/// with this transaction.
 fn hold_resource(
     tx: &Statements<'_>,
     id: DirectoryUserId,
     profile: ProfileId,
     delete: bool,
+    active: Option<bool>,
 ) -> SidResult<()> {
     let held = resources_where(tx, "d.id = $value", uuid(&id.0))?
         .into_iter()
@@ -247,24 +252,28 @@ fn hold_resource(
     let Some(held) = held else {
         return Err(SidError::NotFound(format!("directory user {id}")));
     };
-    let (revision, deleted_at) = if delete {
-        let next = held
-            .revision
+    // A deletion and a change of the relationship's state are changes of
+    // the resource: its revision moves.
+    let stays = active.filter(|_| !delete).unwrap_or(held.active);
+    let changed = delete || stays != held.active;
+    let revision = if changed {
+        held.revision
             .checked_add(1)
-            .ok_or_else(|| SidError::Validation("directory resource revision exhausted".into()))?;
-        (next, Some(Timestamp::now()))
+            .ok_or_else(|| SidError::Validation("directory resource revision exhausted".into()))?
     } else {
-        (held.revision, None)
+        held.revision
     };
+    let deleted_at = delete.then(Timestamp::now);
     let revision = i64::try_from(revision)
         .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
     tx.run(
         "MATCH (d:SidDirectoryUser) WHERE d.id = $id
-         SET d.revision = $revision, d.deleted_at = $deleted_at",
+         SET d.revision = $revision, d.deleted_at = $deleted_at, d.active = $active",
         Params::default()
             .with("id", uuid(&id.0))
             .with("revision", Value::Int(revision))
-            .with("deleted_at", opt_time(deleted_at)),
+            .with("deleted_at", opt_time(deleted_at))
+            .with("active", Value::Bool(stays)),
     )?;
     if delete {
         // Its sources keep their provenance and give their identifiers up.
@@ -566,6 +575,8 @@ struct Candidate {
     /// The asking source's own identifier of the user's resource, if any:
     /// another source's is never compared.
     external_id: Option<String>,
+    /// SCIM `active` of the user (`DirectoryResource::shows_active`).
+    active: bool,
 }
 
 impl Candidate {
@@ -663,7 +674,7 @@ impl Candidate {
                         ));
                     }
                 };
-                Ok(self.profile.status.is_in_use() == wanted)
+                Ok(self.active == wanted)
             }
             Attr::UserName | Attr::Email | Attr::Phone => Ok(self
                 .values(attr)
@@ -730,6 +741,7 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
         resources.push(live);
         let principals = super::principal::held_by(tx, profile.id)?;
         let candidate = Candidate {
+            active: live.shows_active(&profile),
             external_id: sources
                 .iter()
                 .find(|s| s.resource == live.id)
@@ -811,7 +823,13 @@ fn write_user(
             // The resource first: a deletion that committed since the caller
             // read it refuses the write as not found.
             if let Some(resource) = write.resource {
-                hold_resource(tx, resource, profile_id, write.delete_resource)?;
+                hold_resource(
+                    tx,
+                    resource,
+                    profile_id,
+                    write.delete_resource,
+                    write.resource_active,
+                )?;
                 if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
                     update_source(tx, resource, source)?;
                 }

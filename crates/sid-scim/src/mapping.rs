@@ -256,6 +256,9 @@ pub struct ScimPlace<'a> {
     pub org_domain: &'a str,
     pub base_url: &'a str,
     pub external_id: Option<&'a str>,
+    /// SCIM `active` of the user: its directory relationship is active and
+    /// its account can be used (`DirectoryResource::shows_active`).
+    pub active: bool,
 }
 
 /// Map SID Profile + Principals + email contacts + Metadata + Groups to SCIM
@@ -275,11 +278,12 @@ pub fn sid_to_scim_user(
         org_domain,
         base_url,
         external_id,
+        active,
     } = place;
     let mut user = proto::ScimUser {
         id: id.to_string(),
         display_name: profile.formatted_name().unwrap_or_default(),
-        active: profile.status.is_in_use(),
+        active,
         ..Default::default()
     };
 

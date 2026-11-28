@@ -4153,7 +4153,7 @@ impl StorageBackend for PostgresBackend {
             .map(|r| r.into_domain())
             .collect();
         let resources = sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users
              WHERE profile_id = ANY($1) AND deleted_at IS NULL",
         )
         .bind(&ids)

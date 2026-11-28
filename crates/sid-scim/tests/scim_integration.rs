@@ -13,10 +13,11 @@ use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::provisioning_connector::SCIM_BEARER_PREFIX;
 use sid_core::models::{
-    AuditEntry, GroupId, OrgId, Principal, PrincipalType, Profile, ProfileId, ProfileStatus,
-    ProfileType, ProjectId, ProvisioningConnector, ProvisioningConnectorId, ProvisioningCredential,
-    ProvisioningDirection, ResourceId, Role, RoleAssignment, RoleAssignmentPrincipal, SCIM_ACTIONS,
-    SCIM_GROUP_CREATE, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_USER_READ, Session,
+    AuditEntry, DirectoryRight, DirectoryRights, GroupId, OrgId, Principal, PrincipalType, Profile,
+    ProfileId, ProfileStatus, ProfileType, ProjectId, ProvisioningConnector,
+    ProvisioningConnectorId, ProvisioningCredential, ProvisioningDirection, ResourceId, Role,
+    RoleAssignment, RoleAssignmentPrincipal, SCIM_ACTIONS, SCIM_GROUP_CREATE, SCIM_GROUP_READ,
+    SCIM_GROUP_UPDATE, SCIM_USER_READ, Session,
 };
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1 as proto;
@@ -127,12 +128,27 @@ thread_local! {
 }
 
 /// A new active inbound connector of `directory`'s organization holding a
-/// role with `actions` on its resource; returns the connector's secret.
+/// role with `actions` on its resource and managing every user of the
+/// directory whole; returns the connector's secret.
 async fn connector_secret(
     storage: &Arc<dyn StorageBackend>,
     directory: ScimDirectory,
     actions: &[&str],
 ) -> String {
+    let rights = DirectoryRights::of(&DirectoryRight::ALL);
+    connector_managing(storage, directory, actions, rights)
+        .await
+        .1
+}
+
+/// [`connector_secret`] for a connector that manages `rights` of every user
+/// of the directory; the connector with its secret.
+async fn connector_managing(
+    storage: &Arc<dyn StorageBackend>,
+    directory: ScimDirectory,
+    actions: &[&str],
+    rights: DirectoryRights,
+) -> (ProvisioningConnector, String) {
     let audit = || AuditEntry::system("test", "scim-connector").into();
     let connector =
         ProvisioningConnector::new(directory.org, ProvisioningDirection::Inbound, "HR sync");
@@ -140,6 +156,13 @@ async fn connector_secret(
         .create_provisioning_connector(&connector, audit())
         .await
         .unwrap();
+    // As its manager selects it: by the revision the manager read.
+    assert!(
+        storage
+            .set_directory_rights(connector.id, connector.revision, rights, audit())
+            .await
+            .unwrap()
+    );
     let issued = bearer_secret::issue(SCIM_BEARER_PREFIX);
     assert!(
         storage
@@ -170,7 +193,7 @@ async fn connector_secret(
         )
         .await
         .unwrap();
-    issued.secret.expose_secret().clone()
+    (connector, issued.secret.expose_secret().clone())
 }
 
 fn test_jwt() -> Arc<JwtService> {
@@ -872,23 +895,39 @@ async fn test_external_id_is_each_sources_own() {
     assert_eq!(listed[0].external_id, external_id);
     assert!(found_by(Some(&other_source), &external_id).await.is_empty());
 
-    // A source that does not know the user gains no identifier of it by
-    // replacing it, and the creating source keeps its own.
+    // A source that does not know the user is made one only by its manager:
+    // a request that names an identifier for the user is refused whole, so
+    // the attribute it carried with it is not written either.
+    let replace = |external_id: &str| proto::ScimReplaceUserRequest {
+        id: created.id.clone(),
+        external_id: external_id.into(),
+        user_name: username.clone(),
+        name: own.name.clone(),
+        emails: own.emails.clone(),
+        phone_numbers: own.phone_numbers.clone(),
+        active: true,
+        employee_number: format!("{employee_number}-2"),
+        department: own.department.clone(),
+        title: own.title.clone(),
+        ..Default::default()
+    };
+    let refused = service
+        .replace_user(with_token(replace("OTHER-1"), &other_source))
+        .await
+        .expect_err("a request does not make its connector a source of the user");
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    let unchanged = service
+        .get_user(provisioned(get.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(unchanged.employee_number, employee_number);
+    assert!(found_by(Some(&other_source), "OTHER-1").await.is_empty());
+
+    // Naming none, it changes what it manages of the user and still has no
+    // identifier of it; the creating source keeps its own.
     let replaced = service
-        .replace_user(with_token(
-            proto::ScimReplaceUserRequest {
-                id: created.id.clone(),
-                external_id: "OTHER-1".into(),
-                user_name: username.clone(),
-                display_name: "Replaced".into(),
-                emails: vec![],
-                phone_numbers: vec![],
-                active: true,
-                employee_number: format!("{employee_number}-2"),
-                ..Default::default()
-            },
-            &other_source,
-        ))
+        .replace_user(with_token(replace(""), &other_source))
         .await
         .unwrap()
         .into_inner();
@@ -1538,11 +1577,12 @@ async fn test_deactivation_keeps_a_hold_and_a_closure() {
     for held in [ProfileStatus::LegalHold, ProfileStatus::ClosureRequested] {
         for by_put in [true, false] {
             let (id, profile_id, session, pat) = signed_in_employee(&service, &storage).await;
-            let created = proto::ScimUser {
-                id,
-                ..Default::default()
-            };
-            let username = unique_username();
+            let created = service
+                .get_user(provisioned(proto::ScimGetUserRequest { id }))
+                .await
+                .unwrap()
+                .into_inner();
+            let username = created.user_name.clone();
             let mut profile = storage.get_profile(profile_id).await.unwrap().unwrap();
             profile.status = held;
             assert!(
@@ -2025,6 +2065,7 @@ async fn test_provisioned_suspend_reactivate_via_put_returns_to_provisioned() {
     service
         .replace_user(provisioned(proto::ScimReplaceUserRequest {
             id: created.id.clone(),
+            user_name: username.clone(),
             active: false,
             ..Default::default()
         }))
@@ -2038,6 +2079,7 @@ async fn test_provisioned_suspend_reactivate_via_put_returns_to_provisioned() {
     service
         .replace_user(provisioned(proto::ScimReplaceUserRequest {
             id: created.id.clone(),
+            user_name: username.clone(),
             active: true,
             ..Default::default()
         }))
@@ -2287,6 +2329,15 @@ async fn signed_in_employee(
         .unwrap()
         .into_inner();
     let profile_id = account_of(storage, &created.id).await;
+    let (session, pat) = sign_in(storage, profile_id).await;
+    (created.id, profile_id, session, pat)
+}
+
+/// A signed-in session and a PAT of the account `profile_id`.
+async fn sign_in(
+    storage: &Arc<dyn StorageBackend>,
+    profile_id: ProfileId,
+) -> (Session, sid_core::models::PersonalAccessToken) {
     let session = Session::new(
         profile_id,
         None,
@@ -2314,7 +2365,271 @@ async fn signed_in_employee(
         )
         .await
         .unwrap();
-    (created.id, profile_id, session, pat)
+    (session, pat)
+}
+
+/// `userName` is given once, when the user is created: discovery says so
+/// (RFC 7643 7, `immutable`), and a PUT that states another value is refused
+/// rather than answered as if it had been applied (RFC 7644 3.5.1). The
+/// value restated, in any letter case (it is not case-exact), is no change.
+#[tokio::test]
+async fn test_user_name_is_immutable() {
+    let (service, _) = setup().await;
+    let schemas = service
+        .get_schemas(provisioned(proto::ScimGetSchemasRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let declared = schemas
+        .resources
+        .iter()
+        .find(|schema| schema.name == "User")
+        .and_then(|schema| schema.attributes.iter().find(|a| a.name == "userName"))
+        .expect("the User schema declares userName");
+    assert_eq!(declared.mutability, "immutable");
+
+    let username = unique_username();
+    let created = service
+        .create_user(provisioned(create_user_request(&username)))
+        .await
+        .unwrap()
+        .into_inner();
+    let replace = |user_name: String| proto::ScimReplaceUserRequest {
+        id: created.id.clone(),
+        external_id: created.external_id.clone(),
+        user_name,
+        name: created.name.clone(),
+        emails: created.emails.clone(),
+        phone_numbers: created.phone_numbers.clone(),
+        active: true,
+        department: created.department.clone(),
+        title: "Renamed".into(),
+        ..Default::default()
+    };
+    let refused = service
+        .replace_user(provisioned(replace(unique_username())))
+        .await
+        .expect_err("another userName is not applied");
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+    let (_, _, metadata) = sid_infra::grpc_error::extract_error_info(&refused).unwrap();
+    assert_eq!(
+        metadata.get("scimType").map(String::as_str),
+        Some("mutability")
+    );
+    let read = service
+        .get_user(provisioned(proto::ScimGetUserRequest {
+            id: created.id.clone(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.user_name, username);
+    assert_eq!(read.title, "Engineer", "a refused request writes nothing");
+
+    let replaced = service
+        .replace_user(provisioned(replace(username.to_uppercase())))
+        .await
+        .expect("the userName restated")
+        .into_inner();
+    assert_eq!(replaced.user_name, username);
+    assert_eq!(replaced.title, "Renamed");
+}
+
+/// A connector manages what its manager selected and nothing else: a change
+/// outside it is refused, a request mixing both is refused whole and writes
+/// nothing, and a value restated takes no right. Deleting a managed account
+/// ends its access, so the right to delete alone does not do it.
+#[tokio::test]
+async fn test_connector_changes_only_what_it_manages() {
+    let (service, storage, revocation, directory) = setup_directory().await;
+    let managing = async |rights: &[DirectoryRight]| {
+        connector_managing(
+            &storage,
+            directory,
+            &SCIM_ACTIONS,
+            DirectoryRights::of(rights),
+        )
+        .await
+        .1
+    };
+    let titles = managing(&[DirectoryRight::Title]).await;
+    let (id, _, session, pat) = signed_in_employee(&service, &storage).await;
+    let op = |path: &str, value: &str| proto::ScimPatchOp {
+        op: "replace".into(),
+        path: path.into(),
+        value: value.into(),
+    };
+    let patch = |operations: Vec<proto::ScimPatchOp>| proto::ScimPatchUserRequest {
+        id: id.clone(),
+        operations,
+    };
+    let read = async || {
+        service
+            .get_user(provisioned(proto::ScimGetUserRequest { id: id.clone() }))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+
+    let patched = service
+        .patch_user(with_token(patch(vec![op("title", "Lead")]), &titles))
+        .await
+        .expect("the title is the connector's to change")
+        .into_inner();
+    assert_eq!(patched.title, "Lead");
+
+    for operations in [
+        vec![op("department", "Sales")],
+        vec![op("name.givenName", "Renamed")],
+        vec![op("active", "false")],
+        // What it manages, with what it does not: nothing of it is written.
+        vec![op("title", "Chief"), op("department", "Sales")],
+    ] {
+        let refused = service
+            .patch_user(with_token(patch(operations.clone()), &titles))
+            .await
+            .expect_err("a change outside what the connector manages");
+        assert_eq!(
+            refused.code(),
+            tonic::Code::PermissionDenied,
+            "{operations:?}"
+        );
+    }
+    let refused = service
+        .delete_user(with_token(
+            proto::ScimDeleteUserRequest { id: id.clone() },
+            &titles,
+        ))
+        .await
+        .expect_err("the user is not the connector's to delete");
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    let kept = read().await;
+    assert_eq!(kept.title, "Lead");
+    assert_eq!(kept.department, "Engineering");
+    assert_eq!(kept.name.as_ref().unwrap().given_name, "Test");
+    assert!(kept.active);
+
+    // A value the user already has is no change of it.
+    service
+        .patch_user(with_token(
+            patch(vec![op("department", "Engineering"), op("active", "true")]),
+            &titles,
+        ))
+        .await
+        .expect("a restated value takes no right");
+
+    // Deleting an account the directory manages whole is its offboarding:
+    // without the right to deactivate it nothing is written.
+    let deleting = managing(&[DirectoryRight::Delete]).await;
+    let refused = service
+        .delete_user(with_token(
+            proto::ScimDeleteUserRequest { id: id.clone() },
+            &deleting,
+        ))
+        .await
+        .expect_err("a deletion that would end access it may not end");
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert!(read().await.active);
+    assert!(storage.get_session(session.id).await.unwrap().is_some());
+
+    let offboarding = managing(&[DirectoryRight::Delete, DirectoryRight::Active]).await;
+    service
+        .delete_user(with_token(
+            proto::ScimDeleteUserRequest { id: id.clone() },
+            &offboarding,
+        ))
+        .await
+        .expect("the whole offboarding is the connector's");
+    assert_access_ended(&storage, &revocation, &session, &pat).await;
+}
+
+/// A user that is an identity signing in elsewhere is a relationship, not
+/// an account of the directory: deactivating it is the relationship's own
+/// state, shown the same by a read and a filter, and deleting it ends the
+/// relationship. Neither suspends the identity or ends its sign-ins, and the
+/// right to delete is enough for the deletion.
+#[tokio::test]
+async fn test_relationship_ends_without_the_identity() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    storage
+        .create_profile(&identity, AuditEntry::system("test", "identity").into())
+        .await
+        .unwrap();
+    let resource = storage.directory_users_of(&[identity.id]).await.unwrap()[0];
+    let id = resource.id.to_string();
+    let (session, pat) = sign_in(&storage, identity.id).await;
+    let set_active = async |value: &str| {
+        service
+            .patch_user(provisioned(proto::ScimPatchUserRequest {
+                id: id.clone(),
+                operations: vec![proto::ScimPatchOp {
+                    op: "replace".into(),
+                    path: "active".into(),
+                    value: value.into(),
+                }],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let found_inactive = async || {
+        service
+            .list_users(provisioned(proto::ScimListUsersRequest {
+                filter: "active eq false".into(),
+                start_index: 1,
+                count: 1000,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .resources
+            .iter()
+            .any(|user| user.id == id)
+    };
+    let untouched = async || {
+        let account = storage.get_profile(identity.id).await.unwrap().unwrap();
+        assert_eq!(account.status, ProfileStatus::Active);
+        assert!(storage.get_session(session.id).await.unwrap().is_some());
+        assert!(storage.get_pat(pat.id).await.unwrap().unwrap().is_usable());
+    };
+
+    assert!(!set_active("false").await.active);
+    let read = service
+        .get_user(provisioned(proto::ScimGetUserRequest { id: id.clone() }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!read.active);
+    assert!(found_inactive().await);
+    untouched().await;
+
+    assert!(set_active("true").await.active);
+    assert!(!found_inactive().await);
+
+    let deleting = connector_managing(
+        &storage,
+        directory,
+        &SCIM_ACTIONS,
+        DirectoryRights::of(&[DirectoryRight::Delete]),
+    )
+    .await
+    .1;
+    service
+        .delete_user(with_token(
+            proto::ScimDeleteUserRequest { id: id.clone() },
+            &deleting,
+        ))
+        .await
+        .expect("the relationship is the connector's to end");
+    untouched().await;
+    let gone = service
+        .get_user(provisioned(proto::ScimGetUserRequest { id: id.clone() }))
+        .await
+        .expect_err("a deleted resource is served by no read");
+    assert_eq!(gone.code(), tonic::Code::NotFound);
 }
 
 /// Asserts the employee can no longer use the session or the PAT.
@@ -2357,13 +2672,19 @@ async fn test_scim_deactivation_ends_sessions_and_pats() {
 
     // PUT active=false
     let (id, _, session, pat) = signed_in_employee(&service, &storage).await;
+    let held = service
+        .get_user(provisioned(proto::ScimGetUserRequest { id: id.clone() }))
+        .await
+        .unwrap()
+        .into_inner();
     let mut replace = create_user_request(&unique_username());
     replace.active = false;
     service
         .replace_user(provisioned(proto::ScimReplaceUserRequest {
             id,
             external_id: replace.external_id,
-            user_name: replace.user_name,
+            // The login handle is the user's own; the rest is replaced.
+            user_name: held.user_name,
             name: replace.name,
             display_name: replace.display_name,
             emails: replace.emails,

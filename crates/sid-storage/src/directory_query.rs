@@ -77,7 +77,7 @@ pub(crate) fn assemble(
     let resource_of: HashMap<_, _> = resources
         .into_iter()
         .filter(|r| r.is_live())
-        .map(|r| (r.profile_id, r.id))
+        .map(|r| (r.profile_id, r))
         .collect();
     let mut external_id_of: HashMap<_, _> = sources
         .into_iter()
@@ -102,15 +102,17 @@ pub(crate) fn assemble(
     profiles
         .into_iter()
         .map(|profile| {
-            let id = *resource_of.get(&profile.id).ok_or_else(|| {
+            let resource = *resource_of.get(&profile.id).ok_or_else(|| {
                 sid_core::Error::Storage(format!(
                     "directory user of profile {} has no live resource",
                     profile.id
                 ))
             })?;
+            let id = resource.id;
             Ok(sid_core::models::DirectoryUser {
                 id,
                 external_id: external_id_of.remove(&id),
+                active: resource.shows_active(&profile),
                 principals: principals_of.remove(&profile.id).unwrap_or_default(),
                 emails: emails_of.remove(&profile.id).unwrap_or_default(),
                 metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
@@ -221,13 +223,16 @@ impl Writer {
                         ));
                     }
                 };
-                // `ProfileStatus::is_in_use`: an account in use or waiting
-                // for its user is active, every other state is not.
-                self.sql.push_str(if wanted {
-                    "p.status IN ('active', 'provisioned')"
-                } else {
-                    "p.status NOT IN ('active', 'provisioned')"
-                });
+                // `DirectoryResource::shows_active`: the relationship is
+                // active and the account is in use or waiting for its user
+                // (`ProfileStatus::is_in_use`); anything else is not active.
+                const ACTIVE: &str = "(p.status IN ('active', 'provisioned') AND p.id IN \
+                     (SELECT d.profile_id FROM directory_users d \
+                      WHERE d.deleted_at IS NULL AND d.active))";
+                if !wanted {
+                    self.sql.push_str("NOT ");
+                }
+                self.sql.push_str(ACTIVE);
             }
             Attr::UserName | Attr::Email | Attr::Phone => {
                 // A semi-join by `IN`, not a correlated `EXISTS`: SQLite

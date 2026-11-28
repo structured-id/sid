@@ -1207,7 +1207,11 @@ CREATE TABLE IF NOT EXISTS directory_users (
     id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     revision    INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    deleted_at  TEXT
+    deleted_at  TEXT,
+    -- Whether the directory relationship itself is active: set 0 for a
+    -- relationship with an identity that signs in elsewhere. An account the
+    -- directory manages whole is deactivated through its own status.
+    active      INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_users_live_profile

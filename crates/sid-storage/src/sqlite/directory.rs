@@ -80,7 +80,7 @@ pub(super) async fn insert_profile(tx: &mut WriteTx, profile: &Profile) -> SidRe
     Ok(())
 }
 
-pub(super) const RESOURCE: &str = "id, profile_id, revision, deleted_at";
+pub(super) const RESOURCE: &str = "id, profile_id, revision, deleted_at, active";
 
 pub(super) fn resource(row: &sqlx::sqlite::SqliteRow) -> SidResult<DirectoryResource> {
     use sqlx::Row;
@@ -93,17 +93,20 @@ pub(super) fn resource(row: &sqlx::sqlite::SqliteRow) -> SidResult<DirectoryReso
         revision: u64::try_from(revision)
             .map_err(|e| SidError::Storage(format!("directory resource revision: {e}")))?,
         deleted_at: super::parse_dt_opt(deleted_at),
+        active: row.try_get("active").map_err(read)?,
     })
 }
 
 /// Require the live resource `id` of `profile_id`, deleting it when
-/// `delete`; anything else (unknown, deleted, another account's) is
-/// `NotFound`. The write transaction is the only writer.
+/// `delete` and setting the relationship's activity when `active` is given;
+/// anything else (unknown, deleted, another account's) is `NotFound`. The
+/// write transaction is the only writer.
 async fn hold_resource(
     tx: &mut WriteTx,
     id: DirectoryUserId,
     profile_id: ProfileId,
     delete: bool,
+    active: Option<bool>,
 ) -> SidResult<()> {
     let held = if delete {
         sqlx::query(
@@ -138,6 +141,18 @@ async fn hold_resource(
             .execute(&mut **tx)
             .await
             .map_err(storage("directory sources"))?;
+    } else if let Some(active) = active {
+        // A change of the relationship's state is a change of the resource.
+        sqlx::query(
+            "UPDATE directory_users SET active = ?, revision = revision + 1
+             WHERE id = ? AND active <> ?",
+        )
+        .bind(active)
+        .bind(id.0)
+        .bind(active)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("directory resource activity"))?;
     }
     Ok(())
 }
@@ -735,7 +750,14 @@ impl SqliteBackend {
                 // The resource first: a deletion that committed since the
                 // caller read it refuses the write as not found.
                 if let Some(resource) = write.resource {
-                    hold_resource(&mut tx, resource, profile_id, write.delete_resource).await?;
+                    hold_resource(
+                        &mut tx,
+                        resource,
+                        profile_id,
+                        write.delete_resource,
+                        write.resource_active,
+                    )
+                    .await?;
                     if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
                         update_source(&mut tx, resource, source).await?;
                     }
@@ -898,16 +920,17 @@ impl SqliteBackend {
             let revision = i64::try_from(r.revision)
                 .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
             let written = sqlx::query(
-                "INSERT INTO directory_users (id, profile_id, revision, deleted_at)
-                 VALUES (?, ?, ?, ?)
+                "INSERT INTO directory_users (id, profile_id, revision, deleted_at, active)
+                 VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO UPDATE SET revision = excluded.revision,
-                    deleted_at = excluded.deleted_at
+                    deleted_at = excluded.deleted_at, active = excluded.active
                  WHERE directory_users.profile_id = excluded.profile_id",
             )
             .bind(r.id.0)
             .bind(profile_id)
             .bind(revision)
             .bind(fmt_dt_opt(r.deleted_at))
+            .bind(r.active)
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("directory resource", e))?

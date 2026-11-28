@@ -4296,6 +4296,7 @@ impl StorageBackend for MockStorage {
                 )),
                 // And no source correlations either.
                 external_id: None,
+                active: profile.status.is_in_use(),
                 principals: self.get_principals_by_profile(profile.id).await?,
                 emails: self.list_profile_emails(profile.id).await?,
                 metadata: self.list_profile_metadata(profile.id).await?,
