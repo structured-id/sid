@@ -9,9 +9,9 @@ use jiff::Timestamp;
 use sid_core::models::profile_email::EmailLabel;
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter as F, DirectoryOperator as Op, DirectoryQuery,
-    DirectorySource, DirectoryUserWrite, DirectoryWriteMode, OrgId, Principal, PrincipalType,
-    Profile, ProfileEmail, ProfileEmailId, ProfileMetadata, ProfileStatus, ProvisioningConnector,
-    ProvisioningConnectorId, ProvisioningDirection,
+    DirectoryRights, DirectorySource, DirectoryUserWrite, DirectoryWriteMode, OrgId, Principal,
+    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileMetadata, ProfileStatus,
+    ProvisioningConnector, ProvisioningConnectorId, ProvisioningDirection,
 };
 use sid_plugin::storage::StorageBackend;
 
@@ -788,6 +788,20 @@ fn live(
         connector,
         external_id: Some(external_id.to_owned()),
         retired: false,
+        created: false,
+        managed: DirectoryRights::NONE,
+    }
+}
+
+/// [`live`], as the source that created the resource is recorded.
+fn creator(
+    resource: sid_core::models::DirectoryUserId,
+    connector: ProvisioningConnectorId,
+    external_id: &str,
+) -> DirectorySource {
+    DirectorySource {
+        created: true,
+        ..live(resource, connector, external_id)
     }
 }
 
@@ -944,7 +958,7 @@ pub async fn test_directory_source_update_never_creates(backend: &dyn StorageBac
     update(a, Some("A-2"), "Renamed").await.unwrap();
     assert_eq!(
         backend.find_directory_source(a, "A-2").await.unwrap(),
-        Some(live(resource.id, a, "A-2"))
+        Some(creator(resource.id, a, "A-2"))
     );
     assert_eq!(backend.find_directory_source(a, "A-1").await.unwrap(), None);
 
@@ -981,10 +995,8 @@ pub async fn test_directory_source_update_never_creates(backend: &dyn StorageBac
             .await
             .unwrap(),
         vec![DirectorySource {
-            resource: resource.id,
-            connector: a,
             external_id: None,
-            retired: false,
+            ..creator(resource.id, a, "")
         }]
     );
 }
@@ -1019,7 +1031,7 @@ pub async fn test_directory_source_retired_with_the_resource(backend: &dyn Stora
     );
     let retired = DirectorySource {
         retired: true,
-        ..live(resource.id, a, "A-1")
+        ..creator(resource.id, a, "A-1")
     };
     assert!(
         backend
@@ -1034,7 +1046,7 @@ pub async fn test_directory_source_retired_with_the_resource(backend: &dyn Stora
         .expect("the identifier is free again");
     assert_eq!(
         backend.find_directory_source(a, "A-1").await.unwrap(),
-        Some(live(resource_of(backend, &again).await.id, a, "A-1"))
+        Some(creator(resource_of(backend, &again).await.id, a, "A-1"))
     );
 }
 

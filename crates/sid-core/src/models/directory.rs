@@ -58,11 +58,153 @@ impl DirectoryResource {
     }
 }
 
+/// One thing a provisioning connector may change of a user it manages. A
+/// right bounds the user and the part of it; the action itself still needs
+/// the connector's role on the directory resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u16)]
+pub enum DirectoryRight {
+    /// The name: its components and the display name.
+    Name = 1 << 0,
+    /// Email addresses, with the login handles made of them.
+    Emails = 1 << 1,
+    /// Phone numbers, with the login handles made of them.
+    PhoneNumbers = 1 << 2,
+    Title = 1 << 3,
+    Department = 1 << 4,
+    EmployeeNumber = 1 << 5,
+    CostCenter = 1 << 6,
+    Organization = 1 << 7,
+    Division = 1 << 8,
+    /// The connector's own identifier of the user (`externalId`).
+    ExternalId = 1 << 9,
+    /// Deactivate and reactivate the account: a deactivation ends every
+    /// sign-in and token of the account, whoever granted them.
+    Active = 1 << 10,
+    /// Delete the user resource. Alone it retires the resource and leaves
+    /// the account and its sign-ins.
+    Delete = 1 << 11,
+}
+
+impl DirectoryRight {
+    pub const ALL: [Self; 12] = [
+        Self::Name,
+        Self::Emails,
+        Self::PhoneNumbers,
+        Self::Title,
+        Self::Department,
+        Self::EmployeeNumber,
+        Self::CostCenter,
+        Self::Organization,
+        Self::Division,
+        Self::ExternalId,
+        Self::Active,
+        Self::Delete,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Emails => "emails",
+            Self::PhoneNumbers => "phone_numbers",
+            Self::Title => "title",
+            Self::Department => "department",
+            Self::EmployeeNumber => "employee_number",
+            Self::CostCenter => "cost_center",
+            Self::Organization => "organization",
+            Self::Division => "division",
+            Self::ExternalId => "external_id",
+            Self::Active => "active",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// A set of [`DirectoryRight`]: what a connector may change of one user, of
+/// every user of the directory, or what one request changes. Empty means
+/// nothing.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "i32", into = "i32")]
+pub struct DirectoryRights(u16);
+
+impl DirectoryRights {
+    pub const NONE: Self = Self(0);
+
+    pub fn of(rights: &[DirectoryRight]) -> Self {
+        rights
+            .iter()
+            .fold(Self::NONE, |set, right| set.with(*right))
+    }
+
+    #[must_use]
+    pub fn with(self, right: DirectoryRight) -> Self {
+        Self(self.0 | right as u16)
+    }
+
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn contains(self, right: DirectoryRight) -> bool {
+        self.0 & right as u16 != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The rights of `needed` this set lacks; empty when it covers them all.
+    #[must_use]
+    pub fn lacking(self, needed: Self) -> Self {
+        Self(needed.0 & !self.0)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = DirectoryRight> {
+        DirectoryRight::ALL
+            .into_iter()
+            .filter(move |right| self.contains(*right))
+    }
+
+    /// The set as stores keep it.
+    pub fn bits(self) -> i32 {
+        i32::from(self.0)
+    }
+
+    /// The set a store kept as `bits`; a bit that is no right is refused.
+    pub fn from_bits(bits: i32) -> Option<Self> {
+        let known = DirectoryRight::ALL
+            .iter()
+            .fold(0u16, |all, right| all | *right as u16);
+        u16::try_from(bits)
+            .ok()
+            .filter(|bits| bits & !known == 0)
+            .map(Self)
+    }
+}
+
+impl From<DirectoryRights> for i32 {
+    fn from(rights: DirectoryRights) -> Self {
+        rights.bits()
+    }
+}
+
+impl TryFrom<i32> for DirectoryRights {
+    type Error = String;
+
+    fn try_from(bits: i32) -> Result<Self, Self::Error> {
+        Self::from_bits(bits).ok_or_else(|| format!("directory rights: unknown bits in {bits}"))
+    }
+}
+
 /// A provisioning source's correlation with a user resource: which connector
 /// knows the resource and by what identifier of its own (RFC 7643 3.1
-/// `externalId`, scoped to that source). It records where a resource came
-/// from; it is neither a condition of reading the resource nor, by itself,
-/// authority to change it.
+/// `externalId`, scoped to that source), and what the directory's manager
+/// assigned the connector of this one user. Knowing a resource, also having
+/// created it, is neither a condition of reading it nor authority to change
+/// it: only `managed` and the connector's directory-wide selection are.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirectorySource {
     pub resource: DirectoryUserId,
@@ -74,6 +216,11 @@ pub struct DirectorySource {
     /// Set with the resource's deletion: the provenance stays, and the
     /// source may give its identifier to a new resource.
     pub retired: bool,
+    /// Whether this source created the resource. Provenance only.
+    pub created: bool,
+    /// What the connector was assigned of this user; empty once withdrawn
+    /// or when it was never assigned.
+    pub managed: DirectoryRights,
 }
 
 /// What a directory write records about the source making it.
