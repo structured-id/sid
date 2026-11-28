@@ -1143,10 +1143,11 @@ pub async fn import(
         if listed.insert(member.group_id) {
             let of = sid_core::models::AssignmentsOf::Group(member.group_id);
             for stored in backend.list_group_assignments(of).await? {
-                held.insert((stored.member.profile_id, stored.source), stored);
+                let key = (member.group_id, stored.member.profile_id, stored.source);
+                held.insert(key, stored);
             }
         }
-        match held.get(&(member.profile_id, assignment.source)) {
+        match held.get(&(member.group_id, member.profile_id, assignment.source)) {
             Some(stored) if stored == assignment => continue,
             Some(_) => return Err(target("the target holds another group membership")),
             None => {}

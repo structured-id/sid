@@ -208,6 +208,7 @@ macro_rules! __storage_conformance {
                 test_directory_relationship_activity
                 test_directory_relationship_activity_is_its_own
                 test_directory_membership_follows_its_grounds
+                test_directory_membership_settles_under_races
                 test_directory_resource_assigned_with_the_account
                 test_directory_resource_deletion
                 test_directory_resource_deletion_races_a_change

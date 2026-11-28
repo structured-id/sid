@@ -188,24 +188,27 @@ impl ScimServiceImpl {
 
     /// Whether the account `profile` has what a deactivation ends: a
     /// sign-in or a usable token. Read before the write: one issued after
-    /// it is not this request's to end.
+    /// it is not this request's to end. A session or a token that lapsed
+    /// and is still stored admits nobody, so it is no access.
     #[allow(clippy::result_large_err)]
     async fn has_live_access(&self, profile: ProfileId) -> Result<bool, Status> {
-        if !self
+        if self
             .storage
             .list_sessions(&profile)
             .await
             .map_err(storage_failure)?
-            .is_empty()
+            .iter()
+            .any(|session| !session.is_expired())
         {
             return Ok(true);
         }
         Ok(self
             .storage
-            .count_active_pats_by_profile(profile)
+            .list_pats_by_profile(profile)
             .await
             .map_err(storage_failure)?
-            > 0)
+            .iter()
+            .any(sid_core::models::PersonalAccessToken::is_usable))
     }
 
     /// The user `resource` as `caller` is shown it, read from the store.

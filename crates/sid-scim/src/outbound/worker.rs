@@ -382,14 +382,19 @@ impl ScimOutboundWorker {
         // deactivated or deleted one is never sent active because the
         // identity's account is in use.
         let relationship = matches!(DirectoryTarget::of(&profile), DirectoryTarget::Relationship);
+        let live = self
+            .storage
+            .directory_users_of(&[profile_id])
+            .await
+            .map_err(storage)?;
         if relationship {
-            let live = self
-                .storage
-                .directory_users_of(&[profile_id])
-                .await
-                .map_err(storage)?;
             user.active = user.active && live.first().is_some_and(|resource| resource.active);
         }
+        // What a directory source assigned stands on the live resource: a
+        // relationship's own state, or for any user the resource itself. A
+        // local account that is only suspended keeps its memberships, so its
+        // groups are not pushed again for that.
+        let grounds_moved = relationship || live.is_empty();
         let entity = profile_id.into_uuid();
         let kind = OutboundEntityType::User;
 
@@ -436,7 +441,7 @@ impl ScimOutboundWorker {
         };
         self.join_groups(target, client, profile_id, &downstream)
             .await?;
-        if relationship {
+        if grounds_moved {
             self.follow_assignments(target, client, profile_id).await?;
         }
         Ok(())
@@ -444,8 +449,8 @@ impl ScimOutboundWorker {
 
     /// Push the groups a directory source assigned `profile_id` to and the
     /// target has. Such an assignment gives membership only while the
-    /// relationship is active, so a change of that state changes the
-    /// groups without a group event of its own.
+    /// resource it rests on is live and active, so a change of that
+    /// changes the groups without a group event of its own.
     async fn follow_assignments(
         &self,
         target: &ScimOutboundTarget,

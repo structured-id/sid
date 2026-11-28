@@ -798,6 +798,98 @@ pub async fn test_directory_membership_follows_its_grounds(backend: &dyn Storage
     );
 }
 
+/// A change of an assignment and a change of the relationship it rests on,
+/// committed at the same time, leave the membership the two together give:
+/// neither a member whose only assignment rests on an inactive relationship,
+/// nor an assignment that stands without its membership.
+pub async fn test_directory_membership_settles_under_races(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryGroupWrite, Group, GroupMember, ProjectId};
+    backend.ensure_system_project(test_audit()).await.unwrap();
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    let source = add_source(backend).await;
+    let group = Group::new(
+        ProjectId::SYSTEM,
+        format!("races_{}", uuid::Uuid::now_v7().simple()),
+    );
+    backend
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+
+    let assign = async |by: Option<ProvisioningConnectorId>, member: bool| {
+        // The group as stored: each write names the revision it read.
+        let stored = backend.get_group(group.id).await.unwrap().unwrap();
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, stored);
+        write.source = by;
+        if member {
+            write
+                .add_members
+                .push(GroupMember::new(group.id, identity.id));
+        } else {
+            write.remove_members.push(identity.id);
+        }
+        backend
+            .write_directory_group(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let relationship = async |active: bool| {
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = Some(active);
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let belongs = async || {
+        backend
+            .list_group_members(group.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.profile_id == identity.id)
+    };
+
+    for round in 0..24 {
+        // A source assigns while its relationship is deactivated.
+        tokio::join!(assign(Some(source), true), relationship(false));
+        assert!(
+            !belongs().await,
+            "round {round}: a member rests on an inactive relationship"
+        );
+
+        // A local assignment is made while the relationship the source's
+        // assignment rests on is deactivated.
+        relationship(true).await;
+        tokio::join!(assign(None, true), relationship(false));
+        assert!(
+            belongs().await,
+            "round {round}: a local assignment stands without its membership"
+        );
+        assign(None, false).await;
+        assert!(!belongs().await, "round {round}");
+
+        // The source withdraws while its relationship is reactivated.
+        tokio::join!(assign(Some(source), false), relationship(true));
+        assert!(
+            !belongs().await,
+            "round {round}: a member outlived its withdrawn assignment"
+        );
+    }
+}
+
 /// The live resource of `profile`.
 async fn resource_of(
     backend: &dyn StorageBackend,

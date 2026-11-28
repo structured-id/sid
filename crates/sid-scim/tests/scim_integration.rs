@@ -2881,6 +2881,33 @@ async fn test_restated_inactive_ends_only_live_access() {
         .into_inner();
     assert_eq!(replaced.title, "Edited");
     assert!(!replaced.active);
+
+    // A sign-in and a token that lapsed but are still stored are no access
+    // either: nothing is left for a deactivation to end.
+    let past = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    let lapsed = |what: &'static str| AuditEntry::system("test.lapsed", what).into();
+    storage
+        .create_session(&Session::new(profile_id, None, past), lapsed("session"))
+        .await
+        .unwrap();
+    let token = sid_core::models::PersonalAccessToken::new(
+        profile_id,
+        "lapsed",
+        format!("hash-{}", Uuid::now_v7().simple()),
+        format!("sid_pat_{}", &Uuid::now_v7().simple().to_string()[..8]),
+        vec![],
+    )
+    .with_expires_at(past);
+    storage
+        .create_pat(&token, None, lapsed("token"))
+        .await
+        .unwrap();
+    let replaced = service
+        .replace_user(with_token(replace("Lapsed"), &titles))
+        .await
+        .expect("lapsed access is not live")
+        .into_inner();
+    assert_eq!(replaced.title, "Lapsed");
 }
 
 /// A connector manages what its manager selected and nothing else: a change

@@ -126,10 +126,16 @@ async fn hold_resource(
         .await
         .map(|r| r.rows_affected() == 1)
     } else {
-        sqlx::query_scalar::<_, Uuid>(
+        // A write that changes the activity takes the lock its update needs
+        // at once: two of them that each held the row shared first would wait
+        // on each other.
+        sqlx::query_scalar::<_, Uuid>(if active.is_some() {
             "SELECT id FROM directory_users
-             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR SHARE",
-        )
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        } else {
+            "SELECT id FROM directory_users
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR SHARE"
+        })
         .bind(id.0)
         .bind(profile_id)
         .fetch_optional(&mut **tx)
@@ -828,6 +834,23 @@ async fn settle_resource_members(tx: &mut Tx<'_>, resource: DirectoryUserId) -> 
     Ok(())
 }
 
+/// Hold the live directory resource of `profile_id` against a change of its
+/// activity or its deletion until this write commits. A membership is
+/// settled from the assignments and the resource together, so a write of
+/// either waits for a write of the other: whichever commits second settles
+/// with the first one's change in view.
+async fn hold_member_resource(tx: &mut Tx<'_>, profile_id: ProfileId) -> SidResult<()> {
+    sqlx::query(
+        "SELECT 1 FROM directory_users
+         WHERE profile_id = $1 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(profile_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(drop)
+    .map_err(storage("hold a member's directory resource"))
+}
+
 /// Record the assignment `member` made by `source` (a repeat is no change)
 /// and settle the membership. A connector's assignment rests on the
 /// member's live directory resource. A grant the new member made to the
@@ -838,6 +861,7 @@ pub(super) async fn add_member(
     member: &GroupMember,
     source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
+    hold_member_resource(tx, member.profile_id).await?;
     sqlx::query(
         "INSERT INTO group_member_origins (group_id, profile_id, connector_id, resource_id, added_at)
          VALUES ($1, $2, $3,
@@ -875,6 +899,7 @@ pub(super) async fn remove_member(
     profile_id: ProfileId,
     source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
+    hold_member_resource(tx, profile_id).await?;
     sqlx::query(
         "DELETE FROM group_member_origins
          WHERE group_id = $1 AND profile_id = $2 AND connector_id = $3",
