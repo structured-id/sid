@@ -399,6 +399,46 @@ fn test_code_for_a_removed_callback_is_not_exchanged() {
     assert!(err.to_string().contains("invalid_grant"), "{err}");
 }
 
+/// A code is redeemed by the client it was issued to alone, even when
+/// another client registers the same redirect URI and holds the verifier.
+/// Bug prevented: a client of the same issuer redeeming a code it obtained
+/// from another client's authorization.
+#[test]
+fn test_code_of_another_client_is_not_exchanged() {
+    let server = OAuth2Server::new(create_test_jwt());
+    let profile = create_test_profile();
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let validated = ValidatedAuthorizeRequest {
+        client_id: "test-client".to_string(),
+        redirect_uri: "https://app.sid.example.com/callback".to_string(),
+        scopes: vec!["openid".to_string()],
+        state: None,
+        code_challenge: Some(compute_s256_challenge(verifier)),
+        nonce: None,
+    };
+    let (_, code) = server
+        .generate_auth_code(
+            profile.id,
+            &validated,
+            sid_core::models::ResourceId::generate(),
+            test_authentication(),
+        )
+        .unwrap();
+    let mut other = create_test_client();
+    other.client_id = "other-client".to_string();
+
+    let err = server
+        .validate_code_exchange(
+            &other,
+            code,
+            Some(verifier),
+            "https://app.sid.example.com/callback",
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("client mismatch"), "{err}");
+}
+
 /// Tokens for an application are issued by its issuer: `iss` is the issuer
 /// URL, the issuer's key signs them, and the installation's own session key
 /// does not verify them. The access token is for the target resource: its
