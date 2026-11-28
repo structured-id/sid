@@ -217,6 +217,112 @@ fn test_fragment_in_redirect_uri_rejected() {
     ));
 }
 
+/// A native application's own scheme is a private-use one, based on a
+/// domain name in reverse order: a scheme without a period is not, whether
+/// it is a registered one or a bare word.
+/// Bug prevented: every scheme other than `http` and `https` registered as
+/// a native redirect, `ftp` and `javascript` included.
+#[test]
+fn a_native_scheme_is_a_private_use_one() {
+    let check = |uri: &str| {
+        let mut req = valid_request();
+        req.application_type = ApplicationType::Native;
+        req.redirect_uris = vec![uri.into()];
+        validate_registration_request(&req)
+    };
+    for accepted in [
+        "com.example.app:/callback",
+        "com.example.app://callback",
+        "org.example.my-app:/oauth2redirect",
+    ] {
+        assert!(check(accepted).is_ok(), "{accepted}");
+    }
+    for refused in [
+        "ftp://example.com/callback",
+        "myapp:/callback",
+        "myapp://callback",
+        "javascript:alert(1)",
+        "data:text/html,callback",
+        "file:///callback",
+    ] {
+        assert!(
+            matches!(check(refused), Err(DcrError::InvalidRedirectUri(_))),
+            "{refused}"
+        );
+    }
+}
+
+/// A browser client's redirect is `https`, or plain `http` on a loopback
+/// host alone; a native application may also use its private scheme. No
+/// redirect carries credentials or a fragment.
+/// Bug prevented: any non-HTTPS scheme passed for a browser client once the
+/// host was `localhost`, `[::1]` was not a loopback host, credentials were
+/// accepted and a native redirect kept its fragment.
+#[test]
+fn redirect_uris_are_https_or_loopback_http() {
+    let check = |application_type, uri: &str| {
+        let mut req = valid_request();
+        req.application_type = application_type;
+        req.redirect_uris = vec![uri.into()];
+        validate_registration_request(&req)
+    };
+    for application_type in [ApplicationType::Web, ApplicationType::Spa] {
+        for accepted in [
+            "https://app.sid.example.com/callback",
+            "http://localhost:3000/callback",
+            "http://127.0.0.1:3000/callback",
+            "http://[::1]:3000/callback",
+        ] {
+            assert!(
+                check(application_type, accepted).is_ok(),
+                "{application_type:?} {accepted}"
+            );
+        }
+        for refused in [
+            "ftp://localhost/callback",
+            "com.example.app://localhost/callback",
+            "http://localhost.example.com/callback",
+            "http://192.168.1.10/callback",
+            "https://user:secret@app.sid.example.com/callback",
+            "https://app.sid.example.com/callback#fragment",
+        ] {
+            assert!(
+                matches!(
+                    check(application_type, refused),
+                    Err(DcrError::InvalidRedirectUri(_))
+                ),
+                "{application_type:?} {refused}"
+            );
+        }
+    }
+    for accepted in [
+        "https://app.sid.example.com/callback",
+        "http://127.0.0.1/callback",
+        "http://[::1]/callback",
+        "http://localhost:8080/callback",
+        "com.example.app:/callback",
+    ] {
+        assert!(
+            check(ApplicationType::Native, accepted).is_ok(),
+            "{accepted}"
+        );
+    }
+    for refused in [
+        "http://192.168.1.10/callback",
+        "http://user@127.0.0.1/callback",
+        "http://127.0.0.1/callback#fragment",
+        "com.example.app:/callback#fragment",
+    ] {
+        assert!(
+            matches!(
+                check(ApplicationType::Native, refused),
+                Err(DcrError::InvalidRedirectUri(_))
+            ),
+            "native {refused}"
+        );
+    }
+}
+
 /// Public subjects need no common host: redirect URIs on several hosts are
 /// valid, each still checked on its own.
 #[test]

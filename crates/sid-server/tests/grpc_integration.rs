@@ -2962,6 +2962,115 @@ async fn test_admin_create_application() {
     assert_eq!(read.client.unwrap().issuer, svc.issuer.canonical_url);
 }
 
+/// An administrator's registration follows the metadata rules of every
+/// other registration: a callback that is not a valid redirect URI, a
+/// browser client without one and an unknown grant type are refused, and
+/// nothing is created.
+/// Bug prevented: the administrator's path stored redirect URIs and grant
+/// types unchecked, so a plain-http callback on any host was registered.
+#[tokio::test]
+async fn test_admin_create_application_validates_client_metadata() {
+    let svc = TestServices::new(MockStorage::new().with_system_project());
+    let before = svc.storage.list_oauth2_clients(0, 100).await.unwrap().len();
+
+    let web = || client_settings(ApplicationType::Web);
+    let cases = [
+        (
+            "a plain http callback",
+            ClientRoleSettings {
+                redirect_uris: vec!["http://app.sid.example.com/callback".to_string()],
+                ..web()
+            },
+        ),
+        (
+            "a callback with a fragment",
+            ClientRoleSettings {
+                redirect_uris: vec!["https://app.sid.example.com/callback#f".to_string()],
+                ..web()
+            },
+        ),
+        (
+            "a callback with credentials",
+            ClientRoleSettings {
+                redirect_uris: vec!["https://user@app.sid.example.com/callback".to_string()],
+                ..web()
+            },
+        ),
+        (
+            "no callback",
+            ClientRoleSettings {
+                redirect_uris: vec![],
+                ..web()
+            },
+        ),
+        (
+            "an unknown grant type",
+            ClientRoleSettings {
+                grant_types: vec!["password".to_string()],
+                ..web()
+            },
+        ),
+    ];
+    for (case, settings) in cases {
+        let err = svc
+            .project
+            .create_application(create_app(&svc, "Refused", Some(settings), None))
+            .await
+            .expect_err(case);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{case}: {err:?}");
+    }
+    assert_eq!(
+        svc.storage.list_oauth2_clients(0, 100).await.unwrap().len(),
+        before,
+        "a refused registration created a client"
+    );
+}
+
+/// An administrator's edit of a client follows the same metadata rules, and
+/// a refused edit leaves the client as it was.
+/// Bug prevented: an edit replaced the callbacks or grant types unchecked.
+#[tokio::test]
+async fn test_admin_client_update_validates_client_metadata() {
+    let client = test_client();
+    let before = client.clone();
+    let svc = TestServices::new(MockStorage::new().with_system_project().with_client(client));
+
+    let cases = [
+        (
+            "a plain http callback",
+            UpdateClientRoleRequest {
+                redirect_uris: vec!["http://app.sid.example.com/callback".to_string()],
+                ..Default::default()
+            },
+        ),
+        (
+            "an unknown grant type",
+            UpdateClientRoleRequest {
+                grant_types: vec!["password".to_string()],
+                ..Default::default()
+            },
+        ),
+    ];
+    for (case, mut request) in cases {
+        request.client_id = "test-client".to_string();
+        let err = svc
+            .project
+            .update_client_role(admin_request(&svc, request))
+            .await
+            .expect_err(case);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{case}: {err:?}");
+    }
+    let stored = svc
+        .storage
+        .get_oauth2_client("test-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.redirect_uris, before.redirect_uris);
+    assert_eq!(stored.grant_types, before.grant_types);
+    assert_eq!(stored.revision, before.revision);
+}
+
 /// A protected API needs no OAuth client: a resource-only application has no
 /// client, no secret and no callback, and its indicator is its audience.
 #[tokio::test]
@@ -10914,17 +11023,27 @@ async fn test_dcr_register_client_happy_path() {
 /// The IAT's redirect pattern `https://*.sid.example.com/*` admits only hosts
 /// under that domain: a URI that reaches another host through the path, the
 /// userinfo or extra labels is refused and registers nothing, and the IAT's
-/// count stays unchanged.
+/// count stays unchanged. A URI carrying userinfo is no redirect URI at all,
+/// so it is refused as invalid before the token's pattern is consulted.
 #[tokio::test]
 async fn test_dcr_redirect_pattern_cannot_reach_another_host() {
     let storage = MockStorage::new().with_system_project();
     let (storage, iat_token) = setup_iat_for_dcr(storage);
     let svc = TestServices::new(storage);
 
-    for uri in [
-        "https://evil.example.com/.sid.example.com/cb",
-        "https://app.sid.example.com@evil.example.com/cb",
-        "https://app.sid.example.com/a/b",
+    for (uri, refusal) in [
+        (
+            "https://evil.example.com/.sid.example.com/cb",
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "https://app.sid.example.com@evil.example.com/cb",
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "https://app.sid.example.com/a/b",
+            tonic::Code::PermissionDenied,
+        ),
     ] {
         let mut request = dcr_request(&svc, "Escaping App");
         request.redirect_uris = vec![uri.to_string()];
@@ -10933,7 +11052,7 @@ async fn test_dcr_redirect_pattern_cannot_reach_another_host() {
             .register_client(bearer_request(request, &iat_token))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{uri}: {err:?}");
+        assert_eq!(err.code(), refusal, "{uri}: {err:?}");
     }
 
     let iats = svc

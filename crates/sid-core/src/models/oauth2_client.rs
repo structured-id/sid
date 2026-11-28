@@ -442,9 +442,24 @@ impl OAuth2Client {
         }
     }
 
-    /// Check if a redirect_uri is allowed.
+    /// Whether `uri` is one of the client's redirect URIs, by exact match
+    /// (RFC 6749 §3.1.2.3). A native application's redirect to a loopback IP
+    /// literal also matches on any port, which the application picks when it
+    /// starts (RFC 8252 §7.3); a host name stays exact (RFC 8252 §8.3), and
+    /// so does every redirect of a web or single-page client.
     pub fn is_redirect_uri_allowed(&self, uri: &str) -> bool {
-        self.redirect_uris.iter().any(|u| u == uri)
+        if self.redirect_uris.iter().any(|u| u == uri) {
+            return true;
+        }
+        if self.application_type != ApplicationType::Native {
+            return false;
+        }
+        let Some(requested) = without_loopback_port(uri) else {
+            return false;
+        };
+        self.redirect_uris
+            .iter()
+            .any(|registered| without_loopback_port(registered) == Some(requested))
     }
 
     /// Whether `uri` is one of the client's post-logout redirect URIs, by
@@ -466,6 +481,31 @@ impl OAuth2Client {
             .cloned()
             .collect()
     }
+}
+
+/// The loopback IP literal and what follows its port, when `uri` is a plain
+/// `http` redirect to `127.0.0.1` or `[::1]` (RFC 8252 §7.3) without a
+/// fragment. The string is taken as written, never parsed into a URL: a
+/// parser normalizes host spellings and dot segments, and the port is the
+/// one part of a redirect URI allowed to differ.
+fn without_loopback_port(uri: &str) -> Option<(&'static str, &str)> {
+    let after_scheme = uri.strip_prefix("http://")?;
+    let (host, after_host) = ["127.0.0.1", "[::1]"]
+        .into_iter()
+        .find_map(|host| Some((host, after_scheme.strip_prefix(host)?)))?;
+    let rest = match after_host.strip_prefix(':') {
+        Some(port) => {
+            let digits = port.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            &port[digits..]
+        }
+        None => after_host,
+    };
+    // The authority ends here: a path, a query or nothing follows it.
+    let ends_authority = rest.is_empty() || rest.starts_with(['/', '?']);
+    (ends_authority && !rest.contains('#')).then_some((host, rest))
 }
 
 #[cfg(test)]

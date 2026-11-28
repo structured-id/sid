@@ -94,12 +94,16 @@ impl TokenVerifier {
     }
 
     /// Verify `token` as either kind the installation's services accept: an
-    /// account API token when its `iss` is the account integration's issuer,
-    /// the installation's own token otherwise. The `iss` read before the
-    /// signature only picks the verifier; each verifies it exactly.
+    /// account API token when it is an access token (`at+jwt`, RFC 9068
+    /// §2.1) of the account integration's issuer, the installation's own
+    /// token otherwise. An installation whose base issuer lives at its root
+    /// origin signs both kinds under one `iss`, so the type tells them apart.
+    /// The `iss` and `typ` read before the signature only pick the verifier;
+    /// each verifies both exactly.
     pub async fn verify(&self, token: &str) -> SidResult<VerifiedAccess> {
         if let Some(account) = &self.account
             && unverified_issuer(token).as_deref() == Some(account.issuer())
+            && is_typed_access_token(token)
         {
             return account.verify(token).await.map(VerifiedAccess::AccountApi);
         }
@@ -962,6 +966,20 @@ fn unverified_issuer(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     serde_json::from_slice::<Iss>(&bytes).ok().map(|i| i.iss)
+}
+
+/// Whether a JWT's header types it an access token, read without verifying
+/// it: `at+jwt` or `application/at+jwt` (RFC 9068 §4), compared
+/// case-insensitively as media types are (RFC 2045 §5.1).
+fn is_typed_access_token(token: &str) -> bool {
+    decode_header(token)
+        .ok()
+        .and_then(|header| header.typ)
+        .is_some_and(|typ| {
+            typ.strip_prefix("application/")
+                .unwrap_or(&typ)
+                .eq_ignore_ascii_case(ACCESS_TOKEN_TYP)
+        })
 }
 
 /// Extract the 32-byte Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.
