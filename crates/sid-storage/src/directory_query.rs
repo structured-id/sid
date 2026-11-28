@@ -60,6 +60,20 @@ pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<C
     })
 }
 
+/// Whose a stored group assignment is: the nil UUID stands for one made
+/// locally, anything else is the inbound connector that made it.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+pub(crate) fn assignment_source(
+    connector: uuid::Uuid,
+) -> SidResult<Option<sid_core::models::ProvisioningConnectorId>> {
+    if connector.is_nil() {
+        return Ok(None);
+    }
+    sid_core::models::ProvisioningConnectorId::from_slice(connector.as_bytes())
+        .map(Some)
+        .map_err(|e| SidError::Storage(format!("group assignment origin: {e}")))
+}
+
 /// The page's users in their order, each with its live resource and its own
 /// principals, emails and metadata from the batch reads. A profile whose
 /// resource is not among `resources` is a storage fault: the page was

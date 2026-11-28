@@ -5240,6 +5240,43 @@ impl StorageBackend for PostgresBackend {
         Ok(rows.into_iter().map(|r| r.into_domain()).collect())
     }
 
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        use sqlx::{FromRow as _, Row as _};
+        let (sql, key) = match of {
+            AssignmentsOf::Group(group) => (
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE group_id = $1 ORDER BY profile_id, connector_id",
+                Uuid::from(group),
+            ),
+            AssignmentsOf::Profile(profile) => (
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE profile_id = $1 ORDER BY group_id, connector_id",
+                Uuid::from(profile),
+            ),
+        };
+        let read = |e: sqlx::Error| SidError::Storage(format!("group assignments: {e}"));
+        sqlx::query(sql)
+            .bind(key)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(read)?
+            .iter()
+            .map(|row| {
+                let connector: Uuid = row.try_get("connector_id").map_err(read)?;
+                Ok(sid_core::models::GroupAssignment {
+                    member: crate::pg_row::GroupMemberRow::from_row(row)
+                        .map_err(read)?
+                        .into_domain(),
+                    source: crate::directory_query::assignment_source(connector)?,
+                })
+            })
+            .collect()
+    }
+
     // === ROLE ASSIGNMENT OPERATIONS ===
 
     async fn create_role_assignment(

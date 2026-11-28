@@ -1516,6 +1516,13 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::list_groups_for_profile(self, profile_id).await
     }
 
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>> {
+        CoordinodeBackend::list_group_assignments(self, of).await
+    }
+
     // === ROLE ASSIGNMENTS ===
 
     async fn create_role_assignment(

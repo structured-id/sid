@@ -1553,6 +1553,25 @@ impl sid_plugin::StorageBackend for MockStorage {
             .cloned()
             .collect())
     }
+    /// The mock keeps memberships only: each is a local assignment.
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        let members = self.group_members.lock().unwrap();
+        Ok(members
+            .iter()
+            .filter(|m| match of {
+                AssignmentsOf::Group(group) => m.group_id == group,
+                AssignmentsOf::Profile(profile) => m.profile_id == profile,
+            })
+            .map(|m| sid_core::models::GroupAssignment {
+                member: m.clone(),
+                source: None,
+            })
+            .collect())
+    }
 
     // === ROLE ASSIGNMENT OPERATIONS (functional) ===
     async fn create_role_assignment(

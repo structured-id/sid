@@ -719,6 +719,23 @@ pub async fn test_directory_membership_follows_its_grounds(backend: &dyn Storage
     assign(Some(second), true).await;
     assign(None, true).await;
     assert!(belongs().await);
+    // Each assignment is on record with whose it is, read by the group and
+    // by the member alike, in one order on every engine.
+    let mut expected = vec![None, Some(first), Some(second)];
+    expected.sort_by_key(|source| source.map(|c| c.into_uuid()));
+    for of in [
+        sid_core::models::AssignmentsOf::Group(group.id),
+        sid_core::models::AssignmentsOf::Profile(identity.id),
+    ] {
+        let recorded = backend.list_group_assignments(of).await.unwrap();
+        assert!(
+            recorded
+                .iter()
+                .all(|a| a.member.group_id == group.id && a.member.profile_id == identity.id)
+        );
+        let sources: Vec<_> = recorded.iter().map(|a| a.source).collect();
+        assert_eq!(sources, expected, "{of:?}");
+    }
     assign(Some(first), false).await;
     assert!(belongs().await, "one source withdrew another's assignment");
     assign(Some(second), false).await;
@@ -732,6 +749,17 @@ pub async fn test_directory_membership_follows_its_grounds(backend: &dyn Storage
     assert!(belongs().await);
     relationship(Some(false), false).await;
     assert!(!belongs().await, "an inactive relationship kept its grant");
+    // The assignment stays on record while it gives nothing.
+    assert_eq!(
+        backend
+            .list_group_assignments(sid_core::models::AssignmentsOf::Group(group.id))
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.source)
+            .collect::<Vec<_>>(),
+        vec![Some(first)]
+    );
     relationship(Some(true), false).await;
     assert!(
         belongs().await,

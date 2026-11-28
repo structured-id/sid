@@ -11,10 +11,10 @@ use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
 use sid_core::models::{
-    AuditEntry, DirectoryGroupWrite, DirectoryResource, DirectoryRight, DirectoryRights,
-    DirectorySource, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, Group, GroupId,
-    GroupMember, MutationContext, OrgId, Principal, PrincipalType, Profile, ProfileId,
-    ProfileMetadata, ProfileStatus, ResourceId, RevocationReason, SCIM_GROUP_CREATE,
+    AssignmentsOf, AuditEntry, DirectoryGroupWrite, DirectoryResource, DirectoryRight,
+    DirectoryRights, DirectorySource, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode,
+    Group, GroupId, GroupMember, MutationContext, OrgId, Principal, PrincipalType, Profile,
+    ProfileId, ProfileMetadata, ProfileStatus, ResourceId, RevocationReason, SCIM_GROUP_CREATE,
     SCIM_GROUP_DELETE, SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_USER_CREATE,
     SCIM_USER_DEACTIVATE, SCIM_USER_READ, SCIM_USER_UPDATE, SessionEnd,
     event::{Event, event_types},
@@ -232,7 +232,7 @@ impl ScimServiceImpl {
             .list_profile_metadata(profile_id)
             .await
             .map_err(storage_failure)?;
-        let group_refs = self.load_group_refs(profile_id).await?;
+        let group_refs = self.load_group_refs(caller, profile_id).await?;
         let emails = self
             .storage
             .list_profile_emails(profile_id)
@@ -1311,7 +1311,7 @@ impl ScimService for ScimServiceImpl {
             .await
             .map_err(|e| refusal::group_write(group.id, e))?;
 
-        let members = self.load_member_refs(group.id).await?;
+        let members = self.load_member_refs(&caller, group.id).await?;
         Ok(Response::new(sid_to_scim_group(
             &group,
             &members,
@@ -1324,7 +1324,7 @@ impl ScimService for ScimServiceImpl {
         &self,
         request: Request<proto::ScimGetGroupRequest>,
     ) -> Result<Response<proto::ScimGroup>, Status> {
-        self.provisioner(&request, SCIM_GROUP_READ).await?;
+        let caller = self.provisioner(&request, SCIM_GROUP_READ).await?;
         let req = request.into_inner();
         let group_id = parse_group_id(&req.id)?;
 
@@ -1335,7 +1335,7 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::group_not_found(group_id))?;
 
-        let members = self.load_member_refs(group_id).await?;
+        let members = self.load_member_refs(&caller, group_id).await?;
         let scim_group = sid_to_scim_group(&group, &members, &self.base_url);
 
         Ok(Response::new(scim_group))
@@ -1346,7 +1346,7 @@ impl ScimService for ScimServiceImpl {
         &self,
         request: Request<proto::ScimListGroupsRequest>,
     ) -> Result<Response<proto::ScimListGroupsResponse>, Status> {
-        self.provisioner(&request, SCIM_GROUP_READ).await?;
+        let caller = self.provisioner(&request, SCIM_GROUP_READ).await?;
         let req = request.into_inner();
 
         let start_index = std::cmp::max(req.start_index, 1);
@@ -1370,7 +1370,7 @@ impl ScimService for ScimServiceImpl {
 
         let mut resources = Vec::with_capacity(paged.len());
         for group in paged {
-            let members = self.load_member_refs(group.id).await?;
+            let members = self.load_member_refs(&caller, group.id).await?;
             resources.push(sid_to_scim_group(group, &members, &self.base_url));
         }
 
@@ -1445,7 +1445,7 @@ impl ScimService for ScimServiceImpl {
             .await
             .map_err(|e| refusal::group_write(group.id, e))?;
 
-        let members = self.load_member_refs(group_id).await?;
+        let members = self.load_member_refs(&caller, group_id).await?;
         Ok(Response::new(sid_to_scim_group(
             &group,
             &members,
@@ -1613,29 +1613,53 @@ impl ScimService for ScimServiceImpl {
 // ── Private helpers on ScimServiceImpl ──
 
 impl ScimServiceImpl {
+    /// The groups `caller` itself assigned the account to: a connector is
+    /// shown its own assignments, not another source's or a local one.
     async fn load_group_refs(
         &self,
+        caller: &ConnectorCaller,
         profile_id: ProfileId,
     ) -> Result<Vec<(GroupId, String)>, Status> {
-        let groups = self
+        let assigned = self
             .storage
-            .list_groups_for_profile(profile_id)
+            .list_group_assignments(AssignmentsOf::Profile(profile_id))
             .await
             .map_err(storage_failure)?;
-        Ok(groups.iter().map(|g| (g.id, g.name.clone())).collect())
+        let mut refs = Vec::new();
+        for assignment in assigned
+            .iter()
+            .filter(|a| a.source == Some(caller.connector.id))
+        {
+            if let Some(group) = self
+                .storage
+                .get_group(assignment.member.group_id)
+                .await
+                .map_err(storage_failure)?
+            {
+                refs.push((group.id, group.name));
+            }
+        }
+        Ok(refs)
     }
 
-    /// A group's members as the directory serves them: by their resource
-    /// identifiers, a member whose resource was deleted left out.
+    /// The members `caller` itself assigned to a group, as the directory
+    /// serves them: by their resource identifiers, a member whose resource
+    /// was deleted left out. Sending this set back unchanged keeps every
+    /// other origin's assignments.
     async fn load_member_refs(
         &self,
+        caller: &ConnectorCaller,
         group_id: GroupId,
     ) -> Result<Vec<(DirectoryUserId, String)>, Status> {
-        let members = self
+        let members: Vec<GroupMember> = self
             .storage
-            .list_group_members(group_id)
+            .list_group_assignments(AssignmentsOf::Group(group_id))
             .await
-            .map_err(storage_failure)?;
+            .map_err(storage_failure)?
+            .into_iter()
+            .filter(|a| a.source == Some(caller.connector.id))
+            .map(|a| a.member)
+            .collect();
         let accounts: Vec<ProfileId> = members.iter().map(|gm| gm.profile_id).collect();
         let resources = self
             .storage

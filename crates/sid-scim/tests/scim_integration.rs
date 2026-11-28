@@ -1471,6 +1471,127 @@ async fn test_delete_user_keeps_a_hold_and_a_terminal_state() {
     }
 }
 
+/// Two sources manage one group: each is shown the members it assigned
+/// itself, in the group and in the user's `groups`, and withdraws only its
+/// own assignment. A member stays in the group while the other source's
+/// assignment stands.
+#[tokio::test]
+async fn test_group_members_are_each_sources_own() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let other = connector_secret(&storage, directory, &SCIM_ACTIONS).await;
+    let user = async || {
+        service
+            .create_user(provisioned(create_user_request(&unique_username())))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let (first, second) = (user().await, user().await);
+    let member = |id: &str| proto::ScimMemberRef {
+        value: id.into(),
+        display: String::new(),
+    };
+    let group = service
+        .create_group(provisioned(proto::ScimCreateGroupRequest {
+            display_name: format!("Shared_{}", Uuid::now_v7().simple()),
+            members: vec![member(&first.id)],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let group_id = GroupId::parse(&group.id).unwrap();
+    let patch = |op: &str, id: &str| proto::ScimPatchGroupRequest {
+        id: group.id.clone(),
+        operations: vec![if op == "add" {
+            proto::ScimPatchOp {
+                op: "add".into(),
+                path: "members".into(),
+                value: format!(r#"[{{"value":"{id}"}}]"#),
+            }
+        } else {
+            proto::ScimPatchOp {
+                op: "remove".into(),
+                path: format!(r#"members[value eq "{id}"]"#),
+                value: String::new(),
+            }
+        }],
+    };
+    let shown = async |token: Option<&str>| {
+        let request = proto::ScimGetGroupRequest {
+            id: group.id.clone(),
+        };
+        let request = match token {
+            Some(token) => with_token(request, token),
+            None => provisioned(request),
+        };
+        let mut ids: Vec<String> = service
+            .get_group(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .members
+            .into_iter()
+            .map(|m| m.value)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |ids: &[&str]| {
+        let mut ids: Vec<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        ids.sort();
+        ids
+    };
+    let effective = async || storage.list_group_members(group_id).await.unwrap().len();
+
+    for id in [&first.id, &second.id] {
+        let answered = service
+            .patch_group(with_token(patch("add", id), &other))
+            .await
+            .expect("the other source assigns its members")
+            .into_inner();
+        assert!(answered.members.iter().any(|m| &m.value == id));
+    }
+    assert_eq!(shown(None).await, sorted(&[&first.id]));
+    assert_eq!(shown(Some(&other)).await, sorted(&[&first.id, &second.id]));
+    assert_eq!(effective().await, 2);
+
+    // The user's own `groups` follows the same rule.
+    let groups_of = async |id: &str, token: Option<&str>| {
+        let request = proto::ScimGetUserRequest { id: id.into() };
+        let request = match token {
+            Some(token) => with_token(request, token),
+            None => provisioned(request),
+        };
+        service
+            .get_user(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .groups
+            .len()
+    };
+    assert_eq!(groups_of(&second.id, None).await, 0);
+    assert_eq!(groups_of(&second.id, Some(&other)).await, 1);
+
+    // One source withdraws its assignment of a member both assigned.
+    service
+        .patch_group(with_token(patch("remove", &first.id), &other))
+        .await
+        .unwrap();
+    assert_eq!(shown(Some(&other)).await, sorted(&[&second.id]));
+    assert_eq!(shown(None).await, sorted(&[&first.id]));
+    assert_eq!(
+        effective().await,
+        2,
+        "one source removed the other's member"
+    );
+    service
+        .patch_group(provisioned(patch("remove", &first.id)))
+        .await
+        .unwrap();
+    assert_eq!(effective().await, 1);
+}
+
 /// Regression: a client that deletes a user and then removes it from its
 /// groups was refused, with every other change of that PATCH: a member was
 /// accepted only while its resource was live. A removal names a deleted

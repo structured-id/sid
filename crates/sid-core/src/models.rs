@@ -150,9 +150,9 @@ pub use device_authorization::{
     DevicePoll, USER_CODE_LENGTH,
 };
 pub use directory::{
-    DirectoryGroupWrite, DirectoryResource, DirectoryRight, DirectoryRights, DirectorySource,
-    DirectoryTarget, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, ManagementOutcome,
-    SourceWrite,
+    AssignmentsOf, DirectoryGroupWrite, DirectoryResource, DirectoryRight, DirectoryRights,
+    DirectorySource, DirectoryTarget, DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode,
+    GroupAssignment, ManagementOutcome, SourceWrite,
 };
 pub use directory_query::{
     DirectoryAttribute, DirectoryFilter, DirectoryOperator, DirectoryPage, DirectoryQuery,

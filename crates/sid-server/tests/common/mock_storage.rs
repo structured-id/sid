@@ -4961,6 +4961,13 @@ impl StorageBackend for MockStorage {
         Ok(vec![])
     }
 
+    async fn list_group_assignments(
+        &self,
+        _of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        Ok(vec![])
+    }
+
     // === ROLE ASSIGNMENT OPERATIONS ===
     async fn create_role_assignment(
         &self,

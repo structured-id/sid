@@ -475,14 +475,15 @@ pub(super) fn add_member(
         };
         tx.run(
             "CREATE (o:SidGroupOrigin {key: $key, pair: $pair, group_id: $group,
-                profile_id: $profile, connector_id: $connector, resource_id: $resource,
-                added_at: $added_at})",
+                profile_id: $profile, connector_id: $connector, local: $local,
+                resource_id: $resource, added_at: $added_at})",
             Params::default()
                 .with("key", origin_key)
                 .with("pair", member_pair(m.group_id, m.profile_id)?)
                 .with("group", bin(m.group_id.as_bytes()))
                 .with("profile", bin(m.profile_id.as_bytes()))
                 .with("connector", bin(&connector))
+                .with("local", Value::Bool(source.is_none()))
                 .with(
                     "resource",
                     resource.as_ref().map_or(Value::Null, super::uuid),
@@ -1598,6 +1599,55 @@ impl CoordinodeBackend {
                 groups.extend(get_group(tx, m.group_id)?);
             }
             Ok(groups)
+        })
+        .await
+    }
+
+    pub(super) async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        self.read(move |tx| {
+            let (filter, value) = match of {
+                AssignmentsOf::Group(group) => ("o.group_id = $value", bin(group.as_bytes())),
+                AssignmentsOf::Profile(profile) => {
+                    ("o.profile_id = $value", bin(profile.as_bytes()))
+                }
+            };
+            let rows = tx.run(
+                &format!(
+                    "MATCH (o:SidGroupOrigin) WHERE {filter}
+                     RETURN o.group_id AS group_id, o.profile_id AS profile_id,
+                        o.added_at AS added_at, o.connector_id AS connector_id,
+                        o.local AS local"
+                ),
+                Params::default().with("value", value),
+            )?;
+            let mut assignments = Vec::with_capacity(rows.len());
+            for row in &rows {
+                assignments.push(sid_core::models::GroupAssignment {
+                    member: member(row)?,
+                    source: if super::get_bool(row, "local")? {
+                        None
+                    } else {
+                        Some(id(
+                            row,
+                            "connector_id",
+                            sid_core::models::ProvisioningConnectorId::from_slice,
+                        )?)
+                    },
+                });
+            }
+            // One order on every engine: by member, then by origin.
+            assignments.sort_by_key(|a| {
+                (
+                    a.member.group_id,
+                    a.member.profile_id,
+                    a.source.map(|c| c.into_uuid()),
+                )
+            });
+            Ok(assignments)
         })
         .await
     }

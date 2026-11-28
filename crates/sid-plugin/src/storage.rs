@@ -1308,6 +1308,16 @@ pub trait StorageBackend:
     /// List groups a profile belongs to.
     async fn list_groups_for_profile(&self, profile_id: ProfileId) -> Result<Vec<Group>>;
 
+    /// The assignments on record to a group or of an account, each with
+    /// whose it is, whether or not it gives membership now (a connector's
+    /// gives none while the directory resource it rests on is inactive or
+    /// deleted). [`Self::list_group_members`] and
+    /// [`Self::list_groups_for_profile`] are the memberships they give.
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>>;
+
     // === ROLE ASSIGNMENT OPERATIONS ===
 
     /// Store a new role assignment; an existing one is never replaced

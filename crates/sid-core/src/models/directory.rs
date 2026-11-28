@@ -4,8 +4,8 @@
 //! entry and event, so a crash leaves the whole change or none of it.
 
 use super::{
-    Group, GroupMember, Principal, PrincipalId, Profile, ProfileEmail, ProfileEmailId, ProfileId,
-    ProfileMetadata, ProfilePhone, ProfilePhoneId, SessionEnd,
+    Group, GroupId, GroupMember, Principal, PrincipalId, Profile, ProfileEmail, ProfileEmailId,
+    ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, SessionEnd,
 };
 
 /// The identifier the directory assigns to a user resource (RFC 7643 3.1):
@@ -393,6 +393,24 @@ impl DirectoryUserWrite {
     pub fn profile_id(&self) -> ProfileId {
         self.profile.id
     }
+}
+
+/// One assignment of a member to a group and whose it is: an inbound
+/// connector's, or (`None`) one made locally. It is on record whether or not
+/// it currently gives membership.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GroupAssignment {
+    pub member: GroupMember,
+    pub source: Option<super::ProvisioningConnectorId>,
+}
+
+/// Which assignments a read asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentsOf {
+    /// Every assignment to this group.
+    Group(GroupId),
+    /// Every assignment of this account.
+    Profile(ProfileId),
 }
 
 /// One directory write to a group.

@@ -2197,6 +2197,13 @@ impl StorageBackend for SqliteBackend {
         self.list_groups_for_profile_impl(profile_id).await
     }
 
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        self.list_group_assignments_impl(of).await
+    }
+
     async fn create_role_assignment(
         &self,
         assignment: &sid_core::models::RoleAssignment,

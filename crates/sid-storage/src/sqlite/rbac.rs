@@ -996,6 +996,40 @@ impl SqliteBackend {
         rows.iter().map(row_to_group).collect()
     }
 
+    pub(crate) async fn list_group_assignments_impl(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        use sqlx::Row as _;
+        let read = |e: sqlx::Error| SidError::Storage(format!("group assignments: {e}"));
+        let query = match of {
+            AssignmentsOf::Group(group) => sqlx::query(
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE group_id = ? ORDER BY profile_id, connector_id",
+            )
+            .bind(group),
+            AssignmentsOf::Profile(profile) => sqlx::query(
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE profile_id = ? ORDER BY group_id, connector_id",
+            )
+            .bind(profile),
+        };
+        query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(read)?
+            .iter()
+            .map(|row| {
+                let connector: uuid::Uuid = row.try_get("connector_id").map_err(read)?;
+                Ok(sid_core::models::GroupAssignment {
+                    member: row_to_group_member(row)?,
+                    source: crate::directory_query::assignment_source(connector)?,
+                })
+            })
+            .collect()
+    }
+
     // === RoleAssignment ===
 
     pub(crate) async fn create_role_assignment_impl(
