@@ -123,9 +123,11 @@ pub fn scim_create_user_to_sid(
         )?);
     }
 
-    // externalId, department, title → metadata
+    // department, title → metadata. externalId is the asking source's own
+    // identifier of the user (RFC 7643 3.1), not an attribute of the account.
     for (key, value) in [
-        ("employee_id", &req.external_id),
+        // The enterprise extension's employeeNumber (RFC 7643 §4.3).
+        ("employee_id", &req.employee_number),
         ("department", &req.department),
         ("title", &req.title),
     ] {
@@ -246,12 +248,14 @@ pub fn phone_digits(value: &str) -> Result<u64, MappingError> {
         .map_err(|_| MappingError::InvalidPhone(value.to_string()))
 }
 
-/// Where a user resource is rendered: the organization domain its corporate
-/// login ends with and the base address its location is under.
+/// Where and for whom a user resource is rendered: the organization domain
+/// its corporate login ends with, the base address its location is under,
+/// and the asking source's own identifier of the user, if it has one.
 #[derive(Debug, Clone, Copy)]
 pub struct ScimPlace<'a> {
     pub org_domain: &'a str,
     pub base_url: &'a str,
+    pub external_id: Option<&'a str>,
 }
 
 /// Map SID Profile + Principals + email contacts + Metadata + Groups to SCIM
@@ -270,6 +274,7 @@ pub fn sid_to_scim_user(
     let ScimPlace {
         org_domain,
         base_url,
+        external_id,
     } = place;
     let mut user = proto::ScimUser {
         id: id.to_string(),
@@ -321,7 +326,8 @@ pub fn sid_to_scim_user(
     }
 
     // Metadata fields
-    user.external_id = metadata_str(metadata, "employee_id");
+    user.external_id = external_id.unwrap_or_default().to_owned();
+    user.employee_number = metadata_str(metadata, "employee_id");
     user.department = metadata_str(metadata, "department");
     user.title = metadata_str(metadata, "title");
 

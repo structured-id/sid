@@ -31,6 +31,7 @@ fn test_create_request() -> proto::ScimCreateUserRequest {
         department: "Engineering".into(),
         title: "Senior Engineer".into(),
         active: true,
+        employee_number: "701984".into(),
     }
 }
 
@@ -153,7 +154,15 @@ fn test_create_user_metadata() {
     let mapping = mapped(&test_create_request());
 
     let keys: Vec<&str> = mapping.metadata.iter().map(|m| m.key.as_str()).collect();
-    assert!(keys.contains(&"employee_id"));
+    // The employee number is the account's; externalId is the asking
+    // source's identifier and never account metadata.
+    let employee = mapping
+        .metadata
+        .iter()
+        .find(|m| m.key == "employee_id")
+        .expect("the employee number is kept");
+    assert_eq!(employee.value.as_str(), Some("701984"));
+    assert!(mapping.metadata.iter().all(|m| m.value != "EMP-42"));
     assert!(keys.contains(&"department"));
     assert!(keys.contains(&"title"));
     // given_name/family_name are Profile fields, NOT metadata
@@ -184,6 +193,7 @@ fn test_sid_to_scim_user_roundtrip() {
         ScimPlace {
             org_domain: &ctx.org_domain,
             base_url: "https://sid.example.com",
+            external_id: Some("EMP-42"),
         },
     );
 
@@ -197,6 +207,7 @@ fn test_sid_to_scim_user_roundtrip() {
     assert_eq!(scim_user.user_name, "alice.smith");
     assert_eq!(scim_user.display_name, "Alice Smith");
     assert_eq!(scim_user.external_id, "EMP-42");
+    assert_eq!(scim_user.employee_number, "701984");
     assert_eq!(scim_user.department, "Engineering");
     assert_eq!(scim_user.title, "Senior Engineer");
     assert!(scim_user.active); // Provisioned is not Suspended
@@ -243,9 +254,12 @@ fn test_suspended_user_active_false() {
         ScimPlace {
             org_domain: &ctx.org_domain,
             base_url: "https://sid.example.com",
+            external_id: None,
         },
     );
     assert!(!scim_user.active);
+    // A source that does not know the user is shown no externalId.
+    assert_eq!(scim_user.external_id, "");
 }
 
 #[test]

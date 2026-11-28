@@ -209,6 +209,11 @@ macro_rules! __storage_conformance {
                 test_directory_resource_deletion
                 test_directory_resource_deletion_races_a_change
                 test_directory_resources_are_carried
+                test_directory_source_identifier_is_the_sources_own
+                test_directory_source_identifier_is_unique_per_source
+                test_directory_source_identifier_races_to_one_user
+                test_directory_source_update_never_creates
+                test_directory_source_retired_with_the_resource
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],email_policy:
                 test_email_key_written_only_under_the_active_revision

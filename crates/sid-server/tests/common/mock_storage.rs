@@ -2954,9 +2954,30 @@ impl StorageBackend for MockStorage {
         &self,
         _: ProfileId,
         _: &[sid_core::models::DirectoryResource],
+        _: &[sid_core::models::DirectorySource],
         _: MutationContext,
     ) -> SidResult<()> {
         unimplemented!("directory resources are exercised by the storage conformance suite")
+    }
+
+    async fn directory_sources(
+        &self,
+        _: Option<sid_core::models::ProvisioningConnectorId>,
+        _: &[sid_core::models::DirectoryUserId],
+    ) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        unimplemented!("directory sources are exercised by the storage conformance suite")
+    }
+
+    async fn find_directory_source(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: &str,
+    ) -> SidResult<Option<sid_core::models::DirectorySource>> {
+        unimplemented!("directory sources are exercised by the storage conformance suite")
+    }
+
+    async fn export_directory_sources(&self) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        unimplemented!("directory sources are exercised by the storage conformance suite")
     }
 
     async fn write_directory_group(
@@ -4252,6 +4273,8 @@ impl StorageBackend for MockStorage {
                 id: sid_core::models::DirectoryUserId(uuid::Uuid::from_u128(
                     profile.id.into_uuid().as_u128() ^ 1,
                 )),
+                // And no source correlations either.
+                external_id: None,
                 principals: self.get_principals_by_profile(profile.id).await?,
                 emails: self.list_profile_emails(profile.id).await?,
                 metadata: self.list_profile_metadata(profile.id).await?,

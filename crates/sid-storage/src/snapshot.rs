@@ -244,6 +244,10 @@ pub struct Snapshot {
     /// restored account keeps the identifiers its directory clients know.
     pub directory_users: Vec<sid_core::models::DirectoryResource>,
 
+    /// Which provisioning source knows which user resource, and by what
+    /// identifier of its own.
+    pub directory_sources: Vec<sid_core::models::DirectorySource>,
+
     /// Registered devices.
     pub devices: Vec<Device>,
 
@@ -418,7 +422,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 17;
+pub const FORMAT_VERSION: u32 = 18;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -517,6 +521,7 @@ impl Snapshot {
             cedar_policies: Vec::new(),
             profile_metadata: Vec::new(),
             directory_users: Vec::new(),
+            directory_sources: Vec::new(),
             devices: Vec::new(),
             device_attestations: Vec::new(),
             device_auth_codes: Vec::new(),
@@ -622,6 +627,7 @@ impl Snapshot {
             self.cedar_policies.len() as u64,
             self.profile_metadata.len() as u64,
             self.directory_users.len() as u64,
+            self.directory_sources.len() as u64,
             self.devices.len() as u64,
             self.device_attestations.len() as u64,
             self.device_auth_codes.len() as u64,

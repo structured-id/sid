@@ -58,6 +58,33 @@ impl DirectoryResource {
     }
 }
 
+/// A provisioning source's correlation with a user resource: which connector
+/// knows the resource and by what identifier of its own (RFC 7643 3.1
+/// `externalId`, scoped to that source). It records where a resource came
+/// from; it is neither a condition of reading the resource nor, by itself,
+/// authority to change it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectorySource {
+    pub resource: DirectoryUserId,
+    pub connector: super::ProvisioningConnectorId,
+    /// The source's own identifier of the resource, when it gave one. Unique
+    /// within the connector among live resources; another connector may use
+    /// the same value.
+    pub external_id: Option<String>,
+    /// Set with the resource's deletion: the provenance stays, and the
+    /// source may give its identifier to a new resource.
+    pub retired: bool,
+}
+
+/// What a directory write records about the source making it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceWrite {
+    pub connector: super::ProvisioningConnectorId,
+    /// The source's identifier of the resource after the write; `None`
+    /// clears it.
+    pub external_id: Option<String>,
+}
+
 /// Whether a directory write creates its resource or changes an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryWriteMode {
@@ -97,6 +124,12 @@ pub struct DirectoryUserWrite {
     /// identifier is never given out again. The account itself stays, as
     /// the rest of the write leaves it.
     pub delete_resource: bool,
+    /// The provisioning source making the write. A create records its
+    /// correlation with the new resource in the same commit. An update
+    /// changes only a correlation that source already has with `resource`:
+    /// it never creates one, so no source takes a resource over by writing
+    /// to it. `None` for a write that is no provisioning source's.
+    pub source: Option<SourceWrite>,
 }
 
 impl DirectoryUserWrite {
@@ -116,7 +149,22 @@ impl DirectoryUserWrite {
             end_access: None,
             resource: None,
             delete_resource: false,
+            source: None,
         }
+    }
+
+    /// A write made by the provisioning source `connector`, which knows the
+    /// resource as `external_id`.
+    pub fn by_source(
+        mut self,
+        connector: super::ProvisioningConnectorId,
+        external_id: Option<String>,
+    ) -> Self {
+        self.source = Some(SourceWrite {
+            connector,
+            external_id,
+        });
+        self
     }
 
     /// An update made through the live directory resource `resource`.

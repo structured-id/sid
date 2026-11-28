@@ -42,6 +42,10 @@ pub struct UserPatchResult {
     pub set_metadata: Vec<(String, serde_json::Value)>,
     /// Metadata keys to remove.
     pub remove_metadata: Vec<String>,
+    /// The identifier the asking provisioning source gives the user, when
+    /// the request sets it: `Some(None)` drops it (RFC 7643 3.1, the
+    /// client's own `externalId`, never an attribute of the account).
+    pub external_id: Option<Option<String>>,
 }
 
 /// An identifier to add via PATCH.
@@ -156,16 +160,14 @@ fn apply_replace(
             result.profile_changed = true;
         }
         "externalId" => {
-            result.set_metadata.push((
-                "employee_id".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
+            result.external_id = Some((!value.is_empty()).then(|| value.to_string()));
         }
-        // SCIM Enterprise Extension (RFC 7643 §4.3)
+        // SCIM Enterprise Extension (RFC 7643 §4.3). The employee number is
+        // the account's, one value whichever source writes it.
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber"
         | "employeeNumber" => {
             result.set_metadata.push((
-                "employee_number".into(),
+                "employee_id".into(),
                 serde_json::Value::String(value.to_string()),
             ));
         }
@@ -491,7 +493,28 @@ mod tests {
         }];
         let result = apply_user_patch(&mut profile, &ops).unwrap();
         assert_eq!(result.set_metadata.len(), 1);
-        assert_eq!(result.set_metadata[0].0, "employee_number");
+        assert_eq!(result.set_metadata[0].0, "employee_id");
+        assert_eq!(result.external_id, None, "not the source's identifier");
+    }
+
+    /// `externalId` is the asking source's identifier of the user, never an
+    /// attribute of the account: it sets no metadata, and an empty value
+    /// drops it.
+    #[test]
+    fn test_replace_external_id_is_the_sources() {
+        let mut profile = test_profile();
+        let op = |value: &str| proto::ScimPatchOp {
+            op: "replace".into(),
+            path: "externalId".into(),
+            value: value.into(),
+        };
+        let result = apply_user_patch(&mut profile, &[op("HR-7")]).unwrap();
+        assert_eq!(result.external_id, Some(Some("HR-7".into())));
+        assert!(result.set_metadata.is_empty());
+        let result = apply_user_patch(&mut profile, &[op("")]).unwrap();
+        assert_eq!(result.external_id, Some(None));
+        let untouched = apply_user_patch(&mut profile, &[]).unwrap();
+        assert_eq!(untouched.external_id, None);
     }
 
     #[test]
@@ -504,7 +527,7 @@ mod tests {
             value: "E-12345".into(),
         }];
         let result = apply_user_patch(&mut profile, &ops).unwrap();
-        assert_eq!(result.set_metadata[0].0, "employee_number");
+        assert_eq!(result.set_metadata[0].0, "employee_id");
     }
 
     #[test]

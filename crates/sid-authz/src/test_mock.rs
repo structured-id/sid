@@ -824,8 +824,26 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: ProfileId,
         _: &[sid_core::models::DirectoryResource],
+        _: &[sid_core::models::DirectorySource],
         _: MutationContext,
     ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn directory_sources(
+        &self,
+        _: Option<sid_core::models::ProvisioningConnectorId>,
+        _: &[sid_core::models::DirectoryUserId],
+    ) -> Result<Vec<sid_core::models::DirectorySource>> {
+        unimplemented!()
+    }
+    async fn find_directory_source(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: &str,
+    ) -> Result<Option<sid_core::models::DirectorySource>> {
+        unimplemented!()
+    }
+    async fn export_directory_sources(&self) -> Result<Vec<sid_core::models::DirectorySource>> {
         unimplemented!()
     }
     async fn write_directory_group(

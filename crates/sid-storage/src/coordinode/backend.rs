@@ -566,9 +566,30 @@ impl StorageBackend for CoordinodeBackend {
         &self,
         profile_id: ProfileId,
         resources: &[sid_core::models::DirectoryResource],
+        sources: &[sid_core::models::DirectorySource],
         ctx: MutationContext,
     ) -> Result<()> {
-        CoordinodeBackend::import_directory_users(self, profile_id, resources, ctx).await
+        CoordinodeBackend::import_directory_users(self, profile_id, resources, sources, ctx).await
+    }
+
+    async fn directory_sources(
+        &self,
+        connector: Option<sid_core::models::ProvisioningConnectorId>,
+        resources: &[sid_core::models::DirectoryUserId],
+    ) -> Result<Vec<sid_core::models::DirectorySource>> {
+        CoordinodeBackend::directory_sources(self, connector, resources).await
+    }
+
+    async fn find_directory_source(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        external_id: &str,
+    ) -> Result<Option<sid_core::models::DirectorySource>> {
+        CoordinodeBackend::find_directory_source(self, connector, external_id).await
+    }
+
+    async fn export_directory_sources(&self) -> Result<Vec<sid_core::models::DirectorySource>> {
+        CoordinodeBackend::export_directory_sources(self).await
     }
 
     async fn write_directory_group(

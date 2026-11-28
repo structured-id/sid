@@ -4,10 +4,10 @@
 //! request's changes commit together with its audit entry and owed work.
 
 use sid_core::models::{
-    DirectoryGroupWrite, DirectoryResource, DirectoryUserId, DirectoryUserWrite,
+    DirectoryGroupWrite, DirectoryResource, DirectorySource, DirectoryUserId, DirectoryUserWrite,
     DirectoryWriteMode, Group, GroupId, GroupMember, MutationContext, Principal, PrincipalId,
     PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileId, ProfileMetadata, ProfilePhone,
-    ProfilePhoneId, Session, SessionEnd,
+    ProfilePhoneId, ProvisioningConnectorId, Session, SessionEnd, SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -128,11 +128,82 @@ async fn hold_resource(
         .map(|found| found.is_some())
     }
     .map_err(storage("directory resource"))?;
-    if held {
-        Ok(())
-    } else {
-        Err(SidError::NotFound(format!("directory user {id}")))
+    if !held {
+        return Err(SidError::NotFound(format!("directory user {id}")));
     }
+    if delete {
+        // Its sources keep their provenance and give their identifiers up.
+        sqlx::query("UPDATE directory_user_sources SET retired = 1 WHERE resource_id = ?")
+            .bind(id.0)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage("directory sources"))?;
+    }
+    Ok(())
+}
+
+pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired";
+
+pub(super) fn source(row: &sqlx::sqlite::SqliteRow) -> SidResult<DirectorySource> {
+    use sqlx::Row;
+    let read = |e: sqlx::Error| SidError::Storage(format!("directory source row: {e}"));
+    Ok(DirectorySource {
+        resource: DirectoryUserId(row.try_get("resource_id").map_err(read)?),
+        connector: row.try_get("connector_id").map_err(read)?,
+        external_id: row.try_get("external_id").map_err(read)?,
+        retired: row.try_get("retired").map_err(read)?,
+    })
+}
+
+/// A source identifier the connector already gives to another live resource
+/// is `Conflict`.
+fn source_error(e: sqlx::Error) -> SidError {
+    match &e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => SidError::Conflict(
+            "the source already names another resource by this identifier".into(),
+        ),
+        _ => SidError::Storage(format!("directory source: {e}")),
+    }
+}
+
+/// Record what the write's source knows of the resource it has just created.
+async fn record_source(
+    tx: &mut WriteTx,
+    profile_id: ProfileId,
+    source: &SourceWrite,
+) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id)
+         SELECT id, ?, ? FROM directory_users WHERE profile_id = ? AND deleted_at IS NULL",
+    )
+    .bind(source.connector)
+    .bind(source.external_id.as_deref())
+    .bind(profile_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(source_error)?;
+    Ok(())
+}
+
+/// Give the correlation the write's source already has with `resource` the
+/// identifier the write carries. A source without one is not given one: no
+/// source takes a resource over by writing to it.
+async fn update_source(
+    tx: &mut WriteTx,
+    resource: DirectoryUserId,
+    source: &SourceWrite,
+) -> SidResult<()> {
+    sqlx::query(
+        "UPDATE directory_user_sources SET external_id = ?
+         WHERE resource_id = ? AND connector_id = ? AND retired = 0",
+    )
+    .bind(source.external_id.as_deref())
+    .bind(resource.0)
+    .bind(source.connector)
+    .execute(&mut **tx)
+    .await
+    .map_err(source_error)?;
+    Ok(())
 }
 
 /// Write `profile` over the stored row while it is still at
@@ -646,13 +717,19 @@ impl SqliteBackend {
                         "a directory create is given no resource".into(),
                     ));
                 }
-                insert_profile(&mut tx, &write.profile).await?
+                insert_profile(&mut tx, &write.profile).await?;
+                if let Some(source) = &write.source {
+                    record_source(&mut tx, profile_id, source).await?;
+                }
             }
             DirectoryWriteMode::Update => {
                 // The resource first: a deletion that committed since the
                 // caller read it refuses the write as not found.
                 if let Some(resource) = write.resource {
                     hold_resource(&mut tx, resource, profile_id, write.delete_resource).await?;
+                    if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
+                        update_source(&mut tx, resource, source).await?;
+                    }
                 }
                 // A missing account or one changed since it was read refuses
                 // the whole write.
@@ -772,6 +849,7 @@ impl SqliteBackend {
         &self,
         profile_id: ProfileId,
         resources: &[DirectoryResource],
+        sources: &[DirectorySource],
         ctx: MutationContext,
     ) -> SidResult<()> {
         if resources.iter().any(|r| r.profile_id != profile_id)
@@ -779,6 +857,14 @@ impl SqliteBackend {
         {
             return Err(SidError::Validation(
                 "an account's directory resources are its own, one of them live at most".into(),
+            ));
+        }
+        if sources
+            .iter()
+            .any(|s| !resources.iter().any(|r| r.id == s.resource))
+        {
+            return Err(SidError::Validation(
+                "a directory source names a resource of the account".into(),
             ));
         }
         let mut tx = self.begin_write().await?;
@@ -824,7 +910,94 @@ impl SqliteBackend {
                 )));
             }
         }
+        // The resources' sources are exactly the ones given.
+        for r in resources {
+            sqlx::query("DELETE FROM directory_user_sources WHERE resource_id = ?")
+                .bind(r.id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage("replace directory sources"))?;
+        }
+        for s in sources {
+            sqlx::query(
+                "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, retired)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(s.resource.0)
+            .bind(s.connector)
+            .bind(s.external_id.as_deref())
+            .bind(s.retired)
+            .execute(&mut *tx)
+            .await
+            .map_err(source_error)?;
+        }
         Self::commit_mutation(tx, &format!("profile:{profile_id}"), ctx).await
+    }
+
+    pub(super) async fn directory_sources_impl(
+        &self,
+        connector: Option<ProvisioningConnectorId>,
+        resources: &[DirectoryUserId],
+    ) -> SidResult<Vec<DirectorySource>> {
+        let mut found = Vec::new();
+        for run in resources.chunks(super::rbac::IN_LIST_CHUNK) {
+            let ids = super::rbac::placeholders(run.len());
+            let of_connector = if connector.is_some() {
+                " AND connector_id = ?"
+            } else {
+                ""
+            };
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {SOURCE} FROM directory_user_sources
+                 WHERE retired = 0 AND resource_id IN ({ids}){of_connector}
+                 ORDER BY resource_id, connector_id"
+            )));
+            for resource in run {
+                read = read.bind(resource.0);
+            }
+            if let Some(connector) = connector {
+                read = read.bind(connector);
+            }
+            for row in read
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage("directory sources"))?
+            {
+                found.push(source(&row)?);
+            }
+        }
+        Ok(found)
+    }
+
+    pub(super) async fn find_directory_source_impl(
+        &self,
+        connector: ProvisioningConnectorId,
+        external_id: &str,
+    ) -> SidResult<Option<DirectorySource>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {SOURCE} FROM directory_user_sources
+             WHERE connector_id = ? AND external_id = ? AND retired = 0"
+        )))
+        .bind(connector)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage("directory source"))?
+        .as_ref()
+        .map(source)
+        .transpose()
+    }
+
+    pub(super) async fn export_directory_sources_impl(&self) -> SidResult<Vec<DirectorySource>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {SOURCE} FROM directory_user_sources ORDER BY resource_id, connector_id"
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage("directory sources"))?
+        .iter()
+        .map(source)
+        .collect()
     }
 
     pub(super) async fn write_directory_group_impl(
