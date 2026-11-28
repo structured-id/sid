@@ -392,6 +392,31 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
         &[("title", "Lead")],
     )
     .await;
+    // A phone contact with a label of its own.
+    let now = Timestamp::now();
+    let mut with_phone = DirectoryUserWrite::new(DirectoryWriteMode::Update, carol.clone());
+    with_phone
+        .add_phones
+        .push(sid_core::models::profile_phone::ProfilePhone {
+            id: sid_core::models::profile_phone::ProfilePhoneId::new(),
+            profile_id: carol.id,
+            e164: 10_000_000_000 + u64::from(uuid::Uuid::now_v7().as_fields().0),
+            extension: None,
+            label: sid_core::models::profile_phone::PhoneLabel::Mobile,
+            custom_label: None,
+            is_primary: true,
+            can_receive_sms: true,
+            can_receive_fax: false,
+            can_receive_voice: true,
+            verified: false,
+            verified_at: None,
+            created_at: now,
+            updated_at: now,
+        });
+    backend
+        .write_directory_user(&with_phone, test_audit())
+        .await
+        .unwrap();
     let dave = add_user(backend, &domain, "dave", &[], &[]).await;
     let mut suspended = dave.clone();
     suspended.status = ProfileStatus::Suspended;
@@ -421,8 +446,15 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
             .all(|p| p.profile_id == carol.id)
     );
     assert_eq!(carol_page.metadata.len(), 1);
+    assert_eq!(carol_page.phones.len(), 1);
+    assert_eq!(carol_page.phones[0].profile_id, carol.id);
+    assert_eq!(
+        carol_page.phones[0].label,
+        sid_core::models::profile_phone::PhoneLabel::Mobile
+    );
     let dave_page = page.users.iter().find(|u| u.profile.id == dave.id).unwrap();
     assert!(dave_page.emails.is_empty() && dave_page.metadata.is_empty());
+    assert!(dave_page.phones.is_empty());
 
     let (_, inactive) = names(
         backend,
@@ -886,6 +918,24 @@ pub async fn test_directory_membership_settles_under_races(backend: &dyn Storage
         assert!(
             !belongs().await,
             "round {round}: a member outlived its withdrawn assignment"
+        );
+
+        // A local assignment and the source's are withdrawn at once, each
+        // through its own entry point.
+        assign(Some(source), true).await;
+        backend
+            .add_to_group(&GroupMember::new(group.id, identity.id), test_audit())
+            .await
+            .unwrap();
+        assert!(belongs().await, "round {round}");
+        let (local, _) = tokio::join!(
+            backend.remove_from_group(group.id, identity.id, test_audit()),
+            assign(Some(source), false)
+        );
+        local.unwrap();
+        assert!(
+            !belongs().await,
+            "round {round}: a member outlived both of its assignments"
         );
     }
 }

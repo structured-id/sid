@@ -4141,6 +4141,17 @@ impl StorageBackend for PostgresBackend {
         .into_iter()
         .map(|r| r.into_domain())
         .collect();
+        let phones: Vec<ProfilePhone> = sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE profile_id = ANY($1)
+             ORDER BY profile_id, is_primary DESC, created_at",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect();
         let metadata: Vec<ProfileMetadata> =
             sqlx::query_as::<_, crate::pg_row::ProfileMetadataRow>(
                 "SELECT * FROM profile_metadata WHERE profile_id = ANY($1)",
@@ -4185,7 +4196,7 @@ impl StorageBackend for PostgresBackend {
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(
-                profiles, resources, sources, principals, emails, metadata,
+                profiles, resources, sources, principals, emails, phones, metadata,
             )?,
         })
     }

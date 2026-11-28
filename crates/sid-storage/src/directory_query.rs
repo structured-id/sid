@@ -85,6 +85,7 @@ pub(crate) fn assemble(
     sources: Vec<sid_core::models::DirectorySource>,
     principals: Vec<sid_core::models::Principal>,
     emails: Vec<sid_core::models::ProfileEmail>,
+    phones: Vec<sid_core::models::ProfilePhone>,
     metadata: Vec<sid_core::models::ProfileMetadata>,
 ) -> sid_core::Result<Vec<sid_core::models::DirectoryUser>> {
     use std::collections::HashMap;
@@ -109,6 +110,10 @@ pub(crate) fn assemble(
     for email in emails {
         emails_of.entry(email.profile_id).or_default().push(email);
     }
+    let mut phones_of: HashMap<_, Vec<_>> = HashMap::new();
+    for phone in phones {
+        phones_of.entry(phone.profile_id).or_default().push(phone);
+    }
     let mut metadata_of: HashMap<_, Vec<_>> = HashMap::new();
     for entry in metadata {
         metadata_of.entry(entry.profile_id).or_default().push(entry);
@@ -129,6 +134,7 @@ pub(crate) fn assemble(
                 active: resource.shows_active(&profile),
                 principals: principals_of.remove(&profile.id).unwrap_or_default(),
                 emails: emails_of.remove(&profile.id).unwrap_or_default(),
+                phones: phones_of.remove(&profile.id).unwrap_or_default(),
                 metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
                 profile,
             })

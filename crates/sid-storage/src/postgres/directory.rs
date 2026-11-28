@@ -851,6 +851,28 @@ async fn hold_member_resource(tx: &mut Tx<'_>, profile_id: ProfileId) -> SidResu
     .map_err(storage("hold a member's directory resource"))
 }
 
+/// Take the membership of `profile_id` in `group_id` for this write: two
+/// changes of its assignments, whichever entry point each comes through,
+/// run one after the other, so the second settles with the first one's
+/// assignment in view. Held first, before the member's resource.
+async fn hold_membership(
+    tx: &mut Tx<'_>,
+    group_id: GroupId,
+    profile_id: ProfileId,
+) -> SidResult<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(
+            'sid.group_member' || chr(31) || $1::text || chr(31) || $2::text, 0))",
+    )
+    .bind(group_id)
+    .bind(profile_id)
+    .execute(&mut **tx)
+    .await
+    .map(drop)
+    .map_err(storage("hold a group membership"))?;
+    hold_member_resource(tx, profile_id).await
+}
+
 /// Record the assignment `member` made by `source` (a repeat is no change)
 /// and settle the membership. A connector's assignment rests on the
 /// member's live directory resource. A grant the new member made to the
@@ -861,7 +883,7 @@ pub(super) async fn add_member(
     member: &GroupMember,
     source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
-    hold_member_resource(tx, member.profile_id).await?;
+    hold_membership(tx, member.group_id, member.profile_id).await?;
     sqlx::query(
         "INSERT INTO group_member_origins (group_id, profile_id, connector_id, resource_id, added_at)
          VALUES ($1, $2, $3,
@@ -899,7 +921,7 @@ pub(super) async fn remove_member(
     profile_id: ProfileId,
     source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
-    hold_member_resource(tx, profile_id).await?;
+    hold_membership(tx, group_id, profile_id).await?;
     sqlx::query(
         "DELETE FROM group_member_origins
          WHERE group_id = $1 AND profile_id = $2 AND connector_id = $3",

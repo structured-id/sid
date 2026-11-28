@@ -241,6 +241,11 @@ impl ScimServiceImpl {
             .list_profile_emails(profile_id)
             .await
             .map_err(storage_failure)?;
+        let phones = self
+            .storage
+            .list_profile_phones(profile_id)
+            .await
+            .map_err(storage_failure)?;
         let external_id = self.external_id_of(caller, resource).await?;
         let found = self
             .storage
@@ -254,6 +259,7 @@ impl ScimServiceImpl {
             &profile,
             &identifiers,
             &emails,
+            &phones,
             &metadata,
             &group_refs,
             self.place(external_id.as_deref(), found.shows_active(&profile)),
@@ -586,6 +592,7 @@ impl ScimService for ScimServiceImpl {
             &profile,
             &principals,
             &write.add_emails,
+            &write.add_phones,
             &metadata,
             &[],
             // A new resource's relationship is active.
@@ -654,6 +661,7 @@ impl ScimService for ScimServiceImpl {
                     &user.profile,
                     &user.principals,
                     &user.emails,
+                    &user.phones,
                     &user.metadata,
                     &[], // Groups are read per user, not for a list.
                     self.place(user.external_id.as_deref(), user.active),
@@ -763,7 +771,11 @@ impl ScimService for ScimServiceImpl {
             .map_err(refusal::mapping)?;
         let stated = |contacts: &mut dyn Iterator<Item = &sid_core::models::ProfileEmail>| {
             let mut set: Vec<_> = contacts
-                .map(|c| (c.email.clone(), c.is_primary, format!("{:?}", c.label)))
+                // By the type each is served under: what a request can state.
+                .map(|c| {
+                    let served = crate::mapping::email_type(&c.label);
+                    (c.email.clone(), c.is_primary, served)
+                })
                 .collect();
             set.sort();
             set
@@ -797,7 +809,7 @@ impl ScimService for ScimServiceImpl {
         let numbers = |contacts: &[sid_core::models::ProfilePhone]| {
             let mut set: Vec<_> = contacts
                 .iter()
-                .map(|c| (c.e164, c.is_primary, format!("{:?}", c.label)))
+                .map(|c| (c.e164, c.is_primary, crate::mapping::phone_type(&c.label)))
                 .collect();
             set.sort();
             set

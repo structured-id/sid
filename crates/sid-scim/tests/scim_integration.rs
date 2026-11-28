@@ -2910,6 +2910,74 @@ async fn test_restated_inactive_ends_only_live_access() {
     assert_eq!(replaced.title, "Lapsed");
 }
 
+/// A user is served with the type each of its contacts is stored under, by a
+/// read and in a list alike, so a connector that reads a user and sends it
+/// back with one field changed takes only the right for that field.
+/// Bug prevented: every contact served as `work`, so the home address and
+/// mobile number the request restated counted as a change of the user's
+/// contacts and the request was refused.
+#[tokio::test]
+async fn test_contacts_are_served_with_their_stored_type() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let mut create = create_user_request(&unique_username());
+    create.emails[0].r#type = "home".into();
+    create.phone_numbers[0].r#type = "mobile".into();
+    let created = service
+        .create_user(provisioned(create.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    let held = service
+        .get_user(provisioned(proto::ScimGetUserRequest {
+            id: created.id.clone(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let listed = service
+        .list_users(provisioned(proto::ScimListUsersRequest {
+            filter: format!("userName eq \"{}\"", create.user_name),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .resources;
+    for shown in [&created, &held, &listed[0]] {
+        assert_eq!(shown.emails[0].r#type, "home");
+        assert_eq!(shown.phone_numbers[0].r#type, "mobile");
+    }
+
+    let (_, titles) = connector_managing(
+        &storage,
+        directory,
+        &SCIM_ACTIONS,
+        DirectoryRights::of(&[DirectoryRight::Title]),
+    )
+    .await;
+    let replaced = service
+        .replace_user(with_token(
+            proto::ScimReplaceUserRequest {
+                id: held.id.clone(),
+                user_name: held.user_name.clone(),
+                name: held.name.clone(),
+                emails: held.emails.clone(),
+                phone_numbers: held.phone_numbers.clone(),
+                active: held.active,
+                department: held.department.clone(),
+                title: "Principal Engineer".into(),
+                ..Default::default()
+            },
+            &titles,
+        ))
+        .await
+        .expect("contacts restated as served are no change")
+        .into_inner();
+    assert_eq!(replaced.title, "Principal Engineer");
+    assert_eq!(replaced.emails[0].r#type, "home");
+    assert_eq!(replaced.phone_numbers[0].r#type, "mobile");
+}
+
 /// A connector manages what its manager selected and nothing else: a change
 /// outside it is refused, a request mixing both is refused whole and writes
 /// nothing, and a value restated takes no right. Deleting a managed account

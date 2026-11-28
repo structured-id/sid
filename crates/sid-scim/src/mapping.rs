@@ -264,15 +264,42 @@ pub struct ScimPlace<'a> {
     pub active: bool,
 }
 
-/// Map SID Profile + Principals + email contacts + Metadata + Groups to SCIM
+/// The SCIM `type` an email contact is served under (RFC 7643 4.1.2). A
+/// label SCIM has no word for is served as `other`; a request that restates
+/// it compares equal and leaves the stored label as it is.
+pub fn email_type(label: &EmailLabel) -> &'static str {
+    match label {
+        EmailLabel::Work => "work",
+        EmailLabel::Personal => "home",
+        EmailLabel::School => "school",
+        EmailLabel::Other | EmailLabel::Custom => "other",
+    }
+}
+
+/// The SCIM `type` a phone contact is served under, as [`email_type`].
+pub fn phone_type(label: &PhoneLabel) -> &'static str {
+    match label {
+        PhoneLabel::Work => "work",
+        PhoneLabel::Home => "home",
+        PhoneLabel::Mobile => "mobile",
+        PhoneLabel::Fax => "fax",
+        PhoneLabel::Pager => "pager",
+        PhoneLabel::Main | PhoneLabel::Other | PhoneLabel::Custom => "other",
+    }
+}
+
+/// Map SID Profile + Principals + contacts + Metadata + Groups to SCIM
 /// User response. `emails` come from the contacts, in the spelling the
-/// directory gave: a principal holds only the login key. `id` is the
-/// directory resource's identifier, never the account's.
+/// directory gave: a principal holds only the login key. A phone number is
+/// served with the type of its contact in `phones`. `id` is the directory
+/// resource's identifier, never the account's.
+#[allow(clippy::too_many_arguments)]
 pub fn sid_to_scim_user(
     id: DirectoryUserId,
     profile: &Profile,
     principals: &[Principal],
     emails: &[ProfileEmail],
+    phones: &[ProfilePhone],
     metadata: &[ProfileMetadata],
     group_memberships: &[(GroupId, String)], // (group_id, group_display_name)
     place: ScimPlace<'_>,
@@ -299,9 +326,14 @@ pub fn sid_to_scim_user(
                 user.user_name = principal.value.trim_end_matches(&domain_suffix).to_string();
             }
             PrincipalType::Phone => {
+                // The contact of this number holds its type; a number with
+                // no contact is the organization's own.
+                let contact = phone_digits(&principal.value)
+                    .ok()
+                    .and_then(|digits| phones.iter().find(|p| p.e164 == digits));
                 user.phone_numbers.push(proto::ScimPhoneNumber {
                     value: principal.value.clone(),
-                    r#type: "work".into(),
+                    r#type: contact.map_or("work", |p| phone_type(&p.label)).into(),
                     primary: principal.is_primary,
                 });
             }
@@ -312,7 +344,7 @@ pub fn sid_to_scim_user(
         .iter()
         .map(|e| proto::ScimEmail {
             value: e.email.clone(),
-            r#type: "work".into(),
+            r#type: email_type(&e.label).into(),
             primary: e.is_primary,
         })
         .collect();

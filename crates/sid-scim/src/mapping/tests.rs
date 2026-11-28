@@ -188,6 +188,7 @@ fn test_sid_to_scim_user_roundtrip() {
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
+        &mapping.phones,
         &mapping.metadata,
         &[],
         ScimPlace {
@@ -253,6 +254,7 @@ fn test_active_is_the_projection_given() {
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
+        &mapping.phones,
         &mapping.metadata,
         &[],
         ScimPlace {

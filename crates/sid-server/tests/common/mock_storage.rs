@@ -4299,6 +4299,7 @@ impl StorageBackend for MockStorage {
                 active: profile.status.is_in_use(),
                 principals: self.get_principals_by_profile(profile.id).await?,
                 emails: self.list_profile_emails(profile.id).await?,
+                phones: self.list_profile_phones(profile.id).await?,
                 metadata: self.list_profile_metadata(profile.id).await?,
                 profile,
             });

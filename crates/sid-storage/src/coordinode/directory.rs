@@ -785,15 +785,17 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     let limit = usize::try_from(query.limit).unwrap_or(usize::MAX);
     let profiles: Vec<Profile> = matching.into_iter().skip(offset).take(limit).collect();
     let (mut principals, mut emails, mut metadata) = (Vec::new(), Vec::new(), Vec::new());
+    let mut phones = Vec::new();
     for profile in &profiles {
         principals.extend(super::principal::held_by(tx, profile.id)?);
         emails.extend(super::profile::emails_of(tx, profile.id)?);
+        phones.extend(super::profile::phones_of(tx, profile.id)?);
         metadata.extend(metadata_of(tx, profile.id)?);
     }
     Ok(DirectoryPage {
         total,
         users: crate::directory_query::assemble(
-            profiles, resources, sources, principals, emails, metadata,
+            profiles, resources, sources, principals, emails, phones, metadata,
         )?,
     })
 }
