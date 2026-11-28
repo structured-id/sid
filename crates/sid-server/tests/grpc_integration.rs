@@ -10914,17 +10914,27 @@ async fn test_dcr_register_client_happy_path() {
 /// The IAT's redirect pattern `https://*.sid.example.com/*` admits only hosts
 /// under that domain: a URI that reaches another host through the path, the
 /// userinfo or extra labels is refused and registers nothing, and the IAT's
-/// count stays unchanged.
+/// count stays unchanged. A URI carrying userinfo is no redirect URI at all,
+/// so it is refused as invalid before the token's pattern is consulted.
 #[tokio::test]
 async fn test_dcr_redirect_pattern_cannot_reach_another_host() {
     let storage = MockStorage::new().with_system_project();
     let (storage, iat_token) = setup_iat_for_dcr(storage);
     let svc = TestServices::new(storage);
 
-    for uri in [
-        "https://evil.example.com/.sid.example.com/cb",
-        "https://app.sid.example.com@evil.example.com/cb",
-        "https://app.sid.example.com/a/b",
+    for (uri, refusal) in [
+        (
+            "https://evil.example.com/.sid.example.com/cb",
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "https://app.sid.example.com@evil.example.com/cb",
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "https://app.sid.example.com/a/b",
+            tonic::Code::PermissionDenied,
+        ),
     ] {
         let mut request = dcr_request(&svc, "Escaping App");
         request.redirect_uris = vec![uri.to_string()];
@@ -10933,7 +10943,7 @@ async fn test_dcr_redirect_pattern_cannot_reach_another_host() {
             .register_client(bearer_request(request, &iat_token))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{uri}: {err:?}");
+        assert_eq!(err.code(), refusal, "{uri}: {err:?}");
     }
 
     let iats = svc
