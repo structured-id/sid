@@ -300,7 +300,14 @@ pub(crate) fn validate_redirect_uri(uri: &str, app_type: ApplicationType) -> Res
         ("http", _) => Err(DcrError::InvalidRedirectUri(format!(
             "plain http redirect must be to a loopback host: {uri}"
         ))),
-        (_, ApplicationType::Native) => Ok(()),
+        // An application's own scheme is based on a domain name in reverse
+        // order (RFC 8252 §7.1); one without a period is not such a scheme
+        // and is refused (RFC 8252 §8.4), which also keeps registered
+        // schemes like `ftp` out.
+        (scheme, ApplicationType::Native) if scheme.contains('.') => Ok(()),
+        (_, ApplicationType::Native) => Err(DcrError::InvalidRedirectUri(format!(
+            "a native application's own scheme is its domain name in reverse order: {uri}"
+        ))),
         _ => Err(DcrError::InvalidRedirectUri(format!(
             "redirect URI must use HTTPS: {uri}"
         ))),

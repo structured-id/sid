@@ -217,6 +217,41 @@ fn test_fragment_in_redirect_uri_rejected() {
     ));
 }
 
+/// A native application's own scheme is a private-use one, based on a
+/// domain name in reverse order: a scheme without a period is not, whether
+/// it is a registered one or a bare word.
+/// Bug prevented: every scheme other than `http` and `https` registered as
+/// a native redirect, `ftp` and `javascript` included.
+#[test]
+fn a_native_scheme_is_a_private_use_one() {
+    let check = |uri: &str| {
+        let mut req = valid_request();
+        req.application_type = ApplicationType::Native;
+        req.redirect_uris = vec![uri.into()];
+        validate_registration_request(&req)
+    };
+    for accepted in [
+        "com.example.app:/callback",
+        "com.example.app://callback",
+        "org.example.my-app:/oauth2redirect",
+    ] {
+        assert!(check(accepted).is_ok(), "{accepted}");
+    }
+    for refused in [
+        "ftp://example.com/callback",
+        "myapp:/callback",
+        "myapp://callback",
+        "javascript:alert(1)",
+        "data:text/html,callback",
+        "file:///callback",
+    ] {
+        assert!(
+            matches!(check(refused), Err(DcrError::InvalidRedirectUri(_))),
+            "{refused}"
+        );
+    }
+}
+
 /// A browser client's redirect is `https`, or plain `http` on a loopback
 /// host alone; a native application may also use its private scheme. No
 /// redirect carries credentials or a fragment.
