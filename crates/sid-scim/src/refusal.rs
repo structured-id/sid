@@ -143,6 +143,17 @@ pub(crate) fn external_id_taken() -> Status {
     .into()
 }
 
+/// The request would change a part of the user the connector does not
+/// manage now, or end more than it has authority over: nothing is written
+/// (403). The refusal names no other source and no account.
+pub(crate) fn not_managed() -> Status {
+    ApiError::new(
+        ErrorReason::InsufficientPermissions,
+        "the connector does not manage what this request would change of the user",
+    )
+    .into()
+}
+
 /// A group write refused by storage: a name already used in the project is
 /// `uniqueness` (RFC 7644 §3.3).
 pub(crate) fn group_write(id: GroupId, e: SidError) -> Status {

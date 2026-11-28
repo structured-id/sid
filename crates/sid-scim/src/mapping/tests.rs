@@ -188,12 +188,14 @@ fn test_sid_to_scim_user_roundtrip() {
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
+        &mapping.phones,
         &mapping.metadata,
         &[],
         ScimPlace {
             org_domain: &ctx.org_domain,
             base_url: "https://sid.example.com",
             external_id: Some("EMP-42"),
+            active: true,
         },
     );
 
@@ -210,7 +212,7 @@ fn test_sid_to_scim_user_roundtrip() {
     assert_eq!(scim_user.employee_number, "701984");
     assert_eq!(scim_user.department, "Engineering");
     assert_eq!(scim_user.title, "Senior Engineer");
-    assert!(scim_user.active); // Provisioned is not Suspended
+    assert!(scim_user.active);
     assert_eq!(scim_user.emails.len(), 1);
     assert_eq!(scim_user.emails[0].value, "alice.smith@acme.com");
     assert_eq!(scim_user.phone_numbers.len(), 1);
@@ -238,23 +240,28 @@ fn test_structured_name_from_scim() {
     );
 }
 
+/// `active` is the directory's projection of the user, handed in by the
+/// caller: the mapping never derives it from the account, whose state alone
+/// does not say whether the relationship is active.
 #[test]
-fn test_suspended_user_active_false() {
+fn test_active_is_the_projection_given() {
     let ctx = test_org_ctx();
-    let mut mapping = mapped(&test_create_request());
-    mapping.profile.status = ProfileStatus::Suspended;
+    let mapping = mapped(&test_create_request());
+    assert!(mapping.profile.status.is_in_use());
 
     let scim_user = sid_to_scim_user(
         DirectoryUserId::new(),
         &mapping.profile,
         &mapping.principals,
         &mapping.emails,
+        &mapping.phones,
         &mapping.metadata,
         &[],
         ScimPlace {
             org_domain: &ctx.org_domain,
             base_url: "https://sid.example.com",
             external_id: None,
+            active: false,
         },
     );
     assert!(!scim_user.active);

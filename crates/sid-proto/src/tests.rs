@@ -162,6 +162,7 @@ const INTERNAL_RPCS: &[&str] = &[
     "sid.v1.scim.ScimService/ListUsers",
     "sid.v1.scim.ScimService/PatchGroup",
     "sid.v1.scim.ScimService/PatchUser",
+    "sid.v1.scim.ScimService/ReplaceGroup",
     "sid.v1.scim.ScimService/ReplaceUser",
     // UI hosts follow the settings over gRPC and serve them in their own
     // configuration; a browser reads that, never the stream.

@@ -341,11 +341,109 @@ fn member_pair(group_id: GroupId, profile: ProfileId) -> SidResult<Value> {
     key(&[group_id.as_bytes(), profile.as_bytes()])
 }
 
-/// Add `m` to its group in `tx` (a repeat is no change). A grant the new
-/// member made to the group stays withheld from it
-/// (`RoleAssignment::withheld_from`), so joining needs no check against the
-/// group's grants.
-pub(super) fn add_member(tx: &Statements<'_>, m: &GroupMember) -> SidResult<()> {
+/// The stored origin of an assignment made by `source`: sixteen zero bytes
+/// stand for one made locally.
+fn origin(source: Option<sid_core::models::ProvisioningConnectorId>) -> [u8; 16] {
+    source.map_or([0; 16], |connector| *connector.as_bytes())
+}
+
+/// Make `SidGroupMember` agree with the assignments (`SidGroupOrigin`) of
+/// `profile` to `group_id` in `tx`: a member while any assignment stands. A
+/// local one always does; a connector's does while the directory resource
+/// it rests on is live and active. `SidGroupMember` is what access
+/// decisions read.
+fn settle_member(
+    tx: &Statements<'_>,
+    group_id: GroupId,
+    profile: ProfileId,
+    added_at: jiff::Timestamp,
+) -> SidResult<()> {
+    let pair = member_pair(group_id, profile)?;
+    let origins = tx.run(
+        "MATCH (o:SidGroupOrigin) WHERE o.pair = $pair
+         RETURN o.local AS local, o.resource_id AS resource_id",
+        Params::default().with("pair", pair.clone()),
+    )?;
+    let mut stands = false;
+    for row in &origins {
+        if super::get_bool(row, "local")? {
+            stands = true;
+            break;
+        }
+        // A connector's assignment made when the member had no live
+        // resource rests on nothing.
+        let Some(resource) = super::get_opt_uuid(row, "resource_id")? else {
+            continue;
+        };
+        let found = tx.run(
+            "MATCH (d:SidDirectoryUser) WHERE d.id = $id
+             RETURN d.deleted_at AS deleted_at, d.active AS active",
+            Params::default().with("id", super::uuid(&resource)),
+        )?;
+        if let Some(d) = found.first()
+            && super::get_opt_time(d, "deleted_at")?.is_none()
+            && super::get_bool(d, "active")?
+        {
+            stands = true;
+            break;
+        }
+    }
+    let held = !tx
+        .run(
+            "MATCH (m:SidGroupMember) WHERE m.pair = $pair RETURN m.pair AS pair",
+            Params::default().with("pair", pair.clone()),
+        )?
+        .is_empty();
+    if stands && !held {
+        tx.run(
+            "CREATE (m:SidGroupMember {pair: $pair, group_id: $group, profile_id: $profile,
+                added_at: $added_at})",
+            Params::default()
+                .with("pair", pair)
+                .with("group", bin(group_id.as_bytes()))
+                .with("profile", bin(profile.as_bytes()))
+                .with("added_at", time(added_at)),
+        )?;
+    } else if !stands && held {
+        tx.run(
+            "MATCH (m:SidGroupMember) WHERE m.pair = $pair DETACH DELETE m",
+            Params::default().with("pair", pair),
+        )?;
+    }
+    Ok(())
+}
+
+/// Settle every membership that rests on the directory resource `resource`
+/// in `tx`, after its activity or its deletion changed.
+pub(super) fn settle_resource_members(
+    tx: &Statements<'_>,
+    resource: sid_core::models::DirectoryUserId,
+) -> SidResult<()> {
+    let resting = tx.run(
+        "MATCH (o:SidGroupOrigin) WHERE o.resource_id = $id
+         RETURN o.group_id AS group_id, o.profile_id AS profile_id",
+        Params::default().with("id", super::uuid(&resource.0)),
+    )?;
+    let now = jiff::Timestamp::now();
+    for row in &resting {
+        let group_id = id(row, "group_id", GroupId::from_slice)?;
+        let profile = id(row, "profile_id", ProfileId::from_slice)?;
+        take_turn(tx, "SidGroup", "id", bin(group_id.as_bytes()))?;
+        settle_member(tx, group_id, profile, now)?;
+    }
+    Ok(())
+}
+
+/// Record the assignment `m` made by `source` in `tx` (a repeat is no
+/// change) and settle the membership. A connector's assignment rests on the
+/// member's live directory resource. A grant the new member made to the
+/// group stays withheld from it (`RoleAssignment::withheld_from`), so joining
+/// needs no check against the group's grants.
+pub(super) fn add_member(
+    tx: &Statements<'_>,
+    m: &GroupMember,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
+) -> SidResult<()> {
     let missing = || SidError::Validation("a group member is not an existing account".into());
     // The group's turn orders changes of its membership; a grant to the group
     // never takes it.
@@ -356,37 +454,69 @@ pub(super) fn add_member(tx: &Statements<'_>, m: &GroupMember) -> SidResult<()> 
     if !claim(tx, "SidProfile", "id", bin(m.profile_id.as_bytes()))? {
         return Err(missing());
     }
-    let pair = member_pair(m.group_id, m.profile_id)?;
-    let held = tx.run(
-        "MATCH (m:SidGroupMember) WHERE m.pair = $pair RETURN m.pair AS pair",
-        Params::default().with("pair", pair.clone()),
-    )?;
-    if held.is_empty() {
+    let connector = origin(source);
+    let origin_key = key(&[m.group_id.as_bytes(), m.profile_id.as_bytes(), &connector])?;
+    let recorded = !tx
+        .run(
+            "MATCH (o:SidGroupOrigin) WHERE o.key = $key RETURN o.key AS key",
+            Params::default().with("key", origin_key.clone()),
+        )?
+        .is_empty();
+    if !recorded {
+        let resource = match source {
+            None => None,
+            Some(_) => tx
+                .run(
+                    "MATCH (d:SidDirectoryUser) WHERE d.profile_id = $profile
+                     RETURN d.id AS id, d.deleted_at AS deleted_at",
+                    Params::default().with("profile", bin(m.profile_id.as_bytes())),
+                )?
+                .iter()
+                .find_map(|d| match super::get_opt_time(d, "deleted_at") {
+                    Ok(None) => Some(super::get_uuid(d, "id")),
+                    Ok(Some(_)) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .transpose()?,
+        };
         tx.run(
-            "CREATE (m:SidGroupMember {pair: $pair, group_id: $group, profile_id: $profile,
-                added_at: $added_at})",
+            "CREATE (o:SidGroupOrigin {key: $key, pair: $pair, group_id: $group,
+                profile_id: $profile, connector_id: $connector, local: $local,
+                resource_id: $resource, added_at: $added_at})",
             Params::default()
-                .with("pair", pair)
+                .with("key", origin_key)
+                .with("pair", member_pair(m.group_id, m.profile_id)?)
                 .with("group", bin(m.group_id.as_bytes()))
                 .with("profile", bin(m.profile_id.as_bytes()))
+                .with("connector", bin(&connector))
+                .with("local", Value::Bool(source.is_none()))
+                .with(
+                    "resource",
+                    resource.as_ref().map_or(Value::Null, super::uuid),
+                )
                 .with("added_at", time(m.added_at)),
         )?;
     }
-    Ok(())
+    settle_member(tx, m.group_id, m.profile_id, m.added_at)
 }
 
-/// Remove `profile` from `group_id` in `tx`.
+/// Withdraw the assignment of `profile` to `group_id` made by `source` in
+/// `tx` and settle the membership: another origin's assignment keeps it.
 pub(super) fn remove_member(
     tx: &Statements<'_>,
     group_id: GroupId,
     profile: ProfileId,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
     take_turn(tx, "SidGroup", "id", bin(group_id.as_bytes()))?;
     tx.run(
-        "MATCH (m:SidGroupMember) WHERE m.pair = $pair DETACH DELETE m",
-        Params::default().with("pair", member_pair(group_id, profile)?),
+        "MATCH (o:SidGroupOrigin) WHERE o.key = $key DETACH DELETE o",
+        Params::default().with(
+            "key",
+            key(&[group_id.as_bytes(), profile.as_bytes(), &origin(source)])?,
+        ),
     )?;
-    Ok(())
+    settle_member(tx, group_id, profile, jiff::Timestamp::now())
 }
 
 /// The groups `profile` is a member of.
@@ -417,6 +547,7 @@ fn delete_group_records(tx: &Statements<'_>, group_id: GroupId) -> SidResult<()>
     delete_sets_of(tx, &RoleAssignmentPrincipal::Group(group_id))?;
     for query in [
         "MATCH (m:SidGroupMember) WHERE m.group_id = $id DETACH DELETE m",
+        "MATCH (o:SidGroupOrigin) WHERE o.group_id = $id DETACH DELETE o",
         "MATCH (g:SidGroup) WHERE g.parent_group_id = $id SET g.parent_group_id = null",
         "MATCH (g:SidGroup) WHERE g.id = $id DETACH DELETE g",
     ] {
@@ -1082,8 +1213,28 @@ fn check_assignment_fence(tx: &Statements<'_>, fence: &AssignmentFence) -> SidRe
 /// Delete in `tx` what `profile` holds here: its memberships, assignments
 /// and access requests.
 pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
-    for m in memberships(tx, profile)? {
-        remove_member(tx, m.group_id, profile)?;
+    // Every assignment of the profile, standing or not, and the memberships
+    // they gave, under each group's turn.
+    let assigned = tx.run(
+        "MATCH (o:SidGroupOrigin) WHERE o.profile_id = $profile RETURN o.group_id AS group_id",
+        Params::default().with("profile", bin(profile.as_bytes())),
+    )?;
+    let mut groups = Vec::new();
+    for row in &assigned {
+        groups.push(id(row, "group_id", GroupId::from_slice)?);
+    }
+    groups.extend(memberships(tx, profile)?.into_iter().map(|m| m.group_id));
+    groups.sort();
+    groups.dedup();
+    for group_id in groups {
+        take_turn(tx, "SidGroup", "id", bin(group_id.as_bytes()))?;
+        let pair = member_pair(group_id, profile)?;
+        for query in [
+            "MATCH (o:SidGroupOrigin) WHERE o.pair = $pair DETACH DELETE o",
+            "MATCH (m:SidGroupMember) WHERE m.pair = $pair DETACH DELETE m",
+        ] {
+            tx.run(query, Params::default().with("pair", pair.clone()))?;
+        }
     }
     for a in assignments_where(tx, "a.profile_id = $value", bin(profile.as_bytes()))? {
         delete_assignment(tx, a.id)?;
@@ -1413,7 +1564,7 @@ impl CoordinodeBackend {
     ) -> SidResult<()> {
         let m = m.clone();
         self.mutate(format!("group:{}", m.group_id), ctx, move |tx| {
-            add_member(tx, &m)
+            add_member(tx, &m, None)
         })
         .await
     }
@@ -1425,7 +1576,7 @@ impl CoordinodeBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         self.mutate(format!("group:{group_id}"), ctx, move |tx| {
-            remove_member(tx, group_id, profile)
+            remove_member(tx, group_id, profile, None)
         })
         .await
     }
@@ -1454,6 +1605,55 @@ impl CoordinodeBackend {
                 groups.extend(get_group(tx, m.group_id)?);
             }
             Ok(groups)
+        })
+        .await
+    }
+
+    pub(super) async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        self.read(move |tx| {
+            let (filter, value) = match of {
+                AssignmentsOf::Group(group) => ("o.group_id = $value", bin(group.as_bytes())),
+                AssignmentsOf::Profile(profile) => {
+                    ("o.profile_id = $value", bin(profile.as_bytes()))
+                }
+            };
+            let rows = tx.run(
+                &format!(
+                    "MATCH (o:SidGroupOrigin) WHERE {filter}
+                     RETURN o.group_id AS group_id, o.profile_id AS profile_id,
+                        o.added_at AS added_at, o.connector_id AS connector_id,
+                        o.local AS local"
+                ),
+                Params::default().with("value", value),
+            )?;
+            let mut assignments = Vec::with_capacity(rows.len());
+            for row in &rows {
+                assignments.push(sid_core::models::GroupAssignment {
+                    member: member(row)?,
+                    source: if super::get_bool(row, "local")? {
+                        None
+                    } else {
+                        Some(id(
+                            row,
+                            "connector_id",
+                            sid_core::models::ProvisioningConnectorId::from_slice,
+                        )?)
+                    },
+                });
+            }
+            // One order on every engine: by member, then by origin.
+            assignments.sort_by_key(|a| {
+                (
+                    a.member.group_id,
+                    a.member.profile_id,
+                    a.source.map(|c| c.into_uuid()),
+                )
+            });
+            Ok(assignments)
         })
         .await
     }

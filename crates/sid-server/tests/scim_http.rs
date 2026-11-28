@@ -359,6 +359,47 @@ impl Replica {
             .unwrap();
     }
 
+    /// Lets `connector` change every part of every user of the directory,
+    /// as its manager selects it through the administration API: at the
+    /// connector's current revision.
+    async fn manage_directory(&self, connector: &Connector) {
+        let current = self
+            .provisioning
+            .get_provisioning_connector(admin(pb::GetProvisioningConnectorRequest {
+                connector_id: connector.proto.id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let rights: Vec<i32> = (1..=13).collect();
+        let managed = self
+            .provisioning
+            .set_directory_management(admin(pb::SetDirectoryManagementRequest {
+                connector_id: connector.proto.id.clone(),
+                revision: current.revision,
+                rights: rights.clone(),
+            }))
+            .await
+            .expect("the administrator selects what the connector manages")
+            .into_inner();
+        assert_eq!(managed.directory_rights, rights);
+        assert!(
+            managed.revision > current.revision,
+            "the selection moves the revision"
+        );
+        // A repeat names the revision the selection moved past.
+        let repeated = self
+            .provisioning
+            .set_directory_management(admin(pb::SetDirectoryManagementRequest {
+                connector_id: connector.proto.id.clone(),
+                revision: current.revision,
+                rights: Vec::new(),
+            }))
+            .await
+            .expect_err("an old selection is refused as changed");
+        assert_eq!(repeated.code(), tonic::Code::Aborted);
+    }
+
     /// A credential of `kind` issued to `connector`; returns its secret.
     async fn issue(&self, connector: &Connector, kind: pb::ConnectorCredentialKind) -> String {
         self.provisioning
@@ -570,6 +611,42 @@ async fn lifecycle(replica: &Replica, storage: &dyn StorageBackend, bearer: &str
         .await;
     assert_eq!(status, 200, "read group: {read}");
     assert_eq!(read["members"][0]["value"], json!(id));
+    // A replacement that states no member list renames the group and
+    // keeps the members; one that states an empty list clears them; one
+    // that lists a member assigns it (RFC 7644 3.5.1).
+    let renamed = unique_name();
+    let replace = async |body: Value| {
+        replica
+            .send(
+                Method::PUT,
+                &format!("/Groups/{group_id}"),
+                Some(bearer),
+                Some(body),
+            )
+            .await
+    };
+    let (status, kept) =
+        replace(json!({ "schemas": [GROUP_SCHEMA], "displayName": renamed })).await;
+    assert_eq!(status, 200, "replace group: {kept}");
+    assert_eq!(kept["displayName"], json!(renamed));
+    assert_eq!(kept["members"][0]["value"], json!(id), "{kept}");
+    let (status, cleared) =
+        replace(json!({ "schemas": [GROUP_SCHEMA], "displayName": renamed, "members": [] })).await;
+    assert_eq!(status, 200, "replace group: {cleared}");
+    assert!(
+        cleared["members"]
+            .as_array()
+            .is_none_or(|members| members.is_empty()),
+        "{cleared}"
+    );
+    let (status, assigned) = replace(json!({
+        "schemas": [GROUP_SCHEMA],
+        "displayName": renamed,
+        "members": [{ "value": id }],
+    }))
+    .await;
+    assert_eq!(status, 200, "replace group: {assigned}");
+    assert_eq!(assigned["members"][0]["value"], json!(id), "{assigned}");
     let (status, emptied) = replica
         .send(
             Method::PATCH,
@@ -685,6 +762,32 @@ async fn provisions_over_http(engine: Engine) {
     let bearer = replica
         .issue(&connector, pb::ConnectorCredentialKind::ScimBearer)
         .await;
+
+    // A role gives the connector its actions, not the users: until its
+    // manager selects what it manages, it creates a user and changes none.
+    let unmanaged = unique_name();
+    let (status, created) = replica
+        .send(
+            reqwest::Method::POST,
+            "/Users",
+            Some(&bearer),
+            Some(new_user(&unmanaged)),
+        )
+        .await;
+    assert_eq!(status, 201, "create user: {created}");
+    let (status, refused) = replica
+        .send(
+            reqwest::Method::PATCH,
+            &format!("/Users/{}", created["id"].as_str().unwrap()),
+            Some(&bearer),
+            Some(patch(
+                json!([{ "op": "replace", "path": "title", "value": "Lead" }]),
+            )),
+        )
+        .await;
+    assert_eq!(status, 403, "an unmanaged user was changed: {refused}");
+
+    replica.manage_directory(&connector).await;
     let secret = replica
         .issue(&connector, pb::ConnectorCredentialKind::ClientSecret)
         .await;
@@ -778,6 +881,212 @@ async fn queries_over_http_on_sqlite() {
 #[tokio::test]
 async fn provisions_over_http_on_sqlite() {
     provisions_over_http(Engine::Sqlite).await;
+}
+
+/// A directory manager gives a second source an existing user: the source
+/// then changes exactly what it was given, under the user's same id and
+/// with an identifier of its own beside the first source's, and may not
+/// delete the user. After the withdrawal it is still a source of the user
+/// and changes nothing of it. A repeat of an old command is refused as
+/// changed and neither restores nor cancels an assignment.
+async fn a_manager_assigns_an_existing_user(engine: Engine) {
+    use reqwest::Method;
+    const ENTERPRISE: &str = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+    const EMPLOYEE_NUMBER: i32 = pb::DirectoryUserRight::EmployeeNumber as i32;
+    const EXTERNAL_ID: i32 = pb::DirectoryUserRight::ExternalId as i32;
+
+    let installation = installation(engine).await;
+    let replica = installation.replica().await;
+    let (first, second) = (replica.connector().await, replica.connector().await);
+    for connector in [&first, &second] {
+        replica.grant(&installation, connector).await;
+    }
+    let first_bearer = replica
+        .issue(&first, pb::ConnectorCredentialKind::ScimBearer)
+        .await;
+    let second_bearer = replica
+        .issue(&second, pb::ConnectorCredentialKind::ScimBearer)
+        .await;
+
+    let user_name = unique_name();
+    let (status, user) = replica
+        .send(
+            Method::POST,
+            "/Users",
+            Some(&first_bearer),
+            Some(new_user(&user_name)),
+        )
+        .await;
+    assert_eq!(status, 201, "create user: {user}");
+    let id = user["id"].as_str().unwrap().to_owned();
+    let path = format!("/Users/{id}");
+    let number = |value: &str| {
+        patch(json!([{
+            "op": "replace",
+            "path": format!("{ENTERPRISE}:employeeNumber"),
+            "value": value,
+        }]))
+    };
+    let user_id: sid_ids_proto::DirectoryUserId = sid_ids::DirectoryUserId::parse(&id)
+        .expect("the SCIM id is a directory user identifier")
+        .into();
+    let revision = async |connector: &Connector| {
+        replica
+            .provisioning
+            .get_provisioning_connector(admin(pb::GetProvisioningConnectorRequest {
+                connector_id: connector.proto.id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .revision
+    };
+    let assign = async |revision: i64| {
+        replica
+            .provisioning
+            .assign_directory_user(admin(pb::AssignDirectoryUserRequest {
+                connector_id: second.proto.id.clone(),
+                revision,
+                user_id: Some(user_id.clone()),
+                rights: vec![EMPLOYEE_NUMBER, EXTERNAL_ID],
+            }))
+            .await
+    };
+    let withdraw = async |revision: i64| {
+        replica
+            .provisioning
+            .withdraw_directory_user(admin(pb::WithdrawDirectoryUserRequest {
+                connector_id: second.proto.id.clone(),
+                revision,
+                user_id: Some(user_id.clone()),
+            }))
+            .await
+    };
+
+    // Not its user yet.
+    let (status, refused) = replica
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&second_bearer),
+            Some(number("N-1")),
+        )
+        .await;
+    assert_eq!(status, 403, "{refused}");
+
+    let before = revision(&second).await;
+    let assigned = assign(before).await.expect("the manager assigns the user");
+    assert!(assigned.into_inner().revision > before);
+
+    // The number, and an identifier of its own: nothing else.
+    let (status, changed) = replica
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&second_bearer),
+            Some(patch(json!([
+                { "op": "replace", "path": format!("{ENTERPRISE}:employeeNumber"), "value": "N-2" },
+                { "op": "replace", "path": "externalId", "value": "SECOND-1" },
+            ]))),
+        )
+        .await;
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!(changed["id"], json!(id));
+    assert_eq!(changed["externalId"], json!("SECOND-1"));
+    assert_eq!(changed[ENTERPRISE]["employeeNumber"], json!("N-2"));
+    let (status, own) = replica
+        .send(Method::GET, &path, Some(&first_bearer), None)
+        .await;
+    assert_eq!(status, 200, "{own}");
+    assert_eq!(own["externalId"], json!(format!("EMP-{user_name}")));
+    assert_eq!(own[ENTERPRISE]["employeeNumber"], json!("N-2"));
+    let (status, refused) = replica
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&second_bearer),
+            Some(patch(
+                json!([{ "op": "replace", "path": "title", "value": "Lead" }]),
+            )),
+        )
+        .await;
+    assert_eq!(status, 403, "a part it was not given: {refused}");
+    let (status, refused) = replica
+        .send(Method::DELETE, &path, Some(&second_bearer), None)
+        .await;
+    assert_eq!(status, 403, "the user was deleted: {refused}");
+    let (status, _) = replica
+        .send(Method::GET, &path, Some(&first_bearer), None)
+        .await;
+    assert_eq!(status, 200, "a refused deletion removed the user");
+
+    // The old assignment repeated names a revision it moved past.
+    let stale = assign(before)
+        .await
+        .expect_err("an old assignment repeated");
+    assert_eq!(stale.code(), tonic::Code::Aborted);
+
+    let assigned_at = revision(&second).await;
+    withdraw(assigned_at)
+        .await
+        .expect("the manager withdraws the user");
+    let (status, refused) = replica
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&second_bearer),
+            Some(number("N-3")),
+        )
+        .await;
+    assert_eq!(
+        status, 403,
+        "a withdrawn source changed the user: {refused}"
+    );
+    // Still a source of the user: it is shown its own identifier.
+    let (status, kept) = replica
+        .send(Method::GET, &path, Some(&second_bearer), None)
+        .await;
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(kept["externalId"], json!("SECOND-1"));
+    assert_eq!(kept[ENTERPRISE]["employeeNumber"], json!("N-2"));
+
+    // Old commands repeated after the withdrawal change nothing.
+    let stale = assign(before)
+        .await
+        .expect_err("an old assignment repeated");
+    assert_eq!(stale.code(), tonic::Code::Aborted);
+    let stale = withdraw(assigned_at)
+        .await
+        .expect_err("an old withdrawal repeated");
+    assert_eq!(stale.code(), tonic::Code::Aborted);
+    // A withdrawal that finds nothing to withdraw changes nothing.
+    let current = revision(&second).await;
+    let unchanged = withdraw(current).await.expect("nothing to withdraw");
+    assert_eq!(unchanged.into_inner().revision, current);
+
+    // An unknown user is not found.
+    let unknown: sid_ids_proto::DirectoryUserId = sid_ids::DirectoryUserId::generate().into();
+    let missing = replica
+        .provisioning
+        .assign_directory_user(admin(pb::AssignDirectoryUserRequest {
+            connector_id: second.proto.id.clone(),
+            revision: current,
+            user_id: Some(unknown),
+            rights: vec![EMPLOYEE_NUMBER],
+        }))
+        .await
+        .expect_err("an unknown user");
+    assert_eq!(missing.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn a_manager_assigns_an_existing_user_on_postgres() {
+    a_manager_assigns_an_existing_user(Engine::Postgres).await;
+}
+
+#[tokio::test]
+async fn a_manager_assigns_an_existing_user_on_sqlite() {
+    a_manager_assigns_an_existing_user(Engine::Sqlite).await;
 }
 
 /// A connector stored directly, as no administration API creates it: of

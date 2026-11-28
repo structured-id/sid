@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use sid_core::models::{
-    AuditEntry, GroupId, MutationContext, OperationCompletion, OperationKey, OutboundEntityType,
-    ProfileId, ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
+    AssignmentsOf, AuditEntry, DirectoryTarget, GroupId, MutationContext, OperationCompletion,
+    OperationKey, OutboundEntityType, ProfileId, ScimOutboundRecord, ScimOutboundTarget,
+    ScimOutboundTargetId,
     event::{Event, RequiredReceiver, SCIM_OUTBOUND_RECEIVER, WorkRecipient, event_types},
 };
 use sid_plugin::StorageBackend;
@@ -374,8 +375,26 @@ impl ScimOutboundWorker {
         profile_id: ProfileId,
     ) -> Result<(), ScimClientError> {
         let (profile, principals, metadata) = self.load_profile_data(profile_id).await?;
-        let user =
+        let mut user =
             mapper::build_scim_user(&profile, &principals, &metadata, &target.attribute_mapping);
+        // A user that is a relationship with an identity signing in
+        // elsewhere goes out with the relationship's own state: a
+        // deactivated or deleted one is never sent active because the
+        // identity's account is in use.
+        let relationship = matches!(DirectoryTarget::of(&profile), DirectoryTarget::Relationship);
+        let live = self
+            .storage
+            .directory_users_of(&[profile_id])
+            .await
+            .map_err(storage)?;
+        if relationship {
+            user.active = user.active && live.first().is_some_and(|resource| resource.active);
+        }
+        // What a directory source assigned stands on the live resource: a
+        // relationship's own state, or for any user the resource itself. A
+        // local account that is only suspended keeps its memberships, so its
+        // groups are not pushed again for that.
+        let grounds_moved = relationship || live.is_empty();
         let entity = profile_id.into_uuid();
         let kind = OutboundEntityType::User;
 
@@ -421,7 +440,44 @@ impl ScimOutboundWorker {
             id
         };
         self.join_groups(target, client, profile_id, &downstream)
+            .await?;
+        if grounds_moved {
+            self.follow_assignments(target, client, profile_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Push the groups a directory source assigned `profile_id` to and the
+    /// target has. Such an assignment gives membership only while the
+    /// resource it rests on is live and active, so a change of that
+    /// changes the groups without a group event of its own.
+    async fn follow_assignments(
+        &self,
+        target: &ScimOutboundTarget,
+        client: &ScimHttpClient,
+        profile_id: ProfileId,
+    ) -> Result<(), ScimClientError> {
+        let mut groups: Vec<GroupId> = self
+            .storage
+            .list_group_assignments(AssignmentsOf::Profile(profile_id))
             .await
+            .map_err(storage)?
+            .into_iter()
+            .filter(|assignment| assignment.source.is_some())
+            .map(|assignment| assignment.member.group_id)
+            .collect();
+        groups.sort();
+        groups.dedup();
+        for group_id in groups {
+            if self
+                .find_downstream_id(target.id, group_id.into_uuid(), OutboundEntityType::Group)
+                .await?
+                .is_some()
+            {
+                self.sync_group(target, client, group_id).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Bring the user `downstream` into each of its groups the target has,

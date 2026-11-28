@@ -953,7 +953,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        super::directory::add_member(&mut tx, member).await?;
+        super::directory::add_member(&mut tx, member, None).await?;
         Self::commit_mutation(tx, &format!("group:{}", member.group_id), audit).await
     }
 
@@ -964,7 +964,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        super::directory::remove_member(&mut tx, group_id, profile_id).await?;
+        super::directory::remove_member(&mut tx, group_id, profile_id, None).await?;
         Self::commit_mutation(tx, &format!("group:{group_id}"), audit).await
     }
 
@@ -994,6 +994,40 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         rows.iter().map(row_to_group).collect()
+    }
+
+    pub(crate) async fn list_group_assignments_impl(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        use sqlx::Row as _;
+        let read = |e: sqlx::Error| SidError::Storage(format!("group assignments: {e}"));
+        let query = match of {
+            AssignmentsOf::Group(group) => sqlx::query(
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE group_id = ? ORDER BY profile_id, connector_id",
+            )
+            .bind(group),
+            AssignmentsOf::Profile(profile) => sqlx::query(
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE profile_id = ? ORDER BY group_id, connector_id",
+            )
+            .bind(profile),
+        };
+        query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(read)?
+            .iter()
+            .map(|row| {
+                let connector: uuid::Uuid = row.try_get("connector_id").map_err(read)?;
+                Ok(sid_core::models::GroupAssignment {
+                    member: row_to_group_member(row)?,
+                    source: crate::directory_query::assignment_source(connector)?,
+                })
+            })
+            .collect()
     }
 
     // === RoleAssignment ===

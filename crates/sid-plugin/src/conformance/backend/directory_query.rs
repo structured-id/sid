@@ -9,9 +9,9 @@ use jiff::Timestamp;
 use sid_core::models::profile_email::EmailLabel;
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter as F, DirectoryOperator as Op, DirectoryQuery,
-    DirectorySource, DirectoryUserWrite, DirectoryWriteMode, OrgId, Principal, PrincipalType,
-    Profile, ProfileEmail, ProfileEmailId, ProfileMetadata, ProfileStatus, ProvisioningConnector,
-    ProvisioningConnectorId, ProvisioningDirection,
+    DirectoryRights, DirectorySource, DirectoryUserWrite, DirectoryWriteMode, OrgId, Principal,
+    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileMetadata, ProfileStatus,
+    ProvisioningConnector, ProvisioningConnectorId, ProvisioningDirection,
 };
 use sid_plugin::storage::StorageBackend;
 
@@ -392,6 +392,31 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
         &[("title", "Lead")],
     )
     .await;
+    // A phone contact with a label of its own.
+    let now = Timestamp::now();
+    let mut with_phone = DirectoryUserWrite::new(DirectoryWriteMode::Update, carol.clone());
+    with_phone
+        .add_phones
+        .push(sid_core::models::profile_phone::ProfilePhone {
+            id: sid_core::models::profile_phone::ProfilePhoneId::new(),
+            profile_id: carol.id,
+            e164: 10_000_000_000 + u64::from(uuid::Uuid::now_v7().as_fields().0),
+            extension: None,
+            label: sid_core::models::profile_phone::PhoneLabel::Mobile,
+            custom_label: None,
+            is_primary: true,
+            can_receive_sms: true,
+            can_receive_fax: false,
+            can_receive_voice: true,
+            verified: false,
+            verified_at: None,
+            created_at: now,
+            updated_at: now,
+        });
+    backend
+        .write_directory_user(&with_phone, test_audit())
+        .await
+        .unwrap();
     let dave = add_user(backend, &domain, "dave", &[], &[]).await;
     let mut suspended = dave.clone();
     suspended.status = ProfileStatus::Suspended;
@@ -421,8 +446,15 @@ pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBa
             .all(|p| p.profile_id == carol.id)
     );
     assert_eq!(carol_page.metadata.len(), 1);
+    assert_eq!(carol_page.phones.len(), 1);
+    assert_eq!(carol_page.phones[0].profile_id, carol.id);
+    assert_eq!(
+        carol_page.phones[0].label,
+        sid_core::models::profile_phone::PhoneLabel::Mobile
+    );
     let dave_page = page.users.iter().find(|u| u.profile.id == dave.id).unwrap();
     assert!(dave_page.emails.is_empty() && dave_page.metadata.is_empty());
+    assert!(dave_page.phones.is_empty());
 
     let (_, inactive) = names(
         backend,
@@ -488,6 +520,424 @@ pub async fn test_directory_active_follows_use(backend: &dyn StorageBackend) {
     .await;
     inactive.sort();
     assert_eq!(inactive, vec!["closing", "held", "suspended"]);
+}
+
+/// The resource carries a state of its own beside the account's. Setting it
+/// is a change of the resource (its revision moves), a repeat is none, and
+/// the account is left as it was either way. A user that is a managed local
+/// account shows the account's lifecycle, in the page and for the filter
+/// alike, whatever that state is.
+pub async fn test_directory_relationship_activity(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let user = add_user(backend, &domain, "related", &[], &[]).await;
+    let resource = resource_of(backend, &user).await;
+    assert!(resource.active, "a new relationship is active");
+    let set = async |active: Option<bool>, status: ProfileStatus| {
+        // The account as stored, in the state the write leaves it in.
+        let mut account = backend.get_profile(user.id).await.unwrap().unwrap();
+        account.status = status;
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+        backend
+            .find_directory_user(resource.id)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // What the directory shows of the user: the page's value, and which of
+    // the two `active` filters finds it.
+    let shown = async || {
+        let by = async |value: &str| {
+            names(
+                backend,
+                &query(&domain, compare(Attr::Active, Op::Eq, value), 0, 10),
+            )
+            .await
+            .1
+        };
+        let page = backend
+            .query_directory(&query(&domain, F::Present(Attr::UserName), 0, 10))
+            .await
+            .unwrap();
+        assert_eq!(page.users.len(), 1);
+        let active = page.users[0].active;
+        assert_eq!(by("true").await.len(), usize::from(active));
+        assert_eq!(by("false").await.len(), usize::from(!active));
+        active
+    };
+    assert!(shown().await);
+
+    // A write that names no state leaves it and the revision.
+    assert_eq!(set(None, user.status).await, resource);
+
+    let ended = set(Some(false), user.status).await;
+    assert!(!ended.active);
+    assert_eq!(ended.revision, resource.revision + 1);
+    assert!(shown().await, "a managed account shows its own lifecycle");
+    let account = backend.get_profile(user.id).await.unwrap().unwrap();
+    assert_eq!(account.status, user.status, "the account is not touched");
+    assert_eq!(
+        set(Some(false), user.status).await,
+        ended,
+        "a repeat changes nothing"
+    );
+
+    let restored = set(Some(true), user.status).await;
+    assert!(restored.active);
+    assert_eq!(restored.revision, ended.revision + 1);
+    assert!(shown().await);
+
+    // A managed account that cannot be used is not an active user.
+    assert!(set(None, ProfileStatus::Suspended).await.active);
+    assert!(!shown().await);
+}
+
+/// What `active` tells depends on what the user stands for. A user that is
+/// a relationship with an identity signing in elsewhere shows the state of
+/// the relationship alone: a block on the identity's own account does not
+/// make an active relationship inactive, nor the reverse. A read, a page
+/// and a filter agree.
+pub async fn test_directory_relationship_activity_is_its_own(backend: &dyn StorageBackend) {
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    // Found among a shared database's users by a value of this run only.
+    let mark = uuid::Uuid::now_v7().simple().to_string();
+    let write = async |status: ProfileStatus, active: Option<bool>| {
+        let mut account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        account.status = status;
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        write.set_metadata.push(ProfileMetadata::new(
+            identity.id,
+            "title",
+            serde_json::Value::String(mark.clone()),
+        ));
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let shown = async || {
+        let found = async |value: &str| {
+            backend
+                .query_directory(&DirectoryQuery {
+                    org_domain: domain(),
+                    filter: Some(F::And(
+                        Box::new(compare(Attr::Title, Op::Eq, &mark)),
+                        Box::new(compare(Attr::Active, Op::Eq, value)),
+                    )),
+                    offset: 0,
+                    limit: 10,
+                    source: None,
+                })
+                .await
+                .unwrap()
+                .users
+        };
+        let (active, inactive) = (found("true").await, found("false").await);
+        assert_eq!(active.len() + inactive.len(), 1, "one of the two finds it");
+        let page = active.first().or(inactive.first()).unwrap().active;
+        assert_eq!(page, !active.is_empty(), "the page and the filter agree");
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let read = backend
+            .find_directory_user(resource.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shows_active(&account);
+        assert_eq!(read, page, "a read and the page agree");
+        page
+    };
+
+    write(ProfileStatus::Active, None).await;
+    assert!(shown().await);
+    // The identity's own account is blocked: the relationship stays active.
+    write(ProfileStatus::Suspended, None).await;
+    assert!(shown().await, "an account block ended the relationship");
+    // The relationship is ended while the account is in use.
+    write(ProfileStatus::Active, Some(false)).await;
+    assert!(!shown().await);
+}
+
+/// A member belongs to a group while any assignment of it stands. Each
+/// inbound source owns its assignments and a local one is independent of
+/// them: removing one leaves the others. A source's assignment rests on the
+/// member's directory resource: while that relationship is inactive or
+/// deleted it gives no membership, an independent assignment still does,
+/// and reactivating the relationship makes only the assignments that still
+/// exist count again.
+pub async fn test_directory_membership_follows_its_grounds(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryGroupWrite, Group, GroupMember, ProjectId};
+    backend.ensure_system_project(test_audit()).await.unwrap();
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    let (first, second) = (add_source(backend).await, add_source(backend).await);
+    let group = Group::new(
+        ProjectId::SYSTEM,
+        format!("grounds_{}", uuid::Uuid::now_v7().simple()),
+    );
+    backend
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+
+    let assign = async |source: Option<ProvisioningConnectorId>, member: bool| {
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone());
+        write.source = source;
+        if member {
+            write
+                .add_members
+                .push(GroupMember::new(group.id, identity.id));
+        } else {
+            write.remove_members.push(identity.id);
+        }
+        backend
+            .write_directory_group(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let relationship = async |active: Option<bool>, delete: bool| {
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        write.delete_resource = delete;
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let belongs = async || {
+        let listed = backend
+            .list_group_members(group.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.profile_id == identity.id);
+        let of_member = backend
+            .list_groups_for_profile(identity.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|g| g.id == group.id);
+        assert_eq!(listed, of_member, "the two reads of membership agree");
+        listed
+    };
+
+    // Two sources and a local assignment: each removal leaves the others.
+    assign(Some(first), true).await;
+    assign(Some(first), true).await;
+    assign(Some(second), true).await;
+    assign(None, true).await;
+    assert!(belongs().await);
+    // Each assignment is on record with whose it is, read by the group and
+    // by the member alike, in one order on every engine.
+    let mut expected = vec![None, Some(first), Some(second)];
+    expected.sort_by_key(|source| source.map(|c| c.into_uuid()));
+    for of in [
+        sid_core::models::AssignmentsOf::Group(group.id),
+        sid_core::models::AssignmentsOf::Profile(identity.id),
+    ] {
+        let recorded = backend.list_group_assignments(of).await.unwrap();
+        assert!(
+            recorded
+                .iter()
+                .all(|a| a.member.group_id == group.id && a.member.profile_id == identity.id)
+        );
+        let sources: Vec<_> = recorded.iter().map(|a| a.source).collect();
+        assert_eq!(sources, expected, "{of:?}");
+    }
+    assign(Some(first), false).await;
+    assert!(belongs().await, "one source withdrew another's assignment");
+    assign(Some(second), false).await;
+    assert!(belongs().await, "the sources withdrew a local assignment");
+    assign(None, false).await;
+    assert!(!belongs().await, "membership outlived its last assignment");
+
+    // A source's assignment gives nothing while its relationship is
+    // inactive, and counts again when it is reactivated.
+    assign(Some(first), true).await;
+    assert!(belongs().await);
+    relationship(Some(false), false).await;
+    assert!(!belongs().await, "an inactive relationship kept its grant");
+    // The assignment stays on record while it gives nothing.
+    assert_eq!(
+        backend
+            .list_group_assignments(sid_core::models::AssignmentsOf::Group(group.id))
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.source)
+            .collect::<Vec<_>>(),
+        vec![Some(first)]
+    );
+    relationship(Some(true), false).await;
+    assert!(
+        belongs().await,
+        "reactivation did not restore a current grant"
+    );
+
+    // An assignment withdrawn while inactive is not restored.
+    assign(Some(second), true).await;
+    relationship(Some(false), false).await;
+    assign(Some(first), false).await;
+    assign(Some(second), false).await;
+    relationship(Some(true), false).await;
+    assert!(!belongs().await, "reactivation restored a withdrawn grant");
+
+    // An independent assignment stands whatever the relationship is, and
+    // a deleted relationship gives nothing.
+    assign(Some(first), true).await;
+    assign(None, true).await;
+    relationship(Some(false), false).await;
+    assert!(
+        belongs().await,
+        "a local assignment fell with the relationship"
+    );
+    assign(None, false).await;
+    assert!(!belongs().await);
+    relationship(Some(true), false).await;
+    assert!(belongs().await);
+    relationship(None, true).await;
+    assert!(!belongs().await, "a deleted relationship kept its grant");
+    // A source's assignment made when no live relationship is left rests
+    // on nothing: it is on record and gives no membership.
+    assign(Some(second), true).await;
+    assert!(
+        !belongs().await,
+        "an assignment without a live relationship gave membership"
+    );
+}
+
+/// A change of an assignment and a change of the relationship it rests on,
+/// committed at the same time, leave the membership the two together give:
+/// neither a member whose only assignment rests on an inactive relationship,
+/// nor an assignment that stands without its membership.
+pub async fn test_directory_membership_settles_under_races(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryGroupWrite, Group, GroupMember, ProjectId};
+    backend.ensure_system_project(test_audit()).await.unwrap();
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    let source = add_source(backend).await;
+    let group = Group::new(
+        ProjectId::SYSTEM,
+        format!("races_{}", uuid::Uuid::now_v7().simple()),
+    );
+    backend
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+
+    let assign = async |by: Option<ProvisioningConnectorId>, member: bool| {
+        // The group as stored: each write names the revision it read.
+        let stored = backend.get_group(group.id).await.unwrap().unwrap();
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, stored);
+        write.source = by;
+        if member {
+            write
+                .add_members
+                .push(GroupMember::new(group.id, identity.id));
+        } else {
+            write.remove_members.push(identity.id);
+        }
+        backend
+            .write_directory_group(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let relationship = async |active: bool| {
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = Some(active);
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let belongs = async || {
+        backend
+            .list_group_members(group.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.profile_id == identity.id)
+    };
+
+    for round in 0..24 {
+        // A source assigns while its relationship is deactivated.
+        tokio::join!(assign(Some(source), true), relationship(false));
+        assert!(
+            !belongs().await,
+            "round {round}: a member rests on an inactive relationship"
+        );
+
+        // A local assignment is made while the relationship the source's
+        // assignment rests on is deactivated.
+        relationship(true).await;
+        tokio::join!(assign(None, true), relationship(false));
+        assert!(
+            belongs().await,
+            "round {round}: a local assignment stands without its membership"
+        );
+        assign(None, false).await;
+        assert!(!belongs().await, "round {round}");
+
+        // The source withdraws while its relationship is reactivated.
+        tokio::join!(assign(Some(source), false), relationship(true));
+        assert!(
+            !belongs().await,
+            "round {round}: a member outlived its withdrawn assignment"
+        );
+
+        // A local assignment and the source's are withdrawn at once, each
+        // through its own entry point.
+        assign(Some(source), true).await;
+        backend
+            .add_to_group(&GroupMember::new(group.id, identity.id), test_audit())
+            .await
+            .unwrap();
+        assert!(belongs().await, "round {round}");
+        let (local, _) = tokio::join!(
+            backend.remove_from_group(group.id, identity.id, test_audit()),
+            assign(Some(source), false)
+        );
+        local.unwrap();
+        assert!(
+            !belongs().await,
+            "round {round}: a member outlived both of its assignments"
+        );
+    }
 }
 
 /// The live resource of `profile`.
@@ -691,12 +1141,15 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
             profile_id: user.id,
             revision: 3,
             deleted_at: Some(Timestamp::from_second(1_700_000_000).unwrap()),
+            active: true,
         },
+        // The live one is carried with the state of its relationship.
         DirectoryResource {
             id: DirectoryUserId::new(),
             profile_id: user.id,
             revision: 0,
             deleted_at: None,
+            active: false,
         },
     ];
     for _ in 0..2 {
@@ -788,6 +1241,20 @@ fn live(
         connector,
         external_id: Some(external_id.to_owned()),
         retired: false,
+        created: false,
+        managed: DirectoryRights::NONE,
+    }
+}
+
+/// [`live`], as the source that created the resource is recorded.
+fn creator(
+    resource: sid_core::models::DirectoryUserId,
+    connector: ProvisioningConnectorId,
+    external_id: &str,
+) -> DirectorySource {
+    DirectorySource {
+        created: true,
+        ..live(resource, connector, external_id)
     }
 }
 
@@ -995,7 +1462,7 @@ pub async fn test_directory_source_update_never_creates(backend: &dyn StorageBac
     update(a, Some("A-2"), "Renamed").await.unwrap();
     assert_eq!(
         backend.find_directory_source(a, "A-2").await.unwrap(),
-        Some(live(resource.id, a, "A-2"))
+        Some(creator(resource.id, a, "A-2"))
     );
     assert_eq!(backend.find_directory_source(a, "A-1").await.unwrap(), None);
 
@@ -1032,10 +1499,8 @@ pub async fn test_directory_source_update_never_creates(backend: &dyn StorageBac
             .await
             .unwrap(),
         vec![DirectorySource {
-            resource: resource.id,
-            connector: a,
             external_id: None,
-            retired: false,
+            ..creator(resource.id, a, "")
         }]
     );
 }
@@ -1070,7 +1535,7 @@ pub async fn test_directory_source_retired_with_the_resource(backend: &dyn Stora
     );
     let retired = DirectorySource {
         retired: true,
-        ..live(resource.id, a, "A-1")
+        ..creator(resource.id, a, "A-1")
     };
     assert!(
         backend
@@ -1085,8 +1550,262 @@ pub async fn test_directory_source_retired_with_the_resource(backend: &dyn Stora
         .expect("the identifier is free again");
     assert_eq!(
         backend.find_directory_source(a, "A-1").await.unwrap(),
-        Some(live(resource_of(backend, &again).await.id, a, "A-1"))
+        Some(creator(resource_of(backend, &again).await.id, a, "A-1"))
     );
+}
+
+/// The connector `id` as stored.
+async fn connector(
+    backend: &dyn StorageBackend,
+    id: ProvisioningConnectorId,
+) -> ProvisioningConnector {
+    backend
+        .get_provisioning_connector(id)
+        .await
+        .unwrap()
+        .expect("the connector is stored")
+}
+
+/// What a connector manages is changed only by a command based on its
+/// current revision, and every change moves the revision. A directory-wide
+/// selection and an assignment of one user are kept apart: withdrawing the
+/// user leaves the selection. An assignment makes the connector a source of
+/// the user without an identifier, keeps the identifier of a source that has
+/// one, and never marks it the creator. A withdrawal keeps the correlation;
+/// one that finds no assignment changes nothing, the revision included. A
+/// command repeated after the connector moved is stale and restores or
+/// cancels nothing.
+pub async fn test_directory_management_follows_the_revision(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryRight as R, ManagementOutcome as Outcome};
+    let domain = domain();
+    let (a, b) = (add_source(backend).await, add_source(backend).await);
+    let user = try_add_user(
+        backend,
+        &domain,
+        "assigned",
+        &[],
+        &[],
+        Some((a, Some("A-1"))),
+    )
+    .await
+    .unwrap();
+    let other = add_user(backend, &domain, "never-assigned", &[], &[]).await;
+    let resource = resource_of(backend, &user).await.id;
+    let other_resource = resource_of(backend, &other).await.id;
+    let of_b = async || {
+        backend
+            .directory_sources(Some(b), &[resource])
+            .await
+            .unwrap()
+    };
+
+    // The directory-wide selection.
+    let first = connector(backend, b).await;
+    assert!(first.directory_rights.is_empty());
+    let wide = DirectoryRights::of(&[R::EmployeeNumber]);
+    assert!(
+        backend
+            .set_directory_rights(b, first.revision, wide, test_audit())
+            .await
+            .unwrap()
+    );
+    let selected = connector(backend, b).await;
+    assert_eq!(selected.directory_rights, wide);
+    assert_eq!(selected.revision, first.revision + 1);
+    // The same command again names a revision the connector moved past.
+    assert!(
+        !backend
+            .set_directory_rights(b, first.revision, DirectoryRights::NONE, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(connector(backend, b).await, selected);
+
+    // One user, assigned.
+    let titles = DirectoryRights::of(&[R::Title]);
+    let assign = async |revision: i64| {
+        backend
+            .manage_directory_user(b, revision, resource, titles, test_audit())
+            .await
+            .unwrap()
+    };
+    assert_eq!(assign(first.revision).await, Outcome::Stale);
+    assert!(of_b().await.is_empty(), "a stale assignment wrote nothing");
+    assert_eq!(assign(selected.revision).await, Outcome::Applied);
+    let assigned = connector(backend, b).await;
+    assert_eq!(assigned.revision, selected.revision + 1);
+    assert_eq!(
+        of_b().await,
+        vec![DirectorySource {
+            resource,
+            connector: b,
+            external_id: None,
+            retired: false,
+            created: false,
+            managed: titles,
+        }]
+    );
+
+    // A withdrawal that finds no assignment changes nothing.
+    assert_eq!(
+        backend
+            .manage_directory_user(
+                b,
+                assigned.revision,
+                other_resource,
+                DirectoryRights::NONE,
+                test_audit()
+            )
+            .await
+            .unwrap(),
+        Outcome::NothingToWithdraw
+    );
+    assert_eq!(connector(backend, b).await, assigned);
+
+    // The creating source is assigned its user: its identifier and its
+    // creator mark stay.
+    let a_now = connector(backend, a).await;
+    assert_eq!(
+        backend
+            .manage_directory_user(
+                a,
+                a_now.revision,
+                resource,
+                DirectoryRights::of(&[R::Name]),
+                test_audit()
+            )
+            .await
+            .unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        backend.find_directory_source(a, "A-1").await.unwrap(),
+        Some(DirectorySource {
+            managed: DirectoryRights::of(&[R::Name]),
+            ..creator(resource, a, "A-1")
+        })
+    );
+
+    // Withdrawn: the correlation stays, the directory-wide selection too.
+    let withdraw = async |revision: i64| {
+        backend
+            .manage_directory_user(b, revision, resource, DirectoryRights::NONE, test_audit())
+            .await
+            .unwrap()
+    };
+    assert_eq!(withdraw(selected.revision).await, Outcome::Stale);
+    assert_eq!(of_b().await[0].managed, titles);
+    assert_eq!(withdraw(assigned.revision).await, Outcome::Applied);
+    let withdrawn = connector(backend, b).await;
+    assert_eq!(withdrawn.revision, assigned.revision + 1);
+    assert_eq!(withdrawn.directory_rights, wide);
+    let kept = of_b().await;
+    assert_eq!(kept.len(), 1, "the provenance stays");
+    assert!(kept[0].managed.is_empty());
+    // Neither the old assignment nor the old withdrawal acts again.
+    assert_eq!(assign(selected.revision).await, Outcome::Stale);
+    assert_eq!(withdraw(assigned.revision).await, Outcome::Stale);
+    assert!(of_b().await[0].managed.is_empty());
+    assert_eq!(connector(backend, b).await, withdrawn);
+
+    // A user that is unknown or deleted is assigned to nobody.
+    let unknown = sid_core::models::DirectoryUserId::new();
+    let refused = backend
+        .manage_directory_user(b, withdrawn.revision, unknown, titles, test_audit())
+        .await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::NotFound(_))),
+        "{refused:?}"
+    );
+    assert_eq!(connector(backend, b).await, withdrawn);
+}
+
+/// A write a connector was authorized for commits only while what the
+/// connector manages is as it was then: a selection or an assignment made
+/// in between refuses the write whole.
+pub async fn test_directory_management_change_fences_a_write(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        ActorFence, ConnectorCredentialKind, DirectoryRight as R, ProvisioningCredential,
+    };
+    let domain = domain();
+    let a = add_source(backend).await;
+    let credential =
+        ProvisioningCredential::new(a, ConnectorCredentialKind::ScimBearer, "f".repeat(64));
+    assert!(
+        backend
+            .add_provisioning_credential(&credential, test_audit())
+            .await
+            .unwrap()
+    );
+    let user = try_add_user(backend, &domain, "fenced", &[], &[], Some((a, None)))
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &user).await.id;
+    // The connector as a request authenticated it.
+    let authorized = connector(backend, a).await;
+    let write = |given: &str, profile: &Profile| {
+        let mut changed = profile.clone();
+        changed.given_name = Some(given.to_owned());
+        DirectoryUserWrite::new(DirectoryWriteMode::Update, changed).through(resource)
+    };
+    let fenced = |revision: i64| {
+        test_audit().fenced_by(ActorFence::Connector {
+            connector: a,
+            revision,
+            credential: credential.id,
+        })
+    };
+
+    for change in ["selection", "assignment"] {
+        let before = connector(backend, a).await;
+        match change {
+            "selection" => assert!(
+                backend
+                    .set_directory_rights(
+                        a,
+                        before.revision,
+                        DirectoryRights::of(&[R::Name]),
+                        test_audit()
+                    )
+                    .await
+                    .unwrap()
+            ),
+            _ => assert_eq!(
+                backend
+                    .manage_directory_user(
+                        a,
+                        before.revision,
+                        resource,
+                        DirectoryRights::NONE.with(R::Title),
+                        test_audit()
+                    )
+                    .await
+                    .unwrap(),
+                sid_core::models::ManagementOutcome::Applied
+            ),
+        }
+        let stored = backend.get_profile(user.id).await.unwrap().unwrap();
+        let refused = backend
+            .write_directory_user(&write("Stale", &stored), fenced(before.revision))
+            .await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::Fenced(_))),
+            "{change}: {refused:?}"
+        );
+        assert_eq!(
+            backend.get_profile(user.id).await.unwrap().unwrap(),
+            stored,
+            "{change}: nothing was written"
+        );
+    }
+    // Authorized again at the current revision, the write commits.
+    let stored = backend.get_profile(user.id).await.unwrap().unwrap();
+    let current = connector(backend, a).await;
+    assert!(current.revision > authorized.revision);
+    backend
+        .write_directory_user(&write("Current", &stored), fenced(current.revision))
+        .await
+        .expect("a write at the current revision commits");
 }
 
 /// Closed and purged profiles are retired records, not directory users.

@@ -4,10 +4,11 @@
 //! request's changes commit together with its audit entry and owed work.
 
 use sid_core::models::{
-    DirectoryGroupWrite, DirectoryResource, DirectorySource, DirectoryUserId, DirectoryUserWrite,
-    DirectoryWriteMode, Group, GroupId, GroupMember, MutationContext, Principal, PrincipalId,
-    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileId, ProfileMetadata, ProfilePhone,
-    ProfilePhoneId, ProvisioningConnectorId, Session, SessionEnd, SourceWrite,
+    DirectoryGroupWrite, DirectoryResource, DirectoryRights, DirectorySource, DirectoryUserId,
+    DirectoryUserWrite, DirectoryWriteMode, Group, GroupId, GroupMember, ManagementOutcome,
+    MutationContext, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId,
+    ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, ProvisioningConnectorId, Session,
+    SessionEnd, SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -99,17 +100,20 @@ pub(super) fn resource(row: &sqlx::postgres::PgRow) -> SidResult<DirectoryResour
         revision: u64::try_from(revision)
             .map_err(|e| SidError::Storage(format!("directory resource revision: {e}")))?,
         deleted_at: deleted_at.map(Into::into),
+        active: row.try_get("active").map_err(read)?,
     })
 }
 
 /// Hold the live resource `id` of `profile_id` for the rest of the write,
-/// deleting it when `delete`; anything else (unknown, deleted, another
-/// account's) is `NotFound`.
+/// deleting it when `delete` and setting the relationship's activity when
+/// `active` is given; anything else (unknown, deleted, another account's) is
+/// `NotFound`.
 async fn hold_resource(
     tx: &mut Tx<'_>,
     id: DirectoryUserId,
     profile_id: ProfileId,
     delete: bool,
+    active: Option<bool>,
 ) -> SidResult<()> {
     let held = if delete {
         sqlx::query(
@@ -122,10 +126,16 @@ async fn hold_resource(
         .await
         .map(|r| r.rows_affected() == 1)
     } else {
-        sqlx::query_scalar::<_, Uuid>(
+        // A write that changes the activity takes the lock its update needs
+        // at once: two of them that each held the row shared first would wait
+        // on each other.
+        sqlx::query_scalar::<_, Uuid>(if active.is_some() {
             "SELECT id FROM directory_users
-             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR SHARE",
-        )
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        } else {
+            "SELECT id FROM directory_users
+             WHERE id = $1 AND profile_id = $2 AND deleted_at IS NULL FOR SHARE"
+        })
         .bind(id.0)
         .bind(profile_id)
         .fetch_optional(&mut **tx)
@@ -143,11 +153,32 @@ async fn hold_resource(
             .execute(&mut **tx)
             .await
             .map_err(storage("directory sources"))?;
+    } else if let Some(active) = active {
+        // A change of the relationship's state is a change of the resource.
+        sqlx::query(
+            "UPDATE directory_users SET active = $2, revision = revision + 1
+             WHERE id = $1 AND active <> $2",
+        )
+        .bind(id.0)
+        .bind(active)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("directory resource activity"))?;
+    }
+    if delete || active.is_some() {
+        // The memberships resting on this resource stand or fall with it.
+        settle_resource_members(tx, id).await?;
     }
     Ok(())
 }
 
-pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired";
+pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired, created, managed";
+
+/// A stored set of rights; bits that are no right are a broken record.
+pub(super) fn rights(bits: i32) -> SidResult<DirectoryRights> {
+    DirectoryRights::from_bits(bits)
+        .ok_or_else(|| SidError::Storage(format!("directory rights: unknown bits in {bits}")))
+}
 
 pub(super) fn source(row: &sqlx::postgres::PgRow) -> SidResult<DirectorySource> {
     use sqlx::Row;
@@ -157,6 +188,8 @@ pub(super) fn source(row: &sqlx::postgres::PgRow) -> SidResult<DirectorySource> 
         connector: row.try_get("connector_id").map_err(read)?,
         external_id: row.try_get("external_id").map_err(read)?,
         retired: row.try_get("retired").map_err(read)?,
+        created: row.try_get("created").map_err(read)?,
+        managed: rights(row.try_get("managed").map_err(read)?)?,
     })
 }
 
@@ -178,8 +211,10 @@ async fn record_source(
     source: &SourceWrite,
 ) -> SidResult<()> {
     sqlx::query(
-        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id)
-         SELECT id, $2, $3 FROM directory_users WHERE profile_id = $1 AND deleted_at IS NULL",
+        // The creator is recorded as such and assigned nothing by creating.
+        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, created)
+         SELECT id, $2, $3, TRUE FROM directory_users
+         WHERE profile_id = $1 AND deleted_at IS NULL",
     )
     .bind(profile_id)
     .bind(source.connector)
@@ -733,22 +768,139 @@ async fn update_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<bool> {
         .map_err(|e| insert_error("group", e))
 }
 
-/// Add a member (a repeat is no change). A grant the new member made to the
+/// The stored origin of an assignment made by `source`: the nil UUID stands
+/// for one made locally.
+fn origin(source: Option<sid_core::models::ProvisioningConnectorId>) -> Uuid {
+    source.map_or(Uuid::nil(), |connector| connector.into_uuid())
+}
+
+/// Make `group_members` agree with the assignments of `profile_id` to
+/// `group_id`: a member while any assignment stands. A local one always
+/// does; a connector's does while the resource it rests on is live and
+/// active.
+async fn settle_member(
+    tx: &mut Tx<'_>,
+    group_id: GroupId,
+    profile_id: ProfileId,
+    added_at: jiff::Timestamp,
+) -> SidResult<()> {
+    macro_rules! standing {
+        () => {
+            "(SELECT 1 FROM group_member_origins o
+              LEFT JOIN directory_users d ON d.id = o.resource_id
+              WHERE o.group_id = $1 AND o.profile_id = $2
+                AND (o.connector_id = '00000000-0000-0000-0000-000000000000'
+                     OR (d.id IS NOT NULL AND d.deleted_at IS NULL AND d.active)))"
+        };
+    }
+    sqlx::query(concat!(
+        "INSERT INTO group_members (group_id, profile_id, added_at)
+         SELECT $1, $2, $3 WHERE EXISTS ",
+        standing!(),
+        " ON CONFLICT (group_id, profile_id) DO NOTHING"
+    ))
+    .bind(group_id)
+    .bind(profile_id)
+    .bind(added_at.pg())
+    .execute(&mut **tx)
+    .await
+    .map_err(member_error)?;
+    sqlx::query(concat!(
+        "DELETE FROM group_members WHERE group_id = $1 AND profile_id = $2
+         AND NOT EXISTS ",
+        standing!()
+    ))
+    .bind(group_id)
+    .bind(profile_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("settle group member"))?;
+    Ok(())
+}
+
+/// Settle every membership that rests on the directory resource `resource`,
+/// after its activity or its deletion changed.
+async fn settle_resource_members(tx: &mut Tx<'_>, resource: DirectoryUserId) -> SidResult<()> {
+    let resting: Vec<(GroupId, ProfileId)> = sqlx::query_as(
+        "SELECT group_id, profile_id FROM group_member_origins WHERE resource_id = $1",
+    )
+    .bind(resource.0)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(storage("memberships of a directory resource"))?;
+    for (group_id, profile_id) in resting {
+        settle_member(tx, group_id, profile_id, jiff::Timestamp::now()).await?;
+    }
+    Ok(())
+}
+
+/// Hold the live directory resource of `profile_id` against a change of its
+/// activity or its deletion until this write commits. A membership is
+/// settled from the assignments and the resource together, so a write of
+/// either waits for a write of the other: whichever commits second settles
+/// with the first one's change in view.
+async fn hold_member_resource(tx: &mut Tx<'_>, profile_id: ProfileId) -> SidResult<()> {
+    sqlx::query(
+        "SELECT 1 FROM directory_users
+         WHERE profile_id = $1 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(profile_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(drop)
+    .map_err(storage("hold a member's directory resource"))
+}
+
+/// Take the membership of `profile_id` in `group_id` for this write: two
+/// changes of its assignments, whichever entry point each comes through,
+/// run one after the other, so the second settles with the first one's
+/// assignment in view. Held first, before the member's resource.
+async fn hold_membership(
+    tx: &mut Tx<'_>,
+    group_id: GroupId,
+    profile_id: ProfileId,
+) -> SidResult<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(
+            'sid.group_member' || chr(31) || $1::text || chr(31) || $2::text, 0))",
+    )
+    .bind(group_id)
+    .bind(profile_id)
+    .execute(&mut **tx)
+    .await
+    .map(drop)
+    .map_err(storage("hold a group membership"))?;
+    hold_member_resource(tx, profile_id).await
+}
+
+/// Record the assignment `member` made by `source` (a repeat is no change)
+/// and settle the membership. A connector's assignment rests on the
+/// member's live directory resource. A grant the new member made to the
 /// group stays withheld from it (`RoleAssignment::withheld_from`), so joining
 /// needs no check against the group's grants.
-pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResult<()> {
+pub(super) async fn add_member(
+    tx: &mut Tx<'_>,
+    member: &GroupMember,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
+) -> SidResult<()> {
+    hold_membership(tx, member.group_id, member.profile_id).await?;
     sqlx::query(
-        "INSERT INTO group_members (group_id, profile_id, added_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (group_id, profile_id) DO NOTHING",
+        "INSERT INTO group_member_origins (group_id, profile_id, connector_id, resource_id, added_at)
+         VALUES ($1, $2, $3,
+            CASE WHEN $4 THEN (SELECT d.id FROM directory_users d
+                               WHERE d.profile_id = $2 AND d.deleted_at IS NULL) END,
+            $5)
+         ON CONFLICT (group_id, profile_id, connector_id) DO NOTHING",
     )
     .bind(member.group_id)
     .bind(member.profile_id)
+    .bind(origin(source))
+    .bind(source.is_some())
     .bind(member.added_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(member_error)?;
-    Ok(())
+    settle_member(tx, member.group_id, member.profile_id, member.added_at).await
 }
 
 /// A member that is no account is the caller's mistake, not a fault.
@@ -761,19 +913,26 @@ fn member_error(e: sqlx::Error) -> SidError {
     }
 }
 
-/// Remove a member.
+/// Withdraw the assignment of `profile_id` to `group_id` made by `source`
+/// and settle the membership: another origin's assignment keeps it.
 pub(super) async fn remove_member(
     tx: &mut Tx<'_>,
     group_id: GroupId,
     profile_id: ProfileId,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
-    sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND profile_id = $2")
-        .bind(group_id)
-        .bind(profile_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(storage("remove group member"))?;
-    Ok(())
+    hold_membership(tx, group_id, profile_id).await?;
+    sqlx::query(
+        "DELETE FROM group_member_origins
+         WHERE group_id = $1 AND profile_id = $2 AND connector_id = $3",
+    )
+    .bind(group_id)
+    .bind(profile_id)
+    .bind(origin(source))
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("remove group member"))?;
+    settle_member(tx, group_id, profile_id, jiff::Timestamp::now()).await
 }
 
 impl PostgresBackend {
@@ -805,7 +964,14 @@ impl PostgresBackend {
                 // The resource first: a deletion that committed since the
                 // caller read it refuses the write as not found.
                 if let Some(resource) = write.resource {
-                    hold_resource(&mut tx, resource, profile_id, write.delete_resource).await?;
+                    hold_resource(
+                        &mut tx,
+                        resource,
+                        profile_id,
+                        write.delete_resource,
+                        write.resource_active,
+                    )
+                    .await?;
                     if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
                         update_source(&mut tx, resource, source).await?;
                     }
@@ -877,7 +1043,7 @@ impl PostgresBackend {
         id: DirectoryUserId,
     ) -> SidResult<Option<DirectoryResource>> {
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users WHERE id = $1",
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -894,7 +1060,7 @@ impl PostgresBackend {
     ) -> SidResult<Vec<DirectoryResource>> {
         let ids: Vec<Uuid> = profiles.iter().map(|p| Uuid::from(*p)).collect();
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users
              WHERE profile_id = ANY($1) AND deleted_at IS NULL ORDER BY profile_id",
         )
         .bind(ids)
@@ -961,7 +1127,7 @@ impl PostgresBackend {
 
     pub(super) async fn export_directory_users_impl(&self) -> SidResult<Vec<DirectoryResource>> {
         sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users ORDER BY profile_id, id",
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users ORDER BY profile_id, id",
         )
         .fetch_all(&self.pool)
         .await
@@ -1007,16 +1173,17 @@ impl PostgresBackend {
             let revision = i64::try_from(r.revision)
                 .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
             let written = sqlx::query(
-                "INSERT INTO directory_users (id, profile_id, revision, deleted_at)
-                 VALUES ($1, $2, $3, $4)
+                "INSERT INTO directory_users (id, profile_id, revision, deleted_at, active)
+                 VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT (id) DO UPDATE SET revision = EXCLUDED.revision,
-                    deleted_at = EXCLUDED.deleted_at
+                    deleted_at = EXCLUDED.deleted_at, active = EXCLUDED.active
                  WHERE directory_users.profile_id = EXCLUDED.profile_id",
             )
             .bind(r.id.0)
             .bind(profile_id)
             .bind(revision)
             .bind(r.deleted_at.pg())
+            .bind(r.active)
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error("directory resource", e))?
@@ -1036,13 +1203,16 @@ impl PostgresBackend {
             .map_err(storage("replace directory sources"))?;
         for s in sources {
             sqlx::query(
-                "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, retired)
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO directory_user_sources
+                     (resource_id, connector_id, external_id, retired, created, managed)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(s.resource.0)
             .bind(s.connector)
             .bind(s.external_id.as_deref())
             .bind(s.retired)
+            .bind(s.created)
+            .bind(s.managed.bits())
             .execute(&mut *tx)
             .await
             .map_err(source_error)?;
@@ -1050,6 +1220,106 @@ impl PostgresBackend {
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(())
+    }
+
+    pub(super) async fn set_directory_rights_impl(
+        &self,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        rights: DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The revision moves with the selection: a write the connector was
+        // authorized for before it no longer commits.
+        let moved = sqlx::query(
+            "UPDATE provisioning_connectors
+             SET directory_rights = $3, revision = revision + 1, updated_at = NOW()
+             WHERE id = $1 AND revision = $2",
+        )
+        .bind(connector)
+        .bind(revision)
+        .bind(rights.bits())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("set directory rights"))?
+        .rows_affected()
+            == 1;
+        if !moved {
+            return Ok(false);
+        }
+        Self::audit_in_tx(&mut tx, &format!("provisioning_connector:{connector}"), ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(true)
+    }
+
+    pub(super) async fn manage_directory_user_impl(
+        &self,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        resource: DirectoryUserId,
+        rights: DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<ManagementOutcome> {
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The connector's row is held at the revision the command names: a
+        // command based on an older one changes nothing.
+        let current = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM provisioning_connectors WHERE id = $1 AND revision = $2 FOR UPDATE",
+        )
+        .bind(connector)
+        .bind(revision)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage("hold connector"))?
+        .is_some();
+        if !current {
+            return Ok(ManagementOutcome::Stale);
+        }
+        let live = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM directory_users WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+        )
+        .bind(resource.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage("directory resource"))?
+        .is_some();
+        if !live {
+            return Err(SidError::NotFound(format!("directory user {resource}")));
+        }
+        if rights.is_empty() {
+            let withdrawn = sqlx::query(
+                "UPDATE directory_user_sources SET managed = 0
+                 WHERE resource_id = $1 AND connector_id = $2 AND NOT retired AND managed <> 0",
+            )
+            .bind(resource.0)
+            .bind(connector)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("withdraw directory user"))?
+            .rows_affected();
+            if withdrawn == 0 {
+                return Ok(ManagementOutcome::NothingToWithdraw);
+            }
+        } else {
+            // A connector that already knows the user keeps its identifier.
+            sqlx::query(
+                "INSERT INTO directory_user_sources (resource_id, connector_id, managed)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (resource_id, connector_id)
+                 DO UPDATE SET managed = excluded.managed",
+            )
+            .bind(resource.0)
+            .bind(connector)
+            .bind(rights.bits())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("assign directory user"))?;
+        }
+        Self::bump_connector_revision(&mut tx, connector).await?;
+        Self::audit_in_tx(&mut tx, &format!("provisioning_connector:{connector}"), ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(ManagementOutcome::Applied)
     }
 
     pub(super) async fn write_directory_group_impl(
@@ -1068,7 +1338,7 @@ impl PostgresBackend {
             }
         }
         for profile_id in &write.remove_members {
-            remove_member(&mut tx, group_id, *profile_id).await?;
+            remove_member(&mut tx, group_id, *profile_id, write.source).await?;
         }
         for member in &write.add_members {
             if member.group_id != group_id {
@@ -1076,7 +1346,7 @@ impl PostgresBackend {
                     "a group write adds members to its own group only".into(),
                 ));
             }
-            add_member(&mut tx, member).await?;
+            add_member(&mut tx, member, write.source).await?;
         }
         Self::audit_in_tx(&mut tx, &format!("group:{group_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;

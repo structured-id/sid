@@ -60,6 +60,20 @@ pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<C
     })
 }
 
+/// Whose a stored group assignment is: the nil UUID stands for one made
+/// locally, anything else is the inbound connector that made it.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+pub(crate) fn assignment_source(
+    connector: uuid::Uuid,
+) -> SidResult<Option<sid_core::models::ProvisioningConnectorId>> {
+    if connector.is_nil() {
+        return Ok(None);
+    }
+    sid_core::models::ProvisioningConnectorId::from_slice(connector.as_bytes())
+        .map(Some)
+        .map_err(|e| SidError::Storage(format!("group assignment origin: {e}")))
+}
+
 /// The page's users in their order, each with its live resource and its own
 /// principals, emails and metadata from the batch reads. A profile whose
 /// resource is not among `resources` is a storage fault: the page was
@@ -71,13 +85,14 @@ pub(crate) fn assemble(
     sources: Vec<sid_core::models::DirectorySource>,
     principals: Vec<sid_core::models::Principal>,
     emails: Vec<sid_core::models::ProfileEmail>,
+    phones: Vec<sid_core::models::ProfilePhone>,
     metadata: Vec<sid_core::models::ProfileMetadata>,
 ) -> sid_core::Result<Vec<sid_core::models::DirectoryUser>> {
     use std::collections::HashMap;
     let resource_of: HashMap<_, _> = resources
         .into_iter()
         .filter(|r| r.is_live())
-        .map(|r| (r.profile_id, r.id))
+        .map(|r| (r.profile_id, r))
         .collect();
     let mut external_id_of: HashMap<_, _> = sources
         .into_iter()
@@ -95,6 +110,10 @@ pub(crate) fn assemble(
     for email in emails {
         emails_of.entry(email.profile_id).or_default().push(email);
     }
+    let mut phones_of: HashMap<_, Vec<_>> = HashMap::new();
+    for phone in phones {
+        phones_of.entry(phone.profile_id).or_default().push(phone);
+    }
     let mut metadata_of: HashMap<_, Vec<_>> = HashMap::new();
     for entry in metadata {
         metadata_of.entry(entry.profile_id).or_default().push(entry);
@@ -102,17 +121,20 @@ pub(crate) fn assemble(
     profiles
         .into_iter()
         .map(|profile| {
-            let id = *resource_of.get(&profile.id).ok_or_else(|| {
+            let resource = *resource_of.get(&profile.id).ok_or_else(|| {
                 sid_core::Error::Storage(format!(
                     "directory user of profile {} has no live resource",
                     profile.id
                 ))
             })?;
+            let id = resource.id;
             Ok(sid_core::models::DirectoryUser {
                 id,
                 external_id: external_id_of.remove(&id),
+                active: resource.shows_active(&profile),
                 principals: principals_of.remove(&profile.id).unwrap_or_default(),
                 emails: emails_of.remove(&profile.id).unwrap_or_default(),
+                phones: phones_of.remove(&profile.id).unwrap_or_default(),
                 metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
                 profile,
             })
@@ -221,13 +243,19 @@ impl Writer {
                         ));
                     }
                 };
-                // `ProfileStatus::is_in_use`: an account in use or waiting
-                // for its user is active, every other state is not.
-                self.sql.push_str(if wanted {
-                    "p.status IN ('active', 'provisioned')"
-                } else {
-                    "p.status NOT IN ('active', 'provisioned')"
-                });
+                // `DirectoryResource::shows_active`: a relationship
+                // (`DirectoryTarget::of`: a record that is not a local
+                // account) shows its own state; a managed account is active
+                // while in use or waiting for its user
+                // (`ProfileStatus::is_in_use`).
+                const ACTIVE: &str = "(CASE WHEN p.profile_type = 'federated' THEN p.id IN \
+                     (SELECT d.profile_id FROM directory_users d \
+                      WHERE d.deleted_at IS NULL AND d.active) \
+                     ELSE p.status IN ('active', 'provisioned') END)";
+                if !wanted {
+                    self.sql.push_str("NOT ");
+                }
+                self.sql.push_str(ACTIVE);
             }
             Attr::UserName | Attr::Email | Attr::Phone => {
                 // A semi-join by `IN`, not a correlated `EXISTS`: SQLite

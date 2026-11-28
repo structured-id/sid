@@ -4,7 +4,7 @@
 //! pagination, the total of the whole matching set, and one page of users
 //! read in batches.
 
-use crate::models::{Principal, Profile, ProfileEmail, ProfileMetadata};
+use crate::models::{Principal, Profile, ProfileEmail, ProfileMetadata, ProfilePhone};
 
 /// An attribute a directory filter compares, with the SCIM attribute it
 /// stands for (RFC 7643 §4.1, enterprise extension §4.3).
@@ -103,9 +103,14 @@ pub struct DirectoryUser {
     pub id: super::DirectoryUserId,
     /// The asking source's own identifier of the resource, if it has one.
     pub external_id: Option<String>,
+    /// Whether the user is active: SCIM `active`
+    /// ([`super::DirectoryResource::shows_active`]).
+    pub active: bool,
     pub profile: Profile,
     pub principals: Vec<Principal>,
     pub emails: Vec<ProfileEmail>,
+    /// The phone contacts: what each phone number's SCIM `type` is read from.
+    pub phones: Vec<ProfilePhone>,
     pub metadata: Vec<ProfileMetadata>,
 }
 

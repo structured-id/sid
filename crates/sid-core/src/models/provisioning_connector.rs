@@ -93,8 +93,13 @@ pub struct ProvisioningConnector {
     /// Administrator-chosen label; renaming keeps the identity.
     pub display_name: String,
     pub state: ConnectorState,
-    /// Advances with every change, so a check made against an older revision
-    /// can be fenced at the write it authorizes.
+    /// What an inbound connector may change of every user of the directory,
+    /// the ones it creates later included; empty when it manages only users
+    /// assigned to it one by one.
+    pub directory_rights: super::DirectoryRights,
+    /// Advances with every change, what it manages included, so a check
+    /// made against an older revision can be fenced at the write it
+    /// authorizes.
     pub revision: i64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -115,6 +120,7 @@ impl ProvisioningConnector {
             client_id: new_client_id(),
             display_name: display_name.into(),
             state: ConnectorState::Active,
+            directory_rights: super::DirectoryRights::NONE,
             revision: 1,
             created_at: now,
             updated_at: now,

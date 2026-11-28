@@ -2980,6 +2980,27 @@ impl StorageBackend for MockStorage {
         unimplemented!("directory sources are exercised by the storage conformance suite")
     }
 
+    async fn set_directory_rights(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("directory management is exercised by the storage conformance suite")
+    }
+
+    async fn manage_directory_user(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryUserId,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> SidResult<sid_core::models::ManagementOutcome> {
+        unimplemented!("directory management is exercised by the storage conformance suite")
+    }
+
     async fn write_directory_group(
         &self,
         _: &sid_core::models::DirectoryGroupWrite,
@@ -4275,8 +4296,10 @@ impl StorageBackend for MockStorage {
                 )),
                 // And no source correlations either.
                 external_id: None,
+                active: profile.status.is_in_use(),
                 principals: self.get_principals_by_profile(profile.id).await?,
                 emails: self.list_profile_emails(profile.id).await?,
+                phones: self.list_profile_phones(profile.id).await?,
                 metadata: self.list_profile_metadata(profile.id).await?,
                 profile,
             });
@@ -4936,6 +4959,13 @@ impl StorageBackend for MockStorage {
         Ok(vec![])
     }
     async fn list_groups_for_profile(&self, _p: ProfileId) -> SidResult<Vec<Group>> {
+        Ok(vec![])
+    }
+
+    async fn list_group_assignments(
+        &self,
+        _of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
         Ok(vec![])
     }
 

@@ -148,16 +148,13 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         snapshot
             .device_attestations
             .extend(backend.list_device_attestations_by_profile(pid).await?);
-        // Memberships of this profile only: each is listed once.
-        for group in backend.list_groups_for_profile(pid).await? {
-            snapshot.group_members.extend(
-                backend
-                    .list_group_members(group.id)
-                    .await?
-                    .into_iter()
-                    .filter(|m| m.profile_id == pid),
-            );
-        }
+        // Every assignment of this profile, with whose it is, whether or
+        // not it gives membership now.
+        snapshot.group_members.extend(
+            backend
+                .list_group_assignments(sid_core::models::AssignmentsOf::Profile(pid))
+                .await?,
+        );
         snapshot
             .role_assignments
             .extend(backend.list_role_assignments_for_profile(pid).await?);

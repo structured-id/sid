@@ -846,6 +846,25 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn export_directory_sources(&self) -> Result<Vec<sid_core::models::DirectorySource>> {
         unimplemented!()
     }
+    async fn set_directory_rights(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn manage_directory_user(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryUserId,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> Result<sid_core::models::ManagementOutcome> {
+        unimplemented!()
+    }
     async fn write_directory_group(
         &self,
         _: &DirectoryGroupWrite,
@@ -1532,6 +1551,25 @@ impl sid_plugin::StorageBackend for MockStorage {
             .iter()
             .filter(|g| group_ids.contains(&g.id))
             .cloned()
+            .collect())
+    }
+    /// The mock keeps memberships only: each is a local assignment.
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        let members = self.group_members.lock().unwrap();
+        Ok(members
+            .iter()
+            .filter(|m| match of {
+                AssignmentsOf::Group(group) => m.group_id == group,
+                AssignmentsOf::Profile(profile) => m.profile_id == profile,
+            })
+            .map(|m| sid_core::models::GroupAssignment {
+                member: m.clone(),
+                source: None,
+            })
             .collect())
     }
 

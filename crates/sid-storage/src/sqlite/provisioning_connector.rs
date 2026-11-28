@@ -28,6 +28,7 @@ fn row_to_connector(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProvisioningConn
         client_id: col(row, "client_id")?,
         display_name: col(row, "display_name")?,
         state: parsed_col(row, "state")?,
+        directory_rights: super::directory::rights(col(row, "directory_rights")?)?,
         revision: col(row, "revision")?,
         created_at: dt_col(row, "created_at")?,
         updated_at: dt_col(row, "updated_at")?,
@@ -187,8 +188,8 @@ impl SqliteBackend {
         sqlx::query(
             "INSERT INTO provisioning_connectors
                  (id, org_id, direction, client_id, display_name, state, revision,
-                  created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  created_at, updated_at, directory_rights)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(c.id)
         .bind(c.org_id)
@@ -199,6 +200,7 @@ impl SqliteBackend {
         .bind(c.revision)
         .bind(fmt_dt(&c.created_at))
         .bind(fmt_dt(&c.updated_at))
+        .bind(c.directory_rights.bits())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("provisioning connector", e))?;
@@ -232,6 +234,103 @@ impl SqliteBackend {
         }
         Self::commit_mutation(tx, &format!("provisioning_connector:{id}"), ctx).await?;
         Ok(true)
+    }
+
+    pub(crate) async fn connector_set_directory_rights(
+        &self,
+        id: ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        // The revision moves with the selection: a write the connector was
+        // authorized for before it no longer commits.
+        let moved = sqlx::query(
+            "UPDATE provisioning_connectors
+             SET directory_rights = ?, revision = revision + 1, updated_at = ?
+             WHERE id = ? AND revision = ?",
+        )
+        .bind(rights.bits())
+        .bind(fmt_dt(&Timestamp::now()))
+        .bind(id)
+        .bind(revision)
+        .execute(&mut *tx)
+        .await
+        .map_err(failed("set directory rights"))?
+        .rows_affected()
+            == 1;
+        if !moved {
+            return Ok(false);
+        }
+        Self::commit_mutation(tx, &format!("provisioning_connector:{id}"), ctx).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn connector_manage_directory_user(
+        &self,
+        id: ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::ManagementOutcome> {
+        use sid_core::models::ManagementOutcome;
+        // The write transaction is the only writer: what it reads holds
+        // until it commits.
+        let mut tx = self.begin_write().await?;
+        let current =
+            sqlx::query("SELECT 1 FROM provisioning_connectors WHERE id = ? AND revision = ?")
+                .bind(id)
+                .bind(revision)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(failed("read connector revision"))?
+                .is_some();
+        if !current {
+            return Ok(ManagementOutcome::Stale);
+        }
+        let live = sqlx::query("SELECT 1 FROM directory_users WHERE id = ? AND deleted_at IS NULL")
+            .bind(resource.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(failed("directory resource"))?
+            .is_some();
+        if !live {
+            return Err(SidError::NotFound(format!("directory user {resource}")));
+        }
+        if rights.is_empty() {
+            let withdrawn = sqlx::query(
+                "UPDATE directory_user_sources SET managed = 0
+                 WHERE resource_id = ? AND connector_id = ? AND retired = 0 AND managed <> 0",
+            )
+            .bind(resource.0)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(failed("withdraw directory user"))?
+            .rows_affected();
+            if withdrawn == 0 {
+                return Ok(ManagementOutcome::NothingToWithdraw);
+            }
+        } else {
+            // A connector that already knows the user keeps its identifier.
+            sqlx::query(
+                "INSERT INTO directory_user_sources (resource_id, connector_id, managed)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT (resource_id, connector_id)
+                 DO UPDATE SET managed = excluded.managed",
+            )
+            .bind(resource.0)
+            .bind(id)
+            .bind(rights.bits())
+            .execute(&mut *tx)
+            .await
+            .map_err(failed("assign directory user"))?;
+        }
+        bump_connector_revision(&mut tx, id).await?;
+        Self::commit_mutation(tx, &format!("provisioning_connector:{id}"), ctx).await?;
+        Ok(ManagementOutcome::Applied)
     }
 
     pub(crate) async fn connector_transition(

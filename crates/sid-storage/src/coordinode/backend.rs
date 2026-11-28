@@ -592,6 +592,28 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::export_directory_sources(self).await
     }
 
+    async fn set_directory_rights(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::set_directory_rights(self, connector, revision, rights, ctx).await
+    }
+
+    async fn manage_directory_user(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<sid_core::models::ManagementOutcome> {
+        CoordinodeBackend::manage_directory_user(self, connector, revision, resource, rights, ctx)
+            .await
+    }
+
     async fn write_directory_group(
         &self,
         write: &DirectoryGroupWrite,
@@ -1492,6 +1514,13 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_groups_for_profile(&self, profile_id: ProfileId) -> Result<Vec<Group>> {
         CoordinodeBackend::list_groups_for_profile(self, profile_id).await
+    }
+
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>> {
+        CoordinodeBackend::list_group_assignments(self, of).await
     }
 
     // === ROLE ASSIGNMENTS ===

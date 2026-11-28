@@ -571,6 +571,10 @@ pub(super) fn emails_of(tx: &Statements<'_>, owner: ProfileId) -> SidResult<Vec<
     contacts(tx, "SidEmail", EMAIL, owner, email)
 }
 
+pub(super) fn phones_of(tx: &Statements<'_>, owner: ProfileId) -> SidResult<Vec<ProfilePhone>> {
+    contacts(tx, "SidPhone", PHONE, owner, phone)
+}
+
 /// `profile`'s contacts of `label`, primary first, then oldest first.
 fn contacts<T>(
     tx: &Statements<'_>,

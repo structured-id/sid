@@ -18,9 +18,10 @@ use sid_core::Error as SidError;
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::provisioning_connector::rotation_grace;
 use sid_core::models::{
-    AuditEntry, ConnectorCredentialKind, ConnectorState, MutationContext, OidcIssuer,
-    OperationContext, OrgId, ProtectedResource, ProvisioningConnector, ProvisioningConnectorId,
-    ProvisioningCredential, ProvisioningCredentialId, ProvisioningDirection,
+    AuditEntry, ConnectorCredentialKind, ConnectorState, DirectoryRight, DirectoryRights,
+    DirectoryUserId, ManagementOutcome, MutationContext, OidcIssuer, OperationContext, OrgId,
+    ProtectedResource, ProvisioningConnector, ProvisioningConnectorId, ProvisioningCredential,
+    ProvisioningCredentialId, ProvisioningDirection,
 };
 use sid_plugin::StorageBackend;
 use sid_proto::keyed::admin::provisioning_service as keyed;
@@ -80,6 +81,9 @@ pub enum ProvisioningError {
     /// The record changed since it was read.
     #[error("changed concurrently")]
     ChangedConcurrently,
+    /// No live user of the directory with this identifier.
+    #[error("directory user {0} not found")]
+    UserNotFound(DirectoryUserId),
 }
 
 fn invalid(field: &'static str, reason: &'static str) -> ProvisioningError {
@@ -285,6 +289,165 @@ impl Provisioning {
             });
         }
         Ok(connector_to_proto(&after))
+    }
+
+    /// The context a directory management command commits under: the
+    /// manager is the installation's administrator, and the write is fenced
+    /// on that authority as it stands now, so one revoked before the commit
+    /// selects nothing.
+    async fn managed(
+        &self,
+        caller: &Caller,
+        action: &str,
+        connector: ProvisioningConnectorId,
+    ) -> Result<MutationContext, ProvisioningError> {
+        caller.require_admin()?;
+        let fence = sid_authz::admin::RoleAdministration::new(self.storage.clone())
+            .installation_administrator_fence(caller.profile_id)
+            .await
+            .map_err(|e| match e {
+                SidError::AuthorizationDenied(_) => ProvisioningError::Caller(CallerError::Denied),
+                other => ProvisioningError::Store(other),
+            })?;
+        Ok(MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            action,
+            connector.to_string(),
+        ))
+        .fenced_by(fence))
+    }
+
+    /// The connector a directory management command names: an inbound one
+    /// that is not retired. Only an inbound connector writes the directory.
+    async fn manageable(
+        &self,
+        id: ProvisioningConnectorId,
+    ) -> Result<ProvisioningConnector, ProvisioningError> {
+        let connector = self.inbound(id).await?;
+        if connector.state == ConnectorState::Retired {
+            return Err(connector_state(id, connector.state, "given users"));
+        }
+        Ok(connector)
+    }
+
+    /// The connector as a management command left it, or why it changed
+    /// nothing: the revision it named is no longer the connector's.
+    async fn settled(
+        &self,
+        id: ProvisioningConnectorId,
+        applied: bool,
+    ) -> Result<pb::ProvisioningConnector, ProvisioningError> {
+        let after = self.connector(id).await?;
+        if !applied {
+            return Err(if after.state == ConnectorState::Retired {
+                connector_state(id, after.state, "given users")
+            } else {
+                ProvisioningError::ChangedConcurrently
+            });
+        }
+        Ok(connector_to_proto(&after))
+    }
+
+    /// Select what a connector may change of every user of the directory,
+    /// at the revision the caller read; an empty selection is nothing. A
+    /// repeat names a revision the first change moved past and is refused
+    /// as changed, so it never undoes a later selection.
+    pub async fn set_directory_management(
+        &self,
+        caller: &Caller,
+        req: pb::SetDirectoryManagementRequest,
+    ) -> Result<pb::ProvisioningConnector, ProvisioningError> {
+        caller.require_admin()?;
+        let id = connector_id(req.connector_id.as_ref())?;
+        let rights = rights_from_proto(&req.rights)?;
+        self.manageable(id).await?;
+        let ctx = self
+            .managed(caller, "provisioning_connector.directory_management", id)
+            .await?;
+        let applied = self
+            .storage
+            .set_directory_rights(id, req.revision, rights, ctx)
+            .await?;
+        self.settled(id, applied).await
+    }
+
+    /// Assign one existing user of the directory to a connector, at the
+    /// revision the caller read. The user keeps its identifier and its
+    /// other assignments; the connector becomes a source of it when it was
+    /// none and keeps the identifier it already has for it.
+    pub async fn assign_directory_user(
+        &self,
+        caller: &Caller,
+        req: pb::AssignDirectoryUserRequest,
+    ) -> Result<pb::ProvisioningConnector, ProvisioningError> {
+        caller.require_admin()?;
+        let id = connector_id(req.connector_id.as_ref())?;
+        let user = directory_user_id(req.user_id.as_ref())?;
+        let rights = rights_from_proto(&req.rights)?;
+        if rights.is_empty() {
+            return Err(invalid("rights", "at least one right"));
+        }
+        self.manage_user(caller, id, req.revision, user, rights, "assign_user")
+            .await
+    }
+
+    /// Withdraw a user from a connector, at the revision the caller read.
+    /// The connector stays recorded as a source of the user. A withdrawal
+    /// that finds no assignment changes nothing and answers the connector
+    /// as it is.
+    pub async fn withdraw_directory_user(
+        &self,
+        caller: &Caller,
+        req: pb::WithdrawDirectoryUserRequest,
+    ) -> Result<pb::ProvisioningConnector, ProvisioningError> {
+        caller.require_admin()?;
+        let id = connector_id(req.connector_id.as_ref())?;
+        let user = directory_user_id(req.user_id.as_ref())?;
+        self.manage_user(
+            caller,
+            id,
+            req.revision,
+            user,
+            DirectoryRights::NONE,
+            "withdraw_user",
+        )
+        .await
+    }
+
+    /// Set what `connector` may change of `user` (nothing withdraws it) at
+    /// `revision`.
+    async fn manage_user(
+        &self,
+        caller: &Caller,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        user: DirectoryUserId,
+        rights: DirectoryRights,
+        action: &str,
+    ) -> Result<pb::ProvisioningConnector, ProvisioningError> {
+        self.manageable(connector).await?;
+        let ctx = self
+            .managed(
+                caller,
+                &format!("provisioning_connector.{action}"),
+                connector,
+            )
+            .await?;
+        let outcome = match self
+            .storage
+            .manage_directory_user(connector, revision, user, rights, ctx)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(SidError::NotFound(_)) => return Err(ProvisioningError::UserNotFound(user)),
+            Err(e) => return Err(e.into()),
+        };
+        match outcome {
+            ManagementOutcome::Applied | ManagementOutcome::NothingToWithdraw => {
+                self.settled(connector, true).await
+            }
+            ManagementOutcome::Stale => self.settled(connector, false).await,
+        }
     }
 
     /// Move a connector to another lifecycle state. A retry of a completed
@@ -602,6 +765,14 @@ fn credential_id(
         .map_err(|_| invalid("credential_id", "not a provisioning credential identifier"))
 }
 
+fn directory_user_id(
+    field: Option<&ids::DirectoryUserId>,
+) -> Result<DirectoryUserId, ProvisioningError> {
+    sid_ids_proto::required(field)
+        .map(|id: sid_ids::DirectoryUserId| DirectoryUserId(id.into_uuid()))
+        .map_err(|_| invalid("user_id", "not a directory user identifier"))
+}
+
 /// A label: non-empty after trimming, at most 200 characters.
 fn display_name(value: &str) -> Result<String, ProvisioningError> {
     let name = value.trim();
@@ -644,6 +815,63 @@ fn credential_status_to_proto(s: CredentialStatus) -> pb::ConnectorCredentialSta
     }
 }
 
+/// The wire name of each right a connector may hold over a directory user.
+const RIGHTS: [(DirectoryRight, pb::DirectoryUserRight); 13] = [
+    (DirectoryRight::Name, pb::DirectoryUserRight::Name),
+    (DirectoryRight::Emails, pb::DirectoryUserRight::Emails),
+    (
+        DirectoryRight::PhoneNumbers,
+        pb::DirectoryUserRight::PhoneNumbers,
+    ),
+    (DirectoryRight::Title, pb::DirectoryUserRight::Title),
+    (
+        DirectoryRight::Department,
+        pb::DirectoryUserRight::Department,
+    ),
+    (
+        DirectoryRight::EmployeeNumber,
+        pb::DirectoryUserRight::EmployeeNumber,
+    ),
+    (
+        DirectoryRight::CostCenter,
+        pb::DirectoryUserRight::CostCenter,
+    ),
+    (
+        DirectoryRight::Organization,
+        pb::DirectoryUserRight::Organization,
+    ),
+    (DirectoryRight::Division, pb::DirectoryUserRight::Division),
+    (
+        DirectoryRight::ExternalId,
+        pb::DirectoryUserRight::ExternalId,
+    ),
+    (DirectoryRight::Active, pb::DirectoryUserRight::Active),
+    (DirectoryRight::Delete, pb::DirectoryUserRight::Delete),
+    (DirectoryRight::UserName, pb::DirectoryUserRight::UserName),
+];
+
+fn rights_to_proto(rights: DirectoryRights) -> Vec<i32> {
+    RIGHTS
+        .iter()
+        .filter(|(right, _)| rights.contains(*right))
+        .map(|(_, wire)| i32::from(*wire))
+        .collect()
+}
+
+/// The rights a request names; a value that is no right is refused, never
+/// dropped: a selection silently narrowed is not the one the manager made.
+fn rights_from_proto(values: &[i32]) -> Result<DirectoryRights, ProvisioningError> {
+    values
+        .iter()
+        .try_fold(DirectoryRights::NONE, |rights, value| {
+            RIGHTS
+                .iter()
+                .find(|(_, wire)| i32::from(*wire) == *value)
+                .map(|(right, _)| rights.with(*right))
+                .ok_or_else(|| invalid("rights", "not a directory user right"))
+        })
+}
+
 fn connector_to_proto(c: &ProvisioningConnector) -> pb::ProvisioningConnector {
     pb::ProvisioningConnector {
         id: Some(c.id.into()),
@@ -653,6 +881,7 @@ fn connector_to_proto(c: &ProvisioningConnector) -> pb::ProvisioningConnector {
         revision: c.revision,
         created_at: Some(to_timestamp(c.created_at)),
         updated_at: Some(to_timestamp(c.updated_at)),
+        directory_rights: rights_to_proto(c.directory_rights),
     }
 }
 

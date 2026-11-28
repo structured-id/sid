@@ -232,6 +232,37 @@ pub trait StorageBackend:
     /// resource.
     async fn export_directory_sources(&self) -> Result<Vec<sid_core::models::DirectorySource>>;
 
+    /// Set what `connector`, still at `revision`, may change of every user
+    /// of the directory, the ones it creates later included (empty: nothing
+    /// directory-wide). The connector's revision moves in the same commit,
+    /// so a write it was authorized for before no longer commits. False,
+    /// with nothing changed, when the connector is unknown or moved past
+    /// `revision`.
+    async fn set_directory_rights(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<bool>;
+
+    /// Assign the live user `resource` to `connector`, still at `revision`,
+    /// with `rights` over that one user, or withdraw it when `rights` is
+    /// empty. An assignment replaces the rights assigned before, records the
+    /// connector as a source of the user when it was none and keeps the
+    /// identifier it already has; a withdrawal keeps the correlation. Either
+    /// moves the connector's revision in the same commit, except a
+    /// withdrawal that finds no assignment, which changes nothing.
+    /// `Error::NotFound` for an unknown or deleted user.
+    async fn manage_directory_user(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<sid_core::models::ManagementOutcome>;
+
     /// Apply one directory write to a group in one transaction, with its
     /// audit entry and owed work (`Error::Conflict` on create over an
     /// existing group, `Error::NotFound` on update of a missing one).
@@ -1276,6 +1307,16 @@ pub trait StorageBackend:
 
     /// List groups a profile belongs to.
     async fn list_groups_for_profile(&self, profile_id: ProfileId) -> Result<Vec<Group>>;
+
+    /// The assignments on record to a group or of an account, each with
+    /// whose it is, whether or not it gives membership now (a connector's
+    /// gives none while the directory resource it rests on is inactive or
+    /// deleted). [`Self::list_group_members`] and
+    /// [`Self::list_groups_for_profile`] are the memberships they give.
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> Result<Vec<sid_core::models::GroupAssignment>>;
 
     // === ROLE ASSIGNMENT OPERATIONS ===
 

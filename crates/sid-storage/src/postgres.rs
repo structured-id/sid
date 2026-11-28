@@ -3575,6 +3575,29 @@ impl StorageBackend for PostgresBackend {
         self.export_directory_sources_impl().await
     }
 
+    async fn set_directory_rights(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_directory_rights_impl(connector, revision, rights, ctx)
+            .await
+    }
+
+    async fn manage_directory_user(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::ManagementOutcome> {
+        self.manage_directory_user_impl(connector, revision, resource, rights, ctx)
+            .await
+    }
+
     async fn write_directory_group(
         &self,
         write: &sid_core::models::DirectoryGroupWrite,
@@ -4118,6 +4141,17 @@ impl StorageBackend for PostgresBackend {
         .into_iter()
         .map(|r| r.into_domain())
         .collect();
+        let phones: Vec<ProfilePhone> = sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE profile_id = ANY($1)
+             ORDER BY profile_id, is_primary DESC, created_at",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect();
         let metadata: Vec<ProfileMetadata> =
             sqlx::query_as::<_, crate::pg_row::ProfileMetadataRow>(
                 "SELECT * FROM profile_metadata WHERE profile_id = ANY($1)",
@@ -4130,7 +4164,7 @@ impl StorageBackend for PostgresBackend {
             .map(|r| r.into_domain())
             .collect();
         let resources = sqlx::query(
-            "SELECT id, profile_id, revision, deleted_at FROM directory_users
+            "SELECT id, profile_id, revision, deleted_at, active FROM directory_users
              WHERE profile_id = ANY($1) AND deleted_at IS NULL",
         )
         .bind(&ids)
@@ -4162,7 +4196,7 @@ impl StorageBackend for PostgresBackend {
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(
-                profiles, resources, sources, principals, emails, metadata,
+                profiles, resources, sources, principals, emails, phones, metadata,
             )?,
         })
     }
@@ -5155,7 +5189,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        directory::add_member(&mut tx, member).await?;
+        directory::add_member(&mut tx, member, None).await?;
         Self::audit_in_tx(
             &mut tx,
             &format!("group:{}:member:{}", member.group_id, member.profile_id),
@@ -5179,7 +5213,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        directory::remove_member(&mut tx, group_id, profile_id).await?;
+        directory::remove_member(&mut tx, group_id, profile_id, None).await?;
         Self::audit_in_tx(
             &mut tx,
             &format!("group:{group_id}:member:{profile_id}"),
@@ -5215,6 +5249,43 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
         Ok(rows.into_iter().map(|r| r.into_domain()).collect())
+    }
+
+    async fn list_group_assignments(
+        &self,
+        of: sid_core::models::AssignmentsOf,
+    ) -> SidResult<Vec<sid_core::models::GroupAssignment>> {
+        use sid_core::models::AssignmentsOf;
+        use sqlx::{FromRow as _, Row as _};
+        let (sql, key) = match of {
+            AssignmentsOf::Group(group) => (
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE group_id = $1 ORDER BY profile_id, connector_id",
+                Uuid::from(group),
+            ),
+            AssignmentsOf::Profile(profile) => (
+                "SELECT group_id, profile_id, added_at, connector_id FROM group_member_origins
+                 WHERE profile_id = $1 ORDER BY group_id, connector_id",
+                Uuid::from(profile),
+            ),
+        };
+        let read = |e: sqlx::Error| SidError::Storage(format!("group assignments: {e}"));
+        sqlx::query(sql)
+            .bind(key)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(read)?
+            .iter()
+            .map(|row| {
+                let connector: Uuid = row.try_get("connector_id").map_err(read)?;
+                Ok(sid_core::models::GroupAssignment {
+                    member: crate::pg_row::GroupMemberRow::from_row(row)
+                        .map_err(read)?
+                        .into_domain(),
+                    source: crate::directory_query::assignment_source(connector)?,
+                })
+            })
+            .collect()
     }
 
     // === ROLE ASSIGNMENT OPERATIONS ===

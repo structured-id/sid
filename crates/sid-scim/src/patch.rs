@@ -3,7 +3,7 @@
 //!
 //! Applies add/remove/replace operations to SID profiles and groups.
 
-use sid_core::models::{PrincipalType, Profile, ProfileStatus};
+use sid_core::models::{PrincipalType, Profile};
 use sid_proto::sid::v1 as proto;
 
 /// Error applying a SCIM PATCH operation.
@@ -26,14 +26,13 @@ pub enum PatchError {
 pub struct UserPatchResult {
     /// Whether the Profile struct was modified.
     pub profile_changed: bool,
-    /// Whether the profile needs reactivation from Suspended.
-    /// The gRPC handler resolves the target state:
-    /// - Provisioned (if never claimed — no verified login identifiers)
-    /// - Active (if previously claimed — has verified login identifiers)
-    pub needs_reactivation: bool,
-    /// Whether the request leaves the user deactivated (`active=false`):
-    /// the account's access ends, whatever state the account keeps.
-    pub deactivated: bool,
+    /// The `active` the request asks the user to show, when it names it;
+    /// the last operation stands. What that changes depends on what the
+    /// resource stands for, which the caller of this module decides.
+    pub active: Option<bool>,
+    /// The `userName` the request gives the user, when it names it; the
+    /// last operation stands.
+    pub user_name: Option<String>,
     /// Identifiers to add.
     pub add_identifiers: Vec<PatchIdentifier>,
     /// Identifiers to remove (by value).
@@ -46,6 +45,27 @@ pub struct UserPatchResult {
     /// the request sets it: `Some(None)` drops it (RFC 7643 3.1, the
     /// client's own `externalId`, never an attribute of the account).
     pub external_id: Option<Option<String>>,
+}
+
+impl UserPatchResult {
+    /// The request leaves metadata `key` with `value`: operations apply in
+    /// order (RFC 7644 §3.5.2), so this one stands over any before it.
+    fn set(&mut self, key: &str, value: &str) {
+        self.unset_pending(key);
+        self.set_metadata
+            .push((key.into(), serde_json::Value::String(value.into())));
+    }
+
+    /// The request leaves metadata `key` absent, likewise.
+    fn remove(&mut self, key: &str) {
+        self.unset_pending(key);
+        self.remove_metadata.push(key.into());
+    }
+
+    fn unset_pending(&mut self, key: &str) {
+        self.set_metadata.retain(|(held, _)| held != key);
+        self.remove_metadata.retain(|held| held != key);
+    }
 }
 
 /// An identifier to add via PATCH.
@@ -104,37 +124,10 @@ fn apply_replace(
                     path: path.into(),
                     reason: "expected boolean".into(),
                 })?;
-            if !active {
-                // Only an account in use is suspended: a closure under way,
-                // a terminal state or a legal hold is not the directory's to
-                // rewrite. Its access ends all the same.
-                if profile.status.is_in_use() {
-                    profile.status = ProfileStatus::Suspended;
-                }
-                result.deactivated = true;
-                // A later `active=true` in the same request starts from
-                // this state, not from a pending reactivation.
-                result.needs_reactivation = false;
-                result.profile_changed = true;
-            } else if profile.status == ProfileStatus::Suspended {
-                result.deactivated = false;
-                // Mark for reactivation — grpc handler resolves the target state
-                // (Provisioned if never claimed, Active if previously claimed).
-                result.needs_reactivation = true;
-                result.profile_changed = true;
-            }
+            result.active = Some(active);
         }
-        "title" => {
-            result
-                .set_metadata
-                .push(("title".into(), serde_json::Value::String(value.to_string())));
-        }
-        "department" => {
-            result.set_metadata.push((
-                "department".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        "title" => result.set("title", value),
+        "department" => result.set("department", value),
         "name.givenName" => {
             profile.given_name = if value.is_empty() {
                 None
@@ -165,32 +158,19 @@ fn apply_replace(
         // SCIM Enterprise Extension (RFC 7643 §4.3). The employee number is
         // the account's, one value whichever source writes it.
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber"
-        | "employeeNumber" => {
-            result.set_metadata.push((
-                "employee_id".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        | "employeeNumber" => result.set("employee_id", value),
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:costCenter" | "costCenter" => {
-            result.set_metadata.push((
-                "cost_center".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
+            result.set("cost_center", value)
         }
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:organization"
-        | "organization" => {
-            result.set_metadata.push((
-                "organization".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        | "organization" => result.set("organization", value),
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:division" | "division" => {
-            result.set_metadata.push((
-                "division".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
+            result.set("division", value)
         }
-        "id" | "userName" => {
+        // The organization's login: whether the caller may rename it is the
+        // caller of this module's to decide.
+        "userName" => result.user_name = Some(value.to_string()),
+        "id" => {
             return Err(PatchError::ImmutableAttribute(path.into()));
         }
         _ => {
@@ -248,12 +228,8 @@ fn apply_add(path: &str, value: &str, result: &mut UserPatchResult) -> Result<()
 
 fn apply_remove(path: &str, result: &mut UserPatchResult) -> Result<(), PatchError> {
     match path {
-        "title" => {
-            result.remove_metadata.push("title".into());
-        }
-        "department" => {
-            result.remove_metadata.push("department".into());
-        }
+        "title" => result.remove("title"),
+        "department" => result.remove("department"),
         "id" | "userName" => {
             return Err(PatchError::ImmutableAttribute(path.into()));
         }
@@ -298,9 +274,14 @@ fn extract_filter_value(path: &str) -> Option<String> {
 pub struct GroupPatchResult {
     /// Display name changed.
     pub display_name: Option<String>,
-    /// Members to add (profile IDs).
+    /// Whether the request set the caller's whole member list (a
+    /// replacement of `members`, or their removal with no value): the
+    /// caller's assignments not in [`Self::add_members`] are withdrawn.
+    pub replaces_members: bool,
+    /// The members the request leaves assigned, by the identifiers it
+    /// named them with, in request order.
     pub add_members: Vec<String>,
-    /// Members to remove (profile IDs).
+    /// The members the request leaves withdrawn, likewise.
     pub remove_members: Vec<String>,
 }
 
@@ -308,10 +289,13 @@ pub struct GroupPatchResult {
 pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult, PatchError> {
     let mut result = GroupPatchResult {
         display_name: None,
+        replaces_members: false,
         add_members: vec![],
         remove_members: vec![],
     };
 
+    // Operations apply in request order, each on the result of the one
+    // before (RFC 7644 §3.5.2): what is kept is where each member ends.
     for op in ops {
         let op_type = op.op.to_lowercase();
         match (op_type.as_str(), op.path.as_str()) {
@@ -319,23 +303,32 @@ pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult,
                 result.display_name = Some(op.value.clone());
             }
             ("add", "members") => {
-                // Value is JSON array or single member ref
-                if let Ok(members) = serde_json::from_str::<Vec<serde_json::Value>>(&op.value) {
-                    for m in members {
-                        if let Some(val) = m.get("value").and_then(|v| v.as_str()) {
-                            result.add_members.push(val.to_string());
-                        }
-                    }
-                } else if let Ok(m) = serde_json::from_str::<serde_json::Value>(&op.value)
-                    && let Some(val) = m.get("value").and_then(|v| v.as_str())
-                {
-                    result.add_members.push(val.to_string());
+                for id in member_values(&op.value)? {
+                    result.assign(id);
+                }
+            }
+            ("replace", "members") => {
+                let members = member_values(&op.value)?;
+                result.clear_members();
+                for id in members {
+                    result.assign(id);
+                }
+            }
+            // No value: the caller's whole list. A value that is present
+            // and malformed is refused by `member_values`, never read as
+            // this.
+            ("remove", "members") if op.value.is_empty() => result.clear_members(),
+            // A value array names the members to remove, an empty one
+            // nobody.
+            ("remove", "members") => {
+                for id in member_values(&op.value)? {
+                    result.withdraw(id);
                 }
             }
             ("remove", path) if path.starts_with("members[") => {
-                if let Some(value) = extract_filter_value(path) {
-                    result.remove_members.push(value);
-                }
+                let id = extract_filter_value(path)
+                    .ok_or_else(|| PatchError::InvalidPath(op.path.clone()))?;
+                result.withdraw(id);
             }
             _ => {
                 return Err(PatchError::InvalidPath(op.path.clone()));
@@ -346,10 +339,60 @@ pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult,
     Ok(result)
 }
 
+impl GroupPatchResult {
+    fn assign(&mut self, id: String) {
+        self.remove_members.retain(|held| *held != id);
+        if !self.add_members.contains(&id) {
+            self.add_members.push(id);
+        }
+    }
+
+    fn withdraw(&mut self, id: String) {
+        self.add_members.retain(|held| *held != id);
+        if !self.remove_members.contains(&id) {
+            self.remove_members.push(id);
+        }
+    }
+
+    fn clear_members(&mut self) {
+        self.replaces_members = true;
+        self.add_members.clear();
+        self.remove_members.clear();
+    }
+}
+
+/// The member identifiers a `members` value names: an array of member
+/// objects, or one object, each with a string `value` (other keys, a `$ref`
+/// of null among them, are not read). Anything else is a refused value.
+fn member_values(value: &str) -> Result<Vec<String>, PatchError> {
+    let invalid = |reason: &str| PatchError::InvalidValue {
+        path: "members".into(),
+        reason: reason.into(),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).map_err(|_| invalid("expected JSON member objects"))?;
+    let members = match parsed {
+        serde_json::Value::Array(members) => members,
+        member @ serde_json::Value::Object(_) => vec![member],
+        _ => return Err(invalid("expected JSON member objects")),
+    };
+    members
+        .iter()
+        .map(|member| {
+            member
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("a member has no value"))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sid_core::models::ProfileType;
+    use sid_core::models::{ProfileStatus, ProfileType};
 
     fn test_profile() -> Profile {
         let mut p = Profile::new(Some("test"));
@@ -374,35 +417,27 @@ mod tests {
         assert_eq!(profile.given_name.as_deref(), Some("Alice Jones"));
     }
 
+    /// `active` is only recorded: whether it suspends an account or ends a
+    /// relationship is not this module's to decide, so the account's state
+    /// is left as it was. The last operation of a request stands.
     #[test]
-    fn test_replace_active_false_suspends() {
-        let mut profile = test_profile();
-        let ops = vec![proto::ScimPatchOp {
+    fn test_replace_active_is_recorded_not_applied() {
+        let op = |value: &str| proto::ScimPatchOp {
             op: "replace".into(),
             path: "active".into(),
-            value: "false".into(),
-        }];
-        let result = apply_user_patch(&mut profile, &ops).unwrap();
-        assert!(result.profile_changed);
-        assert_eq!(profile.status, ProfileStatus::Suspended);
-    }
+            value: value.into(),
+        };
+        let mut profile = test_profile();
+        let result = apply_user_patch(&mut profile, &[op("false")]).unwrap();
+        assert_eq!(result.active, Some(false));
+        assert_eq!(profile.status, ProfileStatus::Active);
 
-    #[test]
-    fn test_replace_active_true_reactivates() {
-        let mut profile = test_profile();
-        profile.status = ProfileStatus::Suspended;
-        let ops = vec![proto::ScimPatchOp {
-            op: "replace".into(),
-            path: "active".into(),
-            value: "true".into(),
-        }];
-        let result = apply_user_patch(&mut profile, &ops).unwrap();
-        // patch.rs doesn't resolve target state — it sets needs_reactivation.
-        // gRPC handler decides Provisioned vs Active based on verified identifiers.
-        assert!(result.needs_reactivation);
-        assert!(result.profile_changed);
-        // Profile status stays Suspended — grpc handler will change it.
-        assert_eq!(profile.status, ProfileStatus::Suspended);
+        let result = apply_user_patch(&mut profile, &[op("false"), op("true")]).unwrap();
+        assert_eq!(result.active, Some(true));
+        assert_eq!(profile.status, ProfileStatus::Active);
+
+        let result = apply_user_patch(&mut profile, &[]).unwrap();
+        assert_eq!(result.active, None);
     }
 
     #[test]
@@ -416,6 +451,36 @@ mod tests {
         let result = apply_user_patch(&mut profile, &ops).unwrap();
         assert_eq!(result.set_metadata.len(), 1);
         assert_eq!(result.set_metadata[0].0, "department");
+    }
+
+    /// RFC 7644 3.5.2: operations apply in request order, each on the result
+    /// of the one before. An attribute replaced and then removed ends
+    /// absent; removed and then replaced it ends with the value; of two
+    /// replacements the later stands.
+    #[test]
+    fn test_metadata_operations_keep_request_order() {
+        let op = |op: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: "title".into(),
+            value: value.into(),
+        };
+        let run = |ops: &[proto::ScimPatchOp]| {
+            let result = apply_user_patch(&mut test_profile(), ops).unwrap();
+            (result.set_metadata, result.remove_metadata)
+        };
+        let title = |value: &str| ("title".to_string(), serde_json::Value::String(value.into()));
+
+        let (set, removed) = run(&[op("replace", "Y"), op("remove", "")]);
+        assert!(set.is_empty(), "{set:?}");
+        assert_eq!(removed, vec!["title"]);
+
+        let (set, removed) = run(&[op("remove", ""), op("replace", "Y")]);
+        assert_eq!(set, vec![title("Y")]);
+        assert!(removed.is_empty(), "{removed:?}");
+
+        let (set, removed) = run(&[op("replace", "Y"), op("replace", "Z")]);
+        assert_eq!(set, vec![title("Z")]);
+        assert!(removed.is_empty());
     }
 
     #[test]
@@ -479,6 +544,103 @@ mod tests {
         let result = apply_group_patch(&ops).unwrap();
         assert_eq!(result.remove_members.len(), 1);
         assert_eq!(result.remove_members[0], "user-id-1");
+    }
+
+    /// One PATCH applies in request order, each operation on the result of
+    /// the one before (RFC 7644 3.5.2): the same member added and then
+    /// removed is removed, removed and then added is added.
+    #[test]
+    fn test_group_patch_member_operations_keep_request_order() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        let add = |id: &str| op("add", "members", &format!(r#"[{{"value":"{id}"}}]"#));
+        let remove = |id: &str| op("remove", &format!(r#"members[value eq "{id}"]"#), "");
+
+        let result = apply_group_patch(&[add("a"), add("b"), remove("a")]).unwrap();
+        assert_eq!(result.add_members, vec!["b"]);
+        assert_eq!(result.remove_members, vec!["a"]);
+        assert!(!result.replaces_members);
+
+        let result = apply_group_patch(&[remove("a"), add("a")]).unwrap();
+        assert_eq!(result.add_members, vec!["a"]);
+        assert!(result.remove_members.is_empty());
+    }
+
+    /// The other member operations directory clients send: a removal that
+    /// lists members in a value array (a `$ref` of null included) removes
+    /// those and nobody else, an empty array nobody; a removal of `members`
+    /// with no value, and a replacement of `members`, set the caller's whole
+    /// list, later operations building on it.
+    #[test]
+    fn test_group_patch_lists_and_whole_set() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        let listed = apply_group_patch(&[op(
+            "remove",
+            "members",
+            r#"[{"value":"a","$ref":null},{"value":"b"}]"#,
+        )])
+        .unwrap();
+        assert_eq!(listed.remove_members, vec!["a", "b"]);
+        assert!(!listed.replaces_members);
+
+        let nobody = apply_group_patch(&[op("remove", "members", "[]")]).unwrap();
+        assert!(nobody.remove_members.is_empty());
+        assert!(!nobody.replaces_members);
+
+        let cleared = apply_group_patch(&[
+            op("add", "members", r#"[{"value":"a"}]"#),
+            op("remove", "members", ""),
+            op("add", "members", r#"[{"value":"b"}]"#),
+        ])
+        .unwrap();
+        assert!(cleared.replaces_members);
+        assert_eq!(cleared.add_members, vec!["b"]);
+
+        let replaced =
+            apply_group_patch(&[op("replace", "members", r#"[{"value":"a"},{"value":"b"}]"#)])
+                .unwrap();
+        assert!(replaced.replaces_members);
+        assert_eq!(replaced.add_members, vec!["a", "b"]);
+    }
+
+    /// A malformed member value is the client's mistake and fails the
+    /// request: it is never read as an omitted value, which for a removal
+    /// would clear the whole list.
+    #[test]
+    fn test_group_patch_malformed_members_are_refused() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        for bad in [
+            op("add", "members", "not json"),
+            op("add", "members", r#"[{"display":"no value"}]"#),
+            op("remove", "members", "{"),
+            op("remove", "members", r#"[{"value":7}]"#),
+            op("replace", "members", r#""a string""#),
+        ] {
+            assert!(
+                matches!(
+                    apply_group_patch(std::slice::from_ref(&bad)),
+                    Err(PatchError::InvalidValue { .. })
+                ),
+                "{} {}",
+                bad.op,
+                bad.value
+            );
+        }
+        assert!(matches!(
+            apply_group_patch(&[op("remove", "members[value eq ]", "")]),
+            Err(PatchError::InvalidPath(_))
+        ));
     }
 
     // ── Enterprise Extension (RFC 7643 §4.3) ──

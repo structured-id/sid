@@ -205,6 +205,10 @@ macro_rules! __storage_conformance {
                 test_directory_users_carry_their_attributes
                 test_directory_omits_retired_profiles
                 test_directory_active_follows_use
+                test_directory_relationship_activity
+                test_directory_relationship_activity_is_its_own
+                test_directory_membership_follows_its_grounds
+                test_directory_membership_settles_under_races
                 test_directory_resource_assigned_with_the_account
                 test_directory_resource_deletion
                 test_directory_resource_deletion_races_a_change
@@ -214,6 +218,8 @@ macro_rules! __storage_conformance {
                 test_directory_source_identifier_races_to_one_user
                 test_directory_source_update_never_creates
                 test_directory_source_retired_with_the_resource
+                test_directory_management_follows_the_revision
+                test_directory_management_change_fences_a_write
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],email_policy:
                 test_email_key_written_only_under_the_active_revision

@@ -44,7 +44,8 @@ const GRANT: &str = "g.machine_user_id AS machine_user_id, g.target_type AS targ
 
 const CONNECTOR: &str = "c.id AS id, c.org_id AS org_id, c.direction AS direction,
     c.client_id AS client_id, c.display_name AS display_name, c.state AS state,
-    c.revision AS revision, c.created_at AS created_at, c.updated_at AS updated_at";
+    c.revision AS revision, c.created_at AS created_at, c.updated_at AS updated_at,
+    c.directory_rights AS directory_rights";
 
 const CONNECTOR_CREDENTIAL: &str = "k.id AS id, k.connector_id AS connector_id, k.kind AS kind,
     k.status AS status, k.verifier AS verifier, k.expires_at AS expires_at,
@@ -215,6 +216,7 @@ fn connector(row: &Row) -> SidResult<ProvisioningConnector> {
         client_id: get_text(row, "client_id")?,
         display_name: get_text(row, "display_name")?,
         state: get_parsed(row, "state")?,
+        directory_rights: super::directory::rights(get_int(row, "directory_rights")?)?,
         revision: get_int(row, "revision")?,
         created_at: get_time(row, "created_at")?,
         updated_at: get_time(row, "updated_at")?,
@@ -872,7 +874,7 @@ impl CoordinodeBackend {
                 "CREATE (c:SidProvisioningConnector {id: $id, org_id: $org_id,
                     direction: $direction, client_id: $client_id, display_name: $display_name,
                     state: $state, revision: $revision, created_at: $created_at,
-                    updated_at: $updated_at})",
+                    updated_at: $updated_at, directory_rights: $directory_rights})",
                 Params::default()
                     .with("id", bin(c.id.as_bytes()))
                     .with("org_id", bin(c.org_id.as_bytes()))
@@ -882,9 +884,90 @@ impl CoordinodeBackend {
                     .with("state", Value::String(c.state.as_str().into()))
                     .with("revision", Value::Int(c.revision))
                     .with("created_at", time(c.created_at))
-                    .with("updated_at", time(c.updated_at)),
+                    .with("updated_at", time(c.updated_at))
+                    .with(
+                        "directory_rights",
+                        Value::Int(i64::from(c.directory_rights.bits())),
+                    ),
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn set_directory_rights(
+        &self,
+        connector_id: ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.transaction(move |tx| {
+            // The revision moves with the selection: a write the connector
+            // was authorized for before it no longer commits.
+            let rows = tx.run(
+                "MATCH (c:SidProvisioningConnector) WHERE c.id = $id AND c.revision = $revision
+                 SET c.directory_rights = $rights, c.revision = c.revision + 1,
+                     c.updated_at = $now
+                 RETURN c.id AS id",
+                Params::default()
+                    .with("id", bin(connector_id.as_bytes()))
+                    .with("revision", Value::Int(revision))
+                    .with("rights", Value::Int(i64::from(rights.bits())))
+                    .with("now", time(Timestamp::now())),
+            )?;
+            if rows.is_empty() {
+                return Ok(Decision::Abandon(false));
+            }
+            finalize(
+                tx,
+                &format!("provisioning_connector:{connector_id}"),
+                ctx.clone(),
+            )?;
+            Ok(Decision::Commit(true))
+        })
+        .await
+    }
+
+    pub(super) async fn manage_directory_user(
+        &self,
+        connector_id: ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::ManagementOutcome> {
+        use sid_core::models::ManagementOutcome;
+        self.transaction(move |tx| {
+            let at_revision = tx.run(
+                "MATCH (c:SidProvisioningConnector) WHERE c.id = $id AND c.revision = $revision
+                 RETURN c.id AS id",
+                Params::default()
+                    .with("id", bin(connector_id.as_bytes()))
+                    .with("revision", Value::Int(revision)),
+            )?;
+            if at_revision.is_empty() {
+                return Ok(Decision::Abandon(ManagementOutcome::Stale));
+            }
+            if !super::directory::manage_user(tx, connector_id, resource, rights)? {
+                return Ok(Decision::Abandon(ManagementOutcome::NothingToWithdraw));
+            }
+            // Written at the revision read above: a concurrent change of
+            // the connector conflicts and this runs again on what it left.
+            tx.run(
+                "MATCH (c:SidProvisioningConnector) WHERE c.id = $id AND c.revision = $revision
+                 SET c.revision = c.revision + 1, c.updated_at = $now",
+                Params::default()
+                    .with("id", bin(connector_id.as_bytes()))
+                    .with("revision", Value::Int(revision))
+                    .with("now", time(Timestamp::now())),
+            )?;
+            finalize(
+                tx,
+                &format!("provisioning_connector:{connector_id}"),
+                ctx.clone(),
+            )?;
+            Ok(Decision::Commit(ManagementOutcome::Applied))
         })
         .await
     }

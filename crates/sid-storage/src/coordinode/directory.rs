@@ -13,9 +13,10 @@ use sid_core::models::directory_query::metadata_keys;
 use sid_core::models::pat::{PatId, PatStatus, PersonalAccessToken};
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter, DirectoryGroupWrite, DirectoryOperator as Op,
-    DirectoryPage, DirectoryQuery, DirectoryResource, DirectorySource, DirectoryUserId,
-    DirectoryUserWrite, DirectoryWriteMode, MutationContext, PrincipalType, Profile, ProfileId,
-    ProfileMetadata, ProfileStatus, ProvisioningConnectorId, Session, SourceWrite,
+    DirectoryPage, DirectoryQuery, DirectoryResource, DirectoryRights, DirectorySource,
+    DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, MutationContext, PrincipalType,
+    Profile, ProfileId, ProfileMetadata, ProfileStatus, ProvisioningConnectorId, Session,
+    SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -168,7 +169,7 @@ fn revoke_active(tx: &Statements<'_>, profile: ProfileId, revoked_by: &str) -> S
 // === Directory user resources ===
 
 const RESOURCE: &str = "d.id AS id, d.profile_id AS profile_id, d.revision AS revision,
-    d.deleted_at AS deleted_at";
+    d.deleted_at AS deleted_at, d.active AS active";
 
 fn resource(row: &Row) -> SidResult<DirectoryResource> {
     let revision = get_int(row, "revision")?;
@@ -178,6 +179,7 @@ fn resource(row: &Row) -> SidResult<DirectoryResource> {
         revision: u64::try_from(revision)
             .map_err(|_| SidError::Storage(format!("directory resource revision: {revision}")))?,
         deleted_at: get_opt_time(row, "deleted_at")?,
+        active: super::get_bool(row, "active")?,
     })
 }
 
@@ -207,12 +209,13 @@ fn create_resource(tx: &Statements<'_>, r: &DirectoryResource) -> SidResult<()> 
         .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
     tx.run(
         "CREATE (d:SidDirectoryUser {id: $id, profile_id: $profile, revision: $revision,
-            deleted_at: $deleted_at})",
+            deleted_at: $deleted_at, active: $active})",
         Params::default()
             .with("id", uuid(&r.id.0))
             .with("profile", bin(r.profile_id.as_bytes()))
             .with("revision", Value::Int(revision))
-            .with("deleted_at", opt_time(r.deleted_at)),
+            .with("deleted_at", opt_time(r.deleted_at))
+            .with("active", Value::Bool(r.active)),
     )?;
     Ok(())
 }
@@ -226,19 +229,22 @@ pub(super) fn assign_resource(tx: &Statements<'_>, profile: &Profile) -> SidResu
             profile_id: profile.id,
             revision: 0,
             deleted_at: None,
+            active: true,
         },
     )
 }
 
 /// Require the live resource `id` of `profile` in `tx`, deleting it when
-/// `delete`; anything else (unknown, deleted, another account's) is
-/// `NotFound`. The matched node is written either way, so a concurrent
-/// deletion conflicts with this transaction.
+/// `delete` and setting the relationship's activity when `active` is given;
+/// anything else (unknown, deleted, another account's) is `NotFound`. The
+/// matched node is written either way, so a concurrent deletion conflicts
+/// with this transaction.
 fn hold_resource(
     tx: &Statements<'_>,
     id: DirectoryUserId,
     profile: ProfileId,
     delete: bool,
+    active: Option<bool>,
 ) -> SidResult<()> {
     let held = resources_where(tx, "d.id = $value", uuid(&id.0))?
         .into_iter()
@@ -246,24 +252,28 @@ fn hold_resource(
     let Some(held) = held else {
         return Err(SidError::NotFound(format!("directory user {id}")));
     };
-    let (revision, deleted_at) = if delete {
-        let next = held
-            .revision
+    // A deletion and a change of the relationship's state are changes of
+    // the resource: its revision moves.
+    let stays = active.filter(|_| !delete).unwrap_or(held.active);
+    let changed = delete || stays != held.active;
+    let revision = if changed {
+        held.revision
             .checked_add(1)
-            .ok_or_else(|| SidError::Validation("directory resource revision exhausted".into()))?;
-        (next, Some(Timestamp::now()))
+            .ok_or_else(|| SidError::Validation("directory resource revision exhausted".into()))?
     } else {
-        (held.revision, None)
+        held.revision
     };
+    let deleted_at = delete.then(Timestamp::now);
     let revision = i64::try_from(revision)
         .map_err(|e| SidError::Validation(format!("directory resource revision: {e}")))?;
     tx.run(
         "MATCH (d:SidDirectoryUser) WHERE d.id = $id
-         SET d.revision = $revision, d.deleted_at = $deleted_at",
+         SET d.revision = $revision, d.deleted_at = $deleted_at, d.active = $active",
         Params::default()
             .with("id", uuid(&id.0))
             .with("revision", Value::Int(revision))
-            .with("deleted_at", opt_time(deleted_at)),
+            .with("deleted_at", opt_time(deleted_at))
+            .with("active", Value::Bool(stays)),
     )?;
     if delete {
         // Its sources keep their provenance and give their identifiers up.
@@ -273,13 +283,26 @@ fn hold_resource(
             Params::default().with("id", uuid(&id.0)),
         )?;
     }
+    if changed {
+        // The memberships resting on this resource stand or fall with it.
+        super::rbac::settle_resource_members(tx, id)?;
+    }
     Ok(())
 }
 
 // === Source correlations ===
 
 const SOURCE: &str = "s.resource_id AS resource_id, s.connector_id AS connector_id,
-    s.external_id AS external_id, s.retired AS retired";
+    s.external_id AS external_id, s.retired AS retired, s.created AS created,
+    s.managed AS managed";
+
+/// A stored set of rights; bits that are no right are a broken record.
+pub(super) fn rights(bits: i64) -> SidResult<DirectoryRights> {
+    i32::try_from(bits)
+        .ok()
+        .and_then(DirectoryRights::from_bits)
+        .ok_or_else(|| SidError::Storage(format!("directory rights: unknown bits in {bits}")))
+}
 
 fn source(row: &Row) -> SidResult<DirectorySource> {
     Ok(DirectorySource {
@@ -287,7 +310,61 @@ fn source(row: &Row) -> SidResult<DirectorySource> {
         connector: get_id(row, "connector_id")?,
         external_id: get_opt_text(row, "external_id")?,
         retired: super::get_bool(row, "retired")?,
+        created: super::get_bool(row, "created")?,
+        managed: rights(super::get_int(row, "managed")?)?,
     })
+}
+
+/// Assign the live user `resource` to `connector` with `rights`, or withdraw
+/// it when `rights` is empty. A connector that knows the user keeps its
+/// identifier; one that does not becomes a source of it. False when a
+/// withdrawal found no assignment and nothing was written.
+pub(super) fn manage_user(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+    resource: DirectoryUserId,
+    rights: DirectoryRights,
+) -> SidResult<bool> {
+    // The resource is written, so a concurrent deletion conflicts.
+    let live = tx.run(
+        "MATCH (d:SidDirectoryUser) WHERE d.id = $id AND d.deleted_at IS NULL
+         SET d.turn = coalesce(d.turn, 0) + 1 RETURN d.id AS id",
+        Params::default().with("id", uuid(&resource.0)),
+    )?;
+    if live.is_empty() {
+        return Err(SidError::NotFound(format!("directory user {resource}")));
+    }
+    let pair = source_pair(resource, connector)?;
+    let held = sources_where(tx, "s.pair = $value", pair.clone())?
+        .into_iter()
+        .find(|s| !s.retired);
+    match held {
+        None if rights.is_empty() => Ok(false),
+        Some(held) if rights.is_empty() && held.managed.is_empty() => Ok(false),
+        Some(_) => {
+            tx.run(
+                "MATCH (s:SidDirectorySource) WHERE s.pair = $pair SET s.managed = $managed",
+                Params::default()
+                    .with("pair", pair)
+                    .with("managed", Value::Int(i64::from(rights.bits()))),
+            )?;
+            Ok(true)
+        }
+        None => {
+            create_source(
+                tx,
+                &DirectorySource {
+                    resource,
+                    connector,
+                    external_id: None,
+                    retired: false,
+                    created: false,
+                    managed: rights,
+                },
+            )?;
+            Ok(true)
+        }
+    }
 }
 
 fn sources_where(
@@ -399,13 +476,16 @@ fn create_source(tx: &Statements<'_>, s: &DirectorySource) -> SidResult<()> {
     }
     tx.run(
         "CREATE (s:SidDirectorySource {pair: $pair, resource_id: $resource,
-            connector_id: $connector, external_id: $external_id, retired: $retired})",
+            connector_id: $connector, external_id: $external_id, retired: $retired,
+            created: $created, managed: $managed})",
         Params::default()
             .with("pair", source_pair(s.resource, s.connector)?)
             .with("resource", uuid(&s.resource.0))
             .with("connector", uuid(&s.connector.into_uuid()))
             .with("external_id", opt_text(s.external_id.as_deref()))
-            .with("retired", Value::Bool(s.retired)),
+            .with("retired", Value::Bool(s.retired))
+            .with("created", Value::Bool(s.created))
+            .with("managed", Value::Int(i64::from(s.managed.bits()))),
     )?;
     Ok(())
 }
@@ -424,6 +504,10 @@ fn record_source(tx: &Statements<'_>, profile: ProfileId, write: &SourceWrite) -
             connector: write.connector,
             external_id: write.external_id.clone(),
             retired: false,
+            // The creator is recorded as such and assigned nothing by
+            // creating.
+            created: true,
+            managed: DirectoryRights::NONE,
         },
     )
 }
@@ -495,6 +579,8 @@ struct Candidate {
     /// The asking source's own identifier of the user's resource, if any:
     /// another source's is never compared.
     external_id: Option<String>,
+    /// SCIM `active` of the user (`DirectoryResource::shows_active`).
+    active: bool,
 }
 
 impl Candidate {
@@ -592,7 +678,7 @@ impl Candidate {
                         ));
                     }
                 };
-                Ok(self.profile.status.is_in_use() == wanted)
+                Ok(self.active == wanted)
             }
             Attr::UserName | Attr::Email | Attr::Phone => Ok(self
                 .values(attr)
@@ -659,6 +745,7 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
         resources.push(live);
         let principals = super::principal::held_by(tx, profile.id)?;
         let candidate = Candidate {
+            active: live.shows_active(&profile),
             external_id: sources
                 .iter()
                 .find(|s| s.resource == live.id)
@@ -698,15 +785,17 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     let limit = usize::try_from(query.limit).unwrap_or(usize::MAX);
     let profiles: Vec<Profile> = matching.into_iter().skip(offset).take(limit).collect();
     let (mut principals, mut emails, mut metadata) = (Vec::new(), Vec::new(), Vec::new());
+    let mut phones = Vec::new();
     for profile in &profiles {
         principals.extend(super::principal::held_by(tx, profile.id)?);
         emails.extend(super::profile::emails_of(tx, profile.id)?);
+        phones.extend(super::profile::phones_of(tx, profile.id)?);
         metadata.extend(metadata_of(tx, profile.id)?);
     }
     Ok(DirectoryPage {
         total,
         users: crate::directory_query::assemble(
-            profiles, resources, sources, principals, emails, metadata,
+            profiles, resources, sources, principals, emails, phones, metadata,
         )?,
     })
 }
@@ -740,7 +829,13 @@ fn write_user(
             // The resource first: a deletion that committed since the caller
             // read it refuses the write as not found.
             if let Some(resource) = write.resource {
-                hold_resource(tx, resource, profile_id, write.delete_resource)?;
+                hold_resource(
+                    tx,
+                    resource,
+                    profile_id,
+                    write.delete_resource,
+                    write.resource_active,
+                )?;
                 if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
                     update_source(tx, resource, source)?;
                 }
@@ -814,7 +909,7 @@ fn write_group(tx: &Statements<'_>, write: &DirectoryGroupWrite) -> SidResult<()
         }
     }
     for profile in &write.remove_members {
-        super::rbac::remove_member(tx, group_id, *profile)?;
+        super::rbac::remove_member(tx, group_id, *profile, write.source)?;
     }
     for member in &write.add_members {
         if member.group_id != group_id {
@@ -822,7 +917,7 @@ fn write_group(tx: &Statements<'_>, write: &DirectoryGroupWrite) -> SidResult<()
                 "a group write adds members to its own group only".into(),
             ));
         }
-        super::rbac::add_member(tx, member)?;
+        super::rbac::add_member(tx, member, write.source)?;
     }
     Ok(())
 }

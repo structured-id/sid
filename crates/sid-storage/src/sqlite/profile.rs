@@ -1943,6 +1943,7 @@ impl SqliteBackend {
         // not one per profile.
         let mut principals = Vec::new();
         let mut emails = Vec::new();
+        let mut phones = Vec::new();
         let mut metadata = Vec::new();
         let mut resources = Vec::new();
         let mut sources = Vec::new();
@@ -2006,6 +2007,16 @@ impl SqliteBackend {
                 emails.push(row_to_profile_email(&row)?);
             }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM profile_phones WHERE profile_id IN ({ids})
+                 ORDER BY profile_id, is_primary DESC, created_at"
+            )));
+            for profile in page {
+                read = read.bind(profile.id);
+            }
+            for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                phones.push(row_to_profile_phone(&row)?);
+            }
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM profile_metadata WHERE profile_id IN ({ids})"
             )));
             for profile in page {
@@ -2020,7 +2031,7 @@ impl SqliteBackend {
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(
-                profiles, resources, sources, principals, emails, metadata,
+                profiles, resources, sources, principals, emails, phones, metadata,
             )?,
         })
     }

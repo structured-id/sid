@@ -1013,6 +1013,29 @@ CREATE TABLE IF NOT EXISTS group_members (
 CREATE INDEX IF NOT EXISTS idx_group_members_profile_id ON group_members(profile_id);
 
 --------------------------------------------------------------------------------
+-- group_member_origins: why a member belongs to a group, one row per
+-- assignment. group_members holds the members with at least one assignment
+-- standing and is what access decisions read; it is settled in the
+-- transaction that changes an assignment or the relationship one rests on.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS group_member_origins (
+    group_id     BLOB NOT NULL CHECK (length(group_id) = 16) REFERENCES groups(id) ON DELETE CASCADE,
+    profile_id   BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
+    -- The inbound provisioning connector that made the assignment; the nil
+    -- UUID for one made locally.
+    connector_id BLOB NOT NULL CHECK (length(connector_id) = 16),
+    -- The directory user resource a connector's assignment rests on: it
+    -- stands while that resource is live and active. NULL for a local one.
+    resource_id  BLOB CHECK (resource_id IS NULL OR length(resource_id) = 16),
+    added_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (group_id, profile_id, connector_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_group_member_origins_resource
+    ON group_member_origins(resource_id) WHERE resource_id IS NOT NULL;
+
+--------------------------------------------------------------------------------
 -- role_assignments
 --------------------------------------------------------------------------------
 
@@ -1207,7 +1230,11 @@ CREATE TABLE IF NOT EXISTS directory_users (
     id          BLOB PRIMARY KEY CHECK (length(id) = 16),
     profile_id  BLOB NOT NULL CHECK (length(profile_id) = 16) REFERENCES profiles(id) ON DELETE CASCADE,
     revision    INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    deleted_at  TEXT
+    deleted_at  TEXT,
+    -- Whether the directory relationship itself is active: set 0 for a
+    -- relationship with an identity that signs in elsewhere. An account the
+    -- directory manages whole is deactivated through its own status.
+    active      INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_users_live_profile
@@ -1217,7 +1244,9 @@ CREATE INDEX IF NOT EXISTS idx_directory_users_profile ON directory_users(profil
 --------------------------------------------------------------------------------
 -- directory_user_sources: which provisioning source knows which user resource,
 -- and by what identifier of its own (SCIM externalId, scoped to the connector).
--- Provenance only: neither a condition of reading nor authority to change.
+-- Knowing a resource, also having created it (`created`), is neither a
+-- condition of reading nor authority to change it: `managed` holds the rights
+-- the connector was assigned of this one user, as bits, 0 once withdrawn.
 -- `retired` is set with the resource's deletion and frees the identifier.
 --------------------------------------------------------------------------------
 
@@ -1226,6 +1255,8 @@ CREATE TABLE IF NOT EXISTS directory_user_sources (
     connector_id  BLOB NOT NULL CHECK (length(connector_id) = 16) REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
     external_id   TEXT CHECK (external_id <> ''),
     retired       INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL DEFAULT 0,
+    managed       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (resource_id, connector_id)
 ) STRICT;
 
@@ -1930,7 +1961,10 @@ CREATE TABLE IF NOT EXISTS provisioning_connectors (
     state           TEXT NOT NULL CHECK (state IN ('active', 'disabled', 'retired')),
     revision        INTEGER NOT NULL CHECK (revision >= 1),
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    -- What the connector may change of every user of the directory, a set
+    -- of rights as bits; 0 when it manages only users assigned one by one.
+    directory_rights INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_connectors_org

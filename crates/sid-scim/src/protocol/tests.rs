@@ -280,6 +280,29 @@ fn a_user_renders_as_rfc_7643() {
     assert!(rendered.get("employeeNumber").is_none());
 }
 
+/// RFC 7643 §6: a resource type names its schema extensions and whether
+/// each is required; a type without any leaves `schemaExtensions` out.
+#[test]
+fn a_resource_type_names_its_schema_extensions() {
+    let mut user = proto::ScimResourceType {
+        id: "User".into(),
+        name: "User".into(),
+        endpoint: "/scim/v2/Users".into(),
+        schema: USER_SCHEMA.into(),
+        ..Default::default()
+    };
+    assert!(resource_type_json(&user).get("schemaExtensions").is_none());
+
+    user.schema_extensions = vec![proto::ScimSchemaExtension {
+        schema: ENTERPRISE_SCHEMA.into(),
+        required: false,
+    }];
+    assert_eq!(
+        resource_type_json(&user)["schemaExtensions"],
+        json!([{ "schema": ENTERPRISE_SCHEMA, "required": false }])
+    );
+}
+
 /// A created resource is 201 with its location (RFC 7644 §3.3).
 #[test]
 fn a_created_resource_names_its_location() {

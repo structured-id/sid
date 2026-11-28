@@ -180,6 +180,16 @@ impl RoleAdministration {
             .map(|_| ())
     }
 
+    /// The fence a write only the installation's administrator may make
+    /// commits under: `profile`'s current administrator assignment. A
+    /// commit under it is refused once that assignment is gone.
+    pub async fn installation_administrator_fence(&self, profile: ProfileId) -> Result<ActorFence> {
+        self.root_basis(&Administrator::Root(AuthzPrincipal::Profile(profile)))
+            .await?
+            .map(ActorFence::Authority)
+            .ok_or_else(not_permitted)
+    }
+
     /// Store `proposed` on `actor`'s authority. An administrative assignment
     /// (with an envelope) is a redelegation and needs that right; a working
     /// one needs assignment of its role. One envelope must cover the whole

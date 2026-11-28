@@ -92,8 +92,11 @@ pub fn scim_create_user_to_sid(
 
     // userName → Principal(Username, "{userName}#{domain}") — federated org login
     if !req.user_name.is_empty() {
-        let corporate_login = format!("{}#{}", req.user_name, ctx.org_domain);
-        principals.push(Principal::new_corporate_login(profile_id, corporate_login));
+        principals.push(organization_login(
+            profile_id,
+            &req.user_name,
+            &ctx.org_domain,
+        ));
     }
 
     let mut emails = Vec::new();
@@ -256,17 +259,47 @@ pub struct ScimPlace<'a> {
     pub org_domain: &'a str,
     pub base_url: &'a str,
     pub external_id: Option<&'a str>,
+    /// SCIM `active` of the user: its directory relationship is active and
+    /// its account can be used (`DirectoryResource::shows_active`).
+    pub active: bool,
 }
 
-/// Map SID Profile + Principals + email contacts + Metadata + Groups to SCIM
+/// The SCIM `type` an email contact is served under (RFC 7643 4.1.2). A
+/// label SCIM has no word for is served as `other`; a request that restates
+/// it compares equal and leaves the stored label as it is.
+pub fn email_type(label: &EmailLabel) -> &'static str {
+    match label {
+        EmailLabel::Work => "work",
+        EmailLabel::Personal => "home",
+        EmailLabel::School => "school",
+        EmailLabel::Other | EmailLabel::Custom => "other",
+    }
+}
+
+/// The SCIM `type` a phone contact is served under, as [`email_type`].
+pub fn phone_type(label: &PhoneLabel) -> &'static str {
+    match label {
+        PhoneLabel::Work => "work",
+        PhoneLabel::Home => "home",
+        PhoneLabel::Mobile => "mobile",
+        PhoneLabel::Fax => "fax",
+        PhoneLabel::Pager => "pager",
+        PhoneLabel::Main | PhoneLabel::Other | PhoneLabel::Custom => "other",
+    }
+}
+
+/// Map SID Profile + Principals + contacts + Metadata + Groups to SCIM
 /// User response. `emails` come from the contacts, in the spelling the
-/// directory gave: a principal holds only the login key. `id` is the
-/// directory resource's identifier, never the account's.
+/// directory gave: a principal holds only the login key. A phone number is
+/// served with the type of its contact in `phones`. `id` is the directory
+/// resource's identifier, never the account's.
+#[allow(clippy::too_many_arguments)]
 pub fn sid_to_scim_user(
     id: DirectoryUserId,
     profile: &Profile,
     principals: &[Principal],
     emails: &[ProfileEmail],
+    phones: &[ProfilePhone],
     metadata: &[ProfileMetadata],
     group_memberships: &[(GroupId, String)], // (group_id, group_display_name)
     place: ScimPlace<'_>,
@@ -275,11 +308,12 @@ pub fn sid_to_scim_user(
         org_domain,
         base_url,
         external_id,
+        active,
     } = place;
     let mut user = proto::ScimUser {
         id: id.to_string(),
         display_name: profile.formatted_name().unwrap_or_default(),
-        active: profile.status.is_in_use(),
+        active,
         ..Default::default()
     };
 
@@ -292,9 +326,14 @@ pub fn sid_to_scim_user(
                 user.user_name = principal.value.trim_end_matches(&domain_suffix).to_string();
             }
             PrincipalType::Phone => {
+                // The contact of this number holds its type; a number with
+                // no contact is the organization's own.
+                let contact = phone_digits(&principal.value)
+                    .ok()
+                    .and_then(|digits| phones.iter().find(|p| p.e164 == digits));
                 user.phone_numbers.push(proto::ScimPhoneNumber {
                     value: principal.value.clone(),
-                    r#type: "work".into(),
+                    r#type: contact.map_or("work", |p| phone_type(&p.label)).into(),
                     primary: principal.is_primary,
                 });
             }
@@ -305,7 +344,7 @@ pub fn sid_to_scim_user(
         .iter()
         .map(|e| proto::ScimEmail {
             value: e.email.clone(),
-            r#type: "work".into(),
+            r#type: email_type(&e.label).into(),
             primary: e.is_primary,
         })
         .collect();
@@ -511,17 +550,13 @@ impl ProfileExt for Profile {
     }
 }
 
-trait PrincipalExt {
-    /// Create a corporate login principal (Username, verified=false).
-    fn new_corporate_login(profile_id: ProfileId, value: String) -> Principal;
-}
-
-impl PrincipalExt for Principal {
-    fn new_corporate_login(profile_id: ProfileId, value: String) -> Principal {
-        let mut login = corporate_contact(profile_id, PrincipalType::Username, value, true);
-        login.source_field = None;
-        login
-    }
+/// The organization's login of `profile_id` for SCIM `userName`:
+/// `{userName}#{domain}`, the one form a create and a rename assign.
+pub fn organization_login(profile_id: ProfileId, user_name: &str, org_domain: &str) -> Principal {
+    let value = format!("{user_name}#{org_domain}");
+    let mut login = corporate_contact(profile_id, PrincipalType::Username, value, true);
+    login.source_field = None;
+    login
 }
 
 #[cfg(test)]

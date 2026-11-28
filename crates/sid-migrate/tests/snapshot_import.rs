@@ -2580,6 +2580,59 @@ async fn a_resumed_import_refuses_a_changed_target_record() {
     assert_ne!(trusted.as_ref(), Some(&device));
 }
 
+/// A resumed import restores a member's assignment to one group when the
+/// target already holds the same member's assignment to another: an
+/// assignment is compared with the target's record of that group only.
+/// Bug prevented: the target's record of another group taken for a changed
+/// record of this one, refusing the import.
+#[tokio::test]
+async fn a_resumed_import_restores_one_of_a_members_groups() {
+    use sid_core::models::{Group, GroupMember, ProjectId};
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let ctx = || AuditEntry::system("test", "groups").into();
+    let profile = Profile::new(Some("two-groups"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    source.ensure_system_project(ctx()).await.unwrap();
+    let groups = [
+        Group::new(ProjectId::SYSTEM, "resumed-first"),
+        Group::new(ProjectId::SYSTEM, "resumed-second"),
+    ];
+    for group in &groups {
+        source.create_group(group, ctx()).await.unwrap();
+        source
+            .add_to_group(&GroupMember::new(group.id, profile.id), ctx())
+            .await
+            .unwrap();
+    }
+    let snapshot = export(&source).await.unwrap();
+
+    // Whichever group the archive lists first, the other is restored beside
+    // it.
+    for lost in &groups {
+        let target = uninitialized().await;
+        import(&target, &snapshot).await.unwrap();
+        target
+            .remove_from_group(lost.id, profile.id, ctx())
+            .await
+            .unwrap();
+        let resumed = import(&target, &snapshot)
+            .await
+            .expect("the missing assignment is restored");
+        assert_eq!(resumed.group_members, 1);
+        for group in &groups {
+            assert!(
+                target
+                    .list_group_members(group.id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.profile_id == profile.id)
+            );
+        }
+    }
+}
+
 /// A store lists sessions and groups in no dependency order: an application
 /// session can precede the IdP session it was authenticated by, a child
 /// group its parent. The import restores each after what it references.
