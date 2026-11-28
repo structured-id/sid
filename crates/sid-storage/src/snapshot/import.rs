@@ -1072,32 +1072,6 @@ pub async fn import(
         )
         .await?;
     }
-    // Each group's stored members are read once, keyed by profile.
-    let mut listed = HashSet::new();
-    let mut members = HashMap::new();
-    for member in &snapshot.group_members {
-        if listed.insert(member.group_id) {
-            for held in backend.list_group_members(member.group_id).await? {
-                members.insert((held.group_id, held.profile_id), held);
-            }
-        }
-        match members.get(&(member.group_id, member.profile_id)) {
-            Some(held) if held == member => continue,
-            Some(_) => return Err(target("the target holds another group membership")),
-            None => {}
-        }
-        backend
-            .add_to_group(
-                member,
-                audit(
-                    "import_group_member",
-                    &format!("{}:{}", member.group_id, member.profile_id),
-                ),
-            )
-            .await?;
-        result.group_members += 1;
-    }
-
     // Provisioning connectors before the roles they hold, their credentials
     // as they were whatever the connector's state.
     for connector in &snapshot.provisioning_connectors {
@@ -1157,6 +1131,47 @@ pub async fn import(
                 audit("import_directory_users", &profile.id.to_string()),
             )
             .await?;
+    }
+    // Group assignments with whose each is, after the directory resources:
+    // a connector's assignment rests on the member's restored resource, and
+    // one whose resource was deleted stays on record giving no membership.
+    // Each group's stored assignments are read once.
+    let mut listed = HashSet::new();
+    let mut held = HashMap::new();
+    for assignment in &snapshot.group_members {
+        let member = &assignment.member;
+        if listed.insert(member.group_id) {
+            let of = sid_core::models::AssignmentsOf::Group(member.group_id);
+            for stored in backend.list_group_assignments(of).await? {
+                held.insert((stored.member.profile_id, stored.source), stored);
+            }
+        }
+        match held.get(&(member.profile_id, assignment.source)) {
+            Some(stored) if stored == assignment => continue,
+            Some(_) => return Err(target("the target holds another group membership")),
+            None => {}
+        }
+        let audit = audit(
+            "import_group_member",
+            &format!("{}:{}", member.group_id, member.profile_id),
+        );
+        match assignment.source {
+            None => backend.add_to_group(member, audit).await?,
+            Some(connector) => {
+                let group = backend
+                    .get_group(member.group_id)
+                    .await?
+                    .ok_or_else(|| target("a group membership names a missing group"))?;
+                let mut write = sid_core::models::DirectoryGroupWrite::new(
+                    sid_core::models::DirectoryWriteMode::Update,
+                    group,
+                )
+                .by_source(connector);
+                write.add_members.push(member.clone());
+                backend.write_directory_group(&write, audit).await?;
+            }
+        }
+        result.group_members += 1;
     }
     for credential in &snapshot.provisioning_credentials {
         if backend

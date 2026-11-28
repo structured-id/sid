@@ -1061,17 +1061,31 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             .unwrap()
     );
     // A user the connector created, known to it by its own identifier.
+    let provisioned = Profile::new(None::<String>);
     source
         .write_directory_user(
             &sid_core::models::DirectoryUserWrite::new(
                 sid_core::models::DirectoryWriteMode::Create,
-                Profile::new(None::<String>),
+                provisioned.clone(),
             )
             .by_source(connector.id, Some("HR-1".into())),
             ctx(),
         )
         .await
         .unwrap();
+    // A group the connector assigned that user to: the assignment is the
+    // connector's own and rests on the user's resource.
+    let provisioned_group = sid_core::models::Group::new(ProjectId::SYSTEM, "provisioned");
+    let mut assign = sid_core::models::DirectoryGroupWrite::new(
+        sid_core::models::DirectoryWriteMode::Create,
+        provisioned_group.clone(),
+    )
+    .by_source(connector.id);
+    assign.add_members.push(sid_core::models::GroupMember::new(
+        provisioned_group.id,
+        provisioned.id,
+    ));
+    source.write_directory_group(&assign, ctx()).await.unwrap();
     // A role the connector holds: its revision counts the grant, and the
     // restored connector keeps that revision.
     let provisioner = Role::new(ProjectId::SYSTEM, "provisioner", "Provisioner");

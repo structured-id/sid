@@ -23,10 +23,10 @@ use sid_core::models::{
 use sid_core::models::{
     Application, BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device,
     DeviceAttestation, DeviceAuthorizationCode, EmailPolicyActivation, ExportJob, Group,
-    GroupMember, ImpersonationGrant, InitialAccessToken, IssuerSigningKey, MachineUser,
-    MachineUserCredential, MagicLinkSession, OAuth2Client, OidcIssuer, OperationPeriodState,
-    OperationRecord, OperationResourceBinding, Organization, OutboundDlqEntry, PersonalAccessToken,
-    Profile, ProfileEmail, ProfileGrant, ProfileMetadata, ProfilePhone, Project, ProtectedResource,
+    ImpersonationGrant, InitialAccessToken, IssuerSigningKey, MachineUser, MachineUserCredential,
+    MagicLinkSession, OAuth2Client, OidcIssuer, OperationPeriodState, OperationRecord,
+    OperationResourceBinding, Organization, OutboundDlqEntry, PersonalAccessToken, Profile,
+    ProfileEmail, ProfileGrant, ProfileMetadata, ProfilePhone, Project, ProtectedResource,
     QuarantinedPrincipal, ResourceAccess, Role, RoleAssignment, ScimOutboundRecord,
     ScimOutboundTarget, ServiceBinding, Session, SessionGrants, StoredPrincipal, StoredUserHandle,
     UpstreamIdentity, UpstreamProvider, WorkSnapshot,
@@ -228,8 +228,9 @@ pub struct Snapshot {
     /// RBAC groups.
     pub groups: Vec<Group>,
 
-    /// Group membership records.
-    pub group_members: Vec<GroupMember>,
+    /// Group assignments, each with whose it is (an inbound provisioning
+    /// connector's, or one made locally): the memberships follow from them.
+    pub group_members: Vec<sid_core::models::GroupAssignment>,
 
     /// Role assignments (profile→role and group→role).
     pub role_assignments: Vec<RoleAssignment>,
@@ -422,7 +423,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 19;
+pub const FORMAT_VERSION: u32 = 20;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
