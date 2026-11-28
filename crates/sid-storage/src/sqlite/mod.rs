@@ -1375,6 +1375,27 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
+    async fn directory_sources(
+        &self,
+        connector: Option<sid_core::models::ProvisioningConnectorId>,
+        resources: &[sid_core::models::DirectoryUserId],
+    ) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        self.directory_sources_impl(connector, resources).await
+    }
+
+    async fn find_directory_source(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        external_id: &str,
+    ) -> SidResult<Option<sid_core::models::DirectorySource>> {
+        self.find_directory_source_impl(connector, external_id)
+            .await
+    }
+
+    async fn export_directory_sources(&self) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        self.export_directory_sources_impl().await
+    }
+
     async fn write_directory_group(
         &self,
         write: &sid_core::models::DirectoryGroupWrite,
