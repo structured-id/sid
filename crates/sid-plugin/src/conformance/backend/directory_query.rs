@@ -928,6 +928,57 @@ pub async fn test_directory_source_identifier_is_unique_per_source(backend: &dyn
     );
 }
 
+/// Of several users one source creates at once under one identifier, exactly
+/// one is created: the others conflict and leave nothing, so the identifier
+/// names one user for every later read.
+pub async fn test_directory_source_identifier_races_to_one_user(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let a = add_source(backend).await;
+    for round in 0..5 {
+        let identifier = format!("R-{round}");
+        // Written directly, and read only once every write has ended.
+        let writes: Vec<DirectoryUserWrite> = (0..8)
+            .map(|i| {
+                let profile = Profile::new(None::<String>);
+                let login = Principal::new(
+                    profile.id,
+                    PrincipalType::Username,
+                    format!("racer-{round}-{i}#{domain}"),
+                );
+                let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Create, profile)
+                    .by_source(a, Some(identifier.clone()));
+                write.bind.push(login);
+                write
+            })
+            .collect();
+        let results = futures::future::join_all(
+            writes
+                .iter()
+                .map(|write| backend.write_directory_user(write, test_audit())),
+        )
+        .await;
+        let created: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
+        assert_eq!(created.len(), 1, "round {round}: {results:?}");
+        for refused in results.iter().filter(|r| r.is_err()) {
+            assert!(
+                matches!(refused, Err(sid_core::Error::Conflict(_))),
+                "{refused:?}"
+            );
+        }
+        let q = DirectoryQuery {
+            source: Some(a),
+            ..query(
+                &domain,
+                compare(Attr::ExternalId, Op::Eq, &identifier),
+                0,
+                10,
+            )
+        };
+        let (total, _) = self::names(backend, &q).await;
+        assert_eq!(total, 1, "round {round}: the identifier names one user");
+    }
+}
+
 /// A write through a resource changes only the correlation its source
 /// already has: the identifier follows the write, an identifier the source
 /// gives another user is a conflict that writes nothing, and a source that

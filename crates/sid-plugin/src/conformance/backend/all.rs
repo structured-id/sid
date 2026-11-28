@@ -211,6 +211,7 @@ macro_rules! __storage_conformance {
                 test_directory_resources_are_carried
                 test_directory_source_identifier_is_the_sources_own
                 test_directory_source_identifier_is_unique_per_source
+                test_directory_source_identifier_races_to_one_user
                 test_directory_source_update_never_creates
                 test_directory_source_retired_with_the_resource
             );
