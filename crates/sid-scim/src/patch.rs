@@ -44,6 +44,27 @@ pub struct UserPatchResult {
     pub external_id: Option<Option<String>>,
 }
 
+impl UserPatchResult {
+    /// The request leaves metadata `key` with `value`: operations apply in
+    /// order (RFC 7644 §3.5.2), so this one stands over any before it.
+    fn set(&mut self, key: &str, value: &str) {
+        self.unset_pending(key);
+        self.set_metadata
+            .push((key.into(), serde_json::Value::String(value.into())));
+    }
+
+    /// The request leaves metadata `key` absent, likewise.
+    fn remove(&mut self, key: &str) {
+        self.unset_pending(key);
+        self.remove_metadata.push(key.into());
+    }
+
+    fn unset_pending(&mut self, key: &str) {
+        self.set_metadata.retain(|(held, _)| held != key);
+        self.remove_metadata.retain(|held| held != key);
+    }
+}
+
 /// An identifier to add via PATCH.
 pub struct PatchIdentifier {
     pub id_type: PrincipalType,
@@ -102,17 +123,8 @@ fn apply_replace(
                 })?;
             result.active = Some(active);
         }
-        "title" => {
-            result
-                .set_metadata
-                .push(("title".into(), serde_json::Value::String(value.to_string())));
-        }
-        "department" => {
-            result.set_metadata.push((
-                "department".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        "title" => result.set("title", value),
+        "department" => result.set("department", value),
         "name.givenName" => {
             profile.given_name = if value.is_empty() {
                 None
@@ -143,30 +155,14 @@ fn apply_replace(
         // SCIM Enterprise Extension (RFC 7643 §4.3). The employee number is
         // the account's, one value whichever source writes it.
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber"
-        | "employeeNumber" => {
-            result.set_metadata.push((
-                "employee_id".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        | "employeeNumber" => result.set("employee_id", value),
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:costCenter" | "costCenter" => {
-            result.set_metadata.push((
-                "cost_center".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
+            result.set("cost_center", value)
         }
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:organization"
-        | "organization" => {
-            result.set_metadata.push((
-                "organization".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
-        }
+        | "organization" => result.set("organization", value),
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:division" | "division" => {
-            result.set_metadata.push((
-                "division".into(),
-                serde_json::Value::String(value.to_string()),
-            ));
+            result.set("division", value)
         }
         "id" | "userName" => {
             return Err(PatchError::ImmutableAttribute(path.into()));
@@ -226,12 +222,8 @@ fn apply_add(path: &str, value: &str, result: &mut UserPatchResult) -> Result<()
 
 fn apply_remove(path: &str, result: &mut UserPatchResult) -> Result<(), PatchError> {
     match path {
-        "title" => {
-            result.remove_metadata.push("title".into());
-        }
-        "department" => {
-            result.remove_metadata.push("department".into());
-        }
+        "title" => result.remove("title"),
+        "department" => result.remove("department"),
         "id" | "userName" => {
             return Err(PatchError::ImmutableAttribute(path.into()));
         }
@@ -386,6 +378,36 @@ mod tests {
         let result = apply_user_patch(&mut profile, &ops).unwrap();
         assert_eq!(result.set_metadata.len(), 1);
         assert_eq!(result.set_metadata[0].0, "department");
+    }
+
+    /// RFC 7644 3.5.2: operations apply in request order, each on the result
+    /// of the one before. An attribute replaced and then removed ends
+    /// absent; removed and then replaced it ends with the value; of two
+    /// replacements the later stands.
+    #[test]
+    fn test_metadata_operations_keep_request_order() {
+        let op = |op: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: "title".into(),
+            value: value.into(),
+        };
+        let run = |ops: &[proto::ScimPatchOp]| {
+            let result = apply_user_patch(&mut test_profile(), ops).unwrap();
+            (result.set_metadata, result.remove_metadata)
+        };
+        let title = |value: &str| ("title".to_string(), serde_json::Value::String(value.into()));
+
+        let (set, removed) = run(&[op("replace", "Y"), op("remove", "")]);
+        assert!(set.is_empty(), "{set:?}");
+        assert_eq!(removed, vec!["title"]);
+
+        let (set, removed) = run(&[op("remove", ""), op("replace", "Y")]);
+        assert_eq!(set, vec![title("Y")]);
+        assert!(removed.is_empty(), "{removed:?}");
+
+        let (set, removed) = run(&[op("replace", "Y"), op("replace", "Z")]);
+        assert_eq!(set, vec![title("Z")]);
+        assert!(removed.is_empty());
     }
 
     #[test]
