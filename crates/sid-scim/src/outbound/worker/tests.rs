@@ -775,6 +775,68 @@ async fn test_an_inactive_user_is_not_created() {
     assert!(down.lock().unwrap().users.is_empty());
 }
 
+/// A user that is a relationship with an identity signing in elsewhere goes
+/// out with the state of the relationship: once it is deactivated the
+/// target is told so although the identity's own account stays in use, and
+/// the groups a directory source assigned it to on that ground are pushed
+/// without it. Reactivating it brings both back.
+#[tokio::test]
+async fn test_a_deactivated_relationship_goes_out_inactive() {
+    use sid_core::models::{
+        DirectoryUserWrite, OrgId, ProfileType, ProvisioningConnector, ProvisioningDirection,
+    };
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    // A federated reference holds no login name of its own.
+    let mut carol = Profile::new(None::<String>);
+    carol.status = ProfileStatus::Active;
+    carol.profile_type = ProfileType::Federated;
+    storage
+        .create_profile(&carol, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    let resource = storage.directory_users_of(&[carol.id]).await.unwrap()[0];
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, carol.id);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+
+    let source =
+        ProvisioningConnector::new(OrgId::generate(), ProvisioningDirection::Inbound, "source");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
+    let mut write =
+        DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()).by_source(source.id);
+    write.add_members.push(GroupMember::new(group.id, carol.id));
+    storage
+        .write_directory_group(&write, AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(&worker, &created).await, Settlement::Done);
+
+    let seen = || {
+        let d = down.lock().unwrap();
+        assert_eq!(d.users.len(), 1, "the target has the one user");
+        let user = d.users.first().expect("the target has the user").clone();
+        let members = d.groups[0]["members"].as_array().map_or(0, Vec::len);
+        (user["active"].clone(), members)
+    };
+    assert_eq!(seen(), (json!(true), 1));
+
+    for (active, expected) in [(false, (json!(false), 0)), (true, (json!(true), 1))] {
+        // Each change is an event of its own.
+        let updated = user_event(event_types::SCIM_USER_UPDATED, carol.id);
+        let account = storage.get_profile(carol.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = Some(active);
+        storage
+            .write_directory_user(&write, AuditEntry::system("test", "relationship").into())
+            .await
+            .unwrap();
+        assert_eq!(first(&worker, &updated).await, Settlement::Done);
+        assert_eq!(seen(), expected, "relationship active: {active}");
+    }
+}
+
 /// A group is pushed with its current membership whichever of its events
 /// comes, and late events after a member left do not bring it back; once
 /// deleted, its downstream copy is deleted.
