@@ -178,6 +178,64 @@ fn test_redirect_uri_exact_match() {
     assert!(!client.is_redirect_uri_allowed("https://app.sid.example.com/callback/"));
 }
 
+/// A native client's loopback IP redirect is allowed on any port, since the
+/// application binds whichever port is free (RFC 8252 §7.3); everything else
+/// about it still matches exactly.
+/// Bug prevented: exact matching refused every native application that
+/// listens on an ephemeral port.
+#[test]
+fn a_native_loopback_redirect_is_allowed_on_any_port() {
+    let mut client = make_public_client();
+    client.application_type = ApplicationType::Native;
+    client.redirect_uris = vec![
+        "http://127.0.0.1/callback".into(),
+        "http://[::1]:7000/callback".into(),
+        "http://localhost:7000/callback".into(),
+        "com.example.app:/callback".into(),
+    ];
+    assert!(client.is_redirect_uri_allowed("http://127.0.0.1/callback"));
+    assert!(client.is_redirect_uri_allowed("http://127.0.0.1:53211/callback"));
+    assert!(client.is_redirect_uri_allowed("http://[::1]:53211/callback"));
+    assert!(client.is_redirect_uri_allowed("http://[::1]/callback"));
+    assert!(client.is_redirect_uri_allowed("com.example.app:/callback"));
+
+    for refused in [
+        // Another path, a query, another address family or scheme.
+        "http://127.0.0.1:53211/other",
+        "http://127.0.0.1:53211/callback?x=1",
+        "https://127.0.0.1:53211/callback",
+        "http://127.0.0.2:53211/callback",
+        // Credentials or a fragment never match.
+        "http://user@127.0.0.1:53211/callback",
+        "http://127.0.0.1:53211/callback#f",
+        // The rule covers loopback IP literals; a host name stays exact
+        // (RFC 8252 §8.3).
+        "http://localhost:53211/callback",
+        // Not a URI.
+        "127.0.0.1:53211/callback",
+    ] {
+        assert!(!client.is_redirect_uri_allowed(refused), "{refused}");
+    }
+}
+
+/// A web or single-page client's loopback redirect matches exactly, port
+/// included: the any-port rule is the native application's alone.
+/// Bug prevented: extending the native rule to browser clients, where the
+/// port is part of the origin another local program may hold.
+#[test]
+fn a_web_loopback_redirect_keeps_its_port() {
+    for application_type in [ApplicationType::Web, ApplicationType::Spa] {
+        let mut client = make_public_client();
+        client.application_type = application_type;
+        client.redirect_uris = vec!["http://127.0.0.1:3000/callback".into()];
+        assert!(client.is_redirect_uri_allowed("http://127.0.0.1:3000/callback"));
+        assert!(
+            !client.is_redirect_uri_allowed("http://127.0.0.1:3001/callback"),
+            "{application_type:?}"
+        );
+    }
+}
+
 #[test]
 fn test_grant_type_allowed() {
     let client = make_public_client();

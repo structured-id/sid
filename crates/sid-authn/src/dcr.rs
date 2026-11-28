@@ -272,44 +272,39 @@ pub fn validate_post_logout_redirect_uris(
     Ok(())
 }
 
-/// Validate a single redirect URI.
+/// Validate a single redirect URI: an absolute URI without a fragment
+/// (RFC 6749 §3.1.2) or credentials, over `https`, or over plain `http` to a
+/// loopback host alone (`localhost`, `127.0.0.1`, `[::1]`). A native
+/// application may also use its private-use scheme (RFC 8252 §7.1).
 pub(crate) fn validate_redirect_uri(uri: &str, app_type: ApplicationType) -> Result<(), DcrError> {
     let parsed = url::Url::parse(uri).map_err(|_| DcrError::InvalidRedirectUri(uri.to_string()))?;
-
-    match app_type {
-        ApplicationType::Native => {
-            // Native apps: allow http://localhost, http://127.0.0.1, custom scheme
-            let scheme = parsed.scheme();
-            if scheme == "http" {
-                let host = parsed.host_str().unwrap_or("");
-                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
-                    return Err(DcrError::InvalidRedirectUri(format!(
-                        "native app http redirect must be localhost, got: {host}"
-                    )));
-                }
-            }
-            // Custom schemes and https are always ok for native
-        }
-        _ => {
-            // Web, SPA: must be HTTPS (except localhost for dev)
-            if parsed.scheme() != "https" {
-                let host = parsed.host_str().unwrap_or("");
-                if host != "localhost" && host != "127.0.0.1" {
-                    return Err(DcrError::InvalidRedirectUri(format!(
-                        "redirect URI must use HTTPS: {uri}"
-                    )));
-                }
-            }
-            // Fragment not allowed per RFC 6749 §3.1.2
-            if parsed.fragment().is_some() {
-                return Err(DcrError::InvalidRedirectUri(
-                    "redirect URI must not contain fragment".to_string(),
-                ));
-            }
-        }
+    if parsed.fragment().is_some() {
+        return Err(DcrError::InvalidRedirectUri(
+            "redirect URI must not contain fragment".to_string(),
+        ));
     }
-
-    Ok(())
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(DcrError::InvalidRedirectUri(
+            "redirect URI must not contain credentials".to_string(),
+        ));
+    }
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(name)) => name == "localhost",
+        Some(url::Host::Ipv4(address)) => address == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(address)) => address == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    };
+    match (parsed.scheme(), app_type) {
+        ("https", _) => Ok(()),
+        ("http", _) if loopback => Ok(()),
+        ("http", _) => Err(DcrError::InvalidRedirectUri(format!(
+            "plain http redirect must be to a loopback host: {uri}"
+        ))),
+        (_, ApplicationType::Native) => Ok(()),
+        _ => Err(DcrError::InvalidRedirectUri(format!(
+            "redirect URI must use HTTPS: {uri}"
+        ))),
+    }
 }
 
 /// Validate Initial Access Token constraints against registration request.

@@ -442,9 +442,28 @@ impl OAuth2Client {
         }
     }
 
-    /// Check if a redirect_uri is allowed.
+    /// Whether `uri` is one of the client's redirect URIs, by exact match
+    /// (RFC 6749 §3.1.2.3). A native application's redirect to a loopback IP
+    /// literal also matches on any port, which the application picks when it
+    /// starts (RFC 8252 §7.3); a host name stays exact (RFC 8252 §8.3), and
+    /// so does every redirect of a web or single-page client.
     pub fn is_redirect_uri_allowed(&self, uri: &str) -> bool {
-        self.redirect_uris.iter().any(|u| u == uri)
+        if self.redirect_uris.iter().any(|u| u == uri) {
+            return true;
+        }
+        if self.application_type != ApplicationType::Native {
+            return false;
+        }
+        let Some(requested) = loopback_ip_redirect(uri) else {
+            return false;
+        };
+        self.redirect_uris.iter().any(|registered| {
+            loopback_ip_redirect(registered).is_some_and(|registered| {
+                registered.host() == requested.host()
+                    && registered.path() == requested.path()
+                    && registered.query() == requested.query()
+            })
+        })
     }
 
     /// Whether `uri` is one of the client's post-logout redirect URIs, by
@@ -466,6 +485,24 @@ impl OAuth2Client {
             .cloned()
             .collect()
     }
+}
+
+/// `uri` parsed, when it is a plain `http` redirect to a loopback IP literal
+/// (`127.0.0.1` or `[::1]`, RFC 8252 §7.3) carrying no credentials and no
+/// fragment.
+fn loopback_ip_redirect(uri: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let loopback = match parsed.host()? {
+        url::Host::Ipv4(address) => address == core::net::Ipv4Addr::LOCALHOST,
+        url::Host::Ipv6(address) => address == core::net::Ipv6Addr::LOCALHOST,
+        url::Host::Domain(_) => false,
+    };
+    (loopback
+        && parsed.scheme() == "http"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.fragment().is_none())
+    .then_some(parsed)
 }
 
 #[cfg(test)]

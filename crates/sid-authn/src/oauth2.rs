@@ -438,6 +438,14 @@ impl OAuth2Server {
             ));
         }
 
+        // The destination is still the client's: a callback removed since
+        // the code was issued ends the codes outstanding for it.
+        if !client.is_redirect_uri_allowed(redirect_uri) {
+            return Err(SidError::Validation(
+                "invalid_grant: redirect_uri is no longer registered".into(),
+            ));
+        }
+
         // PKCE is mandatory for every code (RFC 7636 §4.6): a code without a
         // challenge cannot be exchanged.
         let challenge = exchanged.code_challenge().ok_or_else(|| {
