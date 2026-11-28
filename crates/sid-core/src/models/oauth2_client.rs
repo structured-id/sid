@@ -454,16 +454,12 @@ impl OAuth2Client {
         if self.application_type != ApplicationType::Native {
             return false;
         }
-        let Some(requested) = loopback_ip_redirect(uri) else {
+        let Some(requested) = without_loopback_port(uri) else {
             return false;
         };
-        self.redirect_uris.iter().any(|registered| {
-            loopback_ip_redirect(registered).is_some_and(|registered| {
-                registered.host() == requested.host()
-                    && registered.path() == requested.path()
-                    && registered.query() == requested.query()
-            })
-        })
+        self.redirect_uris
+            .iter()
+            .any(|registered| without_loopback_port(registered) == Some(requested))
     }
 
     /// Whether `uri` is one of the client's post-logout redirect URIs, by
@@ -487,22 +483,29 @@ impl OAuth2Client {
     }
 }
 
-/// `uri` parsed, when it is a plain `http` redirect to a loopback IP literal
-/// (`127.0.0.1` or `[::1]`, RFC 8252 §7.3) carrying no credentials and no
-/// fragment.
-fn loopback_ip_redirect(uri: &str) -> Option<url::Url> {
-    let parsed = url::Url::parse(uri).ok()?;
-    let loopback = match parsed.host()? {
-        url::Host::Ipv4(address) => address == core::net::Ipv4Addr::LOCALHOST,
-        url::Host::Ipv6(address) => address == core::net::Ipv6Addr::LOCALHOST,
-        url::Host::Domain(_) => false,
+/// The loopback IP literal and what follows its port, when `uri` is a plain
+/// `http` redirect to `127.0.0.1` or `[::1]` (RFC 8252 §7.3) without a
+/// fragment. The string is taken as written, never parsed into a URL: a
+/// parser normalizes host spellings and dot segments, and the port is the
+/// one part of a redirect URI allowed to differ.
+fn without_loopback_port(uri: &str) -> Option<(&'static str, &str)> {
+    let after_scheme = uri.strip_prefix("http://")?;
+    let (host, after_host) = ["127.0.0.1", "[::1]"]
+        .into_iter()
+        .find_map(|host| Some((host, after_scheme.strip_prefix(host)?)))?;
+    let rest = match after_host.strip_prefix(':') {
+        Some(port) => {
+            let digits = port.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            &port[digits..]
+        }
+        None => after_host,
     };
-    (loopback
-        && parsed.scheme() == "http"
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.fragment().is_none())
-    .then_some(parsed)
+    // The authority ends here: a path, a query or nothing follows it.
+    let ends_authority = rest.is_empty() || rest.starts_with(['/', '?']);
+    (ends_authority && !rest.contains('#')).then_some((host, rest))
 }
 
 #[cfg(test)]

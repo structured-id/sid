@@ -213,6 +213,17 @@ fn a_native_loopback_redirect_is_allowed_on_any_port() {
         "http://localhost:53211/callback",
         // Not a URI.
         "127.0.0.1:53211/callback",
+        // Only the port may differ: a spelling a URL parser would
+        // normalize into the registered one is another string.
+        "http://127.0.0.1:53211/other/../callback",
+        "http://127.0.0.1:53211/./callback",
+        "http://127.1:53211/callback",
+        "http://0x7f.0.0.1:53211/callback",
+        "HTTP://127.0.0.1:53211/callback",
+        "http://[0:0:0:0:0:0:0:1]:53211/callback",
+        "http://127.0.0.1:53211/callback/",
+        "http://127.0.0.1:/callback",
+        "http://127.0.0.1:53211x/callback",
     ] {
         assert!(!client.is_redirect_uri_allowed(refused), "{refused}");
     }
